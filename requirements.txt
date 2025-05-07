@@ -1,0 +1,11 @@
+absl-py
+jax
+jaxtyping
+flax
+pygrain
+optax
+orbax
+sentencepiece
+tensorboardX
+tensorflow-datasets
+tqdm
