@@ -60,11 +60,15 @@ GitHub directly.
 pip install git+https://github.com/google/tunix
 ```
 
-## Getting Started (Coming Soon)
+## Getting Started
 
-Detailed usage examples and tutorials will be available as the library matures.
-We plan to provide clear and concise documentation to help you get started
-quickly.
+To get started, we have a bunch of detailed examples and tutorials.
+
+- [PEFT Gemma with QLoRA](https://github.com/google/tunix/blob/main/examples/qlora_demo.ipynb)
+- [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_demo.ipynb)
+
+We plan to provide clear, concise documentation and more examples in the near
+future.
 
 ## Contributing and Feedbacks
 
