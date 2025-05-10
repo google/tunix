@@ -210,12 +210,17 @@ class PeftTrainer:
     mesh = pxla.thread_resources.env.physical_mesh
     if mesh.empty or jax.devices()[0].platform == "cpu":
       return input_data
-    return jax.device_put(
-        input_data,
-        shd.NamedSharding(
-            mesh, shd.PartitionSpec(*self.config.data_sharding_axis)
-        ),
-    )
+
+    with jax.transfer_guard("allow"):
+      return jax.tree.map(
+          lambda x: jax.make_array_from_process_local_data(
+              shd.NamedSharding(
+                  mesh, shd.PartitionSpec(*self.config.data_sharding_axis)
+              ),
+              x,
+          ),
+          input_data,
+      )
 
   def _prepare_inputs(self, input_data: Any) -> Any:
     """Override this function for additional input preparation."""
