@@ -22,6 +22,7 @@ dependencies = [
   "jax",
   "jaxtyping",
   "flax",
+  "qwix @ git+https://github.com/google/qwix",
   "sentencepiece",
   "tensorboardX",
   "tqdm",
