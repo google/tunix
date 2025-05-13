@@ -189,11 +189,9 @@ class CheckpointManagerTest(absltest.TestCase):
     )
     model, _ = create_sharded_model(TestModel, nnx.Rngs(0), mesh)
     lora_provider = qwix.LoraProvider(
-        qwix.LoraRule(
-            module_path='.*w1',
-            rank=4,
-            alpha=2.0,
-        ),
+        module_path='.*w1',
+        rank=4,
+        alpha=2.0,
     )
     dummy_model_input = {
         'x': jnp.ones(2, dtype=jnp.int32),

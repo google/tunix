@@ -18,6 +18,8 @@ except ImportError:
   wandb = None
   logging.info("Could not import `wandb`. Logging to W&B not possible.")
 
+_DEFAULT_STEP = 0
+
 
 @dataclasses.dataclass
 class MetricsLoggerOptions:
@@ -31,6 +33,12 @@ class Mode(str, enum.Enum):
 
   def __str__(self):
     return self.value
+
+
+def _get_step(kwargs: dict[str, str | int]) -> int:
+  """Returns the step from the kwargs, or 0 if not provided."""
+  step = kwargs.get("step")
+  return _DEFAULT_STEP if step is None else int(step)
 
 
 def log_to_tensorboard(
@@ -54,10 +62,7 @@ def log_to_tensorboard(
   Raises:
     ValueError: If 'step' is not provided in `kwargs`.
   """
-  step = kwargs.get("step")
-  if step is None:
-    raise ValueError("Step is required for jax.monitoring.record_scalar.")
-  current_step = int(step)
+  current_step = _get_step(kwargs)
   summary_writer.add_scalar(event, scalar_value, current_step)
   if current_step % flush_every_n_steps == 0:
     summary_writer.flush()
@@ -78,10 +83,8 @@ def log_to_wandb(
   Raises:
     ValueError: If 'step' is not provided in `kwargs`.
   """
-  step = kwargs.get("step")
-  if step is None:
-    raise ValueError("Step is required for jax.monitoring.record_scalar.")
-  current_step = int(step)
+  current_step = _get_step(kwargs)
+
   if wandb is not None:
     wandb.log({event: scalar_value}, step=current_step)
 
