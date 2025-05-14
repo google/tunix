@@ -20,7 +20,7 @@ import flax
 from flax import nnx
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
-from tunix.distillation import distillation_strategy
+from tunix.distillation import strategies
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from typing_extensions import override
@@ -45,7 +45,7 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
       self,
       student_model: nnx.Module,
       teacher_model: nnx.Module,
-      strategy: distillation_strategy.BaseDistillationStrategy,
+      strategy: strategies.BaseStrategy,
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
   ):
