@@ -22,8 +22,8 @@ import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
 import optax
-from tunix.distillation import distillation_strategy
 from tunix.distillation import distillation_trainer
+from tunix.distillation import strategies
 from tunix.tests import test_common as tc
 
 
@@ -88,7 +88,7 @@ def get_toy_strategy():
     # Exclude the last step as it does not appear in the targets.
     return logits[:, :-1, :]
 
-  return distillation_strategy.LogitDistillation(
+  return strategies.LogitStrategy(
       student_forward_fn=get_model_outputs_fn,
       teacher_forward_fn=get_model_outputs_fn,
       labels_fn=get_labels_fn,
