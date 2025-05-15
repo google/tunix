@@ -14,6 +14,7 @@
 
 """Utils for loading and converting Qwen3 PT weights."""
 
+import pathlib
 import re
 from flax import nnx
 import jax.numpy as jnp
@@ -127,10 +128,14 @@ def _stoi(s):
 
 
 def create_model_from_safe_tensors(
-    file_path: str, config: model_lib.ModelConfig
+    file_dir: str, config: model_lib.ModelConfig
 ) -> model_lib.Qwen3:
   """Load tensors from the safetensors file and create a Qwen3 model."""
-  tensor_dict = safetensors.load_file(file_path)
+  files = list(pathlib.Path(file_dir).expanduser().glob("**/*safetensors"))
+
+  tensor_dict = {}
+  for f in files:
+    tensor_dict = tensor_dict | safetensors.load_file(f)
 
   qwen3 = nnx.eval_shape(
       lambda: model_lib.Qwen3(config, rngs=nnx.Rngs(params=0))

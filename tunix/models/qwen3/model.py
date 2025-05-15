@@ -100,8 +100,8 @@ class ModelConfig:
     return cls(
         num_layers=28,
         vocab_size=151936,
-        embed_dim=1024,
-        hidden_dim=3072,
+        embed_dim=2048,
+        hidden_dim=6144,
         num_heads=16,
         head_dim=128,
         num_kv_heads=8,
