@@ -9,7 +9,7 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-from tunix.examples.gemma_libs import params as params_lib
+from tunix.models.gemma2 import params as params_lib
 
 
 LayerCache = dict[str, jaxtyping.Array]

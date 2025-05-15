@@ -12,7 +12,7 @@ from flax.nnx import graph
 from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
-from tunix.examples.gemma_libs import gemma as gemma_lib
+from tunix.models.gemma2 import gemma as gemma_lib
 
 import sentencepiece as spm
 

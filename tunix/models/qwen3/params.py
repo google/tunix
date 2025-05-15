@@ -18,7 +18,7 @@ import re
 from flax import nnx
 import jax.numpy as jnp
 import safetensors.torch as safetensors
-from tunix.examples.qwen3 import model as model_lib
+from tunix.models.qwen3 import model as model_lib
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
