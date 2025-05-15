@@ -16,6 +16,7 @@
 
 from collections.abc import Iterable
 
+import datasets
 from etils import epath
 from grain import python as grain
 import numpy as np
@@ -106,10 +107,15 @@ def create_datasets(
   Returns:
     A tuple of train and eval data iterators.
   """
-  if dataset_name != "mtnt/en-fr":
+  if dataset_name == "mtnt/en-fr":
+    train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
+  elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
+    train_ds, eval_ds = datasets.load_dataset(
+        dataset_name, data_dir="en-fr", split=("train", "validation")
+    )
+  else:
     raise ValueError(f"Unsupported dataset: {dataset_name}")
 
-  train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
   input_template = INPUT_TEMPLATE_IT if instruct_tuned else INPUT_TEMPLATE
 
   train_loader = _build_data_loader(
@@ -166,13 +172,26 @@ class _Tokenize(grain.MapTransform):
 
   def map(self, element: dict[str, bytes]) -> tuple[np.ndarray, np.ndarray]:
     """Tokenize the input."""
-    src_tokens = self._tokenizer.tokenize(
-        element["src"].decode(),
-        prefix=self._input_template["prefix"],
-        suffix=self._input_template["suffix"],
-        add_eos=False,
-    )
-    dst_tokens = self._tokenizer.tokenize(element["dst"].decode(), add_eos=True)
+    if "srt" in element.keys():  ## MTNT dataset
+      src_tokens = self._tokenizer.tokenize(
+          element["src"].decode(),
+          prefix=self._input_template["prefix"],
+          suffix=self._input_template["suffix"],
+          add_eos=False,
+      )
+      dst_tokens = self._tokenizer.tokenize(
+          element["dst"].decode(), add_eos=True
+      )
+    else:  ## OPUS-100 dataset
+      src_tokens = self._tokenizer.tokenize(
+          element["translation"]["en"],
+          prefix=self._input_template["prefix"],
+          suffix=self._input_template["suffix"],
+          add_eos=False,
+      )
+      dst_tokens = self._tokenizer.tokenize(
+          element["translation"]["fr"], add_eos=True
+      )
     return src_tokens, dst_tokens
 
 
