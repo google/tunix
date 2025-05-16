@@ -109,6 +109,20 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
+  @classmethod
+  def qwen3_14_b(cls):  # qwen3-14B
+    return cls(
+        num_layers=40,
+        vocab_size=151936,
+        embed_dim=5120,
+        hidden_dim=17408,
+        num_heads=40,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+    )
+
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
