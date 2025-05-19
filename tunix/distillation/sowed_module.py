@@ -48,11 +48,11 @@ class SowedModule(nnx.Module):
     return output
 
 
-def get_sowed_intermediate_outputs(
+def pop_sowed_intermediate_outputs(
     model: nnx.Module,
 ) -> nnx.graph.GraphState:
   """Returns the intermediate output from a model."""
-  return nnx.state(model, nnx.Intermediate)
+  return nnx.pop(model, nnx.Intermediate)
 
 
 def wrap_model_with_sowed_modules(

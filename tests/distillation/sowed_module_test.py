@@ -123,7 +123,7 @@ class SowedModuleTest(absltest.TestCase):
     sowed_module.wrap_model_with_sowed_modules(model, [SimpleLayer])
     # Assertions about captured state after forward pass
     output = model(dummy_input)  # Run forward pass to populate intermediates
-    state = sowed_module.get_sowed_intermediate_outputs(model).to_pure_dict()
+    state = sowed_module.pop_sowed_intermediate_outputs(model).to_pure_dict()
 
     val_b1_l1 = original_b1_l1(dummy_input)  # Input: dummy_input
     val_b1_l2 = original_b1_l2(val_b1_l1)  # Input: output of b1_l1
