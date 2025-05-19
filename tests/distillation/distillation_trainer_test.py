@@ -56,42 +56,53 @@ def dummy_gen_model_input_fn(x: distillation_trainer.TrainingInput):
   }
 
 
-def get_toy_strategy():
-  def get_labels_fn(
-      input_tokens: jax.Array,
-      input_mask: jax.Array,
-      positions: jax.Array,
-      attention_mask: jax.Array,
-  ):
-    del positions, attention_mask
-    target_tokens = input_tokens[:, 1:]
-    target_mask = input_mask[:, 1:]
-    # Convert the target labels to one-hot encoded vectors.
-    labels = jax.nn.one_hot(target_tokens, _VOCAB_SIZE)
-    # Don't update on unwanted tokens.
-    return labels * target_mask.astype(labels.dtype)[..., None]
+def get_labels_fn(
+    input_tokens: jax.Array,
+    input_mask: jax.Array,
+    positions: jax.Array,
+    attention_mask: jax.Array,
+):
+  del positions, attention_mask
+  target_tokens = input_tokens[:, 1:]
+  target_mask = input_mask[:, 1:]
+  # Convert the target labels to one-hot encoded vectors.
+  labels = jax.nn.one_hot(target_tokens, _VOCAB_SIZE)
+  # Don't update on unwanted tokens.
+  return labels * target_mask.astype(labels.dtype)[..., None]
 
-  def get_model_outputs_fn(
-      model: nnx.Module,
-      input_tokens: jax.Array,
-      input_mask: jax.Array,
-      positions: jax.Array,
-      attention_mask: jax.Array,
-  ):
-    del input_mask
-    logits, _ = model(
-        input_tokens,
-        positions,
-        None,
-        attention_mask,
-    )
-    # Exclude the last step as it does not appear in the targets.
-    return logits[:, :-1, :]
 
+def get_model_outputs_fn(
+    model: nnx.Module,
+    input_tokens: jax.Array,
+    input_mask: jax.Array,
+    positions: jax.Array,
+    attention_mask: jax.Array,
+):
+  del input_mask
+  logits, _ = model(
+      input_tokens,
+      positions,
+      None,
+      attention_mask,
+  )
+  # Exclude the last step as it does not appear in the targets.
+  return logits[:, :-1, :]
+
+
+def get_toy_logit_strategy():
   return strategies.LogitStrategy(
       student_forward_fn=get_model_outputs_fn,
       teacher_forward_fn=get_model_outputs_fn,
       labels_fn=get_labels_fn,
+  )
+
+
+def get_toy_attention_transfer_strategy():
+  return strategies.AttentionTransferStrategy(
+      student_forward_fn=get_model_outputs_fn,
+      teacher_forward_fn=get_model_outputs_fn,
+      labels_fn=get_labels_fn,
+      attention_layer=nnx.MultiHeadAttention,
   )
 
 
@@ -117,7 +128,7 @@ class DistillationTrainerTest(absltest.TestCase):
     teacher_rngs = nnx.Rngs(1)
     student_model = tc.ToyTransformer(rngs=student_rngs, vocab_size=_VOCAB_SIZE)
     teacher_model = tc.ToyTransformer(rngs=teacher_rngs, vocab_size=_VOCAB_SIZE)
-    strategy = get_toy_strategy()
+    strategy = get_toy_logit_strategy()
     config = distillation_trainer.TrainingConfig(
         eval_every_n_steps=2, max_steps=100
     )
@@ -135,7 +146,7 @@ class DistillationTrainerTest(absltest.TestCase):
     original_variables = jax.tree.map(
         jnp.copy, nnx.state(student_model, nnx.Param)
     )
-    strategy = get_toy_strategy()
+    strategy = get_toy_logit_strategy()
     config = distillation_trainer.TrainingConfig(
         eval_every_n_steps=2, max_steps=100
     )
@@ -144,7 +155,29 @@ class DistillationTrainerTest(absltest.TestCase):
     ).with_gen_model_input_fn(dummy_gen_model_input_fn)
 
     trainer.train(self.train_ds, self.eval_ds)
-    trainer.train(self.train_ds)  # No eval dataset.
+    variables = nnx.state(student_model, nnx.Param)
+
+    jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
+
+  def test_complex_strategy_training(self):
+    student_rngs = nnx.Rngs(0)
+    teacher_rngs = nnx.Rngs(1)
+    student_model = tc.ToyTransformer(rngs=student_rngs, vocab_size=_VOCAB_SIZE)
+    teacher_model = tc.ToyTransformer(
+        rngs=teacher_rngs, vocab_size=_VOCAB_SIZE, num_layers=6
+    )
+    original_variables = jax.tree.map(
+        jnp.copy, nnx.state(student_model, nnx.Param)
+    )
+    strategy = get_toy_attention_transfer_strategy()
+    config = distillation_trainer.TrainingConfig(
+        eval_every_n_steps=2, max_steps=100
+    )
+    trainer = distillation_trainer.DistillationTrainer(
+        student_model, teacher_model, strategy, optax.sgd(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(self.train_ds, self.eval_ds)
     variables = nnx.state(student_model, nnx.Param)
 
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
@@ -164,7 +197,7 @@ class DistillationTrainerTest(absltest.TestCase):
     original_variables = jax.tree.map(
         jnp.copy, nnx.state(student_model, nnx.Param)
     )
-    strategy = get_toy_strategy()
+    strategy = get_toy_attention_transfer_strategy()
     config = distillation_trainer.TrainingConfig(
         eval_every_n_steps=2, max_steps=100
     )

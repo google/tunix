@@ -65,6 +65,45 @@ class BaseStrategy(abc.ABC):
   ) -> jax.Array:
     """Computes the distillation loss based on model outputs and labels."""
 
+  def pre_process_models(
+      self,
+      student_model: nnx.Module,
+      teacher_model: nnx.Module,
+  ) -> tuple[nnx.Module, nnx.Module]:
+    """Pre-processes the models to prepare for distillation.
+
+    This method is called before the distillation process. It can be used to
+    modify the models to prepare them for distillation.
+
+    Args:
+      student_model: Original student model.
+      teacher_model: Original teacher model.
+
+    Returns:
+      Student model processed for distillation.
+      Teacher model processed for distillation.
+    """
+    return student_model, teacher_model
+
+  def post_process_models(
+      self,
+      student_model: nnx.Module,
+      teacher_model: nnx.Module,
+  ) -> tuple[nnx.Module, nnx.Module]:
+    """Post-processes the models after distillation.
+
+    This method usually reverts the changes made in `pre_process_models`.
+
+    Args:
+      student_model: Pre processed student model.
+      teacher_model: Pre processed teacher model.
+
+    Returns:
+      Original student model.
+      Original processed teacher model.
+    """
+    return student_model, teacher_model
+
   def get_teacher_outputs(
       self,
       teacher_model: nnx.Module,
@@ -73,6 +112,14 @@ class BaseStrategy(abc.ABC):
     """Computes the teacher model outputs."""
     return self._teacher_forward_fn(teacher_model, **inputs)
 
+  def get_student_outputs(
+      self,
+      student_model: nnx.Module,
+      inputs: dict[str, jax.Array],
+  ) -> Any:
+    """Computes the student model outputs."""
+    return self._student_forward_fn(student_model, **inputs)
+
   def get_train_loss(
       self,
       student_model: nnx.Module,
@@ -80,7 +127,7 @@ class BaseStrategy(abc.ABC):
       inputs: dict[str, jax.Array],
   ) -> jax.Array:
     """Computes the distillation loss."""
-    student_output = self._student_forward_fn(student_model, **inputs)
+    student_output = self.get_student_outputs(student_model, inputs)
     labels = self._labels_fn(**inputs)
     return self.compute_loss(
         student_output=student_output,
@@ -94,7 +141,7 @@ class BaseStrategy(abc.ABC):
       inputs: dict[str, jax.Array],
   ) -> jax.Array:
     """Computes the task loss based on student model forward pass and labels."""
-    student_output = self._student_forward_fn(student_model, **inputs)
+    student_output = self.get_student_outputs(student_model, inputs)
     labels = self._labels_fn(**inputs)
     return self.compute_eval_loss(
         student_output=student_output,

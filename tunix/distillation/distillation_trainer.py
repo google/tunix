@@ -58,6 +58,10 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
         optimizer: The optimizer to use for training.
         training_config: The training config.
     """
+    self.strategy = strategy
+    student_model, teacher_model = strategy.pre_process_models(
+        student_model, teacher_model
+    )
     super().__init__(student_model, optimizer, training_config)
     self.teacher_model = teacher_model
     self.strategy = strategy
@@ -125,3 +129,9 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
   ) -> ArrayLike:
     del teacher_output  # Not computed in eval.
     return self.strategy.get_eval_loss(model, inputs)
+
+  def close(self):
+    super().close()
+    self.model, self.teacher_model = self.strategy.post_process_models(
+        self.model, self.teacher_model
+    )

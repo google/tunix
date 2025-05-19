@@ -360,6 +360,9 @@ class PeftTrainer:
           force=True,
       )
     ckpt_manager.close()
+    self.close()
+
+  def close(self):
     self._metrics_logger.close()
     if self._pbar is not None:
       self._pbar.close()
