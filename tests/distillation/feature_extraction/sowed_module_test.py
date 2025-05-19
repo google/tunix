@@ -41,10 +41,16 @@ class Block(nnx.Module):
     self.tag = tag
     self.layer1 = SimpleLayer(f'{tag}_layer1')
     self.layer2 = SimpleLayer(f'{tag}_layer2')  # Another instance
+    self.other_layers = [
+        SimpleLayer(f'{tag}_layer3'),
+        SimpleLayer(f'{tag}_layer4'),
+    ]
 
   def __call__(self, x: jax.Array) -> jax.Array:
     x = self.layer1(x)
     x = self.layer2(x)
+    for layer in self.other_layers:
+      x = layer(x)
     return x
 
 
@@ -71,8 +77,12 @@ class SowedModuleTest(absltest.TestCase):
     # Store references to all original SimpleLayer instances
     original_b1_l1 = model.block1.layer1
     original_b1_l2 = model.block1.layer2
+    original_b1_other_layers_0 = model.block1.other_layers[0]
+    original_b1_other_layers_1 = model.block1.other_layers[1]
     original_b2_l1 = model.block2.layer1
     original_b2_l2 = model.block2.layer2
+    original_b2_other_layers_0 = model.block2.other_layers[0]
+    original_b2_other_layers_1 = model.block2.other_layers[1]
     original_final = model.final_layer
 
     # Target SimpleLayer for wrapping
@@ -89,11 +99,27 @@ class SowedModuleTest(absltest.TestCase):
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
+        model.block1.other_layers[0],
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block1.other_layers[1],
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
         model.block2.layer1,
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
         model.block2.layer2,
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block2.other_layers[0],
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block2.other_layers[1],
         sowed_module.SowedModule,
     )
     self.assertIsInstance(
@@ -106,9 +132,113 @@ class SowedModuleTest(absltest.TestCase):
     # Check wrapped models are the originals
     self.assertIs(model.block1.layer1.wrapped_model, original_b1_l1)
     self.assertIs(model.block1.layer2.wrapped_model, original_b1_l2)
+    self.assertIs(
+        model.block1.other_layers[0].wrapped_model, original_b1_other_layers_0
+    )
+    self.assertIs(
+        model.block1.other_layers[1].wrapped_model, original_b1_other_layers_1
+    )
     self.assertIs(model.block2.layer1.wrapped_model, original_b2_l1)
     self.assertIs(model.block2.layer2.wrapped_model, original_b2_l2)
+    self.assertIs(
+        model.block2.other_layers[0].wrapped_model, original_b2_other_layers_0
+    )
+    self.assertIs(
+        model.block2.other_layers[1].wrapped_model, original_b2_other_layers_1
+    )
     self.assertIs(model.final_layer.wrapped_model, original_final)
+
+  def test_wrap_model_with_multiple_target_types(self):
+    dummy_input = jnp.array([10.0])
+    model = OuterModel()
+    # Store references to all original SimpleLayer instances
+    original_b1 = model.block1
+    original_b1_l1 = model.block1.layer1
+    original_b1_l2 = model.block1.layer2
+    original_b1_other_layers_0 = model.block1.other_layers[0]
+    original_b1_other_layers_1 = model.block1.other_layers[1]
+    original_b2 = model.block2
+    original_b2_l1 = model.block2.layer1
+    original_b2_l2 = model.block2.layer2
+    original_b2_other_layers_0 = model.block2.other_layers[0]
+    original_b2_other_layers_1 = model.block2.other_layers[1]
+    original_final = model.final_layer
+
+    # Target SimpleLayer for wrapping
+    target_types = [SimpleLayer, Block]
+    sowed_module.wrap_model_with_sowed_modules(model, target_types)
+
+    # Assert all SimpleLayers are wrapped
+    self.assertIsInstance(
+        model.block1.wrapped_model.layer1,
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block1.wrapped_model.layer2,
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block1.wrapped_model.other_layers[0],
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block1.wrapped_model.other_layers[1],
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block2.wrapped_model.layer1,
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block2.wrapped_model.layer2,
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block2.wrapped_model.other_layers[0],
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.block2.wrapped_model.other_layers[1],
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(
+        model.final_layer,
+        sowed_module.SowedModule,
+    )
+    self.assertIsInstance(model.block1, sowed_module.SowedModule)
+    self.assertIsInstance(model.block2, sowed_module.SowedModule)
+    # Check wrapped models are the originals
+    self.assertIs(
+        model.block1.wrapped_model.layer1.wrapped_model, original_b1_l1
+    )
+    self.assertIs(
+        model.block1.wrapped_model.layer2.wrapped_model, original_b1_l2
+    )
+    self.assertIs(
+        model.block1.wrapped_model.other_layers[0].wrapped_model,
+        original_b1_other_layers_0,
+    )
+    self.assertIs(
+        model.block1.wrapped_model.other_layers[1].wrapped_model,
+        original_b1_other_layers_1,
+    )
+    self.assertIs(
+        model.block2.wrapped_model.layer1.wrapped_model, original_b2_l1
+    )
+    self.assertIs(
+        model.block2.wrapped_model.layer2.wrapped_model, original_b2_l2
+    )
+    self.assertIs(
+        model.block2.wrapped_model.other_layers[0].wrapped_model,
+        original_b2_other_layers_0,
+    )
+    self.assertIs(
+        model.block2.wrapped_model.other_layers[1].wrapped_model,
+        original_b2_other_layers_1,
+    )
+    self.assertIs(model.final_layer.wrapped_model, original_final)
+    self.assertIs(model.block1.wrapped_model, original_b1)
+    self.assertIs(model.block2.wrapped_model, original_b2)
 
   def test_wrap_model_with_sowed_modules_forward_pass(self):
     dummy_input = jnp.array([10.0])
@@ -116,8 +246,12 @@ class SowedModuleTest(absltest.TestCase):
     # Store references to all original SimpleLayer instances
     original_b1_l1 = model.block1.layer1
     original_b1_l2 = model.block1.layer2
+    original_b1_other_layers_0 = model.block1.other_layers[0]
+    original_b1_other_layers_1 = model.block1.other_layers[1]
     original_b2_l1 = model.block2.layer1
     original_b2_l2 = model.block2.layer2
+    original_b2_other_layers_0 = model.block2.other_layers[0]
+    original_b2_other_layers_1 = model.block2.other_layers[1]
     original_final = model.final_layer
     # Wrap the model (all SimpleLayers)
     sowed_module.wrap_model_with_sowed_modules(model, [SimpleLayer])
@@ -127,9 +261,25 @@ class SowedModuleTest(absltest.TestCase):
 
     val_b1_l1 = original_b1_l1(dummy_input)  # Input: dummy_input
     val_b1_l2 = original_b1_l2(val_b1_l1)  # Input: output of b1_l1
-    val_b2_l1 = original_b2_l1(val_b1_l2)  # Input: output of b1_l2
+    val_b1_other_layers_0 = original_b1_other_layers_0(
+        val_b1_l2
+    )  # Input: output of b1_l2
+    val_b1_other_layers_1 = original_b1_other_layers_1(
+        val_b1_other_layers_0
+    )  # Input: output of b1_other_layers_0
+    val_b2_l1 = original_b2_l1(
+        val_b1_other_layers_1
+    )  # Input: output of b1_other_layers_1
     val_b2_l2 = original_b2_l2(val_b2_l1)  # Input: output of b2_l1
-    val_final = original_final(val_b2_l2)  # Input: output of b2_l2
+    val_b2_other_layers_0 = original_b2_other_layers_0(
+        val_b2_l2
+    )  # Input: output of b2_l2
+    val_b2_other_layers_1 = original_b2_other_layers_1(
+        val_b2_other_layers_0
+    )  # Input: output of b2_other_layers_0
+    val_final = original_final(
+        val_b2_other_layers_1
+    )  # Input: output of b2_other_layers_1
     # Final output should match val_final
     tc.assert_close('final_output', output, val_final)
 
@@ -139,10 +289,18 @@ class SowedModuleTest(absltest.TestCase):
         'block1': {
             'layer1': {tag: (val_b1_l1,)},
             'layer2': {tag: (val_b1_l2,)},
+            'other_layers': {
+                0: {tag: (val_b1_other_layers_0,)},
+                1: {tag: (val_b1_other_layers_1,)},
+            },
         },
         'block2': {
             'layer1': {tag: (val_b2_l1,)},
             'layer2': {tag: (val_b2_l2,)},
+            'other_layers': {
+                0: {tag: (val_b2_other_layers_0,)},
+                1: {tag: (val_b2_other_layers_1,)},
+            },
         },
         'final_layer': {tag: (val_final,)},
     }
@@ -179,50 +337,30 @@ class SowedModuleTest(absltest.TestCase):
     # Store references to ALL original SimpleLayer instances
     original_b1_l1 = model.block1.layer1
     original_b1_l2 = model.block1.layer2
+    original_b1_other_layers_0 = model.block1.other_layers[0]
+    original_b1_other_layers_1 = model.block1.other_layers[1]
     original_b2_l1 = model.block2.layer1
     original_b2_l2 = model.block2.layer2
+    original_b2_other_layers_0 = model.block2.other_layers[0]
+    original_b2_other_layers_1 = model.block2.other_layers[1]
     original_final = model.final_layer
 
     # Wrap the model (all SimpleLayers)
     target_types = [SimpleLayer]
     sowed_module.wrap_model_with_sowed_modules(model, target_types)
 
-    # Sanity check ALL wrapping occurred
-    self.assertIsInstance(
-        model.block1.layer1,
-        sowed_module.SowedModule,
-    )
-    self.assertIsInstance(
-        model.block1.layer2,
-        sowed_module.SowedModule,
-    )
-    self.assertIsInstance(
-        model.block2.layer1,
-        sowed_module.SowedModule,
-    )
-    self.assertIsInstance(
-        model.block2.layer2,
-        sowed_module.SowedModule,
-    )
-    self.assertIsInstance(
-        model.final_layer,
-        sowed_module.SowedModule,
-    )
-
     # Unwrap the sowed modules
     sowed_module.unwrap_sowed_modules(model)
 
-    # Assert structure is restored for all layers
-    self.assertIsInstance(model.block1.layer1, SimpleLayer)
-    self.assertIsInstance(model.block1.layer2, SimpleLayer)
-    self.assertIsInstance(model.block2.layer1, SimpleLayer)
-    self.assertIsInstance(model.block2.layer2, SimpleLayer)
-    self.assertIsInstance(model.final_layer, SimpleLayer)
     # Check if the instances are the originals
     self.assertIs(model.block1.layer1, original_b1_l1)
     self.assertIs(model.block1.layer2, original_b1_l2)
+    self.assertIs(model.block1.other_layers[0], original_b1_other_layers_0)
+    self.assertIs(model.block1.other_layers[1], original_b1_other_layers_1)
     self.assertIs(model.block2.layer1, original_b2_l1)
     self.assertIs(model.block2.layer2, original_b2_l2)
+    self.assertIs(model.block2.other_layers[0], original_b2_other_layers_0)
+    self.assertIs(model.block2.other_layers[1], original_b2_other_layers_1)
     self.assertIs(model.final_layer, original_final)
 
 

@@ -15,7 +15,6 @@
 """Utilities for wrapping nnx.Modules to capture their outputs."""
 
 import logging
-from typing import Type
 
 from flax import nnx
 
@@ -57,7 +56,7 @@ def pop_sowed_intermediate_outputs(
 
 def wrap_model_with_sowed_modules(
     model: nnx.Module,
-    modules_to_capture: list[Type[nnx.Module]],
+    modules_to_capture: list[type[nnx.Module]],
 ):
   """Wrap the layers of a model with a SowedModule to capture their outputs.
 
@@ -73,23 +72,55 @@ def wrap_model_with_sowed_modules(
   Returns:
       The number of layers that were wrapped.
   """
-  for path, child_module in model.iter_children():
-    # Check recursively for any modules that needs to be wrapped.
-    wrap_model_with_sowed_modules(child_module, modules_to_capture)
-    # Check if the child is the target types and is not already wrapped.
-    if any(
-        [isinstance(child_module, module) for module in modules_to_capture]
-    ) and not isinstance(model, SowedModule):
-      logger.debug(
-          "Wrapping %s instance found at %s.%s",
-          child_module.__class__,
-          model.__class__,
-          path,
+  replacements = []
+
+  for path, module in model.iter_modules():
+    # Only wrap if it's the target module_to_wrap and not already wrapped
+    if isinstance(module, tuple(modules_to_capture)) and not isinstance(
+        module, SowedModule
+    ):
+      wrapped_instance = SowedModule(module)
+      replacements.append((path, wrapped_instance))
+
+  # Apply replacements
+  for path, wrapped_instance in replacements:
+    if not path:
+      raise ValueError(
+          "Attempted to wrap the root module"
+          f" ({type(model).__name__}). This utility is designed for"
+          " wrapping submodules in-place. The root module itself will not be"
+          " replaced by this function's modification logic. If you need to"
+          " wrap the root module, instantiate the wrapper directly around it."
       )
-      # Create the wrapper
-      wrapper = SowedModule(child_module)
-      # Replace the attribute on the parent model
-      setattr(model, path, wrapper)
+
+    # Traverse the path to find the direct parent of the module to be replaced
+    current_parent_obj = model
+    for part in path[:-1]:
+      if isinstance(part, str):
+        current_parent_obj = getattr(current_parent_obj, part)
+      elif isinstance(part, int):
+        current_parent_obj = current_parent_obj[part]
+      else:
+        raise TypeError(
+            f"Unsupported path part type: {type(part)}. Path: {path}"
+        )
+
+    if isinstance(current_parent_obj, SowedModule):
+      # Do not wrap if the parent is already a SowedModule
+      continue
+
+    last_key = path[-1]
+
+    if isinstance(last_key, str):
+      setattr(current_parent_obj, last_key, wrapped_instance)
+    elif isinstance(last_key, int):
+      # If the parent is a sequence, try to modify in-place
+      current_parent_obj[last_key] = wrapped_instance
+    else:
+      raise TypeError(
+          f"Unsupported key type for replacement: {type(last_key)}. Path:"
+          f" {path}"
+      )
 
 
 def unwrap_sowed_modules(model: nnx.Module):
@@ -102,16 +133,50 @@ def unwrap_sowed_modules(model: nnx.Module):
   Args:
       model: The root nnx.Module to traverse and modify.
   """
-  for path, child_module in model.iter_children():
-    # Check recursively for any modules that needs to be unwrapped.
-    unwrap_sowed_modules(child_module)
-    # Check if the child is a SowedModule.
-    if isinstance(child_module, SowedModule):
-      logger.debug(
-          "Unwrapping %s instance found at %s.%s",
-          child_module.wrapped_model.__class__,
-          model.__class__,
-          path,
+  replacements = []
+
+  # Collect all wrapper instances and their original wrapped modules
+  for path, module in model.iter_modules():
+    if isinstance(module, SowedModule):
+      if not hasattr(module, "wrapped_model"):
+        raise ValueError(
+            f"Wrapper module at path {path} does not have a 'wrapped_model'"
+            " attribute."
+        )
+      replacements.append((path, module.wrapped_model))
+
+  # Apply replacements
+  for path, original_module in replacements:
+    if not path:
+      raise ValueError(
+          "Attempted to unwrap the root module"
+          f" ({type(model).__name__}). This utility is designed for"
+          " unwrapping submodules in-place. The root module itself will not be"
+          " replaced by this function's modification logic. If you need to"
+          " unwrap the root module, you should typically re-assign the result"
+          " of this function: `model = unwrap_module_instances(model)`."
       )
-      # Replace the attribute on the parent model
-      setattr(model, path, child_module.wrapped_model)
+
+    # Traverse the path to find the direct parent of the module to be unwrapped
+    current_parent_obj = model
+    for part in path[:-1]:
+      if isinstance(part, str):
+        current_parent_obj = getattr(current_parent_obj, part)
+      elif isinstance(part, int):
+        current_parent_obj = current_parent_obj[part]
+      else:
+        raise TypeError(
+            f"Unsupported path part type: {type(part)}. Path: {path}"
+        )
+
+    last_key = path[-1]
+
+    if isinstance(last_key, str):
+      setattr(current_parent_obj, last_key, original_module)
+    elif isinstance(last_key, int):
+      current_parent_obj[last_key] = original_module
+    else:
+      raise TypeError(
+          f"Unsupported key type for replacement: {type(last_key)}. Path:"
+          f" {path}"
+      )
