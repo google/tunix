@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities for mutating feature shapes for distillation."""
+"""Utilities for mutating feature shapes via pooling for distillation."""
 
 import enum
 from flax import nnx

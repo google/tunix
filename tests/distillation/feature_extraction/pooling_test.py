@@ -16,7 +16,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax.numpy as jnp
 import numpy as np
-from tunix.distillation import feature_shape
+from tunix.distillation.feature_extraction import pooling
 
 
 class AvgPoolArrayToTargetShapeTest(parameterized.TestCase):
@@ -27,56 +27,56 @@ class AvgPoolArrayToTargetShapeTest(parameterized.TestCase):
           testcase_name='valid_1d_exact_div',
           input_shape=(10,),
           target_shape=(5,),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='valid_1d_to_one',
           input_shape=(10,),
           target_shape=(1,),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='valid_1d_no_change',
           input_shape=(5,),
           target_shape=(5,),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='valid_1d_general_k4_s2',
           input_shape=(10,),
           target_shape=(4,),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='valid_1d_general_k4_s3',
           input_shape=(10,),
           target_shape=(3,),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='valid_2d_exact_div',
           input_shape=(4, 5),
           target_shape=(2, 5),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='valid_2d_mixed_reduction',
           input_shape=(6, 10),
           target_shape=(3, 5),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='valid_3d_reduction',
           input_shape=(8, 6, 4),
           target_shape=(4, 3, 2),
-          padding_mode=feature_shape.PaddingMode.VALID,
+          padding_mode=pooling.PaddingMode.VALID,
           count_include_pad_for_same_padding=False,
       ),
       # SAME padding tests
@@ -84,21 +84,21 @@ class AvgPoolArrayToTargetShapeTest(parameterized.TestCase):
           testcase_name='same_1d_exact_div',
           input_shape=(10,),
           target_shape=(5,),
-          padding_mode=feature_shape.PaddingMode.SAME,
+          padding_mode=pooling.PaddingMode.SAME,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='same_1d_general',
           input_shape=(10,),
           target_shape=(3,),
-          padding_mode=feature_shape.PaddingMode.SAME,
+          padding_mode=pooling.PaddingMode.SAME,
           count_include_pad_for_same_padding=False,
       ),
       dict(
           testcase_name='same_2d_reduction',
           input_shape=(4, 5),
           target_shape=(2, 3),
-          padding_mode=feature_shape.PaddingMode.SAME,
+          padding_mode=pooling.PaddingMode.SAME,
           count_include_pad_for_same_padding=False,
       ),
   )
@@ -106,11 +106,11 @@ class AvgPoolArrayToTargetShapeTest(parameterized.TestCase):
       self,
       input_shape: tuple[int, ...],
       target_shape: tuple[int, ...],
-      padding_mode: feature_shape.PaddingMode,
+      padding_mode: pooling.PaddingMode,
       count_include_pad_for_same_padding: bool,
   ):
     """Tests if the function produces the correct output shape for valid inputs."""
-    result = feature_shape.avg_pool_array_to_target_shape(
+    result = pooling.avg_pool_array_to_target_shape(
         input_array=jnp.arange(np.prod(input_shape), dtype=jnp.float32).reshape(
             input_shape
         ),
@@ -125,20 +125,20 @@ class AvgPoolArrayToTargetShapeTest(parameterized.TestCase):
     input_arr = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=jnp.float32)
     target_shape = (2,)
 
-    result_true = feature_shape.avg_pool_array_to_target_shape(
+    result_true = pooling.avg_pool_array_to_target_shape(
         input_array=input_arr,
         target_shape=target_shape,
-        padding_mode=feature_shape.PaddingMode.SAME,
+        padding_mode=pooling.PaddingMode.SAME,
         count_include_pad_for_same_padding=True,
     )
     np.testing.assert_allclose(
         result_true, jnp.array([2.0, 3.0], dtype=jnp.float32), rtol=1e-6
     )
 
-    result_false = feature_shape.avg_pool_array_to_target_shape(
+    result_false = pooling.avg_pool_array_to_target_shape(
         input_array=input_arr,
         target_shape=target_shape,
-        padding_mode=feature_shape.PaddingMode.SAME,
+        padding_mode=pooling.PaddingMode.SAME,
         count_include_pad_for_same_padding=False,
     )
     np.testing.assert_allclose(
@@ -180,7 +180,7 @@ class AvgPoolArrayToTargetShapeTest(parameterized.TestCase):
       error_msg_regex: str,
   ):
     with self.assertRaisesRegex(ValueError, error_msg_regex):
-      feature_shape.avg_pool_array_to_target_shape(
+      pooling.avg_pool_array_to_target_shape(
           jnp.arange(np.prod(input_shape), dtype=jnp.float32).reshape(
               input_shape
           ),

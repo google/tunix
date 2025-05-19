@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for distillation strategies."""
+"""Tests for attention transfer strategy."""
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -20,9 +20,13 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy.testing as npt
-from tunix.distillation import distillation_strategy
+from tunix.distillation.strategies import attention_transfer_strategy
 
 jax.config.update("jax_threefry_partitionable", False)
+
+AttentionTransferStrategy = (
+    attention_transfer_strategy.AttentionTransferStrategy
+)
 
 
 class DummyModel(nnx.Module):
@@ -31,156 +35,7 @@ class DummyModel(nnx.Module):
     return x
 
 
-class LogitDistillationTest(parameterized.TestCase):
-
-  def _get_dummy_logits(self, key, batch_size, num_classes):
-    return jax.random.normal(key, (batch_size, num_classes))
-
-  def _get_dummy_labels(self, key, batch_size, num_classes):
-    labels_int = jax.random.randint(key, (batch_size,), 0, num_classes)
-    return jax.nn.one_hot(labels_int, num_classes)
-
-  def dummy_fn(self):
-    pass
-
-  @parameterized.named_parameters(
-      ("valid", 2.0, 0.5),
-      ("alpha_zero", 3.0, 0.0),
-      ("alpha_one", 2.0, 1.0),
-  )
-  def test_init_valid(self, temp, alpha):
-    strategy = distillation_strategy.LogitDistillation(
-        student_forward_fn=self.dummy_fn,
-        teacher_forward_fn=self.dummy_fn,
-        labels_fn=self.dummy_fn,
-        temperature=temp,
-        alpha=alpha,
-    )
-    self.assertEqual(strategy.temperature, float(temp))
-    self.assertEqual(strategy.alpha, alpha)
-
-  @parameterized.named_parameters(
-      ("temp_zero", 0, 0.5),
-      ("temp_neg", -1.0, 0.5),
-      ("alpha_neg", 2.0, -0.1),
-      ("alpha_over", 2.0, 1.1),
-  )
-  def test_init_invalid(self, temp, alpha):
-    with self.assertRaises(ValueError):
-      distillation_strategy.LogitDistillation(
-          student_forward_fn=self.dummy_fn,
-          teacher_forward_fn=self.dummy_fn,
-          labels_fn=self.dummy_fn,
-          temperature=temp,
-          alpha=alpha,
-      )
-
-  @parameterized.named_parameters(
-      ("alpha_one", 1.0, 0.818179),
-      ("alpha_half", 0.5, 1.530153),
-      ("alpha_zero", 0.0, 2.242127),
-  )
-  def test_logit_distillation_compute_loss(self, alpha, expected_loss):
-    s_key, t_key, l_key = jax.random.split(jax.random.key(0), 3)
-    batch_size, num_classes = 4, 10
-    student_logits = self._get_dummy_logits(s_key, batch_size, num_classes)
-    teacher_logits = self._get_dummy_logits(t_key, batch_size, num_classes)
-    labels = self._get_dummy_labels(l_key, batch_size, num_classes)
-    temp = 3.0
-    strategy = distillation_strategy.LogitDistillation(
-        student_forward_fn=self.dummy_fn,
-        teacher_forward_fn=self.dummy_fn,
-        labels_fn=self.dummy_fn,
-        temperature=temp,
-        alpha=alpha,
-    )
-
-    computed_loss = strategy.compute_loss(
-        student_output=student_logits,
-        teacher_output=teacher_logits,
-        labels=labels,
-    )
-
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
-
-  @parameterized.named_parameters(
-      ("alpha_one", 1.0),
-      ("alpha_half", 0.5),
-      ("alpha_zero", 0.0),
-  )
-  def test_compute_eval_loss(self, alpha):
-    s_key, l_key = jax.random.split(jax.random.key(0), 2)
-    batch_size, num_classes = 4, 10
-    student_logits = self._get_dummy_logits(s_key, batch_size, num_classes)
-    labels = self._get_dummy_labels(l_key, batch_size, num_classes)
-    temp = 3.0
-    strategy = distillation_strategy.LogitDistillation(
-        student_forward_fn=self.dummy_fn,
-        teacher_forward_fn=self.dummy_fn,
-        labels_fn=self.dummy_fn,
-        temperature=temp,
-        alpha=alpha,
-    )
-    expected_loss = 2.49732
-
-    computed_loss = strategy.compute_eval_loss(
-        student_output=student_logits,
-        labels=labels,
-    )
-
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
-
-  def test_get_train_loss(self):
-    strategy = distillation_strategy.LogitDistillation(
-        student_forward_fn=lambda _, student_output, **kwargs: student_output,
-        teacher_forward_fn=lambda _, teacher_output, **kwargs: teacher_output,
-        labels_fn=lambda labels, **kwargs: labels,
-    )
-    inputs = {
-        "student_output": jnp.array([1.0, 2.0, 3.0]),
-        "teacher_output": jnp.array([4.0, 5.0, 6.0]),
-        "labels": jnp.array([7.0, 8.0, 9.0]),
-    }
-    expected_loss = strategy.compute_loss(
-        student_output=inputs["student_output"],
-        teacher_output=inputs["teacher_output"],
-        labels=inputs["labels"],
-    )
-
-    teacher_output = strategy.get_teacher_outputs(
-        teacher_model=DummyModel(), inputs=inputs
-    )
-    computed_loss = strategy.get_train_loss(
-        student_model=DummyModel(), teacher_output=teacher_output, inputs=inputs
-    )
-
-    npt.assert_allclose(teacher_output, inputs["teacher_output"], rtol=1e-6)
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
-
-  def test_get_eval_loss(self):
-    strategy = distillation_strategy.LogitDistillation(
-        student_forward_fn=lambda _, student_output, **kwargs: student_output,
-        teacher_forward_fn=lambda _, teacher_output, **kwargs: teacher_output,
-        labels_fn=lambda labels, **kwargs: labels,
-    )
-    inputs = {
-        "student_output": jnp.array([1.0, 2.0, 3.0]),
-        "teacher_output": jnp.array([]),
-        "labels": jnp.array([7.0, 8.0, 9.0]),
-    }
-    expected_loss = strategy.compute_eval_loss(
-        student_output=inputs["student_output"],
-        labels=inputs["labels"],
-    )
-
-    computed_loss = strategy.get_eval_loss(
-        student_model=DummyModel(), inputs=inputs
-    )
-
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
-
-
-class AttentionTransferTest(parameterized.TestCase):
+class AttentionTransferStrategyTest(parameterized.TestCase):
 
   def _get_dummy_logits(self, key, batch_size, num_classes):
     return jax.random.normal(key, (batch_size, num_classes))
@@ -208,13 +63,13 @@ class AttentionTransferTest(parameterized.TestCase):
       ("alpha_one", 1.0),
   )
   def test_init_valid(self, alpha):
-    strategy = distillation_strategy.AttentionTransfer(
+    strategy = AttentionTransferStrategy(
         student_forward_fn=self.dummy_fn,
         teacher_forward_fn=self.dummy_fn,
         labels_fn=self.dummy_fn,
         alpha=alpha,
     )
-    self.assertIsInstance(strategy, distillation_strategy.AttentionTransfer)
+    self.assertIsInstance(strategy, AttentionTransferStrategy)
     self.assertEqual(strategy.alpha, alpha)
 
   @parameterized.named_parameters(
@@ -223,7 +78,7 @@ class AttentionTransferTest(parameterized.TestCase):
   )
   def test_init_invalid(self, alpha):
     with self.assertRaises(ValueError):
-      distillation_strategy.AttentionTransfer(
+      AttentionTransferStrategy(
           student_forward_fn=self.dummy_fn,
           teacher_forward_fn=self.dummy_fn,
           labels_fn=self.dummy_fn,
@@ -231,11 +86,11 @@ class AttentionTransferTest(parameterized.TestCase):
       )
 
   @parameterized.named_parameters(
-      ("alpha_one", 1.0, 0.161182),
-      ("alpha_half", 0.5, 1.07304),
+      ("alpha_one", 1.0, 0.162183),
+      ("alpha_half", 0.5, 1.07354),
       ("alpha_zero", 0.0, 1.984897),
   )
-  def test_compute_loss_default_mse(self, alpha, expected_loss):
+  def test_compute_loss_default_cosine_distance(self, alpha, expected_loss):
     key = jax.random.key(2)
     output_key, s_attn_key, t_attn_key, label_key = jax.random.split(key, 4)
     num_layers, batch_size, num_heads, seq_len, num_classes = 3, 2, 4, 8, 5
@@ -245,11 +100,11 @@ class AttentionTransferTest(parameterized.TestCase):
         s_attn_key, num_layers, batch_size, num_heads, seq_len
     )
     teacher_attns = self._get_dummy_attentions(
-        t_attn_key, num_layers, batch_size, num_heads, seq_len
+        t_attn_key, num_layers * 2, batch_size, num_heads * 2, seq_len
     )
     labels = self._get_dummy_labels(label_key, batch_size, num_classes)
     student_outputs = {"logits": student_logits, "attentions": student_attns}
-    strategy = distillation_strategy.AttentionTransfer(
+    strategy = AttentionTransferStrategy(
         student_forward_fn=self.dummy_fn,
         teacher_forward_fn=self.dummy_fn,
         labels_fn=self.dummy_fn,
@@ -271,13 +126,13 @@ class AttentionTransferTest(parameterized.TestCase):
     labels = self._get_dummy_labels(label_key, batch_size, num_classes)
     student_outputs = {"logits": student_logits, "attentions": jnp.array([])}
     alpha = 0.6
-    strategy = distillation_strategy.AttentionTransfer(
+    strategy = AttentionTransferStrategy(
         student_forward_fn=self.dummy_fn,
         teacher_forward_fn=self.dummy_fn,
         labels_fn=self.dummy_fn,
         alpha=alpha,
     )
-    expected_combined_loss = jnp.array(0.844023)
+    expected_combined_loss = jnp.array(1.444023)
 
     computed_loss = strategy.compute_loss(
         student_output=student_outputs,
@@ -297,7 +152,7 @@ class AttentionTransferTest(parameterized.TestCase):
     student_logits = self._get_dummy_logits(s_key, batch_size, num_classes)
     student_output = {"logits": student_logits, "attentions": jnp.array([])}
     labels = self._get_dummy_labels(l_key, batch_size, num_classes)
-    strategy = distillation_strategy.AttentionTransfer(
+    strategy = AttentionTransferStrategy(
         student_forward_fn=self.dummy_fn,
         teacher_forward_fn=self.dummy_fn,
         labels_fn=self.dummy_fn,
@@ -313,7 +168,7 @@ class AttentionTransferTest(parameterized.TestCase):
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
 
   def test_get_train_loss(self):
-    strategy = distillation_strategy.AttentionTransfer(
+    strategy = AttentionTransferStrategy(
         student_forward_fn=lambda _, student_output, **kwargs: student_output,
         teacher_forward_fn=lambda _, teacher_output, **kwargs: teacher_output,
         labels_fn=lambda labels, **kwargs: labels,
@@ -343,7 +198,7 @@ class AttentionTransferTest(parameterized.TestCase):
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
 
   def test_get_eval_loss(self):
-    strategy = distillation_strategy.AttentionTransfer(
+    strategy = AttentionTransferStrategy(
         student_forward_fn=lambda _, student_output, **kwargs: student_output,
         teacher_forward_fn=lambda _, teacher_output, **kwargs: teacher_output,
         labels_fn=lambda labels, **kwargs: labels,
