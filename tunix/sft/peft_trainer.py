@@ -33,6 +33,7 @@ import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger
+from tunix.sft import profiler
 from tunix.sft import progress_bar
 
 _ModelInputT = Dict[str, ArrayLike]
@@ -65,6 +66,9 @@ class TrainingConfig:
 
   # Configs for the metrics logger.
   metrics_logging_options: metrics_logger.MetricsLoggerOptions | None = None
+
+  # Configs for the profiler.
+  profiler_options: profiler.ProfilerOptions | None = None
 
   data_sharding_axis: Tuple[str, ...] = ("fsdp",)
 
@@ -288,6 +292,11 @@ class PeftTrainer:
           max_steps=self.config.max_steps,
       )
 
+    prof = profiler.Profiler(
+        initial_step=self._train_steps,
+        max_step=self.config.max_steps,
+        profiler_options=self.config.profiler_options,
+    )
     with time_measure("Train loop"):
       for index, train_example in enumerate(train_ds):
         # TODO: Add support to restore the iterator state instead of
@@ -295,41 +304,50 @@ class PeftTrainer:
         if index < self._train_steps:
           # Skip the examples that are already trained.
           continue
-
-        if eval_ds and self._train_steps % self.config.eval_every_n_steps == 0:
-          self._run_eval(eval_ds, eval_step)
-
-        # Stop training if max_steps is reached.
-        if (
-            self.config.max_steps is not None
-            and self._train_steps >= self.config.max_steps
+        prof.maybe_activate(self._train_steps)
+        with jax.profiler.StepTraceAnnotation(
+            "train", step_num=self._train_steps
         ):
-          break
+          if (
+              eval_ds
+              and self._train_steps % self.config.eval_every_n_steps == 0
+          ):
+            self._run_eval(eval_ds, eval_step)
 
-        train_example = self._prepare_inputs(train_example)
-        train_example = self._shard_input(train_example)
+          # Stop training if max_steps is reached.
+          if (
+              self.config.max_steps is not None
+              and self._train_steps >= self.config.max_steps
+          ):
+            break
 
-        self._throttler.wait_for_next()
-        train_loss, aux = train_step(self.model, self.optimizer, train_example)
-        self._throttler.add_computation(train_loss)
-        self._train_steps += 1
-        self._post_process_train_step(aux)
-        self._log_metrics(train_loss, self._train_steps)
-        self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
+          train_example = self._prepare_inputs(train_example)
+          train_example = self._shard_input(train_example)
 
-        logging.info(
-            "Train step %d training loss: %f  - training perplexity: %f",
-            self._train_steps,
-            self._metrics_logger.get_metric("loss", "train"),
-            self._metrics_logger.get_metric("perplexity", "train"),
-        )
+          self._throttler.wait_for_next()
+          train_loss, aux = train_step(
+              self.model, self.optimizer, train_example
+          )
+          self._throttler.add_computation(train_loss)
+          self._train_steps += 1
+          self._post_process_train_step(aux)
+          self._log_metrics(train_loss, self._train_steps)
+          self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
 
-        # Actual checkpoint frequency is configured by checkpointing_options.
-        ckpt_manager.save(
-            self._train_steps,
-            self.model,
-            save_only_lora_params=self._lora_enabled,
-        )
+          logging.info(
+              "Train step %d training loss: %f  - training perplexity: %f",
+              self._train_steps,
+              self._metrics_logger.get_metric("loss", "train"),
+              self._metrics_logger.get_metric("perplexity", "train"),
+          )
+
+          # Actual checkpoint frequency is configured by checkpointing_options.
+          ckpt_manager.save(
+              self._train_steps,
+              self.model,
+              save_only_lora_params=self._lora_enabled,
+          )
+          prof.maybe_deactivate(self._train_steps)
 
     self._throttler.wait_for_all()
     # Save the final checkpoint forcefully if not already saved.

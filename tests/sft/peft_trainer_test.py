@@ -28,6 +28,7 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager
 from tunix.sft import peft_trainer
+from tunix.sft import profiler
 from tunix.tests import test_common as tc
 
 
@@ -103,6 +104,50 @@ class PeftTrainerTest(absltest.TestCase):
     )
 
     trainer.train(self.train_ds)  # No eval dataset.
+
+  @mock.patch.object(profiler, 'Profiler')
+  def test_basic_training_with_profiler(self, mock_profiler_init):
+    self.train_ds = dummy_datasets(batch_size=4, repeat=4)
+    mock_profiler_instance = mock.MagicMock()
+    mock_profiler_init.return_value = mock_profiler_instance
+    mock_profiler_instance.should_activate.side_effect = (
+        lambda step: step == profiler_options.skip_first_n_steps
+    )
+    mock_profiler_instance.should_deactivate.side_effect = (
+        lambda step: step
+        == (
+            profiler_options.skip_first_n_steps
+            + profiler_options.profiler_steps
+        )
+    )
+    profiler_options = profiler.ProfilerOptions(
+        '/tmp/profiler', skip_first_n_steps=2, profiler_steps=3
+    )
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2, max_steps=100, profiler_options=profiler_options
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(rngs=rngs)
+
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds)  # No eval dataset.
+
+    mock_profiler_init.assert_called_once_with(
+        initial_step=0,
+        max_step=config.max_steps,
+        profiler_options=profiler_options,
+    )
+    expected_calls = (
+        # steps 0 through 8.
+        [mock.call.maybe_activate(step) for step in range(8)]
+        # steps 1 through 9 as step number is incremented during each step.
+        + [mock.call.maybe_deactivate(step) for step in range(1, 9)]
+    )
+    mock_profiler_instance.assert_has_calls(
+        expected_calls,
+        any_order=True,
+    )
 
   def test_dist_training(self):
     mesh = shd.Mesh(
