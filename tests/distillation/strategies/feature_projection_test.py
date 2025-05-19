@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for attention transfer strategy."""
+"""Tests for feature pooling strategy."""
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -20,16 +20,16 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy.testing as npt
-from tunix.distillation.strategies import attention
+from tunix.distillation.strategies import feature_projection
 
 jax.config.update("jax_threefry_partitionable", False)
 
-AttentionTransferStrategy = attention.AttentionTransferStrategy
+FeatureProjectionStrategy = feature_projection.FeatureProjectionStrategy
 
 
 class DummyModel(nnx.Module):
 
-  def __init__(self, in_features=3, out_features=1):
+  def __init__(self, in_features=3, out_features=10):
     self.linear = nnx.Linear(
         in_features=in_features, out_features=out_features, rngs=nnx.Rngs(0)
     )
@@ -39,20 +39,13 @@ class DummyModel(nnx.Module):
     return x
 
 
-class AttentionTransferStrategyTest(parameterized.TestCase):
-
-  def _get_dummy_logits(self, key, batch_size, num_classes):
-    return jax.random.normal(key, (batch_size, num_classes))
-
-  def _get_dummy_labels(self, key, batch_size, num_classes):
-    labels_int = jax.random.randint(key, (batch_size,), 0, num_classes)
-    return jax.nn.one_hot(labels_int, num_classes)
+class FeatureProjectionStrategyTest(parameterized.TestCase):
 
   def model_forward_fn(self, model: nnx.Module, x: jax.Array):
     return model(x)
 
   def get_labels_fn(self, x: jax.Array):
-    return jnp.mean(x)
+    return jnp.ones(10) * jnp.mean(x)
 
   @parameterized.named_parameters(
       ("alpha_half", 0.5),
@@ -60,14 +53,16 @@ class AttentionTransferStrategyTest(parameterized.TestCase):
       ("alpha_one", 1.0),
   )
   def test_init_valid(self, alpha):
-    strategy = AttentionTransferStrategy(
+    strategy = FeatureProjectionStrategy(
         student_forward_fn=self.model_forward_fn,
         teacher_forward_fn=self.model_forward_fn,
         labels_fn=self.get_labels_fn,
         alpha=alpha,
-        attention_layer=nnx.Linear,
+        feature_layer=nnx.Linear,
+        dummy_input={"x": jnp.ones(3)},
+        rngs=nnx.Rngs(0),
     )
-    self.assertIsInstance(strategy, AttentionTransferStrategy)
+    self.assertIsInstance(strategy, FeatureProjectionStrategy)
     self.assertEqual(strategy.alpha, alpha)
 
   @parameterized.named_parameters(
@@ -76,55 +71,34 @@ class AttentionTransferStrategyTest(parameterized.TestCase):
   )
   def test_init_invalid(self, alpha):
     with self.assertRaises(ValueError):
-      AttentionTransferStrategy(
+      FeatureProjectionStrategy(
           student_forward_fn=self.model_forward_fn,
           teacher_forward_fn=self.model_forward_fn,
           labels_fn=self.get_labels_fn,
           alpha=alpha,
-          attention_layer=nnx.Linear,
+          feature_layer=nnx.Linear,
+          dummy_input={"x": jnp.ones(3)},
+          rngs=nnx.Rngs(0),
       )
 
-  @parameterized.named_parameters(
-      ("alpha_one", 1.0),
-      ("alpha_half", 0.5),
-      ("alpha_zero", 0.0),
-  )
-  def test_compute_eval_loss(self, alpha):
-    s_key, l_key = jax.random.split(jax.random.key(0), 2)
-    batch_size, num_classes = 4, 10
-    student_logits = self._get_dummy_logits(s_key, batch_size, num_classes)
-    student_output = {"logits": student_logits, "attentions": jnp.array([])}
-    labels = self._get_dummy_labels(l_key, batch_size, num_classes)
-    strategy = AttentionTransferStrategy(
-        student_forward_fn=self.model_forward_fn,
-        teacher_forward_fn=self.model_forward_fn,
-        labels_fn=self.get_labels_fn,
-        alpha=alpha,
-        attention_layer=nnx.Linear,
-    )
-    expected_loss = 2.49732
-
-    computed_loss = strategy.compute_eval_loss(
-        student_output=student_output,
-        labels=labels,
-    )
-
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
-
   def test_get_train_loss(self):
-    strategy = AttentionTransferStrategy(
+    strategy = FeatureProjectionStrategy(
         student_forward_fn=self.model_forward_fn,
         teacher_forward_fn=self.model_forward_fn,
         labels_fn=self.get_labels_fn,
-        attention_layer=nnx.Linear,
+        feature_layer=nnx.Linear,
+        dummy_input={"x": jnp.ones(3)},
+        rngs=nnx.Rngs(0),
     )
     inputs = {
         "x": jnp.array([10.0, 11.0, 12.0]),
     }
     student_model = DummyModel()
-    teacher_model = DummyModel()
-    strategy.pre_process_models(student_model, teacher_model)
-    expected_loss = 0.0
+    teacher_model = DummyModel(out_features=20)
+    student_model, teacher_model = strategy.pre_process_models(
+        student_model, teacher_model
+    )
+    expected_loss = 574.2112
 
     teacher_output = strategy.get_teacher_outputs(
         teacher_model=teacher_model, inputs=inputs
@@ -135,23 +109,24 @@ class AttentionTransferStrategyTest(parameterized.TestCase):
         inputs=inputs,
     )
 
-    npt.assert_allclose(teacher_output, 2.016251, rtol=1e-6)
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
 
   def test_get_eval_loss(self):
-    strategy = AttentionTransferStrategy(
+    strategy = FeatureProjectionStrategy(
         student_forward_fn=self.model_forward_fn,
         teacher_forward_fn=self.model_forward_fn,
         labels_fn=self.get_labels_fn,
-        attention_layer=nnx.Linear,
+        feature_layer=nnx.Linear,
+        dummy_input={"x": jnp.ones(3)},
+        rngs=nnx.Rngs(0),
     )
     inputs = {
         "x": jnp.array([10.0, 11.0, 12.0]),
     }
     student_model = DummyModel()
     teacher_model = DummyModel()
-    strategy.pre_process_models(student_model, teacher_model)
-    expected_loss = 0.0
+    student_model, _ = strategy.pre_process_models(student_model, teacher_model)
+    expected_loss = 1806.01306152
 
     computed_loss = strategy.get_eval_loss(
         student_model=student_model, inputs=inputs

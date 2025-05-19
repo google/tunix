@@ -15,8 +15,10 @@
 
 # pylint: disable=g-importing-member
 
+from tunix.distillation.strategies.attention import AttentionProjectionStrategy
 from tunix.distillation.strategies.attention import AttentionTransferStrategy
 from tunix.distillation.strategies.base_strategy import BaseStrategy
 from tunix.distillation.strategies.base_strategy import ModelForwardCallable
 from tunix.distillation.strategies.feature_pooling import FeaturePoolingStrategy
+from tunix.distillation.strategies.feature_projection import FeatureProjectionStrategy
 from tunix.distillation.strategies.logit import LogitStrategy
