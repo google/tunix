@@ -143,6 +143,7 @@ class GrpoTrainingConfig(peft_trainer.TrainingConfig):
   epsilon: float = 0.2
   temperature: float = 0.9
   top_p: float = 1.0
+  top_k: int | None = None
 
   max_prompt_length: int = 256
 
@@ -293,6 +294,7 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
         echo=False,
         temperature=self.grpo_config.temperature,
         top_p=self.grpo_config.top_p,
+        top_k=self.grpo_config.top_k,
     )
     completion_ids = pad_inputs(
         completion_output.tokens,

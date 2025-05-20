@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import dataclasses
+from typing import Optional
 
 import flax
 from flax import nnx
@@ -35,9 +36,12 @@ LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
-def _sample_top_p(probs: jnp.ndarray, p: float, key: jax.Array) -> jnp.ndarray:
+def _sample_top_p(
+    probs: jnp.ndarray, p: float, key: jax.Array, k: Optional[int] = None
+) -> jnp.ndarray:
   """Sample a token using top-p sampling."""
-  probs_sorted, indices = jax.lax.top_k(probs, k=probs.shape[-1])
+  k = probs.shape[-1] if k is None else k
+  probs_sorted, indices = jax.lax.top_k(probs, k=k)
   cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
   mask = cumsum_probs - probs_sorted > p
   probs_sorted = jnp.where(mask, 0.0, probs_sorted)
@@ -50,9 +54,9 @@ def _sample_top_p(probs: jnp.ndarray, p: float, key: jax.Array) -> jnp.ndarray:
   return next_token
 
 
-def sample_top_p(logits, key, temperature: float, top_p: float):
+def sample_top_p(logits, key, temperature: float, top_p: float, top_k: int):
   probs = jax.nn.softmax(logits[:, -1] / temperature, axis=-1)
-  next_token = _sample_top_p(probs, top_p, key)
+  next_token = _sample_top_p(probs, top_p, key, top_k)
   return next_token
 
 
@@ -183,6 +187,9 @@ class _SamplingState:
 
   # Top-p sampling threshold.
   top_p: float = flax.struct.field(pytree_node=False)
+
+  # Top-k sampling threshold.
+  top_k: int | None = flax.struct.field(default=None, pytree_node=False)
 
 
 @dataclasses.dataclass
@@ -328,6 +335,7 @@ class Sampler:
       forbidden_token_ids: Sequence[int] | None,
       temperature: float,
       top_p: float,
+      top_k: int,
       seed: jax.Array,
   ) -> _SamplingState:
     """Initializes the sampling state given input prompts."""
@@ -379,6 +387,7 @@ class Sampler:
         forbidden_token_ids=forbidden_token_ids,
         temperature=temperature,
         top_p=top_p,
+        top_k=top_k,
         seed=seed,
     )
 
@@ -445,7 +454,11 @@ class Sampler:
     if sampler_state.temperature > 0:
       key = jax.random.fold_in(sampler_state.seed, decoding_step)
       next_token_candidate = sample_top_p(
-          logits, key, sampler_state.temperature, sampler_state.top_p
+          logits,
+          key,
+          sampler_state.temperature,
+          sampler_state.top_p,
+          sampler_state.top_k,
       )
     else:
       next_token_candidate = sample_best(logits)
@@ -479,6 +492,7 @@ class Sampler:
         forbidden_token_ids=sampler_state.forbidden_token_ids,
         temperature=sampler_state.temperature,
         top_p=sampler_state.top_p,
+        top_k=sampler_state.top_k,
         seed=sampler_state.seed,
     )
 
@@ -530,7 +544,11 @@ class Sampler:
     if sampler_state.temperature > 0:
       key = jax.random.fold_in(sampler_state.seed, decoding_step)
       next_token_candidate = sample_top_p(
-          logits, key, sampler_state.temperature, sampler_state.top_p
+          logits,
+          key,
+          sampler_state.temperature,
+          sampler_state.top_p,
+          sampler_state.top_k,
       )
     else:
       next_token_candidate = sample_best(logits)
@@ -569,6 +587,7 @@ class Sampler:
         forbidden_token_ids=sampler_state.forbidden_token_ids,
         temperature=sampler_state.temperature,
         top_p=sampler_state.top_p,
+        top_k=sampler_state.top_k,
         seed=sampler_state.seed,
     )
 
@@ -582,6 +601,7 @@ class Sampler:
       forbidden_tokens: Sequence[str] | None = None,
       temperature: float = 0.0,
       top_p: float = 0.95,
+      top_k: int | None = None,
       seed: jax.Array | None = None,
   ) -> SamplerOutput:
     """Samples a completion of the input string.
@@ -598,6 +618,7 @@ class Sampler:
         token must map to a single token id in the vocab.
       temperature: temperature for sampling.
       top_p: top-p sampling threshold.
+      top_k: top-k sampling threshold.
       seed: random seed for sampling.
 
     Returns:
@@ -639,6 +660,7 @@ class Sampler:
         forbidden_token_ids=forbidden_token_ids,
         temperature=temperature,
         top_p=top_p,
+        top_k=top_k,
         seed=seed,
     )
     sampling_state = self._compiled_prefill_fn(

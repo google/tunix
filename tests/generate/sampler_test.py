@@ -104,6 +104,18 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(top_p_result_2)
     self.assertNotEqual(top_p_result.text, top_p_result_2.text)
 
+    top_k_result = sampler(
+        ['input string', 'hello world'],
+        total_generation_steps=10,
+        temperature=9,
+        top_p=0.95,
+        top_k=3,
+        seed=jax.random.PRNGKey(42),
+        echo=echo,
+    )
+    self.assertIsNotNone(top_k_result)
+    self.assertNotEqual(top_p_result_2.text, top_k_result.text)
+
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
