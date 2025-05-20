@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Forked from flax/examples/gemma/sampler.py
 """Vanilla sampler for LLM generation."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 import dataclasses
+from typing import Any
 from typing import Optional
 
 import flax
@@ -29,8 +29,8 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+import tunix.generate.tokenizer_adapter as tok_adapter
 
-import sentencepiece as spm
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -139,9 +139,7 @@ def _init_cache(
         'v': jnp.zeros(
             (batch_size, cache_size, num_kv_heads, head_dim), dtype=dtype
         ),
-        'end_index': jnp.zeros(
-            (batch_size,), dtype=jnp.int32
-        ),  # TODO: consider how to support other index names
+        'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
     }
 
   cache = {f'layer_{i}': _init_layer_cache() for i in range(n_layers)}
@@ -225,17 +223,17 @@ class Sampler:
   def __init__(
       self,
       transformer: nnx.Module,
-      vocab: spm.SentencePieceProcessor,
+      tokenizer: Any,
       cache_config: CacheConfig,
   ):
     """Initializes the sampler.
 
     Args:
       transformer: an instance of the transformer.
-      vocab: vocabulary of the given model.
+      tokenizer: a tokenizer for the given model.
       cache_config: configuration for the KV cache.
     """
-    self.vocab = vocab
+    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.cache_config = cache_config
     self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)
     self._transformer_state: list[statelib.State] = nnx.variables(transformer)
@@ -348,13 +346,13 @@ class Sampler:
             batch_size,
             buffer_size,
         ),
-        self.vocab.pad_id(),
+        self.tokenizer.pad_id(),
         dtype=jnp.int32,
     )
     input_mask = jnp.ones_like(token_buffer, dtype=jnp.bool_)
     token_buffer = token_buffer.at[:, :num_input_tokens].set(all_input_ids)
     input_mask = input_mask.at[:, :num_input_tokens].set(
-        all_input_ids != self.vocab.pad_id()
+        all_input_ids != self.tokenizer.pad_id()
     )
     positions = _build_positions_from_mask(input_mask)
 
@@ -393,23 +391,28 @@ class Sampler:
 
   def tokenize(self, input_string: str) -> jax.Array:
     """Tokenizes the input string."""
-    input_ids = self.vocab.EncodeAsIds(input_string)
-    input_ids = jnp.array([self.vocab.bos_id()] + input_ids, dtype=jnp.int32)
+    input_ids = self.tokenizer.encode(input_string)
+    bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
+    input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
     return input_ids
 
   def mask_tokens_after_eos_ids(self, token_buffer):
     """Mask token IDs after the EOS token with the padding ID."""
-    eos_id = self.vocab.eos_id()
+    eos_id = self.tokenizer.eos_id()
     eos_exists = jnp.any(jnp.equal(token_buffer, eos_id), axis=-1)
     eos_indices = jnp.where(
         eos_exists,
-        jnp.argmax(jnp.equal(token_buffer, eos_id), axis=-1),
+        token_buffer.shape[-1]
+        - 1
+        - jnp.argmax(jnp.flip(jnp.equal(token_buffer, eos_id)), axis=-1),
         token_buffer.shape[-1],
     )
     mask = jnp.less_equal(
         jnp.arange(token_buffer.shape[-1]), eos_indices[:, None]
     )
-    masked_token_buffer = token_buffer * mask + self.vocab.pad_id() * (1 - mask)
+    masked_token_buffer = token_buffer * mask + self.tokenizer.pad_id() * (
+        1 - mask
+    )
 
     return masked_token_buffer
 
@@ -435,7 +438,7 @@ class Sampler:
         slice_sizes=(batch_size, sampler_state.num_input_tokens),
     )
 
-    input_mask = tokens != self.vocab.pad_id()
+    input_mask = tokens != self.tokenizer.pad_id()
     attention_mask = make_causal_attn_mask(
         input_mask, self.cache_config.cache_size
     )
@@ -477,7 +480,7 @@ class Sampler:
       logits_buffer = sampler_state.logits_buffer
 
     done = sampler_state.done | jnp.equal(
-        token_buffer[:, decoding_step + 1], self.vocab.eos_id()
+        token_buffer[:, decoding_step + 1], self.tokenizer.eos_id()
     )
 
     return _SamplingState(
@@ -526,7 +529,7 @@ class Sampler:
         sampler_state.positions[:, decoding_step], -1
     )
 
-    input_mask = sampler_state.token_buffer == self.vocab.pad_id()
+    input_mask = sampler_state.token_buffer == self.tokenizer.pad_id()
     attention_mask = _compute_attention_masks(
         decoding_step, self.cache_config.cache_size, input_mask
     )
@@ -572,7 +575,7 @@ class Sampler:
       logits_buffer = sampler_state.logits_buffer
 
     done = sampler_state.done | jnp.equal(
-        token_buffer[:, decoding_step + 1], self.vocab.eos_id()
+        token_buffer[:, decoding_step + 1], self.tokenizer.eos_id()
     )
 
     return _SamplingState(
@@ -628,7 +631,7 @@ class Sampler:
     if forbidden_tokens is not None:
       forbidden_token_ids = []
       for token in forbidden_tokens:
-        token_id = self.vocab.EncodeAsIds(token)
+        token_id = self.tokenizer.encode(token)
         if len(token_id) != 1:
           raise ValueError(
               'Forbidden tokens must map to single token ids in the vocab.'
@@ -644,12 +647,17 @@ class Sampler:
         pad_to_length(
             x,
             target_length=max_prompt_length,
-            pad_value=self.vocab.pad_id(),
+            pad_value=self.tokenizer.pad_id(),
             left=True,
         )
         for x in tokens
     ])
     total_sampling_steps = max_prompt_length + total_generation_steps
+    if total_sampling_steps > self.cache_config.cache_size:
+      raise ValueError(
+          'Total sampling steps must be less than the cache size'
+          f' {self.cache_config.cache_size}.'
+      )
 
     if seed is None:
       seed = jax.random.PRNGKey(0)
@@ -679,7 +687,7 @@ class Sampler:
     out_logits = []
     for i, token_buffer in enumerate(masked_token_buffer):
       start_idx = (
-          find_first_non_pad_idx(token_buffer, self.vocab.pad_id())
+          find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
           if echo
           else max_prompt_length
       )
@@ -689,7 +697,7 @@ class Sampler:
         out_logits.append(logits_buffer[start_idx:total_sampling_steps])
 
     decoded_outputs = [
-        self.vocab.DecodeIds(tokens.tolist()) for tokens in out_tokens
+        self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
     ]
 
     result = SamplerOutput(

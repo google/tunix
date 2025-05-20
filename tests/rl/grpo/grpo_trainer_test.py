@@ -134,7 +134,7 @@ class GrpoTrainerTest(parameterized.TestCase):
     )
     sampler = sampler_lib.Sampler(
         transformer=model,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=1024,
             num_layers=4,
@@ -264,7 +264,7 @@ class GrpoTrainerTest(parameterized.TestCase):
     )
     sampler = sampler_lib.Sampler(
         transformer=model,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=1024,
             num_layers=4,
@@ -323,7 +323,7 @@ class GrpoTrainerTest(parameterized.TestCase):
     )
     sampler = sampler_lib.Sampler(
         transformer=model,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=1024,
             num_layers=4,

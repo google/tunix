@@ -283,8 +283,8 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
       prompt IDs, completion IDs, masks, advantages, and per-token log
       probabilities from the reference and policy models.
     """
-    pad_value = self.sampler.vocab.pad_id()
-    eos_value = self.sampler.vocab.eos_id()
+    pad_value = self.sampler.tokenizer.pad_id()
+    eos_value = self.sampler.tokenizer.eos_id()
 
     # Generate, and pad output.
     completion_output = self.sampler(

@@ -60,7 +60,7 @@ class SamplerTest(parameterized.TestCase):
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=64,
             num_layers=4,
@@ -123,7 +123,7 @@ class SamplerTest(parameterized.TestCase):
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=1024,
             num_layers=4,
@@ -156,7 +156,7 @@ class SamplerTest(parameterized.TestCase):
 
     sampler = sampler_lib.Sampler(
         transformer=transformer,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=1024,
             num_layers=4,
@@ -195,7 +195,7 @@ class SamplerTest(parameterized.TestCase):
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=1024,
             num_layers=4,
@@ -220,7 +220,7 @@ class SamplerTest(parameterized.TestCase):
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
-        vocab=vocab,
+        tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(
             cache_size=1024,
             num_layers=4,
@@ -268,7 +268,6 @@ class SamplerTest(parameterized.TestCase):
   def test_make_causal_attn_mask(self):
     input_mask = jnp.array([[0, 1, 1, 0], [1, 1, 1, 0]])
     attn_mask = sampler_lib.make_causal_attn_mask(input_mask, 5)
-    print(attn_mask)
     expected = jnp.array([
         [
             [0, 0, 0, 0, 0],
