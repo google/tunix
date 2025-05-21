@@ -14,8 +14,8 @@
 
 """Utils for loading and converting Qwen3 PT weights."""
 
-import pathlib
 import re
+from etils import epath
 from flax import nnx
 import jax.numpy as jnp
 import safetensors.torch as safetensors
@@ -131,11 +131,14 @@ def create_model_from_safe_tensors(
     file_dir: str, config: model_lib.ModelConfig
 ) -> model_lib.Qwen3:
   """Load tensors from the safetensors file and create a Qwen3 model."""
-  files = list(pathlib.Path(file_dir).expanduser().glob("**/*safetensors"))
+  files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
+
+  if not files:
+    raise ValueError(f"No safetensors found in {file_dir}")
 
   tensor_dict = {}
   for f in files:
-    tensor_dict = tensor_dict | safetensors.load_file(f)
+    tensor_dict |= safetensors.load_file(f)
 
   qwen3 = nnx.eval_shape(
       lambda: model_lib.Qwen3(config, rngs=nnx.Rngs(params=0))
