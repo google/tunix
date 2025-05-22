@@ -14,7 +14,9 @@
 
 """Gemma transformer."""
 
+from collections.abc import Iterable
 import dataclasses
+import enum
 from typing import Any, Callable, Self, Tuple
 import flax
 from flax import nnx
@@ -161,6 +163,11 @@ def apply_rope(
 K_MASK = -2.3819763e38  # Set to a large negative number.
 
 
+class AttentionType(enum.Enum):
+  GLOBAL = 1
+  LOCAL_SLIDING = 2
+
+
 class Attention(nnx.Module):
   """Attention module."""
 
@@ -170,11 +177,20 @@ class Attention(nnx.Module):
       num_kv_heads: int,
       features: int,
       head_dim: int,
+      attn_type: AttentionType,
       *,
       rngs: nnx.Rngs,
+      sliding_window_size: int | None = None,
       attn_logits_soft_cap: float | None = None,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
+    if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
+      raise ValueError(
+          '`sliding_window_size` must be set if `attn_type` is Local Sliding.'
+      )
+
+    self.sliding_window_size = sliding_window_size
+    self.attn_type = attn_type
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.shd_config = shd_config
     self.attn_vec_einsum = Einsum(
@@ -251,16 +267,48 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
-    logits = jnp.einsum('BTNH,BSNH->BTNS', query_scaled, key_proj)
+    if self.use_gqa:
+      # Reshape matrices to enable einsums over groups.
+      b, t, kg, h = query_scaled.shape
+      query_scaled = query_scaled.reshape(
+          (b, t, self.num_kv_heads, int(kg / self.num_kv_heads), h)
+      )
+      logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_scaled, key_proj)
+      b, t, k, g, s = logits.shape
+      logits = logits.reshape((b, t, k * g, s))
+    else:
+      # [batch_size, seq_len, num_heads, cache_size]
+      # If cache is None, then cache_size = seq_len.
+      logits = jnp.einsum('BTNH,BSNH->BTNS', query_scaled, key_proj)
 
     if self.attn_logits_soft_cap is not None:
       logits = jnp.tanh(logits / self.attn_logits_soft_cap)
       logits = logits * self.attn_logits_soft_cap
 
+    if self.attn_type == AttentionType.LOCAL_SLIDING:
+      all_ones = jnp.ones_like(attn_mask)
+      sliding_mask = jnp.triu(
+          all_ones, -1 * self.sliding_window_size + 1
+      ) * jnp.tril(all_ones, self.sliding_window_size - 1)
+      attn_mask = sliding_mask * attn_mask
+
     padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
 
     probs = jax.nn.softmax(padded_logits, axis=-1).astype(key_proj.dtype)
-    encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
+
+    if self.use_gqa:
+      # Reshape matrices to enable einsums over groups.
+      b, t, kg, h = probs.shape
+      probs = probs.reshape(
+          (b, t, self.num_kv_heads, int(kg / self.num_kv_heads), h)
+      )
+      encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs, value_proj)
+      b, t, k, g, h = encoded.shape
+      encoded = encoded.reshape((b, t, k * g, h))
+    else:
+      # [batch_size, seq_len, num_heads, head_dim]
+      encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
+
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.shd_config.act_btd)
 
@@ -298,6 +346,10 @@ class Attention(nnx.Module):
   @property
   def use_qkv_einsum(self):
     return hasattr(self, 'qkv_einsum') and self.qkv_einsum is not None
+
+  @property
+  def use_gqa(self):
+    return self.num_kv_heads != self.num_heads and self.num_kv_heads > 1
 
   def init_cache(
       self,
@@ -384,9 +436,11 @@ class Block(nnx.Module):
       hidden_dim: int,
       use_post_attn_norm: bool,
       use_post_ffw_norm: bool,
+      attn_type: AttentionType,
       *,
       rngs: nnx.Rngs,
-      attn_logits_soft_cap: float | None = None,
+      attn_logits_soft_cap: float | None,
+      sliding_window_size: int | None = None,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.pre_attention_norm = RMSNorm(
@@ -397,7 +451,9 @@ class Block(nnx.Module):
         num_kv_heads=num_kv_heads,
         features=embed_dim,
         head_dim=head_dim,
+        attn_type=attn_type,
         attn_logits_soft_cap=attn_logits_soft_cap,
+        sliding_window_size=sliding_window_size,
         rngs=rngs,
         shd_config=shd_config,
     )
@@ -428,17 +484,19 @@ class Block(nnx.Module):
         cache,
         attn_mask,
     )
-    attn_output += x
-    residual = attn_output
-    attn_output = self.pre_ffw_norm(attn_output)
 
     if self.use_post_attn_norm:
       attn_output = self.post_attn_norm(attn_output)
 
-    outputs = self.mlp(attn_output)
+    attn_output += x
+
+    outputs = self.pre_ffw_norm(attn_output)
+    outputs = self.mlp(outputs)
+
     if self.use_post_ffw_norm:
       outputs = self.post_ffw_norm(outputs)
-    outputs = residual + outputs
+
+    outputs += attn_output
     return cache, outputs
 
   @property
@@ -480,7 +538,8 @@ class RMSNorm(nnx.Module):
   @jax.named_scope('rms_norm')
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
     var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-    normed_inputs = jnp.asarray(x * jnp.reciprocal(jnp.sqrt(var + 1e-06)))
+    normed_inputs = x * jax.lax.rsqrt(var + 1e-06)
+
     # normed_inputs is a rank-K tensor, K > 1 (K is typically 2 or 3). scale is
     # a rank-1 tensor. To avoid implicit rank-promotion, reshape scale to
     # a (1, ..., 1, D) tensor, so the rank of scale matches normed_inputs.
@@ -503,6 +562,7 @@ class TransformerConfig:
   final_logit_softcap: float | None
   use_post_attn_norm: bool
   use_post_ffw_norm: bool
+  attention_types: Iterable[AttentionType]
   attn_logits_soft_cap: float | None = None
   sliding_window_size: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
@@ -519,6 +579,7 @@ class TransformerConfig:
         head_dim=256,
         num_kv_heads=1,
         final_logit_softcap=None,
+        attention_types=(AttentionType.GLOBAL,) * num_layers,
         use_post_attn_norm=False,
         use_post_ffw_norm=False,
     )
@@ -535,8 +596,55 @@ class TransformerConfig:
         head_dim=256,
         num_kv_heads=16,
         final_logit_softcap=None,
+        attention_types=(AttentionType.GLOBAL,) * num_layers,
         use_post_attn_norm=False,
         use_post_ffw_norm=False,
+    )
+
+  @classmethod
+  def gemma2_2b(cls):
+    num_layers = 26
+    return cls(
+        num_layers=num_layers,
+        num_embed=256128,
+        embed_dim=2304,
+        hidden_dim=9216,
+        num_heads=8,
+        head_dim=256,
+        num_kv_heads=4,
+        final_logit_softcap=30.0,
+        attention_types=(
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.GLOBAL,
+        )
+        * int(num_layers / 2),
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        attn_logits_soft_cap=50.0,
+        sliding_window_size=4096,
+    )
+
+  @classmethod
+  def gemma2_9b(cls):
+    num_layers = 42
+    return cls(
+        num_layers=num_layers,
+        num_embed=256128,
+        embed_dim=3584,
+        hidden_dim=28672,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        final_logit_softcap=30.0,
+        attention_types=(
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.GLOBAL,
+        )
+        * int(num_layers / 2),
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        attn_logits_soft_cap=50.0,
+        sliding_window_size=4096,
     )
 
 
@@ -633,6 +741,8 @@ def _map_linen_var_names(key: tuple[str, ...]) -> tuple[str | int, ...]:
     elif k == 'linear':
       new_key.append('down_proj')
       new_key.append('kernel')
+    elif k == 'post_attention_norm':
+      new_key.append('post_attn_norm')
     else:
       new_key.append(k)
 
@@ -662,6 +772,10 @@ class Transformer(nnx.Module):
       config = TransformerConfig.gemma_2b()
     elif version in ['7b', '7b-it']:
       config = TransformerConfig.gemma_7b()
+    elif version in ['2-2b', '2-2b-it']:
+      config = TransformerConfig.gemma2_2b()
+    elif version in ['2-9b', '2-9b-it']:
+      config = TransformerConfig.gemma2_9b()
     else:
       raise ValueError(f'Unsupported version: {version}')
 
@@ -692,13 +806,17 @@ class Transformer(nnx.Module):
             embed_dim=config.embed_dim,
             head_dim=config.head_dim,
             hidden_dim=config.hidden_dim,
+            sliding_window_size=config.sliding_window_size,
             use_post_attn_norm=config.use_post_attn_norm,
             use_post_ffw_norm=config.use_post_ffw_norm,
             attn_logits_soft_cap=config.attn_logits_soft_cap,
+            attn_type=attn_type,
             rngs=rngs,
             shd_config=shd_config,
         )
-        for _ in range(config.num_layers)
+        for _, attn_type in zip(
+            range(config.num_layers), config.attention_types
+        )
     ]
     self.final_norm = RMSNorm(
         config.embed_dim, rngs=rngs, shd_config=shd_config
