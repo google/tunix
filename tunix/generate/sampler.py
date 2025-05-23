@@ -54,7 +54,7 @@ class _SamplingState:
   # Model state for conditioning the model on autoregressively.
   cache: dict[str, dict[str, jaxtyping.Array]]
 
-  # Is decoding done on the given sequence?
+  # Eos position in the decoded sequence. -1 means no eos if generated.
   done: jnp.ndarray  # [B]
 
   # Total sampling steps (including the prompt).
@@ -203,7 +203,11 @@ def sample(
         next_token_candidate
     )
 
-  done = done | jnp.equal(token_buffer[:, decoding_step + 1], eos)
+  # Update done to the first generated eos position.
+  done = done + (
+      jnp.equal(token_buffer[:, decoding_step + 1], eos) & jnp.equal(done, -1)
+  ) * (decoding_step + 2)
+
   return _SamplingState(
       decoding_step=sampler_state.decoding_step + 1,
       num_input_tokens=sampler_state.num_input_tokens,
@@ -442,7 +446,7 @@ class Sampler:
     )
     positions = _build_positions_from_mask(input_mask)
 
-    done = jnp.zeros((batch_size,), dtype=jnp.bool_)
+    done = jnp.full((batch_size,), -1, dtype=jnp.int32)
 
     cache = _init_cache(
         n_layers=self.cache_config.num_layers,
@@ -501,17 +505,8 @@ class Sampler:
     input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
     return input_ids
 
-  def mask_tokens_after_eos_ids(self, token_buffer):
+  def mask_tokens_after_eos_ids(self, token_buffer, eos_indices):
     """Mask token IDs after the EOS token with the padding ID."""
-    eos_id = self.tokenizer.eos_id()
-    eos_exists = jnp.any(jnp.equal(token_buffer, eos_id), axis=-1)
-    eos_indices = jnp.where(
-        eos_exists,
-        token_buffer.shape[-1]
-        - 1
-        - jnp.argmax(jnp.flip(jnp.equal(token_buffer, eos_id)), axis=-1),
-        token_buffer.shape[-1],
-    )
     mask = jnp.less_equal(
         jnp.arange(token_buffer.shape[-1]), eos_indices[:, None]
     )
@@ -566,6 +561,7 @@ class Sampler:
       )
     else:
       logits_buffer = sampler_state.logits_buffer
+
     if sampler_state.sampling_mode == 'beam_search':
       # init beam state in prefill instead of init as one minor optimization
       # to avoid running unnecessary prefill for
@@ -624,7 +620,7 @@ class Sampler:
     def cond_fn(sampler_state: _SamplingState):
       return (
           sampler_state.decoding_step < sampler_state.total_sampling_steps
-      ) & jnp.any(jnp.logical_not(sampler_state.done))
+      ) & jnp.any(jnp.equal(sampler_state.done, -1))
 
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
 
@@ -768,31 +764,44 @@ class Sampler:
 
     token_buffers = sampling_state.token_buffer
     logits_buffers = sampling_state.logits_buffer
+    done = sampling_state.done
 
     if sampling_state.sampling_mode == 'beam_search':
       updated_args = beam_search_lib.finalize_beam_search_state(
           sampling_state.beam_search_sampling_state,
           sampling_state.token_buffer,
           sampling_state.logits_buffer,
+          sampling_state.done,
       )
       token_buffers = updated_args['token_buffer']
       logits_buffers = updated_args['logits_buffer']
-      # delete the sampling state in case the further referece
-      # if need more internal states, they should be updated by
-      # finalize_beam_search_state
-      del sampling_state
+      done = updated_args['done']
 
-    masked_token_buffer = self.mask_tokens_after_eos_ids(token_buffers)
+    # delete the sampling state in case the further referece
+    # if need more internal states, they should be updated by
+    # finalize_beam_search_state
+    del sampling_state
+
+    eos_indices = jnp.where(
+        done == -1,
+        token_buffers.shape[-1],
+        done,
+    )
+    masked_token_buffer = self.mask_tokens_after_eos_ids(
+        token_buffers, eos_indices
+    )
 
     out_tokens = []
     out_logits = []
-    for i, token_buffer in enumerate(masked_token_buffer):
+    for i, (token_buffer, eos_idx) in enumerate(
+        zip(masked_token_buffer, eos_indices)
+    ):
       start_idx = (
           find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
           if echo
           else max_prompt_length
       )
-      out_tokens.append(token_buffer[start_idx:total_sampling_steps])
+      out_tokens.append(token_buffer[start_idx:eos_idx])
       if return_logits:
         logits_buffer = logits_buffers[i]
         out_logits.append(logits_buffer[start_idx:total_sampling_steps])

@@ -39,7 +39,7 @@ class BeamSearchTest(absltest.TestCase):
     token_buffer = jnp.arange(self.batch_size * self.vocab_size).reshape(
         (self.batch_size, self.vocab_size)
     )
-    done = jnp.zeros((self.batch_size), dtype=jnp.bool)
+    done = jnp.full((self.batch_size), -1, dtype=jnp.float32)
     positions = jnp.arange(self.batch_size * self.seq_length).reshape(
         (self.batch_size, self.seq_length)
     )
@@ -83,7 +83,7 @@ class BeamSearchTest(absltest.TestCase):
         scores=jnp.zeros((self.batch_size, self.beam_size), dtype=jnp.float32),
         initialized=False,
     )
-    done = jnp.zeros((self.batch_size * self.beam_size), dtype=jnp.bool)
+    done = jnp.full((self.batch_size * self.beam_size), -1, dtype=jnp.float32)
     token_buffer = jnp.full(
         (self.batch_size * self.beam_size, self.seq_length),
         pad_token_id,
@@ -123,11 +123,8 @@ class BeamSearchTest(absltest.TestCase):
     self.assertTrue(jnp.allclose(updated_token_buffer, expected))
     self.assertTrue(jnp.allclose(updated_params['done'], done))
 
-    def _check(x, y) -> None:
-      self.assertTrue(jnp.allclose(x, y))
-
     jax.tree.map(
-        _check,
+        lambda x, y: self.assertTrue(jnp.allclose(x, y)),
         updated_params['cache'],
         original_cache,
     )
@@ -205,6 +202,7 @@ class BeamSearchTest(absltest.TestCase):
         state,
         updated_params['token_buffer'],
         None,
+        done,
     )['token_buffer']
     self.assertEqual(final_output.shape, (self.batch_size, self.seq_length))
     self.assertTrue(
@@ -224,7 +222,7 @@ class BeamSearchTest(absltest.TestCase):
     )
     initial_scores = initial_scores.at[0, 0].set(0.2)
     initial_scores = initial_scores.at[0, 1].set(-2)
-    done = jnp.array([True, False])  # mark the first beam as done.
+    done = jnp.array([1, -1])  # mark the first beam as done.
     token_buffer = jnp.full(
         (self.batch_size * self.beam_size, self.seq_length),
         pad_token_id,
@@ -265,7 +263,7 @@ class BeamSearchTest(absltest.TestCase):
             jnp.array([pad_token_id] * (self.seq_length - 1)),
         )
     )
-    self.assertFalse(done[1])
+    self.assertEqual(done[1], -1)
     for i in range(0, decoding_step + 1):
       self.assertNotEqual(token_buffer[1, i], pad_token_id)
     for i in range(decoding_step + 1, self.seq_length):
@@ -279,7 +277,7 @@ class BeamSearchTest(absltest.TestCase):
     )
     initial_scores = initial_scores.at[0, 0].set(-100)
     initial_scores = initial_scores.at[0, 1].set(-2)
-    done = jnp.array([True, False])  # mark the first beam as done.
+    done = jnp.array([1, -1])  # mark the first beam as done.
     token_buffer = jnp.full(
         (self.batch_size * self.beam_size, self.seq_length),
         pad_token_id,
@@ -308,8 +306,8 @@ class BeamSearchTest(absltest.TestCase):
         decoding_step=decoding_step,
     )
     done = updated_params['done']
-    self.assertFalse(done[0])
-    self.assertFalse(done[1])
+    self.assertEqual(done[0], -1)
+    self.assertEqual(done[1], -1)
 
 
 if __name__ == '__main__':
