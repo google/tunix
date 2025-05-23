@@ -83,6 +83,30 @@ class SamplerTest(parameterized.TestCase):
     else:
       self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))
 
+    # With 1 beam, the beam search result should be the
+    # same as the greedy output
+    result_beam_search_1 = sampler(
+        ['input string', 'hello world'],
+        total_generation_steps=10,
+        return_logits=True,
+        max_prompt_length=max_prompt_length,
+        echo=echo,
+        beam_size=1,
+    )
+    self.assertIsNotNone(result_beam_search_1)
+    self.assertEqual(result_beam_search_1.text, result.text)
+
+    # Check with multiple beams, it still works.
+    result_beam_search_2 = sampler(
+        ['input string', 'hello world'],
+        total_generation_steps=10,
+        return_logits=True,
+        max_prompt_length=max_prompt_length,
+        echo=echo,
+        beam_size=2,
+    )
+    self.assertIsNotNone(result_beam_search_2)
+
     top_p_result = sampler(
         ['input string', 'hello world'],
         total_generation_steps=10,

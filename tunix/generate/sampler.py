@@ -21,6 +21,7 @@ import dataclasses
 from typing import Any
 from typing import Optional
 
+from absl import logging
 import flax
 from flax import nnx
 from flax.nnx import filterlib
@@ -29,11 +30,92 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
 
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+@flax.struct.dataclass
+class _SamplingState:
+  """Internal sampling state."""
+
+  # Decoding step.
+  decoding_step: jnp.int32
+
+  # Fixed-size buffer for accumulating the output tokens.
+  token_buffer: jnp.ndarray  # [B, L]
+
+  # Position indices, based on ignoring pad tokens.
+  positions: jnp.ndarray  # [B, L]
+
+  # Model state for conditioning the model on autoregressively.
+  cache: dict[str, dict[str, jaxtyping.Array]]
+
+  # Is decoding done on the given sequence?
+  done: jnp.ndarray  # [B]
+
+  # Total sampling steps (including the prompt).
+  total_sampling_steps: int
+
+  # Fixed-size buffer for accumulating the output logits.
+  logits_buffer: jnp.ndarray | None  # [B, L, V]
+
+  # List of tokens that are forbidden to be generated.
+  forbidden_token_ids: Sequence[int] | None
+
+  # Random seed for sampling.
+  seed: jax.Array
+
+  # The sampling mode to use, one of "greedy", "top_p" or "beam_search"
+  sampling_mode: str = flax.struct.field(pytree_node=False)
+
+  # Number of input tokens with padding.
+  num_input_tokens: jnp.int32 = flax.struct.field(pytree_node=False)
+
+  # Tempurature for top_p sampling.
+  temperature: float = flax.struct.field(pytree_node=False)
+
+  # Sampling parameters.
+  # For top_p, it contains "top_p" and "top_k".
+  # For beam search, it contains "beam_size"
+  sampling_parameters: dict[str, float | int] = flax.struct.field(
+      pytree_node=False
+  )
+
+  # Only present when sampling_mode is "beam_search".
+  beam_search_sampling_state: (
+      beam_search_lib._BeamSearchSamplingState | None
+  ) = None
+
+
+@dataclasses.dataclass
+class SamplerOutput:
+  """Output of the sampler."""
+
+  # Decoded samples from the model.
+  text: list[str]
+
+  # Per-step logits used during sampling.
+  logits: list[jax.Array]
+
+  # Tokens corresponding to the generated samples.
+  tokens: list[jax.Array]
+
+  # Left padded prompt tokens.
+  padded_prompt_tokens: jax.Array
+
+
+@dataclasses.dataclass(frozen=True)
+class CacheConfig:
+  """Configuration for the KV cache."""
+
+  cache_size: int
+  num_layers: int
+  num_kv_heads: int
+  head_dim: int
 
 
 def _sample_top_p(
@@ -54,7 +136,9 @@ def _sample_top_p(
   return next_token
 
 
-def sample_top_p(logits, key, temperature: float, top_p: float, top_k: int):
+def sample_top_p(
+    logits, key, temperature: float, top_p: float, top_k: Optional[int]
+):
   probs = jax.nn.softmax(logits[:, -1] / temperature, axis=-1)
   next_token = _sample_top_p(probs, top_p, key, top_k)
   return next_token
@@ -64,6 +148,78 @@ def sample_best(logits):
   next_token = jnp.argmax(logits[:, -1], axis=-1, keepdims=True)
   next_token = next_token[:, 0]
   return next_token
+
+
+def sample(
+    logits: jnp.ndarray,
+    eos: int,
+    cache: dict[str, dict[str, jaxtyping.Array]],
+    sampler_state: _SamplingState,
+) -> _SamplingState:
+  """Samples a token from the logits."""
+
+  logits = logits[:, -1][:, None, :]  # B, 1, V
+  decoding_step = sampler_state.decoding_step
+  token_buffer = sampler_state.token_buffer
+  done = sampler_state.done
+  logits_buffer = sampler_state.logits_buffer
+  beam_search_state = sampler_state.beam_search_sampling_state
+
+  if sampler_state.forbidden_token_ids:
+    logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
+
+  if sampler_state.sampling_mode == 'beam_search':
+    beam_search_state, updated_args = beam_search_lib.beam_search_step(
+        logits=logits,
+        done=done,
+        token_buffer=token_buffer,
+        cache=cache,
+        logits_buffer=logits_buffer,
+        state=beam_search_state,
+        pad_token_id=eos,
+        decoding_step=decoding_step,
+    )
+    cache = updated_args['cache']
+    token_buffer = updated_args['token_buffer']
+    done = updated_args['done']
+    logits_buffer = updated_args['logits_buffer']
+  else:
+    if sampler_state.sampling_mode == 'greedy':
+      next_token_candidate = sample_best(logits)
+    elif sampler_state.sampling_mode == 'top_p':
+      key = jax.random.fold_in(sampler_state.seed, decoding_step)
+      next_token_candidate = sample_top_p(
+          logits,
+          key,
+          sampler_state.temperature,
+          sampler_state.sampling_parameters['top_p'],
+          sampler_state.sampling_parameters['top_k'],
+      )
+    else:
+      raise ValueError(
+          'Unsupported sampling mode: %s' % sampler_state.sampling_mode
+      )
+    token_buffer = token_buffer.at[:, decoding_step + 1].set(
+        next_token_candidate
+    )
+
+  done = done | jnp.equal(token_buffer[:, decoding_step + 1], eos)
+  return _SamplingState(
+      decoding_step=sampler_state.decoding_step + 1,
+      num_input_tokens=sampler_state.num_input_tokens,
+      token_buffer=token_buffer,
+      positions=sampler_state.positions,
+      logits_buffer=logits_buffer,
+      cache=cache,
+      done=done,
+      total_sampling_steps=sampler_state.total_sampling_steps,
+      forbidden_token_ids=sampler_state.forbidden_token_ids,
+      temperature=sampler_state.temperature,
+      sampling_parameters=sampler_state.sampling_parameters,
+      seed=sampler_state.seed,
+      sampling_mode=sampler_state.sampling_mode,
+      beam_search_sampling_state=beam_search_state,
+  )
 
 
 def _compute_attention_masks(
@@ -144,77 +300,6 @@ def _init_cache(
 
   cache = {f'layer_{i}': _init_layer_cache() for i in range(n_layers)}
   return cache
-
-
-@flax.struct.dataclass
-class _SamplingState:
-  """Internal sampling state."""
-
-  # Decoding step.
-  decoding_step: jnp.int32
-
-  # Fixed-size buffer for accumulating the output tokens.
-  token_buffer: jnp.ndarray  # [B, L]
-
-  # Position indices, based on ignoring pad tokens.
-  positions: jnp.ndarray  # [B, L]
-
-  # Model state for conditioning the model on autoregressively.
-  cache: dict[str, dict[str, jaxtyping.Array]]
-
-  # Is decoding done on the given sequence?
-  done: jnp.ndarray  # [B]
-
-  # Total sampling steps (including the prompt).
-  total_sampling_steps: int
-
-  # Fixed-size buffer for accumulating the output logits.
-  logits_buffer: jnp.ndarray | None  # [B, L, V]
-
-  # List of tokens that are forbidden to be generated.
-  forbidden_token_ids: Sequence[int] | None
-
-  # Random seed for sampling.
-  seed: jax.Array
-
-  # Number of input tokens with padding.
-  num_input_tokens: jnp.int32 = flax.struct.field(pytree_node=False)
-
-  # Tempurature for top_p sampling.
-  temperature: float = flax.struct.field(pytree_node=False)
-
-  # Top-p sampling threshold.
-  top_p: float = flax.struct.field(pytree_node=False)
-
-  # Top-k sampling threshold.
-  top_k: int | None = flax.struct.field(default=None, pytree_node=False)
-
-
-@dataclasses.dataclass
-class SamplerOutput:
-  """Output of the sampler."""
-
-  # Decoded samples from the model.
-  text: list[str]
-
-  # Per-step logits used during sampling.
-  logits: list[jax.Array]
-
-  # Tokens corresponding to the generated samples.
-  tokens: list[jax.Array]
-
-  # Left padded prompt tokens.
-  padded_prompt_tokens: jax.Array
-
-
-@dataclasses.dataclass(frozen=True)
-class CacheConfig:
-  """Configuration for the KV cache."""
-
-  cache_size: int
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
 
 
 class Sampler:
@@ -332,9 +417,10 @@ class Sampler:
       include_logits: bool,
       forbidden_token_ids: Sequence[int] | None,
       temperature: float,
-      top_p: float,
-      top_k: int,
+      top_p: Optional[float],
+      top_k: Optional[int],
       seed: jax.Array,
+      beam_size: Optional[int],
   ) -> _SamplingState:
     """Initializes the sampling state given input prompts."""
     batch_size = all_input_ids.shape[0]
@@ -358,6 +444,15 @@ class Sampler:
 
     done = jnp.zeros((batch_size,), dtype=jnp.bool_)
 
+    cache = _init_cache(
+        n_layers=self.cache_config.num_layers,
+        cache_size=self.cache_config.cache_size,
+        batch_size=batch_size,
+        num_kv_heads=self.cache_config.num_kv_heads,
+        head_dim=self.cache_config.head_dim,
+        dtype=self.dtype,
+    )
+
     if include_logits:
       logits_buffer = jnp.zeros(
           (batch_size, buffer_size, self.transformer.num_embed),
@@ -365,6 +460,22 @@ class Sampler:
       )
     else:
       logits_buffer = None
+    sampling_parameters = {}
+    sampling_mode = 'greedy'
+    if beam_size is not None and top_p is not None:
+      raise ValueError(
+          'Cannot use both beam_size and top_p at the same time. Please unset'
+          ' one of them.'
+      )
+    if beam_size is not None:
+      sampling_mode = 'beam_search'
+      sampling_parameters['beam_size'] = beam_size
+    elif top_p is not None:
+      sampling_mode = 'top_p'
+      sampling_parameters['top_p'] = top_p
+      sampling_parameters['top_k'] = top_k
+
+    logging.debug('Using sampling mode: %s', sampling_mode)
 
     return _SamplingState(
         decoding_step=num_input_tokens - 1,
@@ -372,21 +483,15 @@ class Sampler:
         token_buffer=token_buffer,
         positions=positions,
         logits_buffer=logits_buffer,
-        cache=_init_cache(
-            n_layers=self.cache_config.num_layers,
-            cache_size=self.cache_config.cache_size,
-            batch_size=batch_size,
-            num_kv_heads=self.cache_config.num_kv_heads,
-            head_dim=self.cache_config.head_dim,
-            dtype=self.dtype,
-        ),
+        cache=cache,
         done=done,
         total_sampling_steps=total_sampling_steps,
         forbidden_token_ids=forbidden_token_ids,
         temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
+        sampling_parameters=sampling_parameters,
         seed=seed,
+        sampling_mode=sampling_mode,
+        beam_search_sampling_state=None,
     )
 
   def tokenize(self, input_string: str) -> jax.Array:
@@ -421,7 +526,6 @@ class Sampler:
   ) -> _SamplingState:
     """Performs prefill."""
     batch_size = sampler_state.token_buffer.shape[0]
-    decoding_step = sampler_state.decoding_step
 
     tokens = jax.lax.dynamic_slice(
         sampler_state.token_buffer,
@@ -450,26 +554,10 @@ class Sampler:
         sampler_state.cache,
         attention_mask,
     )
-
-    if sampler_state.forbidden_token_ids:
-      logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
-
-    if sampler_state.temperature > 0:
-      key = jax.random.fold_in(sampler_state.seed, decoding_step)
-      next_token_candidate = sample_top_p(
-          logits,
-          key,
-          sampler_state.temperature,
-          sampler_state.top_p,
-          sampler_state.top_k,
-      )
-    else:
-      next_token_candidate = sample_best(logits)
-
-    token_buffer = sampler_state.token_buffer.at[:, decoding_step + 1].set(
-        next_token_candidate
-    )
-
+    token_buffer = sampler_state.token_buffer
+    done = sampler_state.done
+    positions = sampler_state.positions
+    beam_search_sampling_state = None
     if sampler_state.logits_buffer is not None:
       logits_buffer = jax.lax.dynamic_update_slice(
           sampler_state.logits_buffer,
@@ -478,26 +566,50 @@ class Sampler:
       )
     else:
       logits_buffer = sampler_state.logits_buffer
+    if sampler_state.sampling_mode == 'beam_search':
+      # init beam state in prefill instead of init as one minor optimization
+      # to avoid running unnecessary prefill for
+      # duplicated input prompt per beam.
+      sampling_state, updated_args = beam_search_lib.init_batched_beam_state(
+          logits=logits,
+          input_token_buffer=sampler_state.token_buffer,
+          initial_cache=cache,
+          done=sampler_state.done,
+          positions=sampler_state.positions,
+          logits_buffer=sampler_state.logits_buffer,
+          beam_size=int(sampler_state.sampling_parameters['beam_size']),
+      )
+      beam_search_sampling_state = sampling_state
+      logits = updated_args['logits']
+      cache = updated_args['cache']
+      token_buffer = updated_args['token_buffer']
+      done = updated_args['done']
+      positions = updated_args['positions']
+      logits_buffer = updated_args['logits_buffer']
 
-    done = sampler_state.done | jnp.equal(
-        token_buffer[:, decoding_step + 1], self.tokenizer.eos_id()
-    )
-
-    return _SamplingState(
-        decoding_step=decoding_step + 1,
+    updated_sampling_state = _SamplingState(
+        decoding_step=sampler_state.decoding_step,
         num_input_tokens=sampler_state.num_input_tokens,
         token_buffer=token_buffer,
-        positions=sampler_state.positions,
+        positions=positions,
         logits_buffer=logits_buffer,
         cache=cache,
         done=done,
         total_sampling_steps=sampler_state.total_sampling_steps,
         forbidden_token_ids=sampler_state.forbidden_token_ids,
         temperature=sampler_state.temperature,
-        top_p=sampler_state.top_p,
-        top_k=sampler_state.top_k,
+        sampling_parameters=sampler_state.sampling_parameters,
         seed=sampler_state.seed,
+        sampling_mode=sampler_state.sampling_mode,
+        beam_search_sampling_state=beam_search_sampling_state,
     )
+    updated_sampler_state = sample(
+        logits=logits,
+        cache=cache,
+        eos=self.tokenizer.eos_id(),
+        sampler_state=updated_sampling_state,
+    )
+    return updated_sampler_state
 
   def _decode_fn(
       self,
@@ -521,7 +633,7 @@ class Sampler:
   ) -> _SamplingState:
     """Performs a single sampling step."""
     batch_size = sampler_state.token_buffer.shape[0]
-    decoding_step = jnp.asarray(sampler_state.decoding_step, dtype=jnp.int32)
+    decoding_step = sampler_state.decoding_step
 
     last_token = sampler_state.token_buffer[:, decoding_step]
     last_token = last_token.reshape((batch_size, 1))
@@ -541,58 +653,26 @@ class Sampler:
         sampler_state.cache,
         attention_mask,
     )
-    if sampler_state.forbidden_token_ids:
-      logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
-
-    if sampler_state.temperature > 0:
-      key = jax.random.fold_in(sampler_state.seed, decoding_step)
-      next_token_candidate = sample_top_p(
-          logits,
-          key,
-          sampler_state.temperature,
-          sampler_state.top_p,
-          sampler_state.top_k,
-      )
-    else:
-      next_token_candidate = sample_best(logits)
-
-    next_token_candidate = jnp.where(
-        decoding_step < sampler_state.num_input_tokens - 1,
-        sampler_state.token_buffer[:, decoding_step + 1],
-        next_token_candidate,
-    )
-
-    token_buffer = sampler_state.token_buffer.at[:, decoding_step + 1].set(
-        next_token_candidate
-    )
-
-    if sampler_state.logits_buffer is not None:
-      next_logits = jnp.squeeze(logits, 1)
-      logits_buffer = sampler_state.logits_buffer.at[:, decoding_step + 1].set(
-          next_logits
-      )
-    else:
-      logits_buffer = sampler_state.logits_buffer
-
-    done = sampler_state.done | jnp.equal(
-        token_buffer[:, decoding_step + 1], self.tokenizer.eos_id()
-    )
-
-    return _SamplingState(
-        decoding_step=sampler_state.decoding_step + 1,
-        num_input_tokens=sampler_state.num_input_tokens,
-        token_buffer=token_buffer,
-        positions=sampler_state.positions,
-        logits_buffer=logits_buffer,
+    updated_sampler_state = sample(
+        logits=logits,
         cache=cache,
-        done=done,
-        total_sampling_steps=sampler_state.total_sampling_steps,
-        forbidden_token_ids=sampler_state.forbidden_token_ids,
-        temperature=sampler_state.temperature,
-        top_p=sampler_state.top_p,
-        top_k=sampler_state.top_k,
-        seed=sampler_state.seed,
+        eos=self.tokenizer.eos_id(),
+        sampler_state=sampler_state,
     )
+
+    if updated_sampler_state.logits_buffer is not None:
+      next_logits = jnp.squeeze(logits, 1)
+      logits_buffer = updated_sampler_state.logits_buffer.at[
+          :, decoding_step + 1
+      ].set(next_logits)
+    else:
+      logits_buffer = None
+
+    updated_sampler_state = dataclasses.replace(
+        updated_sampler_state,
+        logits_buffer=logits_buffer,
+    )
+    return updated_sampler_state
 
   def __call__(
       self,
@@ -603,11 +683,16 @@ class Sampler:
       return_logits: bool = False,
       forbidden_tokens: Sequence[str] | None = None,
       temperature: float = 0.0,
-      top_p: float = 0.95,
-      top_k: int | None = None,
+      top_p: Optional[float] = None,
+      top_k: Optional[int] = None,
+      beam_size: Optional[int] = None,
       seed: jax.Array | None = None,
   ) -> SamplerOutput:
     """Samples a completion of the input string.
+
+    If top_p is provided, the sampling mode will be top_p.
+    If beam_size is provided, the sampling mode will be beam_search.
+    If None of them are provided, the sampling mode will be greedy.
 
     Args:
       input_strings: input prompts to feed to the model for sampling.
@@ -622,6 +707,7 @@ class Sampler:
       temperature: temperature for sampling.
       top_p: top-p sampling threshold.
       top_k: top-k sampling threshold.
+      beam_size: beam size for beam search.
       seed: random seed for sampling.
 
     Returns:
@@ -670,6 +756,7 @@ class Sampler:
         top_p=top_p,
         top_k=top_k,
         seed=seed,
+        beam_size=beam_size,
     )
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state, sampling_state
@@ -679,9 +766,23 @@ class Sampler:
         self._flattened_transformer_state, sampling_state
     )
 
-    masked_token_buffer = self.mask_tokens_after_eos_ids(
-        sampling_state.token_buffer
-    )
+    token_buffers = sampling_state.token_buffer
+    logits_buffers = sampling_state.logits_buffer
+
+    if sampling_state.sampling_mode == 'beam_search':
+      updated_args = beam_search_lib.finalize_beam_search_state(
+          sampling_state.beam_search_sampling_state,
+          sampling_state.token_buffer,
+          sampling_state.logits_buffer,
+      )
+      token_buffers = updated_args['token_buffer']
+      logits_buffers = updated_args['logits_buffer']
+      # delete the sampling state in case the further referece
+      # if need more internal states, they should be updated by
+      # finalize_beam_search_state
+      del sampling_state
+
+    masked_token_buffer = self.mask_tokens_after_eos_ids(token_buffers)
 
     out_tokens = []
     out_logits = []
@@ -693,7 +794,7 @@ class Sampler:
       )
       out_tokens.append(token_buffer[start_idx:total_sampling_steps])
       if return_logits:
-        logits_buffer = sampling_state.logits_buffer[i]
+        logits_buffer = logits_buffers[i]
         out_logits.append(logits_buffer[start_idx:total_sampling_steps])
 
     decoded_outputs = [
