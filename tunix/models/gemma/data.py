@@ -166,13 +166,26 @@ class _Tokenize(grain.MapTransform):
 
   def map(self, element: dict[str, bytes]) -> tuple[np.ndarray, np.ndarray]:
     """Tokenize the input."""
-    src_tokens = self._tokenizer.tokenize(
-        element["src"].decode(),
-        prefix=self._input_template["prefix"],
-        suffix=self._input_template["suffix"],
-        add_eos=False,
-    )
-    dst_tokens = self._tokenizer.tokenize(element["dst"].decode(), add_eos=True)
+    if "srt" in element.keys():  ## MTNT dataset
+      src_tokens = self._tokenizer.tokenize(
+          element["src"].decode(),
+          prefix=self._input_template["prefix"],
+          suffix=self._input_template["suffix"],
+          add_eos=False,
+      )
+      dst_tokens = self._tokenizer.tokenize(
+          element["dst"].decode(), add_eos=True
+      )
+    else:  ## OPUS-100 dataset
+      src_tokens = self._tokenizer.tokenize(
+          element["translation"]["en"],
+          prefix=self._input_template["prefix"],
+          suffix=self._input_template["suffix"],
+          add_eos=False,
+      )
+      dst_tokens = self._tokenizer.tokenize(
+          element["translation"]["fr"], add_eos=True
+      )
     return src_tokens, dst_tokens
 
 
