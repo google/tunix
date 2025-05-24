@@ -140,6 +140,39 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
 
+  def test_multi_turn_samples(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Input strings with multiple eos tokens
+    result = sampler(
+        ['input string </s> hello </s> input is', 'hello </s> My name </s>'],
+        total_generation_steps=10,
+        return_logits=True,
+        max_prompt_length=16,
+        echo=True,
+    )
+    # result is properly truncated to the first generated eos token.
+    self.assertEqual(
+        result.text,
+        [
+            '<s> input string </s> hello </s> input is is',
+            '<s> hello </s> My name </s> is',
+        ],
+    )
+
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(

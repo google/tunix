@@ -142,7 +142,7 @@ def beam_search_step(
 
     # For finished beams, set the candidate scores to -inf
     candidate_scores = jnp.where(
-        done.reshape(batch_size, beam_size)[:, :, None],
+        done.reshape(batch_size, beam_size)[:, :, None] != -1,
         -jnp.inf,
         candidate_scores,
     )
@@ -153,7 +153,7 @@ def beam_search_step(
 
   # don't forget finished beams
   scores_of_finished_beams = jnp.where(
-      done.reshape(batch_size, beam_size), state.scores, -jnp.inf
+      done.reshape(batch_size, beam_size) != -1, state.scores, -jnp.inf
   )
   # (batch_size, beam_size * vocab_size + beam_size)
   combined_scores = jnp.concatenate(
@@ -245,6 +245,7 @@ def finalize_beam_search_state(
     beam_search_state: _BeamSearchSamplingState,
     token_buffer: jax.Array,
     logits_buffer: jax.Array | None,
+    done: jax.Array,
 ) -> dict[str, Any]:
   """Finalize the beam search sampling state.
 
@@ -256,6 +257,7 @@ def finalize_beam_search_state(
       information for this function, for example, batch_size, beam_size, etc.
     token_buffer: The token buffer of the previous step. [B, L]
     logits_buffer: The logits buffer of the current step. [B, L, vocab_size]
+    done: Array contains position of first generated eos token.
 
   Returns:
     The updated token buffer and logits buffer by choosing the top beam result.
@@ -272,4 +274,5 @@ def finalize_beam_search_state(
       "logits_buffer": (
           logits_buffer[:, 0, ...] if logits_buffer is not None else None
       ),
+      "done": done.reshape(batch_size, beam_size)[:, 0],
   }
