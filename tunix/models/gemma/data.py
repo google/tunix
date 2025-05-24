@@ -15,6 +15,7 @@
 """Data loading and preprocessing."""
 
 from collections.abc import Iterable
+from typing import Any
 
 from etils import epath
 from grain import python as grain
@@ -91,6 +92,7 @@ def create_datasets(
     num_train_epochs: int | None,
     tokenizer: GemmaTokenizer,
     instruct_tuned: bool = False,
+    input_template: dict[str, str] | None = None,
 ) -> tuple[Iterable[TrainingInput], Iterable[TrainingInput]]:
   """Creates train and eval data iterator.
 
@@ -102,6 +104,7 @@ def create_datasets(
       dataset will be repeated indefinitely.
     tokenizer: The tokenizer to use for tokenizing the dataset.
     instruct_tuned: Whether the dataset should be instruct tuned.
+    input_template: The input template to use for the dataset.
 
   Returns:
     A tuple of train and eval data iterators.
@@ -110,7 +113,8 @@ def create_datasets(
     raise ValueError(f"Unsupported dataset: {dataset_name}")
 
   train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
-  input_template = INPUT_TEMPLATE_IT if instruct_tuned else INPUT_TEMPLATE
+  if input_template is None:
+    input_template = INPUT_TEMPLATE_IT if instruct_tuned else INPUT_TEMPLATE
 
   train_loader = _build_data_loader(
       data_source=train_ds,
@@ -164,9 +168,9 @@ class _Tokenize(grain.MapTransform):
     self._tokenizer = tokenizer
     self._input_template = input_template
 
-  def map(self, element: dict[str, bytes]) -> tuple[np.ndarray, np.ndarray]:
+  def map(self, element: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     """Tokenize the input."""
-    if "srt" in element.keys():  ## MTNT dataset
+    if "src" in element.keys():  ## MTNT dataset
       src_tokens = self._tokenizer.tokenize(
           element["src"].decode(),
           prefix=self._input_template["prefix"],
