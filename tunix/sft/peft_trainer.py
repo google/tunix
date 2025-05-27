@@ -299,7 +299,7 @@ class PeftTrainer:
     )
     with time_measure("Train loop"):
       for index, train_example in enumerate(train_ds):
-        # TODO: Add support to restore the iterator state instead of
+        # TODO(mridulsahu): Add support to restore the iterator state instead of
         # skipping the already trained examples.
         if index < self._train_steps:
           # Skip the examples that are already trained.

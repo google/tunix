@@ -179,7 +179,7 @@ class MetricsLogger:
   def close(self):
     """Closes the metrics logger."""
     if self._summary_writers:
-      # TODO: Solution for destructing lister in jax.monitoring.
+      # TODO(b/413717077): Solution for destructing lister in jax.monitoring.
       for summary_writer in self._summary_writers:
         summary_writer.close()
     if wandb is not None:

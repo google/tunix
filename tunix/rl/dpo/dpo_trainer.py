@@ -167,7 +167,7 @@ class DpoTrainer(peft_trainer.PeftTrainer):
     self._metrics_logger.log("rewards_margin", aux["rewards_margin"], m, s)
     self._metrics_logger.log("rewards_accuracy", aux["rewards_accuracy"], m, s)
 
-  # TODO: override _post_process_eval_step once eval step is properly
+  # TODO(tsbao): override _post_process_eval_step once eval step is properly
   # tracked.
 
 
