@@ -501,26 +501,6 @@ class Sampler:
     input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
     return input_ids
 
-  def mask_tokens_after_eos_ids(self, token_buffer):
-    """Mask token IDs after the EOS token with the padding ID."""
-    eos_id = self.tokenizer.eos_id()
-    eos_exists = jnp.any(jnp.equal(token_buffer, eos_id), axis=-1)
-    eos_indices = jnp.where(
-        eos_exists,
-        token_buffer.shape[-1]
-        - 1
-        - jnp.argmax(jnp.flip(jnp.equal(token_buffer, eos_id)), axis=-1),
-        token_buffer.shape[-1],
-    )
-    mask = jnp.less_equal(
-        jnp.arange(token_buffer.shape[-1]), eos_indices[:, None]
-    )
-    masked_token_buffer = token_buffer * mask + self.tokenizer.pad_id() * (
-        1 - mask
-    )
-
-    return masked_token_buffer
-
   def _prefill_fn(
       self, params: statelib.State, sampler_state: _SamplingState
   ) -> _SamplingState:
@@ -782,20 +762,23 @@ class Sampler:
       # finalize_beam_search_state
       del sampling_state
 
-    masked_token_buffer = self.mask_tokens_after_eos_ids(token_buffers)
-
     out_tokens = []
     out_logits = []
-    for i, token_buffer in enumerate(masked_token_buffer):
+    for i, token_buffer in enumerate(token_buffers):
       start_idx = (
           find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
           if echo
           else max_prompt_length
       )
-      out_tokens.append(token_buffer[start_idx:total_sampling_steps])
+      end_idx = (
+          find_first_eos_idx(
+              token_buffer[max_prompt_length:], self.tokenizer.eos_id()
+          )
+          + max_prompt_length
+      )
+      out_tokens.append(token_buffer[start_idx:end_idx])
       if return_logits:
-        logits_buffer = logits_buffers[i]
-        out_logits.append(logits_buffer[start_idx:total_sampling_steps])
+        out_logits.append(logits_buffers[i][start_idx:end_idx])
 
     decoded_outputs = [
         self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
@@ -852,6 +835,15 @@ def find_first_non_pad_idx(ids, pad_id):
     return jnp.argmax(mask)
   else:
     return 0
+
+
+def find_first_eos_idx(ids, eos_id):
+  """Finds the index of the first EOS token."""
+  mask = ids == eos_id
+  if jnp.any(mask):
+    return jnp.argmax(mask)
+  else:
+    return ids.shape[0]
 
 
 def make_causal_attn_mask(input_mask: jax.Array, cache_size: int) -> jax.Array:

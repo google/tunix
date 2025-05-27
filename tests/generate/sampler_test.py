@@ -56,7 +56,7 @@ class SamplerTest(parameterized.TestCase):
   def test_samples(self, max_prompt_length, echo):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
@@ -79,9 +79,9 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(result)
     self.assertLen(result.logits, 2)
     if echo:
-      self.assertEqual(result.logits[0].shape, (13, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (14, vocab.GetPieceSize()))
     else:
-      self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (11, vocab.GetPieceSize()))
 
     # With 1 beam, the beam search result should be the
     # same as the greedy output
@@ -168,9 +168,8 @@ class SamplerTest(parameterized.TestCase):
         input_strings, total_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
-      np.testing.assert_allclose(
-          original_logits, new_logits, atol=1e-1, rtol=1e-1
-      )
+      for orig, new in zip(original_logits, new_logits):
+        np.testing.assert_allclose(orig, new, atol=1e-1, rtol=1e-1)
 
   def test_lora_state_update(self):
     vocab = tc.MockVocab()
@@ -207,9 +206,8 @@ class SamplerTest(parameterized.TestCase):
         input_strings, total_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
-      np.testing.assert_allclose(
-          original_logits, new_logits, atol=1e-1, rtol=1e-1
-      )
+      for orig, new in zip(original_logits, new_logits):
+        np.testing.assert_allclose(orig, new, atol=1e-1, rtol=1e-1)
 
   def test_invalid_state_update(self):
     vocab = tc.MockVocab()
