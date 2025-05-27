@@ -17,6 +17,7 @@
 from collections.abc import Iterable
 from typing import Any
 
+import datasets
 from etils import epath
 from grain import python as grain
 import numpy as np
@@ -109,12 +110,16 @@ def create_datasets(
   Returns:
     A tuple of train and eval data iterators.
   """
-  if dataset_name != "mtnt/en-fr":
+  if dataset_name == "mtnt/en-fr":
+    train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
+  elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
+    train_ds, eval_ds = datasets.load_dataset(
+        dataset_name, data_dir="en-fr", split=("train", "validation")
+    )
+  else:
     raise ValueError(f"Unsupported dataset: {dataset_name}")
 
-  train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
-  if input_template is None:
-    input_template = INPUT_TEMPLATE_IT if instruct_tuned else INPUT_TEMPLATE
+  input_template = INPUT_TEMPLATE_IT if instruct_tuned else INPUT_TEMPLATE
 
   train_loader = _build_data_loader(
       data_source=train_ds,
