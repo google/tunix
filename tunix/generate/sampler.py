@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import dataclasses
+import functools
 from typing import Any
 from typing import Optional
 
@@ -140,7 +141,10 @@ def sample_top_p(
     logits, key, temperature: float, top_p: float, top_k: Optional[int]
 ):
   probs = jax.nn.softmax(logits[:, -1] / temperature, axis=-1)
-  next_token = _sample_top_p(probs, top_p, key, top_k)
+  keys = jax.random.split(key, num=probs.shape[0])
+  next_token = jax.vmap(functools.partial(_sample_top_p, p=top_p, k=top_k))(
+      probs, key=keys
+  )
   return next_token
 
 

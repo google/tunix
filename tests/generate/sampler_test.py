@@ -140,6 +140,34 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
 
+  def test_top_p_repeated_prompt(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    result = sampler(
+        ['input string', 'input string', 'input string'],
+        total_generation_steps=10,
+        return_logits=True,
+        echo=True,
+        temperature=9,
+        top_p=0.95,
+    )
+    self.assertNotEqual(result.text[0], result.text[1])
+    self.assertNotEqual(result.text[1], result.text[2])
+    self.assertNotEqual(result.text[0], result.text[2])
+
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
