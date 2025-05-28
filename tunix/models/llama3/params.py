@@ -17,6 +17,7 @@
 import re
 from etils import epath
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import safetensors.torch as safetensors
 from tunix.models.llama3 import model as model_lib
@@ -128,7 +129,9 @@ def _stoi(s):
 
 
 def create_model_from_safe_tensors(
-    file_dir: str, config: model_lib.ModelConfig
+    file_dir: str,
+    config: model_lib.ModelConfig,
+    mesh: jax.sharding.Mesh | None = None,
 ) -> model_lib.Llama3:
   """Load tensors from the safetensors file and create a Llama3 model."""
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
@@ -153,5 +156,11 @@ def create_model_from_safe_tensors(
     )
     jax_keys = [_stoi(s) for s in jax_key.split(".")]
     _assign_weights(jax_keys, v, state_dict, k, transform)
+
+  if mesh is not None:
+    sharding = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
+    state_dict = jax.device_put(state_dict, sharding)
+  else:
+    state_dict = jax.device_put(state_dict, jax.devices()[0])
 
   return nnx.merge(graph_def, state_dict)
