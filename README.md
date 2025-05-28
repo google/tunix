@@ -67,6 +67,8 @@ To get started, we have a bunch of detailed examples and tutorials.
 - [PEFT Gemma with QLoRA](https://github.com/google/tunix/blob/main/examples/qlora_demo.ipynb)
 - [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_demo.ipynb)
 
+To setup Jupyter notebook on sigle host GCP TPU VM, please refer to the [setup script](./scripts/setup_notebook_tpu_single_host.sh).
+
 We plan to provide clear, concise documentation and more examples in the near
 future.
 
