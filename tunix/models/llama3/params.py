@@ -18,8 +18,7 @@ import re
 from etils import epath
 from flax import nnx
 import jax
-import jax.numpy as jnp
-import safetensors.torch as safetensors
+import safetensors.flax as safetensors
 from tunix.models.llama3 import model as model_lib
 
 
@@ -93,13 +92,13 @@ def _torch_key_to_jax_key(mapping, source_key):
 
 
 def _assign_weights(keys, tensor, state_dict, torch_key, transform):
-  """Convert torch weights to jax and assign to nnx state_dict."""
+  """Convert weights and assign to nnx state_dict."""
   key = keys[0]
   if len(keys) == 1:
     try:
       if transform is not None:
         permute, reshape = transform
-        tensor = tensor.permute(permute) if permute else tensor
+        tensor = tensor.transpose(permute) if permute else tensor
         tensor = tensor.reshape(reshape) if reshape else tensor
     except Exception as e:
       raise RuntimeError(
@@ -112,7 +111,7 @@ def _assign_weights(keys, tensor, state_dict, torch_key, transform):
           f"shape must match for {torch_key}, got {tensor.shape} vs"
           f" {state_dict[key].shape}"
       )
-    state_dict[key] = jnp.from_dlpack(tensor.detach().contiguous())
+    state_dict[key] = tensor
     return state_dict
   else:
     if key not in state_dict:
