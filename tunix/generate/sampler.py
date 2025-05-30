@@ -30,9 +30,11 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+from tunix.generate import attention_utils
+from tunix.generate import validation
 import tunix.generate.beam_search as beam_search_lib
+import tunix.generate.contrastive_search as contrastive_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
-
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -62,6 +64,10 @@ class _SamplingState:
 
   # Fixed-size buffer for accumulating the output logits.
   logits_buffer: jnp.ndarray | None  # [B, L, V]
+
+  # Hidden states from the model. Only present when sampling_mode is
+  # 'contrastive_search'.
+  hidden_states_buffer: jnp.ndarray | None  # [B, L, D]
 
   # List of tokens that are forbidden to be generated.
   forbidden_token_ids: Sequence[int] | None
@@ -150,105 +156,6 @@ def sample_best(logits):
   return next_token
 
 
-def sample(
-    logits: jnp.ndarray,
-    eos: int,
-    cache: dict[str, dict[str, jaxtyping.Array]],
-    sampler_state: _SamplingState,
-) -> _SamplingState:
-  """Samples a token from the logits."""
-
-  logits = logits[:, -1][:, None, :]  # B, 1, V
-  decoding_step = sampler_state.decoding_step
-  token_buffer = sampler_state.token_buffer
-  done = sampler_state.done
-  logits_buffer = sampler_state.logits_buffer
-  beam_search_state = sampler_state.beam_search_sampling_state
-
-  if sampler_state.forbidden_token_ids:
-    logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
-
-  if sampler_state.sampling_mode == 'beam_search':
-    beam_search_state, updated_args = beam_search_lib.beam_search_step(
-        logits=logits,
-        done=done,
-        token_buffer=token_buffer,
-        cache=cache,
-        logits_buffer=logits_buffer,
-        state=beam_search_state,
-        pad_token_id=eos,
-        decoding_step=decoding_step,
-    )
-    cache = updated_args['cache']
-    token_buffer = updated_args['token_buffer']
-    done = updated_args['done']
-    logits_buffer = updated_args['logits_buffer']
-  else:
-    if sampler_state.sampling_mode == 'greedy':
-      next_token_candidate = sample_best(logits)
-    elif sampler_state.sampling_mode == 'top_p':
-      key = jax.random.fold_in(sampler_state.seed, decoding_step)
-      next_token_candidate = sample_top_p(
-          logits,
-          key,
-          sampler_state.temperature,
-          sampler_state.sampling_parameters['top_p'],
-          sampler_state.sampling_parameters['top_k'],
-      )
-    else:
-      raise ValueError(
-          'Unsupported sampling mode: %s' % sampler_state.sampling_mode
-      )
-    token_buffer = token_buffer.at[:, decoding_step + 1].set(
-        next_token_candidate
-    )
-
-  done = done | jnp.equal(token_buffer[:, decoding_step + 1], eos)
-  return _SamplingState(
-      decoding_step=sampler_state.decoding_step + 1,
-      num_input_tokens=sampler_state.num_input_tokens,
-      token_buffer=token_buffer,
-      positions=sampler_state.positions,
-      logits_buffer=logits_buffer,
-      cache=cache,
-      done=done,
-      total_sampling_steps=sampler_state.total_sampling_steps,
-      forbidden_token_ids=sampler_state.forbidden_token_ids,
-      temperature=sampler_state.temperature,
-      sampling_parameters=sampler_state.sampling_parameters,
-      seed=sampler_state.seed,
-      sampling_mode=sampler_state.sampling_mode,
-      beam_search_sampling_state=beam_search_state,
-  )
-
-
-def _compute_attention_masks(
-    time_step: jax.Array, seq_len: int, input_mask: jax.Array
-) -> jax.Array:
-  """Computes causal attention mask."""
-  batch_size = input_mask.shape[0]
-  batch_time_step = jnp.full((batch_size, 1), time_step, dtype=jnp.uint32)
-  causal_padding = jnp.greater(
-      jnp.expand_dims(jnp.arange(seq_len), 0), batch_time_step
-  )
-  max_seq_len = min(input_mask.shape[-1], seq_len)
-  input_mask = jax.lax.dynamic_slice(
-      input_mask,
-      (0, jnp.maximum(time_step - seq_len + 1, 0)),
-      (batch_size, max_seq_len),
-  )
-  input_mask = (
-      jnp.zeros((batch_size, seq_len), dtype=jnp.bool_)
-      .at[:, :max_seq_len]
-      .set(input_mask)
-  )
-
-  causal_padding = jnp.logical_or(causal_padding, input_mask)
-  attention_mask = causal_padding[:, jnp.newaxis, :].astype(jnp.bool_)
-
-  return ~attention_mask
-
-
 def _build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
   """Computes the `positions` from the `input_mask`.
 
@@ -310,6 +217,7 @@ class Sampler:
       transformer: nnx.Module,
       tokenizer: Any,
       cache_config: CacheConfig,
+      embed_dim: int | None = None,
   ):
     """Initializes the sampler.
 
@@ -317,6 +225,8 @@ class Sampler:
       transformer: an instance of the transformer.
       tokenizer: a tokenizer for the given model.
       cache_config: configuration for the KV cache.
+      embed_dim: the dimension of the embedding. Only needed for contrastive
+        search.
     """
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.cache_config = cache_config
@@ -326,6 +236,7 @@ class Sampler:
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
+    self._embed_dim = embed_dim
     # we separate out state and graph def so that the state can be passed as an
     # argument to _decode_fn, resulting in it not being treated as a static
     # arg. This greatly reduces the size of the HLO and reduces compile time
@@ -419,6 +330,7 @@ class Sampler:
       temperature: float,
       top_p: Optional[float],
       top_k: Optional[int],
+      penalty_alpha: Optional[float],
       seed: jax.Array,
       beam_size: Optional[int],
   ) -> _SamplingState:
@@ -461,21 +373,43 @@ class Sampler:
     else:
       logits_buffer = None
     sampling_parameters = {}
-    sampling_mode = 'greedy'
-    if beam_size is not None and top_p is not None:
-      raise ValueError(
-          'Cannot use both beam_size and top_p at the same time. Please unset'
-          ' one of them.'
-      )
+    sampling_mode = [None]
+
     if beam_size is not None:
-      sampling_mode = 'beam_search'
+      validation.check_sampling_mode_conflict(sampling_mode, 'beam_search')
       sampling_parameters['beam_size'] = beam_size
-    elif top_p is not None:
-      sampling_mode = 'top_p'
+
+    if top_p is not None:
+      validation.check_sampling_mode_conflict(sampling_mode, 'top_p')
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
 
-    logging.debug('Using sampling mode: %s', sampling_mode)
+    if (
+        top_k is not None
+        and top_k > 1
+        and penalty_alpha is not None
+        and penalty_alpha > 0
+    ):
+      validation.check_sampling_mode_conflict(
+          sampling_mode, 'contrastive_search'
+      )
+      sampling_parameters['top_k'] = top_k
+      sampling_parameters['penalty_alpha'] = penalty_alpha
+
+    if sampling_mode[0] is None:
+      sampling_mode[0] = 'greedy'
+
+    logging.debug('Using sampling mode: %s', sampling_mode[0])
+
+    hidden_states_buffer = None
+    if sampling_mode[0] == 'contrastive_search':
+      assert self._embed_dim is not None, (
+          'embed_dim must be provided for contrastive search. Pass in'
+          ' embed_dim to the constructor.'
+      )
+      hidden_states_buffer = jnp.zeros(
+          (batch_size, buffer_size, self._embed_dim), dtype=jnp.float32
+      )
 
     return _SamplingState(
         decoding_step=num_input_tokens - 1,
@@ -490,8 +424,9 @@ class Sampler:
         temperature=temperature,
         sampling_parameters=sampling_parameters,
         seed=seed,
-        sampling_mode=sampling_mode,
+        sampling_mode=sampling_mode[0],
         beam_search_sampling_state=None,
+        hidden_states_buffer=hidden_states_buffer,
     )
 
   def tokenize(self, input_string: str) -> jax.Array:
@@ -501,10 +436,105 @@ class Sampler:
     input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
     return input_ids
 
+  def _sample(
+      self,
+      logits: jnp.ndarray,
+      eos: int,
+      cache: dict[str, dict[str, jaxtyping.Array]],
+      sampler_state: _SamplingState,
+      params: statelib.State,
+  ) -> _SamplingState:
+    """Samples a token from the logits."""
+
+    logits = logits[:, -1][:, None, :]  # B, 1, V
+    decoding_step = sampler_state.decoding_step
+    token_buffer = sampler_state.token_buffer
+    done = sampler_state.done
+    logits_buffer = sampler_state.logits_buffer
+    beam_search_state = sampler_state.beam_search_sampling_state
+    hidden_states_buffer = sampler_state.hidden_states_buffer
+    if sampler_state.forbidden_token_ids:
+      logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
+
+    if sampler_state.sampling_mode == 'beam_search':
+      beam_search_state, updated_args = beam_search_lib.beam_search_step(
+          logits=logits,
+          done=done,
+          token_buffer=token_buffer,
+          cache=cache,
+          logits_buffer=logits_buffer,
+          state=beam_search_state,
+          pad_token_id=eos,
+          decoding_step=decoding_step,
+      )
+      cache = updated_args['cache']
+      token_buffer = updated_args['token_buffer']
+      done = updated_args['done']
+      logits_buffer = updated_args['logits_buffer']
+    else:
+      if sampler_state.sampling_mode == 'greedy':
+        next_token_candidate = sample_best(logits)
+      elif sampler_state.sampling_mode == 'top_p':
+        key = jax.random.fold_in(sampler_state.seed, decoding_step)
+        next_token_candidate = sample_top_p(
+            logits,
+            key,
+            sampler_state.temperature,
+            sampler_state.sampling_parameters['top_p'],
+            sampler_state.sampling_parameters['top_k'],
+        )
+      elif sampler_state.sampling_mode == 'contrastive_search':
+        next_token_candidate, next_hidden = (
+            contrastive_search_lib.contrastive_search_step(
+                transformer=nnx.merge(self._transformer_graphdef, params),
+                logits=logits,
+                token_buffer=sampler_state.token_buffer,
+                positions=sampler_state.positions,
+                decoding_step=decoding_step,
+                cache=cache,
+                hidden_states_buffer=hidden_states_buffer,
+                top_k=sampler_state.sampling_parameters['top_k'],
+                alpha=sampler_state.sampling_parameters['penalty_alpha'],
+                pad_id=self.tokenizer.pad_id(),
+                cache_size=self.cache_config.cache_size,
+            )
+        )
+        assert hidden_states_buffer is not None  # make pyright happy
+        hidden_states_buffer = hidden_states_buffer.at[
+            :, decoding_step + 1, :
+        ].set(next_hidden)
+      else:
+        raise ValueError(
+            'Unsupported sampling mode: %s' % sampler_state.sampling_mode
+        )
+      token_buffer = token_buffer.at[:, decoding_step + 1].set(
+          next_token_candidate
+      )
+
+    done = done | jnp.equal(token_buffer[:, decoding_step + 1], eos)
+    return _SamplingState(
+        decoding_step=sampler_state.decoding_step + 1,
+        num_input_tokens=sampler_state.num_input_tokens,
+        token_buffer=token_buffer,
+        positions=sampler_state.positions,
+        logits_buffer=logits_buffer,
+        cache=cache,
+        done=done,
+        total_sampling_steps=sampler_state.total_sampling_steps,
+        forbidden_token_ids=sampler_state.forbidden_token_ids,
+        temperature=sampler_state.temperature,
+        sampling_parameters=sampler_state.sampling_parameters,
+        seed=sampler_state.seed,
+        sampling_mode=sampler_state.sampling_mode,
+        beam_search_sampling_state=beam_search_state,
+        hidden_states_buffer=hidden_states_buffer,
+    )
+
   def _prefill_fn(
       self, params: statelib.State, sampler_state: _SamplingState
   ) -> _SamplingState:
     """Performs prefill."""
+    output_hidden_states = sampler_state.hidden_states_buffer is not None
     batch_size = sampler_state.token_buffer.shape[0]
 
     tokens = jax.lax.dynamic_slice(
@@ -523,7 +553,7 @@ class Sampler:
     )
 
     input_mask = tokens != self.tokenizer.pad_id()
-    attention_mask = make_causal_attn_mask(
+    attention_mask = attention_utils.make_causal_attn_mask(
         input_mask, self.cache_config.cache_size
     )
 
@@ -533,6 +563,7 @@ class Sampler:
         step_positions,
         sampler_state.cache,
         attention_mask,
+        output_hidden_states=output_hidden_states,
     )
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
@@ -546,6 +577,24 @@ class Sampler:
       )
     else:
       logits_buffer = sampler_state.logits_buffer
+    if output_hidden_states:
+      assert hasattr(
+          transformer, 'all_hidden_states'
+      ), 'Missing all_hidden_states, set output_hidden_states to True.'
+      assert len(transformer.all_hidden_states.value) == 1
+      assert (
+          sampler_state.hidden_states_buffer is not None
+      )  # make pyright happy
+      hidden_states_buffer = jax.lax.dynamic_update_slice(
+          sampler_state.hidden_states_buffer,
+          transformer.all_hidden_states.value[0].astype(
+              sampler_state.hidden_states_buffer.dtype
+          ),
+          (0, 0, 0),
+      )
+    else:
+      hidden_states_buffer = sampler_state.hidden_states_buffer
+
     if sampler_state.sampling_mode == 'beam_search':
       # init beam state in prefill instead of init as one minor optimization
       # to avoid running unnecessary prefill for
@@ -582,12 +631,18 @@ class Sampler:
         seed=sampler_state.seed,
         sampling_mode=sampler_state.sampling_mode,
         beam_search_sampling_state=beam_search_sampling_state,
+        hidden_states_buffer=sampler_state.hidden_states_buffer,
     )
-    updated_sampler_state = sample(
+    updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
         eos=self.tokenizer.eos_id(),
         sampler_state=updated_sampling_state,
+        params=params,
+    )
+    updated_sampler_state = dataclasses.replace(
+        updated_sampler_state,
+        hidden_states_buffer=hidden_states_buffer,
     )
     return updated_sampler_state
 
@@ -622,7 +677,7 @@ class Sampler:
     )
 
     input_mask = sampler_state.token_buffer == self.tokenizer.pad_id()
-    attention_mask = _compute_attention_masks(
+    attention_mask = attention_utils.compute_attention_masks(
         decoding_step, self.cache_config.cache_size, input_mask
     )
 
@@ -633,11 +688,12 @@ class Sampler:
         sampler_state.cache,
         attention_mask,
     )
-    updated_sampler_state = sample(
+    updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
         eos=self.tokenizer.eos_id(),
         sampler_state=sampler_state,
+        params=params,
     )
 
     if updated_sampler_state.logits_buffer is not None:
@@ -665,6 +721,7 @@ class Sampler:
       temperature: float = 0.0,
       top_p: Optional[float] = None,
       top_k: Optional[int] = None,
+      penalty_alpha: Optional[float] = None,
       beam_size: Optional[int] = None,
       seed: jax.Array | None = None,
   ) -> SamplerOutput:
@@ -672,6 +729,8 @@ class Sampler:
 
     If top_p is provided, the sampling mode will be top_p.
     If beam_size is provided, the sampling mode will be beam_search.
+    If penalty_alpha>0. and top_k>1, the sampling mode will be
+    contrastive_search.
     If None of them are provided, the sampling mode will be greedy.
 
     Args:
@@ -687,6 +746,8 @@ class Sampler:
       temperature: temperature for sampling.
       top_p: top-p sampling threshold.
       top_k: top-k sampling threshold.
+      penalty_alpha: penalty alpha for contrastive search, the larger the value,
+        the more penalty applied to the similarity check.
       beam_size: beam size for beam search.
       seed: random seed for sampling.
 
@@ -737,6 +798,7 @@ class Sampler:
         top_k=top_k,
         seed=seed,
         beam_size=beam_size,
+        penalty_alpha=penalty_alpha,
     )
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state, sampling_state
@@ -844,28 +906,3 @@ def find_first_eos_idx(ids, eos_id):
     return jnp.argmax(mask)
   else:
     return ids.shape[0]
-
-
-def make_causal_attn_mask(input_mask: jax.Array, cache_size: int) -> jax.Array:
-  """Create causal attention mask for prefill.
-
-  The causal attention mask during prefill phase is having shape
-  (B, T, CACHE_SIZE).
-
-  Args:
-    input_mask: Mask for the input
-    cache_size: KV cache size
-
-  Returns:
-    Attention mask.
-  """
-  seq_len = input_mask.shape[-1]
-  attn_mask = input_mask[..., None, :]
-  causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
-  attn_mask *= causal_mask[None, ...]
-  padding = cache_size - seq_len
-  assert padding >= 0
-  attn_mask = jnp.pad(
-      attn_mask, (*((0, 0) for _ in range(attn_mask.ndim - 1)), (0, padding))
-  )
-  return attn_mask

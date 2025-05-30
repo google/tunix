@@ -829,6 +829,7 @@ class Transformer(nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
+      output_hidden_states: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Transformer forward pass.
 
@@ -840,6 +841,7 @@ class Transformer(nnx.Module):
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
+      output_hidden_states: whether to output the hidden states.
 
     Returns:
       predicted_logits, new_cache
@@ -862,12 +864,13 @@ class Transformer(nnx.Module):
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
+    if output_hidden_states:
+      self.sow(nnx.Intermediate, 'all_hidden_states', x)
     logits = self.embedder.decode(x)
 
     if self.final_logits_softcap is not None:
       logits /= self.final_logits_softcap
       logits = jnp.tanh(logits) * self.final_logits_softcap
-
     return logits, new_cache  # pytype: disable=bad-return-type
 
   @property

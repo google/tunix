@@ -83,10 +83,18 @@ class ToyTransformer(nnx.Module):
     self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
     self.output = nnx.Linear(in_features=16, out_features=vocab_size, rngs=rngs)
 
-  def __call__(self, x, positions, cache, attention_mask):
+  def __call__(
+      self, x, positions, cache, attention_mask, output_hidden_states=False
+  ):
     x = self.emb(x)
     for layer in self.layers:
       x = layer(x)
+    if output_hidden_states:
+      self.sow(
+          nnx.Intermediate,
+          'all_hidden_states',
+          x,
+      )
     return self.output(x), cache
 
   @property
