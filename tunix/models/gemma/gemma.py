@@ -768,9 +768,9 @@ class Transformer(nnx.Module):
   @classmethod
   def from_params(cls, params: params_lib.Params, version: str) -> Self:
 
-    if version in ['2b', '2b-it']:
+    if version in ['2b', '2b-it', '1.1-2b-it']:
       config = TransformerConfig.gemma_2b()
-    elif version in ['7b', '7b-it']:
+    elif version in ['7b', '7b-it', '1.1-7b-it']:
       config = TransformerConfig.gemma_7b()
     elif version in ['2-2b', '2-2b-it']:
       config = TransformerConfig.gemma2_2b()
