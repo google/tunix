@@ -37,7 +37,7 @@ INPUT_TEMPLATE_IT = {
 }
 
 
-class GemmaTokenizer:
+class GemmaTokenizer(spm.SentencePieceProcessor):
   """Tokenizing and encoding/decoding text using the Sentencepiece tokenizer."""
 
   _GEMMA2_TOKENIZER_PATH: epath.PathLike = (
@@ -45,19 +45,9 @@ class GemmaTokenizer:
   )
 
   def __init__(self, model_path: str = _GEMMA2_TOKENIZER_PATH):
-    self._spm_processor = spm.SentencePieceProcessor()
     model_proto = epath.Path(model_path).read_bytes()
-    self._spm_processor.LoadFromSerializedProto(model_proto)
-
-  @property
-  def pad_id(self) -> int:
-    """Fast access to the pad ID."""
-    return self._spm_processor.pad_id()
-
-  @property
-  def vocab(self) -> spm.SentencePieceProcessor:
-    """Fast access to the BOS ID."""
-    return self._spm_processor
+    super().__init__()
+    self.LoadFromSerializedProto(model_proto)
 
   def tokenize(
       self,
@@ -78,10 +68,10 @@ class GemmaTokenizer:
     Returns:
       Tokens corresponding to the input string.
     """
-    int_list = [self._spm_processor.bos_id()]
-    int_list.extend(self._spm_processor.EncodeAsIds(prefix + example + suffix))
+    int_list = [self.bos_id()]
+    int_list.extend(self.EncodeAsIds(prefix + example + suffix))
     if add_eos:
-      int_list.append(self._spm_processor.eos_id())
+      int_list.append(self.eos_id())
 
     return np.array(int_list, dtype=np.int32)
 
@@ -159,7 +149,7 @@ def _build_data_loader(
       ),
       operations=[
           _Tokenize(tokenizer, input_template),
-          _BuildTrainInput(max_seq_len, tokenizer.pad_id),
+          _BuildTrainInput(max_seq_len, tokenizer.pad_id()),
           _FilterOverlength(max_seq_len),
           grain.Batch(batch_size=batch_size, drop_remainder=True),
       ],

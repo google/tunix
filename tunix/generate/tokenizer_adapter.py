@@ -30,14 +30,23 @@ class TokenizerAdapter:
 
   def __init__(self, tokenizer: Any):
     self._tokenizer = tokenizer
-    if not self._missing_methods():
+
+    missing_methods = self._missing_methods()
+    if not missing_methods:
       pass
     elif isinstance(self._tokenizer, spm.SentencePieceProcessor):
       self._tokenizer_type = TokenizerType.SP
     elif self._is_hf_tokenizer():
       self._tokenizer_type = TokenizerType.HF
     else:
-      raise ValueError(f'Unsupported tokenizer type: {type(self._tokenizer)}.')
+      raise ValueError(
+          'Your tokenizer should either be a `spm.SentencePieceProcessor` '
+          'tokenizer, a HuggingFace tokenizer, or it should have '
+          'the following methods: '
+          '`["encode", "decode", "bos_id", "eos_id", "pad_id"]`. Received: '
+          f'`type(tokenizer)` = {type(tokenizer)}, with missing methods: '
+          f'{missing_methods}.'
+      )
 
   def encode(self, text: str) -> list[int]:
     if self._tokenizer_type == TokenizerType.SP:
