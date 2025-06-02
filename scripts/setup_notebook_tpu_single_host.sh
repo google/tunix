@@ -3,7 +3,7 @@
 #
 # Example usage:
 #   bash setup_notebook_tpu_single_host.sh --tpu-zone us-central1-a --tpu-project cloud-tpu-inference-test
-#   bash setup_notebook_tpu_single_host.sh --tpu-name ${USER}-v5e-8 --tpu-zone us-central1-a --tpu-project cloud-tpu-inference-test --tpu-name ${USER}-tpu-v5e-8
+#   bash setup_notebook_tpu_single_host.sh --tpu-name ${USER}-v5e-8 --tpu-zone us-central1-a --tpu-project cloud-tpu-inference-test
 # Then open http://localhost:8889/tree on your local machine
 # The Jupyter server log is here: ~/jupyter.log
 
@@ -105,7 +105,7 @@ chmod +x ~/run_jupyter.sh'"
 }
 
 run_jupyter() {
-echo "Running Jupyter sever now..."
+echo "Running Jupyter server now..."
 tmux kill-session -t jupyter-session 2>/dev/null || true
 tmux new -d -s jupyter-session "$(declare -f tpu_exec); tpu_exec 'bash ~/run_jupyter.sh' '-L 8889:localhost:8889' > ~/jupyter.log 2>&1"
 }
