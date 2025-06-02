@@ -15,7 +15,7 @@
 """LLama3 model."""
 
 import dataclasses
-from typing import Tuple
+from typing import Any, Tuple
 import flax
 from flax import nnx
 import jax
@@ -472,7 +472,7 @@ class Llama3(nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
-  ) -> tuple[jaxtyping.Array, Cache | None]:
+  ) -> dict[str, Any]:
     """Llama3 model.
 
     Args:
@@ -482,10 +482,10 @@ class Llama3(nnx.Module):
       attention_mask: transformer input mask.
 
     Returns:
-      predicted_logits, new_cache
-
-      predicted_logits: output logits predicted by the model
-      new_cache: updated cache if the input cache is not None, None elsewhere.
+      A dictionary of the following items:
+        logits: output logits predicted by the model
+        cache: updated cache if the input cache is not None, None elsewhere.
+        last_hidden_state: the last hidden state before decoding.
     """
     new_cache = None if cache is None else {}
     x = self.embedder.encode(input_tokens)
@@ -505,4 +505,8 @@ class Llama3(nnx.Module):
     x = self.final_norm(x)
     logits = self.lm_head(x)
 
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return {
+        'logits': logits,
+        'cache': new_cache,
+        'last_hidden_state': x,
+    }

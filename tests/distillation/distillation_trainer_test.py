@@ -79,12 +79,12 @@ def get_model_outputs_fn(
     attention_mask: jax.Array,
 ):
   del input_mask
-  logits, _ = model(
+  logits = model(
       input_tokens,
       positions,
       None,
       attention_mask,
-  )
+  )['logits']
   # Exclude the last step as it does not appear in the targets.
   return logits[:, :-1, :]
 

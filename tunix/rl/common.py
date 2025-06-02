@@ -42,9 +42,9 @@ def get_per_token_logps(
     logits_to_keep: int,
 ) -> jax.Array:
   """Computes the per-token log probabilities."""
-  logits, _ = model(
+  logits = model(
       input_tokens, positions=positions, attention_mask=attn_mask, cache=None
-  )
+  )["logits"]
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]
   return selective_log_softmax(logits, input_tokens)

@@ -353,12 +353,14 @@ class Sampler:
     attention_mask = make_causal_attn_mask(input_mask, self.cache_size)
 
     transformer = nnx.merge(self._transformer_graphdef, params)
-    logits, cache = transformer(
+    model_output = transformer(
         tokens,
         step_positions,
         sampler_state.cache,
         attention_mask,
     )
+    logits = model_output['logits']
+    cache = model_output['cache']
 
     if sampler_state.forbidden_token_ids:
       logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)

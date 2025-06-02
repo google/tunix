@@ -15,7 +15,7 @@
 """Qwen3 model."""
 
 import dataclasses
-from typing import Tuple
+from typing import Any, Tuple
 import flax
 from flax import nnx
 import jax
@@ -513,8 +513,7 @@ class Qwen3(nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
-      output_hidden_states: bool = False,
-  ) -> tuple[jaxtyping.Array, Cache | None]:
+  ) -> dict[str, Any]:
     """Qwen3 model.
 
     Args:
@@ -522,13 +521,12 @@ class Qwen3(nnx.Module):
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
-      output_hidden_states: whether to output the hidden states.
 
     Returns:
-      predicted_logits, new_cache
-
-      predicted_logits: output logits predicted by the model
-      new_cache: updated cache if the input cache is not None, None elsewhere.
+      A dictionary of the following items:
+        logits: output logits predicted by the model
+        cache: updated cache if the input cache is not None, None elsewhere.
+        last_hidden_state: the last hidden state before decoding.
     """
     new_cache = None if cache is None else {}
     x = self.embedder.encode(input_tokens)
@@ -546,8 +544,10 @@ class Qwen3(nnx.Module):
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
-    if output_hidden_states:
-      self.sow(nnx.Intermediate, 'all_hidden_states', x)
     logits = self.lm_head(x)
 
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return {
+        'logits': logits,
+        'cache': new_cache,
+        'last_hidden_state': x,
+    }

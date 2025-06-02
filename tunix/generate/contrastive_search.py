@@ -118,18 +118,12 @@ def contrastive_search_step(
   updated_step_positions = updated_components['step_positions']
   updated_attention_mask = updated_components['attention_mask']
 
-  transformer(
+  next_hidden = transformer(
       topk_tokens,
       updated_step_positions,
       updated_cache,
       updated_attention_mask,
-      output_hidden_states=True,
-  )
-  assert hasattr(
-      transformer, 'all_hidden_states'
-  ), 'Missing all_hidden_states, set output_hidden_states to True.'
-  assert len(transformer.all_hidden_states.value) == 1
-  next_hidden = transformer.all_hidden_states.value[0]
+  )['last_hidden_state']
   next_hidden = next_hidden.reshape(
       (batch_size, top_k, 1, next_hidden.shape[-1])
   )  # [B, top_k, 1, D]

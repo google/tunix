@@ -197,7 +197,7 @@ class PeftTrainerTest(absltest.TestCase):
         positions: jax.Array,
         attention_mask: jax.Array,
     ) -> jax.Array:
-      logits, _ = model(input_tokens, positions, None, attention_mask)
+      logits = model(input_tokens, positions, None, attention_mask)['logits']
       logits = logits[:, :-1, :]
       target_tokens = input_tokens[:, 1:]
       target_mask = input_mask[:, 1:]

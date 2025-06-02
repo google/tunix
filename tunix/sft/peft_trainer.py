@@ -400,7 +400,7 @@ def _default_loss_fn(
     attention_mask: jax.Array,
 ) -> ArrayLike:
   """Default loss function for PEFT training."""
-  logits, _ = model(input_tokens, positions, None, attention_mask)
+  logits = model(input_tokens, positions, None, attention_mask)["logits"]
 
   # Exclude the last step as it does not appear in the targets.
   logits = logits[:, :-1, :]

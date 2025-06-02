@@ -534,7 +534,6 @@ class Sampler:
       self, params: statelib.State, sampler_state: _SamplingState
   ) -> _SamplingState:
     """Performs prefill."""
-    output_hidden_states = sampler_state.hidden_states_buffer is not None
     batch_size = sampler_state.token_buffer.shape[0]
 
     tokens = jax.lax.dynamic_slice(
@@ -558,13 +557,15 @@ class Sampler:
     )
 
     transformer = nnx.merge(self._transformer_graphdef, params)
-    logits, cache = transformer(
+    model_output = transformer(
         tokens,
         step_positions,
         sampler_state.cache,
         attention_mask,
-        output_hidden_states=output_hidden_states,
     )
+    logits = model_output['logits']
+    cache = model_output['cache']
+    hidden_state = model_output.get('last_hidden_state', None)
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
     positions = sampler_state.positions
@@ -577,19 +578,10 @@ class Sampler:
       )
     else:
       logits_buffer = sampler_state.logits_buffer
-    if output_hidden_states:
-      assert hasattr(
-          transformer, 'all_hidden_states'
-      ), 'Missing all_hidden_states, set output_hidden_states to True.'
-      assert len(transformer.all_hidden_states.value) == 1
-      assert (
-          sampler_state.hidden_states_buffer is not None
-      )  # make pyright happy
+    if sampler_state.hidden_states_buffer is not None:
       hidden_states_buffer = jax.lax.dynamic_update_slice(
           sampler_state.hidden_states_buffer,
-          transformer.all_hidden_states.value[0].astype(
-              sampler_state.hidden_states_buffer.dtype
-          ),
+          hidden_state.astype(sampler_state.hidden_states_buffer.dtype),
           (0, 0, 0),
       )
     else:
@@ -682,12 +674,14 @@ class Sampler:
     )
 
     transformer = nnx.merge(self._transformer_graphdef, params)
-    logits, cache = transformer(
+    model_output = transformer(
         last_token,
         step_positions,
         sampler_state.cache,
         attention_mask,
     )
+    logits = model_output['logits']
+    cache = model_output['cache']
     updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
