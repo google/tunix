@@ -136,7 +136,7 @@ class GrpoTrainingConfig(peft_trainer.TrainingConfig):
   - https://arxiv.org/abs/2402.03300
   """
 
-  total_generation_steps: int = 1
+  total_generation_steps: int
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
@@ -145,7 +145,7 @@ class GrpoTrainingConfig(peft_trainer.TrainingConfig):
   top_p: float = 1.0
   top_k: int | None = None
 
-  max_prompt_length: int = 256
+  max_prompt_length: int
 
   def __post_init__(self):
     assert self.num_generations > 1, (

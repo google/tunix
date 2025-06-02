@@ -23,6 +23,7 @@ import sentencepiece as spm
 class TokenizerType(enum.Enum):
   SP: str = 'sp'  # sentencepiece tokenizer
   HF: str = 'hf'  # huggingface tokenizer
+  NONE: str = 'none'  # Represents no tokenizer
 
 
 class TokenizerAdapter:
@@ -30,14 +31,23 @@ class TokenizerAdapter:
 
   def __init__(self, tokenizer: Any):
     self._tokenizer = tokenizer
-    if not self._missing_methods():
-      pass
+
+    missing_methods = self._missing_methods()
+    if not missing_methods:
+      self._tokenizer_type = TokenizerType.NONE
     elif isinstance(self._tokenizer, spm.SentencePieceProcessor):
       self._tokenizer_type = TokenizerType.SP
     elif self._is_hf_tokenizer():
       self._tokenizer_type = TokenizerType.HF
     else:
-      raise ValueError(f'Unsupported tokenizer type: {type(self._tokenizer)}.')
+      raise ValueError(
+          'Your tokenizer should either be a `spm.SentencePieceProcessor` '
+          'tokenizer, a HuggingFace tokenizer, or it should have '
+          'the following methods: '
+          '`["encode", "decode", "bos_id", "eos_id", "pad_id"]`. Received: '
+          f'`type(tokenizer)` = {type(tokenizer)}, with missing methods: '
+          f'{missing_methods}.'
+      )
 
   def encode(self, text: str) -> list[int]:
     if self._tokenizer_type == TokenizerType.SP:

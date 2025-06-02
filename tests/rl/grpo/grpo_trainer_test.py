@@ -147,6 +147,7 @@ class GrpoTrainerTest(parameterized.TestCase):
         num_generations=2,
         eval_every_n_steps=1,
         max_steps=10,
+        max_prompt_length=256,
     )
     grpo_trainer = grpo_lib.GrpoTrainer(
         model=model,
@@ -280,6 +281,7 @@ class GrpoTrainerTest(parameterized.TestCase):
         eval_every_n_steps=10,
         max_steps=10,
         gradient_accumulation_steps=gradient_accumulation_steps,
+        max_prompt_length=256,
     )
     grpo_trainer = grpo_lib.GrpoTrainer(
         model=model,
@@ -336,6 +338,7 @@ class GrpoTrainerTest(parameterized.TestCase):
         num_generations=2,
         eval_every_n_steps=10,
         max_steps=10,
+        max_prompt_length=256,
     )
     grpo_trainer = grpo_lib.GrpoTrainer(
         model=model,
