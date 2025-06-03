@@ -35,6 +35,7 @@ from tunix.generate import validation
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.contrastive_search as contrastive_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
+import tunix.generate.top_k as top_k_lib
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -384,7 +385,7 @@ class Sampler:
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
 
-    if (
+    if sampling_mode[0] is None and ( # Add this check to ensure top_k is not already set by top_p
         top_k is not None
         and top_k > 1
         and penalty_alpha is not None
@@ -395,6 +396,10 @@ class Sampler:
       )
       sampling_parameters['top_k'] = top_k
       sampling_parameters['penalty_alpha'] = penalty_alpha
+    elif sampling_mode[0] is None and top_k is not None: # Condition for top_k sampling
+      validation.check_sampling_mode_conflict(sampling_mode, 'top_k')
+      sampling_parameters['top_k'] = top_k
+      # temperature is already a top-level parameter
 
     if sampling_mode[0] is None:
       sampling_mode[0] = 'greedy'
@@ -482,6 +487,14 @@ class Sampler:
             sampler_state.temperature,
             sampler_state.sampling_parameters['top_p'],
             sampler_state.sampling_parameters['top_k'],
+        )
+      elif sampler_state.sampling_mode == 'top_k':
+        key = jax.random.fold_in(sampler_state.seed, decoding_step)
+        next_token_candidate = top_k_lib.sample_top_k(
+            logits=logits[:, 0, :], # Pass logits as [B, V]
+            key=key,
+            top_k=sampler_state.sampling_parameters['top_k'],
+            temperature=sampler_state.temperature,
         )
       elif sampler_state.sampling_mode == 'contrastive_search':
         next_token_candidate, next_hidden = (
