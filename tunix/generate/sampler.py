@@ -125,14 +125,17 @@ class CacheConfig:
 
 
 def _sample_top_p(
-    probs: jnp.ndarray, p: float, key: jax.Array, k: Optional[int] = None
+    probs: jnp.ndarray, p: Optional[float], key: jax.Array, k: Optional[int] = None
 ) -> jnp.ndarray:
-  """Sample a token using top-p sampling."""
+  """Sample a token using top-p or top-k sampling."""
   k = probs.shape[-1] if k is None else k
   probs_sorted, indices = jax.lax.top_k(probs, k=k)
-  cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
-  mask = cumsum_probs - probs_sorted > p
-  probs_sorted = jnp.where(mask, 0.0, probs_sorted)
+
+  if p is not None:
+    cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
+    mask = cumsum_probs - probs_sorted > p
+    probs_sorted = jnp.where(mask, 0.0, probs_sorted)
+
   probs_sorted /= jnp.sum(probs_sorted, axis=-1, keepdims=True)
 
   next_token = jax.random.categorical(key, logits=jnp.log(probs_sorted))
@@ -143,7 +146,7 @@ def _sample_top_p(
 
 
 def sample_top_p(
-    logits, key, temperature: float, top_p: float, top_k: Optional[int]
+    logits, key, temperature: float, top_p: Optional[float], top_k: Optional[int]
 ):
   probs = jax.nn.softmax(logits[:, -1] / temperature, axis=-1)
   next_token = _sample_top_p(probs, top_p, key, top_k)
@@ -382,18 +385,28 @@ class Sampler:
     if top_p is not None:
       validation.check_sampling_mode_conflict(sampling_mode, 'top_p')
       sampling_parameters['top_p'] = top_p
+      # top_k can be used with top_p, so store it regardless
+      sampling_parameters['top_k'] = top_k
+    elif top_k is not None: # top_p is None here
+      validation.check_sampling_mode_conflict(sampling_mode, 'top_k')
       sampling_parameters['top_k'] = top_k
 
     if (
-        top_k is not None
-        and top_k > 1
-        and penalty_alpha is not None
+        penalty_alpha is not None # Check for contrastive search
         and penalty_alpha > 0
+        and top_k is not None # Contrastive search requires top_k
+        and top_k > 1
     ):
+      # If top_p was also set, contrastive search takes precedence if conditions met
+      if sampling_mode[0] == 'top_p':
+        logging.warning(
+            'Top_p is set but conditions for contrastive search are also met.'
+            ' Contrastive search will be used.'
+        )
       validation.check_sampling_mode_conflict(
-          sampling_mode, 'contrastive_search'
+          sampling_mode, 'contrastive_search', allow_override=True
       )
-      sampling_parameters['top_k'] = top_k
+      sampling_parameters['top_k'] = top_k # top_k is needed for contrastive
       sampling_parameters['penalty_alpha'] = penalty_alpha
 
     if sampling_mode[0] is None:
@@ -481,6 +494,15 @@ class Sampler:
             key,
             sampler_state.temperature,
             sampler_state.sampling_parameters['top_p'],
+            sampler_state.sampling_parameters.get('top_k'), # top_k might be None
+        )
+      elif sampler_state.sampling_mode == 'top_k':
+        key = jax.random.fold_in(sampler_state.seed, decoding_step)
+        next_token_candidate = sample_top_p(
+            logits,
+            key,
+            sampler_state.temperature,
+            None,  # top_p is None for top_k sampling
             sampler_state.sampling_parameters['top_k'],
         )
       elif sampler_state.sampling_mode == 'contrastive_search':
