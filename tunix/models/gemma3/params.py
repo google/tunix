@@ -57,7 +57,7 @@ def create_model_from_checkpoint(
     params = jax.tree.map(
         lambda x, shd: jnp.asarray(x, device=shd),
         params,
-        nnx.get_named_sharding(nnx.state(abs_model), mesh),
+        nnx.to_pure_dict(nnx.get_named_sharding(nnx.state(abs_model), mesh)),
     )
   else:
     params = jax.tree.map(jnp.asarray, params)
@@ -119,6 +119,11 @@ def _map_from_upstream_checkpoint(params):
   for key_path, value in flax.traverse_util.flatten_dict(params).items():
     module_path, param_name = key_path
     module_path = module_path.split('/')[1:]  # Remove the leading 'transformer'
+    if module_path[0] == 'siglip_encoder':
+      continue  # We don't support MM input yet.
+    if module_path[0] == 'embedder':
+      if len(module_path) > 1 and module_path[1].startswith('mm_'):
+        continue  # We don't support MM input yet.
     if module_path[0] in ('embedder', 'final_norm'):
       new_params[(module_path[0], param_name)] = value
       continue

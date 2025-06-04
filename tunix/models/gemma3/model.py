@@ -66,6 +66,16 @@ class ShardingConfig:
     )
 
 
+class QueryPreAttentionNormalisation(enum.Enum):
+  """Initialization strategy."""
+
+  # Whether to scale the query by 1/sqrt(head_dim)
+  BY_ONE_OVER_SQRT_HEAD_DIM = enum.auto()
+
+  # Whether to scale the query by `1/sqrt(embed_dim // num_heads)`
+  BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS = enum.auto()
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Gemma3Config:
   """Transformer config."""
@@ -80,6 +90,11 @@ class Gemma3Config:
   sliding_window_size: int | None = None
   local_base_frequency: int = 10_000
   global_base_frequency: int = 10_000
+  local_scale_factor: float = 1.0
+  global_scale_factor: float = 1.0
+  query_pre_attn_norm: QueryPreAttentionNormalisation = (
+      QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM
+  )
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
@@ -95,6 +110,59 @@ class Gemma3Config:
         sliding_window_size=512,
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
+    )
+
+  @classmethod
+  def gemma3_4b(cls) -> 'Gemma3Config':
+    """Gemma3-4B text-only config."""
+    return cls(
+        num_layers=34,
+        num_embed=262_144,
+        embed_dim=2560,
+        hidden_dim=2560 * 8 // 2,
+        num_heads=8,
+        head_dim=256,
+        num_kv_heads=4,
+        sliding_window_size=1024,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+        global_scale_factor=8.0,
+    )
+
+  @classmethod
+  def gemma3_12b(cls) -> 'Gemma3Config':
+    """Gemma3-12B text-only config."""
+    return cls(
+        num_layers=48,
+        num_embed=262144,
+        embed_dim=30 * 128,
+        hidden_dim=8 * 30 * 128 // 2,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        query_pre_attn_norm=QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM,
+        sliding_window_size=1024,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+        global_scale_factor=8.0,
+    )
+
+  @classmethod
+  def gemma3_27b(cls) -> 'Gemma3Config':
+    """Gemma3-27B text-only config."""
+    return cls(
+        num_layers=62,
+        num_embed=262144,
+        embed_dim=5376,
+        hidden_dim=5376 * 8 // 2,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=16,
+        query_pre_attn_norm=QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS,
+        sliding_window_size=1024,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+        global_scale_factor=8.0,
     )
 
 
@@ -173,6 +241,7 @@ def apply_rope(
     *,
     head_dim: int,
     base_frequency: int,
+    scale_factor: float = 1.0,
 ) -> jaxtyping.Array:
   """Applies RoPE."""
   fraction = 2 * jnp.arange(0, head_dim // 2) / head_dim
@@ -182,6 +251,10 @@ def apply_rope(
       positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
   )
   sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
+  if scale_factor < 1.0:
+    raise ValueError(f'scale_factor must be >= 1.0, got {scale_factor}')
+  sinusoid_inp /= scale_factor
+
   sin = jnp.sin(sinusoid_inp)
   cos = jnp.cos(sinusoid_inp)
 
@@ -224,6 +297,8 @@ class Attention(nnx.Module):
       rngs: nnx.Rngs,
       sliding_window_size: int | None,
       rope_base_frequency: int,
+      rope_scale_factor: float,
+      query_pre_attn_norm: QueryPreAttentionNormalisation,
       shd_config: ShardingConfig,
   ):
     if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
@@ -234,6 +309,8 @@ class Attention(nnx.Module):
     self.sliding_window_size = sliding_window_size
     self.attn_type = attn_type
     self.rope_base_frequency = rope_base_frequency
+    self.rope_scale_factor = rope_scale_factor
+    self.query_pre_attn_norm = query_pre_attn_norm
     self.shd_config = shd_config
     self.attn_vec_einsum = Einsum(
         einsum_str='BTNH,NHD->BTD',
@@ -295,13 +372,15 @@ class Attention(nnx.Module):
         segment_pos,
         head_dim=self.head_dim,
         base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
     )
-    query_scaled = query_proj * self.head_dim**-0.5
+    query_scaled = query_proj * self.query_pre_attn_scalar
     key_proj = apply_rope(
         key_proj,
         segment_pos,
         head_dim=self.head_dim,
         base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
     )
 
     # Cache is left aligned.
@@ -372,6 +451,20 @@ class Attention(nnx.Module):
   @property
   def head_dim(self):
     return self.attn_vec_einsum.shape[1]
+
+  @property
+  def features(self):
+    return self.attn_vec_einsum.shape[2]
+
+  @property
+  def query_pre_attn_scalar(self):
+    match self.query_pre_attn_norm:
+      case QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM:
+        return self.head_dim**-0.5
+      case (
+          QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS
+      ):
+        return (self.features // self.num_heads) ** -0.5
 
   @property
   def num_heads(self):
@@ -467,6 +560,8 @@ class Block(nnx.Module):
       rngs: nnx.Rngs,
       sliding_window_size: int | None,
       rope_base_frequency: int,
+      rope_scale_factor: float,
+      query_pre_attn_norm: QueryPreAttentionNormalisation,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.pre_attention_norm = RMSNorm(
@@ -480,6 +575,8 @@ class Block(nnx.Module):
         attn_type=attn_type,
         sliding_window_size=sliding_window_size,
         rope_base_frequency=rope_base_frequency,
+        rope_scale_factor=rope_scale_factor,
+        query_pre_attn_norm=query_pre_attn_norm,
         rngs=rngs,
         shd_config=shd_config,
     )
@@ -575,6 +672,10 @@ class Gemma3(nnx.Module):
             rope_base_frequency=config.local_base_frequency
             if attn_type == AttentionType.LOCAL_SLIDING
             else config.global_base_frequency,
+            rope_scale_factor=config.local_scale_factor
+            if attn_type == AttentionType.LOCAL_SLIDING
+            else config.global_scale_factor,
+            query_pre_attn_norm=config.query_pre_attn_norm,
             rngs=rngs,
             shd_config=config.shd_config,
         )
