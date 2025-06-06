@@ -139,6 +139,39 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
 
+  def test_prompt_padding_bucketization(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 0)
+    sampler(
+        ['input', 'hello'],
+        total_generation_steps=10,
+    )
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 1)
+
+    sampler(
+        ['input input input input input', 'hello hello'],
+        total_generation_steps=10,
+    )
+
+    sampler(
+        ['input input input input input input', 'hello hello'],
+        total_generation_steps=10,
+    )
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)
+
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(

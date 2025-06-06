@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""Utils for attention functions."""
+"""Utility functions for sampler."""
 
 import jax
 import jax.numpy as jnp
@@ -69,3 +69,10 @@ def make_causal_attn_mask(input_mask: jax.Array, cache_size: int) -> jax.Array:
       attn_mask, (*((0, 0) for _ in range(attn_mask.ndim - 1)), (0, padding))
   )
   return attn_mask
+
+
+def next_power_of_2(x: int) -> int:
+  """Returns the next power of 2 that is not smaller than x."""
+  if x == 0:
+    return 1
+  return int(2 ** int(jnp.ceil(jnp.log2(x))))

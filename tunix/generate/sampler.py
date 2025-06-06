@@ -30,7 +30,7 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
-from tunix.generate import attention_utils
+from tunix.generate import utils
 from tunix.generate import validation
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.contrastive_search as contrastive_search_lib
@@ -553,7 +553,7 @@ class Sampler:
     )
 
     input_mask = tokens != self.tokenizer.pad_id()
-    attention_mask = attention_utils.make_causal_attn_mask(
+    attention_mask = utils.make_causal_attn_mask(
         input_mask, self.cache_config.cache_size
     )
 
@@ -677,7 +677,7 @@ class Sampler:
     )
 
     input_mask = sampler_state.token_buffer == self.tokenizer.pad_id()
-    attention_mask = attention_utils.compute_attention_masks(
+    attention_mask = utils.compute_attention_masks(
         decoding_step, self.cache_config.cache_size, input_mask
     )
 
@@ -769,7 +769,7 @@ class Sampler:
     tokens = [self.tokenize(x) for x in input_strings]
     max_tokens_length = max(len(x) for x in tokens)
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
-      max_prompt_length = max_tokens_length
+      max_prompt_length = utils.next_power_of_2(max_tokens_length)
     all_input_ids = jnp.array([
         pad_to_length(
             x,

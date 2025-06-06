@@ -15,10 +15,10 @@
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
-from tunix.generate import attention_utils
+from tunix.generate import utils
 
 
-class AttentionUtilsTest(absltest.TestCase):
+class UtilsTest(absltest.TestCase):
 
   def test_compute_attention_mask(self):
     # Check that the input mask is correctly applied when total sampling steps
@@ -26,9 +26,7 @@ class AttentionUtilsTest(absltest.TestCase):
     input_mask = jnp.array([[1, 1, 0, 0, 0], [1, 1, 0, 1, 0]], dtype=jnp.bool_)
     seq_len = 8
     time_step = 4
-    attn_mask = attention_utils.compute_attention_masks(
-        time_step, seq_len, input_mask
-    )
+    attn_mask = utils.compute_attention_masks(time_step, seq_len, input_mask)
     expected_attn_mask = jnp.array(
         [[0, 0, 1, 1, 1, 0, 0, 0], [0, 0, 1, 0, 1, 0, 0, 0]], dtype=jnp.bool_
     )
@@ -39,9 +37,7 @@ class AttentionUtilsTest(absltest.TestCase):
     # is *longer* than the max cache length.
     seq_len = 4
     time_step = 4
-    attn_mask = attention_utils.compute_attention_masks(
-        time_step, seq_len, input_mask
-    )
+    attn_mask = utils.compute_attention_masks(time_step, seq_len, input_mask)
     expected_attn_mask = jnp.array(
         [[0, 1, 1, 1], [0, 1, 0, 1]], dtype=jnp.bool_
     )
@@ -50,7 +46,7 @@ class AttentionUtilsTest(absltest.TestCase):
 
   def test_make_causal_attn_mask(self):
     input_mask = jnp.array([[0, 1, 1, 0], [1, 1, 1, 0]])
-    attn_mask = attention_utils.make_causal_attn_mask(input_mask, 5)
+    attn_mask = utils.make_causal_attn_mask(input_mask, 5)
     expected = jnp.array([
         [
             [0, 0, 0, 0, 0],
@@ -66,6 +62,13 @@ class AttentionUtilsTest(absltest.TestCase):
         ],
     ])
     np.testing.assert_array_equal(attn_mask, expected)
+
+  def test_next_power_of_2(self):
+    self.assertEqual(utils.next_power_of_2(0), 1)
+    self.assertEqual(utils.next_power_of_2(2), 2)
+    self.assertEqual(utils.next_power_of_2(3), 4)
+    self.assertEqual(utils.next_power_of_2(4), 4)
+    self.assertEqual(utils.next_power_of_2(5), 8)
 
 
 if __name__ == '__main__':

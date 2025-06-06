@@ -20,7 +20,7 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from tunix.generate import attention_utils
+from tunix.generate import utils
 
 
 def expand_dims(
@@ -110,7 +110,7 @@ def contrastive_search_step(
   current_token_mask = topk_indices[:, 0] == pad_id
   input_mask = input_mask.at[:, decoding_step + 1].set(current_token_mask)
 
-  attention_mask = attention_utils.compute_attention_masks(
+  attention_mask = utils.compute_attention_masks(
       decoding_step + 1, cache_size, input_mask
   )
   updated_components = expand_dims(cache, step_positions, attention_mask, top_k)
