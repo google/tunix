@@ -14,13 +14,14 @@
 
 """Implements Feature Projection Distillation Strategy."""
 
-from typing import Callable, override
+from typing import Callable
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import optax
 from tunix.distillation import feature_extraction
 from tunix.distillation.strategies import base_strategy
+from typing_extensions import override
 
 ModelForwardCallable = base_strategy.ModelForwardCallable
 
