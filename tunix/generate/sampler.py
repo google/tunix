@@ -31,7 +31,6 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 from tunix.generate import utils
-from tunix.generate import validation
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.contrastive_search as contrastive_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
@@ -154,22 +153,6 @@ def sample_best(logits):
   next_token = jnp.argmax(logits[:, -1], axis=-1, keepdims=True)
   next_token = next_token[:, 0]
   return next_token
-
-
-def _build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
-  """Computes the `positions` from the `input_mask`.
-
-  Args:
-    input_mask: The tokens `input_mask`, True for non-padded tokens only.
-
-  Returns:
-    The indices to use for RoPE and absolute position encodings for the given
-    input mask.
-  """
-  positions = jnp.cumsum(input_mask, axis=-1)
-  # Subtract one for all positions from the first valid one as they are
-  # 0-indexed
-  return positions - (positions >= 1)
 
 
 def _init_cache(
@@ -352,7 +335,7 @@ class Sampler:
     input_mask = input_mask.at[:, :num_input_tokens].set(
         all_input_ids != self.tokenizer.pad_id()
     )
-    positions = _build_positions_from_mask(input_mask)
+    positions = utils.build_positions_from_mask(input_mask)
 
     done = jnp.zeros((batch_size,), dtype=jnp.bool_)
 
@@ -376,11 +359,11 @@ class Sampler:
     sampling_mode = [None]
 
     if beam_size is not None:
-      validation.check_sampling_mode_conflict(sampling_mode, 'beam_search')
+      utils.check_sampling_mode_conflict(sampling_mode, 'beam_search')
       sampling_parameters['beam_size'] = beam_size
 
     if top_p is not None:
-      validation.check_sampling_mode_conflict(sampling_mode, 'top_p')
+      utils.check_sampling_mode_conflict(sampling_mode, 'top_p')
       sampling_parameters['top_p'] = top_p
       sampling_parameters['top_k'] = top_k
 
@@ -390,9 +373,7 @@ class Sampler:
         and penalty_alpha is not None
         and penalty_alpha > 0
     ):
-      validation.check_sampling_mode_conflict(
-          sampling_mode, 'contrastive_search'
-      )
+      utils.check_sampling_mode_conflict(sampling_mode, 'contrastive_search')
       sampling_parameters['top_k'] = top_k
       sampling_parameters['penalty_alpha'] = penalty_alpha
 
@@ -771,7 +752,7 @@ class Sampler:
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
     all_input_ids = jnp.array([
-        pad_to_length(
+        utils.pad_to_length(
             x,
             target_length=max_prompt_length,
             pad_value=self.tokenizer.pad_id(),
@@ -828,12 +809,12 @@ class Sampler:
     out_logits = []
     for i, token_buffer in enumerate(token_buffers):
       start_idx = (
-          find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
+          utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
           if echo
           else max_prompt_length
       )
       end_idx = (
-          find_first_eos_idx(
+          utils.find_first_eos_idx(
               token_buffer[max_prompt_length:], self.tokenizer.eos_id()
           )
           + max_prompt_length
@@ -853,56 +834,3 @@ class Sampler:
         padded_prompt_tokens=all_input_ids,
     )
     return result
-
-
-def pad_to_length(
-    x: jax.Array,
-    target_length: int,
-    pad_value: int = 0,
-    left=False,
-    axis: int = 0,
-) -> jax.Array:
-  """Pads a JAX array to a specified target length along a given axis.
-
-  Args:
-      x: The JAX array to pad.
-      target_length: The desired length of the padded array.
-      pad_value: The value to use for padding (default: 0).
-      left: If True, add padding tokens to the left of the array.
-      axis: The axis along which to pad (default: 0).
-
-  Returns:
-      A new JAX array that is padded to the target length along the specified
-      axis. Return original array if it is already longer than the target
-      length.
-  """
-  length = x.shape[axis]
-  if length >= target_length:
-    return x
-
-  padding_shape = list(x.shape)
-  padding_shape[axis] = target_length - length
-  padding = jnp.full(padding_shape, pad_value, dtype=x.dtype)
-
-  if left:
-    return jnp.concatenate([padding, x], axis=axis)
-  else:
-    return jnp.concatenate([x, padding], axis=axis)
-
-
-def find_first_non_pad_idx(ids, pad_id):
-  """Finds the index of the first non-pad token."""
-  mask = ids != pad_id
-  if jnp.any(mask):
-    return jnp.argmax(mask)
-  else:
-    return 0
-
-
-def find_first_eos_idx(ids, eos_id):
-  """Finds the index of the first EOS token."""
-  mask = ids == eos_id
-  if jnp.any(mask):
-    return jnp.argmax(mask)
-  else:
-    return ids.shape[0]

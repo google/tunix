@@ -76,3 +76,94 @@ def next_power_of_2(x: int) -> int:
   if x == 0:
     return 1
   return int(2 ** int(jnp.ceil(jnp.log2(x))))
+
+
+def pad_to_length(
+    x: jax.Array,
+    target_length: int,
+    pad_value: int = 0,
+    left=False,
+    axis: int = 0,
+) -> jax.Array:
+  """Pads a JAX array to a specified target length along a given axis.
+
+  Args:
+      x: The JAX array to pad.
+      target_length: The desired length of the padded array.
+      pad_value: The value to use for padding (default: 0).
+      left: If True, add padding tokens to the left of the array.
+      axis: The axis along which to pad (default: 0).
+
+  Returns:
+      A new JAX array that is padded to the target length along the specified
+      axis. Return original array if it is already longer than the target
+      length.
+  """
+  length = x.shape[axis]
+  if length >= target_length:
+    return x
+
+  padding_shape = list(x.shape)
+  padding_shape[axis] = target_length - length
+  padding = jnp.full(padding_shape, pad_value, dtype=x.dtype)
+
+  if left:
+    return jnp.concatenate([padding, x], axis=axis)
+  else:
+    return jnp.concatenate([x, padding], axis=axis)
+
+
+def find_first_non_pad_idx(ids, pad_id):
+  """Finds the index of the first non-pad token."""
+  mask = ids != pad_id
+  if jnp.any(mask):
+    return jnp.argmax(mask)
+  else:
+    return 0
+
+
+def find_first_eos_idx(ids, eos_id):
+  """Finds the index of the first EOS token."""
+  mask = ids == eos_id
+  if jnp.any(mask):
+    return jnp.argmax(mask)
+  else:
+    return ids.shape[0]
+
+
+def build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
+  """Computes the `positions` from the `input_mask`.
+
+  Args:
+    input_mask: The tokens `input_mask`, True for non-padded tokens only.
+
+  Returns:
+    The indices to use for RoPE and absolute position encodings for the given
+    input mask.
+  """
+  positions = jnp.cumsum(input_mask, axis=-1)
+  # Subtract one for all positions from the first valid one as they are
+  # 0-indexed
+  return positions - (positions >= 1)
+
+
+def check_sampling_mode_conflict(
+    original_sampling_mode: list[
+        str | None
+    ],  # pass in as list to modify in place
+    new_sampling_mode: str,
+) -> None:
+  """Checks if the new sampling mode conflicts with the original sampling mode."""
+
+  if original_sampling_mode[0] is not None:
+    raise ValueError(
+        'Conflicts setting sampling_mode, the current set sampling_mode is'
+        f' {original_sampling_mode[0]} but trying to override to'
+        f' {new_sampling_mode}. The rules are\n: 1. If top_p is provided,'
+        ' top_p will be used. 2. If top_k > 1 and penalty_alpha > 0,'
+        ' contrastive_search will be used. 3. If beam_size is provided,'
+        ' beam_search will be used 4. If none of the above, greedy will be'
+        ' used.'
+    )
+  else:
+    original_sampling_mode[0] = new_sampling_mode
