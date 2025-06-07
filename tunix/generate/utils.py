@@ -160,10 +160,8 @@ def check_sampling_mode_conflict(
         'Conflicts setting sampling_mode, the current set sampling_mode is'
         f' {original_sampling_mode[0]} but trying to override to'
         f' {new_sampling_mode}. The rules are\n: 1. If top_p is provided,'
-        ' top_p will be used. 2. If top_k > 1 and penalty_alpha > 0,'
-        ' contrastive_search will be used. 3. If beam_size is provided,'
-        ' beam_search will be used 4. If none of the above, greedy will be'
-        ' used.'
+        ' top_p will be used. 2. If beam_size is provided,beam_search will be'
+        ' used 3. If none of the above, greedy will be used.'
     )
   else:
     original_sampling_mode[0] = new_sampling_mode

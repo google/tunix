@@ -203,33 +203,6 @@ class SamplerTest(parameterized.TestCase):
       for orig, new in zip(original_logits, new_logits):
         np.testing.assert_allclose(orig, new, atol=1e-1, rtol=1e-1)
 
-  def test_contrastive_search(self):
-    vocab = tc.MockVocab()
-    transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
-    )
-    sampler = sampler_lib.Sampler(
-        transformer=transformer,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(
-            cache_size=1024,
-            num_layers=4,
-            num_kv_heads=4,
-            head_dim=16,
-        ),
-        embed_dim=16,
-    )
-    result = sampler(
-        ['input string', 'hello world'],
-        total_generation_steps=10,
-        return_logits=True,
-        max_prompt_length=None,
-        echo=False,
-        top_k=3,
-        penalty_alpha=0.9,
-    )
-    self.assertIsNotNone(result)
-
   def test_lora_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.get_lora_model(
