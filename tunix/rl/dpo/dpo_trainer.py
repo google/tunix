@@ -51,6 +51,74 @@ class TrainExample:
   logits_to_keep: int = flax.struct.field(pytree_node=False)
 
 
+def _generate_ids_and_masks(
+    input_strings: list[str],
+    tokenizer: Any,
+    max_length: int,
+    left_pad: bool = True,
+) -> tuple[jax.Array, jax.Array]:
+  """Generates ids and masks for a list of strings."""
+  tokens = [tokenizer.tokenize(x) for x in input_strings]
+  all_input_ids = jnp.array([
+      common.pad_to_length(
+          x[:max_length],
+          target_length=max_length,
+          pad_value=tokenizer.pad_id(),
+          left=left_pad,
+          axis=-1,
+      )
+      for x in tokens
+  ])
+  # generate masks
+  all_input_mask = (all_input_ids != tokenizer.pad_id()).astype("int32")
+  return all_input_ids[0], all_input_mask[0]
+
+
+def process_dpo_record(
+    record: dict[str, Any], tokenizer: Any, max_seq_length: int
+) -> TrainingInput:
+  """Processes and tokenizes a single record for DPO training.
+
+  This function takes a dictionary containing a prompt, a chosen response,
+  and a rejected response. It tokenizes each text field into ids and creates
+  the corresponding attention masks.
+
+  Args:
+      record: A dictionary containing the training data. Expected to have
+        'prompt', 'chosen', and 'rejected' keys, each with a string value.
+      tokenizer: The tokenizer to use for converting text into token IDs.
+      max_seq_length: The maximum length for the tokenized sequences. Any
+        sequence longer than this will be truncated.
+
+  Returns:
+      A `TrainingInput` object
+  """
+
+  # only prompt is left padded, others are right padded.
+  prompt_ids, prompt_mask = _generate_ids_and_masks(
+      [record["prompt"]], tokenizer, max_seq_length
+  )
+  chosen_ids, chosen_mask = _generate_ids_and_masks(
+      [record["chosen"]], tokenizer, max_seq_length, left_pad=False
+  )
+  rejected_ids, rejected_mask = _generate_ids_and_masks(
+      [record["rejected"]], tokenizer, max_seq_length, left_pad=False
+  )
+
+  # Ensure the shapes are correct
+  assert prompt_ids.shape == chosen_ids.shape == rejected_ids.shape
+  assert prompt_mask.shape == chosen_mask.shape == rejected_mask.shape
+
+  return TrainingInput(
+      prompt_ids=prompt_ids,
+      prompt_mask=prompt_mask,
+      chosen_ids=chosen_ids,
+      chosen_mask=chosen_mask,
+      rejected_ids=rejected_ids,
+      rejected_mask=rejected_mask,
+  )
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class DpoTrainingConfig(peft_trainer.TrainingConfig):
   beta: float = 0.1  # 𝛽 for KL penalty https://arxiv.org/pdf/2305.18290
