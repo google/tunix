@@ -19,6 +19,7 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from tunix.distillation.feature_extraction import sowed_module
 
 
@@ -51,7 +52,7 @@ class ModelWithFeatureProjection(nnx.Module):
     self.projection_layer = nnx.LinearGeneral(
         feature_shape,
         feature_target_shape,
-        axis=jnp.arange(len(feature_shape)),
+        axis=np.arange(len(feature_shape)),
         rngs=rngs,
     )
 

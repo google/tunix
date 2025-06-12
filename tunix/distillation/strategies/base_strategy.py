@@ -49,9 +49,9 @@ class BaseStrategy(abc.ABC):
       teacher_forward_fn: Function to compute teacher model outputs.
       labels_fn: Function to compute labels from model inputs.
     """
-    self._student_forward_fn = student_forward_fn
-    self._teacher_forward_fn = teacher_forward_fn
-    self._labels_fn = labels_fn
+    self._student_forward_fn = nnx.jit(student_forward_fn)
+    self._teacher_forward_fn = nnx.jit(teacher_forward_fn)
+    self._labels_fn = nnx.jit(labels_fn)
 
   @abc.abstractmethod
   def compute_loss(

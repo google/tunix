@@ -59,10 +59,9 @@ def dummy_gen_model_input_fn(x: distillation_trainer.TrainingInput):
 def get_labels_fn(
     input_tokens: jax.Array,
     input_mask: jax.Array,
-    positions: jax.Array,
-    attention_mask: jax.Array,
+    **kwargs,
 ):
-  del positions, attention_mask
+  del kwargs
   target_tokens = input_tokens[:, 1:]
   target_mask = input_mask[:, 1:]
   # Convert the target labels to one-hot encoded vectors.

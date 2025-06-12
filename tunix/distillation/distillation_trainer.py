@@ -58,17 +58,16 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
         optimizer: The optimizer to use for training.
         training_config: The training config.
     """
-    self.strategy = strategy
     student_model, teacher_model = strategy.pre_process_models(
         student_model, teacher_model
     )
     super().__init__(student_model, optimizer, training_config)
-    self.teacher_model = teacher_model
     self.strategy = strategy
+    self.teacher_model = teacher_model
     self.loss_fn = self.get_train_loss
     self.eval_loss_fn = self.get_eval_loss
     self.gen_model_input_fn = lambda x: {
-        "inputs": x,
+        "inputs": {"input_tokens": x.input_tokens, "input_mask": x.input_mask},
         "teacher_output": (
             x.teacher_output if hasattr(x, "teacher_output") else None
         ),
@@ -103,7 +102,7 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
     if self._mode == metrics_logger.Mode.EVAL:
       teacher_output = None
     else:
-      teacher_output = nnx.jit(self.strategy.get_teacher_outputs)(
+      teacher_output = self.strategy.get_teacher_outputs(
           self.teacher_model, inputs
       )
 
