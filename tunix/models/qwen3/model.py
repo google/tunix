@@ -46,6 +46,8 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  exp_weight_cdf: Tuple[str | None, ...]
+  exp_weight_cfd: Tuple[str | None, ...]
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -63,6 +65,8 @@ class ShardingConfig:
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
+        exp_weight_cdf=('fsdp', None, 'tp'),
+        exp_weight_cfd=('fsdp', 'tp', None),
     )
 
 
@@ -79,6 +83,8 @@ class ModelConfig:
   num_kv_heads: int
   rope_theta: int
   norm_eps: float
+  num_experts: int | None = None
+  num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
@@ -121,6 +127,22 @@ class ModelConfig:
         num_kv_heads=8,
         norm_eps=1e-06,
         rope_theta=1_000_000,
+    )
+
+  @classmethod
+  def qwen3_30_b(cls):  # qwen3-30B
+    return cls(
+        num_layers=48,
+        vocab_size=151936,
+        embed_dim=2048,
+        hidden_dim=768,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=4,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        num_experts=128,
+        num_experts_per_tok=8,
     )
 
 
@@ -371,6 +393,85 @@ class Attention(nnx.Module):
     return self.kv_proj.shape[1]
 
 
+class MoELayer(nnx.Module):
+  """MoE layer."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      *,
+      rngs: nnx.Rngs,
+      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ):
+    self.shd_config = shd_config
+    self.experts_per_tok = config.num_experts_per_tok
+    self.num_experts = config.num_experts
+    self.router = nnx.Linear(
+        in_features=config.embed_dim,
+        out_features=config.num_experts,
+        use_bias=False,
+        rngs=rngs,
+    )
+    self.gate_proj = nnx.Param(
+        nnx.initializers.normal()(
+            rngs.params(),
+            (config.num_experts, config.embed_dim, config.hidden_dim),
+        ),
+        sharding=shd_config.exp_weight_cdf,
+    )
+    self.up_proj = nnx.Param(
+        nnx.initializers.normal()(
+            rngs.params(),
+            (config.num_experts, config.embed_dim, config.hidden_dim),
+        ),
+        sharding=shd_config.exp_weight_cdf,
+    )
+    self.down_proj = nnx.Param(
+        nnx.initializers.normal()(
+            rngs.params(),
+            (config.num_experts, config.hidden_dim, config.embed_dim),
+        ),
+        sharding=shd_config.exp_weight_cfd,
+    )
+
+  def __call__(self, x):
+    scores = self.router(x).astype(jnp.float32)  # [B,T,E]
+    routing_weights, routing_idx = jax.lax.top_k(
+        jax.nn.softmax(scores, axis=-1), self.experts_per_tok
+    )
+    routing_weights = (
+        routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
+    ).astype(x.dtype)
+
+    dispatch_mask = jax.nn.one_hot(
+        routing_idx, num_classes=self.num_experts, dtype=x.dtype
+    )  # [B, T, K, E]
+    dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
+
+    dispatched_input = jnp.einsum(
+        'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
+    ).astype(x.dtype)
+
+    expert_outputs = []
+    for i in range(self.num_experts):
+      expert_input = dispatched_input[:, :, i, :]
+      activations = nnx.silu(
+          jnp.einsum('BTD,DF->BTF', expert_input, self.gate_proj[i])
+      ) * jnp.einsum('BTD,DF->BTF', expert_input, self.up_proj[i])
+      activations = shard(activations, self.shd_config.act_btf)
+      expert_output = jnp.einsum('BTF,FD->BTD', activations, self.down_proj[i])
+      expert_outputs.append(expert_output)
+
+    stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
+    routing_weights = jnp.tile(
+        routing_weights[:, :, None, :], (1, 1, self.num_experts, 1)
+    )  # [B, T, E, K]
+    routing_weights = dispatch_mask * routing_weights  # [B, T, E, K]
+
+    output = jnp.einsum('BTED,BTEK->BTD', stacked_outputs, routing_weights)
+    return output
+
+
 class MLP(nnx.Module):
   """MLP module."""
 
@@ -446,11 +547,18 @@ class DecoderLayer(nnx.Module):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.mlp = MLP(
-        config=config,
-        rngs=rngs,
-        shd_config=shd_config,
-    )
+    if config.num_experts is None:
+      self.mlp = MLP(
+          config=config,
+          rngs=rngs,
+          shd_config=shd_config,
+      )
+    else:
+      self.mlp = MoELayer(
+          config=config,
+          rngs=rngs,
+          shd_config=shd_config,
+      )
 
   def __call__(
       self,

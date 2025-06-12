@@ -18,8 +18,32 @@ import re
 from etils import epath
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import safetensors.flax as safetensors
+import tqdm
 from tunix.models.qwen3 import model as model_lib
+
+
+def _stack_experts(params: dict[str, jax.Array]):
+  """Stack experts in the loaded pytorch params."""
+  key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))  # pytype: disable=attribute-error
+  new_params = dict(params).copy()
+  for kw in ["gate", "up", "down"]:
+    pattern = r"(.*?)experts\.(.*?)\.{}_proj\.(.*)".format(kw)
+    keys = [k for k in params.keys() if re.match(pattern, k)]
+    prefix_groups = set([re.match(pattern, k).group(1) for k in keys])  # pytype: disable=attribute-error
+    for prefix in prefix_groups:
+      keys_to_merge = list(
+          sorted([k for k in keys if k.startswith(prefix)], key=key_fn)
+      )
+      for k in keys_to_merge:
+        del new_params[k]
+      suffix = re.match(pattern, keys_to_merge[0]).group(3)  # pytype: disable=attribute-error
+      with jax.default_device(jax.devices("cpu")[0]):
+        new_params[f"{prefix}experts.{kw}_proj.{suffix}"] = jnp.stack(
+            [params[k] for k in keys_to_merge], 0
+        )
+  return new_params
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
@@ -56,8 +80,25 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           r"layers.\1.mlp.down_proj.kernel",
           ((1, 0), None),
       ),
-      r"model\.norm\.weight": ("final_norm.w", None),
+      # moe
+      r"model\.layers\.([0-9]+)\.mlp\.gate\.weight": (
+          r"layers.\1.mlp.router.kernel",
+          ((1, 0), None),
+      ),
+      r"model\.layers\.([0-9]+)\.mlp\.experts\.gate_proj\.weight": (
+          r"layers.\1.mlp.gate_proj",
+          ((0, 2, 1), None),
+      ),
+      r"model\.layers\.([0-9]+)\.mlp\.experts\.up_proj\.weight": (
+          r"layers.\1.mlp.up_proj",
+          ((0, 2, 1), None),
+      ),
+      r"model\.layers\.([0-9]+)\.mlp\.experts\.down_proj\.weight": (
+          r"layers.\1.mlp.down_proj",
+          ((0, 2, 1), None),
+      ),
       # norms
+      r"model\.norm\.weight": ("final_norm.w", None),
       r"model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
           r"layers.\1.attn.q_norm.w",
           None,
@@ -139,8 +180,11 @@ def create_model_from_safe_tensors(
     raise ValueError(f"No safetensors found in {file_dir}")
 
   tensor_dict = {}
-  for f in files:
+  for f in tqdm.tqdm(files):
     tensor_dict |= safetensors.load_file(f)
+
+  if config.num_experts is not None:
+    tensor_dict = _stack_experts(tensor_dict)
 
   qwen3 = nnx.eval_shape(
       lambda: model_lib.Qwen3(config, rngs=nnx.Rngs(params=0))
@@ -149,12 +193,13 @@ def create_model_from_safe_tensors(
   graph_def, abs_state = nnx.split(qwen3)
   state_dict = abs_state.to_pure_dict()
 
-  for k, v in tensor_dict.items():
-    jax_key, transform = _torch_key_to_jax_key(
-        _get_key_and_transform_mapping(config), k
-    )
-    jax_keys = [_stoi(s) for s in jax_key.split(".")]
-    _assign_weights(jax_keys, v, state_dict, k, transform)
+  with jax.default_device(jax.devices("cpu")[0]):
+    for k, v in tqdm.tqdm(tensor_dict.items()):
+      jax_key, transform = _torch_key_to_jax_key(
+          _get_key_and_transform_mapping(config), k
+      )
+      jax_keys = [_stoi(s) for s in jax_key.split(".")]
+      _assign_weights(jax_keys, v, state_dict, k, transform)
 
   if mesh is not None:
     sharding = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
