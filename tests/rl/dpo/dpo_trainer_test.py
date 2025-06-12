@@ -127,7 +127,7 @@ class DpoTrainerTest(parameterized.TestCase):
         "rewards_accuracy",
     ]:
       self.assertLen(
-          dpo_trainer._metrics_logger.get_metric_history(metric_name, "train"),
+          dpo_trainer.metrics_logger.get_metric_history(metric_name, "train"),
           dpo_trainer._train_steps,
       )
 

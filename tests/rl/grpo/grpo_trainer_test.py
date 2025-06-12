@@ -166,7 +166,7 @@ class GrpoTrainerTest(parameterized.TestCase):
     self.assertEqual(grpo_trainer._train_steps, 2)
     self.assertEqual(grpo_trainer._eval_steps, 4)
 
-    metric_logger = grpo_trainer._metrics_logger
+    metric_logger = grpo_trainer.metrics_logger
     self.assertNotEqual(metric_logger.get_metric('rewards/overall', 'train'), 0)
     for metric_name in [
         'rewards/overall',

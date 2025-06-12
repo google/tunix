@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GRPO trainer."""
+"""GRPO trainer. There is a newer v1 version, consider making changes there."""
 
 from __future__ import annotations
 
@@ -263,11 +263,11 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:
-    self._metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
+    self.metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
 
   @override
   def _post_process_eval_step(self, aux: Any) -> None:
-    self._metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
+    self.metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
 
   def _generate_and_compute_advantage(
       self, training_input: _TrainingInputT
@@ -348,19 +348,19 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
     steps = self._get_metric_logging_steps()
-    self._metrics_logger.log(
+    self.metrics_logger.log(
         "completions/mean_length",
         agg_completion_mask.mean(),
         self._mode,
         steps,
     )
-    self._metrics_logger.log(
+    self.metrics_logger.log(
         "completions/max_length",
         agg_completion_mask.max(),
         self._mode,
         steps,
     )
-    self._metrics_logger.log(
+    self.metrics_logger.log(
         "completions/min_length",
         agg_completion_mask.min(),
         self._mode,
@@ -399,7 +399,7 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
       r = jnp.array(r)
       rewards = rewards.at[:, i].set(r)
 
-      self._metrics_logger.log(
+      self.metrics_logger.log(
           f"rewards/{reward_fn.__name__}",
           r.mean(),
           self._mode,
@@ -408,7 +408,7 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
 
     rewards = jnp.nansum(rewards, axis=1)
 
-    self._metrics_logger.log(
+    self.metrics_logger.log(
         "rewards/overall",
         rewards.mean(),
         self._mode,

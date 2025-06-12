@@ -92,18 +92,36 @@ class PeftTrainerTest(absltest.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     self.assertGreater(
-        trainer._metrics_logger.get_metric('perplexity', 'train'), 0
+        trainer.metrics_logger.get_metric('perplexity', 'train'), 0
     )
     self.assertGreater(
-        trainer._metrics_logger.get_metric('perplexity', 'eval'), 0
+        trainer.metrics_logger.get_metric('perplexity', 'eval'), 0
     )
     self.assertGreater(trainer._train_steps, 0)
     self.assertLen(
-        trainer._metrics_logger.get_metric_history('perplexity', 'train'),
+        trainer.metrics_logger.get_metric_history('perplexity', 'train'),
         trainer._train_steps,
     )
 
     trainer.train(self.train_ds)  # No eval dataset.
+
+  def test_reusing_trainer(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(rngs=rngs)
+
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, None)
+
+    previous_jit_func = trainer._jitted_train_step_fn
+    self.assertIsNotNone(previous_jit_func)
+
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, None)
+    curr_jit_func = trainer._jitted_train_step_fn
+    self.assertIsNotNone(curr_jit_func)
+    self.assertIsNot(previous_jit_func, curr_jit_func)
 
   @mock.patch.object(profiler, 'Profiler')
   def test_basic_training_with_profiler(self, mock_profiler_init):
