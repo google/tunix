@@ -35,6 +35,7 @@ from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
+from tunix.sft import system_metrics_calculator
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
@@ -91,6 +92,23 @@ class TrainingInput:
   input_mask: jax.Array | np.ndarray
 
 
+def _calculate_global_batch_size(train_example: Any) -> int:
+  if dataclasses.is_dataclass(train_example):
+    attributes = dataclasses.asdict(train_example)
+  else:
+    attributes = vars(train_example)
+
+  for field_value in attributes.values():
+    if isinstance(field_value, (jax.Array, np.ndarray)):
+      # Assume the first array we find has the batch dimension.
+      return field_value.shape[0]
+
+  raise TypeError(
+      "Could not automatically determine batch size. No JAX or NumPy "
+      "array found in the training example."
+  )
+
+
 def is_lora_enabled(model: nnx.Module) -> bool:
   for _, value in nnx.iter_graph(model):
     if isinstance(value, nnx.LoRAParam):
@@ -138,6 +156,12 @@ class PeftTrainer:
     self._mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
+    self._total_model_params = sum(
+        p.size
+        for p in jax.tree_util.tree_leaves(
+            nnx.state(self.model).filter(nnx.Param, nnx.LoRAParam)
+        )
+    )
 
     self._train_steps = self.checkpoint_manager.maybe_restore(
         self.model, restore_only_lora_params=self._lora_enabled
@@ -282,9 +306,16 @@ class PeftTrainer:
     """Override this function for post processing aux data from eval step."""
     pass
 
-  def _log_metrics(self, loss: ArrayLike, step: int | None = None):
+  def _log_metrics(
+      self,
+      loss: ArrayLike,
+      step: int | None = None,
+      tflops: float | None = None,
+  ):
     self.metrics_logger.log("loss", loss, self._mode, step)
     self.metrics_logger.log("perplexity", jnp.exp(loss), self._mode, step)
+    if tflops is not None:
+      self.metrics_logger.log("tflops", tflops, self._mode, step)
 
   @contextlib.contextmanager
   def _switch_mode(self, mode: metrics_logger.Mode):
@@ -297,7 +328,7 @@ class PeftTrainer:
 
   @property
   def _tqdm_train_metrics(self) -> list[str] | None:
-    return ["loss", "perplexity"]
+    return ["loss", "perplexity", "tflops"]
 
   @property
   def _tqdm_eval_metrics(self) -> list[str] | None:
@@ -359,15 +390,30 @@ class PeftTrainer:
 
           train_example = self._prepare_inputs(train_example)
           train_example = self._shard_input(train_example)
+          global_batch_size = _calculate_global_batch_size(train_example)
 
           self._throttler.wait_for_next()
+          step_start_time = time.perf_counter()
           train_loss, aux = train_step(
               self.model, self.optimizer, train_example
           )
+          step_end_time = time.perf_counter()
+          step_time_delta = step_end_time - step_start_time
+
+          tflops = system_metrics_calculator.tflops(
+              total_model_params=self._total_model_params,
+              global_batch_size=global_batch_size,
+              step_time_delta=step_time_delta,
+          )
+
           self._throttler.add_computation(train_loss)
           self._train_steps += 1
           self._post_process_train_step(aux)
-          self._log_metrics(train_loss, self._train_steps)
+          self._log_metrics(
+              train_loss,
+              self._train_steps,
+              tflops,
+          )
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
 
           logging.info(
