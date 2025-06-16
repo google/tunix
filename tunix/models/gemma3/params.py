@@ -25,7 +25,11 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
+from orbax.checkpoint.google import pathways_type_handlers  # GOOGLE-INTERNAL
 from tunix.models.gemma3 import model as model_lib
+
+from google3.learning.deepmind.jax.ocean import remote_python as rp  # pylint: disable=line-too-long  # GOOGLE-INTERNAL
+from google3.learning.pathways.jax import pathways as pw  # GOOGLE-INTERNAL
 import sentencepiece as spm
 
 # Pretrained
@@ -51,16 +55,35 @@ def create_model_from_checkpoint(
   abs_model = nnx.eval_shape(
       lambda: model_lib.Gemma3(model_config, rngs=nnx.Rngs(0))
   )
-  params = ocp.StandardCheckpointer().restore(checkpoint_path)
-  params = _map_from_upstream_checkpoint(params)
+  _, abs_state = nnx.split(abs_model)
   if mesh is not None:
-    params = jax.tree.map(
-        lambda x, shd: jnp.asarray(x, device=shd),
-        params,
-        nnx.to_pure_dict(nnx.get_named_sharding(nnx.state(abs_model), mesh)),
+    abs_state = jax.tree.map(
+        lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.float32, sharding=s),
+        abs_state,
+        nnx.get_named_sharding(abs_state, mesh),
     )
-  else:
-    params = jax.tree.map(jnp.asarray, params)
+
+  abs_state_dict = _map_to_downstream_checkpoint(abs_state.to_pure_dict())
+
+  # BEGIN GOOGLE-INTERNAL
+  if pw.is_pathways_backend() and rp.available():
+    pathways_type_handlers.register_pathways_handlers()
+  # END GOOGLE-INTERNAL
+  restored_state = jax.tree_util.tree_map(
+      lambda x: ocp.type_handlers.ArrayRestoreArgs(
+          sharding=x.sharding,
+          global_shape=x.shape,
+          dtype=x.dtype,
+      ),
+      abs_state_dict,
+  )
+  params = ocp.PyTreeCheckpointer().restore(
+      checkpoint_path,
+      item=abs_state_dict,
+      partial_restore=True,
+      restore_args=restored_state,
+  )
+  params = _map_from_upstream_checkpoint(params)
   nnx.update(abs_model, params)
   return abs_model
 
@@ -136,4 +159,72 @@ def _map_from_upstream_checkpoint(params):
       new_params[(*layer_idx, 'mlp', 'down_proj', 'kernel')] = value
     else:
       new_params[(*layer_idx, *module_path[1:], param_name)] = value
+  return flax.traverse_util.unflatten_dict(new_params)
+
+
+def _map_to_downstream_checkpoint(params):
+  """Map to downstream checkpoint from our implementation."""
+  # From:
+  #
+  # ('embedder', 'input_embedding') (262144, 1152)
+  # ('final_norm', 'scale') (1152,)
+  # ('layers', 0, 'attn', '_key_norm', 'scale') (256,)
+  # ('layers', 0, 'attn', '_query_norm', 'scale') (256,)
+  # ('layers', 0, 'attn', 'attn_vec_einsum', 'w') (4, 256, 1152)
+  # ('layers', 0, 'attn', 'kv_einsum', 'w') (2, 1, 1152, 256)
+  # ('layers', 0, 'attn', 'q_einsum', 'w') (4, 1152, 256)
+  # ('layers', 0, 'mlp', 'down_proj', 'kernel') (6912, 1152)
+  # ('layers', 0, 'mlp', 'gate_proj', 'kernel') (1152, 6912)
+  # ('layers', 0, 'mlp', 'up_proj', 'kernel') (1152, 6912)
+  # ('layers', 0, 'post_attn_norm', 'scale') (1152,)
+  # ('layers', 0, 'post_ffw_norm', 'scale') (1152,)
+  # ('layers', 0, 'pre_attention_norm', 'scale') (1152,)
+  # ('layers', 0, 'pre_ffw_norm', 'scale') (1152,)
+  # To:
+  #
+  # ('transformer/embedder', 'input_embedding') (262144, 1152)
+  # ('transformer/final_norm', 'scale') (1152,)
+  # ('transformer/layer_0/attn/_key_norm', 'scale') (256,)
+  # ('transformer/layer_0/attn/_query_norm', 'scale') (256,)
+  # ('transformer/layer_0/attn/attn_vec_einsum', 'w') (4, 256, 1152)
+  # ('transformer/layer_0/attn/kv_einsum', 'w') (2, 1, 1152, 256)
+  # ('transformer/layer_0/attn/q_einsum', 'w') (4, 1152, 256)
+  # ('transformer/layer_0/mlp/gating_einsum', 'w') (2, 6912, 1152)
+  # ('transformer/layer_0/mlp/linear', 'w') (6912, 1152)
+  # ('transformer/layer_0/post_attention_norm', 'scale') (1152,)
+  # ('transformer/layer_0/post_ffw_norm', 'scale') (1152,)
+  # ('transformer/layer_0/pre_attention_norm', 'scale') (1152,)
+  # ('transformer/layer_0/pre_ffw_norm', 'scale') (1152,)
+  #
+  new_params = {}
+  gate_proj = {}
+  for key_path, value in flax.traverse_util.flatten_dict(params).items():
+    if key_path[0] in ('embedder', 'final_norm'):
+      new_params[(f'transformer/{key_path[0]}', key_path[1])] = value
+      continue
+    layer_idx = str(key_path[1])
+    if [key_path[2], key_path[3]] == ['mlp', 'gate_proj']:
+      gate_proj[layer_idx] = value
+    elif [key_path[2], key_path[3]] == ['mlp', 'up_proj']:
+      continue
+    elif [key_path[2], key_path[3]] == ['mlp', 'down_proj']:
+      new_params[(f'transformer/layer_{layer_idx}/mlp/linear', 'w')] = value
+    elif len(key_path) == 4:
+      new_params[(
+          f'transformer/layer_{layer_idx}/{key_path[2]}',
+          key_path[3],
+      )] = value
+    else:
+      new_params[(
+          f'transformer/layer_{layer_idx}/{key_path[2]}/{key_path[3]}',
+          key_path[4],
+      )] = value
+  for layer_idx, gate_proj_value in gate_proj.items():
+    new_params[(f'transformer/layer_{layer_idx}/mlp/gating_einsum', 'w')] = (
+        jax.ShapeDtypeStruct(
+            [2, *gate_proj_value.shape[::-1]],
+            jnp.float32,
+            sharding=gate_proj_value.sharding,
+        )
+    )
   return flax.traverse_util.unflatten_dict(new_params)
