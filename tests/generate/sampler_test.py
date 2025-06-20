@@ -35,6 +35,79 @@ class SamplerTest(parameterized.TestCase):
           testcase_name='case1',
           max_prompt_length=None,
           echo=False,
+          return_logits=False,
+      ),
+      dict(
+          testcase_name='case2',
+          max_prompt_length=4,
+          echo=True,
+          return_logits=True,
+      ),
+      dict(
+          testcase_name='case3',
+          max_prompt_length=4,
+          echo=False,
+          return_logits=False,
+      ),
+      dict(
+          testcase_name='case4',
+          max_prompt_length=1,
+          echo=False,
+          return_logits=True,
+      ),
+  )
+  def test_samples_padding_output(self, max_prompt_length, echo, return_logits):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    result_padded = sampler(
+        ['input string', 'hello world'],
+        total_generation_steps=10,
+        return_logits=return_logits,
+        max_prompt_length=max_prompt_length,
+        echo=echo,
+        pad_output=True,
+    )
+
+    result_not_padded = sampler(
+        ['input string', 'hello world'],
+        total_generation_steps=10,
+        return_logits=return_logits,
+        max_prompt_length=max_prompt_length,
+        echo=echo,
+    )
+    for i in range(len(result_not_padded.text)):
+      self.assertEqual(result_not_padded.text[i], result_padded.text[i])
+      if return_logits:
+        self.assertTrue(
+            np.allclose(
+                result_not_padded.logits[i],
+                result_padded.logits[i][: result_padded.valid_length[i]],
+            )
+        )
+      self.assertTrue(
+          np.allclose(
+              result_not_padded.tokens[i],
+              result_padded.tokens[i][: result_padded.valid_length[i]],
+          )
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='case1',
+          max_prompt_length=None,
+          echo=False,
       ),
       dict(
           testcase_name='case2',
@@ -67,7 +140,6 @@ class SamplerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
-
     result = sampler(
         ['input string', 'hello world'],
         total_generation_steps=10,
