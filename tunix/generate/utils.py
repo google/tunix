@@ -15,7 +15,9 @@
 
 """Utility functions for sampler."""
 
+import functools
 import jax
+from jax import lax
 import jax.numpy as jnp
 
 
@@ -116,19 +118,127 @@ def pad_to_length(
 def find_first_non_pad_idx(ids, pad_id):
   """Finds the index of the first non-pad token."""
   mask = ids != pad_id
-  if jnp.any(mask):
-    return jnp.argmax(mask)
-  else:
-    return 0
+
+  return lax.cond(
+      jnp.any(mask),
+      lambda operands: jnp.argmax(operands[0]),
+      lambda operands: 0,
+      (mask,),
+  )
 
 
 def find_first_eos_idx(ids, eos_id):
   """Finds the index of the first EOS token."""
   mask = ids == eos_id
-  if jnp.any(mask):
-    return jnp.argmax(mask)
-  else:
-    return ids.shape[0]
+
+  return lax.cond(
+      jnp.any(mask),
+      lambda operands: jnp.argmax(operands[0]),
+      lambda operands: operands[1].shape[0],
+      (mask, ids),
+  )
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=[
+        'return_logits',
+        'echo',
+        'pad_value',
+        'eos_value',
+        'max_prompt_length',
+        'max_total_length',
+    ],
+)
+def padded_fill_tokens_and_logits(
+    token_buffers: jax.Array,
+    logits_buffers: jax.Array | None,
+    return_logits: bool,
+    echo: bool,
+    pad_value: int,
+    eos_value: int,
+    max_prompt_length: int,
+    max_total_length: int,
+) -> tuple[jax.Array, jax.Array, jax.Array | None]:
+  """Truncates the token_buffers and logits_buffers to the valid output.
+
+  For the token_buffers, find the valid output tokens from the start_idx to the
+  end_idx. Then pad the valid output tokens to the max_total_length. Similar
+  operation for the logits_buffers if return_logits is True.
+
+  Args:
+    token_buffers: The token buffers from the sampler. [B, L2]
+    logits_buffers: The logits buffers from the sampler. [B, L2, V]
+    return_logits: Whether to return the logits.
+    echo: Whether to echo the input prompt in the output.
+    pad_value: The value to use for padding.
+    eos_value: The value to use for EOS.
+    max_prompt_length: The maximum length of the input prompt.
+    max_total_length: The maximum total length of the output.
+
+  Returns:
+    The shape of the valid output tokens, the output tokens and the output
+    logits.
+  """
+  return jax.vmap(
+      single_padded_fill_tokens_and_logits,
+      in_axes=(0, 0, None, None, None, None, None, None),
+      out_axes=(0, 0, 0),
+  )(
+      token_buffers,
+      logits_buffers,
+      return_logits,
+      echo,
+      pad_value,
+      eos_value,
+      max_prompt_length,
+      max_total_length,
+  )
+
+
+def single_padded_fill_tokens_and_logits(
+    token_buffer: jax.Array,
+    logits_buffer: jax.Array | None,
+    return_logits: bool,
+    echo: bool,
+    pad_value: int,
+    eos_value: int,
+    max_prompt_length: int,
+    max_total_length: int,
+) -> tuple[jax.Array, jax.Array, jax.Array | None]:
+  """Generates tokens and logits from the input token_buffer and logits_buffer."""
+  start_idx = (
+      find_first_non_pad_idx(token_buffer, pad_value)
+      if echo
+      else max_prompt_length
+  )
+  end_idx = (
+      find_first_eos_idx(token_buffer[max_prompt_length:], eos_value)
+      + max_prompt_length
+  )
+  length = end_idx - start_idx
+  mask = jnp.arange(max_total_length) < length
+  padded_token_buffer = jnp.pad(
+      token_buffer, (0, max_total_length), constant_values=pad_value
+  )
+  output_token = lax.dynamic_slice(
+      padded_token_buffer, (start_idx,), (max_total_length,)
+  )
+  output_token = jnp.where(mask, output_token, pad_value)
+
+  output_logit = None
+  if return_logits:
+    assert logits_buffer is not None
+    dim = logits_buffer.shape[-1]
+    padded_logits_buffer = jnp.pad(
+        logits_buffer, ((0, max_total_length), (0, 0)), constant_values=0
+    )
+    output_logit = lax.dynamic_slice(
+        padded_logits_buffer, (start_idx, 0), (max_total_length, dim)
+    )
+    mask = mask[:, None]
+    output_logit = jnp.where(mask, output_logit, 0)
+  return jnp.array(length), output_token, output_logit
 
 
 def build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
