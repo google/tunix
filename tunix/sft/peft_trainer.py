@@ -280,7 +280,7 @@ class PeftTrainer:
 
   def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
     mesh = pxla.thread_resources.env.physical_mesh
-    if mesh.empty or jax.devices()[0].platform == "cpu":
+    if mesh.empty:
       return input_data
 
     with jax.transfer_guard("allow"):

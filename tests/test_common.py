@@ -17,6 +17,7 @@
 from collections.abc import Iterable
 
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
@@ -77,7 +78,10 @@ class ToyTransformer(nnx.Module):
   """Toy transformer for testing."""
 
   def __init__(
-      self, rngs: nnx.Rngs, vocab_size: int = 256, num_layers: int = 4
+      self,
+      rngs: nnx.Rngs,
+      vocab_size: int = 256,
+      num_layers: int = 4,
   ):
     self.emb = nnx.Embed(vocab_size, 16, rngs=rngs)
     self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
@@ -103,7 +107,9 @@ class ToyTransformer(nnx.Module):
 
 
 def get_lora_model(
-    model: nnx.Module, module_path: str = '.*w1|.*w2'
+    model: nnx.Module,
+    module_path: str = '.*w1|.*w2',
+    mesh: jax.sharding.Mesh | None = None,
 ) -> nnx.Module:
   """Apply LoRA to ToyTransformer."""
   lora_provider = qwix.LoraProvider(
@@ -117,7 +123,16 @@ def get_lora_model(
       'cache': None,
       'attention_mask': jnp.ones((1, 1, 1), dtype=jnp.bool),
   }
-  return qwix.apply_lora_to_model(model, lora_provider, **dummy_model_input)
+  lora_model = qwix.apply_lora_to_model(
+      model, lora_provider, **dummy_model_input
+  )
+  if mesh is not None:
+    with mesh:
+      state = nnx.state(lora_model)
+      pspecs = nnx.get_partition_spec(state)
+      sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+      nnx.update(lora_model, sharded_state)
+  return lora_model
 
 
 class MockVocab(spm.SentencePieceProcessor):
