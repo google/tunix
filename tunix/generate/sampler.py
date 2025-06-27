@@ -107,8 +107,6 @@ class SamplerOutput:
   # Left padded prompt tokens.
   padded_prompt_tokens: jax.Array
 
-  valid_length: jax.Array
-
 
 @dataclasses.dataclass(frozen=True)
 class CacheConfig:
@@ -763,8 +761,6 @@ class Sampler:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
         lengths.append(end_idx - start_idx)
 
-      lengths = jnp.array(lengths)
-
       decoded_outputs = [
           self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
       ]
@@ -774,6 +770,5 @@ class Sampler:
         logits=out_logits if return_logits else [],
         tokens=out_tokens,
         padded_prompt_tokens=all_input_ids,
-        valid_length=lengths,
     )
     return result

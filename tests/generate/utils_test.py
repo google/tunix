@@ -70,6 +70,35 @@ class UtilsTest(absltest.TestCase):
     self.assertEqual(utils.next_power_of_2(4), 4)
     self.assertEqual(utils.next_power_of_2(5), 8)
 
+  def test_find_first_non_pad_idx(self):
+    data = [
+        ([1, 2, 3, 4, 5, 6], 0),
+        ([0, 0, 1, 2, 3, 4], 2),
+        ([0, 1, 2, 3, 0, 0], 1),
+    ]
+    for ids, expected in data:
+      self.assertEqual(
+          utils.find_first_non_pad_idx(jnp.array(ids), 0), expected
+      )
+
+  def test_find_first_eos_idx(self):
+    data = [
+        ([1, 2, 3, 4, 5, -1], 5),
+        ([1, 2, -1, 4, -1, 0], 2),
+        ([1, 2, 3, 4, 5, 6], 6),
+    ]
+    for ids, expected in data:
+      self.assertEqual(utils.find_first_eos_idx(jnp.array(ids), -1), expected)
+
+  def test_find_last_non_pad_idx(self):
+    data = [
+        ([1, 2, 3, 4, 5, 6], 5),
+        ([1, 2, 3, 0, 0, 0], 2),
+        ([0, 1, 2, 3, 0, 0], 3),
+    ]
+    for ids, expected in data:
+      self.assertEqual(utils.find_last_non_pad_idx(jnp.array(ids), 0), expected)
+
 
 if __name__ == '__main__':
   absltest.main()

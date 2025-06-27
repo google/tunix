@@ -20,6 +20,7 @@ from flax import nnx
 import jax
 import numpy as np
 from tunix.generate import sampler as sampler_lib
+from tunix.generate import utils
 from tunix.tests import test_common as tc
 
 
@@ -87,21 +88,22 @@ class SamplerTest(parameterized.TestCase):
         max_prompt_length=max_prompt_length,
         echo=echo,
     )
+
     for i in range(len(result_not_padded.text)):
       self.assertEqual(result_not_padded.text[i], result_padded.text[i])
       if return_logits:
-        self.assertTrue(
-            np.allclose(
-                result_not_padded.logits[i],
-                result_padded.logits[i][: result_padded.valid_length[i]],
-            )
+        valid_length = (
+            utils.find_last_non_pad_idx(result_padded.tokens[i], vocab.pad_id())
+            + 1
         )
-      self.assertTrue(
-          np.allclose(
-              result_not_padded.tokens[i],
-              result_padded.tokens[i][: result_padded.valid_length[i]],
-          )
-      )
+        np.testing.assert_allclose(
+            result_not_padded.logits[i],
+            result_padded.logits[i][:valid_length],
+        )
+        np.testing.assert_allclose(
+            result_not_padded.tokens[i],
+            result_padded.tokens[i][:valid_length],
+        )
 
   @parameterized.named_parameters(
       dict(

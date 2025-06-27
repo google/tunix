@@ -117,6 +117,7 @@ def pad_to_length(
 
 def find_first_non_pad_idx(ids, pad_id):
   """Finds the index of the first non-pad token."""
+  assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
   mask = ids != pad_id
 
   return lax.cond(
@@ -129,6 +130,7 @@ def find_first_non_pad_idx(ids, pad_id):
 
 def find_first_eos_idx(ids, eos_id):
   """Finds the index of the first EOS token."""
+  assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
   mask = ids == eos_id
 
   return lax.cond(
@@ -136,6 +138,20 @@ def find_first_eos_idx(ids, eos_id):
       lambda operands: jnp.argmax(operands[0]),
       lambda operands: operands[1].shape[0],
       (mask, ids),
+  )
+
+
+def find_last_non_pad_idx(ids, pad_id):
+  """Finds the index of the last non-pad token."""
+  assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
+  mask = ids != pad_id
+  reversed_mask = jnp.flip(mask, axis=-1)
+
+  return jax.lax.cond(
+      jnp.any(reversed_mask),
+      lambda operands: operands[1].shape[-1] - jnp.argmax(operands[0]) - 1,
+      lambda operands: operands[1].shape[-1],
+      (reversed_mask, ids),
   )
 
 
