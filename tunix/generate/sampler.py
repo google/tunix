@@ -197,6 +197,8 @@ class Sampler:
       transformer: nnx.Module,
       tokenizer: Any,
       cache_config: CacheConfig,
+      *,
+      use_jit: bool = True,
   ):
     """Initializes the sampler.
 
@@ -207,6 +209,7 @@ class Sampler:
     """
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.cache_config = cache_config
+    self.model = transformer
     self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)
     self._transformer_state: list[statelib.State] = nnx.variables(transformer)
     self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
@@ -216,8 +219,16 @@ class Sampler:
     # we separate out state and graph def so that the state can be passed as an
     # argument to _decode_fn, resulting in it not being treated as a static
     # arg. This greatly reduces the size of the HLO and reduces compile time
-    self._compiled_decode_fn = jax.jit(self._decode_fn)
-    self._compiled_prefill_fn = jax.jit(self._prefill_fn)
+    if use_jit:
+      try:
+        self._compiled_decode_fn = jax.jit(self._decode_fn)
+        self._compiled_prefill_fn = jax.jit(self._prefill_fn)
+      except Exception:  # pragma: no cover - fall back if JIT fails
+        self._compiled_decode_fn = self._decode_fn
+        self._compiled_prefill_fn = self._prefill_fn
+    else:
+      self._compiled_decode_fn = self._decode_fn
+      self._compiled_prefill_fn = self._prefill_fn
 
   @property
   def transformer(self) -> nnx.Module:
@@ -485,8 +496,7 @@ class Sampler:
         input_mask, self.cache_config.cache_size
     )
 
-    transformer = nnx.merge(self._transformer_graphdef, params)
-    logits, cache = transformer(
+    logits, cache = self.model(
         tokens,
         step_positions,
         sampler_state.cache,
@@ -585,8 +595,7 @@ class Sampler:
         decoding_step, self.cache_config.cache_size, input_mask
     )
 
-    transformer = nnx.merge(self._transformer_graphdef, params)
-    logits, cache = transformer(
+    logits, cache = self.model(
         last_token,
         step_positions,
         sampler_state.cache,

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utils for loading and converting Qwen3 PT weights."""
+"""Utils for loading and converting DeepseekV3 PT weights."""
 
 import re
 from etils import epath
@@ -23,7 +23,7 @@ import safetensors.flax as safetensors
 import tqdm
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig
-from tunix.models.qwen3 import model as model_lib
+from tunix.models.deepseek_v3 import model as model_lib
 
 
 def _stack_experts(params: dict[str, jax.Array]):
@@ -174,8 +174,8 @@ def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
-) -> model_lib.Qwen3:
-  """Load tensors from the safetensors file and create a Qwen3 model."""
+) -> model_lib.DeepseekV3:
+  """Load tensors from the safetensors file and create a DeepseekV3 model."""
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
 
   if not files:
@@ -188,11 +188,11 @@ def create_model_from_safe_tensors(
   if config.num_experts is not None:
     tensor_dict = _stack_experts(tensor_dict)
 
-  qwen3 = nnx.eval_shape(
-      lambda: model_lib.Qwen3(config, rngs=nnx.Rngs(params=0))
+  deepseek_v3_model = nnx.eval_shape(
+      lambda: model_lib.DeepseekV3(config, rngs=nnx.Rngs(params=0))
   )
 
-  graph_def, abs_state = nnx.split(qwen3)
+  graph_def, abs_state = nnx.split(deepseek_v3_model)
   state_dict = abs_state.to_pure_dict()
 
   with jax.default_device(jax.devices("cpu")[0]):
@@ -211,6 +211,36 @@ def create_model_from_safe_tensors(
 
   return nnx.merge(graph_def, state_dict)
 
+
+def from_pretrained(
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+    mesh: jax.sharding.Mesh | None = None,
+) -> model_lib.DeepseekV3:
+  """Load a DeepseekV3 model directly from the Hugging Face Hub."""
+  local_dir = snapshot_download(repo_id, revision=revision, cache_dir=cache_dir)
+  hf_cfg = AutoConfig.from_pretrained(local_dir)
+  head_dim = getattr(
+      hf_cfg, 'head_dim', hf_cfg.hidden_size // hf_cfg.num_attention_heads
+  )
+
+  config = model_lib.ModelConfig(
+      num_layers=hf_cfg.num_hidden_layers,
+      vocab_size=hf_cfg.vocab_size,
+      embed_dim=hf_cfg.hidden_size,
+      hidden_dim=hf_cfg.intermediate_size,
+      num_heads=hf_cfg.num_attention_heads,
+      head_dim=head_dim,
+      num_kv_heads=getattr(hf_cfg, "num_key_value_heads", hf_cfg.num_attention_heads),
+      rope_theta=int(getattr(hf_cfg, "rope_theta", 10000)),
+      norm_eps=getattr(hf_cfg, "rms_norm_eps", 1e-6),
+      num_experts=getattr(hf_cfg, "num_total_experts", None),
+      num_experts_per_tok=getattr(hf_cfg, "num_experts_per_tok", None),
+      shd_config=model_lib.ShardingConfig.get_default_sharding(),
+  )
+  return create_model_from_safe_tensors(local_dir, config, mesh)
 
 def from_pretrained(
     repo_id: str,
