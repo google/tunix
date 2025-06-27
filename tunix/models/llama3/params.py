@@ -163,3 +163,35 @@ def create_model_from_safe_tensors(
     state_dict = jax.device_put(state_dict, jax.devices()[0])
 
   return nnx.merge(graph_def, state_dict)
+
+
+
+def from_pretrained(
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+    mesh: jax.sharding.Mesh | None = None,
+) -> model_lib.Llama3:
+  """Load a Llama model directly from the Hugging Face Hub."""
+  local_dir = snapshot_download(repo_id, revision=revision, cache_dir=cache_dir)
+  hf_cfg = AutoConfig.from_pretrained(local_dir)
+  head_dim = getattr(
+      hf_cfg, 'head_dim', hf_cfg.hidden_size // hf_cfg.num_attention_heads
+  )
+
+  config = model_lib.ModelConfig(
+      num_layers=hf_cfg.num_hidden_layers,
+      vocab_size=hf_cfg.vocab_size,
+      embed_dim=hf_cfg.hidden_size,
+      hidden_dim=hf_cfg.intermediate_size,
+      num_heads=hf_cfg.num_attention_heads,
+      head_dim=head_dim,
+      num_kv_heads=getattr(hf_cfg, "num_key_value_heads", hf_cfg.num_attention_heads),
+      rope_theta=int(getattr(hf_cfg, "rope_theta", 10000)),
+      norm_eps=getattr(hf_cfg, "rms_norm_eps", 1e-6),
+      num_experts=getattr(hf_cfg, "num_total_experts", None),
+      num_experts_per_tok=getattr(hf_cfg, "num_experts_per_tok", None),
+      shd_config=model_lib.ShardingConfig.get_default_sharding(),
+  )
+  return create_model_from_safe_tensors(local_dir, config, mesh)

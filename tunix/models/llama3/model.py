@@ -81,19 +81,6 @@ class ModelConfig:
   norm_eps: float
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
-  @classmethod
-  def llama3_8b(cls):
-    return cls(
-        num_layers=32,
-        vocab_size=128256,
-        embed_dim=4096,
-        hidden_dim=14336,
-        num_heads=32,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-05,
-        rope_theta=500_000,
-    )
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
