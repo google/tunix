@@ -98,7 +98,10 @@ class Gemma3Config:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
-  def gemma3_1b(cls) -> 'Gemma3Config':
+  def gemma3_1b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     return cls(
         num_layers=26,
         num_embed=262144,
@@ -110,10 +113,14 @@ class Gemma3Config:
         sliding_window_size=512,
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
+        shd_config=sharding_config,
     )
 
   @classmethod
-  def gemma3_4b(cls) -> 'Gemma3Config':
+  def gemma3_4b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     """Gemma3-4B text-only config."""
     return cls(
         num_layers=34,
@@ -127,10 +134,14 @@ class Gemma3Config:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
+        shd_config=sharding_config,
     )
 
   @classmethod
-  def gemma3_12b(cls) -> 'Gemma3Config':
+  def gemma3_12b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     """Gemma3-12B text-only config."""
     return cls(
         num_layers=48,
@@ -145,10 +156,14 @@ class Gemma3Config:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
+        shd_config=sharding_config,
     )
 
   @classmethod
-  def gemma3_27b(cls) -> 'Gemma3Config':
+  def gemma3_27b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'Gemma3Config':
     """Gemma3-27B text-only config."""
     return cls(
         num_layers=62,
@@ -163,6 +178,7 @@ class Gemma3Config:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
+        shd_config=sharding_config,
     )
 
 
