@@ -296,7 +296,7 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
         top_p=self.grpo_config.top_p,
         top_k=self.grpo_config.top_k,
     )
-    completion_ids = pad_inputs(
+    completion_ids = common.pad_inputs(
         completion_output.tokens,
         target_length=self.grpo_config.total_generation_steps,
         pad_value=pad_value,
@@ -310,7 +310,7 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
         completion_mask,
         prompt_completion_mask,
         prompt_completion_causal_mask,
-    ) = process_ids(prompt_ids, completion_ids, pad_value, eos_value)
+    ) = common.process_ids(prompt_ids, completion_ids, pad_value, eos_value)
 
     logits_to_keep = completion_ids.shape[1]
     if self.grpo_config.beta != 0.0:
@@ -441,78 +441,7 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
     super().train(train_ds, eval_ds, skip_jit)
 
 
-def pad_inputs(
-    inputs: list[jax.Array],
-    target_length: int,
-    pad_value: int,
-    left: bool,
-):
-  """Pads provided list of JAX arrays to the same length along the last axis.
 
-  Args:
-    inputs: A list of JAX arrays to be padded.
-    target_length: The desired length of each padded array along the last axis.
-    pad_value: The value to use for padding the arrays.
-    left: A boolean indicating whether to pad on the left side of the array.
-
-  Returns:
-    A JAX array where each original input array has been padded to
-    `target_length` along the last axis.
-  """
-  padded_inputs = []
-
-  for s in inputs:
-    padded_s = common.pad_to_length(
-        jnp.array(s),
-        target_length=target_length,
-        pad_value=pad_value,
-        left=left,
-        axis=-1,
-    )
-    padded_s = padded_s[..., -target_length:]
-    padded_inputs.append(padded_s)
-  return jnp.array(padded_inputs)
-
-
-@functools.partial(jax.jit, static_argnames=["pad_value", "eos_value"])
-def process_ids(
-    prompt_ids: jax.Array,
-    completion_ids: jax.Array,
-    pad_value: int,
-    eos_value: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-  """Process prompt and completion ids."""
-  prompt_completion_ids = jnp.concat([prompt_ids, completion_ids], axis=1)
-
-  # Compute masks. For prompt, this is just the padding mask. For completion,
-  # we do an and of the padding mask and the completion mask (computed using
-  # the eos token).
-  prompt_mask = (prompt_ids != pad_value).astype("int32")
-
-  completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype(
-      "int32"
-  )
-  completion_mask = common.make_completion_mask(
-      completion_ids, eos_tok=eos_value
-  )
-  completion_mask = completion_mask * completion_padding_mask
-
-  prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, completion_mask], axis=-1
-  )
-
-  # Get positions for the concatenated prompt and completion ids.
-  positions = common.build_positions_from_mask(prompt_completion_mask)
-  prompt_completion_causal_mask = common.make_causal_attn_mask(
-      prompt_completion_mask
-  )
-  return (
-      positions,
-      prompt_completion_ids,
-      completion_mask,
-      prompt_completion_mask,
-      prompt_completion_causal_mask,
-  )
 
 
 def grpo_loss_fn(model, train_example, beta, epsilon):
