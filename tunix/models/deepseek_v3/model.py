@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""LLama3 model."""
+"""DeepseekV3 model."""
 
 import dataclasses
 from typing import Tuple
@@ -33,7 +33,7 @@ Cache = dict[str, LayerCache]
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
-  """Sharding configuration for Llama3 model."""
+  """Sharding configuration for DeepseekV3 model."""
 
   emb_vd: Tuple[str | None, ...]
   emb_dv: Tuple[str | None, ...]
@@ -46,6 +46,8 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  exp_weight_cdf: Tuple[str | None, ...]
+  exp_weight_cfd: Tuple[str | None, ...]
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -63,12 +65,14 @@ class ShardingConfig:
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
+        exp_weight_cdf=('fsdp', None, 'tp'),
+        exp_weight_cfd=('fsdp', 'tp', None),
     )
 
 
 @dataclasses.dataclass(frozen=True)
 class ModelConfig:
-  """Configuration for the Llama3 model."""
+  """Configuration for the DeepseekV3 model."""
 
   num_layers: int
   vocab_size: int
@@ -79,8 +83,9 @@ class ModelConfig:
   num_kv_heads: int
   rope_theta: int
   norm_eps: float
+  num_experts: int | None = None
+  num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
-
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
@@ -94,6 +99,7 @@ def shard(x: jnp.ndarray, s: Tuple[str, ...]):
 
 class Einsum(nnx.Module):
   """Einsum is a convenience module for parameterized tensor multiplication."""
+
 
   def __init__(
       self,
@@ -228,6 +234,18 @@ class Attention(nnx.Module):
         rngs=rngs,
         sharding=shd_config.o_weight_nhd,
     )
+    self.q_norm = RMSNorm(
+        config.head_dim,
+        norm_eps=config.norm_eps,
+        rngs=rngs,
+        shd_config=shd_config,
+    )
+    self.k_norm = RMSNorm(
+        config.head_dim,
+        norm_eps=config.norm_eps,
+        rngs=rngs,
+        shd_config=shd_config,
+    )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
 
@@ -241,8 +259,8 @@ class Attention(nnx.Module):
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
 
-    query_proj = self.q_proj(x)
-    key_proj = self.k_proj(x)
+    query_proj = self.q_norm(self.q_proj(x))
+    key_proj = self.k_norm(self.k_proj(x))
     value_proj = self.v_proj(x)
 
     query_proj = shard(query_proj, self.shd_config.act_btnh)
@@ -318,6 +336,85 @@ class Attention(nnx.Module):
     return self.kv_proj.shape[1]
 
 
+class MoELayer(nnx.Module):
+  """MoE layer."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      *,
+      rngs: nnx.Rngs,
+      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ):
+    self.shd_config = shd_config
+    self.experts_per_tok = config.num_experts_per_tok
+    self.num_experts = config.num_experts
+    self.router = nnx.Linear(
+        in_features=config.embed_dim,
+        out_features=config.num_experts,
+        use_bias=False,
+        rngs=rngs,
+    )
+    self.gate_proj = nnx.Param(
+        nnx.initializers.normal()(
+            rngs.params(),
+            (config.num_experts, config.embed_dim, config.hidden_dim),
+        ),
+        sharding=shd_config.exp_weight_cdf,
+    )
+    self.up_proj = nnx.Param(
+        nnx.initializers.normal()(
+            rngs.params(),
+            (config.num_experts, config.embed_dim, config.hidden_dim),
+        ),
+        sharding=shd_config.exp_weight_cdf,
+    )
+    self.down_proj = nnx.Param(
+        nnx.initializers.normal()(
+            rngs.params(),
+            (config.num_experts, config.hidden_dim, config.embed_dim),
+        ),
+        sharding=shd_config.exp_weight_cfd,
+    )
+
+  def __call__(self, x):
+    scores = self.router(x).astype(jnp.float32)  # [B,T,E]
+    routing_weights, routing_idx = jax.lax.top_k(
+        jax.nn.softmax(scores, axis=-1), self.experts_per_tok
+    )
+    routing_weights = (
+        routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
+    ).astype(x.dtype)
+
+    dispatch_mask = jax.nn.one_hot(
+        routing_idx, num_classes=self.num_experts, dtype=x.dtype
+    )  # [B, T, K, E]
+    dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
+
+    dispatched_input = jnp.einsum(
+        'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
+    ).astype(x.dtype)
+
+    expert_outputs = []
+    for i in range(self.num_experts):
+      expert_input = dispatched_input[:, :, i, :]
+      activations = nnx.silu(
+          jnp.einsum('BTD,DF->BTF', expert_input, self.gate_proj[i])
+      ) * jnp.einsum('BTD,DF->BTF', expert_input, self.up_proj[i])
+      activations = shard(activations, self.shd_config.act_btf)
+      expert_output = jnp.einsum('BTF,FD->BTD', activations, self.down_proj[i])
+      expert_outputs.append(expert_output)
+
+    stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
+    routing_weights = jnp.tile(
+        routing_weights[:, :, None, :], (1, 1, self.num_experts, 1)
+    )  # [B, T, E, K]
+    routing_weights = dispatch_mask * routing_weights  # [B, T, E, K]
+
+    output = jnp.einsum('BTED,BTEK->BTD', stacked_outputs, routing_weights)
+    return output
+
+
 class MLP(nnx.Module):
   """MLP module."""
 
@@ -387,17 +484,24 @@ class DecoderLayer(nnx.Module):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.mlp = MLP(
-        config=config,
-        rngs=rngs,
-        shd_config=shd_config,
-    )
     self.post_attention_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=shd_config,
     )
+    if config.num_experts is None:
+      self.mlp = MLP(
+          config=config,
+          rngs=rngs,
+          shd_config=shd_config,
+      )
+    else:
+      self.mlp = MoELayer(
+          config=config,
+          rngs=rngs,
+          shd_config=shd_config,
+      )
 
   def __call__(
       self,
@@ -416,12 +520,13 @@ class DecoderLayer(nnx.Module):
     attn_output += x
     residual = attn_output
     attn_output = self.post_attention_layernorm(attn_output)
-    outputs = residual + self.mlp(attn_output)
+    outputs = self.mlp(attn_output)
+    outputs = residual + outputs
     return cache, outputs
 
 
-class Llama3(nnx.Module):
-  """Llama3 model."""
+class DeepseekV3(nnx.Module):
+  """DeepseekV3 model."""
 
   def __init__(
       self,
@@ -459,14 +564,16 @@ class Llama3(nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
+      output_hidden_states: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
-    """Llama3 model.
+    """DeepseekV3 model.
 
     Args:
       input_tokens: input sequence of tokens.
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
+      output_hidden_states: whether to output the hidden states.
 
     Returns:
       predicted_logits, new_cache
@@ -490,6 +597,8 @@ class Llama3(nnx.Module):
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
+    if output_hidden_states:
+      self.sow(nnx.Intermediate, 'all_hidden_states', x)
     logits = self.lm_head(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
