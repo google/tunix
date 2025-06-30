@@ -435,7 +435,7 @@ class PeftTrainer:
     if not self.is_managed_externally:
       self.close()
 
-  def force_save_checkpoint(self):
+  def _save_last_checkpoint(self):
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
@@ -450,7 +450,7 @@ class PeftTrainer:
     return self._train_steps
 
   def close(self):
-    self.force_save_checkpoint()
+    self._save_last_checkpoint()
     self.checkpoint_manager.close()
     self.metrics_logger.close()
     if self._pbar is not None:

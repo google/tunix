@@ -124,7 +124,7 @@ class Gemma3Config:
     """Gemma3-4B text-only config."""
     return cls(
         num_layers=34,
-        num_embed=262_144,
+        num_embed=262144,
         embed_dim=2560,
         hidden_dim=2560 * 8 // 2,
         num_heads=8,
