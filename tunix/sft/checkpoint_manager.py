@@ -77,6 +77,8 @@ class CheckpointManager:
     """
     if self._checkpoint_manager is None:
       return False
+    if not force and not self._checkpoint_manager.should_save(step):
+      return False
     if save_only_lora_params:
       params = nnx.state(model, nnx.LoRAParam)
     else:
