@@ -310,12 +310,11 @@ class Sampler:
     """Initializes the sampling state given input prompts."""
     batch_size = all_input_ids.shape[0]
     num_input_tokens = all_input_ids.shape[1]
-    buffer_size = total_sampling_steps + 1
 
     token_buffer = jnp.full(
         (
             batch_size,
-            buffer_size,
+            total_sampling_steps,
         ),
         self.tokenizer.pad_id(),
         dtype=jnp.int32,
@@ -340,7 +339,7 @@ class Sampler:
 
     if include_logits:
       logits_buffer = jnp.zeros(
-          (batch_size, buffer_size, self.transformer.num_embed),
+          (batch_size, total_sampling_steps, self.transformer.num_embed),
           dtype=jnp.float32,
       )
     else:
@@ -725,7 +724,7 @@ class Sampler:
       # finalize_beam_search_state
       del sampling_state
     if pad_output:
-      max_len = (total_sampling_steps if echo else total_generation_steps) + 1
+      max_len = total_sampling_steps if echo else total_generation_steps
       lengths, out_tokens, out_logits = utils.padded_fill_tokens_and_logits(
           token_buffers,
           logits_buffers,

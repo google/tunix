@@ -72,9 +72,10 @@ class SamplerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
+    total_generation_steps = 10
     result_padded = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        total_generation_steps=total_generation_steps,
         return_logits=return_logits,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -83,7 +84,7 @@ class SamplerTest(parameterized.TestCase):
 
     result_not_padded = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        total_generation_steps=total_generation_steps,
         return_logits=return_logits,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -104,6 +105,10 @@ class SamplerTest(parameterized.TestCase):
             result_not_padded.tokens[i],
             result_padded.tokens[i][:valid_length],
         )
+        if not echo:
+          np.testing.assert_equal(
+              result_padded.tokens[i].shape[0], total_generation_steps
+          )
 
   @parameterized.named_parameters(
       dict(
@@ -152,9 +157,9 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(result)
     self.assertLen(result.logits, 2)
     if echo:
-      self.assertEqual(result.logits[0].shape, (14, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (13, vocab.GetPieceSize()))
     else:
-      self.assertEqual(result.logits[0].shape, (11, vocab.GetPieceSize()))
+      self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))
 
     # With 1 beam, the beam search result should be the
     # same as the greedy output
