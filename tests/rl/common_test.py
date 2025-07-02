@@ -54,6 +54,28 @@ class CommonTest(absltest.TestCase):
         np.array([[-5.7448483, -5.937829], [-4.222273, -4.41953]]),
     )
 
+  def test_compute_per_token_logps(self):
+    model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+    prompt_tokens = jnp.array([[1, 2, 3, 4], [0, 0, 1, 2], [0, 1, 2, 3]])
+    completion_tokens = jnp.array(
+        [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
+    )
+    per_token_logps = common.compute_per_token_logps(
+        model,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+    )
+    np.testing.assert_allclose(
+        per_token_logps,
+        np.array([
+            [-5.876301, -8.700251, -5.046069, -5.788748],
+            [-6.071025, -7.5328417, -5.9712567, -4.653783],
+            [-6.039485, -8.264197, -6.2771187, -4.767109],
+        ]),
+    )
+
   def test_make_completion_mask(self):
     completion_ids = jnp.array([
         [1, 2, 3, 4],
@@ -129,6 +151,7 @@ class CommonTest(absltest.TestCase):
         [0, 0, 1, 1],
     ])
     np.testing.assert_array_equal(positions, expected_value)
+
 
 if __name__ == "__main__":
   absltest.main()

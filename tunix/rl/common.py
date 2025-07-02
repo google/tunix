@@ -33,6 +33,7 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   return per_token_logps[..., 0]
 
 
+# TODO(tsbao): remove this once old callsite is cleaned up.
 @nnx.jit(static_argnums=(4,))
 def get_per_token_logps(
     model: nnx.Module,
@@ -48,6 +49,32 @@ def get_per_token_logps(
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]
   return selective_log_softmax(logits, input_tokens)
+
+
+@nnx.jit(static_argnames=('pad_id', 'eos_id'))
+def compute_per_token_logps(
+    model: nnx.Module,
+    prompt_tokens: jax.Array,
+    completion_tokens: jax.Array,
+    pad_id: int,
+    eos_id: int,
+) -> jax.Array:
+  """Computes the per-token log probabilities."""
+  prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
+  prompt_mask = prompt_tokens != pad_id
+  completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+  prompt_completion_mask = jnp.concatenate(
+      [prompt_mask, completion_mask], axis=-1
+  )
+  positions = build_positions_from_mask(prompt_completion_mask)
+  attn_mask = make_causal_attn_mask(prompt_completion_mask)
+  return get_per_token_logps(
+      model,
+      input_tokens=prompt_completion_ids,
+      positions=positions,
+      attn_mask=attn_mask,
+      logits_to_keep=completion_tokens.shape[1],
+  )
 
 
 def make_completion_mask(completion_ids, eos_tok: int = 0):
