@@ -360,11 +360,6 @@ class PeftTrainer:
       )
     with time_measure("Train loop"):
       for index, train_example in enumerate(train_ds):
-        # TODO(annyan): This is a temporary solution to support the external
-        # checkpoint manager. Because with external checkpoint manager, the
-        # training steps are not reset to 0, so need to skip the check blow. We
-        # need to think through how checkpointing should work with external
-        # checkpoint manager.
         if not self.is_managed_externally:
           # TODO(mridulsahu): Add support to restore the iterator state
           # instead of skipping the already trained examples.
