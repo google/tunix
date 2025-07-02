@@ -352,7 +352,7 @@ class PeftTrainer:
 
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
 
-    if self.config.max_steps is not None:
+    if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
           metrics_logger=self.metrics_logger,
           initial_steps=self._train_steps,
@@ -455,6 +455,7 @@ class PeftTrainer:
     self.metrics_logger.close()
     if self._pbar is not None:
       self._pbar.close()
+      self._pbar = None
 
   def _run_eval(
       self,
