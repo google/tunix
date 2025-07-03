@@ -245,7 +245,6 @@ class Einsum(nnx.Module):
         nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
     )
 
-  @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     return jnp.einsum(self.einsum_str, x, self.w.value)
 
@@ -550,14 +549,17 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    ff_gate = self.gate_proj(x)
+    with jax.named_scope('gate_proj'):
+      ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
-    ff1 = self.up_proj(x)
+    with jax.named_scope('up_proj'):
+      ff1 = self.up_proj(x)
     activations = gate_value * ff1
     activations = shard(activations, self.shd_config.act_btf)
 
-    outputs = self.down_proj(activations)
+    with jax.named_scope('down_proj'):
+      outputs = self.down_proj(activations)
     return outputs
 
 
@@ -734,12 +736,13 @@ class Gemma3(nnx.Module):
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
-      layer_cache, x = layer(
-          x,
-          positions,
-          layer_cache,
-          attention_mask,
-      )
+      with jax.named_scope(layer_name):
+        layer_cache, x = layer(
+            x,
+            positions,
+            layer_cache,
+            attention_mask,
+        )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
