@@ -17,3 +17,5 @@
 /include/
 /lib/
 /share/
+
+examples/data/*

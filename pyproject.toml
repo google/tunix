@@ -1,6 +1,6 @@
 [project]
 name = "tunix"
-version = "0.0.0"
+version = "0.0.1"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
@@ -21,17 +21,23 @@ classifiers = [
 dependencies = [
   "jax",
   "jaxtyping",
-  "flax",
+  "flax @ git+https://github.com/google/flax.git",
   "sentencepiece",
   "tensorboardX",
   "tqdm",
+  "datasets",
+  "grain",
+  "tensorflow",
+  "kagglehub",
+  "qwix @ git+https://github.com/google/qwix",
 ]
+
 
 [project.urls]
 Source = "https://github.com/google/tunix"
 
 [build-system]
-requires = ["setuptools >= 77.0.3"]
+requires = ["setuptools >= 64.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

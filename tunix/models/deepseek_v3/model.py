@@ -87,64 +87,6 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
-  @classmethod
-  def deepseek_v3_0_6_b(cls):  # 0.6B
-    return cls(
-        num_layers=28,
-        vocab_size=151936,
-        embed_dim=1024,
-        hidden_dim=3072,
-        num_heads=16,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-    )
-
-  @classmethod
-  def deepseek_v3_1_7_b(cls):  # 1.7B
-    return cls(
-        num_layers=28,
-        vocab_size=151936,
-        embed_dim=2048,
-        hidden_dim=6144,
-        num_heads=16,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-    )
-
-  @classmethod
-  def deepseek_v3_14_b(cls):  # 14B
-    return cls(
-        num_layers=40,
-        vocab_size=151936,
-        embed_dim=5120,
-        hidden_dim=17408,
-        num_heads=40,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-    )
-
-  @classmethod
-  def deepseek_v3_30_b(cls):  # 30B
-    return cls(
-        num_layers=48,
-        vocab_size=151936,
-        embed_dim=2048,
-        hidden_dim=768,
-        num_heads=32,
-        head_dim=128,
-        num_kv_heads=4,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-        num_experts=128,
-        num_experts_per_tok=8,
-    )
-
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
