@@ -14,6 +14,7 @@
 """Common RL helper functions."""
 
 from flax import nnx
+import gc
 import jax
 from jax import numpy as jnp
 
@@ -168,3 +169,69 @@ def build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
   # Subtract one for all positions from the first valid one as they are
   # 0-indexed
   return positions - (positions >= 1)
+
+def compute_kl_divergence(
+    per_token_logps: jax.Array, ref_per_token_logps: jax.Array
+) -> jax.Array:
+  """Compute per token KL divergence between trained and reference policy.
+
+  Args:
+    per_token_logps: Per token log probabilities from the trained policy.
+    ref_per_token_logps: Per token log probabilities from the reference policy.
+
+  Returns:
+    KL divergence.
+  """
+  per_token_kl = (
+      jnp.exp(ref_per_token_logps - per_token_logps)
+      - (ref_per_token_logps - per_token_logps)
+      - 1
+  )
+  return per_token_kl
+
+
+@nnx.jit
+def masked_mean(x: jax.Array, mask: jax.Array) -> jax.Array:
+  """Compute mean of ``x`` over True ``mask`` elements."""
+  total = jnp.sum(x * mask)
+  count = jnp.sum(mask)
+  return total / jnp.maximum(count, 1)
+
+
+@nnx.jit
+def masked_whiten(x: jax.Array, mask: jax.Array, shift_mean: bool = True) -> jax.Array:
+  """Whitens ``x`` considering the ``mask``."""
+  mean = masked_mean(x, mask) if shift_mean else 0.0
+  var = masked_mean((x - mean) ** 2, mask)
+  return (x - mean) / (jnp.sqrt(var) + 1e-8)
+
+
+@nnx.jit
+def generalized_advantage_estimation(
+    rewards: jax.Array,
+    values: jax.Array,
+    mask: jax.Array,
+    gamma: float,
+    lam: float,
+) -> tuple[jax.Array, jax.Array]:
+  """Compute advantages and returns using GAE."""
+  seq_len = rewards.shape[1]
+  adv = jnp.zeros_like(rewards)
+  lastgaelam = jnp.zeros(rewards.shape[0])
+  for t in range(seq_len - 1, -1, -1):
+    next_value = jnp.where(t < seq_len - 1, values[:, t + 1], 0.0)
+    delta = rewards[:, t] + gamma * next_value - values[:, t]
+    lastgaelam = delta + gamma * lam * lastgaelam
+    adv = adv.at[:, t].set(lastgaelam)
+  returns = adv + values
+  adv = jnp.where(mask, adv, 0.0)
+  returns = jnp.where(mask, returns, 0.0)
+  return adv, returns
+
+
+def clear_memory() -> None:
+  """Attempt to free JAX and Python memory."""
+  if hasattr(jax, "clear_caches"):
+    jax.clear_caches()
+  gc.collect()
+
