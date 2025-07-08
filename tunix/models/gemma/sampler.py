@@ -127,13 +127,16 @@ class SamplerOutput:
   text: list[str]
 
   # Per-step logits used during sampling.
-  logits: list[jax.Array]
+  logits: Optioanl[list[jax.Array]]
 
   # Tokens corresponding to the generated samples.
   tokens: list[jax.Array]
 
   # Left padded prompt tokens.
   padded_prompt_tokens: jax.Array
+
+  # Per-step log probs for output tokens
+  logprobs: Optional[list[float]]
 
 
 class Sampler:
@@ -611,6 +614,7 @@ class Sampler:
         logits=out_logits,
         tokens=out_tokens,
         padded_prompt_tokens=all_input_ids,
+        logprobs=None,
     )
     return result
 
