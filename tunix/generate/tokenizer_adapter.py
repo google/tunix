@@ -85,6 +85,8 @@ class TokenizerAdapter:
     if self._tokenizer_type == TokenizerType.SP:
       return self._tokenizer.pad_id()
     elif self._tokenizer_type == TokenizerType.HF:
+      if self._tokenizer.pad_token_id is None:
+        self._tokenizer.pad_token = self._tokenizer.eos_token
       return self._tokenizer.pad_token_id
     else:
       return self._tokenizer.pad_id()
