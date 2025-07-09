@@ -82,6 +82,20 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
+  def llama3_1b(cls):
+    return cls(
+        num_layers=16,
+        vocab_size=128256,
+        embed_dim=2048,
+        hidden_dim=8192,
+        num_heads=32,
+        head_dim=64,
+        num_kv_heads=8,
+        norm_eps=1e-05,
+        rope_theta=500_000,
+    )
+
+  @classmethod
   def llama3_8b(cls):
     return cls(
         num_layers=32,
