@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import itertools
-import queue
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -28,6 +27,7 @@ import orbax.checkpoint as ocp
 from tunix.generate import sampler as sampler_lib
 from tunix.rl import common
 from tunix.rl.grpo import grpo_learner as grpo_lib
+from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import vanilla_rollout
 from tunix.tests import test_common as tc
 from typing_extensions import override
@@ -103,7 +103,7 @@ class GrpoLearnerTest(parameterized.TestCase):
       iterator = iter(dataset)
       while True:
         try:
-          data_queue = queue.Queue(maxsize=2)
+          data_queue = queue_lib.SimpleDataQueue(maxsize=2)
           empty_trainer.prepare_dataset(
               iterator=iterator,
               proceed_num_steps=grad_acc_steps,

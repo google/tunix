@@ -19,7 +19,6 @@ from __future__ import annotations
 from concurrent import futures
 import dataclasses
 import functools
-import queue
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 
 import flax
@@ -33,6 +32,7 @@ import numpy as np
 import optax
 from tunix.rl import common
 from tunix.rl.grpo import grpo_helpers
+from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import checkpoint_manager
 from tunix.sft import metrics_logger
@@ -430,7 +430,9 @@ class GrpoLearner:
       proceed_num_steps: int,
       sample_repeat: int,
       batch_repeat: int,
-      data_queue: queue.Queue[list[TrainExample] | RepeatIterable | None],
+      data_queue: queue_lib.AbstractDataQueue[
+          list[TrainExample] | RepeatIterable | None
+      ],
       async_loading: bool = False,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
   ) -> None:
@@ -446,7 +448,6 @@ class GrpoLearner:
       batch_repeat: The number of times to repeat the batch in the final
         dataset.
       data_queue: The data queue to use for putting the examples into.
-        TODO:b/429061772: Creates the replay buffer abstraction.
       async_loading: Whether to load the batch asyncronously, if not async
         loading, then all the examples needed will be processed and then loaded
         into the data queue.
@@ -581,9 +582,11 @@ class GrpoLearner:
       try:
         # reserve 1 for None and the other for repeated interable
         # if batch_repeat > 1
-        train_data_queue = queue.Queue(maxsize=self.grad_acc_steps + 2)
+        train_data_queue = queue_lib.SimpleDataQueue(
+            maxsize=self.grad_acc_steps + 2
+        )
         # reserve 1 for None
-        eval_data_queue = queue.Queue(maxsize=2)
+        eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
         initial_train_steps = self._train_steps
         future = self.executor.submit(
             self.prepare_dataset,
