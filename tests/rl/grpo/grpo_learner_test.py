@@ -25,8 +25,8 @@ import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
 from tunix.generate import sampler as sampler_lib
-from tunix.rl import common
 from tunix.rl.grpo import grpo_learner as grpo_lib
+from tunix.rl.inference import inference_worker as inference
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import vanilla_rollout
 from tunix.tests import test_common as tc
@@ -176,6 +176,13 @@ class GrpoLearnerTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
+    inference_worker = inference.InferenceWorker(
+        models=[
+            inference.ModelContainer(
+                model=ref_model, role=inference.ModelRole.REFERENCE
+            )
+        ]
+    )
     rollout_worker = vanilla_rollout.VanillaRollout(
         model=model,
         tokenizer=vocab,
@@ -196,7 +203,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     )
     grpo_trainer = grpo_lib.GrpoLearner(
         model=model,
-        ref_model=ref_model,
+        inference_worker=inference_worker,
         rollout_worker=rollout_worker,
         reward_fns=reward_fns,
         optimizer=optax.sgd(1e-3),
@@ -245,7 +252,7 @@ class GrpoLearnerTest(parameterized.TestCase):
           beta=0.04,
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 2, 4, 6, 8],
-          expected_logps_fn_call_at_step=[0, 0, 2, 4, 6, 8],
+          expected_inference_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
           expected_rollout_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
       ),
       dict(
@@ -254,7 +261,7 @@ class GrpoLearnerTest(parameterized.TestCase):
           beta=0.04,
           gradient_accumulation_steps=3,
           expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_logps_fn_call_at_step=[0, 0, 0, 0, 6, 6, 6],
+          expected_inference_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
           expected_rollout_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
       ),
       dict(
@@ -263,7 +270,7 @@ class GrpoLearnerTest(parameterized.TestCase):
           beta=0,
           gradient_accumulation_steps=3,
           expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_logps_fn_call_at_step=[0],
+          expected_inference_worker_logps_fn_call_at_step=[],
           expected_rollout_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
       ),
       dict(
@@ -272,7 +279,16 @@ class GrpoLearnerTest(parameterized.TestCase):
           beta=0.04,
           gradient_accumulation_steps=3,
           expected_gen_fn_call_at_step=[0, 0, 0, 3, 3, 3, 6, 6],
-          expected_logps_fn_call_at_step=[0, 0, 0, 3, 3, 3, 6, 6],
+          expected_inference_worker_logps_fn_call_at_step=[
+              0,
+              0,
+              0,
+              3,
+              3,
+              3,
+              6,
+              6,
+          ],
           expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
@@ -281,7 +297,16 @@ class GrpoLearnerTest(parameterized.TestCase):
           beta=0.04,
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 1, 2, 3, 4, 5, 6, 7],
-          expected_logps_fn_call_at_step=[0, 1, 2, 3, 4, 5, 6, 7],
+          expected_inference_worker_logps_fn_call_at_step=[
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+          ],
           expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
@@ -290,7 +315,7 @@ class GrpoLearnerTest(parameterized.TestCase):
           beta=0,
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 1, 2, 3, 4, 5, 6, 7],
-          expected_logps_fn_call_at_step=[],
+          expected_inference_worker_logps_fn_call_at_step=[],
           expected_rollout_worker_logps_fn_call_at_step=[],
       ),
   )
@@ -300,19 +325,19 @@ class GrpoLearnerTest(parameterized.TestCase):
       beta,
       gradient_accumulation_steps,
       expected_gen_fn_call_at_step,
-      expected_logps_fn_call_at_step,
+      expected_inference_worker_logps_fn_call_at_step,
       expected_rollout_worker_logps_fn_call_at_step,
   ):
     gen_fn_call_at_step = []
-    logps_fn_call_at_step = []
     rollout_worker_logps_fn_call_at_step = []
+    inference_worker_logps_fn_call_at_step = []
 
     def wrap_fn(fn, fn_call_at_step, trainer):
       def wrapper(*args, **kwargs):
         fn_call_at_step.append(trainer.trainer.train_steps)
         return fn(*args, **kwargs)
 
-      return wrapper, fn
+      return wrapper
 
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
@@ -330,6 +355,13 @@ class GrpoLearnerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
+    inference_worker = inference.InferenceWorker(
+        models=[
+            inference.ModelContainer(
+                model=ref_model, role=inference.ModelRole.REFERENCE
+            )
+        ]
+    )
     grpo_config = grpo_lib.GrpoConfig(
         total_generation_steps=10,
         num_generations=2,
@@ -342,7 +374,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     )
     grpo_trainer = grpo_lib.GrpoLearner(
         model=model,
-        ref_model=ref_model,
+        inference_worker=inference_worker,
         rollout_worker=rollout_worker,
         reward_fns=reward_1,
         optimizer=optax.sgd(1e-3),
@@ -353,34 +385,34 @@ class GrpoLearnerTest(parameterized.TestCase):
         grpo_trainer._generate_and_compute_advantage,
         gen_fn_call_at_step,
         grpo_trainer,
-    )[0]
-    wrapped_get_per_token_logps, old_get_per_token_logps = wrap_fn(
-        common.get_per_token_logps, logps_fn_call_at_step, grpo_trainer
     )
-    common.get_per_token_logps = wrapped_get_per_token_logps
+
     rollout_worker.get_per_token_logps = wrap_fn(
         rollout_worker.get_per_token_logps,
         rollout_worker_logps_fn_call_at_step,
         grpo_trainer,
-    )[0]
+    )
+    inference_worker.get_ref_per_token_logps = wrap_fn(
+        inference_worker.get_ref_per_token_logps,
+        inference_worker_logps_fn_call_at_step,
+        grpo_trainer,
+    )
 
-    try:
-      train_ds = _dummy_dataset(_DUMMY_DATA * 2, batch_size=1)
-      grpo_trainer.train(train_ds, None)
+    train_ds = _dummy_dataset(_DUMMY_DATA * 2, batch_size=1)
+    grpo_trainer.train(train_ds, None)
 
-      variables = nnx.state(model, nnx.Param)
-      jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
+    variables = nnx.state(model, nnx.Param)
+    jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
-      self.assertEqual(gen_fn_call_at_step, expected_gen_fn_call_at_step)
-      self.assertEqual(
-          logps_fn_call_at_step[1:], expected_logps_fn_call_at_step
-      )
-      self.assertEqual(
-          rollout_worker_logps_fn_call_at_step,
-          expected_rollout_worker_logps_fn_call_at_step,
-      )
-    finally:
-      common.get_per_token_logps = old_get_per_token_logps
+    self.assertEqual(gen_fn_call_at_step, expected_gen_fn_call_at_step)
+    self.assertEqual(
+        inference_worker_logps_fn_call_at_step,
+        expected_inference_worker_logps_fn_call_at_step,
+    )
+    self.assertEqual(
+        rollout_worker_logps_fn_call_at_step,
+        expected_rollout_worker_logps_fn_call_at_step,
+    )
 
   # def test_grpo_with_lora_model(self):
   #   mesh1 = Mesh(
@@ -475,6 +507,13 @@ class GrpoLearnerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
+    inference_worker = inference.InferenceWorker(
+        models=[
+            inference.ModelContainer(
+                model=ref_model, role=inference.ModelRole.REFERENCE
+            )
+        ]
+    )
     grpo_config = grpo_lib.GrpoConfig(
         total_generation_steps=10,
         num_generations=2,
@@ -485,7 +524,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     )
     grpo_trainer = _TrainerWithException(
         model=model,
-        ref_model=ref_model,
+        inference_worker=inference_worker,
         rollout_worker=rollout_worker,
         reward_fns=reward_1,
         optimizer=optax.sgd(1e-3),
@@ -500,6 +539,13 @@ class GrpoLearnerTest(parameterized.TestCase):
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+    inference_worker = inference.InferenceWorker(
+        models=[
+            inference.ModelContainer(
+                model=ref_model, role=inference.ModelRole.REFERENCE
+            )
+        ]
     )
     rollout_worker = vanilla_rollout.VanillaRollout(
         model=model,
@@ -521,7 +567,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     )
     grpo_trainer = grpo_lib.GrpoLearner(
         model=model,
-        ref_model=ref_model,
+        inference_worker=inference_worker,
         rollout_worker=rollout_worker,
         reward_fns=reward_1,
         optimizer=optax.sgd(1e-3),
@@ -558,9 +604,16 @@ class GrpoLearnerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
+    inference_worker2 = inference.InferenceWorker(
+        models=[
+            inference.ModelContainer(
+                model=ref_model, role=inference.ModelRole.REFERENCE
+            )
+        ]
+    )
     grpo_trainer2 = grpo_lib.GrpoLearner(
         model=model2,
-        ref_model=ref_model,
+        inference_worker=inference_worker,
         rollout_worker=rollout_worker2,
         reward_fns=reward_1,
         optimizer=optax.sgd(1e-3),
@@ -569,7 +622,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     grpo_trainer2.train(train_ds_full[0:1], None)
     grpo_trainer2 = grpo_lib.GrpoLearner(
         model=model2,
-        ref_model=ref_model,
+        inference_worker=inference_worker2,
         rollout_worker=rollout_worker2,
         reward_fns=reward_1,
         optimizer=optax.sgd(1e-3),

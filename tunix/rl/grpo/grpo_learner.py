@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from concurrent import futures
 import dataclasses
-import functools
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 
 import flax
@@ -32,6 +31,7 @@ import numpy as np
 import optax
 from tunix.rl import common
 from tunix.rl.grpo import grpo_helpers
+from tunix.rl.inference import inference_worker as inference
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import checkpoint_manager
@@ -178,7 +178,7 @@ class GrpoLearner:
   def __init__(
       self,
       model: nnx.Module,
-      ref_model: nnx.Module,
+      inference_worker: inference.InferenceWorker,
       rollout_worker: base_rollout.BaseRollout,
       reward_fns: RewardFn | List[RewardFn],
       optimizer: optax.GradientTransformation,
@@ -190,9 +190,7 @@ class GrpoLearner:
 
     Args:
       model: The policy model to be trained.
-      ref_model: The reference model, kept fixed during training, and used for
-        computing KL divergence. The goal is to make sure `model` does not
-        deviate too much from `ref_model`.
+      inference_worker: The inference worker for forward only computations.
       rollout_worker: The rollout worker to use for generating text completions
         from the policy model, based on prompts.
       reward_fns: A single callable or a list of callables that compute a scalar
@@ -210,7 +208,7 @@ class GrpoLearner:
     """
     self.grpo_config = training_config
     self.model = model
-    self.ref_model = ref_model
+    self.inference_worker = inference_worker
     self.rollout_worker = rollout_worker
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
@@ -309,22 +307,21 @@ class GrpoLearner:
     completion_ids = completion_output.tokens
     prompt_ids = completion_output.left_padded_prompt_tokens
 
-    (
-        positions,
-        prompt_completion_ids,
-        completion_mask,
-        prompt_completion_mask,
-        prompt_completion_causal_mask,
-    ) = process_ids(prompt_ids, completion_ids, pad_value, eos_value)
+    prompt_mask = (prompt_ids != pad_value).astype("int32")
+    completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype(
+        "int32"
+    )
+    completion_mask = common.make_completion_mask(
+        completion_ids, eos_tok=eos_value
+    )
+    completion_mask = completion_mask * completion_padding_mask
 
-    logits_to_keep = completion_ids.shape[1]
     if self.grpo_config.beta != 0.0:
-      ref_per_token_logps = common.get_per_token_logps(
-          self.ref_model,
-          input_tokens=prompt_completion_ids,
-          positions=positions,
-          attn_mask=prompt_completion_causal_mask,
-          logits_to_keep=logits_to_keep,
+      ref_per_token_logps = self.inference_worker.get_ref_per_token_logps(
+          prompt_tokens=prompt_ids,
+          completion_tokens=completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
       )
     else:
       ref_per_token_logps = None
@@ -371,9 +368,9 @@ class GrpoLearner:
 
     return TrainExample(
         prompt_ids=prompt_ids,
-        prompt_mask=prompt_completion_mask[:, : len(prompt_ids[0])],
+        prompt_mask=prompt_mask,
         completion_ids=completion_ids,
-        completion_mask=prompt_completion_mask[:, len(prompt_ids[0]) :],
+        completion_mask=completion_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         old_per_token_logps=old_per_token_logps,
@@ -642,80 +639,6 @@ class GrpoLearner:
       except StopIteration:
         break
     self.trainer.close()
-
-
-def pad_inputs(
-    inputs: list[jax.Array],
-    target_length: int,
-    pad_value: int,
-    left: bool,
-):
-  """Pads provided list of JAX arrays to the same length along the last axis.
-
-  Args:
-    inputs: A list of JAX arrays to be padded.
-    target_length: The desired length of each padded array along the last axis.
-    pad_value: The value to use for padding the arrays.
-    left: A boolean indicating whether to pad on the left side of the array.
-
-  Returns:
-    A JAX array where each original input array has been padded to
-    `target_length` along the last axis.
-  """
-  padded_inputs = []
-
-  for s in inputs:
-    padded_s = common.pad_to_length(
-        jnp.array(s),
-        target_length=target_length,
-        pad_value=pad_value,
-        left=left,
-        axis=-1,
-    )
-    padded_s = padded_s[..., -target_length:]
-    padded_inputs.append(padded_s)
-  return jnp.array(padded_inputs)
-
-
-@functools.partial(jax.jit, static_argnames=["pad_value", "eos_value"])
-def process_ids(
-    prompt_ids: jax.Array,
-    completion_ids: jax.Array,
-    pad_value: int,
-    eos_value: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-  """Process prompt and completion ids."""
-  prompt_completion_ids = jnp.concat([prompt_ids, completion_ids], axis=1)
-
-  # Compute masks. For prompt, this is just the padding mask. For completion,
-  # we do an and of the padding mask and the completion mask (computed using
-  # the eos token).
-  prompt_mask = (prompt_ids != pad_value).astype("int32")
-
-  completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype(
-      "int32"
-  )
-  completion_mask = common.make_completion_mask(
-      completion_ids, eos_tok=eos_value
-  )
-  completion_mask = completion_mask * completion_padding_mask
-
-  prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, completion_mask], axis=-1
-  )
-
-  # Get positions for the concatenated prompt and completion ids.
-  positions = common.build_positions_from_mask(prompt_completion_mask)
-  prompt_completion_causal_mask = common.make_causal_attn_mask(
-      prompt_completion_mask
-  )
-  return (
-      positions,
-      prompt_completion_ids,
-      completion_mask,
-      prompt_completion_mask,
-      prompt_completion_causal_mask,
-  )
 
 
 def grpo_loss_fn(model, train_example, beta, epsilon):
