@@ -227,6 +227,12 @@ class Sampler:
   def transformer_state(self) -> statelib.State:
     return self._transformer_state
 
+  def pad_id(self) -> int:
+    return self.tokenizer.pad_id()
+
+  def eos_id(self) -> int:
+    return self.tokenizer.eos_id()
+
   @transformer_state.setter
   def transformer_state(self, state: statelib.State) -> None:
 
