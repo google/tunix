@@ -464,6 +464,7 @@ class PeftTrainer:
         eval_example = self._prepare_inputs(eval_example)
         eval_example = self._shard_input(eval_example)
         loss, aux = eval_step(self.model, eval_example)
+        loss = jax.lax.stop_gradient(loss)
         self._eval_steps += 1
         self._post_process_eval_step(aux)
         eval_loss += loss

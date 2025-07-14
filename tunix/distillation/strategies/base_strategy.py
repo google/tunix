@@ -110,7 +110,9 @@ class BaseStrategy(abc.ABC):
       inputs: dict[str, jax.Array],
   ) -> Any:
     """Computes the teacher model outputs."""
-    return self._teacher_forward_fn(teacher_model, **inputs)
+    output = self._teacher_forward_fn(teacher_model, **inputs)
+    output = jax.lax.stop_gradient(output)
+    return output
 
   def get_student_outputs(
       self,
@@ -142,6 +144,7 @@ class BaseStrategy(abc.ABC):
   ) -> jax.Array:
     """Computes the task loss based on student model forward pass and labels."""
     student_output = self.get_student_outputs(student_model, inputs)
+    student_output = jax.lax.stop_gradient(student_output)
     labels = self._labels_fn(**inputs)
     return self.compute_eval_loss(
         student_output=student_output,
