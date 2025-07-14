@@ -101,6 +101,7 @@ def reshard_pytree(
     )
   # END GOOGLE-INTERNAL
 
+  # Do not remove this check. It's used in google internally.
   if reshardfn is None:
     try:
       import pathwaysutils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
