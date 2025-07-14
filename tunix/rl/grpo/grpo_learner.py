@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from concurrent import futures
+import contextlib
 import dataclasses
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 
@@ -31,6 +32,8 @@ import numpy as np
 import optax
 from tunix.rl import common
 from tunix.rl.grpo import grpo_helpers
+from tunix.rl.grpo import reshard
+from tunix.rl.grpo import utils
 from tunix.rl.inference import inference_worker as inference
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
@@ -256,11 +259,6 @@ class GrpoLearner:
     self.need_sync_sampler_weights = (
         self.trainer_mesh != self.rollout_worker_mesh
     )
-    if self.need_sync_sampler_weights:
-      raise ValueError(
-          "Different trainer and sampler meshes are not supported for now. We"
-          " are working on the binary release. Stay tuned."
-      )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_train_step = self.trainer.train_steps
 
@@ -445,7 +443,7 @@ class GrpoLearner:
       batch_repeat: The number of times to repeat the batch in the final
         dataset.
       data_queue: The data queue to use for putting the examples into.
-      async_loading: Whether to load the batch asyncronously, if not async
+      async_loading: Whether to load the batch asynchronously, if not async
         loading, then all the examples needed will be processed and then loaded
         into the data queue.
       mode: The mode to use for logging metrics.
@@ -511,27 +509,25 @@ class GrpoLearner:
 
   def sync_sampler_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
-    # if jax.devices():
-    #   cm = contextlib.ExitStack()
-    #   cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
-    #   cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))
-    # else:
-    #   cm = contextlib.nullcontext()
-    # with cm:
-    #   if utils.is_lora_enabled(self.trainer.model):
-    #     src_lora_params = nnx.state(self.trainer.model, nnx.LoRAParam)
-    #     dst_lora_params =
-    #       nnx.state(self.rollout_worker.model(), nnx.LoRAParam)
-    #     resharded_lora_params = reshard.reshard_pytree(
-    #         src_lora_params, dst_lora_params
-    #     )
-    #     self.rollout_worker.update_params(resharded_lora_params)
-    #   else:
-    #     src_params = nnx.state(self.trainer.model, nnx.Param)
-    #     dst_params = nnx.state(self.rollout_worker.model(), nnx.Param)
-    #     resharded_params = reshard.reshard_pytree(src_params, dst_params)
-    #     self.rollout_worker.update_params(resharded_params)
-    pass
+    if jax.devices():
+      cm = contextlib.ExitStack()
+      cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
+      cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))
+    else:
+      cm = contextlib.nullcontext()
+    with cm:
+      if utils.is_lora_enabled(self.trainer.model):
+        src_lora_params = nnx.state(self.trainer.model, nnx.LoRAParam)
+        dst_lora_params = nnx.state(self.rollout_worker.model(), nnx.LoRAParam)
+        resharded_lora_params = reshard.reshard_pytree(
+            src_lora_params, dst_lora_params
+        )
+        self.rollout_worker.update_params(resharded_lora_params)
+      else:
+        src_params = nnx.state(self.trainer.model, nnx.Param)
+        dst_params = nnx.state(self.rollout_worker.model(), nnx.Param)
+        resharded_params = reshard.reshard_pytree(src_params, dst_params)
+        self.rollout_worker.update_params(resharded_params)
 
   def train(
       self,
