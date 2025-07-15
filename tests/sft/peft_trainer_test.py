@@ -13,12 +13,12 @@
 # limitations under the License.
 
 """Peft trainer unittest."""
-
 import functools
 import os
 from typing import Any, Tuple
 from unittest import mock
 from absl.testing import absltest
+import chex
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -70,12 +70,38 @@ def dummy_datasets(batch_size: int, repeat: int = 1):
       for x in dummy_input
   ] * repeat
 
+global_counter = 0
+
 
 class PeftTrainerTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
+    self.num_cpus = 4
+    chex.set_n_cpu_devices(self.num_cpus)
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
+
+  def test_compile_once(self):
+    class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
+
+      def _train_step(self, model, optimizer, inputs):
+        global global_counter
+        global_counter += 1
+        return super()._train_step(model, optimizer, inputs)
+
+    mesh = shd.Mesh(
+        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
+    )
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.get_lora_model(tc.ToyTransformer(rngs=rngs), mesh=mesh)
+    trainer = CountCompiledTimesTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    global global_counter
+    global_counter = 0  # make mypy happy
+    with mesh:
+      trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(global_counter, 1)
 
   def test_basic_training(self):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)

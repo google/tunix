@@ -216,42 +216,71 @@ class PeftTrainer:
     self.gen_model_input_fn = gen_model_input_fn
     return self
 
+  def _train_step(
+      self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
+  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+    """Main body for one train step.
+
+    Args:
+      model: The model to train.
+      optimizer: The optimizer to use.
+      inputs: The training input.
+
+    Returns:
+      The loss and auxiliary data if has_aux is True, otherwise the loss.
+    """
+    inputs = self.gen_model_input_fn(inputs)
+
+    grad_fn = nnx.value_and_grad(
+        self.loss_fn,
+        argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
+        has_aux=self._has_aux,
+    )
+    out, grads = grad_fn(model, **inputs)
+    optimizer.update(grads)
+    if self._has_aux:
+      loss, aux = out
+      return loss, aux
+    else:
+      return out, None
+
+  def _eval_step(
+      self, model: nnx.Module, inputs: Any
+  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+    inputs = self.gen_model_input_fn(inputs)
+    out = self.eval_loss_fn(model, **inputs)
+    if self._has_aux:
+      loss, aux = out
+      return loss, aux
+    else:
+      return out, None
+
   def create_train_step_fn(self) -> Callable[..., ArrayLike]:
     """Creates the train step function."""
-
-    def train_step(
-        model: nnx.Module, optimizer: nnx.Optimizer, inputs: TrainingInput
-    ) -> ArrayLike | Tuple[ArrayLike, Any]:
-      inputs = self.gen_model_input_fn(inputs)
-
-      grad_fn = nnx.value_and_grad(
-          self.loss_fn,
-          argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
-          has_aux=self._has_aux,
-      )
-      out, grads = grad_fn(model, **inputs)
-      optimizer.update(grads)
-      if self._has_aux:
-        loss, aux = out
-        return loss, aux
-      else:
-        return out, None
-
-    return train_step
+    return self._train_step
 
   def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
     """Creates the eval step function."""
+    return self._eval_step
 
-    def eval_step(model: nnx.Module, inputs: TrainingInput) -> Any:
-      inputs = self.gen_model_input_fn(inputs)
-      out = self.eval_loss_fn(model, **inputs)
-      if self._has_aux:
-        loss, aux = out
-        return loss, aux
-      else:
-        return out, None
+  def _shard_optimizer(self, mesh: shd.Mesh) -> None:
+    """Optimizer states should be sharded before calling the jit function.
 
-    return eval_step
+    If not, the _train_step will be compiled 2 times.
+
+    Args:
+      mesh: The mesh used for sharding.
+    """
+    if mesh.empty:
+      return
+    optimizer_state = nnx.state(
+        self.optimizer, nnx.optimizer.OptState
+    )  # select only the optimizer state
+    optimizer_shardings = nnx.get_named_sharding(optimizer_state, mesh)
+    optimizer_sharded_state = jax.lax.with_sharding_constraint(
+        optimizer_state, optimizer_shardings
+    )
+    nnx.update(self.optimizer, optimizer_sharded_state)
 
   def jit_train_and_eval_step(self, skip_jit: bool = False):
     """Creates and returns the train and eval step functions.
@@ -270,6 +299,8 @@ class PeftTrainer:
       return train_step, eval_step
     else:
       if self._jitted_train_step_fn is None:
+        mesh = pxla.thread_resources.env.physical_mesh
+        self._shard_optimizer(mesh)
         self._jitted_train_step_fn = nnx.jit(
             train_step, donate_argnames=("optimizer",)
         )
