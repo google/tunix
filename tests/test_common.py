@@ -106,6 +106,28 @@ class ToyTransformer(nnx.Module):
     return self.emb.num_embeddings
 
 
+class ToyScoreModel(ToyTransformer):
+  """Toy transformer which outputs a score."""
+
+  def __init__(
+      self, rngs: nnx.Rngs, vocab_size: int = 256, num_layers: int = 4
+  ):
+    super().__init__(rngs, vocab_size, num_layers)
+
+    self.score_layer = nnx.Linear(
+        in_features=16,
+        out_features=1,
+        rngs=rngs,
+    )
+
+  def score(self, x, positions, attention_mask):
+    x = self.emb(x)
+    for layer in self.layers:
+      x = layer(x)
+
+    return self.score_layer(x)
+
+
 def get_lora_model(
     model: nnx.Module,
     module_path: str = '.*w1|.*w2',
