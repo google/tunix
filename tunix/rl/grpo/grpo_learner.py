@@ -321,7 +321,6 @@ class GrpoLearner:
           pad_id=pad_value,
           eos_id=eos_value,
       )
-      ref_per_token_logps = jax.lax.stop_gradient(ref_per_token_logps)
     else:
       ref_per_token_logps = None
 
@@ -329,7 +328,6 @@ class GrpoLearner:
       old_per_token_logps = self.rollout_worker.get_per_token_logps(
           prompt_tokens=prompt_ids, completion_tokens=completion_ids
       )
-      old_per_token_logps = jax.lax.stop_gradient(old_per_token_logps)
     else:
       old_per_token_logps = None
 
@@ -511,7 +509,7 @@ class GrpoLearner:
 
   def sync_sampler_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
-    if jax.devices():
+    if jax.devices("tpu"):
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
       cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))

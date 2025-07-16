@@ -68,13 +68,14 @@ def compute_per_token_logps(
   )
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
-  return get_per_token_logps(
+  per_token_logps = get_per_token_logps(
       model,
       input_tokens=prompt_completion_ids,
       positions=positions,
       attn_mask=attn_mask,
       logits_to_keep=completion_tokens.shape[1],
   )
+  return jax.lax.stop_gradient(per_token_logps)
 
 
 def make_completion_mask(completion_ids, eos_tok: int = 0):
