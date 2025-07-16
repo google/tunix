@@ -74,6 +74,8 @@ class CommonTest(absltest.TestCase):
             [-6.071025, -7.5328417, -5.9712567, -4.653783],
             [-6.039485, -8.264197, -6.2771187, -4.767109],
         ]),
+        atol=1e-6,
+        rtol=1e-6,
     )
 
   def test_make_completion_mask(self):

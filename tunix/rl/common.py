@@ -58,6 +58,7 @@ def compute_per_token_logps(
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
+    stop_gradient: bool = True,
 ) -> jax.Array:
   """Computes the per-token log probabilities."""
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
@@ -68,13 +69,16 @@ def compute_per_token_logps(
   )
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
-  return get_per_token_logps(
+  per_token_logps = get_per_token_logps(
       model,
       input_tokens=prompt_completion_ids,
       positions=positions,
       attn_mask=attn_mask,
       logits_to_keep=completion_tokens.shape[1],
   )
+  if stop_gradient:
+    per_token_logps = jax.lax.stop_gradient(per_token_logps)
+  return per_token_logps
 
 
 def make_completion_mask(completion_ids, eos_tok: int = 0):
