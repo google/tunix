@@ -197,8 +197,10 @@ class CheckpointManagerTest(absltest.TestCase):
         'x': jnp.ones(2, dtype=jnp.int32),
     }
     model = qwix.apply_lora_to_model(model, lora_provider, **dummy_model_input)
-    expected_lora_state = nnx.state(model, nnx.LoRAParam)
-    old_non_lora_state = nnx.state(model, (nnx.filterlib.Not(nnx.LoRAParam)))
+    expected_lora_state = nnx.clone(nnx.state(model, nnx.LoRAParam))
+    old_non_lora_state = nnx.clone(
+        nnx.state(model, (nnx.filterlib.Not(nnx.LoRAParam)))
+    )
 
     # Save the model params.
     self.assertTrue(
@@ -226,7 +228,7 @@ class CheckpointManagerTest(absltest.TestCase):
     jax.tree.map_with_path(
         assert_not_equal,
         old_non_lora_state,
-        nnx.state(model, (nnx.filterlib.Not(nnx.LoRAParam))),
+        nnx.state(model, nnx.filterlib.Not(nnx.LoRAParam)),
     )
 
 
