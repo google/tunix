@@ -18,6 +18,7 @@ import os
 from typing import Any, Tuple
 from unittest import mock
 from absl.testing import absltest
+from absl.testing import parameterized
 import chex
 from flax import nnx
 import jax
@@ -73,7 +74,7 @@ def dummy_datasets(batch_size: int, repeat: int = 1):
 global_counter = 0
 
 
-class PeftTrainerTest(absltest.TestCase):
+class PeftTrainerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -124,6 +125,7 @@ class PeftTrainerTest(absltest.TestCase):
         trainer.metrics_logger.get_metric('perplexity', 'eval'), 0
     )
     self.assertGreater(trainer._train_steps, 0)
+    # TODO(b/328669617): Validate the learning rate scheduler.
     self.assertLen(
         trainer.metrics_logger.get_metric_history('perplexity', 'train'),
         trainer._train_steps,
@@ -263,7 +265,10 @@ class PeftTrainerTest(absltest.TestCase):
 
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
-  def test_lora_training(self):
+  @parameterized.named_parameters(
+      ('scalar', 1e-3), ('constant_schedule', optax.constant_schedule(1e-3))
+  )
+  def test_lora_training(self, learning_rate_scheduler):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     rngs = nnx.Rngs(0)
     model = tc.get_lora_model(tc.ToyTransformer(rngs=rngs))
@@ -275,7 +280,9 @@ class PeftTrainerTest(absltest.TestCase):
         jnp.copy, nnx.state(model, nnx.LoRAParam)
     )
 
-    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.sgd(learning_rate_scheduler), config
+    )
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
     trainer.train(self.train_ds, self.eval_ds)
@@ -287,8 +294,21 @@ class PeftTrainerTest(absltest.TestCase):
         tc.assert_not_equal, original_lora_params, lora_params
     )
 
-  def test_gradient_accumulation(self):
-    def train(train_ds, gradient_accumulation_steps: int | None):
+  @parameterized.named_parameters(
+      ('scalar', 1e-3),
+      (
+          'piecewise_constant_schedule',
+          optax.piecewise_constant_schedule(
+              init_value=1e-3, boundaries_and_scales={0: 1e-4, 1: 1e-1}
+          ),
+      ),
+  )
+  def test_gradient_accumulation(self, learning_rate_schedule):
+    def train(
+        train_ds,
+        gradient_accumulation_steps: int | None,
+        learning_rate_schedule: int | optax.Schedule,
+    ):
       config = peft_trainer.TrainingConfig(
           eval_every_n_steps=2,
           max_steps=100,
@@ -297,17 +317,24 @@ class PeftTrainerTest(absltest.TestCase):
       rngs = nnx.Rngs(0)
       model = tc.ToyTransformer(rngs=rngs)
 
-      trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+      trainer = peft_trainer.PeftTrainer(
+          model, optax.sgd(learning_rate_schedule), config
+      )
       trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
       trainer.train(train_ds, self.eval_ds)
       return nnx.state(model, nnx.Param)
 
     train_ds = dummy_datasets(batch_size=4, repeat=4)
-    params = train(train_ds, gradient_accumulation_steps=None)
+    params = train(
+        train_ds,
+        gradient_accumulation_steps=None,
+        learning_rate_schedule=learning_rate_schedule,
+    )
     params_with_grad_accumulation = train(
         dummy_datasets(batch_size=2, repeat=4),
         gradient_accumulation_steps=2,
+        learning_rate_schedule=learning_rate_schedule,
     )
     jax.tree.map_with_path(
         functools.partial(tc.assert_close, atol=1e-7, rtol=1e-7),
