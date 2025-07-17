@@ -2,6 +2,7 @@
 
 import collections
 import dataclasses
+import datetime
 import enum
 import functools
 import logging
@@ -112,7 +113,10 @@ def register_jax_monitoring(metrics_logger_options: MetricsLoggerOptions):
   )
   # Register Weights & Biases backend.
   if wandb is not None:
-    wandb.init(project="tunix", name="tunix_metrics_logger", anonymous="allow")
+    wandb_run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb.init(project="tunix", name=wandb_run_name, anonymous="allow")
+    if wandb.run:
+      logging.info("W&B run URL: %s", wandb.run.url)
     jax.monitoring.register_scalar_listener(log_to_wandb)
   return [tensorboard_summary_writer]
 

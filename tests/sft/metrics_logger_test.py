@@ -11,8 +11,13 @@ from tunix.sft import metrics_logger
 
 class MetricLoggerTest(absltest.TestCase):
 
+  @mock.patch("tunix.sft.metrics_logger.datetime")
   @mock.patch("tunix.sft.metrics_logger.wandb")
-  def test_metrics_logger(self, mock_wandb):
+  def test_metrics_logger(self, mock_wandb, mock_datetime):
+    fixed_timestamp_str = "2025-07-17_13-56-53"
+    mock_datetime.datetime.now.return_value.strftime.return_value = (
+        fixed_timestamp_str
+    )
     metrics_logger.wandb = mock_wandb
     log_dir = self.create_tempdir().full_path
     logger = metrics_logger.MetricsLogger(
@@ -48,7 +53,7 @@ class MetricLoggerTest(absltest.TestCase):
     self.assertGreater(file_size_after, file_size_before)
 
     mock_wandb.init.assert_called_once_with(
-        project="tunix", name="tunix_metrics_logger", anonymous="allow"
+        project="tunix", name=fixed_timestamp_str, anonymous="allow"
     )
     self.assertGreater(mock_wandb.log.call_count, 6)
 
