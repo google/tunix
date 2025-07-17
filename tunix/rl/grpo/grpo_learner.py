@@ -37,7 +37,6 @@ from tunix.rl.grpo import utils
 from tunix.rl.inference import inference_worker as inference
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
-from tunix.sft import checkpoint_manager
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from typing_extensions import override
@@ -216,13 +215,6 @@ class GrpoLearner:
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
-    self._metrics_logger = metrics_logger.MetricsLogger(
-        self.grpo_config.metrics_logging_options
-    )
-    self.ckpt_manager = checkpoint_manager.CheckpointManager(
-        root_directory=self.grpo_config.checkpoint_root_directory,
-        options=self.grpo_config.checkpointing_options,
-    )
     self.trainer = Trainer(
         model,
         optimizer,
@@ -236,9 +228,9 @@ class GrpoLearner:
             "epsilon": self.grpo_config.epsilon,
         }
     )
-    self.trainer.metrics_logger = self._metrics_logger
-    self.trainer.checkpoint_manager = self.ckpt_manager
     self.trainer.is_managed_externally = True
+
+    self._metrics_logger = self.trainer.metrics_logger
 
     self.grad_acc_steps = self.grpo_config.get_with_default(
         "gradient_accumulation_steps", 1
