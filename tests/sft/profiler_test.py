@@ -219,6 +219,51 @@ class ProfilerTest(parameterized.TestCase):
     else:
       mock_stop_trace.assert_not_called()
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='first_5_last_10_max_1',
+          max_step=1,
+          initial_step=0,
+          skip_first_n_steps=5,
+          profiler_steps=5,
+      ),
+      dict(
+          testcase_name='first_1_last_1_max_1',
+          max_step=1,
+          initial_step=0,
+          skip_first_n_steps=1,
+          profiler_steps=0,
+      ),
+      dict(
+          testcase_name='first_1_last_2_max_1',
+          max_step=1,
+          initial_step=0,
+          skip_first_n_steps=1,
+          profiler_steps=1,
+      ),
+      dict(
+          testcase_name='first_1_last_1_max_10',
+          max_step=10,
+          initial_step=0,
+          skip_first_n_steps=1,
+          profiler_steps=0,
+      ),
+  )
+  def test_invalid_step_numbers(
+      self, max_step, initial_step, skip_first_n_steps, profiler_steps
+  ):
+    profiler_options = profiler.ProfilerOptions(
+        log_dir=self.log_dir,
+        skip_first_n_steps=skip_first_n_steps,
+        profiler_steps=profiler_steps,
+    )
+    with self.assertRaises(ValueError):
+      profiler.Profiler(
+          initial_step=initial_step,
+          max_step=max_step,
+          profiler_options=profiler_options,
+      )
+
 
 if __name__ == '__main__':
   absltest.main()

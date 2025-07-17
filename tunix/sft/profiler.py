@@ -43,12 +43,20 @@ class Profiler:
       return
     self._do_not_profile = False
     self._output_path = profiler_options.log_dir
+    # This is step number, starting from 0.
     self._first_profile_step = (
         initial_step + profiler_options.skip_first_n_steps
     )
+    # This is step number + 1, starting from 1.
     self._last_profile_step = self._set_last_profile_step(
         profiler_options.profiler_steps, max_step
     )
+    # We use >= instead of > because last_profile_step is step number + 1.
+    if self._first_profile_step >= self._last_profile_step:
+      raise ValueError(
+          f"First profile step {self._first_profile_step} cannot be greater"
+          f" than the last profile step {self._last_profile_step}."
+      )
 
   def maybe_activate(self, step: int):
     """Start the profiler."""
