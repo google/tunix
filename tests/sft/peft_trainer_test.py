@@ -28,6 +28,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager
+from tunix.sft import hooks
 from tunix.sft import peft_trainer
 from tunix.sft import profiler
 from tunix.tests import test_common as tc
@@ -132,6 +133,34 @@ class PeftTrainerTest(parameterized.TestCase):
     )
 
     trainer.train(self.train_ds)  # No eval dataset.
+
+  def test_basic_training_with_hooks(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(rngs=rngs)
+
+    mock_training_hooks_instance = mock.create_autospec(hooks.TrainingHooks)
+    trainer = peft_trainer.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        config,
+        training_hooks=mock_training_hooks_instance,
+    )
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+
+    expected_training_hooks_calls = (
+        [mock.call.on_train_start(hooks.TrainingContext(model=model))]
+        + [mock.call.on_train_step_start(step, 100) for step in range(1)]
+        + [mock.call.on_train_step_end(step, mock.ANY) for step in range(1, 3)]
+        + [mock.call.on_eval_step_start(step) for step in range(2)]
+        + [mock.call.on_eval_step_end(step, mock.ANY) for step in range(1)]
+        + [mock.call.on_train_end()]
+    )
+    mock_training_hooks_instance.assert_has_calls(
+        expected_training_hooks_calls,
+        any_order=True,
+    )
 
   def test_reusing_trainer(self):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
