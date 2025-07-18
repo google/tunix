@@ -31,6 +31,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 from tunix.rl import common
+from tunix.rl import trainer as rl_trainer
 from tunix.rl.grpo import grpo_helpers
 from tunix.rl.grpo import reshard
 from tunix.rl.grpo import utils
@@ -39,7 +40,6 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
-from typing_extensions import override
 
 _TrainingInputT = Dict[str, List[str] | ArrayLike]
 
@@ -123,45 +123,6 @@ class GrpoConfig(peft_trainer.TrainingConfig):
     )
 
 
-class Trainer(peft_trainer.PeftTrainer):
-  """Overrides certain methods for metrics logging, etc."""
-
-  def __init__(
-      self,
-      model: nnx.Module,
-      optimizer: optax.GradientTransformation,
-      training_config: GrpoConfig,
-  ):
-    super().__init__(
-        model,
-        optimizer,
-        training_config,
-    )
-    self.grpo_config = training_config
-
-  @override
-  def _post_process_train_step(self, aux: Any) -> None:
-    self.metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
-
-  @override
-  def _post_process_eval_step(self, aux: Any) -> None:
-    self.metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
-
-  @property
-  def _tqdm_train_metrics(self) -> list[str]:
-    metrics = ["loss", "perplexity", "rewards/overall"]
-    if self.grpo_config.beta != 0.0:
-      metrics.append("kl")
-    return metrics
-
-  @property
-  def _tqdm_eval_metrics(self) -> list[str]:
-    metrics = ["loss", "perplexity", "rewards/overall"]
-    if self.grpo_config.beta != 0.0:
-      metrics.append("kl")
-    return metrics
-
-
 class GrpoLearner:
   """GRPO (Group Relative Policy Optimization) learner.
 
@@ -215,7 +176,7 @@ class GrpoLearner:
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
-    self.trainer = Trainer(
+    self.trainer = rl_trainer.Trainer(
         model,
         optimizer,
         training_config,
@@ -228,6 +189,11 @@ class GrpoLearner:
             "epsilon": self.grpo_config.epsilon,
         }
     )
+    self.trainer.with_rl_metrics_to_log({"kl": "kl"})
+    self.trainer.with_tqdm_metrics_to_display([
+        "rewards/overall",
+        lambda: "kl" if self.grpo_config.beta != 0.0 else None,
+    ])
     self.trainer.is_managed_externally = True
 
     self._metrics_logger = self.trainer.metrics_logger

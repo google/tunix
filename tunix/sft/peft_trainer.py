@@ -358,11 +358,11 @@ class PeftTrainer:
       self._mode = original_mode
 
   @property
-  def _tqdm_train_metrics(self) -> list[str] | None:
+  def _tqdm_train_metrics(self) -> list[str]:
     return ["loss", "perplexity", "tflops"]
 
   @property
-  def _tqdm_eval_metrics(self) -> list[str] | None:
+  def _tqdm_eval_metrics(self) -> list[str]:
     return ["loss", "perplexity"]
 
   def _may_update_pbar(self, metrics, increment_steps: bool = False):
