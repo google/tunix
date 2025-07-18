@@ -15,6 +15,7 @@
 """Common test utilities."""
 
 from collections.abc import Iterable
+import dataclasses
 
 from flax import nnx
 import jax
@@ -74,6 +75,15 @@ class Decoder(nnx.Module):
     return h
 
 
+@dataclasses.dataclass(kw_only=True, frozen=True)
+class ModelConfig:
+  """Model config for testing."""
+
+  num_layers: int
+  num_kv_heads: int
+  head_dim: int
+
+
 class ToyTransformer(nnx.Module):
   """Toy transformer for testing."""
 
@@ -83,6 +93,9 @@ class ToyTransformer(nnx.Module):
       vocab_size: int = 256,
       num_layers: int = 4,
   ):
+    self.config = ModelConfig(
+        num_layers=num_layers, num_kv_heads=4, head_dim=16
+    )
     self.emb = nnx.Embed(vocab_size, 16, rngs=rngs)
     self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
     self.output = nnx.Linear(in_features=16, out_features=vocab_size, rngs=rngs)
