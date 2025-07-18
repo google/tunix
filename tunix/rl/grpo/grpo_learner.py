@@ -24,22 +24,16 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 import flax
 from flax import nnx
 import jax
-from jax.interpreters import pxla
 import jax.numpy as jnp
-from jax.sharding import Mesh
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
-import optax
 from tunix.rl import common
-from tunix.rl import trainer as rl_trainer
+from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_helpers
 from tunix.rl.grpo import reshard
 from tunix.rl.grpo import utils
-from tunix.rl.inference import inference_worker as inference
 from tunix.rl.queue import data_queue as queue_lib
-from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
-from tunix.sft import peft_trainer
 
 _TrainingInputT = Dict[str, List[str] | ArrayLike]
 
@@ -80,12 +74,10 @@ class TrainExample:
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class GrpoConfig(peft_trainer.TrainingConfig):
-  """Configuration for GRPO trainer.
+class GrpoConfig:
+  """Configuration for GRPO algorithm.
 
   Attributes:
-    total_generation_steps: The maximum number of tokens to generate for each
-      completion. This determines the length of the generated sequences.
     num_generations: The number of times the policy generates multiple responses
       for a given prompt within a single training step. This corresponds to 'G'
       in Algorithm 1 in the paper. A higher value means more samples are used to
@@ -96,25 +88,15 @@ class GrpoConfig(peft_trainer.TrainingConfig):
       the reference model. A value of 0.0 means no KL penalty is applied.
     epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
       PPO, it ensures stable updates.
-    temperature: The temperature parameter for generating completions.
-    top_p: The top-p parameter for next-token decoding during text generation.
-    max_prompt_length: The maximum length of the prompt. The prompt will be
-      padded/truncated to this length.
 
   References:
   - https://arxiv.org/abs/2402.03300
   """
 
-  total_generation_steps: int
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
   epsilon: float = 0.2
-  temperature: float = 0.9
-  top_p: float = 1.0
-  top_k: int | None = None
-
-  max_prompt_length: int
 
   def __post_init__(self):
     assert self.num_generations > 1, (
@@ -140,85 +122,61 @@ class GrpoLearner:
 
   def __init__(
       self,
-      model: nnx.Module,
-      inference_worker: inference.InferenceWorker,
-      rollout_worker: base_rollout.BaseRollout,
+      rl_cluster: rl_cluster_lib.RLCluster,
       reward_fns: RewardFn | List[RewardFn],
-      optimizer: optax.GradientTransformation,
-      training_config: GrpoConfig,
-      trainer_mesh: None | Mesh = None,
-      rollout_worker_mesh: None | Mesh = None,
+      grpo_config: GrpoConfig,
   ):
     """Initializes the `GrpoTrainer`.
 
     Args:
-      model: The policy model to be trained.
-      inference_worker: The inference worker for forward only computations.
-      rollout_worker: The rollout worker to use for generating text completions
-        from the policy model, based on prompts.
+      rl_cluster: RL cluster containing actor, reference and reward models.
       reward_fns: A single callable or a list of callables that compute a scalar
         reward for given prompts and completions. Each function should accept
         `prompts`, `completions` and optional keyword arguments, and return a
         list of float rewards.
-      optimizer: The Optax optimizer to use for training.
-      training_config: An instance of `GrpoConfig` containing all
-        training-specific configuration options.
-      trainer_mesh: The mesh to use for the trainer.
-      rollout_worker_mesh: The mesh to use for the rollout worker. NOTE:
-        currently, it's assumed the passed in sampler is already sharded to the
-        rollout_worker_mesh. This is pending to change with further API
-        refactoring.
+      grpo_config: An instance of `GrpoConfig` containing all GRPO sepecific
+        parameters.
     """
-    self.grpo_config = training_config
-    self.model = model
-    self.inference_worker = inference_worker
-    self.rollout_worker = rollout_worker
+    self.grpo_config = grpo_config
+    self.rl_cluster = rl_cluster
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
-    self.trainer = rl_trainer.Trainer(
-        model,
-        optimizer,
-        training_config,
-    )
-    self.trainer.with_loss_fn(grpo_loss_fn, has_aux=True)
-    self.trainer.with_gen_model_input_fn(
+    self.rl_cluster.actor_trainer.with_loss_fn(grpo_loss_fn, has_aux=True)
+    self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
             "beta": self.grpo_config.beta,
             "epsilon": self.grpo_config.epsilon,
         }
     )
-    self.trainer.with_rl_metrics_to_log({"kl": "kl"})
-    self.trainer.with_tqdm_metrics_to_display([
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": "kl"})
+    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         "rewards/overall",
         lambda: "kl" if self.grpo_config.beta != 0.0 else None,
     ])
-    self.trainer.is_managed_externally = True
+    self.rl_cluster.actor_trainer.is_managed_externally = True
 
-    self._metrics_logger = self.trainer.metrics_logger
+    self._metrics_logger = self.rl_cluster.actor_trainer.metrics_logger
 
-    self.grad_acc_steps = self.grpo_config.get_with_default(
-        "gradient_accumulation_steps", 1
+    self.grad_acc_steps = (
+        self.rl_cluster.cluster_config.training_config.get_with_default(
+            "gradient_accumulation_steps", 1
+        )
     )
 
     self._train_steps = 0
     self._eval_steps = 0
-    self.trainer_mesh = (
-        trainer_mesh
-        if trainer_mesh is not None
-        else pxla.thread_resources.env.physical_mesh
-    )
-    self.rollout_worker_mesh = (
-        rollout_worker_mesh
-        if rollout_worker_mesh is not None
-        else pxla.thread_resources.env.physical_mesh
-    )
+
+    # TODO: b/419334887 - move this to rl_cluster.
     self.need_sync_sampler_weights = (
-        self.trainer_mesh != self.rollout_worker_mesh
+        self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
+        != self.rl_cluster.cluster_config.role_to_mesh[
+            rl_cluster_lib.Role.ROLLOUT
+        ]
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
-    self._last_train_step = self.trainer.train_steps
+    self._last_train_step = self.rl_cluster.actor_trainer.train_steps
 
   def _get_metric_logging_steps(self, mode: metrics_logger.Mode) -> int:
     return (
@@ -244,21 +202,12 @@ class GrpoLearner:
       prompt IDs, completion IDs, masks, advantages, and per-token log
       probabilities from the reference and policy models.
     """
-    pad_value = self.rollout_worker.pad_id()
-    eos_value = self.rollout_worker.eos_id()
+    pad_value = self.rl_cluster.rollout.pad_id()
+    eos_value = self.rl_cluster.rollout.eos_id()
 
     # Generate, and pad output.
-    completion_output = self.rollout_worker.generate(
+    completion_output = self.rl_cluster.generate(
         prompts=training_input["prompts"],
-        rollout_config=base_rollout.RolloutConfig(
-            max_tokens_to_generate=self.grpo_config.total_generation_steps,
-            temperature=self.grpo_config.temperature,
-            top_p=self.grpo_config.top_p,
-            top_k=self.grpo_config.top_k,
-            seed=None,
-        ),
-        max_prompt_length=self.grpo_config.max_prompt_length,
-        pad_output=True,
     )
     completion_ids = completion_output.tokens
     prompt_ids = completion_output.left_padded_prompt_tokens
@@ -273,7 +222,7 @@ class GrpoLearner:
     completion_mask = completion_mask * completion_padding_mask
 
     if self.grpo_config.beta != 0.0:
-      ref_per_token_logps = self.inference_worker.get_ref_per_token_logps(
+      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           pad_id=pad_value,
@@ -283,7 +232,7 @@ class GrpoLearner:
       ref_per_token_logps = None
 
     if self.grpo_config.num_iterations > 1:
-      old_per_token_logps = self.rollout_worker.get_per_token_logps(
+      old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
           prompt_tokens=prompt_ids, completion_tokens=completion_ids
       )
     else:
@@ -433,16 +382,15 @@ class GrpoLearner:
             example,
         )  # [B] -> [B * G]
 
-        with self.rollout_worker_mesh:
-          with jax.profiler.StepTraceAnnotation(
-              "sampler",
-              step_num=self._train_steps
-              if mode == metrics_logger.Mode.TRAIN
-              else self._eval_steps,
-          ):
-            advantage = self._generate_and_compute_advantage(example, mode)
-          if async_loading:
-            data_queue.put([advantage])
+        with jax.profiler.StepTraceAnnotation(
+            "sampler",
+            step_num=self._train_steps
+            if mode == metrics_logger.Mode.TRAIN
+            else self._eval_steps,
+        ):
+          advantage = self._generate_and_compute_advantage(example, mode)
+        if async_loading:
+          data_queue.put([advantage])
 
         if mode == metrics_logger.Mode.TRAIN:
           self._train_steps += 1
@@ -465,6 +413,7 @@ class GrpoLearner:
         data_queue.put(None)
         raise e
 
+  # TODO: b/419334887 - move this to rl_cluster.
   def sync_sampler_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
     if jax.devices():
@@ -474,18 +423,22 @@ class GrpoLearner:
     else:
       cm = contextlib.nullcontext()
     with cm:
-      if utils.is_lora_enabled(self.trainer.model):
-        src_lora_params = nnx.state(self.trainer.model, nnx.LoRAParam)
-        dst_lora_params = nnx.state(self.rollout_worker.model(), nnx.LoRAParam)
+      if utils.is_lora_enabled(self.rl_cluster.actor_trainer.model):
+        src_lora_params = nnx.state(
+            self.rl_cluster.actor_trainer.model, nnx.LoRAParam
+        )
+        dst_lora_params = nnx.state(
+            self.rl_cluster.rollout.model(), nnx.LoRAParam
+        )
         resharded_lora_params = reshard.reshard_pytree(
             src_lora_params, dst_lora_params
         )
-        self.rollout_worker.update_params(resharded_lora_params)
+        self.rl_cluster.rollout.update_params(resharded_lora_params)
       else:
-        src_params = nnx.state(self.trainer.model, nnx.Param)
-        dst_params = nnx.state(self.rollout_worker.model(), nnx.Param)
+        src_params = nnx.state(self.rl_cluster.actor_trainer.model, nnx.Param)
+        dst_params = nnx.state(self.rl_cluster.rollout.model(), nnx.Param)
         resharded_params = reshard.reshard_pytree(src_params, dst_params)
-        self.rollout_worker.update_params(resharded_params)
+        self.rl_cluster.rollout.update_params(resharded_params)
 
   def train(
       self,
@@ -557,42 +510,44 @@ class GrpoLearner:
             "trainer", step_num=initial_train_steps
         ):
           while True:
-            with self.trainer_mesh:
-              curr_train_ds = train_data_queue.get(block=True)
-              if curr_train_ds is None:
-                break
-              if eval_ds and not curr_eval_ds:
-                self.prepare_dataset(
-                    iterator=iter(eval_ds),
-                    proceed_num_steps=-1,
-                    sample_repeat=self.grpo_config.num_generations,
-                    batch_repeat=1,
-                    data_queue=eval_data_queue,
-                    async_loading=False,
-                    mode=metrics_logger.Mode.EVAL,
-                )
-                curr_eval_ds = eval_data_queue.get(block=True)
-              self.trainer.train(
-                  curr_train_ds,
-                  curr_eval_ds,
-                  skip_jit,
-              )  # loop over μ
+            curr_train_ds = train_data_queue.get(block=True)
+            if curr_train_ds is None:
+              break
+            if eval_ds and not curr_eval_ds:
+              self.prepare_dataset(
+                  iterator=iter(eval_ds),
+                  proceed_num_steps=-1,
+                  sample_repeat=self.grpo_config.num_generations,
+                  batch_repeat=1,
+                  data_queue=eval_data_queue,
+                  async_loading=False,
+                  mode=metrics_logger.Mode.EVAL,
+              )
+              curr_eval_ds = eval_data_queue.get(block=True)
+            self.rl_cluster.update_actor(
+                curr_train_ds,
+                curr_eval_ds,
+                skip_jit,
+            )  # loop over μ
         # call to throw stop iteration as a singal to break the loop
         future.result()
         # sync the train steps with internel trainer, this is based on the
         # assumption that the trainer internally doesn't reset the train steps.
         # there is current a unit test to ensure this assumption.
-        self._train_steps = self.trainer.train_steps
+        self._train_steps = self.rl_cluster.actor_trainer.train_steps
         if self.need_sync_sampler_weights:
           with jax.profiler.StepTraceAnnotation(
               "sync_sampler_weights", step_num=initial_train_steps
           ):
             self.sync_sampler_weights()
-        if self._train_steps >= self.grpo_config.max_steps:
+        if (
+            self._train_steps
+            >= self.rl_cluster.cluster_config.training_config.max_steps
+        ):
           break
       except StopIteration:
         break
-    self.trainer.close()
+    self.rl_cluster.actor_trainer.close()
 
 
 def grpo_loss_fn(model, train_example, beta, epsilon):

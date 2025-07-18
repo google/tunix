@@ -672,6 +672,7 @@ class Gemma3(nnx.Module):
   """Gemma transformer."""
 
   def __init__(self, config: Gemma3Config, *, rngs: nnx.Rngs):
+    self.config = config
     self.embedder = Embedder(
         vocab_size=config.num_embed,
         embed_dim=config.embed_dim,

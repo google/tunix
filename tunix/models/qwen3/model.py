@@ -592,6 +592,7 @@ class Qwen3(nnx.Module):
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
+    self.config = config
     self.embedder = Embedder(
         vocab_size=config.vocab_size,
         embed_dim=config.embed_dim,

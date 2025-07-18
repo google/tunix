@@ -14,33 +14,22 @@
 
 """Inference worker for RL."""
 
-import enum
-from typing import List
 from flax import nnx
 import jax
 from tunix.rl import common
 
 
-class ModelRole(enum.Enum):
-  """Role of the model."""
-
-  CRITIC = 0
-  REFERENCE = 1
-  REWARD = 2
-
-
-class ModelContainer:
-
-  def __init__(self, model: nnx.Module, role: ModelRole):
-    self.model = model
-    self.role = role
-
-
 class InferenceWorker:
   """Inference worker hosting critic, reference and reward models."""
 
-  def __init__(self, models: List[ModelContainer]):
-    self._model_map = {m.role: m.model for m in models}
+  def __init__(self, models: dict[str, nnx.Module]):
+    for k in models.keys():
+      if k not in ["critic", "reference", "reward"]:
+        raise ValueError(
+            f"Model role {k} is not supported. Supported models are critic,"
+            " reference and reward."
+        )
+    self._models = models
     # TODO(tsbao): support multiple reward models.
 
   def compute_rewards(self):
@@ -53,7 +42,7 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
   ):
-    ref_model = self._model_map.get(ModelRole.REFERENCE)
+    ref_model = self._models.get("reference")
     if ref_model is None:
       raise ValueError("Reference model is not available.")
     return common.compute_per_token_logps(
