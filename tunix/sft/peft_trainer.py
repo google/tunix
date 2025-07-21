@@ -117,7 +117,23 @@ def is_lora_enabled(model: nnx.Module) -> bool:
 
 
 class PeftTrainer:
-  """PEFT trainer for LoRA. Only LoRA parameters are updated."""
+  """PEFT trainer for LoRA. Only LoRA parameters are updated.
+
+  Attributes:
+    model: The model to train.
+    config: The training config.
+    optimizer: The optimizer to use. To monitor the learning rate at each step,
+      use `optax.inject_hyperparams` to inject learning rate as a
+      hyperparameter. For example: optimizer =
+      optax.inject_hyperparams(optax.sgd)(learning_rate=learning_rate_schedule)
+    loss_fn: The loss function to use.
+    eval_loss_fn: The loss function to use for evaluation.
+    gen_model_input_fn: The function to generate model input from training
+      input.
+    checkpoint_manager: The checkpoint manager to use.
+    metrics_logger: The metrics logger to use.
+    is_managed_externally: Whether the trainer is managed externally.
+  """
 
   def __init__(
       self,
@@ -337,16 +353,32 @@ class PeftTrainer:
     """Override this function for post processing aux data from eval step."""
     pass
 
+  def _try_get_learning_rate(self) -> float | None:
+    """Returns the learning rate from the optimizer state if available."""
+    try:
+      return self.optimizer.opt_state.hyperparams["learning_rate"]
+    except AttributeError:
+      for chainpart in self.optimizer.opt_state:
+        if isinstance(chainpart, optax.EmptyState):
+          break
+        if hasattr(chainpart, "hyperparams"):
+          return chainpart.hyperparams["learning_rate"]
+      return None
+
   def _log_metrics(
       self,
       loss: ArrayLike,
       step: int | None = None,
       tflops: float | None = None,
   ):
+    """Logs the metrics to the metrics logger."""
     self.metrics_logger.log("loss", loss, self._mode, step)
     self.metrics_logger.log("perplexity", jnp.exp(loss), self._mode, step)
     if tflops is not None:
       self.metrics_logger.log("tflops", tflops, self._mode, step)
+    learning_rate = self._try_get_learning_rate()
+    if learning_rate is not None:
+      self.metrics_logger.log("learning_rate", learning_rate, self._mode, step)
 
   @contextlib.contextmanager
   def _switch_mode(self, mode: metrics_logger.Mode):
@@ -359,7 +391,7 @@ class PeftTrainer:
 
   @property
   def _tqdm_train_metrics(self) -> list[str]:
-    return ["loss", "perplexity", "tflops"]
+    return ["loss", "perplexity", "tflops", "learning_rate"]
 
   @property
   def _tqdm_eval_metrics(self) -> list[str]:
@@ -473,6 +505,7 @@ class PeftTrainer:
 
   @property
   def train_steps(self) -> int:
+    """Returns the number of train steps taken."""
     return self._train_steps
 
   def close(self):

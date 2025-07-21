@@ -32,6 +32,7 @@ from tunix.sft import peft_trainer
 from tunix.sft import profiler
 from tunix.tests import test_common as tc
 
+TEST_LEARNING_RATE = 1e-3
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
@@ -109,8 +110,10 @@ class PeftTrainerTest(parameterized.TestCase):
     rngs = nnx.Rngs(0)
     model = tc.ToyTransformer(rngs=rngs)
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
-
-    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+    )
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
     trainer.train(self.train_ds, self.eval_ds)
@@ -121,11 +124,15 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertGreater(
         trainer.metrics_logger.get_metric('perplexity', 'train'), 0
     )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        TEST_LEARNING_RATE,
+    )
     self.assertGreater(
         trainer.metrics_logger.get_metric('perplexity', 'eval'), 0
     )
     self.assertGreater(trainer._train_steps, 0)
-    # TODO(b/328669617): Validate the learning rate scheduler.
+
     self.assertLen(
         trainer.metrics_logger.get_metric_history('perplexity', 'train'),
         trainer._train_steps,
@@ -266,7 +273,8 @@ class PeftTrainerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
   @parameterized.named_parameters(
-      ('scalar', 1e-3), ('constant_schedule', optax.constant_schedule(1e-3))
+      ('scalar', TEST_LEARNING_RATE),
+      ('constant_schedule', optax.constant_schedule(TEST_LEARNING_RATE)),
   )
   def test_lora_training(self, learning_rate_scheduler):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
@@ -279,10 +287,10 @@ class PeftTrainerTest(parameterized.TestCase):
     original_lora_params = jax.tree.map(
         jnp.copy, nnx.state(model, nnx.LoRAParam)
     )
-
-    trainer = peft_trainer.PeftTrainer(
-        model, optax.sgd(learning_rate_scheduler), config
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        learning_rate=learning_rate_scheduler
     )
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
     trainer.train(self.train_ds, self.eval_ds)
@@ -293,15 +301,14 @@ class PeftTrainerTest(parameterized.TestCase):
     jax.tree.map_with_path(
         tc.assert_not_equal, original_lora_params, lora_params
     )
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        TEST_LEARNING_RATE,
+    )
 
   @parameterized.named_parameters(
-      ('scalar', 1e-3),
-      (
-          'piecewise_constant_schedule',
-          optax.piecewise_constant_schedule(
-              init_value=1e-3, boundaries_and_scales={0: 1e-4, 1: 1e-1}
-          ),
-      ),
+      ('scalar', TEST_LEARNING_RATE),
+      ('constant_schedule', optax.constant_schedule(TEST_LEARNING_RATE)),
   )
   def test_gradient_accumulation(self, learning_rate_schedule):
     def train(
@@ -317,12 +324,17 @@ class PeftTrainerTest(parameterized.TestCase):
       rngs = nnx.Rngs(0)
       model = tc.ToyTransformer(rngs=rngs)
 
-      trainer = peft_trainer.PeftTrainer(
-          model, optax.sgd(learning_rate_schedule), config
+      optimizer = optax.inject_hyperparams(optax.sgd)(
+          learning_rate=learning_rate_schedule
       )
+      trainer = peft_trainer.PeftTrainer(model, optimizer, config)
       trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
       trainer.train(train_ds, self.eval_ds)
+      self.assertEqual(
+          trainer.metrics_logger.get_metric('learning_rate', 'train'),
+          TEST_LEARNING_RATE,
+      )
       return nnx.state(model, nnx.Param)
 
     train_ds = dummy_datasets(batch_size=4, repeat=4)
@@ -414,6 +426,24 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
     self.assertEqual(eval_invoke, {'foo': 1, 'bar': 4})
+
+  def test_injected_params(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+
+    learning_rate_scheduler = optax.constant_schedule(TEST_LEARNING_RATE)
+    optimizer = optax.inject_hyperparams(optax.sgd)(
+        momentum=0.001,
+        learning_rate=learning_rate_scheduler,
+    )
+
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        TEST_LEARNING_RATE,
+    )
 
 
 if __name__ == '__main__':
