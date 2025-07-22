@@ -193,7 +193,6 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
   return intermediate_sharding
 
 
-# TODO(linchai): add donate_input support.
 def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
   """Simple heuristic to determine if resharding with replicated all-gather is needed.
 
