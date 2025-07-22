@@ -89,6 +89,15 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
   Returns:
     An intermediate sharding, or None if no intermediate sharding can be found.
   """
+  if not isinstance(
+      source_sharding, jax.sharding.NamedSharding
+  ) or not isinstance(target_sharding, jax.sharding.NamedSharding):
+    logging.vlog(
+        2,
+        'None-NamedSharding does not need intermediate sharding.'
+        f' {source_sharding=}, {target_sharding=}',
+    )
+    return None
   src_mesh = source_sharding.mesh
   dst_mesh = target_sharding.mesh
 
@@ -311,7 +320,9 @@ def reshard_pytree(
   """
 
   def _get_dst_sharding(x):
-    if isinstance(x, jax.sharding.NamedSharding):
+    if isinstance(
+        x, jax.sharding.NamedSharding | jax.sharding.SingleDeviceSharding
+    ):
       return x
     else:
       return jax.sharding.NamedSharding(

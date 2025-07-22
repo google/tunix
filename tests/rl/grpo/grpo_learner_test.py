@@ -17,11 +17,13 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import chex
 from flax import nnx
+from flax.nnx import filterlib
 from grain import python as grain
 import jax
 from jax import sharding
 from jax.interpreters import pxla
 import jax.numpy as jnp
+import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -424,76 +426,83 @@ class GrpoLearnerTest(parameterized.TestCase):
         expected_rollout_worker_logps_fn_call_at_step,
     )
 
-  # def test_grpo_with_lora_model(self):
-  #   mesh1 = Mesh(
-  #       np.array(jax.devices()[: self.num_cpus // 2]).reshape(1, 1),
-  #       ('fsdp', 'tp'),
-  #   )
-  #   mesh2 = Mesh(
-  #       np.array(jax.devices()[self.num_cpus // 2 :]).reshape(1, 1),
-  #       ('fsdp', 'tp'),
-  #   )
-  #   vocab = tc.MockVocab()
-  #   model = tc.get_lora_model(
-  #       tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()),
-  #       mesh=mesh1,
-  #   )
-  #   sampler_model = tc.get_lora_model(
-  #       tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()),
-  #       mesh=mesh2,
-  #   )
-  #   original_base_params = jax.tree.map(
-  #       jnp.copy, nnx.state(model, filterlib.Not(nnx.LoRAParam))
-  #   )
-  #   original_lora_variables = jax.tree.map(
-  #       jnp.copy, nnx.state(model, nnx.LoRAParam)
-  #   )
-  #   ref_model = tc.ToyTransformer(
-  #       rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
-  #   )
-  #   rollout_worker = vanilla_rollout.VanillaRollout(
-  #       model=sampler_model,
-  #       tokenizer=vocab,
-  #       cache_config=sampler_lib.CacheConfig(
-  #           cache_size=1024,
-  #           num_layers=4,
-  #           num_kv_heads=4,
-  #           head_dim=16,
-  #       ),
-  #   )
-  #   grpo_config = grpo_lib.GrpoConfig(
-  #       total_generation_steps=10,
-  #       num_generations=2,
-  #       eval_every_n_steps=10,
-  #       max_steps=10,
-  #       max_prompt_length=256,
-  #   )
-  #   grpo_trainer = grpo_lib.GrpoLearner(
-  #       model=model,
-  #       ref_model=ref_model,
-  #       rollout_worker=rollout_worker,
-  #       reward_fns=reward_1,
-  #       optimizer=optax.sgd(1e-3),
-  #       training_config=grpo_config,
-  #       trainer_mesh=mesh1,
-  #       rollout_worker_mesh=mesh2,
-  #   )
-  #   self.assertTrue(grpo_trainer.need_sync_sampler_weights)
-  #   train_ds = _dummy_dataset(batch_size=2)
-  #   grpo_trainer.train(train_ds, None)
+  def test_grpo_with_lora_model(self):
+    # reshard through default device_put.
+    mesh1 = Mesh(
+        np.array(jax.devices()[: self.num_cpus // 2]).reshape(1, 1),
+        ('fsdp', 'tp'),
+    )
+    mesh2 = Mesh(
+        np.array(jax.devices()[self.num_cpus // 2 :]).reshape(1, 1),
+        ('fsdp', 'tp'),
+    )
+    vocab = tc.MockVocab()
+    actor_model = tc.get_lora_model(
+        tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()),
+        mesh=mesh1,
+    )
+    original_base_params = jax.tree.map(
+        jnp.copy, nnx.state(actor_model, filterlib.Not(nnx.LoRAParam))
+    )
+    original_lora_variables = jax.tree.map(
+        jnp.copy, nnx.state(actor_model, nnx.LoRAParam)
+    )
+    ref_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh1,
+            rl_cluster_lib.Role.REFERENCE: mesh2,
+            rl_cluster_lib.Role.ROLLOUT: mesh2,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=actor_model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+    grpo_config = grpo_lib.GrpoConfig(
+        num_generations=2,
+        num_iterations=1,
+    )
 
-  #   base_params = nnx.state(model, filterlib.Not(nnx.LoRAParam))
-  #   lora_params = nnx.state(model, nnx.LoRAParam)
-  #   lora_params_from_sampler = nnx.state(
-  #       grpo_trainer.rollout_worker.model(), nnx.LoRAParam
-  #   )
-  #   jax.tree.map_with_path(
-  #       tc.assert_not_equal, original_lora_variables, lora_params
-  #   )
-  #   jax.tree.map_with_path(
-  #       tc.assert_equal, lora_params_from_sampler, lora_params
-  #   )
-  #   jax.tree.map_with_path(tc.assert_equal, original_base_params, base_params)
+    grpo_trainer = grpo_lib.GrpoLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_1,
+        grpo_config=grpo_config,
+    )
+    self.assertTrue(grpo_trainer.need_sync_sampler_weights)
+    train_ds = _dummy_dataset(batch_size=2)
+    grpo_trainer.train(train_ds, None)
+
+    base_params = nnx.state(
+        rl_cluster.train_actor, filterlib.Not(nnx.LoRAParam)
+    )
+    lora_params = nnx.state(rl_cluster.train_actor, nnx.LoRAParam)
+    lora_params_from_sampler = nnx.state(
+        grpo_trainer.rl_cluster.rollout.model(), nnx.LoRAParam
+    )
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_lora_variables, lora_params
+    )
+    jax.tree.map_with_path(
+        tc.assert_equal, lora_params_from_sampler, lora_params
+    )
+    jax.tree.map_with_path(tc.assert_equal, original_base_params, base_params)
 
   def test_exception_from_data_preparation(self):
     class _TrainerWithException(grpo_lib.GrpoLearner):
