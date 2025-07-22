@@ -17,12 +17,10 @@
 from __future__ import annotations
 
 from concurrent import futures
-import contextlib
 import dataclasses
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 
 import flax
-from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
@@ -30,8 +28,6 @@ import numpy as np
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_helpers
-from tunix.rl.grpo import reshard
-from tunix.rl.grpo import utils
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import metrics_logger
 
@@ -413,33 +409,6 @@ class GrpoLearner:
         data_queue.put(None)
         raise e
 
-  # TODO: b/419334887 - move this to rl_cluster.
-  def sync_sampler_weights(self):
-    """Syncs the weights of between the sampler model and trainer model."""
-    if jax.devices():
-      cm = contextlib.ExitStack()
-      cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
-      cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))
-    else:
-      cm = contextlib.nullcontext()
-    with cm:
-      if utils.is_lora_enabled(self.rl_cluster.actor_trainer.model):
-        src_lora_params = nnx.state(
-            self.rl_cluster.actor_trainer.model, nnx.LoRAParam
-        )
-        dst_lora_params = nnx.state(
-            self.rl_cluster.rollout.model(), nnx.LoRAParam
-        )
-        resharded_lora_params = reshard.reshard_pytree(
-            src_lora_params, dst_lora_params
-        )
-        self.rl_cluster.rollout.update_params(resharded_lora_params)
-      else:
-        src_params = nnx.state(self.rl_cluster.actor_trainer.model, nnx.Param)
-        dst_params = nnx.state(self.rl_cluster.rollout.model(), nnx.Param)
-        resharded_params = reshard.reshard_pytree(src_params, dst_params)
-        self.rl_cluster.rollout.update_params(resharded_params)
-
   def train(
       self,
       train_ds: Iterable[_TrainingInputT],
@@ -539,7 +508,7 @@ class GrpoLearner:
           with jax.profiler.StepTraceAnnotation(
               "sync_sampler_weights", step_num=initial_train_steps
           ):
-            self.sync_sampler_weights()
+            self.rl_cluster.sync_weights()
         if (
             self._train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps

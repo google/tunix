@@ -23,7 +23,7 @@ import jax
 import jaxtyping
 from tunix.generate import sampler
 from tunix.rl import common
-from tunix.rl.grpo import utils
+from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 
 

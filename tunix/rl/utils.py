@@ -19,12 +19,8 @@ from flax.nnx import statelib
 import jax
 import jaxtyping
 
-
-def is_lora_enabled(model: nnx.Module) -> bool:
-  for _, value in nnx.iter_graph(model):
-    if isinstance(value, nnx.LoRAParam):
-      return True
-  return False
+Mesh = jax.sharding.Mesh
+NamedSharding = jax.sharding.NamedSharding
 
 
 def to_flat_dict(
@@ -34,3 +30,23 @@ def to_flat_dict(
     tree = nnx.to_pure_dict(tree)
   flattened, tree_def = jax.tree.flatten_with_path(tree)
   return {tuple(k.key for k in keys): v for keys, v in flattened}, tree_def
+
+
+def get_pytree_mesh_info(tree: jaxtyping.PyTree) -> Mesh | None:
+  """Returns the mesh info for the pytree."""
+  mesh_info = set()
+
+  def _get_mesh_info(leaf: jaxtyping.PyTree):
+    if isinstance(leaf, jax.Array):
+      if hasattr(leaf, 'sharding') and leaf.sharding:
+        sharding = leaf.sharding
+        if isinstance(sharding, NamedSharding):
+          mesh_info.add(sharding.mesh)
+    return leaf
+
+  jax.tree_util.tree_map(_get_mesh_info, tree)
+  if len(mesh_info) > 1:
+    raise ValueError(
+        f'All leaves of the pytree must have the same mesh. Found: {mesh_info}'
+    )
+  return mesh_info.pop() if mesh_info else None

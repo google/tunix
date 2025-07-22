@@ -14,20 +14,22 @@
 
 """Client facing abstraction for interacting with RL training cluster."""
 
+import contextlib
 import dataclasses
 import enum
 from typing import Any, Union
-
+from absl import logging
 from flax import nnx
 import jax
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import optax
+from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
+from tunix.rl import utils
 from tunix.rl.inference import inference_worker
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import peft_trainer
-
 
 type ModelOrPath = Union[nnx.Module, str]
 
@@ -94,15 +96,51 @@ class RLCluster:
       cluster_config: ClusterConfig,
   ):
     self.cluster_config = cluster_config
-    self.actor = self._load_model(actor)
-    self.critic = self._load_model(critic) if critic else None
-    self.reference = self._load_model(reference) if reference else None
-    self.reward = self._load_model(reward) if reward else None
+    r2m = cluster_config.role_to_mesh
+    self.train_actor = self._load_model(actor, r2m[Role.ACTOR])
+    if self.cluster_config.rollout_engine == "vanilla":
+      # vLLM has it's own model loading logic. Only load for vanilla rollout.
+      self.rollout_actor = self._load_model(actor, r2m[Role.ROLLOUT])
+    self.critic = self._load_model(critic, r2m[Role.CRITIC]) if critic else None
+    self.reference = (
+        self._load_model(reference, r2m[Role.REFERENCE]) if reference else None
+    )
+    self.reward = self._load_model(reward, r2m[Role.REWARD]) if reward else None
     self.tokenizer = tokenizer
     self._init_cluster()
 
-  def _load_model(self, model_or_path: ModelOrPath) -> nnx.Module:
+  def _load_model(self, model_or_path: ModelOrPath, mesh: Mesh) -> nnx.Module:
+    """Loads model with given mesh.
+
+    If input is already an NNX model, check if the model is sharded on the
+    target mesh. If not, reshard the model.
+
+    Args:
+      model_or_path: either a nnx.Module or a path to a model.
+      mesh: the mesh to load the model on.
+
+    Returns:
+      The model loaded on the given mesh.
+    """
     if isinstance(model_or_path, nnx.Module):
+      model_mesh = utils.get_pytree_mesh_info(nnx.state(model_or_path))
+      if not mesh.empty and model_mesh != mesh:
+        logging.warning("Resharding model from %s to %s", model_mesh, mesh)
+        graph, state = nnx.split(model_or_path)
+        dst_shardings = jax.tree_util.tree_map(
+            lambda x: jax.sharding.NamedSharding(
+                mesh,
+                x,
+            ),
+            nnx.get_partition_spec(state),
+        )
+        model_or_path = nnx.merge(
+            graph,
+            reshard.reshard_pytree(
+                state,
+                dst_shardings,
+            ),
+        )
       return model_or_path
     else:
       raise NotImplementedError("Loading from path is not supported yet.")
@@ -116,16 +154,16 @@ class RLCluster:
     ], f"Unsupported rollout engine: {self.cluster_config.rollout_engine}"
     if self.cluster_config.rollout_engine == "vanilla":
       assert hasattr(
-          self.actor, "config"
+          self.rollout_actor, "config"
       ), "Actor model must have a config attribute."
       self._rollout = vanilla_rollout.VanillaRollout(
-          self.actor,
+          self.rollout_actor,
           self.tokenizer,
           cache_config=vanilla_rollout.CacheConfig(
               cache_size=self.cluster_config.rollout_config.kv_cache_size,
-              num_layers=self.actor.config.num_layers,
-              num_kv_heads=self.actor.config.num_kv_heads,
-              head_dim=self.actor.config.head_dim,
+              num_layers=self.rollout_actor.config.num_layers,
+              num_kv_heads=self.rollout_actor.config.num_kv_heads,
+              head_dim=self.rollout_actor.config.head_dim,
           ),
       )
     elif self.cluster_config.rollout_engine == "vllm":
@@ -143,7 +181,7 @@ class RLCluster:
 
     # 3. Initialize trainer.
     self._actor_trainer = rl_trainer.Trainer(
-        model=self.actor,
+        model=self.train_actor,
         optimizer=self.cluster_config.training_config.actor_optimizer,
         training_config=self.cluster_config.training_config,
     )
@@ -207,3 +245,25 @@ class RLCluster:
   ) -> jax.Array:
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       return self.rollout.get_per_token_logps(prompt_tokens, completion_tokens)
+
+  def sync_weights(self):
+    """Syncs the weights of between the sampler model and trainer model."""
+    if jax.devices():
+      cm = contextlib.ExitStack()
+      cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
+      cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))
+    else:
+      cm = contextlib.nullcontext()
+    with cm:
+      if peft_trainer.is_lora_enabled(self.actor_trainer.model):
+        src_lora_params = nnx.state(self.actor_trainer.model, nnx.LoRAParam)
+        dst_lora_params = nnx.state(self.rollout.model(), nnx.LoRAParam)
+        resharded_lora_params = reshard.reshard_pytree(
+            src_lora_params, dst_lora_params
+        )
+        self.rollout.update_params(resharded_lora_params)
+      else:
+        src_params = nnx.state(self.actor_trainer.model, nnx.Param)
+        dst_params = nnx.state(self.rollout.model(), nnx.Param)
+        resharded_params = reshard.reshard_pytree(src_params, dst_params)
+        self.rollout.update_params(resharded_params)

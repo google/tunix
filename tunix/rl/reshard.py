@@ -298,7 +298,8 @@ def reshard_pytree(
   Args:
     source: The input source pytree to reshard.
     target: The target pytree to reshard to. Contains target mesh and named
-      sharding information.
+      sharding information. This can be a pytree containing jax.Array or
+      jax.sharding.NamedSharding.
     cache_plan: Whether to cache the resharding plan. This can largely speed up
       the resharding process. Turn off with cautious.
     donate_input: Whether to donate the input (source) to the reshard.
@@ -309,12 +310,18 @@ def reshard_pytree(
     The resharded pytree.
   """
 
-  dst_shardings = jax.tree_util.tree_map(
-      lambda x: jax.sharding.NamedSharding(
+  def _get_dst_sharding(x):
+    if isinstance(x, jax.sharding.NamedSharding):
+      return x
+    else:
+      return jax.sharding.NamedSharding(
           x.sharding.mesh,
           x.sharding.spec,
           memory_kind=x.sharding.memory_kind,
-      ),
+      )
+
+  dst_shardings = jax.tree_util.tree_map(
+      _get_dst_sharding,
       target,
   )
 
