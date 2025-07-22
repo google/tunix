@@ -22,8 +22,6 @@ import optax
 from tunix.sft import peft_trainer
 from typing_extensions import override
 
-# TODO(tsbao): Create common RL config for GRPO and PPO.
-
 
 class Trainer(peft_trainer.PeftTrainer):
   """Handles additional RL metrics logging and display."""

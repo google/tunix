@@ -14,6 +14,7 @@
 
 """Vanilla rollout worker with Tunix sampler."""
 
+import dataclasses
 import functools
 import operator
 from typing import Any
@@ -26,16 +27,27 @@ from tunix.rl.grpo import utils
 from tunix.rl.rollout import base_rollout
 
 
+@dataclasses.dataclass(frozen=True)
+class CacheConfig:
+  """Configuration for the KV cache."""
+
+  cache_size: int
+  num_layers: int
+  num_kv_heads: int
+  head_dim: int
+
+
 class VanillaRollout(base_rollout.BaseRollout):
   """Vanilla rollout worker."""
 
-  # TODO(tsbao): Remove cache_config from the constructor.
-  # Instead, we should just take in cache_size and have default config based on
-  # model.
   def __init__(
-      self, model: nnx.Module, tokenizer: Any, cache_config: sampler.CacheConfig
+      self, model: nnx.Module, tokenizer: Any, cache_config: CacheConfig
   ):
-    self._sampler = sampler.Sampler(model, tokenizer, cache_config)
+    self._sampler = sampler.Sampler(
+        model,
+        tokenizer,
+        sampler.CacheConfig(**dataclasses.asdict(cache_config)),
+    )
 
   def generate(
       self,
@@ -47,7 +59,7 @@ class VanillaRollout(base_rollout.BaseRollout):
     output = self._sampler(
         input_strings=prompts,
         total_generation_steps=rollout_config.max_tokens_to_generate,
-        max_prompt_length=kwargs.get('max_prompt_length', None),
+        max_prompt_length=rollout_config.max_prompt_length,
         echo=False,
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,

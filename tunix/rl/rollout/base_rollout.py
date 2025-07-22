@@ -57,11 +57,11 @@ class RolloutConfig:
   # Float that controls the randomness of the sampling.
   # Lower values make the model more deterministic, while higher values make the
   # model more random. Zero means greedy sampling.
-  temperature: float = 0.0
+  temperature: float = 0.9
 
   # Float that controls the cumulative probability of the top tokens to
   # consider. Must be in (0, 1]. Set to 1 to consider all tokens.
-  top_p: float | None = None
+  top_p: float | None = 1.0
 
   # Integer that controls the number of top tokens to consider. Set to -1 to
   # consider all tokens.
@@ -69,6 +69,13 @@ class RolloutConfig:
 
   # Random seed to use for the generation.
   seed: jax.Array | None = None
+
+  # Maximum length of the prompt. The prompt will be padded/truncated to this
+  # length.
+  max_prompt_length: int = 64
+
+  # Only used for vanilla rollout engine.
+  kv_cache_size: int = 1024  # Only used for vanilla rollout engine.
 
 
 class BaseRollout(abc.ABC):

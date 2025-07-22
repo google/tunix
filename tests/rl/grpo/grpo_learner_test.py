@@ -24,11 +24,10 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
-from tunix.generate import sampler as sampler_lib
+from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
-from tunix.rl.inference import inference_worker as inference
 from tunix.rl.queue import data_queue as queue_lib
-from tunix.rl.rollout import vanilla_rollout
+from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 from typing_extensions import override
 
@@ -176,38 +175,43 @@ class GrpoLearnerTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
-    inference_worker = inference.InferenceWorker(
-        models=[
-            inference.ModelContainer(
-                model=ref_model, role=inference.ModelRole.REFERENCE
-            )
-        ]
-    )
-    rollout_worker = vanilla_rollout.VanillaRollout(
-        model=model,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(
-            cache_size=1024,
-            num_layers=4,
-            num_kv_heads=4,
-            head_dim=16,
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=1,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
         ),
     )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
     grpo_config = grpo_lib.GrpoConfig(
-        total_generation_steps=10,
         num_generations=2,
-        eval_every_n_steps=1,
-        max_steps=10,
-        max_prompt_length=256,
         num_iterations=1,
     )
     grpo_trainer = grpo_lib.GrpoLearner(
-        model=model,
-        inference_worker=inference_worker,
-        rollout_worker=rollout_worker,
+        rl_cluster=rl_cluster,
         reward_fns=reward_fns,
-        optimizer=optax.sgd(1e-3),
-        training_config=grpo_config,
+        grpo_config=grpo_config,
     )
     self.assertFalse(grpo_trainer.need_sync_sampler_weights)
     train_ds = eval_ds = _dummy_dataset(batch_size=2)
@@ -219,7 +223,8 @@ class GrpoLearnerTest(parameterized.TestCase):
     self.assertEqual(grpo_trainer._train_steps, 2)
     self.assertEqual(grpo_trainer._eval_steps, 4)
     self.assertEqual(
-        grpo_trainer.trainer._train_steps, grpo_trainer._train_steps
+        grpo_trainer.rl_cluster.actor_trainer._train_steps,
+        grpo_trainer._train_steps,
     )
 
     metric_logger = grpo_trainer._metrics_logger
@@ -334,7 +339,7 @@ class GrpoLearnerTest(parameterized.TestCase):
 
     def wrap_fn(fn, fn_call_at_step, trainer):
       def wrapper(*args, **kwargs):
-        fn_call_at_step.append(trainer.trainer.train_steps)
+        fn_call_at_step.append(trainer.train_steps)
         return fn(*args, **kwargs)
 
       return wrapper
@@ -345,57 +350,62 @@ class GrpoLearnerTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
-    rollout_worker = vanilla_rollout.VanillaRollout(
-        model=model,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(
-            cache_size=1024,
-            num_layers=4,
-            num_kv_heads=4,
-            head_dim=16,
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
         ),
     )
-    inference_worker = inference.InferenceWorker(
-        models=[
-            inference.ModelContainer(
-                model=ref_model, role=inference.ModelRole.REFERENCE
-            )
-        ]
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
     )
+
     grpo_config = grpo_lib.GrpoConfig(
-        total_generation_steps=10,
         num_generations=2,
-        beta=beta,
         num_iterations=num_iterations,
-        eval_every_n_steps=10,
-        max_steps=10,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        max_prompt_length=256,
+        beta=beta,
     )
+
     grpo_trainer = grpo_lib.GrpoLearner(
-        model=model,
-        inference_worker=inference_worker,
-        rollout_worker=rollout_worker,
+        rl_cluster=rl_cluster,
         reward_fns=reward_1,
-        optimizer=optax.sgd(1e-3),
-        training_config=grpo_config,
+        grpo_config=grpo_config,
     )
 
     grpo_trainer._generate_and_compute_advantage = wrap_fn(
         grpo_trainer._generate_and_compute_advantage,
         gen_fn_call_at_step,
-        grpo_trainer,
+        grpo_trainer.rl_cluster.actor_trainer,
     )
 
-    rollout_worker.get_per_token_logps = wrap_fn(
-        rollout_worker.get_per_token_logps,
+    rl_cluster.rollout.get_per_token_logps = wrap_fn(
+        rl_cluster.rollout.get_per_token_logps,
         rollout_worker_logps_fn_call_at_step,
-        grpo_trainer,
+        grpo_trainer.rl_cluster.actor_trainer,
     )
-    inference_worker.get_ref_per_token_logps = wrap_fn(
-        inference_worker.get_ref_per_token_logps,
+    rl_cluster.inference_worker.get_ref_per_token_logps = wrap_fn(
+        rl_cluster.inference_worker.get_ref_per_token_logps,
         inference_worker_logps_fn_call_at_step,
-        grpo_trainer,
+        grpo_trainer.rl_cluster.actor_trainer,
     )
 
     train_ds = _dummy_dataset(_DUMMY_DATA * 2, batch_size=1)
@@ -497,39 +507,45 @@ class GrpoLearnerTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
-    rollout_worker = vanilla_rollout.VanillaRollout(
-        model=model,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(
-            cache_size=1024,
-            num_layers=4,
-            num_kv_heads=4,
-            head_dim=16,
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
         ),
     )
-    inference_worker = inference.InferenceWorker(
-        models=[
-            inference.ModelContainer(
-                model=ref_model, role=inference.ModelRole.REFERENCE
-            )
-        ]
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
     )
+
     grpo_config = grpo_lib.GrpoConfig(
-        total_generation_steps=10,
         num_generations=2,
-        eval_every_n_steps=1,
-        max_steps=10,
-        max_prompt_length=256,
         num_iterations=1,
     )
+
     grpo_trainer = _TrainerWithException(
-        model=model,
-        inference_worker=inference_worker,
-        rollout_worker=rollout_worker,
+        rl_cluster=rl_cluster,
         reward_fns=reward_1,
-        optimizer=optax.sgd(1e-3),
-        training_config=grpo_config,
+        grpo_config=grpo_config,
     )
+
     train_ds = _dummy_dataset(batch_size=2)
     with self.assertRaises(ValueError):
       grpo_trainer.train(train_ds, None)
@@ -540,93 +556,102 @@ class GrpoLearnerTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
-    inference_worker = inference.InferenceWorker(
-        models=[
-            inference.ModelContainer(
-                model=ref_model, role=inference.ModelRole.REFERENCE
-            )
-        ]
-    )
-    rollout_worker = vanilla_rollout.VanillaRollout(
-        model=model,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(
-            cache_size=1024,
-            num_layers=4,
-            num_kv_heads=4,
-            head_dim=16,
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
         ),
     )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
     grpo_config = grpo_lib.GrpoConfig(
-        total_generation_steps=10,
         num_generations=2,
-        eval_every_n_steps=1,
-        max_steps=10,
-        max_prompt_length=256,
         num_iterations=1,
     )
+
     grpo_trainer = grpo_lib.GrpoLearner(
-        model=model,
-        inference_worker=inference_worker,
-        rollout_worker=rollout_worker,
+        rl_cluster=rl_cluster,
         reward_fns=reward_1,
-        optimizer=optax.sgd(1e-3),
-        training_config=grpo_config,
+        grpo_config=grpo_config,
     )
+
     train_ds_full = _dummy_dataset(batch_size=2)
     grpo_trainer.train(train_ds_full, None)
 
     temp_path = self.create_tempdir().full_path
-    grpo_config2 = grpo_lib.GrpoConfig(
-        total_generation_steps=10,
-        num_generations=2,
-        eval_every_n_steps=1,
-        max_steps=10,
-        max_prompt_length=256,
-        num_iterations=1,
-        checkpoint_root_directory=temp_path,
-        checkpointing_options=ocp.CheckpointManagerOptions(
-            save_interval_steps=1,
-            max_to_keep=10,
-        ),
-    )
 
     model2 = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
-    rollout_worker2 = vanilla_rollout.VanillaRollout(
-        model=model2,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(
-            cache_size=1024,
-            num_layers=4,
-            num_kv_heads=4,
-            head_dim=16,
+
+    cluster_config2 = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=10,
+            checkpoint_root_directory=temp_path,
+            checkpointing_options=ocp.CheckpointManagerOptions(
+                save_interval_steps=1,
+                max_to_keep=10,
+            ),
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
         ),
     )
-    inference_worker2 = inference.InferenceWorker(
-        models=[
-            inference.ModelContainer(
-                model=ref_model, role=inference.ModelRole.REFERENCE
-            )
-        ]
+    rl_cluster2 = rl_cluster_lib.RLCluster(
+        actor=model2,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config2,
     )
+
     grpo_trainer2 = grpo_lib.GrpoLearner(
-        model=model2,
-        inference_worker=inference_worker,
-        rollout_worker=rollout_worker2,
+        rl_cluster=rl_cluster2,
         reward_fns=reward_1,
-        optimizer=optax.sgd(1e-3),
-        training_config=grpo_config2,
+        grpo_config=grpo_config,
     )
+
     grpo_trainer2.train(train_ds_full[0:1], None)
+    rl_cluster2 = rl_cluster_lib.RLCluster(
+        actor=model2,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config2,
+    )
     grpo_trainer2 = grpo_lib.GrpoLearner(
-        model=model2,
-        inference_worker=inference_worker2,
-        rollout_worker=rollout_worker2,
+        rl_cluster=rl_cluster2,
         reward_fns=reward_1,
-        optimizer=optax.sgd(1e-3),
-        training_config=grpo_config2,
+        grpo_config=grpo_config,
     )
     assert grpo_trainer2._last_train_step == 1
     grpo_trainer2.train(train_ds_full, None)
