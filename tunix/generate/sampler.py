@@ -622,7 +622,7 @@ class Sampler:
       top_p: Optional[float] = None,
       top_k: Optional[int] = None,
       beam_size: Optional[int] = None,
-      seed: jax.Array | None = None,
+      seed: int | None = None,
       pad_output: bool = False,
   ) -> SamplerOutput:
     """Samples a completion of the input string.
@@ -689,6 +689,8 @@ class Sampler:
 
     if seed is None:
       seed = jax.random.PRNGKey(0)
+    elif isinstance(seed, int):
+      seed = jax.random.PRNGKey(seed)
     sampling_state = self.init_sample_state(
         all_input_ids,
         include_logits=return_logits,

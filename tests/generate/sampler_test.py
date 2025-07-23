@@ -200,7 +200,7 @@ class SamplerTest(parameterized.TestCase):
         total_generation_steps=10,
         temperature=9,
         top_p=0.95,
-        seed=jax.random.PRNGKey(42),
+        seed=42,
         echo=echo,
     )
     self.assertIsNotNone(top_p_result_2)
@@ -212,7 +212,7 @@ class SamplerTest(parameterized.TestCase):
         temperature=9,
         top_p=0.95,
         top_k=3,
-        seed=jax.random.PRNGKey(42),
+        seed=42,
         echo=echo,
     )
     self.assertIsNotNone(top_k_result)

@@ -514,7 +514,7 @@ class Sampler:
       temperature: float = 0.0,
       top_p: float = 0.95,
       top_k: int | None = None,
-      seed: jax.Array | None = None,
+      seed: int | None = None,
   ) -> SamplerOutput:
     """Samples a completion of the input string.
 
@@ -565,6 +565,8 @@ class Sampler:
 
     if seed is None:
       seed = jax.random.PRNGKey(0)
+    elif isinstance(seed, int):
+      seed = jax.random.PRNGKey(seed)
     sampling_state = self.init_sample_state(
         all_input_ids,
         include_logits=return_logits,
