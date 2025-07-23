@@ -16,7 +16,7 @@
 
 import functools
 import operator
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from flax import nnx
 import jax
 import jaxtyping
@@ -31,14 +31,17 @@ class vLLMRollout(base_rollout.BaseRollout):
   """vLLM rollout worker."""
 
   def __init__(
-      self, model: nnx.Module, tokenizer: Any, cache_config: sampler.CacheConfig, lora_config: Dict[str, str]
+      self, model: nnx.Module, tokenizer: Any, cache_config: sampler.CacheConfig, mesh: jax.sharding.Mesh, lora_config: Optional[Dict[str, str]] = None,  model_version: str = "meta-llama/Llama-3.1-8B",
   ):
     self.model = model
+    self.mesh = mesh
     self._sampler = vllm_sampler.vLLMSampler(
       model=model,
       tokenizer=tokenizer,
       max_model_len=cache_config.cache_size,
-      lora_config=lora_config)
+      lora_config=lora_config,
+      mesh=mesh,
+      model_version=model_version,)
 
   def generate(
       self,
@@ -73,7 +76,7 @@ class vLLMRollout(base_rollout.BaseRollout):
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
     # b/428730696, we cannot return self.output.logprobs yet
-    # TODO(lancewang): Need to validate if there will be any difference from recalculation
+    # May need to validate if there will be any difference from recalculation
     # return self.output.logprobs
 
     return common.compute_per_token_logps(
@@ -85,7 +88,7 @@ class vLLMRollout(base_rollout.BaseRollout):
     )
 
   def update_params(self, params: jaxtyping.PyTree) -> None:
-    self._sampler.sync_weights(params)
+    self._sampler.update_params(params)
 
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()

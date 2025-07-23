@@ -1,45 +1,70 @@
 from typing import Dict, Optional, List, Any
 from flax import nnx
 import tunix.generate.tokenizer_adapter as tok_adapter
-from vllm import LLM, EngineArgs
-from tunix.generate.sampler import SamplerOutput
+from vllm.entrypoints.llm import LLM, EngineArgs
 from vllm.outputs import RequestOutput
 from absl import logging
+import jax
 import jax.numpy as jnp
 from tunix.generate import utils
+from tunix.generate import base_sampler
+import os
 
-class vLLMSampler():
+class vLLMSampler(base_sampler.SamplerBase):
   def __init__(
         self,
         model: nnx.module,
         tokenizer: Any,
-        lora_config: Optional[Dict[str, Any]] = None,
-        model_version: Optional[str] = "meta-llama/Llama-3.1-8B", # TODO(lancewang): We still need the model version for now, will remove it later
-        max_model_len: int = 1024,
+        mesh: jax.sharding.Mesh,
+        max_model_len: int,
+        lora_config: Optional[Dict[str, Any]],
+        model_version: Optional[str], # We still need the model version for now, will remove it later
     ):
-    self.transformer = model
+    os.environ["TPU_BACKEND_TYPE"] = "jax"
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
-    self.args = {}
-    self.args["additional_config"] = {}
-    self.args["model"] = model_version
-    self.args["max_model_len"] = max_model_len
-    self.args["additional_config"]["lora_config"] = lora_config
+    self.model_version = model_version
+    self.max_model_len = max_model_len
+    self.mesh = mesh
+    self.lora_config = lora_config
 
-    _, params = nnx.split(model)
-    # self.args["additional_config"]["custom_nnx_weights"] = params
-
+    self.args = self._vllm_config()
     self.llm = LLM(**self.args)
 
-    self.mappings = self.get_tunix_lora_to_hf_mappings() | self.get_tunix_to_hf_mappings()
-    # TODO(lancewang): This is how we load the weights to vLLM now, consider load the orbax checkpoint in vLLM directly
-    self.sync_weights(updated_weights=params)
+    self.mappings = self.get_to_hf_mappings
+    if lora_config is not None:
+      self.mappings |= self.get_lora_to_hf_mappings
 
-  def sync_weights(self, updated_weights: nnx.Module):
-    self.llm.llm_engine.model_executor.collective_rpc("sync_weights", args=(updated_weights, self.mappings))
+    # This is how we load the weights to vLLM now, consider load the orbax checkpoint in vLLM directly
+    _, params = nnx.split(model)
+    self.update_params(updated_weights=params)
+
+  def update_params(self, updated_weights: nnx.Module):
+    self.llm.llm_engine.model_executor.collective_rpc("sync_weights", args=(updated_weights, self.mappings, self.get_to_hf_transpose_keys))
+
+  def _vllm_config(self):
+    args = {}
+    args["additional_config"] = {}
+    args["model"] = self.model_version
+    args["max_model_len"] = self.max_model_len
+    args["tensor_parallel_size"] = self.mesh.shape["tp"]
+    args["gpu_memory_utilization"] = 0.3
+    if self.lora_config is not None:
+      args["additional_config"]["lora_config"] = self.lora_config
+    return args
+
+  @property
+  def _model_runner(self):
+    return self.llm.llm_engine.model_executor.driver_worker.model_runner
+
+  @property
+  def transformer(self):
+    return nnx.merge(self._model_runner.graph_def, self._model_runner.state)
 
   @property
   def transformer_state(self):
-    return self.llm.llm_engine.model_executor.driver_worker.model_runner.transformer_state
+    return self._model_runner.state
 
   def tokenize(self, input_string: str) -> List[int]:
     """Tokenizes the input string."""
@@ -48,11 +73,12 @@ class vLLMSampler():
     return bos_tok + input_ids
 
   def _get_logprobs_from_vllm_output(self, logprobs: List[Optional[Dict[int, Any]]]):
-      logging.info("vLLM Jax backend doesn't support log probs yet! Recalculate with model!")
+      logging.info("vLLM Jax backend doesn't support returnning log probs yet!")
       return []
-      assert logprobs[0] is not None, f"Logprobs are missing"
-      assert len(logprobs[0]) == 1, f"The log probs contains more than 1 ({len(logprobs[0])} token per position"
-      return [list(logprob_dict.values())[0].logprob for logprob_dict in logprobs]
+      # Below is to get the log probs from vLLM output
+      # assert logprobs[0] is not None, f"Logprobs are missing"
+      # assert len(logprobs[0]) == 1, f"The log probs contains more than 1 ({len(logprobs[0])} token per position"
+      # return [list(logprob_dict.values())[0].logprob for logprob_dict in logprobs]
 
   def detokenize(self, input_strings, return_logits, request_outputs: List[RequestOutput]):
     print("-" * 50)
@@ -84,7 +110,7 @@ class vLLMSampler():
         seed=None,
         multi_sampling: int=1,
         return_logits: bool=True,
-        echo:bool = False, # Placeholder
+        echo:bool = False,
         pad_output: bool = False,
     ):
     # max_tokens: maximum number of tokens to generate
@@ -102,7 +128,7 @@ class vLLMSampler():
       self.sampling_params.max_tokens = total_generation_steps
       self.sampling_params.n = multi_sampling
       self.sampling_params.temperature = temperature
-      self.sampling_params.logprobs = 1 # b/428730696
+      self.sampling_params.logprobs = 1        # b/428730696
       self.sampling_params.prompt_logprobs = 1 # b/428730696
 
 
@@ -124,7 +150,7 @@ class vLLMSampler():
     decoded_outputs, out_logits, out_tokens = self.detokenize(input_strings, return_logits, outputs)
 
     max_tokens_length = max(len(x) for x in prompt_ids)
-    print(f"YY {max_tokens_length=} {max_prompt_length=} {len(out_tokens[0])=}")
+
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
     all_input_ids  = [
@@ -149,53 +175,61 @@ class vLLMSampler():
     ]
     all_output_ids = jnp.array(all_output_ids)
     # To support multisampling, just return the whole list of SamplerOutput
-    return SamplerOutput(
+    return base_sampler.SamplerOutput(
       text=decoded_outputs[0],
       logits=out_logits[0],
       tokens=all_output_ids,
       padded_prompt_tokens=all_input_ids,
     )
 
-
-  def get_tunix_to_hf_mappings(self):
+  # For now, we are still passing sharding to vLLM, consider removing it after switching to the reshard API
+  @property
+  def get_to_hf_mappings(self):
     return {
-      "lm_head.w": ("lm_head", (None, "model")),
-      "embedder.input_embedding": ("embed.embedding", ("model", None)),
+      "lm_head.w": ("lm_head.input_embedding_table_DV", (None, "model")),
+      "embedder.input_embedding": ("embedder.input_embedding_table_DV", ("model", None)),
       "layers.*.input_layernorm.w":
-      ("model.layers.*.input_layernorm.scale", (None, )),
+      ("layers.*.pre_attention_norm.scale", (None, )),
       "layers.*.mlp.down_proj.kernel":
-      ("model.layers.*.mlp.down_proj.kernel", ("model", None)),
+      ("layers.*.mlp.kernel_down_proj_FD", ("model", None)),
       "layers.*.mlp.gate_proj.kernel":
-      ("model.layers.*.mlp.gate_proj.kernel", (None, "model")),
-      "layers.*.mlp.up_proj.kernel": ("model.layers.*.mlp.up_proj.kernel",
-                                    (None, "model")),
+      ("layers.*.mlp.kernel_gating_DF", (None, "model")),
+      "layers.*.mlp.up_proj.kernel":
+      ("layers.*.mlp.kernel_up_proj_DF", (None, "model")),
       "layers.*.post_attention_layernorm.w":
-      ("model.layers.*.post_attention_layernorm.scale", (None, )),
+      ("layers.*.pre_mlp_norm.scale", (None, )),
       "layers.*.attn.k_proj.w":
-      ("model.layers.*.self_attn.k_proj.kernel", ("model", None, None)),
+      ("layers.*.attn.kernel_k_proj_DKH", (None, "model", None)),
       "layers.*.attn.o_proj.w":
-      ("model.layers.*.self_attn.o_proj.kernel", ("model", None, None)),
+      ("layers.*.attn.kernel_o_proj_NHD", ("model", None, None)),
       "layers.*.attn.q_proj.w":
-      ("model.layers.*.self_attn.q_proj.kernel", ("model", None, None)),
+      ("layers.*.attn.kernel_q_proj_DNH", (None, "model", None)),
       "layers.*.attn.v_proj.w":
-      ("model.layers.*.self_attn.v_proj.kernel", ("model", None, None)),
-      "final_norm.w": ("model.norm.scale", (None, )),
+      ("layers.*.attn.kernel_v_proj_DKH", (None, "model", None)),
+      "final_norm.w": ("final_norm.scale", (None, )),
     }
 
-  def get_tunix_lora_to_hf_mappings(self):
+  @property
+  def get_lora_to_hf_mappings(self):
     return {
-        "layers.*.mlp.gate_proj.kernel_lora_a": ("model.layers.*.mlp.gate_proj.kernel_lora_a",(None, None)),
-        "layers.*.mlp.gate_proj.kernel_lora_b": ("model.layers.*.mlp.gate_proj.kernel_lora_b",(None, "model")),
-        "layers.*.mlp.up_proj.kernel_lora_a": ("model.layers.*.mlp.up_proj.kernel_lora_a",(None, None)),
-        "layers.*.mlp.up_proj.kernel_lora_b": ("model.layers.*.mlp.up_proj.kernel_lora_b",(None, "model")),
-        "layers.*.mlp.down_proj.kernel_lora_a": ("model.layers.*.mlp.down_proj.kernel_lora_a",("model", None)),
-        "layers.*.mlp.down_proj.kernel_lora_b": ("model.layers.*.mlp.down_proj.kernel_lora_b",(None, None)),
-        "layers.*.attn.q_proj.w_lora_a": ("model.layers.*.self_attn.q_proj.kernel_lora_a",("model", None)),
-        "layers.*.attn.q_proj.w_lora_b": ("model.layers.*.self_attn.q_proj.kernel_lora_b",(None, None)),
-        "layers.*.attn.k_proj.w_lora_a": ("model.layers.*.self_attn.k_proj.kernel_lora_a",("model", None)),
-        "layers.*.attn.k_proj.w_lora_b": ("model.layers.*.self_attn.k_proj.kernel_lora_b",(None, None)),
-        "layers.*.attn.v_proj.w_lora_a": ("model.layers.*.self_attn.v_proj.kernel_lora_a",("model", None)),
-        "layers.*.attn.v_proj.w_lora_b": ("model.layers.*.self_attn.v_proj.kernel_lora_b",(None, None)),
-        "layers.*.attn.o_proj.w_lora_a": ("model.layers.*.self_attn.o_proj.kernel_lora_a",("model", None)),
-        "layers.*.attn.o_proj.w_lora_b": ("model.layers.*.self_attn.o_proj.kernel_lora_b",(None, None))
+        "layers.*.mlp.gate_proj.kernel_lora_a": ("layers.*.mlp.kernel_gating_DF_lora_a",(None, None)),
+        "layers.*.mlp.gate_proj.kernel_lora_b": ("layers.*.mlp.kernel_gating_DF_lora_b",(None, "model")),
+        "layers.*.mlp.up_proj.kernel_lora_a": ("layers.*.mlp.kernel_up_proj_DF_lora_a",(None, None)),
+        "layers.*.mlp.up_proj.kernel_lora_b": ("layers.*.mlp.kernel_up_proj_DF_lora_b",(None, "model")),
+        "layers.*.mlp.down_proj.kernel_lora_a": ("layers.*.mlp.kernel_down_proj_FD_lora_a",("model", None)),
+        "layers.*.mlp.down_proj.kernel_lora_b": ("layers.*.mlp.kernel_down_proj_FD_lora_b",(None, None)),
+        "layers.*.attn.q_proj.w_lora_a": ("layers.*.attn.kernel_q_proj_DNH_lora_a",("model", None)),
+        "layers.*.attn.q_proj.w_lora_b": ("layers.*.attn.kernel_q_proj_DNH_lora_b",(None, None)),
+        "layers.*.attn.k_proj.w_lora_a": ("layers.*.attn.kernel_k_proj_DKH_lora_a",("model", None)),
+        "layers.*.attn.k_proj.w_lora_b": ("layers.*.attn.kernel_k_proj_DKH_lora_b",(None, None)),
+        "layers.*.attn.v_proj.w_lora_a": ("layers.*.attn.kernel_v_proj_DKH_lora_a",("model", None)),
+        "layers.*.attn.v_proj.w_lora_b": ("layers.*.attn.kernel_v_proj_DKH_lora_b",(None, None)),
+        "layers.*.attn.o_proj.w_lora_a": ("layers.*.attn.kernel_o_proj_NHD_lora_a",("model", None)),
+        "layers.*.attn.o_proj.w_lora_b": ("layers.*.attn.kernel_o_proj_NHD_lora_b",(None, None))
       }
+
+  @property
+  def get_to_hf_transpose_keys(self):
+    return {
+        "input_embedding": (1, 0),
+    }

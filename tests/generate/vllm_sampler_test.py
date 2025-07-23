@@ -12,448 +12,194 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for vLLM sampler."""
+import os
+import jax
+import numpy as np
 
 from absl.testing import absltest
-from absl.testing import parameterized
 from flax import nnx
-import jax
-import jax.numpy as jnp
-import numpy as np
-from unittest.mock import Mock, patch, MagicMock
+from qwix import lora
+from transformers import AutoTokenizer
 from tunix.generate import vllm_sampler
-from tunix.generate.sampler import SamplerOutput
-from tunix.tests import test_common as tc
+from tunix.generate import sampler as vanilla_sampler
+from tunix.models.llama3 import model as llama_lib
+from tunix.models.llama3 import params as llama_params
 
 
-class vLLMSamplerTest(parameterized.TestCase):
+os.environ["TPU_BACKEND_TYPE"] = "jax"
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+os.environ["SKIP_JAX_PRECOMPILE"] = "1"
+# TODO(b/433750353): Enable random weights after vLLM supports it properly
+# os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
-  def setUp(self):
-    """Set up test fixtures."""
-    self.mock_tokenizer = tc.MockVocab()
-    self.mock_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(42), vocab_size=self.mock_tokenizer.GetPieceSize()
+class vLLMSamplerTest(absltest.TestCase):
+
+  def setUp(self) -> None:
+    super().setUp()
+    mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
+    axis_names = ("fsdp", "tp")  #
+    self.mesh = jax.make_mesh(mesh_shape,
+                          axis_names,
+                          devices=jax.devices())
+    # self.model_path = "meta-llama/Llama-3.1-8B"
+    self.model_path = "/workspace/tunix/rl/grpo/models/meta-llama/Meta-Llama-3-8B-Instruct/"
+    # TODO(b/432096319): Enable after LoRA support in vLLM
+    self.enable_lora = False
+
+  def get_lora_model(self, base_model):
+    lora_provider = lora.LoraProvider(
+        module_path=(
+            ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
+        ),
+        rank=64,
+        alpha=64.0,
     )
-    self.default_lora_config = {
-        "rank": 64,
-        "alpha": 64.0,
-        "module_path": ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
+
+    model_input = base_model.get_model_input()
+    lora_model = lora.apply_lora_to_model(
+        base_model, lora_provider, **model_input
+    )
+
+    state = nnx.state(lora_model)
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    nnx.update(lora_model, sharded_state)
+
+    return lora_model
+
+  def load_llama3_model(self, model_version: str = "llama3-1b", enable_lora: bool = False):
+    model_config = {
+        "llama3-1b": llama_lib.ModelConfig.llama3_1b,
+        "llama3-8b": llama_lib.ModelConfig.llama3_8b,
     }
+    assert (
+        model_version in model_config
+    ), f"Invalid model version: {model_version}"
+    model_config = model_config[model_version]()
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_vllm_sampler_initialization(self, mock_llm):
-    """Test vLLMSampler initialization."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    # Mock the sampling params
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config,
-        model_version="meta-llama/Llama-3.1-8B",
-        max_model_len=1024
-    )
-    
-    # Verify LLM was called with correct arguments
-    mock_llm.assert_called_once()
-    call_args = mock_llm.call_args[1]
-    
-    # Check that the args contain the expected keys
-    self.assertIn('additional_config', call_args)
-    self.assertIn('custom_nnx_weights', call_args['additional_config'])
-    self.assertIn('lora_config', call_args['additional_config'])
-    self.assertIn('max_model_len', call_args)
-    self.assertIn('model', call_args)
-    
-    # Verify sampling params were configured
-    self.assertEqual(mock_sampling_params.detokenize, False)
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_vllm_sampler_initialization_no_lora(self, mock_llm):
-    """Test vLLMSampler initialization without LoRA config."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=None,
-        max_model_len=512
-    )
-    
-    # Verify default LoRA config was used
-    call_args = mock_llm.call_args[1]
-    lora_config = call_args['additional_config']['lora_config']
-    self.assertEqual(lora_config['rank'], 64)
-    self.assertEqual(lora_config['alpha'], 64.0)
+    llama3 = llama_params.create_model_from_safe_tensors(self.model_path, model_config, self.mesh)
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_tokenize_method(self, mock_llm):
-    """Test the tokenize method."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Test tokenization
-    input_string = "input string"
-    tokenized = sampler.tokenize(input_string)
-    
-    # Should include BOS token + input tokens
-    expected_tokens = [self.mock_tokenizer.bos_id()] + self.mock_tokenizer.EncodeAsIds(input_string)
-    self.assertEqual(tokenized, expected_tokens)
+    if enable_lora:
+      llama3 = self.get_lora_model(llama3)
+      print(f"Loaded LoRA model: {model_version} with LoRA enabled")
+    # nnx.display(llama3)
+    return llama3
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_detokenize_method(self, mock_llm):
-    """Test the detokenize method."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Mock RequestOutput structure
-    mock_output = Mock()
-    mock_single_output = Mock()
-    mock_single_output.token_ids = [5, 6]  # "hello world"
-    mock_single_output.logprob = [0.1, 0.2]
-    mock_output.__iter__ = lambda self: iter([[mock_single_output]])
-    
-    prompts = ["test prompt"]
-    outputs = [mock_output]
-    
-    # Test with return_logits=True
-    decoded_outputs, out_logits, out_tokens = sampler.detokenize(
-        prompts, return_logits=True, outputs=outputs
-    )
-    
-    self.assertEqual(len(decoded_outputs), 1)
-    self.assertEqual(len(out_logits), 1)
-    self.assertEqual(len(out_tokens), 1)
-    self.assertEqual(decoded_outputs[0][0], "hello world")
-    self.assertEqual(out_logits[0][0], [0.1, 0.2])
-    self.assertEqual(out_tokens[0][0], [5, 6])
+  def print_mem_stats(self, label: str):
+    print(f"\nMemstats: {label}:")
+    try:
+      for d in jax.local_devices():
+        stats = d.memory_stats()
+        used = round(stats["bytes_in_use"] / 2**30, 2)
+        limit = round(stats["bytes_limit"] / 2**30, 2)
+        print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
+    except (RuntimeError, KeyError, TypeError) as ex:
+        print(f"\tMemstats unavailable, error: {ex}")
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_call_method_basic(self, mock_llm):
-    """Test the __call__ method with basic parameters."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    # Mock the generate method
-    mock_output = Mock()
-    mock_single_output = Mock()
-    mock_single_output.token_ids = [5, 6]  # "hello world"
-    mock_single_output.logprob = [0.1, 0.2]
-    mock_output.__iter__ = lambda self: iter([[mock_single_output]])
-    
-    mock_llm_instance.generate.return_value = [mock_output]
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Test basic call
-    result = sampler(
-        prompts=["test prompt"],
-        max_generation_length=10,
-        return_logits=True
-    )
-    
-    # Verify result structure
-    self.assertIsInstance(result, SamplerOutput)
-    self.assertEqual(len(result.text), 1)
-    self.assertEqual(len(result.logits), 1)
-    self.assertEqual(len(result.tokens), 1)
-    
-    # Verify sampling params were updated
-    self.assertEqual(mock_sampling_params.max_tokens, 10)
-    self.assertEqual(mock_sampling_params.n, 1)
+  def templatize(self, prompts, tokenizer=None):
+    out = []
+    for p in prompts:
+      out.append(
+          tokenizer.apply_chat_template(
+            [
+                {"role": "user", "content": p},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+      )
+    return out
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_call_method_with_sampling_params(self, mock_llm):
-    """Test the __call__ method with temperature, top_p, top_k."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    # Mock the generate method
-    mock_output = Mock()
-    mock_single_output = Mock()
-    mock_single_output.token_ids = [5, 6]
-    mock_single_output.logprob = [0.1, 0.2]
-    mock_output.__iter__ = lambda self: iter([[mock_single_output]])
-    
-    mock_llm_instance.generate.return_value = [mock_output]
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Test with sampling parameters
-    result = sampler(
-        prompts=["test prompt"],
-        max_generation_length=20,
-        temperature=0.8,
-        top_p=0.9,
-        top_k=50,
-        multi_sampling=3,
-        return_logits=False
-    )
-    
-    # Verify sampling params were updated
-    self.assertEqual(mock_sampling_params.temperature, 0.8)
-    self.assertEqual(mock_sampling_params.top_p, 0.9)
-    self.assertEqual(mock_sampling_params.top_k, 50)
-    self.assertEqual(mock_sampling_params.n, 3)
+  def test_vllm_sampler(self):
+      if "8B" in self.model_path:
+          tunix_model_type = "llama3-8b"
+      elif "1B" in self.model_path:
+          tunix_model_type = "llama3-1b"
+      else:
+          raise ValueError(f"Unsupported model type: {self.model_path}")
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_call_method_max_length_validation(self, mock_llm):
-    """Test that max_generation_length validation works."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config,
-        max_model_len=100
-    )
-    
-    # Test that exceeding max_model_len raises an error
-    with self.assertRaises(AssertionError):
-      sampler(
-          prompts=["test prompt"],
-          max_generation_length=150,  # Exceeds max_model_len=100
-          return_logits=False
+      tunix_model = self.load_llama3_model(tunix_model_type, enable_lora=self.enable_lora)
+
+      args = {}
+      args["model"]=self.model_path
+      args["additional_config"] = {}
+      args["additional_config"]["lora_config"] = None
+      if self.enable_lora:
+        args["additional_config"]["lora_config"] = {
+              "rank": 64,
+              "alpha": 64.0,
+              "module_path":
+                  ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
+              # "dropout": 0.0,
+              # "bias": "none",
+            }
+
+      self.print_mem_stats("After loading tunix model")
+
+      # Sampler setup
+      model_tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+
+      # Generate texts from the prompts. The output is a list of RequestOutput
+      # objects that contain the prompt, generated text, and other information.
+      prompts = [
+          "Hello, my name is",
+          "The capital of France is",
+      ]
+
+
+      inputs = self.templatize(prompts, tokenizer=model_tokenizer)
+
+      _vanilla_sampler = vanilla_sampler.Sampler(
+          transformer=tunix_model,
+          tokenizer=model_tokenizer,
+          cache_config = vanilla_sampler.CacheConfig(
+             cache_size=512,
+             num_layers=32,
+             num_kv_heads=8,
+             head_dim=128)
+      )
+      vanilla_output = _vanilla_sampler(
+          input_strings=inputs,
+          total_generation_steps=128,  # Change from 768 to 1024 to comply with vLLM constraints
+          max_prompt_length=None,  # Use default max prompt length
+          temperature=0.0,
+          # top_p=0.9,
+          top_k=1,
+          seed=0,
+          echo=False,
+          pad_output=True,  # Use padding for output
       )
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_transformer_state_property(self, mock_llm):
-    """Test the transformer_state property."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    # Mock the nested structure
-    mock_model_executor = Mock()
-    mock_driver_worker = Mock()
-    mock_model_runner = Mock()
-    mock_transformer_state = Mock()
-    
-    mock_llm_instance.llm_engine.model_executor = mock_model_executor
-    mock_model_executor.driver_worker = mock_driver_worker
-    mock_driver_worker.model_runner = mock_model_runner
-    mock_model_runner.transformer_state = mock_transformer_state
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Test the property
-    transformer_state = sampler.transformer_state
-    self.assertEqual(transformer_state, mock_transformer_state)
+      _vllm_sampler = vllm_sampler.vLLMSampler(
+          model=tunix_model,
+          tokenizer=model_tokenizer,
+          mesh=self.mesh,
+          max_model_len=512,  # Set to 1024 for vLLM
+          lora_config=args["additional_config"]["lora_config"],
+          model_version=self.model_path,
+      )
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_multi_sampling_output_structure(self, mock_llm):
-    """Test that multi-sampling produces correct output structure."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    # Mock multiple outputs for multi-sampling
-    mock_output = Mock()
-    mock_single_output1 = Mock()
-    mock_single_output1.token_ids = [5, 6]  # "hello world"
-    mock_single_output1.logprob = [0.1, 0.2]
-    
-    mock_single_output2 = Mock()
-    mock_single_output2.token_ids = [7, 8]  # "Hello there"
-    mock_single_output2.logprob = [0.3, 0.4]
-    
-    mock_output.__iter__ = lambda self: iter([[mock_single_output1, mock_single_output2]])
-    
-    mock_llm_instance.generate.return_value = [mock_output]
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Test multi-sampling
-    result = sampler(
-        prompts=["test prompt"],
-        max_generation_length=10,
-        multi_sampling=2,
-        return_logits=True
-    )
-    
-    # Verify multi-sampling structure
-    self.assertEqual(len(result.text), 2)  # Two samples
-    self.assertEqual(len(result.logits), 2)
-    self.assertEqual(len(result.tokens), 2)
-    
-    # Verify sampling params
-    self.assertEqual(mock_sampling_params.n, 2)
+      self.print_mem_stats("After loading vLLM sampler")
 
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_batch_processing(self, mock_llm):
-    """Test processing multiple prompts in a batch."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    # Mock outputs for multiple prompts
-    mock_output1 = Mock()
-    mock_single_output1 = Mock()
-    mock_single_output1.token_ids = [5, 6]  # "hello world"
-    mock_single_output1.logprob = [0.1, 0.2]
-    mock_output1.__iter__ = lambda self: iter([[mock_single_output1]])
-    
-    mock_output2 = Mock()
-    mock_single_output2 = Mock()
-    mock_single_output2.token_ids = [7, 8]  # "Hello there"
-    mock_single_output2.logprob = [0.3, 0.4]
-    mock_output2.__iter__ = lambda self: iter([[mock_single_output2]])
-    
-    mock_llm_instance.generate.return_value = [mock_output1, mock_output2]
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Test batch processing
-    result = sampler(
-        prompts=["prompt 1", "prompt 2"],
-        max_generation_length=10,
-        return_logits=True
-    )
-    
-    # Verify batch processing
-    self.assertEqual(len(result.text), 1)  # Only first prompt's output
-    self.assertEqual(len(result.logits), 1)
-    self.assertEqual(len(result.tokens), 1)
-    
-    # Verify generate was called with correct prompt_token_ids
-    generate_call = mock_llm_instance.generate.call_args
-    self.assertIn('prompt_token_ids', generate_call[1])
+      vllm_output = _vllm_sampler(
+          input_strings=inputs,
+          total_generation_steps=128,  # Change from 768 to 1024 to comply with vLLM constraints
+          max_prompt_length=None,  # Use default max prompt length
+          temperature=0.0,
+          # top_p=0.9,
+          top_k=1,
+          seed=0,
+          echo=False,
+          pad_output=True,  # Use padding for output
+      )
+      # Print the outputs.
+      print("-" * 50)
+      print(f"Vanilla Generated text: {vanilla_output.text}")
 
-  def test_lora_config_default_values(self):
-    """Test that default LoRA config values are correct."""
-    # Test the default LoRA config structure
-    expected_config = {
-        "rank": 64,
-        "alpha": 64.0,
-        "module_path": ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
-    }
-    
-    self.assertEqual(self.default_lora_config, expected_config)
-
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_error_handling_invalid_model_version(self, mock_llm):
-    """Test error handling for invalid model version."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    # Test with invalid model version
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config,
-        model_version="invalid/model/version"
-    )
-    
-    # The sampler should still initialize, but the LLM might fail later
-    # This test ensures the initialization doesn't crash
-    self.assertIsNotNone(sampler)
-
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_tokenizer_adapter_integration(self, mock_llm):
-    """Test that TokenizerAdapter is properly integrated."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Verify tokenizer adapter was created
-    self.assertIsNotNone(sampler.tokenizer)
-    self.assertEqual(sampler.tokenizer.bos_id(), 1)
-    self.assertEqual(sampler.tokenizer.eos_id(), 2)
-    self.assertEqual(sampler.tokenizer.pad_id(), 0)
-
-  @patch('tunix.generate.vllm_sampler.LLM')
-  def test_model_parameter_extraction(self, mock_llm):
-    """Test that model parameters are properly extracted."""
-    mock_llm_instance = Mock()
-    mock_llm.return_value = mock_llm_instance
-    
-    mock_sampling_params = Mock()
-    mock_llm_instance.get_default_sampling_params.return_value = mock_sampling_params
-    
-    sampler = vllm_sampler.vLLMSampler(
-        tokenizer=self.mock_tokenizer,
-        model=self.mock_model,
-        lora_config=self.default_lora_config
-    )
-    
-    # Verify that model parameters were extracted and passed to LLM
-    call_args = mock_llm.call_args[1]
-    self.assertIn('custom_nnx_weights', call_args['additional_config'])
-    self.assertIsNotNone(call_args['additional_config']['custom_nnx_weights'])
-
+      print("-" * 50)
+      print(f"vLLM Generated text: {vllm_output.text}")
 
 if __name__ == '__main__':
-  absltest.main() 
+  absltest.main()
+

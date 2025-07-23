@@ -123,20 +123,6 @@ class ModelConfig:
         rope_theta=500_000,
     )
 
-  @classmethod
-  def llama3_0b(cls):
-    return cls(
-        num_layers=2,
-        vocab_size=128256,
-        embed_dim=2048,
-        hidden_dim=8192,
-        num_heads=32,
-        head_dim=64,
-        num_kv_heads=8,
-        norm_eps=1e-05,
-        rope_theta=500_000,
-    )
-
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
