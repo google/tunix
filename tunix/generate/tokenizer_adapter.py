@@ -49,21 +49,21 @@ class TokenizerAdapter:
           f'{missing_methods}.'
       )
 
-  def encode(self, text: str) -> list[int]:
+  def encode(self, text: str, **kwargs) -> list[int]:
     if self._tokenizer_type == TokenizerType.SP:
-      return self._tokenizer.EncodeAsIds(text)
+      return self._tokenizer.EncodeAsIds(text, **kwargs)
     elif self._tokenizer_type == TokenizerType.HF:
-      return self._tokenizer.encode(text)
+      return self._tokenizer.encode(text, **kwargs)
     else:
-      return self._tokenizer.encode(text)
+      return self._tokenizer.encode(text, **kwargs)
 
-  def decode(self, ids: list[int]) -> str:
+  def decode(self, ids: list[int], **kwargs) -> str:
     if self._tokenizer_type == TokenizerType.SP:
-      return self._tokenizer.DecodeIds(ids)
+      return self._tokenizer.DecodeIds(ids, **kwargs)
     elif self._tokenizer_type == TokenizerType.HF:
-      return self._tokenizer.decode(ids)
+      return self._tokenizer.decode(ids, **kwargs)
     else:
-      return self._tokenizer.decode(ids)
+      return self._tokenizer.decode(ids, **kwargs)
 
   def bos_id(self) -> int:
     if self._tokenizer_type == TokenizerType.SP:
@@ -82,9 +82,16 @@ class TokenizerAdapter:
       return self._tokenizer.eos_id()
 
   def pad_id(self) -> int:
+    """Returns the pad token id."""
     if self._tokenizer_type == TokenizerType.SP:
-      return self._tokenizer.pad_id()
+      ret_id = self._tokenizer.pad_id()
+      if ret_id == -1:
+        raise ValueError('SentencePiece tokenizer has a undefined pad_id.')
+      return ret_id
     elif self._tokenizer_type == TokenizerType.HF:
+      # e.g. llama3 HF tokenizers do not have pad_id
+      if self._tokenizer.pad_token_id is None:
+        self._tokenizer.pad_token = self._tokenizer.eos_token
       return self._tokenizer.pad_token_id
     else:
       return self._tokenizer.pad_id()
