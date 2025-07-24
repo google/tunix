@@ -14,7 +14,7 @@
 
 """Distillation trainer."""
 import dataclasses
-from typing import Any, Callable, Self, Tuple
+from typing import Any, Callable, Tuple
 
 import flax
 from flax import nnx
@@ -76,7 +76,7 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
   @override
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, ArrayLike]]
-  ) -> Self:
+  ) -> "DistillationTrainer":
     self.gen_model_input_fn = lambda x: {
         "inputs": gen_model_input_fn(x),
         "teacher_output": (
@@ -90,7 +90,7 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
       self,
       loss_fn: Callable[..., ArrayLike | Tuple[ArrayLike, Any]],
       has_aux: bool = False,
-  ) -> Self:
+  ) -> "DistillationTrainer":
     raise NotImplementedError(
         "with_loss_fn is not supported for distillation. Use the strategy to"
         " define the loss."

@@ -27,7 +27,12 @@ from tunix.rl.rollout import vllm_rollout
 
 from tunix.sft import metrics_logger
 
-from transformers import AutoTokenizer #YY
+from transformers import AutoTokenizer
+
+
+print(f"This script is still WIP and you'll need to download all the data to"
+      "local first. Functionality and performance is not guaranteed. Try at "
+      "your own discretion")
 
 os.environ["TPU_BACKEND_TYPE"] = "jax"
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -35,11 +40,11 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"  # Disable precompilation
 # os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
 # ====== Data ======
-TRAIN_DATA_PATH = "/workspace/tunix/rl/grpo/data/gsm8k_train.json" #YY
-TEST_DATA_PATH = "/workspace/tunix/rl/grpo/data/gsm8k_test.json" #YY
+TRAIN_DATA_PATH = "/workspace/rl/grpo/data/gsm8k_train.json"
+TEST_DATA_PATH = "/workspace/rl/grpo/data/gsm8k_test.json"
 
-VLLM_MODEL_VERSION="/workspace/tunix/rl/grpo/models/meta-llama/Meta-Llama-3-8B-Instruct/"
-VLLM_MODEL_VERSION="meta-llama/Llama-3.1-8B" #YY
+VLLM_MODEL_VERSION="/workspace/rl/grpo/models/meta-llama/8b/"
+VLLM_MODEL_VERSION="meta-llama/Llama-3-8B-Instruct"
 
 os.environ["TPU_BACKEND_TYPE"] = "jax"
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -47,7 +52,7 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 TRAIN_FRACTION = 1.0
 
 # ====== Base Model ======
-NNX_CKPT_DIR="/workspace/tunix/rl/grpo/models/meta-llama/"
+NNX_CKPT_DIR="/workspace/rl/grpo/models/meta-llama/"
 MODEL_VERSION = "8b"
 
 # ====== Reproducibility ======
@@ -115,7 +120,7 @@ MAX_GRAD_NORM = 0.1
 
 # ====== Checkpoint saving ======
 CKPT_DIR = (
-    "/workspace/tunix/rl/grpo/demo/experiments/llama3/training_runs/2"
+    "/workspace/rl/grpo/demo/experiments/llama3/training_runs/2"
 )
 
 SAVE_INTERVAL_STEPS = 500 # To speed up for quick workflow validation, we can change it to e.g. 2
@@ -142,7 +147,7 @@ for name, obj in list(globals().items()):
 gc.collect()
 
 
-def load_json_from_cns(path):
+def load_json_from_local(path):
   # with gfile.Open(path, "rb") as f:
   with open(path, "rb") as f: #YY
     return json.loads(f.read())
@@ -202,7 +207,7 @@ def extract_hash_answer(text: str) -> str | None:
 
 def get_dataset(path: str) -> grain.MapDataset:
 
-  data = load_json_from_cns(path)
+  data = load_json_from_local(path)
 
   dataset = (
       grain.MapDataset.source(data)
