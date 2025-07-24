@@ -27,21 +27,14 @@ from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 
 
-@dataclasses.dataclass(frozen=True)
-class CacheConfig:
-  """Configuration for the KV cache."""
-
-  cache_size: int
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
-
-
 class VanillaRollout(base_rollout.BaseRollout):
   """Vanilla rollout worker."""
 
   def __init__(
-      self, model: nnx.Module, tokenizer: Any, cache_config: CacheConfig
+      self,
+      model: nnx.Module,
+      tokenizer: Any,
+      cache_config: base_rollout.CacheConfig,
   ):
     self._sampler = sampler.Sampler(
         model,

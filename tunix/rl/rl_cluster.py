@@ -29,6 +29,7 @@ from tunix.rl import utils
 from tunix.rl.inference import inference_worker
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
+from tunix.rl.rollout import vllm_rollout
 from tunix.sft import peft_trainer
 
 type ModelOrPath = Union[nnx.Module, str]
@@ -81,6 +82,11 @@ class ClusterConfig:
   training_config: RLTrainingConfig
   rollout_config: base_rollout.RolloutConfig
 
+  # TODO(lancewang): Remove this when vLLM Jax backends supports sharded initial
+  # random weights properly
+  rollout_model_version: str = ""
+  rollout_lora_config: dict[str, Any] = None
+
 
 class RLCluster:
   """RLCluster."""
@@ -96,16 +102,17 @@ class RLCluster:
       cluster_config: ClusterConfig,
   ):
     self.cluster_config = cluster_config
-    r2m = cluster_config.role_to_mesh
-    self.train_actor = self._load_model(actor, r2m[Role.ACTOR])
+    self.r2m = cluster_config.role_to_mesh
+    self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
     if self.cluster_config.rollout_engine == "vanilla":
-      # vLLM has it's own model loading logic. Only load for vanilla rollout.
-      self.rollout_actor = self._load_model(actor, r2m[Role.ROLLOUT])
-    self.critic = self._load_model(critic, r2m[Role.CRITIC]) if critic else None
+      # vLLM has it's own model loading logic in the init cluster. Only load for
+      # vanilla rollout.
+      self.rollout_actor = self._load_model(actor, self.r2m[Role.ROLLOUT])
+    self.critic = self._load_model(critic, self.r2m[Role.CRITIC]) if critic else None
     self.reference = (
-        self._load_model(reference, r2m[Role.REFERENCE]) if reference else None
+        self._load_model(reference, self.r2m[Role.REFERENCE]) if reference else None
     )
-    self.reward = self._load_model(reward, r2m[Role.REWARD]) if reward else None
+    self.reward = self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
     self.tokenizer = tokenizer
     self._init_cluster()
 
@@ -167,7 +174,19 @@ class RLCluster:
           ),
       )
     elif self.cluster_config.rollout_engine == "vllm":
-      raise NotImplementedError("vLLM rollout engine is not supported yet.")
+      self._rollout = vllm_rollout.vLLMRollout(
+          self.rollout_actor,
+          self.tokenizer,
+          cache_config=base_rollout.CacheConfig(
+              cache_size=self.cluster_config.rollout_config.kv_cache_size,
+              num_layers=0,  # vLLM doesn't rely on these model config
+              num_kv_heads=0,
+              head_dim=0,
+          ),
+          mesh=self.r2m[Role.ROLLOUT],
+          lora_config=self.cluster_config.rollout_lora_config,
+          model_version=self.cluster_config.model_version
+      )
 
     # 2. Initialize inference worker.
     inference_models = {}

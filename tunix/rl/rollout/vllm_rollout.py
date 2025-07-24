@@ -14,8 +14,6 @@
 
 """vLLM rollout worker with Tunix sampler."""
 
-import functools
-import operator
 from typing import Any, Dict, Optional
 from flax import nnx
 import jax
@@ -31,7 +29,13 @@ class vLLMRollout(base_rollout.BaseRollout):
   """vLLM rollout worker."""
 
   def __init__(
-      self, model: nnx.Module, tokenizer: Any, cache_config: sampler.CacheConfig, mesh: jax.sharding.Mesh, lora_config: Optional[Dict[str, str]] = None,  model_version: str = "meta-llama/Llama-3.1-8B",
+      self,
+      model: nnx.Module,
+      tokenizer: Any,
+      cache_config: base_rollout.CacheConfig,
+      mesh: jax.sharding.Mesh,
+      lora_config: Optional[Dict[str, str]] = None,
+      model_version: str = "meta-llama/Llama-3.1-8B",
   ):
     self.model = model
     self.mesh = mesh

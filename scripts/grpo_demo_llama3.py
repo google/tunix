@@ -16,14 +16,15 @@ from orbax import checkpoint as ocp
 from qwix import lora
 from tqdm.auto import tqdm
 from tunix.generate import sampler as sampler_lib
-from tunix.models.llama3 import model as llama_lib #YY
+from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3.model import ModelConfig as llama_model_config
 from tunix.models.llama3.params import create_model_from_safe_tensors
-
+from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
-from tunix.rl.rollout import vanilla_rollout
-from tunix.rl.rollout import vllm_rollout #YY
-from tunix.generate import vllm_sampler #YY
+from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout import vllm_rollout
+
+
 from tunix.sft import metrics_logger
 
 from transformers import AutoTokenizer #YY
@@ -538,6 +539,99 @@ def evaluate(
 model_tokenizer = AutoTokenizer.from_pretrained(VLLM_MODEL_VERSION)
 
 show_hbm_usage("After creating a raw sampler")
+
+# Ckpt saving
+checkpointing_options = ocp.CheckpointManagerOptions(
+    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+)
+
+# Metrics logger
+metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
+)
+
+
+show_hbm_usage("After creating a new rollout worker")
+# Optimizer, learning rate scheduler, gradient clipping
+optimizer = optax.adamw(
+    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=LEARNING_RATE,
+        warmup_steps=WARMUP_STEPS,
+        decay_steps=MAX_STEPS,
+        end_value=0.0,
+    ),
+    b1=B1,
+    b2=B2,
+    weight_decay=WEIGHT_DECAY,
+)
+if MAX_GRAD_NORM is not None:
+  optimizer = optax.chain(
+      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      optimizer,
+  )
+
+# Training config
+cluster_config = rl_cluster_lib.ClusterConfig(
+    role_to_mesh={
+        rl_cluster_lib.Role.ACTOR: mesh,
+        rl_cluster_lib.Role.REFERENCE: mesh,
+        rl_cluster_lib.Role.ROLLOUT: mesh,
+    },
+    rollout_engine='vllm',
+    offload_to_cpu=False,
+    training_config=rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optimizer,
+        eval_every_n_steps=EVAL_EVERY_N_STEPS,
+        max_steps=MAX_STEPS,
+        gradient_accumulation_steps=1,
+        # metrics logging
+        metrics_logging_options=metrics_logging_options,
+        # checkpoint saving
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
+    ),
+    rollout_config=base_rollout.RolloutConfig(
+        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+        max_prompt_length=MAX_PROMPT_LENGTH,
+        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        top_k=TOP_K,
+    ),
+    rollout_model_version=VLLM_MODEL_VERSION
+)
+
+grpo_config = GrpoConfig(
+    num_generations=NUM_GENERATIONS,
+    num_iterations=NUM_ITERATIONS,
+    beta=BETA,
+    epsilon=EPSILON,
+)
+
+# RL cluster
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=lora_transformer,
+    reference=transformer,
+    tokenizer=model_tokenizer,
+    cluster_config=cluster_config,
+)
+
+# GRPO Trainer
+grpo_trainer = GrpoLearner(
+    rl_cluster=rl_cluster,
+    reward_fns=[
+        match_format_exactly,
+        match_format_approximately,
+        check_answer,
+        check_numbers,
+    ],
+    grpo_config=grpo_config,
+)
+
+show_hbm_usage("After creating the learner")
+
+sampler = rl_cluster._rollout._sampler
 (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
     test_dataset,
     sampler,
@@ -564,102 +658,10 @@ print(
 #   print(f"Response:\n{response}")
 #   print("===============")
 
-# %load_ext google3.learning.brain.tensorboard.notebook.extension
-
-# Ckpt saving
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
-)
-
-# Metrics logger
-metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
-)
-
-# Logs
-# %tensorboard --logdir /tmp/tensorboard/grpo --port=0
-
-# Training config
-training_config = GrpoConfig(
-    max_prompt_length=MAX_PROMPT_LENGTH,
-    total_generation_steps=TOTAL_GENERATION_STEPS,
-    num_generations=NUM_GENERATIONS,
-    num_iterations=NUM_ITERATIONS,
-    beta=BETA,
-    epsilon=EPSILON,
-    temperature=TEMPERATURE,
-    top_p=TOP_P,
-    top_k=TOP_K,
-    eval_every_n_steps=EVAL_EVERY_N_STEPS,
-    max_steps=MAX_STEPS,
-    # metrics logging
-    metrics_logging_options=metrics_logging_options,
-    # checkpoint saving
-    checkpoint_root_directory=CKPT_DIR,
-    checkpointing_options=checkpointing_options,
-)
-
-# Rollout worker
-rollout_worker = vllm_rollout.vLLMRollout(
-  model=lora_transformer,
-  tokenizer=model_tokenizer,
-  cache_config=sampler_lib.CacheConfig(
-      cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-      num_layers=model_config.num_layers,
-      num_kv_heads=model_config.num_kv_heads,
-      head_dim=model_config.head_dim,
-  ),
-  lora_config={
-        "rank": 64,
-        "alpha": 64.0,
-        "module_path":
-            ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
-      },
-  mesh=mesh,
-  model_version=VLLM_MODEL_VERSION, #YY
-)
-
-show_hbm_usage("After creating a new rollout worker")
-# Optimizer, learning rate scheduler, gradient clipping
-optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
-)
-if MAX_GRAD_NORM is not None:
-  optimizer = optax.chain(
-      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-      optimizer,
-  )
-
-# GRPO Trainer
-grpo_trainer = GrpoLearner(
-    model=lora_transformer,
-    ref_model=transformer,  # use the base model as reference
-    reward_fns=[
-        match_format_exactly,
-        match_format_approximately,
-        check_answer,
-        check_numbers,
-    ],
-    rollout_worker=rollout_worker,
-    optimizer=optimizer,
-    training_config=training_config,
-    trainer_mesh=mesh,
-    rollout_worker_mesh=mesh,
-)
 
 show_hbm_usage("Right before training")
 with mesh:
   if DO_MEM_PROFILING:
-    with profile_and_capture_log("llm_benchmark"):
       jax.profiler.start_trace(PROFILER_PATH)
       grpo_trainer.train(train_dataset)
       jax.profiler.stop_trace()
@@ -687,19 +689,6 @@ nnx.update(
         trained_lora_params,
     ),
 )
-
-# model_tokenizer = data_lib.GemmaTokenizer() #YY
-# sampler = sampler_lib.Sampler(
-#     transformer=lora_transformer,
-#     tokenizer=model_tokenizer,
-#     cache_config=sampler_lib.CacheConfig(
-#         cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-#         num_layers=model_config.num_layers,
-#         num_kv_heads=model_config.num_kv_heads,
-#         head_dim=model_config.head_dim,
-#     ),
-# )
-sampler = rollout_worker._sampler
 
 (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
     test_dataset,
