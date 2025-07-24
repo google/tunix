@@ -16,11 +16,9 @@ from orbax import checkpoint as ocp
 from qwix import lora
 from tqdm.auto import tqdm
 from tunix.generate import sampler as sampler_lib
-from tunix.models.gemma import data as data_lib
-from tunix.models.gemma import gemma as gemma_lib
 from tunix.models.llama3 import model as llama_lib #YY
 from tunix.models.llama3.model import ModelConfig as llama_model_config
-from tunix.models.llama3.params import create_model_from_safe_tensors, create_model_from_safe_tensors_original #YY
+from tunix.models.llama3.params import create_model_from_safe_tensors
 
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner
 from tunix.rl.rollout import vanilla_rollout
@@ -32,35 +30,24 @@ from transformers import AutoTokenizer #YY
 
 os.environ["TPU_BACKEND_TYPE"] = "jax"
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-# os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"  # Disable precompilation
-
-#YY
-# from google3.perftools.accelerators.xprof.api.python import xprof_session
-# from google3.pyglib import gfile
+# os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
 # ====== Data ======
 TRAIN_DATA_PATH = "/workspace/tunix/rl/grpo/data/gsm8k_train.json" #YY
 TEST_DATA_PATH = "/workspace/tunix/rl/grpo/data/gsm8k_test.json" #YY
 
-USE_VLLM = True  # YY
 VLLM_MODEL_VERSION="/workspace/tunix/rl/grpo/models/meta-llama/Meta-Llama-3-8B-Instruct/"
-# VLLM_MODEL_VERSION="meta-llama/Llama-3.1-8B" #YY
+VLLM_MODEL_VERSION="meta-llama/Llama-3.1-8B" #YY
 
-if USE_VLLM: #YY
-  os.environ["TPU_BACKEND_TYPE"] = "jax"
-  os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
+os.environ["TPU_BACKEND_TYPE"] = "jax"
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 TRAIN_FRACTION = 1.0
 
 # ====== Base Model ======
-NNX_CKPT_DIR = "/workspace/tunix/rl/grpo/nnx/"
-MODEL_VERSION = "2b-it"
-
-if USE_VLLM: # YY
-  NNX_CKPT_DIR="/workspace/tunix/rl/grpo/models/meta-llama/Meta-Llama-3-8B-Instruct/" # Need llama3 8B safetensor checkpoint
-  MODEL_VERSION = "8b"
+NNX_CKPT_DIR="/workspace/tunix/rl/grpo/models/meta-llama/"
+MODEL_VERSION = "8b"
 
 # ====== Reproducibility ======
 SEED = 42
@@ -98,11 +85,11 @@ BETA = 0.08
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 4
-NUM_BATCHES = 2 #YY 1869 -> 2
+BATCH_SIZE = 2 # 2 is the max we can do on v5e-8 with llama3 8B model.
+NUM_BATCHES = 1869 # To speed up for quick workflow validation, we can change it to e.g. 2
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
-NUM_TEST_BATCHES = 50 # YY 50 -> 1
+NUM_TEST_BATCHES = 50 # To speed up for quick workflow validation, we can change it to e.g. 1
 
 EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
@@ -127,14 +114,10 @@ MAX_GRAD_NORM = 0.1
 
 # ====== Checkpoint saving ======
 CKPT_DIR = (
-    "/workspace/tunix/rl/grpo/demo/experiments/gemma2/training_runs/2"
+    "/workspace/tunix/rl/grpo/demo/experiments/llama3/training_runs/2"
 )
-if USE_VLLM:
-  CKPT_DIR = (
-      "/workspace/tunix/rl/grpo/demo/experiments/llama3/training_runs/2"
-  )
 
-SAVE_INTERVAL_STEPS = 500 #YY 500 -> 5
+SAVE_INTERVAL_STEPS = 500 # To speed up for quick workflow validation, we can change it to e.g. 2
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -147,6 +130,9 @@ GENERATION_CONFIGS = {
     # liberal
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
+
+# ====== Profiler ======
+PROFILER_PATH = "/workspace/tunix/rl/grpo/demo/experiments/llama3/profiler"
 
 import gc
 for name, obj in list(globals().items()):
@@ -256,30 +242,10 @@ for ele in train_dataset[:1]:
   pprint(ele)
 
 MODEL_CONFIG = {
-    "2b": gemma_lib.TransformerConfig.gemma2_2b,
-    "2b-it": gemma_lib.TransformerConfig.gemma2_2b,
+    "1b": llama_lib.ModelConfig.llama3_1b,
     "8b": llama_lib.ModelConfig.llama3_8b,
 }
 
-#YY
-def get_gemma_model(ckpt_path, mesh):
-  abs_gemma: nnx.Module = nnx.eval_shape(
-      lambda: gemma_lib.Transformer(model_config, rngs=nnx.Rngs(params=0))
-  )
-  abs_state = nnx.state(abs_gemma)
-  abs_state = jax.tree.map(
-      lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.float32, sharding=s),
-      abs_state,
-      nnx.get_named_sharding(abs_state, mesh),
-  )
-  checkpointer = ocp.StandardCheckpointer()
-  restored_params = checkpointer.restore(ckpt_path, target=abs_state)
-
-  graph_def, _ = nnx.split(abs_gemma)
-  gemma = nnx.merge(graph_def, restored_params)
-  return gemma
-
-#YY
 def get_llama_model(ckpt_path, mesh):
   return create_model_from_safe_tensors(ckpt_path, llama_model_config.llama3_8b(), mesh)
 
@@ -287,14 +253,9 @@ def get_ref_model():
   ckpt_path = os.path.join(NNX_CKPT_DIR, MODEL_VERSION)
   mesh = jax.make_mesh(*MESH)
   model_config = MODEL_CONFIG[MODEL_VERSION]()
-  if MODEL_VERSION in ("2b", "2b-it"):
-    model = get_gemma_model(ckpt_path, mesh)
-  else:
-    model = get_llama_model(NNX_CKPT_DIR, mesh)
+  model = get_llama_model(ckpt_path, mesh)
   return model, mesh, model_config
 
-
-# YY
 def get_lora_model(base_model, mesh=None):
   if isinstance(base_model, llama_lib.Llama3):
     module_path = ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
@@ -323,12 +284,12 @@ def get_lora_model(base_model, mesh=None):
   return lora_model
 
 # Reference model
-transformer, mesh, model_config = get_ref_model() #YY rename gemma to transformer
-# nnx.display(transformer)
+transformer, mesh, model_config = get_ref_model()
+nnx.display(transformer)
 
 # Policy model
-lora_transformer = get_lora_model(transformer, mesh=mesh) #YY rename lora_gemma to lora_transformer
-# nnx.display(lora_transformer)
+lora_transformer = get_lora_model(transformer, mesh=mesh)
+nnx.display(lora_transformer)
 
 show_hbm_usage("After creating the reference lora model")
 
@@ -463,12 +424,6 @@ def generate(
         for q in question
     ]
 
-  #YY
-  if seed is not None:
-    if not USE_VLLM:
-      seed = jax.random.PRNGKey(seed)
-    else:
-      seed = None #YY vLLM doesn't support per reqeust seed yet. Set temperature to 0 for fixed outputs.
 
   out_data = sampler(
       input_strings=input_batch,
@@ -477,7 +432,7 @@ def generate(
       top_k=top_k,
       top_p=top_p,
       echo=False,
-      seed=seed,
+      seed=seed if seed is not None else None,
   )
 
   output = out_data.text
@@ -580,43 +535,18 @@ def evaluate(
   return to_return
 
 
-#YY
-if USE_VLLM:
-  model_tokenizer = AutoTokenizer.from_pretrained(VLLM_MODEL_VERSION)
-  # sampler = vllm_sampler.vLLMSampler(
-  #   tokenizer=model_tokenizer,
-  #   model=lora_transformer,
-  #   model_version=VLLM_MODEL_VERSION,
-  #   lora_config={
-  #         "rank": 64,
-  #         "alpha": 64.0,
-  #         "module_path":
-  #             ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
-  #       }
-  # )
-else:
-  model_tokenizer = data_lib.GemmaTokenizer() #YY rename gemma_tokenizer to model_tokenizer
-  # sampler = sampler_lib.Sampler(
-  #     transformer=lora_transformer,
-  #     tokenizer=model_tokenizer,
-  #     cache_config=sampler_lib.CacheConfig(
-  #         cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256, # YY 1280 / page size:32=40, needs to be divisable to 16, that's is to say, the total cache size should be 512X
-  #         num_layers=model_config.num_layers,
-  #         num_kv_heads=model_config.num_kv_heads,
-  #         head_dim=model_config.head_dim,
-  #     ),
-  # )
-# show_hbm_usage("After creating a raw sampler")
-# YY disable sampling
-# (corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
-#     test_dataset,
-#     sampler,
-#     **GENERATION_CONFIGS["greedy"],
-# )
-# print(
-#     f"{corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
-#     f" {format_accuracy=}%"
-# )
+model_tokenizer = AutoTokenizer.from_pretrained(VLLM_MODEL_VERSION)
+
+show_hbm_usage("After creating a raw sampler")
+(corr, total, accuracy, partial_accuracy, format_accuracy) = evaluate(
+    test_dataset,
+    sampler,
+    **GENERATION_CONFIGS["greedy"],
+)
+print(
+    f"{corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
+    f" {format_accuracy=}%"
+)
 
 # for eval_example in QUALITATIVE_EVAL_EXAMPLES:
 #   question = eval_example["question"]
@@ -670,37 +600,25 @@ training_config = GrpoConfig(
 )
 
 # Rollout worker
-# model_tokenizer = data_lib.GemmaTokenizer() #YY
-if USE_VLLM:
-  rollout_worker = vllm_rollout.vLLMRollout(
-    model=lora_transformer,
-    tokenizer=model_tokenizer,
-    cache_config=sampler_lib.CacheConfig(
-        cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-        num_layers=model_config.num_layers,
-        num_kv_heads=model_config.num_kv_heads,
-        head_dim=model_config.head_dim,
-    ),
-    lora_config={
-          "rank": 64,
-          "alpha": 64.0,
-          "module_path":
-              ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
-        },
-    mesh=mesh,
-    model_version=VLLM_MODEL_VERSION, #YY
-  )
-else:
-  rollout_worker = vanilla_rollout.VanillaRollout(
-      model=lora_transformer,
-      tokenizer=model_tokenizer,
-      cache_config=sampler_lib.CacheConfig(
-          cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-          num_layers=model_config.num_layers,
-          num_kv_heads=model_config.num_kv_heads,
-          head_dim=model_config.head_dim,
-      ),
-  )
+rollout_worker = vllm_rollout.vLLMRollout(
+  model=lora_transformer,
+  tokenizer=model_tokenizer,
+  cache_config=sampler_lib.CacheConfig(
+      cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+      num_layers=model_config.num_layers,
+      num_kv_heads=model_config.num_kv_heads,
+      head_dim=model_config.head_dim,
+  ),
+  lora_config={
+        "rank": 64,
+        "alpha": 64.0,
+        "module_path":
+            ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
+      },
+  mesh=mesh,
+  model_version=VLLM_MODEL_VERSION, #YY
+)
+
 show_hbm_usage("After creating a new rollout worker")
 # Optimizer, learning rate scheduler, gradient clipping
 optimizer = optax.adamw(
@@ -741,8 +659,10 @@ grpo_trainer = GrpoLearner(
 show_hbm_usage("Right before training")
 with mesh:
   if DO_MEM_PROFILING:
-    with profile_and_capture_log("gemma_benchmark"):
+    with profile_and_capture_log("llm_benchmark"):
+      jax.profiler.start_trace(PROFILER_PATH)
       grpo_trainer.train(train_dataset)
+      jax.profiler.stop_trace()
   else:
     grpo_trainer.train(train_dataset, eval_ds=val_dataset)
 

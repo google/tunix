@@ -41,8 +41,7 @@ class vLLMSamplerTest(absltest.TestCase):
     self.mesh = jax.make_mesh(mesh_shape,
                           axis_names,
                           devices=jax.devices())
-    # self.model_path = "meta-llama/Llama-3.1-8B"
-    self.model_path = "/workspace/tunix/rl/grpo/models/meta-llama/Meta-Llama-3-8B-Instruct/"
+    self.model_path = "meta-llama/Llama-3.1-8B"
     # TODO(b/432096319): Enable after LoRA support in vLLM
     self.enable_lora = False
 
