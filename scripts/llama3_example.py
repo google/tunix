@@ -1,24 +1,32 @@
+import jax
+
 from flax import nnx
+from huggingface_hub import snapshot_download
+from transformers import AutoTokenizer
+from tunix.generate import sampler
 from tunix.models.llama3 import params
 from tunix.models.llama3 import model
 
-# MODEL_CP_PATH = '/cns/gg-d/home/qwix-dev/llama3/torch/8b-it'
-MODEL_CP_PATH = '/workspace/tunix/rl/grpo/models/meta-llama/Meta-Llama-3-8B-Instruct'
 
-import jax
+MODEL_VERSION="meta-llama/Llama-3.2-1B-Instruct"
+MODEL_CP_PATH='/tmp/model/' + MODEL_VERSION
+
+
+print(f"Make sure you logged in to the huggingface cli.")
+
+snapshot_download(
+    repo_id=MODEL_VERSION,
+    local_dir=MODEL_CP_PATH,
+    local_dir_use_symlinks=False  # optional: avoids symlinks for portability
+)
 
 mesh = jax.make_mesh((1, 8), ('fsdp', 'tp'))
-
-config = model.ModelConfig.llama3_8b()  # pick corresponding config based on model version
+config = model.ModelConfig.llama3_1b()  # pick corresponding config based on model version
 llama3 = params.create_model_from_safe_tensors(MODEL_CP_PATH, config, mesh)
 nnx.display(llama3)
 
-from transformers import AutoTokenizer
-
 tokenizer = AutoTokenizer.from_pretrained(MODEL_CP_PATH)
 tokenizer.pad_token_id = 0
-
-from tunix.generate import sampler
 
 def templatize(prompts):
   out = []
