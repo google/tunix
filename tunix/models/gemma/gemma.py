@@ -17,7 +17,7 @@
 from collections.abc import Iterable
 import dataclasses
 import enum
-from typing import Any, Callable, Self, Tuple
+from typing import Any, Callable, Tuple
 import flax
 from flax import nnx
 import jax
@@ -766,7 +766,9 @@ class Transformer(nnx.Module):
   """Gemma transformer."""
 
   @classmethod
-  def from_params(cls, params: params_lib.Params, version: str) -> Self:
+  def from_params(
+      cls, params: params_lib.Params, version: str
+  ) -> 'Transformer':
 
     if version in ['2b', '2b-it', '1.1-2b-it']:
       config = TransformerConfig.gemma_2b()
