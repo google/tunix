@@ -20,7 +20,7 @@ from flax import nnx
 import jax
 import safetensors.flax as safetensors
 from tunix.models.llama3 import model as model_lib
-from safetensors.numpy import safe_open, save_file
+
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
@@ -86,7 +86,7 @@ def _torch_key_to_jax_key(mapping, source_key):
       if re.match(pat, source_key)
   ]
   if len(subs) != 1:
-    raise ValueError(f"Only one key should be found: {subs[0]}")
+    raise ValueError(f"Only one key should be found: {subs} for {source_key}")
   else:
     return subs[0]
 
@@ -135,42 +135,6 @@ def _stoi(s):
 
 
 def create_model_from_safe_tensors(
-    file_dir: str,
-    config: model_lib.ModelConfig,
-    mesh: jax.sharding.Mesh | None = None,
-) -> model_lib.Llama3:
-  """Load tensors from the safetensors file and create a Llama3 model."""
-  files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
-
-  if not files:
-    raise ValueError(f"No safetensors found in {file_dir}")
-
-  llama3 = nnx.eval_shape(
-      lambda: model_lib.Llama3(config, rngs=nnx.Rngs(params=0))
-  )
-
-  graph_def, abs_state = nnx.split(llama3)
-  state_dict = abs_state.to_pure_dict()
-
-  if mesh is not None:
-      full_sharding = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
-  else:
-      full_sharding = jax.devices()[0]  # fallback to a single device
-
-
-  for f in files:
-      with safe_open(f, framework="jax") as sf:
-          for k in sf.keys():
-              v = sf.get_tensor(k)
-
-              jax_key, transform = _torch_key_to_jax_key(_get_key_and_transform_mapping(config), k)
-              jax_keys = [_stoi(s) for s in jax_key.split(".")]
-
-              _assign_weights(jax_keys, v, state_dict, full_sharding, k, transform)
-
-  return nnx.merge(graph_def, state_dict)
-
-def create_model_from_safe_tensors_original(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,

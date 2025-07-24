@@ -96,6 +96,5 @@ class vLLMRollout(base_rollout.BaseRollout):
   def eos_id(self) -> int:
     return self._sampler.tokenizer.eos_id()
 
-
   def model(self) -> nnx.Module:
     return self._sampler.transformer

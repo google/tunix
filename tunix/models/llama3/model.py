@@ -109,19 +109,6 @@ class ModelConfig:
         rope_theta=500_000,
     )
 
-  @classmethod
-  def llama3_1b(cls):
-    return cls(
-        num_layers=16,
-        vocab_size=128256,
-        embed_dim=2048,
-        hidden_dim=8192,
-        num_heads=32,
-        head_dim=64,
-        num_kv_heads=8,
-        norm_eps=1e-05,
-        rope_theta=500_000,
-    )
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
@@ -319,9 +306,7 @@ class Attention(nnx.Module):
     query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
     attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
     attn = attn.reshape((b, qh, t, s))
-    # jax.debug.visualize_array_sharding(attn)
-    # jax.debug.print("YYY")
-    # jax.debug.print(jax.sharding.get_array_mapping(attn))
+
     if attn_mask is not None:
       attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
 

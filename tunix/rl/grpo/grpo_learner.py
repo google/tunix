@@ -231,7 +231,7 @@ class GrpoLearner:
       old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
           prompt_tokens=prompt_ids, completion_tokens=completion_ids
       )
-      old_per_token_logps = jax.lax.stop_gradient(old_per_token_logps)
+      old_per_token_logps = old_per_token_logps
     else:
       old_per_token_logps = None
 
@@ -563,7 +563,7 @@ def grpo_loss_fn(model, train_example, beta, epsilon):
   advantages = train_example.advantages
 
   if train_example.old_per_token_logps is None:
-    old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
+    old_per_token_logps = per_token_logps
   else:
     old_per_token_logps = train_example.old_per_token_logps
   coef_1 = jnp.exp(per_token_logps - old_per_token_logps)
