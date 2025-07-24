@@ -11,11 +11,107 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Common RL helper functions."""
+"""Common RL helper classes and functions."""
 
+import dataclasses
+from typing import Any, Iterable
+
+import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+
+
+class RepeatIterable(Iterable[Any]):
+  """A simple wrapper on top of an example to repeat it N times.
+
+  This iterable wraps a list of data and allows iterating over it multiple
+  times. It also provides an option to shuffle the contents of each yielded
+  batch.
+
+  Attributes:
+    data: The list of data to repeat.
+    repeat: The number of times to repeat the data.
+    shuffle: Whether to shuffle the data.
+    key: The key to use for shuffling.
+  """
+
+  def __init__(
+      self,
+      data: list[Any],
+      repeat: int = 1,
+      shuffle: bool = False,
+      key: jnp.ndarray | None = None,
+  ):
+    self._data = data
+    self._data_len = len(data)
+    self._total_count = repeat * self._data_len
+    self._itr_cnt = 0
+
+    self.shuffle = shuffle
+    self.key = key
+
+  def __iter__(self):
+    self._itr_cnt = 0
+    return self
+
+  def __next__(self):
+    if self._itr_cnt >= self._total_count:
+      raise StopIteration
+    output = self._data[self._itr_cnt % self._data_len]
+    self._itr_cnt += 1
+
+    if self.shuffle:
+      is_dict = True
+      if not isinstance(output, dict):
+        is_dict = False
+        data_type = type(output)
+        output = dataclasses.asdict(output)
+
+      fields = list(output.keys())
+      batch_size = output[fields[0]].shape[0]
+
+      self.key, subkey = jax.random.split(self.key)
+      shuffled_indices = jax.random.permutation(subkey, batch_size)
+
+      new_output = {}
+      for k, v in output.items():
+        new_output[k] = v[shuffled_indices]
+      if not is_dict:
+        new_output = data_type(**new_output)  # pylint: disable=undefined-variable
+      return new_output
+    return output
+
+
+@flax.struct.dataclass(frozen=True)
+class TrainExample:
+  prompt_ids: jax.Array
+  prompt_mask: jax.Array
+  completion_ids: jax.Array
+  completion_mask: jax.Array
+  advantages: jax.Array
+  ref_per_token_logps: jax.Array | None
+  old_per_token_logps: jax.Array | None
+
+
+def compute_kl_divergence(
+    per_token_logps: jax.Array, ref_per_token_logps: jax.Array
+) -> jax.Array:
+  """Compute per token KL divergence between trained and reference policy.
+
+  Args:
+    per_token_logps: Per token log probabilities from the trained policy.
+    ref_per_token_logps: Per token log probabilities from the reference policy.
+
+  Returns:
+    KL divergence.
+  """
+  per_token_kl = (
+      jnp.exp(ref_per_token_logps - per_token_logps)
+      - (ref_per_token_logps - per_token_logps)
+      - 1
+  )
+  return per_token_kl
 
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
@@ -51,7 +147,30 @@ def get_per_token_logps(
   return selective_log_softmax(logits, input_tokens)
 
 
+# TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
+# and twice in `compute_score`. We can factor this out and compute it just once.
 @nnx.jit(static_argnames=('pad_id', 'eos_id'))
+def process_ids(
+    prompt_tokens: jax.Array,
+    completion_tokens: jax.Array,
+    pad_id: int,
+    eos_id: int,
+):
+  """Processes prompt and completion ids."""
+
+  prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
+  prompt_mask = prompt_tokens != pad_id
+  completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+  prompt_completion_mask = jnp.concatenate(
+      [prompt_mask, completion_mask], axis=-1
+  )
+  positions = build_positions_from_mask(prompt_completion_mask)
+  attn_mask = make_causal_attn_mask(prompt_completion_mask)
+
+  return prompt_completion_ids, positions, attn_mask
+
+
+@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
 def compute_per_token_logps(
     model: nnx.Module,
     prompt_tokens: jax.Array,
@@ -61,14 +180,9 @@ def compute_per_token_logps(
     stop_gradient: bool = True,
 ) -> jax.Array:
   """Computes the per-token log probabilities."""
-  prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
-  prompt_mask = prompt_tokens != pad_id
-  completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
-  prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, completion_mask], axis=-1
+  prompt_completion_ids, positions, attn_mask = process_ids(
+      prompt_tokens, completion_tokens, pad_id, eos_id
   )
-  positions = build_positions_from_mask(prompt_completion_mask)
-  attn_mask = make_causal_attn_mask(prompt_completion_mask)
   per_token_logps = get_per_token_logps(
       model,
       input_tokens=prompt_completion_ids,
@@ -79,6 +193,35 @@ def compute_per_token_logps(
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
   return per_token_logps
+
+
+@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
+def compute_score(
+    model,
+    prompt_tokens: jax.Array,
+    completion_tokens: jax.Array,
+    pad_id: int,
+    eos_id: int,
+    stop_gradient: bool = True,
+):
+  """Computes reward using the provided model."""
+  prompt_completion_ids, positions, attn_mask = process_ids(
+      prompt_tokens, completion_tokens, pad_id, eos_id
+  )
+
+  per_token_scores = model.score(
+      prompt_completion_ids,
+      positions=positions,
+      attention_mask=attn_mask,
+  )
+  # The model returns a tensor of shape [B, T, 1]. We squeeze the last
+  # dimension to get a tensor of shape [B, T].
+  per_token_scores = jnp.squeeze(per_token_scores, axis=-1)
+
+  if stop_gradient:
+    per_token_scores = jax.lax.stop_gradient(per_token_scores)
+
+  return per_token_scores
 
 
 def make_completion_mask(completion_ids, eos_tok: int = 0):

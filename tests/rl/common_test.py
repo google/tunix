@@ -25,6 +25,28 @@ jax.config.update("jax_threefry_partitionable", False)
 
 class CommonTest(absltest.TestCase):
 
+  def test_compute_kl_divergence(self):
+    rng = jax.random.PRNGKey(0)
+    k1, k2 = jax.random.split(rng)
+    per_token_logps = jax.random.uniform(k1, shape=(2, 2, 4))
+    ref_per_token_logps = jax.random.uniform(k2, shape=(2, 2, 4))
+    kl_divergence = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps
+    )
+    expected_value = jnp.array([
+        [
+            [0.0654075, 0.220744, 0.0545462, 0.1321163],
+            [0.1168784, 0.0089617, 0.0915209, 0.0211542],
+        ],
+        [
+            [0.080888, 0.1209372, 0.0348731, 0.0845257],
+            [0.0023897, 0.0076445, 0.2349406, 0.0113707],
+        ],
+    ])
+    np.testing.assert_allclose(
+        kl_divergence, expected_value, atol=1e-7, rtol=1e-5
+    )
+
   def test_selective_log_softmax(self):
     rng = jax.random.PRNGKey(0)
     logits = jax.random.uniform(rng, shape=(2, 4, 8))

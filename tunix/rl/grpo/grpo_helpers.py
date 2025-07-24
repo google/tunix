@@ -14,7 +14,6 @@
 """Helper functions for GRPO Trainer."""
 
 import jax
-from jax import numpy as jnp
 
 
 def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
@@ -33,23 +32,3 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
   return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-
-
-def compute_kl_divergence(
-    per_token_logps: jax.Array, ref_per_token_logps: jax.Array
-) -> jax.Array:
-  """Compute per token KL divergence between trained and reference policy.
-
-  Args:
-    per_token_logps: Per token log probabilities from the trained policy.
-    ref_per_token_logps: Per token log probabilities from the reference policy.
-
-  Returns:
-    KL divergence.
-  """
-  per_token_kl = (
-      jnp.exp(ref_per_token_logps - per_token_logps)
-      - (ref_per_token_logps - per_token_logps)
-      - 1
-  )
-  return per_token_kl

@@ -32,8 +32,19 @@ class InferenceWorker:
     self._models = models
     # TODO(tsbao): support multiple reward models.
 
-  def compute_rewards(self):
-    raise NotImplementedError()
+  def get_rewards(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+  ) -> jax.Array:
+    reward_model = self._models.get("reward")
+    if reward_model is None:
+      raise ValueError("Reward model is not available.")
+    return common.compute_score(
+        reward_model, prompt_tokens, completion_tokens, pad_id, eos_id
+    )
 
   def get_ref_per_token_logps(
       self,
@@ -53,5 +64,20 @@ class InferenceWorker:
         eos_id=eos_id,
     )
 
-  def compute_values(self):
-    raise NotImplementedError()
+  def get_values(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+  ) -> jax.Array:
+    critic_model = self._models.get("critic")
+    if critic_model is None:
+      raise ValueError("Critic model is not available.")
+    return common.compute_score(
+        critic_model,
+        prompt_tokens,
+        completion_tokens,
+        pad_id,
+        eos_id,
+    )
