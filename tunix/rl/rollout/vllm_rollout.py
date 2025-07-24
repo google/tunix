@@ -41,7 +41,8 @@ class vLLMRollout(base_rollout.BaseRollout):
       max_model_len=cache_config.cache_size,
       lora_config=lora_config,
       mesh=mesh,
-      model_version=model_version,)
+      model_version=model_version,
+      gpu_memory_utilization=0.3)
 
   def generate(
       self,

@@ -91,40 +91,33 @@ def _torch_key_to_jax_key(mapping, source_key):
     return subs[0]
 
 
-def _assign_weights(keys, tensor, state_dict, sharding_dict, torch_key, transform):
-    """Assign one weight with optional transform and sharding."""
-    key = keys[0]
-    if len(keys) == 1:
-        try:
-            if transform is not None:
-                permute, reshape = transform
-                if permute:
-                    tensor = tensor.transpose(permute)
-                if reshape:
-                    tensor = tensor.reshape(reshape)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to transform tensor {torch_key} with shape {tensor.shape}: {e}"
-            ) from e
+def _assign_weights(keys, tensor, state_dict, torch_key, transform):
+  """Convert weights and assign to nnx state_dict."""
+  key = keys[0]
+  if len(keys) == 1:
+    try:
+      if transform is not None:
+        permute, reshape = transform
+        tensor = tensor.transpose(permute) if permute else tensor
+        tensor = tensor.reshape(reshape) if reshape else tensor
+    except Exception as e:
+      raise RuntimeError(
+          f"Failed to transform tensor {torch_key} with shape"
+          f" {tensor.shape}: {e}"
+      ) from e
 
-        # Apply sharding here:
-        if isinstance(sharding_dict[key], jax.sharding.Sharding):
-            tensor = jax.device_put(tensor, sharding_dict[key])
-        else:
-            tensor = jax.device_put(tensor, jax.devices()[0])
-
-        if tensor.shape != state_dict[key].shape:
-            raise ValueError(
-                f"Shape mismatch for {torch_key}: got {tensor.shape}, expected {state_dict[key].shape}"
-            )
-
-        state_dict[key] = tensor
-        return state_dict
-    else:
-        if key not in state_dict:
-            raise ValueError(f"Unfound key {key} in state_dict")
-        _assign_weights(keys[1:], tensor, state_dict[key], sharding_dict[key], torch_key, transform)
-        return state_dict
+    if tensor.shape != state_dict[key].shape:
+      raise ValueError(
+          f"shape must match for {torch_key}, got {tensor.shape} vs"
+          f" {state_dict[key].shape}"
+      )
+    state_dict[key] = tensor
+    return state_dict
+  else:
+    if key not in state_dict:
+      raise ValueError(f"Unfound key {key} in {state_dict}")
+    _assign_weights(keys[1:], tensor, state_dict[key], torch_key, transform)
+    return state_dict
 
 
 def _stoi(s):

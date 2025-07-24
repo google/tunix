@@ -19,6 +19,7 @@ class vLLMSampler(base_sampler.SamplerBase):
         max_model_len: int,
         lora_config: Optional[Dict[str, Any]],
         model_version: Optional[str], # We still need the model version for now, will remove it later
+        gpu_memory_utilization: Optional[float] = 0.3,
     ):
     os.environ["TPU_BACKEND_TYPE"] = "jax"
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -28,6 +29,7 @@ class vLLMSampler(base_sampler.SamplerBase):
     self.max_model_len = max_model_len
     self.mesh = mesh
     self.lora_config = lora_config
+    self.gpu_memory_utilization = gpu_memory_utilization
 
     self.args = self._vllm_config()
     self.llm = LLM(**self.args)
@@ -49,7 +51,7 @@ class vLLMSampler(base_sampler.SamplerBase):
     args["model"] = self.model_version
     args["max_model_len"] = self.max_model_len
     args["tensor_parallel_size"] = self.mesh.shape["tp"]
-    args["gpu_memory_utilization"] = 0.3
+    args["gpu_memory_utilization"] = self.gpu_memory_utilization
     if self.lora_config is not None:
       args["additional_config"]["lora_config"] = self.lora_config
     return args

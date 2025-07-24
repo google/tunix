@@ -33,7 +33,7 @@ class SamplerBase(abc.ABC):
     @property
     @abc.abstractmethod
     def transformer_state(self) -> statelib.State:
-      return self._transformer_state
+      """Returns the transformer state used by the sampler."""
 
     @abc.abstractmethod
     def __call__(
@@ -48,7 +48,7 @@ class SamplerBase(abc.ABC):
           seed=None,
           multi_sampling: int=1,
           return_logits: bool=True,
-          echo:bool = False, # Placeholder
+          echo:bool = False,
           pad_output: bool = False,
       ):
         """Returns a list of generated samples for the input strings."""
