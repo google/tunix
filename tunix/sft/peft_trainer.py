@@ -31,6 +31,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager
+from tunix.sft import hooks
 from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
@@ -93,8 +94,22 @@ class TrainingInput:
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
+  """Calculates the global batch size from a training example.
+
+  Args:
+    train_example: A training example, which can be a dataclass, a dict, or an
+      object with attributes.
+
+  Returns:
+    The global batch size.
+
+  Raises:
+    TypeError: If the batch size cannot be determined from the training example.
+  """
   if dataclasses.is_dataclass(train_example):
     attributes = dataclasses.asdict(train_example)
+  elif isinstance(train_example, dict):
+    attributes = train_example
   else:
     attributes = vars(train_example)
 
@@ -133,6 +148,8 @@ class PeftTrainer:
     checkpoint_manager: The checkpoint manager to use.
     metrics_logger: The metrics logger to use.
     is_managed_externally: Whether the trainer is managed externally.
+    training_hooks: The training hooks to use.
+    data_hooks: The data hooks to use.
   """
 
   def __init__(
@@ -190,6 +207,14 @@ class PeftTrainer:
         max_step=self.config.max_steps,
         profiler_options=self.config.profiler_options,
     )
+    self.training_hooks = None
+    self.data_hooks = None
+
+  def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
+    self.training_hooks = training_hooks
+
+  def with_data_hooks(self, data_hooks: hooks.DataHooks):
+    self.data_hooks = data_hooks
 
   def clear_jit_cache(self):
     """Clears the JIT cache of the train and eval step functions.
@@ -421,14 +446,33 @@ class PeftTrainer:
           initial_steps=self._train_steps,
           max_steps=self.config.max_steps,
       )
+
+    if self.training_hooks:
+      self.training_hooks.on_train_start(self)
+
+    train_iterator = iter(train_ds)
+    index = 0
     with time_measure("Train loop"):
-      for index, train_example in enumerate(train_ds):
-        if not self.is_managed_externally:
-          # TODO(mridulsahu): Add support to restore the iterator state
-          # instead of skipping the already trained examples.
-          if index < self._train_steps:
-            # Skip the examples that are already trained.
-            continue
+      while True:
+        train_example = None
+        if self.data_hooks:
+          train_example = self.data_hooks.load_next_train_batch(self)
+        else:
+          try:
+            train_example = next(train_iterator)
+            if not self.is_managed_externally:
+              # TODO(mridulsahu): Add support to restore the iterator state
+              # instead of skipping the already trained examples.
+              if index < self._train_steps:
+                # Skip the examples that are already trained.
+                index += 1
+                continue
+            index += 1
+          except StopIteration:
+            pass
+        if train_example is None:
+          break
+
         self._prof.maybe_activate(self._train_steps)
         with jax.profiler.StepTraceAnnotation(
             "train", step_num=self._train_steps
@@ -451,6 +495,8 @@ class PeftTrainer:
           global_batch_size = _calculate_global_batch_size(train_example)
 
           self._throttler.wait_for_next()
+          if self.training_hooks:
+            self.training_hooks.on_train_step_start(self)
           step_start_time = time.perf_counter()
           train_loss, aux = train_step(
               self.model, self.optimizer, train_example
@@ -487,9 +533,13 @@ class PeftTrainer:
               self.model,
               save_only_lora_params=self._lora_enabled,
           )
+          if self.training_hooks:
+            self.training_hooks.on_train_step_end(self, train_loss)
           self._prof.maybe_deactivate(self._train_steps)
 
     self._throttler.wait_for_all()
+    if self.training_hooks:
+      self.training_hooks.on_train_end(self)
     if not self.is_managed_externally:
       self.close()
 
@@ -522,11 +572,23 @@ class PeftTrainer:
       eval_step: Callable[..., Any],
   ) -> None:
     """Runs evaluation loop."""
+    eval_iterator = iter(eval_ds)
     with self._switch_mode(metrics_logger.Mode.EVAL):
       eval_loss, local_eval_steps = 0, 0
-      for eval_example in eval_ds:
+      while True:
+        if self.data_hooks:
+          eval_example = self.data_hooks.load_next_eval_batch(self)
+        else:
+          try:
+            eval_example = next(eval_iterator)
+          except StopIteration:
+            eval_example = None
+        if eval_example is None:
+          break
         eval_example = self._prepare_inputs(eval_example)
         eval_example = self._shard_input(eval_example)
+        if self.training_hooks:
+          self.training_hooks.on_eval_step_start(self)
         loss, aux = eval_step(self.model, eval_example)
         loss = jax.lax.stop_gradient(loss)
         self._eval_steps += 1
@@ -542,6 +604,8 @@ class PeftTrainer:
           self.metrics_logger.get_metric("loss", "eval"),
           self.metrics_logger.get_metric("perplexity", "eval"),
       )
+      if self.training_hooks:
+        self.training_hooks.on_eval_step_end(self, eval_loss)
 
 
 def _default_loss_fn(
