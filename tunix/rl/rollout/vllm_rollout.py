@@ -12,35 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Vanilla rollout worker with Tunix sampler."""
+"""vLLM rollout worker with Tunix sampler."""
 
-import dataclasses
-import functools
-import operator
-from typing import Any
+from typing import Any, Dict, Optional
 from flax import nnx
 import jax
 import jaxtyping
+from tunix.generate import vllm_sampler
 from tunix.generate import sampler
 from tunix.rl import common
-from tunix.rl import utils
+from tunix.rl.grpo import utils
 from tunix.rl.rollout import base_rollout
 
 
-class VanillaRollout(base_rollout.BaseRollout):
-  """Vanilla rollout worker."""
+class vLLMRollout(base_rollout.BaseRollout):
+  """vLLM rollout worker."""
 
   def __init__(
       self,
       model: nnx.Module,
       tokenizer: Any,
       cache_config: base_rollout.CacheConfig,
+      mesh: jax.sharding.Mesh,
+      lora_config: Optional[Dict[str, str]] = None,
+      model_version: str = "meta-llama/Llama-3.1-8B",
   ):
-    self._sampler = sampler.Sampler(
-        model,
-        tokenizer,
-        sampler.CacheConfig(**dataclasses.asdict(cache_config)),
-    )
+    self.model = model
+    self.mesh = mesh
+    self._sampler = vllm_sampler.vLLMSampler(
+      model=model,
+      tokenizer=tokenizer,
+      max_model_len=cache_config.cache_size,
+      lora_config=lora_config,
+      mesh=mesh,
+      model_version=model_version,
+      gpu_memory_utilization=0.3)
 
   def generate(
       self,
@@ -49,22 +55,23 @@ class VanillaRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
-    output = self._sampler(
+    self.output = self._sampler(
         input_strings=prompts,
         total_generation_steps=rollout_config.max_tokens_to_generate,
-        max_prompt_length=rollout_config.max_prompt_length,
-        echo=False,
+        max_prompt_length=kwargs.get('max_prompt_length', None),
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
         seed=rollout_config.seed,
-        pad_output=True,
+        echo=False,
+        pad_output=kwargs.get('max_prompt_length', True),
     )
+
     return base_rollout.RolloutOutput(
-        text=output.text,
-        logits=output.logits,
-        tokens=output.tokens,
-        left_padded_prompt_tokens=output.padded_prompt_tokens,
+        text=self.output.text,
+        logits=self.output.logits,
+        tokens=self.output.tokens,
+        left_padded_prompt_tokens=self.output.padded_prompt_tokens,
     )
 
   def get_per_token_logps(
@@ -73,6 +80,10 @@ class VanillaRollout(base_rollout.BaseRollout):
       completion_tokens: jax.Array,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
+    # b/428730696, we cannot return self.output.logprobs yet
+    # May need to validate if there will be any difference from recalculation
+    # return self.output.logprobs
+
     return common.compute_per_token_logps(
         self.model(),
         prompt_tokens=prompt_tokens,
@@ -82,16 +93,7 @@ class VanillaRollout(base_rollout.BaseRollout):
     )
 
   def update_params(self, params: jaxtyping.PyTree) -> None:
-    flat_new_params, _ = utils.to_flat_dict(params)
-    flat_old_params, tree_def = utils.to_flat_dict(
-        self._sampler.transformer_state
-    )
-    merged_params = functools.reduce(
-        operator.ior, [flat_old_params, flat_new_params], {}
-    )
-    merged_params = jax.tree.unflatten(tree_def, merged_params.values())
-    new_model = nnx.merge(self._sampler._transformer_graphdef, merged_params)  # pylint: disable=protected-access
-    self._sampler.transformer_state = nnx.variables(new_model, nnx.Param)
+    self._sampler.update_params(params)
 
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()
