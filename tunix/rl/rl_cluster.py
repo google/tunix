@@ -195,6 +195,15 @@ class RLCluster:
           training_config=self.cluster_config.training_config,
       )
 
+    # Delete the cluster's reference to nnx.Module models after
+    # workers are initialized in case they hold reference to stale params.
+    # Instead we should always refer to each worker's model if needed.
+    del self.train_actor
+    del self.rollout_actor
+    del self.critic
+    del self.reference
+    del self.reward
+
   @property
   def rollout(self) -> base_rollout.BaseRollout:
     return self._rollout

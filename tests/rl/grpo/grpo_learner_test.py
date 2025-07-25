@@ -490,9 +490,9 @@ class GrpoLearnerTest(parameterized.TestCase):
     grpo_trainer.train(train_ds, None)
 
     base_params = nnx.state(
-        rl_cluster.train_actor, filterlib.Not(nnx.LoRAParam)
+        rl_cluster.actor_trainer.model, filterlib.Not(nnx.LoRAParam)
     )
-    lora_params = nnx.state(rl_cluster.train_actor, nnx.LoRAParam)
+    lora_params = nnx.state(rl_cluster.actor_trainer.model, nnx.LoRAParam)
     lora_params_from_sampler = nnx.state(
         grpo_trainer.rl_cluster.rollout.model(), nnx.LoRAParam
     )

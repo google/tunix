@@ -89,7 +89,9 @@ class RlClusterTest(absltest.TestCase):
     )
     self.assertEqual(rollout_actor_mesh, rollout_mesh)
 
-    ref_model_mesh = utils.get_pytree_mesh_info(nnx.state(rl_cluster.reference))
+    ref_model_mesh = utils.get_pytree_mesh_info(
+        nnx.state(rl_cluster.inference_worker._models['reference'])
+    )
     self.assertEqual(ref_model_mesh, actor_mesh)
 
 
