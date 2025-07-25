@@ -31,7 +31,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import peft_trainer
 
-type ModelOrPath = Union[nnx.Module, str]
+ModelOrPath = Union[nnx.Module, str]
 
 
 class Role(enum.Enum):
