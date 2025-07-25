@@ -166,9 +166,11 @@ class PeftTrainer:
           optimizer, training_config.gradient_accumulation_steps
       )
     if self._lora_enabled:
-      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
+      self.optimizer = nnx.ModelAndOptimizer(
+          self.model, optimizer, wrt=nnx.LoRAParam
+      )
     else:
-      self.optimizer = nnx.Optimizer(self.model, optimizer)
+      self.optimizer = nnx.ModelAndOptimizer(self.model, optimizer)
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
@@ -258,7 +260,7 @@ class PeftTrainer:
     return self
 
   def _train_step(
-      self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
+      self, model: nnx.Module, optimizer: nnx.ModelAndOptimizer, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     """Main body for one train step.
 
