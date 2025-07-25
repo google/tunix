@@ -8,22 +8,24 @@ from tunix.models.llama3 import params
 from tunix.models.llama3 import model
 
 
-MODEL_VERSION="meta-llama/Llama-3.2-1B-Instruct"
+MODEL_VERSION="meta-llama/Llama-3-8B-Instruct"
 MODEL_CP_PATH='/tmp/model/' + MODEL_VERSION
 
 
 print(f"Make sure you logged in to the huggingface cli.")
 
-snapshot_download(
-    repo_id=MODEL_VERSION,
-    local_dir=MODEL_CP_PATH,
-    local_dir_use_symlinks=False  # optional: avoids symlinks for portability
-)
+# snapshot_download(
+#     repo_id=MODEL_VERSION,
+#     local_dir=MODEL_CP_PATH,
+#     local_dir_use_symlinks=False  # optional: avoids symlinks for portability
+# )
+
+MODEL_CP_PATH = "/workspace/rl/grpo/models/meta-llama/8b"
 
 mesh = jax.make_mesh((1, 8), ('fsdp', 'tp'))
-config = model.ModelConfig.llama3_1b()  # pick corresponding config based on model version
+config = model.ModelConfig.llama3_8b()  # pick corresponding config based on model version
 llama3 = params.create_model_from_safe_tensors(MODEL_CP_PATH, config, mesh)
-nnx.display(llama3)
+# nnx.display(llama3)
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_CP_PATH)
 tokenizer.pad_token_id = 0
@@ -51,8 +53,12 @@ inputs = templatize(
     ]
 )
 
-sampler = sampler.Sampler(llama3, tokenizer, sampler.CacheConfig(cache_size=256, num_layers=32, num_kv_heads=8, head_dim=128))
-out = sampler(inputs, total_generation_steps=128, echo=True, top_p=0.9)
+sampler = sampler.Sampler(llama3, tokenizer, sampler.CacheConfig(
+                                                cache_size=256,
+                                                num_layers=32,
+                                                num_kv_heads=8,
+                                                head_dim=128))
+out = sampler(inputs, total_generation_steps=128, echo=True, top_p=None)
 
 for t in out.text:
   print(t)

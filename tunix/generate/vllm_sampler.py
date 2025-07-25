@@ -62,7 +62,8 @@ class vLLMSampler(base_sampler.SamplerBase):
 
   @property
   def transformer(self):
-    return nnx.merge(self._model_runner.graph_def, self._model_runner.state)
+    # vLLM doesn't expose the underlying model
+    return None
 
   @property
   def transformer_state(self):
