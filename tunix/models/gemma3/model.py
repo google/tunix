@@ -298,6 +298,35 @@ GEMMA3_ATTENTION_PATTERN = (
 )
 
 
+def _create_sliding_mask(
+    segment_pos: jnp.ndarray,  # [B, seq_len]
+    cache_len: int,
+    sliding_window_size: int,
+):
+  """Helper function to create sliding mask for local attention.
+
+  It generates the sliding mask based on current segment position, the window
+  is [segment_pos - window, segment_pos + window]
+
+  Args:
+    segment_pos: Current segment position of shape [B, seq_len].
+    cache_len: The length of the cache.
+    sliding_window_size: The size of the sliding window.
+
+  Returns:
+    The sliding mask of shape [B, seq_len, cache_len].
+  """
+  cache_positions = jnp.arange(cache_len)
+
+  cache_positions = cache_positions[None, None, :]  # [1, 1, cache_len]
+  segment_pos = segment_pos[:, :, None]  # [B, seq_len, 1]
+
+  # abs_pos - window <= key_abs_pos <= abs_pos + window
+  sliding_mask = cache_positions >= segment_pos - sliding_window_size + 1
+  sliding_mask *= cache_positions <= segment_pos + sliding_window_size - 1
+  return sliding_mask  # [B, seq_len, cache_len]
+
+
 class Attention(nnx.Module):
   """Attention module."""
 
@@ -426,10 +455,11 @@ class Attention(nnx.Module):
       logits = jnp.einsum('BTNH,BSNH->BTNS', query_scaled, key_proj)
 
     if self.attn_type == AttentionType.LOCAL_SLIDING:
-      all_ones = jnp.ones_like(attn_mask)
-      sliding_mask = jnp.triu(
-          all_ones, -1 * self.sliding_window_size + 1
-      ) * jnp.tril(all_ones, self.sliding_window_size - 1)
+      sliding_mask = _create_sliding_mask(
+          segment_pos,
+          cache_len=attn_mask.shape[-1],
+          sliding_window_size=self.sliding_window_size,
+      )
       attn_mask = sliding_mask * attn_mask
 
     padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
