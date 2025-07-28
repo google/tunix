@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# BEGIN-GOOGLE-INTERNAL
-# You can only run this test locally because it accesses CNS. To run this test,
-# run the following command:
-# blaze test --test_strategy=local --notest_loasd \
-#  third_party/py/tunix/generate/tokenizer_adapter_test
-# END-GOOGLE-INTERNAL
+#
 
 from absl.testing import absltest
 import transformers
@@ -32,9 +27,7 @@ class TokenizerAdapterTest(absltest.TestCase):
   def test_hf_tokenizer_adapter(self):
     # Additional assignment to handle google internal logics.
     model = None  # pylint: disable=unused-variable
-    # BEGIN-GOOGLE-INTERNAL
-    model = '/cns/gg-d/home/qwix-dev/llama3/torch/8b-it'
-    # END-GOOGLE-INTERNAL
+    #
     if model is None:
       model = 'meta-llama/Meta-Llama-3-8B-Instruct'
     hf_tokenizer = AutoTokenizer.from_pretrained(model)

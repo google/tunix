@@ -54,6 +54,7 @@ def callback_on_ready(
   threading.Thread(target=wait).start()
 
 
+#
 
 
 def reshard_pytree(
@@ -103,6 +104,7 @@ def reshard_pytree(
 
   reshardfn = None
 
+  #
 
   # Do not remove this check. It's used in google internally.
   if reshardfn is None:
