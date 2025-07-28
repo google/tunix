@@ -27,6 +27,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import utils
 from tunix.rl.grpo import grpo_helpers
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import metrics_logger
@@ -164,8 +165,18 @@ class GrpoLearner:
     self._train_steps = 0
     self._eval_steps = 0
 
-    # TODO: b/419334887 - move this to rl_cluster.
-    self.need_sync_sampler_weights = (
+    # Sync weights if the actor model and rollout model are not sharing weights.
+    self.should_sync_weights = not (
+        utils.is_sharing_weights(
+            self.rl_cluster.actor_trainer.model,
+            self.rl_cluster.rollout.model(),
+        )
+    )
+
+    # Enable async rollout if trainer and rollout are not on the same mesh.
+    # If they do, then doesn't make sense for the interleave because they will
+    # have resource contention.
+    self.can_enable_async_rollout = (
         self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
         != self.rl_cluster.cluster_config.role_to_mesh[
             rl_cluster_lib.Role.ROLLOUT
@@ -468,10 +479,7 @@ class GrpoLearner:
             sample_repeat=self.grpo_config.num_generations,
             batch_repeat=self.grpo_config.num_iterations,
             data_queue=train_data_queue,
-            # only do async rollout and training if we know that sampler
-            # and trainer don't deploy to the same devices. If they do, don't
-            # make sense for the interleave because they will have contention.
-            async_loading=True if self.need_sync_sampler_weights else False,
+            async_loading=self.can_enable_async_rollout,
             mode=metrics_logger.Mode.TRAIN,
         )
         curr_eval_ds = None
@@ -504,7 +512,8 @@ class GrpoLearner:
         # assumption that the trainer internally doesn't reset the train steps.
         # there is current a unit test to ensure this assumption.
         self._train_steps = self.rl_cluster.actor_trainer.train_steps
-        if self.need_sync_sampler_weights:
+
+        if self.should_sync_weights:
           with jax.profiler.StepTraceAnnotation(
               "sync_sampler_weights", step_num=initial_train_steps
           ):

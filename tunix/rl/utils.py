@@ -18,6 +18,7 @@ from flax import nnx
 from flax.nnx import statelib
 import jax
 import jaxtyping
+import numpy as np
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
@@ -50,3 +51,19 @@ def get_pytree_mesh_info(tree: jaxtyping.PyTree) -> Mesh | None:
         f'All leaves of the pytree must have the same mesh. Found: {mesh_info}'
     )
   return mesh_info.pop() if mesh_info else None
+
+
+def is_sharing_weights(
+    m1: nnx.Module,
+    m2: nnx.Module,
+) -> bool:
+  """Returns whether two models are sharing same copy of weights."""
+  s1 = nnx.state(m1)
+  s2 = nnx.state(m2)
+  return np.all(
+      jax.tree.map(
+          lambda x, y: x is y,
+          jax.tree_util.tree_leaves(s1),
+          jax.tree_util.tree_leaves(s2),
+      )
+  )

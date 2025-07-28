@@ -64,6 +64,21 @@ class UtilsTest(absltest.TestCase):
     )
     self.assertIsNone(utils.get_pytree_mesh_info(nnx.state(model3)))
 
+  def test_is_sharing_weights(self):
+    m1 = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+    )
+    m2 = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+    )
+    m3 = nnx.clone(m1)
+    self.assertIsNot(nnx.state(m1), nnx.state(m2))
+    self.assertIsNot(nnx.state(m1), nnx.state(m3))
+    self.assertIsNot(nnx.state(m2), nnx.state(m3))
+    self.assertFalse(utils.is_sharing_weights(m1, m2))
+    self.assertFalse(utils.is_sharing_weights(m2, m3))
+    self.assertTrue(utils.is_sharing_weights(m1, m3))
+
 
 if __name__ == '__main__':
   absltest.main()

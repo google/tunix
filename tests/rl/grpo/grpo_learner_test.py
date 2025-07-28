@@ -215,7 +215,8 @@ class GrpoLearnerTest(parameterized.TestCase):
         reward_fns=reward_fns,
         grpo_config=grpo_config,
     )
-    self.assertFalse(grpo_trainer.need_sync_sampler_weights)
+    self.assertFalse(grpo_trainer.should_sync_weights)
+    self.assertFalse(grpo_trainer.can_enable_async_rollout)
     train_ds = eval_ds = _dummy_dataset(batch_size=2)
     grpo_trainer.train(train_ds, eval_ds)
 
@@ -485,7 +486,8 @@ class GrpoLearnerTest(parameterized.TestCase):
         reward_fns=reward_1,
         grpo_config=grpo_config,
     )
-    self.assertTrue(grpo_trainer.need_sync_sampler_weights)
+    self.assertTrue(grpo_trainer.should_sync_weights)
+    self.assertTrue(grpo_trainer.can_enable_async_rollout)
     train_ds = _dummy_dataset(batch_size=2)
     grpo_trainer.train(train_ds, None)
 
