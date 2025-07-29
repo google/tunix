@@ -371,16 +371,17 @@ class GrpoLearner:
     def _put_list_of_examples_to_data_queue():
       if not async_loading:
         data_queue.put(RepeatIterable(example_list, batch_repeat))
-      else:
-        if batch_repeat > 1:
-          data_queue.put(RepeatIterable(example_list, batch_repeat - 1))
+      elif batch_repeat > 1:
+        # Since we have already loaded the batch in data_queue once, we only
+        # need to repeat batch_repeat - 1 times.
+        data_queue.put(RepeatIterable(example_list, batch_repeat - 1))
 
-    while True:
-      try:
+    try:
+      while True:
         while (
             mode == metrics_logger.Mode.TRAIN
             and self._train_steps < self._last_train_step
-        ):
+        ):  # fast forward the iterator if loading from a previous checkpoint.
           next(iterator)
           self._train_steps += 1
         example = next(iterator)
@@ -403,22 +404,22 @@ class GrpoLearner:
           self._train_steps += 1
         else:
           self._eval_steps += 1
+
         example_list.append(advantage)
         if proceed_num_steps > 0 and len(example_list) == proceed_num_steps:
           _put_list_of_examples_to_data_queue()
-          data_queue.put(None)
           return
-      except StopIteration as e:
-        if proceed_num_steps > 0:
-          data_queue.put(None)
-          raise e
-        else:
-          _put_list_of_examples_to_data_queue()
-          data_queue.put(None)
-          return
-      except Exception as e:
-        data_queue.put(None)
+    except StopIteration as e:
+      if proceed_num_steps > 0:
         raise e
+      else:
+        _put_list_of_examples_to_data_queue()
+        return
+    except Exception as e:
+      raise e
+    finally:
+      # Signal no more iterable to be loaded.
+      data_queue.put(None)
 
   def train(
       self,
