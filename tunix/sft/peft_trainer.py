@@ -456,29 +456,28 @@ class PeftTrainer:
     index = 0
     with time_measure("Train loop"):
       while True:
-        train_example = None
-        if self.data_hooks:
-          train_example = self.data_hooks.load_next_train_batch(self)
-        else:
-          try:
-            train_example = next(train_iterator)
-            if not self.is_managed_externally:
-              # TODO(mridulsahu): Add support to restore the iterator state
-              # instead of skipping the already trained examples.
-              if index < self._train_steps:
-                # Skip the examples that are already trained.
-                index += 1
-                continue
-            index += 1
-          except StopIteration:
-            pass
-        if train_example is None:
-          break
-
         self._prof.maybe_activate(self._train_steps)
         with jax.profiler.StepTraceAnnotation(
             "train", step_num=self._train_steps
         ):
+          train_example = None
+          if self.data_hooks:
+            train_example = self.data_hooks.load_next_train_batch(self)
+          else:
+            try:
+              train_example = next(train_iterator)
+              if not self.is_managed_externally:
+                # TODO(mridulsahu): Add support to restore the iterator state
+                # instead of skipping the already trained examples.
+                if index < self._train_steps:
+                  # Skip the examples that are already trained.
+                  index += 1
+                  continue
+              index += 1
+            except StopIteration:
+              pass
+          if train_example is None:
+            break
           if (
               eval_ds
               and self._train_steps % self.config.eval_every_n_steps == 0
@@ -537,7 +536,7 @@ class PeftTrainer:
           )
           if self.training_hooks:
             self.training_hooks.on_train_step_end(self, train_loss)
-          self._prof.maybe_deactivate(self._train_steps)
+        self._prof.maybe_deactivate(self._train_steps)
 
     self._throttler.wait_for_all()
     if self.training_hooks:
