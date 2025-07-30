@@ -85,15 +85,19 @@ class GrpoConfig:
       the reference model. A value of 0.0 means no KL penalty is applied.
     epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
       PPO, it ensures stable updates.
+    loss_algo: use GRPO or GSPO for loss computation. (GRPO loss is per-batch
+      normalized instead of per-response normalized as mentioned in the paper.)
 
   References:
-  - https://arxiv.org/abs/2402.03300
+  - GRPO: https://arxiv.org/abs/2402.03300
+  - GSPO: https://www.arxiv.org/pdf/2507.18071
   """
 
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
   epsilon: float = 0.2
+  loss_algo: str = "grpo"  # grpo or gspo TODO(tsbao): support gspo-token
 
   def __post_init__(self):
     assert self.num_generations > 1, (
@@ -134,12 +138,30 @@ class GrpoLearner:
       grpo_config: An instance of `GrpoConfig` containing all GRPO sepecific
         parameters.
     """
+    assert grpo_config.loss_algo in ["grpo", "gspo"], (
+        "loss_algo should be either grpo or gspo. Received: "
+        f"{grpo_config.loss_algo}"
+    )
     self.grpo_config = grpo_config
     self.rl_cluster = rl_cluster
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
-    self.rl_cluster.actor_trainer.with_loss_fn(grpo_loss_fn, has_aux=True)
+
+    # Workaround for passing in importance_sampling_algo as jax transforms
+    # doesn't like partial functions with kwargs.
+    loss_fn = lambda model, train_example, beta, epsilon: grpo_loss_fn(
+        model,
+        train_example,
+        beta=beta,
+        epsilon=epsilon,
+        loss_algo=self.grpo_config.loss_algo,
+    )
+
+    self.rl_cluster.actor_trainer.with_loss_fn(
+        loss_fn,
+        has_aux=True,
+    )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
@@ -529,7 +551,7 @@ class GrpoLearner:
     self.rl_cluster.actor_trainer.close()
 
 
-def grpo_loss_fn(model, train_example, beta, epsilon):
+def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
   """GRPO loss function.
 
   The loss aims to maximize the expected advantage of the chosen actions while
@@ -544,6 +566,7 @@ def grpo_loss_fn(model, train_example, beta, epsilon):
     beta: The coefficient for the KL divergence penalty. A value of 0.0 means no
       KL penalty is applied.
     epsilon: Epsilon value for clipping.
+    loss_algo: The loss algorithm to use. Can be GRPO or GSPO.
 
   Returns:
     A tuple containing the loss and an aux dictionary.
@@ -575,14 +598,25 @@ def grpo_loss_fn(model, train_example, beta, epsilon):
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
     old_per_token_logps = train_example.old_per_token_logps
-  coef_1 = jnp.exp(per_token_logps - old_per_token_logps)
+
+  logps_diff = per_token_logps - old_per_token_logps
+  if loss_algo == "gspo":
+    logps_diff = (logps_diff * completion_mask).sum(axis=-1) / jnp.clip(
+        completion_mask.sum(-1), min=1
+    )
+    logps_diff = jnp.expand_dims(logps_diff, axis=-1)
+
+  coef_1 = jnp.exp(logps_diff)
   coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
   per_token_loss = -jnp.minimum(
       coef_1 * jnp.expand_dims(advantages, 1),
       coef_2 * jnp.expand_dims(advantages, 1),
   )
 
-  loss_denominator = jnp.clip(completion_mask.sum(), min=1)
+  if loss_algo == "gspo":
+    loss_denominator = jnp.clip(completion_mask.sum(axis=-1), min=1)
+  else:  # grpo
+    loss_denominator = jnp.clip(completion_mask.sum(), min=1)
 
   aux = {"kl": 0.0}
   if beta != 0.0:
@@ -592,8 +626,13 @@ def grpo_loss_fn(model, train_example, beta, epsilon):
     per_token_loss = per_token_loss + beta * kl
 
     # Log mean KL.
-    aux["kl"] = (kl * completion_mask).sum() / loss_denominator
+    aux["kl"] = (kl * completion_mask).sum() / loss_denominator.mean()
 
-  loss = (per_token_loss * completion_mask).sum() / loss_denominator
+  if loss_algo == "gspo":
+    loss = (
+        (per_token_loss * completion_mask).sum(axis=-1) / loss_denominator
+    ).mean()
+  else:  # grpo
+    loss = (per_token_loss * completion_mask).sum() / loss_denominator
 
   return loss, aux

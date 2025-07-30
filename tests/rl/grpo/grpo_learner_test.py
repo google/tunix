@@ -161,6 +161,7 @@ class GrpoLearnerTest(parameterized.TestCase):
       dict(
           testcase_name='single_reward_fn',
           reward_fns=reward_1,
+          loss_algo='grpo',
       ),
       dict(
           testcase_name='multiple_reward_fns',
@@ -168,9 +169,15 @@ class GrpoLearnerTest(parameterized.TestCase):
               reward_1,
               reward_2,
           ],
+          loss_algo='grpo',
+      ),
+      dict(
+          testcase_name='single_reward_fn_gspo',
+          reward_fns=reward_1,
+          loss_algo='gspo',
       ),
   )
-  def test_grpo_trainer(self, reward_fns):
+  def test_grpo_trainer(self, reward_fns, loss_algo):
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
@@ -209,6 +216,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     grpo_config = grpo_lib.GrpoConfig(
         num_generations=2,
         num_iterations=1,
+        loss_algo=loss_algo,
     )
     grpo_trainer = grpo_lib.GrpoLearner(
         rl_cluster=rl_cluster,
