@@ -190,7 +190,7 @@ class VllmSamplerTest(absltest.TestCase):
         pad_output=True,  # Use padding for output
     )
 
-    vl_sampler = vllm_sampler.vLLMSampler(
+    vl_sampler = vllm_sampler.VllmSampler(
         tokenizer=model_tokenizer,
         mesh=self.mesh,
         max_model_len=512,  # Set to 1024 for vLLM
