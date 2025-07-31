@@ -50,16 +50,9 @@ print(
     "your own discretion"
 )
 
-os.environ["TPU_BACKEND_TYPE"] = "jax"
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
 # Disable precompilation for faster iteration, need to toggle it back for
 # official run
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
-# vLLM recommends use the old model design
-# os.environ["NEW_MODEL_DESIGN"]= "True"
-
 
 # Parse command line options
 parser = argparse.ArgumentParser(description="Arguments for GRPO demo")

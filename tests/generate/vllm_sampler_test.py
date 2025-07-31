@@ -27,15 +27,9 @@ from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 
 
-os.environ["TPU_BACKEND_TYPE"] = "jax"
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
 # vLLM Jax backend suggest to use old model desing for now.
 # os.environ["NEW_MODEL_DESIGN"]="True"
-
-# TODO(b/433750353): Enable random weights after vLLM supports it properly
-# os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 
 class VllmSamplerTest(absltest.TestCase):
