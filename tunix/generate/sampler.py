@@ -30,6 +30,7 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
@@ -89,23 +90,6 @@ class _SamplingState:
   beam_search_sampling_state: (
       beam_search_lib._BeamSearchSamplingState | None
   ) = None
-
-
-@dataclasses.dataclass
-class SamplerOutput:
-  """Output of the sampler."""
-
-  # Decoded samples from the model.
-  text: list[str]
-
-  # Per-step logits used during sampling.
-  logits: list[jax.Array] | jax.Array
-
-  # Tokens corresponding to the generated samples.
-  tokens: list[jax.Array] | jax.Array
-
-  # Left padded prompt tokens.
-  padded_prompt_tokens: jax.Array
 
 
 @dataclasses.dataclass(frozen=True)
@@ -187,7 +171,7 @@ def _init_cache(
   return cache
 
 
-class Sampler:
+class Sampler(base_sampler.BaseSampler):
   """Sampler for transformer model."""
 
   def __init__(
@@ -624,7 +608,7 @@ class Sampler:
       beam_size: Optional[int] = None,
       seed: int | None = None,
       pad_output: bool = False,
-  ) -> SamplerOutput:
+  ) -> base_sampler.SamplerOutput:
     """Samples a completion of the input string.
 
     If top_p is provided, the sampling mode will be top_p.
@@ -709,7 +693,6 @@ class Sampler:
     sampling_state = self._compiled_decode_fn(
         self._flattened_transformer_state, sampling_state
     )
-
     token_buffers = sampling_state.token_buffer
     logits_buffers = sampling_state.logits_buffer
 
@@ -766,10 +749,11 @@ class Sampler:
           self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
       ]
 
-    result = SamplerOutput(
+    result = base_sampler.SamplerOutput(
         text=decoded_outputs,
         logits=out_logits if return_logits else [],
         tokens=out_tokens,
         padded_prompt_tokens=all_input_ids,
+        logprobs=None,
     )
     return result
