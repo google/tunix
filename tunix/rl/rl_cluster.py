@@ -23,6 +23,7 @@ from flax import nnx
 import jax
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import optax
+from tunix.rl.rollout import vllm_rollout
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils
@@ -31,7 +32,6 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import peft_trainer
 
-from tunix.rl.rollout import vllm_rollout
 
 ModelOrPath = Union[nnx.Module, str]
 
