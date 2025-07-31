@@ -1,6 +1,6 @@
 # Copyright 2025 Google LLC
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the "License');
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
@@ -15,7 +15,9 @@
 """LLama3 model."""
 
 import dataclasses
+import os
 from typing import Tuple
+
 import flax
 from flax import nnx
 import jax
@@ -342,7 +344,7 @@ class Attention(nnx.Module):
 
   @property
   def num_kv_heads(self):
-    return self.kv_proj.shape[1]
+    return self.k_proj.shape[1]
 
 
 class MLP(nnx.Module):
@@ -538,3 +540,226 @@ class Llama3(nnx.Module):
     logits = self.lm_head(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
+
+  @property
+  def num_embed(self) -> int:
+    return self.config.embed_dim
+
+  # For now, we are still passing sharding to vLLM, consider removing it after
+  # switching to the reshard API
+  @staticmethod
+  def to_hf_mappings():
+    if os.environ.get('NEW_MODEL_DESIGN') == 'True':
+      return {
+          'lm_head.w': ('lm_head.input_embedding_table_DV', (None, 'model')),
+          'embedder.input_embedding': (
+              'embedder.input_embedding_table_VD',
+              ('model', None),
+          ),
+          'layers.*.input_layernorm.w': (
+              'layers.*.pre_attention_norm.scale',
+              (None,),
+          ),
+          'layers.*.mlp.down_proj.kernel': (
+              'layers.*.mlp.kernel_down_proj_FD',
+              ('model', None),
+          ),
+          'layers.*.mlp.gate_proj.kernel': (
+              'layers.*.mlp.kernel_gating_DF',
+              (None, 'model'),
+          ),
+          'layers.*.mlp.up_proj.kernel': (
+              'layers.*.mlp.kernel_up_proj_DF',
+              (None, 'model'),
+          ),
+          'layers.*.post_attention_layernorm.w': (
+              'layers.*.pre_mlp_norm.scale',
+              (None,),
+          ),
+          'layers.*.attn.k_proj.w': (
+              'layers.*.attn.kernel_k_proj_DKH',
+              (None, 'model', None),
+          ),
+          'layers.*.attn.o_proj.w': (
+              'layers.*.attn.kernel_o_proj_NHD',
+              ('model', None, None),
+          ),
+          'layers.*.attn.q_proj.w': (
+              'layers.*.attn.kernel_q_proj_DNH',
+              (None, 'model', None),
+          ),
+          'layers.*.attn.v_proj.w': (
+              'layers.*.attn.kernel_v_proj_DKH',
+              (None, 'model', None),
+          ),
+          'final_norm.w': ('final_norm.scale', (None,)),
+      }
+    else:
+      return {
+          'lm_head.w': ('lm_head', (None, 'model')),
+          'embedder.input_embedding': ('embed.embedding', ('model', None)),
+          'layers.*.input_layernorm.w': (
+              'model.layers.*.input_layernorm.scale',
+              (None,),
+          ),
+          'layers.*.mlp.down_proj.kernel': (
+              'model.layers.*.mlp.down_proj.kernel',
+              ('model', None),
+          ),
+          'layers.*.mlp.gate_proj.kernel': (
+              'model.layers.*.mlp.gate_proj.kernel',
+              (None, 'model'),
+          ),
+          'layers.*.mlp.up_proj.kernel': (
+              'model.layers.*.mlp.up_proj.kernel',
+              (None, 'model'),
+          ),
+          'layers.*.post_attention_layernorm.w': (
+              'model.layers.*.post_attention_layernorm.scale',
+              (None,),
+          ),
+          'layers.*.attn.k_proj.w': (
+              'model.layers.*.self_attn.k_proj.kernel',
+              (None, 'model', None),
+          ),
+          'layers.*.attn.o_proj.w': (
+              'model.layers.*.self_attn.o_proj.kernel',
+              ('model', None, None),
+          ),
+          'layers.*.attn.q_proj.w': (
+              'model.layers.*.self_attn.q_proj.kernel',
+              (None, 'model', None),
+          ),
+          'layers.*.attn.v_proj.w': (
+              'model.layers.*.self_attn.v_proj.kernel',
+              (None, 'model', None),
+          ),
+          'final_norm.w': ('model.norm.scale', (None,)),
+      }
+
+  @staticmethod
+  def lora_to_hf_mappings():
+    if os.environ.get('NEW_MODEL_DESIGN') == 'True':
+      return {
+          'layers.*.mlp.gate_proj.kernel_lora_a': (
+              'layers.*.mlp.kernel_gating_DF_lora_a',
+              (None, None),
+          ),
+          'layers.*.mlp.gate_proj.kernel_lora_b': (
+              'layers.*.mlp.kernel_gating_DF_lora_b',
+              (None, 'model'),
+          ),
+          'layers.*.mlp.up_proj.kernel_lora_a': (
+              'layers.*.mlp.kernel_up_proj_DF_lora_a',
+              (None, None),
+          ),
+          'layers.*.mlp.up_proj.kernel_lora_b': (
+              'layers.*.mlp.kernel_up_proj_DF_lora_b',
+              (None, 'model'),
+          ),
+          'layers.*.mlp.down_proj.kernel_lora_a': (
+              'layers.*.mlp.kernel_down_proj_FD_lora_a',
+              ('model', None),
+          ),
+          'layers.*.mlp.down_proj.kernel_lora_b': (
+              'layers.*.mlp.kernel_down_proj_FD_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.q_proj.w_lora_a': (
+              'layers.*.attn.kernel_q_proj_DNH_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.q_proj.w_lora_b': (
+              'layers.*.attn.kernel_q_proj_DNH_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.k_proj.w_lora_a': (
+              'layers.*.attn.kernel_k_proj_DKH_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.k_proj.w_lora_b': (
+              'layers.*.attn.kernel_k_proj_DKH_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.v_proj.w_lora_a': (
+              'layers.*.attn.kernel_v_proj_DKH_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.v_proj.w_lora_b': (
+              'layers.*.attn.kernel_v_proj_DKH_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.o_proj.w_lora_a': (
+              'layers.*.attn.kernel_o_proj_NHD_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.o_proj.w_lora_b': (
+              'layers.*.attn.kernel_o_proj_NHD_lora_b',
+              (None, None),
+          ),
+      }
+    else:
+      return {
+          'layers.*.mlp.gate_proj.kernel_lora_a': (
+              'model.layers.*.mlp.gate_proj.kernel_lora_a',
+              (None, None),
+          ),
+          'layers.*.mlp.gate_proj.kernel_lora_b': (
+              'model.layers.*.mlp.gate_proj.kernel_lora_b',
+              (None, 'model'),
+          ),
+          'layers.*.mlp.up_proj.kernel_lora_a': (
+              'model.layers.*.mlp.up_proj.kernel_lora_a',
+              (None, None),
+          ),
+          'layers.*.mlp.up_proj.kernel_lora_b': (
+              'model.layers.*.mlp.up_proj.kernel_lora_b',
+              (None, 'model'),
+          ),
+          'layers.*.mlp.down_proj.kernel_lora_a': (
+              'model.layers.*.mlp.down_proj.kernel_lora_a',
+              ('model', None),
+          ),
+          'layers.*.mlp.down_proj.kernel_lora_b': (
+              'model.layers.*.mlp.down_proj.kernel_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.q_proj.w_lora_a': (
+              'layers.*.self_attn.q_proj.kernel_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.q_proj.w_lora_b': (
+              'layers.*.self_attn.q_proj.kernel_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.k_proj.w_lora_a': (
+              'layers.*.self_attn.k_proj.kernel_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.k_proj.w_lora_b': (
+              'layers.*.self_attn.k_proj.kernel_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.v_proj.w_lora_a': (
+              'layers.*.self_attn.v_proj.kernel_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.v_proj.w_lora_b': (
+              'layers.*.self_attn.v_proj.kernel_lora_b',
+              (None, None),
+          ),
+          'layers.*.attn.o_proj.w_lora_a': (
+              'layers.*.self_attn.o_proj.kernel_lora_a',
+              ('model', None),
+          ),
+          'layers.*.attn.o_proj.w_lora_b': (
+              'layers.*.self_attn.o_proj.kernel_lora_b',
+              (None, None),
+          ),
+      }
+
+  @staticmethod
+  def to_hf_transpose_keys():
+    return {
+        'embedding': (1, 0),
+    }

@@ -21,6 +21,16 @@ import jax
 import jaxtyping
 
 
+@dataclasses.dataclass(frozen=True)
+class CacheConfig:
+  """Configuration for the KV cache."""
+
+  cache_size: int
+  num_layers: int
+  num_kv_heads: int
+  head_dim: int
+
+
 @dataclasses.dataclass
 class RolloutOutput:
   """Output of the rollout worker."""
@@ -38,6 +48,9 @@ class RolloutOutput:
   # TODO(tsbao): Reconcile with vLLM output and see if we should remove this
   # field, or add prompt + generated as extra.
   left_padded_prompt_tokens: jax.Array
+
+  # The log probs from sampler generations.
+  logprobs: list[float] | None
 
 
 @dataclasses.dataclass
