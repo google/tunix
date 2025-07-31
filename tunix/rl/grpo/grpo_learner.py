@@ -85,8 +85,9 @@ class GrpoConfig:
       the reference model. A value of 0.0 means no KL penalty is applied.
     epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
       PPO, it ensures stable updates.
-    loss_algo: use GRPO or GSPO for loss computation. (GRPO loss is per-batch
-      normalized instead of per-response normalized as mentioned in the paper.)
+    loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
+      normalized instead of per-response normalized as mentioned in the paper.
+      For GSPO, we use gspo-token loss which is more flexible.
 
   References:
   - GRPO: https://arxiv.org/abs/2402.03300
@@ -97,7 +98,7 @@ class GrpoConfig:
   num_iterations: int = 1
   beta: float = 0.04
   epsilon: float = 0.2
-  loss_algo: str = "grpo"  # grpo or gspo TODO(tsbao): support gspo-token
+  loss_algo: str = "grpo"  # grpo or gspo-token
 
   def __post_init__(self):
     assert self.num_generations > 1, (
@@ -138,8 +139,8 @@ class GrpoLearner:
       grpo_config: An instance of `GrpoConfig` containing all GRPO sepecific
         parameters.
     """
-    assert grpo_config.loss_algo in ["grpo", "gspo"], (
-        "loss_algo should be either grpo or gspo. Received: "
+    assert grpo_config.loss_algo in ["grpo", "gspo-token"], (
+        "loss_algo should be either grpo or gspo-token. Received: "
         f"{grpo_config.loss_algo}"
     )
     self.grpo_config = grpo_config
@@ -566,7 +567,7 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
     beta: The coefficient for the KL divergence penalty. A value of 0.0 means no
       KL penalty is applied.
     epsilon: Epsilon value for clipping.
-    loss_algo: The loss algorithm to use. Can be GRPO or GSPO.
+    loss_algo: The loss algorithm to use. Can be grpo or gspo-token.
 
   Returns:
     A tuple containing the loss and an aux dictionary.
@@ -599,21 +600,28 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
   else:
     old_per_token_logps = train_example.old_per_token_logps
 
-  logps_diff = per_token_logps - old_per_token_logps
-  if loss_algo == "gspo":
-    logps_diff = (logps_diff * completion_mask).sum(axis=-1) / jnp.clip(
-        completion_mask.sum(-1), min=1
+  seq_importance_ratio = per_token_logps - old_per_token_logps
+  if loss_algo == "gspo-token":
+    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
+        axis=-1
+    ) / jnp.clip(completion_mask.sum(-1), min=1)
+    seq_importance_ratio = (
+        per_token_logps
+        - jax.lax.stop_gradient(per_token_logps)
+        + jnp.expand_dims(jax.lax.stop_gradient(seq_importance_ratio), axis=-1)
     )
-    logps_diff = jnp.expand_dims(logps_diff, axis=-1)
+    seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
-  coef_1 = jnp.exp(logps_diff)
+  coef_1 = jnp.exp(seq_importance_ratio)
   coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
+
+  # TODO(tsbao): We should handle token level advantages.
   per_token_loss = -jnp.minimum(
       coef_1 * jnp.expand_dims(advantages, 1),
       coef_2 * jnp.expand_dims(advantages, 1),
   )
 
-  if loss_algo == "gspo":
+  if loss_algo == "gspo-token":
     loss_denominator = jnp.clip(completion_mask.sum(axis=-1), min=1)
   else:  # grpo
     loss_denominator = jnp.clip(completion_mask.sum(), min=1)
@@ -628,7 +636,7 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
     # Log mean KL.
     aux["kl"] = (kl * completion_mask).sum() / loss_denominator.mean()
 
-  if loss_algo == "gspo":
+  if loss_algo == "gspo-token":
     loss = (
         (per_token_loss * completion_mask).sum(axis=-1) / loss_denominator
     ).mean()

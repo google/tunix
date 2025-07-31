@@ -174,7 +174,7 @@ class GrpoLearnerTest(parameterized.TestCase):
       dict(
           testcase_name='single_reward_fn_gspo',
           reward_fns=reward_1,
-          loss_algo='gspo',
+          loss_algo='gspo-token',
       ),
   )
   def test_grpo_trainer(self, reward_fns, loss_algo):
