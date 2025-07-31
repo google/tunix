@@ -27,8 +27,15 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 
 
+# vLLM recommends use the old model design
+# os.environ["NEW_MODEL_DESIGN"]= "True"
+# Enable Jax backend
 os.environ["TPU_BACKEND_TYPE"] = "jax"
+# Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+# Init vLLM model with random weights because model weights are synced from
+# trainer later on
+os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
 
 @dataclasses.dataclass
@@ -65,9 +72,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         mesh (jax.sharding.Mesh): The JAX mesh for parallel execution.
         max_model_len (int): Maximum sequence (prompt + generation) length
           supported by vLLM.
-        model_version (Optional[str]): The model version identifier. This is
-          currently required for vLLM compatibility, but will be removed in the
-          future.
+        model_version (Optional[str]): The model version identifier.
         mapping_config: The config for weight name mappings from external model
           to vLLM model, including to_hf_mappings, lora_to_hf_mappings,
           to_hf_transpose_keys and lora_config.

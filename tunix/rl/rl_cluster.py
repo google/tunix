@@ -85,8 +85,6 @@ class ClusterConfig:
   training_config: RLTrainingConfig
   rollout_config: base_rollout.RolloutConfig
 
-  # TODO(lancewang): Remove this when vLLM Jax backends supports sharded initial
-  # random weights properly
   rollout_model_version: str = ""
   rollout_lora_config: dict[str, Any] | None = None
 
