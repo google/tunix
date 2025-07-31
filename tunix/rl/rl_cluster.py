@@ -107,10 +107,7 @@ class RLCluster:
     self.cluster_config = cluster_config
     self.r2m = cluster_config.role_to_mesh
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
-    if self.cluster_config.rollout_engine == "vanilla":
-      # vLLM has it's own model loading logic in the init cluster. Only load for
-      # vanilla rollout.
-      self.rollout_actor = self._load_model(actor, self.r2m[Role.ROLLOUT])
+    self.rollout_actor = self._load_model(actor, self.r2m[Role.ROLLOUT])
     self.critic = (
         self._load_model(critic, self.r2m[Role.CRITIC]) if critic else None
     )
@@ -123,7 +120,7 @@ class RLCluster:
         self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
     )
     self.tokenizer = tokenizer
-    self._init_cluster(actor)
+    self._init_cluster()
 
   def _load_model(self, model_or_path: ModelOrPath, mesh: Mesh) -> nnx.Module:
     """Loads model with given mesh.
@@ -161,7 +158,7 @@ class RLCluster:
     else:
       raise NotImplementedError("Loading from path is not supported yet.")
 
-  def _init_cluster(self, actor: nnx.Module):
+  def _init_cluster(self):
     """Initializes the RL cluster."""
     # 1. Initialize rollout.
     assert self.cluster_config.rollout_engine in [
@@ -184,7 +181,7 @@ class RLCluster:
       )
     elif self.cluster_config.rollout_engine == "vllm":
       self._rollout = vllm_rollout.VllmRollout(
-          actor,
+          self.rollout_actor,
           self.tokenizer,
           cache_config_or_size=self.cluster_config.rollout_config.kv_cache_size,
           mesh=self.r2m[Role.ROLLOUT],
