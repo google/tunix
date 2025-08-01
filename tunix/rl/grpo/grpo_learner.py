@@ -356,7 +356,7 @@ class GrpoLearner:
 
     return rewards
 
-  def prepare_dataset(
+  def _prepare_data(
       self,
       iterator: Iterator[_TrainingInputT],
       proceed_num_steps: int,
@@ -368,7 +368,9 @@ class GrpoLearner:
       async_loading: bool = False,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
   ) -> None:
-    """Prepares the dataset for training.
+    """Prepares the data for training.
+
+    Includes rollout generation and advantage computation.
 
     Args:
       iterator: The input iterator of the dataset.
@@ -497,7 +499,7 @@ class GrpoLearner:
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
         initial_train_steps = self._train_steps
         future = self.executor.submit(
-            self.prepare_dataset,
+            self._prepare_data,
             iterator=train_iterator,
             proceed_num_steps=self.grad_acc_steps,
             sample_repeat=self.grpo_config.num_generations,
@@ -515,7 +517,7 @@ class GrpoLearner:
             if curr_train_ds is None:
               break
             if eval_ds and not curr_eval_ds:
-              self.prepare_dataset(
+              self._prepare_data(
                   iterator=iter(eval_ds),
                   proceed_num_steps=-1,
                   sample_repeat=self.grpo_config.num_generations,

@@ -105,7 +105,7 @@ class GrpoLearnerTest(parameterized.TestCase):
       while True:
         try:
           data_queue = queue_lib.SimpleDataQueue(maxsize=2)
-          empty_trainer.prepare_dataset(
+          empty_trainer._prepare_data(
               iterator=iterator,
               proceed_num_steps=grad_acc_steps,
               sample_repeat=sample_repeat,
