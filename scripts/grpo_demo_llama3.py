@@ -25,6 +25,7 @@ import json
 import os
 import pprint
 import re
+
 from flax import nnx
 import grain
 import huggingface_hub
@@ -33,7 +34,7 @@ import jax
 from jax import numpy as jnp
 import optax
 from orbax import checkpoint as ocp
-from qwix import lora
+import qwix
 from tqdm.auto import tqdm
 import transformers
 from tunix.models.llama3 import model as llama_lib
@@ -380,7 +381,7 @@ def get_ref_model():
   model_mesh = jax.make_mesh(*MESH)
   ref_model_config = MODEL_CONFIG[SIMPLIFIED_MODEL_VERSION]()
   model = get_llama_model(ckpt_path, model_mesh)
-  return model, mesh, ref_model_config
+  return model, model_mesh, ref_model_config
 
 
 def get_lora_model(base_model, model_mesh=None):
@@ -400,14 +401,14 @@ def get_lora_model(base_model, model_mesh=None):
   else:
     module_path = ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
 
-  lora_provider = lora.LoraProvider(
+  lora_provider = qwix.LoraProvider(
       module_path=(module_path),
       rank=RANK,
       alpha=ALPHA,
   )
 
   model_input = base_model.get_model_input()
-  lora_model = lora.apply_lora_to_model(
+  lora_model = qwix.apply_lora_to_model(
       base_model, lora_provider, **model_input
   )
 
