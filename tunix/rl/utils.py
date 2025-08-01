@@ -14,11 +14,14 @@
 
 """Simple utils used by GRPO."""
 
+from typing import Optional
+
 from flax import nnx
 from flax.nnx import statelib
 import jax
 import jaxtyping
 import numpy as np
+
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
@@ -54,10 +57,13 @@ def get_pytree_mesh_info(tree: jaxtyping.PyTree) -> Mesh | None:
 
 
 def is_sharing_weights(
-    m1: nnx.Module,
-    m2: nnx.Module,
+    m1: Optional[nnx.Module],
+    m2: Optional[nnx.Module],
 ) -> bool:
   """Returns whether two models are sharing same copy of weights."""
+  if m1 is None or m2 is None:
+    return False
+
   s1 = nnx.state(m1)
   s2 = nnx.state(m2)
   return np.all(

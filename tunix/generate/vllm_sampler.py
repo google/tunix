@@ -132,7 +132,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   @property
   def transformer(self):
-    raise NotImplementedError("vLLM doesn't expose the underlying model!")
+    # vLLM doesn't expose the underlying model
+    return None
 
   @property
   def transformer_state(self):

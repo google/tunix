@@ -98,4 +98,4 @@ class VllmRollout(base_rollout.BaseRollout):
     return self._sampler.tokenizer.eos_id()
 
   def model(self) -> nnx.Module:
-    raise NotImplementedError("vLLM doesn't expose the model")
+    return self._sampler.transformer
