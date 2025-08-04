@@ -19,7 +19,6 @@ training, evaluation, and inference.
 """
 
 import argparse
-import functools
 import gc
 import json
 import os
@@ -29,7 +28,6 @@ import re
 from flax import nnx
 import grain
 import huggingface_hub
-import humanize
 import jax
 from jax import numpy as jnp
 import optax
@@ -40,10 +38,13 @@ import transformers
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import utils
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 
+
+show_hbm_usage = utils.show_hbm_usage
 
 print(
     "This script is still WIP and you'll need to download all the data to"
@@ -243,46 +244,6 @@ def load_json_from_local(path):
   # with gfile.Open(path, "rb") as f:
   with open(path, "rb") as f:
     return json.loads(f.read())
-
-
-def show_hbm_usage(title=""):
-  """Prints the current HBM usage.
-
-  Args:
-    title: The title to print before the HBM usage.
-  """
-  fmt_size = functools.partial(humanize.naturalsize, binary=True)
-  # Force a GC sweep to catch recently deallocated arrays
-  gc.collect()
-  try:
-    import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import
-
-    print("Using Pathways compatible HBM stats collector")
-
-    # Track usage per device
-    usage_by_device = {d: 0 for d in jax.local_devices()}
-
-    for mem_obj in gc.get_objects():
-      try:
-        if isinstance(mem_obj, jax.Array):
-          device = mem_obj.device()
-          usage_by_device[device] += mem_obj.size * mem_obj.dtype.itemsize
-      except Exception:  # pylint: disable=broad-except
-        continue  # Skip objects that raise
-
-    for d, used in usage_by_device.items():
-      print(f"{title} -- Using {fmt_size(used)} on {d}")
-  except Exception:  # pylint: disable=broad-except
-    print("Pathways not available. Using non Pathways HBM stats collector")
-
-    for d in jax.local_devices():
-      stats = d.memory_stats()
-      used = stats["bytes_in_use"]
-      limit = stats["bytes_limit"]
-      print(
-          f"{title} -- Using {fmt_size(used)} /"
-          f" {fmt_size(limit)} ({used/limit:%}) on {d}"
-      )
 
 
 show_hbm_usage()
