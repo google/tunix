@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen3 model."""
+"""Qwen2 model."""
 
 import dataclasses
 from typing import Tuple
@@ -83,67 +83,22 @@ class ModelConfig:
   num_kv_heads: int
   rope_theta: int
   norm_eps: float
-  num_experts: int | None = None
-  num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
-  def qwen3_0_6_b(cls):  # qwen3-0.6B
+  def qwen2_5_0_5_b(cls):  # qwen2.5-0.5B
     return cls(
-        num_layers=28,
+        num_layers=24,
         vocab_size=151936,
-        embed_dim=1024,
-        hidden_dim=3072,
-        num_heads=16,
-        head_dim=128,
-        num_kv_heads=8,
+        embed_dim=896,
+        hidden_dim=4864,
+        num_heads=14,
+        head_dim=64,
+        num_kv_heads=2,
         norm_eps=1e-06,
         rope_theta=1_000_000,
     )
-
-  @classmethod
-  def qwen3_1_7_b(cls):  # qwen3-1.7B
-    return cls(
-        num_layers=28,
-        vocab_size=151936,
-        embed_dim=2048,
-        hidden_dim=6144,
-        num_heads=16,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-    )
-
-  @classmethod
-  def qwen3_14_b(cls):  # qwen3-14B
-    return cls(
-        num_layers=40,
-        vocab_size=151936,
-        embed_dim=5120,
-        hidden_dim=17408,
-        num_heads=40,
-        head_dim=128,
-        num_kv_heads=8,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-    )
-
-  @classmethod
-  def qwen3_30_b(cls):  # qwen3-30B
-    return cls(
-        num_layers=48,
-        vocab_size=151936,
-        embed_dim=2048,
-        hidden_dim=768,
-        num_heads=32,
-        head_dim=128,
-        num_kv_heads=4,
-        norm_eps=1e-06,
-        rope_theta=1_000_000,
-        num_experts=128,
-        num_experts_per_tok=8,
-    )
+  # TODO(linchai): add other qwen2.5 model configs.
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
@@ -291,20 +246,24 @@ class Attention(nnx.Module):
         rngs=rngs,
         sharding=shd_config.o_weight_nhd,
     )
-    self.q_norm = RMSNorm(
-        config.head_dim,
-        norm_eps=config.norm_eps,
-        rngs=rngs,
-        shd_config=shd_config,
-    )
-    self.k_norm = RMSNorm(
-        config.head_dim,
-        norm_eps=config.norm_eps,
-        rngs=rngs,
-        shd_config=shd_config,
-    )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
+    self.q_bias = nnx.Param(
+        nnx.initializers.zeros_init()(
+            rngs.params(), config.num_heads * config.head_dim
+        ),
+    )
+    self.k_bias = nnx.Param(
+        nnx.initializers.zeros_init()(
+            rngs.params(), config.num_kv_heads * config.head_dim
+        ),
+        sharding=shd_config.kv_weight_ndh,
+    )
+    self.v_bias = nnx.Param(
+        nnx.initializers.zeros_init()(
+            rngs.params(), config.num_kv_heads * config.head_dim
+        ),
+    )
 
   @jax.named_scope('attention')
   def __call__(
@@ -316,9 +275,17 @@ class Attention(nnx.Module):
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
 
-    query_proj = self.q_norm(self.q_proj(x))
-    key_proj = self.k_norm(self.k_proj(x))
+    query_proj = self.q_proj(x)
+    b, t, n, h = query_proj.shape
+    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias
+    query_proj = jnp.reshape(query_proj, (b, t, n, h))
+    key_proj = self.k_proj(x)
+    _, s, k, h = key_proj.shape
+    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias
+    key_proj = jnp.reshape(key_proj, (b, s, k, h))
     value_proj = self.v_proj(x)
+    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias
+    value_proj = jnp.reshape(value_proj, (b, s, k, h))
 
     query_proj = shard(query_proj, self.shd_config.act_btnh)
     key_proj = shard(key_proj, self.shd_config.act_btnh)
@@ -391,85 +358,6 @@ class Attention(nnx.Module):
   @property
   def num_kv_heads(self):
     return self.k_proj.shape[1]
-
-
-class MoELayer(nnx.Module):
-  """MoE layer."""
-
-  def __init__(
-      self,
-      config: ModelConfig,
-      *,
-      rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  ):
-    self.shd_config = shd_config
-    self.experts_per_tok = config.num_experts_per_tok
-    self.num_experts = config.num_experts
-    self.router = nnx.Linear(
-        in_features=config.embed_dim,
-        out_features=config.num_experts,
-        use_bias=False,
-        rngs=rngs,
-    )
-    self.gate_proj = nnx.Param(
-        nnx.initializers.normal()(
-            rngs.params(),
-            (config.num_experts, config.embed_dim, config.hidden_dim),
-        ),
-        sharding=shd_config.exp_weight_cdf,
-    )
-    self.up_proj = nnx.Param(
-        nnx.initializers.normal()(
-            rngs.params(),
-            (config.num_experts, config.embed_dim, config.hidden_dim),
-        ),
-        sharding=shd_config.exp_weight_cdf,
-    )
-    self.down_proj = nnx.Param(
-        nnx.initializers.normal()(
-            rngs.params(),
-            (config.num_experts, config.hidden_dim, config.embed_dim),
-        ),
-        sharding=shd_config.exp_weight_cfd,
-    )
-
-  def __call__(self, x):
-    scores = self.router(x).astype(jnp.float32)  # [B,T,E]
-    routing_weights, routing_idx = jax.lax.top_k(
-        jax.nn.softmax(scores, axis=-1), self.experts_per_tok
-    )
-    routing_weights = (
-        routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
-    ).astype(x.dtype)
-
-    dispatch_mask = jax.nn.one_hot(
-        routing_idx, num_classes=self.num_experts, dtype=x.dtype
-    )  # [B, T, K, E]
-    dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
-
-    dispatched_input = jnp.einsum(
-        'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
-    ).astype(x.dtype)
-
-    expert_outputs = []
-    for i in range(self.num_experts):
-      expert_input = dispatched_input[:, :, i, :]
-      activations = nnx.silu(
-          jnp.einsum('BTD,DF->BTF', expert_input, self.gate_proj[i])
-      ) * jnp.einsum('BTD,DF->BTF', expert_input, self.up_proj[i])
-      activations = shard(activations, self.shd_config.act_btf)
-      expert_output = jnp.einsum('BTF,FD->BTD', activations, self.down_proj[i])
-      expert_outputs.append(expert_output)
-
-    stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
-    routing_weights = jnp.tile(
-        routing_weights[:, :, None, :], (1, 1, self.num_experts, 1)
-    )  # [B, T, E, K]
-    routing_weights = dispatch_mask * routing_weights  # [B, T, E, K]
-
-    output = jnp.einsum('BTED,BTEK->BTD', stacked_outputs, routing_weights)
-    return output
 
 
 class MLP(nnx.Module):
@@ -547,18 +435,11 @@ class DecoderLayer(nnx.Module):
         rngs=rngs,
         shd_config=shd_config,
     )
-    if config.num_experts is None:
-      self.mlp = MLP(
-          config=config,
-          rngs=rngs,
-          shd_config=shd_config,
-      )
-    else:
-      self.mlp = MoELayer(
-          config=config,
-          rngs=rngs,
-          shd_config=shd_config,
-      )
+    self.mlp = MLP(
+        config=config,
+        rngs=rngs,
+        shd_config=shd_config,
+    )
 
   def __call__(
       self,
@@ -582,8 +463,8 @@ class DecoderLayer(nnx.Module):
     return cache, outputs
 
 
-class Qwen3(nnx.Module):
-  """Qwen3 model."""
+class Qwen2(nnx.Module):
+  """Qwen2.5 model."""
 
   def __init__(
       self,
@@ -609,12 +490,6 @@ class Qwen3(nnx.Module):
         norm_eps=config.norm_eps,
         shd_config=shd_config,
     )
-    self.lm_head = Einsum(
-        einsum_str='BTD,DV->BTV',
-        shape=(config.embed_dim, config.vocab_size),
-        rngs=rngs,
-        sharding=shd_config.emb_dv,
-    )
 
   def __call__(
       self,
@@ -624,7 +499,7 @@ class Qwen3(nnx.Module):
       attention_mask: jaxtyping.Array,  # [B, L, L']
       output_hidden_states: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
-    """Qwen3 model.
+    """Qwen2 model.
 
     Args:
       input_tokens: input sequence of tokens.
@@ -657,6 +532,7 @@ class Qwen3(nnx.Module):
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
-    logits = self.lm_head(x)
+    # Qwen2.5 0.5B-3B uses tied embedding, sharing weights for input and output.
+    logits = self.embedder.decode(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
