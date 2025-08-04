@@ -370,9 +370,9 @@ MODEL_CONFIG = {
 }
 
 
-def get_llama_model(ckpt_path, model_mesh):
+def get_llama_model(ckpt_path, model_mesh, ref_model_config):
   return params.create_model_from_safe_tensors(
-      ckpt_path, llama_lib.ModelConfig.llama3_8b(), model_mesh
+      ckpt_path, ref_model_config, model_mesh
   )
 
 
@@ -380,7 +380,7 @@ def get_ref_model():
   ckpt_path = os.path.join(NNX_CKPT_DIR)
   model_mesh = jax.make_mesh(*MESH)
   ref_model_config = MODEL_CONFIG[SIMPLIFIED_MODEL_VERSION]()
-  model = get_llama_model(ckpt_path, model_mesh)
+  model = get_llama_model(ckpt_path, model_mesh, ref_model_config)
   return model, model_mesh, ref_model_config
 
 
