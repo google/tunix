@@ -149,31 +149,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
     return bos_tok + input_ids
 
-  def _get_logprobs_from_vllm_output(
-      self, logprobs: List[Optional[Dict[int, Any]]]
-  ) -> List[float]:
-    # Below is to get the log probs from vLLM output
-    if logprobs is None or logprobs[0] is None:
-      logging.debug("Logprobs are missing")
-      return []
-
-    assert len(logprobs[0]) == 1, (
-        f"The log probs contains more than 1 ({len(logprobs[0])} token per"
-        " position"
-    )
-
-    try:
-      result = [
-          list(logprob_dict.values())[0].logprob
-          for logprob_dict in logprobs
-          if logprob_dict is not None and logprob_dict.values()
-      ]
-    except Exception as e:  # pylint: disable=broad-except
-      logging.error("Failed to get logprobs from vLLM output: %s", e)
-      result = []
-
-    return result
-
   def detokenize(
       self, input_strings: List[str], request_outputs: List[RequestOutput]
   ) -> Tuple[List[str], List[float], List[int]]:
@@ -194,7 +169,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         decoded_outputs[idx].append(
             self.tokenizer.decode(single_output.token_ids)
         )
-        logprobs = self._get_logprobs_from_vllm_output(single_output.logprobs)
+        logprobs = utils.get_logprobs_from_vllm_output(
+            single_output.token_ids, single_output.logprobs
+        )
         out_logprobs[idx].append(logprobs)
         logging.debug(
             "Prompt: %r\n\nGenerated text: %r\n\n ",

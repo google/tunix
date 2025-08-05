@@ -18,6 +18,14 @@ import numpy as np
 from tunix.generate import utils
 
 
+class Logprob:
+
+  def __init__(self, logprob, rank=None, decoded_token=None):
+    self.logprob = logprob
+    self.rank = rank
+    self.decoded_token = decoded_token
+
+
 class UtilsTest(absltest.TestCase):
 
   def test_compute_attention_mask(self):
@@ -98,6 +106,25 @@ class UtilsTest(absltest.TestCase):
     ]
     for ids, expected in data:
       self.assertEqual(utils.find_last_non_pad_idx(jnp.array(ids), 0), expected)
+
+  def test_basic_extraction(self):
+    token_ids = [271, 567, 15166]
+    logprobs = [
+        {271: Logprob(-1.71), 198: Logprob(-0.52)},
+        {567: Logprob(-0.37)},
+        {15166: Logprob(0.0)},
+    ]
+    expected = [-1.71, -0.37, 0.0]
+    self.assertEqual(
+        utils.get_logprobs_from_vllm_output(token_ids, logprobs),
+        expected,
+    )
+
+  def test_missing_token(self):
+    token_ids = [100, 200]
+    logprobs = [{101: Logprob(-0.5)}, {200: Logprob(-1.2)}]
+    with self.assertRaises(ValueError):
+      utils.get_logprobs_from_vllm_output(token_ids, logprobs)
 
 
 if __name__ == '__main__':

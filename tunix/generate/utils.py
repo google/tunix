@@ -16,6 +16,9 @@
 """Utility functions for sampler."""
 
 import functools
+import logging
+from typing import Any, Dict, List, Optional
+
 import jax
 from jax import lax
 import jax.numpy as jnp
@@ -291,3 +294,29 @@ def check_sampling_mode_conflict(
     )
   else:
     original_sampling_mode[0] = new_sampling_mode
+
+
+def get_logprobs_from_vllm_output(
+    token_ids: List[int],
+    logprobs: List[Optional[Dict[int, Any]]],
+) -> List[float]:
+  """Extracts the log probs from the vLLM output."""
+  if logprobs is None or logprobs[0] is None:
+    logging.debug('Logprobs are missing')
+    return []
+
+  assert len(logprobs) == len(token_ids), (
+      f'log probs has {len(logprobs)} number of items !='
+      f' {len(token_ids)} token ids'
+  )
+
+  extracted = []
+  for tok_id, tok_logprobs in zip(token_ids, logprobs):
+    if tok_id in tok_logprobs:
+      extracted.append(tok_logprobs[tok_id].logprob)
+    else:
+      raise ValueError(
+          f'The selected token id {tok_id} not in the return log probs list'
+          f' {tok_logprobs}'
+      )
+  return extracted
