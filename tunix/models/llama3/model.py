@@ -97,6 +97,21 @@ class ModelConfig:
         rope_theta=500_000,
     )
 
+  # Llama3.2 3B
+  @classmethod
+  def llama3_3b(cls):
+    return cls(
+        num_layers=28,  # ← from num_hidden_layers
+        vocab_size=128256,  # ← from vocab_size
+        embed_dim=3072,  # ← from hidden_size
+        hidden_dim=8192,  # ← from intermediate_size
+        num_heads=24,  # ← from num_attention_heads
+        head_dim=128,  # ← from head_dim
+        num_kv_heads=8,  # ← from num_key_value_heads
+        norm_eps=1e-05,  # ← from rms_norm_eps
+        rope_theta=500_000,  # ← from rope_theta
+    )
+
   @classmethod
   def llama3_8b(cls):
     return cls(
