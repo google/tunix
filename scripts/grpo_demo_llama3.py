@@ -92,10 +92,6 @@ VLLM_MODEL_SUBDIR = "rl/grpo/models/"
 VLLM_MODEL_VERSION = os.path.join(
     args.root_dir, VLLM_MODEL_SUBDIR, HF_MODEL_VERSION
 )
-if "8B" in HF_MODEL_VERSION:
-  SIMPLIFIED_MODEL_VERSION = "8b"
-else:
-  SIMPLIFIED_MODEL_VERSION = "1b"
 
 # ====== Base Model ======
 NNX_CKPT_DIR = os.path.join(args.root_dir, "rl/grpo/models/", HF_MODEL_VERSION)
@@ -326,8 +322,9 @@ for ele in train_dataset[:1]:
   pprint.pprint(ele)
 
 MODEL_CONFIG = {
-    "1b": llama_lib.ModelConfig.llama3_1b,
-    "8b": llama_lib.ModelConfig.llama3_8b,
+    "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_1b,
+    "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_3b,
+    "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_8b,
 }
 
 
@@ -340,7 +337,7 @@ def get_llama_model(ckpt_path, model_mesh, ref_model_config):
 def get_ref_model():
   ckpt_path = os.path.join(NNX_CKPT_DIR)
   model_mesh = jax.make_mesh(*MESH)
-  ref_model_config = MODEL_CONFIG[SIMPLIFIED_MODEL_VERSION]()
+  ref_model_config = MODEL_CONFIG[HF_MODEL_VERSION]()
   model = get_llama_model(ckpt_path, model_mesh, ref_model_config)
   return model, model_mesh, ref_model_config
 
