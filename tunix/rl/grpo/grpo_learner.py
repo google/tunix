@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from concurrent import futures
 import dataclasses
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
+from typing import Callable, Dict, Iterable, Iterator, List, Sequence
 
 import flax
 import jax
@@ -38,36 +38,9 @@ _TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 
 
-class RepeatIterable(Iterable[Any]):
-  """A simple wrapper on top of one example to repeat it N times."""
-
-  def __init__(self, data: list[Any], repeat: int = 1):
-    self._data = data
-    self._data_len = len(data)
-    self._total_count = repeat * self._data_len
-    self._itr_cnt = 0
-
-  def __iter__(self):
-    self._itr_cnt = 0
-    return self
-
-  def __next__(self):
-    if self._itr_cnt >= self._total_count:
-      raise StopIteration
-    output = self._data[self._itr_cnt % self._data_len]
-    self._itr_cnt += 1
-    return output
-
-
 @flax.struct.dataclass(frozen=True)
-class TrainExample:
-  prompt_ids: jax.Array
-  prompt_mask: jax.Array
-  completion_ids: jax.Array
-  completion_mask: jax.Array
-  advantages: jax.Array
-  ref_per_token_logps: jax.Array | None
-  old_per_token_logps: jax.Array | None
+class TrainExample(common.TrainExample):
+  pass
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -136,7 +109,7 @@ class GrpoLearner:
         reward for given prompts and completions. Each function should accept
         `prompts`, `completions` and optional keyword arguments, and return a
         list of float rewards.
-      grpo_config: An instance of `GrpoConfig` containing all GRPO sepecific
+      grpo_config: An instance of `GrpoConfig` containing all GRPO specific
         parameters.
     """
     assert grpo_config.loss_algo in ["grpo", "gspo-token"], (
@@ -363,7 +336,7 @@ class GrpoLearner:
       sample_repeat: int,
       batch_repeat: int,
       data_queue: queue_lib.AbstractDataQueue[
-          list[TrainExample] | RepeatIterable | None
+          list[TrainExample] | common.RepeatIterable | None
       ],
       async_loading: bool = False,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
@@ -395,11 +368,11 @@ class GrpoLearner:
 
     def _put_list_of_examples_to_data_queue():
       if not async_loading:
-        data_queue.put(RepeatIterable(example_list, batch_repeat))
+        data_queue.put(common.RepeatIterable(example_list, batch_repeat))
       elif batch_repeat > 1:
         # Since we have already loaded the batch in data_queue once, we only
         # need to repeat batch_repeat - 1 times.
-        data_queue.put(RepeatIterable(example_list, batch_repeat - 1))
+        data_queue.put(common.RepeatIterable(example_list, batch_repeat - 1))
 
     try:
       while True:
@@ -630,7 +603,7 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
 
   aux = {"kl": 0.0}
   if beta != 0.0:
-    kl = grpo_helpers.compute_kl_divergence(
+    kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps
     )
     per_token_loss = per_token_loss + beta * kl

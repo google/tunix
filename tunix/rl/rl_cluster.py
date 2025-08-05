@@ -39,9 +39,9 @@ ModelOrPath = Union[nnx.Module, str]
 class Role(enum.Enum):
   """Role of the model."""
 
-  ACTOR = "actor"
-  CRITIC = "critic"
-  REFERENCE = "reference"
+  ACTOR = "actor"  # policy model
+  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
+  REFERENCE = "reference"  # kept fixed during training
   REWARD = "reward"
   ROLLOUT = "rollout"
 
@@ -298,3 +298,30 @@ class RLCluster:
         dst_params = nnx.state(self.rollout.model(), nnx.Param)
         resharded_params = reshard.reshard_pytree(src_params, dst_params)
         self.rollout.update_params(resharded_params)
+
+  def get_values(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+  ) -> jax.Array:
+    with self.cluster_config.role_to_mesh[Role.CRITIC]:
+      return self.inference_worker.get_values(
+          prompt_tokens, completion_tokens, pad_id, eos_id
+      )
+
+  def get_rewards(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+  ) -> jax.Array:
+    with self.cluster_config.role_to_mesh[Role.REWARD]:
+      return self.inference_worker.get_rewards(
+          prompt_tokens,
+          completion_tokens,
+          pad_id,
+          eos_id,
+      )

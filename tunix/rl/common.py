@@ -11,11 +11,112 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Common RL helper functions."""
+"""Common RL helper classes and functions."""
 
+from typing import Any, Iterable
+
+import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+import jax.tree_util as jtu
+
+
+class RepeatIterable(Iterable[Any]):
+  """An iterable that processes a list of rollout batches.
+
+  For each rollout batch, it shuffles its contents, slices it into mini-batches,
+  and yields them sequentially before moving to the next rollout batch. This
+  entire process is repeated for a specified number of epochs.
+  """
+
+  def __init__(
+      self,
+      data: list[Any],
+      repeat: int,
+      mini_batch_size: int | None = None,
+      shuffle: bool = False,
+      key: jnp.ndarray | None = None,
+  ):
+    self._data = data
+
+    self.repeat = repeat
+    self.mini_batch_size = mini_batch_size
+
+    self.shuffle = shuffle
+    self.key = key if key is not None else jax.random.PRNGKey(0)
+
+    # Maintain a private, mutable `mini_batch_size`, for simpler code.
+    self._mini_batch_size = mini_batch_size
+
+  def _shuffle_and_slice_one_batch(self, rollout_batch: Any):
+    """A generator that shuffles and slices a single rollout batch."""
+    leaves, _ = jtu.tree_flatten(rollout_batch)
+    rollout_batch_size = leaves[0].shape[0]
+
+    if self.mini_batch_size is None:
+      self._mini_batch_size = rollout_batch_size
+
+    if rollout_batch_size % self._mini_batch_size != 0:
+      raise ValueError(
+          "Each rollout batch's size must be divisible by `mini_batch_size`."
+      )
+    num_mini_batches = rollout_batch_size // self._mini_batch_size
+
+    # Shuffle indices.
+    if self.shuffle:
+      self.key, _ = jax.random.split(self.key)
+      shuffled_indices = jax.random.permutation(self.key, rollout_batch_size)
+    else:
+      shuffled_indices = jnp.arange(rollout_batch_size)
+
+    # Slice the rollout batch into mini-batches.
+    for i in range(num_mini_batches):
+      start = i * self._mini_batch_size
+      end = start + self._mini_batch_size
+      batch_indices = shuffled_indices[start:end]
+
+      mini_batch = jtu.tree_map(
+          lambda leaf, indices=batch_indices: leaf[indices], rollout_batch
+      )
+      yield mini_batch
+
+  def __iter__(self):
+    """The main generator for the iterable."""
+    for _ in range(self.repeat):
+      for rollout_batch in self._data:
+        yield from self._shuffle_and_slice_one_batch(rollout_batch)
+
+
+@flax.struct.dataclass(frozen=True)
+class TrainExample:
+  prompt_ids: jax.Array
+  prompt_mask: jax.Array
+  completion_ids: jax.Array
+  completion_mask: jax.Array
+  advantages: jax.Array
+  ref_per_token_logps: jax.Array | None
+  old_per_token_logps: jax.Array | None
+
+
+def compute_kl_divergence(
+    per_token_logps: jax.Array, ref_per_token_logps: jax.Array
+) -> jax.Array:
+  """Compute per token KL divergence between trained and reference policy.
+
+  Args:
+    per_token_logps: Per token log probabilities from the trained policy.
+    ref_per_token_logps: Per token log probabilities from the reference policy.
+
+  Returns:
+    KL divergence.
+  """
+  per_token_kl = (
+      jnp.exp(ref_per_token_logps - per_token_logps)
+      - (ref_per_token_logps - per_token_logps)
+      - 1
+  )
+  return per_token_kl
 
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
@@ -51,7 +152,30 @@ def get_per_token_logps(
   return selective_log_softmax(logits, input_tokens)
 
 
+# TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
+# and twice in `compute_score`. We can factor this out and compute it just once.
 @nnx.jit(static_argnames=('pad_id', 'eos_id'))
+def process_ids(
+    prompt_tokens: jax.Array,
+    completion_tokens: jax.Array,
+    pad_id: int,
+    eos_id: int,
+):
+  """Processes prompt and completion ids."""
+
+  prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
+  prompt_mask = prompt_tokens != pad_id
+  completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+  prompt_completion_mask = jnp.concatenate(
+      [prompt_mask, completion_mask], axis=-1
+  )
+  positions = build_positions_from_mask(prompt_completion_mask)
+  attn_mask = make_causal_attn_mask(prompt_completion_mask)
+
+  return prompt_completion_ids, positions, attn_mask
+
+
+@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
 def compute_per_token_logps(
     model: nnx.Module,
     prompt_tokens: jax.Array,
@@ -61,14 +185,9 @@ def compute_per_token_logps(
     stop_gradient: bool = True,
 ) -> jax.Array:
   """Computes the per-token log probabilities."""
-  prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
-  prompt_mask = prompt_tokens != pad_id
-  completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
-  prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, completion_mask], axis=-1
+  prompt_completion_ids, positions, attn_mask = process_ids(
+      prompt_tokens, completion_tokens, pad_id, eos_id
   )
-  positions = build_positions_from_mask(prompt_completion_mask)
-  attn_mask = make_causal_attn_mask(prompt_completion_mask)
   per_token_logps = get_per_token_logps(
       model,
       input_tokens=prompt_completion_ids,
@@ -79,6 +198,35 @@ def compute_per_token_logps(
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
   return per_token_logps
+
+
+@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
+def compute_score(
+    model,
+    prompt_tokens: jax.Array,
+    completion_tokens: jax.Array,
+    pad_id: int,
+    eos_id: int,
+    stop_gradient: bool = True,
+):
+  """Computes reward using the provided model."""
+  prompt_completion_ids, positions, attn_mask = process_ids(
+      prompt_tokens, completion_tokens, pad_id, eos_id
+  )
+
+  per_token_scores = model.score(
+      prompt_completion_ids,
+      positions=positions,
+      attention_mask=attn_mask,
+  )
+  # The model returns a tensor of shape [B, T, 1]. We squeeze the last
+  # dimension to get a tensor of shape [B, T].
+  per_token_scores = jnp.squeeze(per_token_scores, axis=-1)
+
+  if stop_gradient:
+    per_token_scores = jax.lax.stop_gradient(per_token_scores)
+
+  return per_token_scores
 
 
 def make_completion_mask(completion_ids, eos_tok: int = 0):
