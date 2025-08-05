@@ -13,9 +13,11 @@
 # limitations under the License.
 
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
+
 import dataclasses
 import os
 from typing import Any, Dict, List, Optional, Tuple
+
 from absl import logging
 import jax
 import jax.numpy as jnp
@@ -23,6 +25,7 @@ import jaxtyping
 from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.tokenizer_adapter as tok_adapter
+from tunix.rl.utils import reshard
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 
@@ -103,9 +106,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
   def update_params(self, updated_weights: jaxtyping.PyTree):
-    self.llm.llm_engine.model_executor.collective_rpc(
-        "sync_weights",
-        args=(updated_weights, self.mappings, self.to_hf_transpose_keys),
+    utils.transfer_state_with_mappings(
+        src_state=updated_weights,
+        tgt_state=self.transformer_state,
+        mappings=self.mappings,
+        transpose_keys=self.to_hf_transpose_keys,
+        shard=reshard.reshard_pytree,
     )
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
@@ -137,7 +143,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   @property
   def transformer_state(self):
-    return self._model_runner.state
+    if hasattr(self._model_runner, "state"):
+      return self._model_runner.state
+    else:
+      raise AttributeError("vLLM model runner doesn't have state.")
 
   def tokenize(self, input_string: str) -> List[int]:
     """Tokenizes the input string."""

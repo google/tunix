@@ -17,8 +17,10 @@
 
 import functools
 import logging
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, Iterator, List, Optional
 
+from flax import nnx
 import jax
 from jax import lax
 import jax.numpy as jnp
@@ -320,3 +322,121 @@ def get_logprobs_from_vllm_output(
           f' {tok_logprobs}'
       )
   return extracted
+
+
+def build_flat_dict(
+    flat_state: Iterator[tuple[tuple[str, ...], nnx.State]],
+    mappings: Dict[str, tuple[str, tuple[int, ...]]],
+):
+  """Build a new flat dictionary from the flat state using the provided mappings.
+
+  Args:
+    flat_state: A list of tuples, where each tuple contains the nested keys and
+      the corresponding value.
+    mappings: A dictionary defining how to map keys from the source state to the
+      target state. The keys of the dictionary are the source keys, and the
+      values are tuples containing the target key and the sharding information.
+
+  Returns:
+    A new flat dictionary with the mapped keys and values.
+  """
+  new_flat_dict = {}
+  for keys, v in flat_state:
+    path = '.'.join(str(key) for key in keys)
+    mapped = False
+    for src, (tgt, sharding) in mappings.items():
+      regex = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
+      matched = re.match(regex, path)
+      if matched:
+        # Extract wildcards if any
+        wildcards = matched.groups()
+        src_parts = []
+        wc_index = 0
+        for part in src.split('.'):
+          if part == '*':
+            src_parts.append(wildcards[wc_index])
+            wc_index += 1
+          else:
+            src_parts.append(part)
+        actual_src = '.'.join(src_parts)
+        new_flat_dict[actual_src] = v, sharding
+        mapped = True
+        break
+    # There are no mappings for rng related params.
+    if not mapped:
+      logging.warning('!!! No mapping for flat state: %s', keys)
+  return new_flat_dict
+
+
+def transfer_state_with_mappings(
+    src_state,
+    dst_state,
+    key_mappings,
+    transpose_keys=None,
+    reshard_fn=None,
+):
+  """Transfer state using mappings, with optional transpose and shard logic.
+
+  Args:
+    src_state: The source state to transfer from.
+    dst_state: The destination state to transfer to.
+    key_mappings: A dictionary defining how to map keys from the source state to
+      the target state. The keys of the dictionary are the source keys, and the
+      values are tuples containing the target key and the sharding information.
+    transpose_keys: A dictionary defining which keys to transpose and the
+      corresponding axes to transpose.
+    reshard_fn: A function to shard the value.
+
+  Returns:
+    The target state with the transferred values.
+  """
+
+  src_flat = src_state.flat_state()
+  tgt_flat = dst_state.flat_state()
+  new_src_dict = build_flat_dict(tgt_flat, key_mappings)
+
+  def process_entry(src_keys, src_val):
+    flat_key = '.'.join(str(k) for k in src_keys)
+    if flat_key not in new_src_dict:
+      logging.error('!!! No mapping for source key: %s', flat_key)
+      return
+
+    tgt_param, _ = new_src_dict[flat_key]
+    value = src_val.value
+
+    # Optional transpose
+    if (
+        transpose_keys
+        and (src_keys[-1] in transpose_keys)
+        and 'lora' not in src_keys[-1]
+    ):
+      value = jnp.transpose(value, transpose_keys[src_keys[-1]])
+
+    # Shape check
+    if tgt_param.value.shape != value.shape:
+      raise ValueError(
+          f'Shape mismatch for {flat_key}: {tgt_param.value.shape} vs'
+          f' {value.shape}'
+      )
+
+    # Type cast if needed
+    if tgt_param.value.dtype != value.dtype:
+      logging.warning(
+          'Type mismatch on %s: %s -> %s',
+          flat_key,
+          value.dtype,
+          tgt_param.value.dtype,
+      )
+      value = value.astype(tgt_param.value.dtype)
+
+    # Apply resharding if provided
+    new_value = (
+        reshard_fn(value, tgt_param.value.sharding) if reshard_fn else value
+    )
+    tgt_param.value = new_value
+
+  # Loop through each parameter
+  for src_keys, src_val in src_flat:
+    process_entry(src_keys, src_val)
+
+  return dst_state.from_flat_path(tgt_flat)
