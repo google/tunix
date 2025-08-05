@@ -14,10 +14,12 @@
 
 """Simple utils used by RL algorithms."""
 import gc
+import operator
 from typing import Any, List, Optional, Tuple
 
 from absl import logging
 from flax import nnx
+from flax.nnx import filterlib
 from flax.nnx import statelib
 import jax
 import jaxtyping
@@ -44,7 +46,7 @@ def get_pytree_mesh_info(tree: jaxtyping.PyTree) -> Mesh | None:
 
   def _get_mesh_info(leaf: jaxtyping.PyTree):
     if isinstance(leaf, jax.Array):
-      if hasattr(leaf, 'sharding') and leaf.sharding:
+      if hasattr(leaf, "sharding") and leaf.sharding:
         sharding = leaf.sharding
         if isinstance(sharding, NamedSharding):
           mesh_info.add(sharding.mesh)
@@ -53,9 +55,20 @@ def get_pytree_mesh_info(tree: jaxtyping.PyTree) -> Mesh | None:
   jax.tree_util.tree_map(_get_mesh_info, tree)
   if len(mesh_info) > 1:
     raise ValueError(
-        f'All leaves of the pytree must have the same mesh. Found: {mesh_info}'
+        f"All leaves of the pytree must have the same mesh. Found: {mesh_info}"
     )
   return mesh_info.pop() if mesh_info else None
+
+
+def _is_same_state(s1: jaxtyping.PyTree, s2: jaxtyping.PyTree) -> bool:
+  """Returns whether two states refer to the same Params."""
+  return np.all(
+      jax.tree.map(
+          lambda x, y: x is y,
+          jax.tree_util.tree_leaves(s1),
+          jax.tree_util.tree_leaves(s2),
+      )
+  )
 
 
 def is_sharing_weights(
@@ -68,13 +81,17 @@ def is_sharing_weights(
 
   s1 = nnx.state(m1)
   s2 = nnx.state(m2)
-  return np.all(
-      jax.tree.map(
-          lambda x, y: x is y,
-          jax.tree_util.tree_leaves(s1),
-          jax.tree_util.tree_leaves(s2),
-      )
-  )
+  return _is_same_state(s1, s2)
+
+
+def is_sharing_backbone(
+    m1: nnx.Module,
+    m2: nnx.Module,
+) -> bool:
+  """Returns whether two models are sharing same copy of backbone."""
+  s1 = nnx.state(m1, filterlib.Not(nnx.LoRAParam))
+  s2 = nnx.state(m2, filterlib.Not(nnx.LoRAParam))
+  return _is_same_state(s1, s2)
 
 
 def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
@@ -92,11 +109,11 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
   # TODO(lancewang): Find a way to get the accurate hbm limit on Pathways.
   hbm_limit = None
   for array in live_arrays:
-    assert hasattr(array, 'sharding') and hasattr(
-        array.sharding, 'device_set'
+    assert hasattr(array, "sharding") and hasattr(
+        array.sharding, "device_set"
     ), (
-        'This function must not be called within jax tracer (e.g. jit, vmap,'
-        ' grad)'
+        "This function must not be called within jax tracer (e.g. jit, vmap,"
+        " grad)"
     )
     for device in array.sharding.device_set:
       hbm_used[device] += (
@@ -109,13 +126,13 @@ def jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
   hbm_used = []
   for d in devices:
     stats = d.memory_stats()
-    used = stats['bytes_in_use']
-    limit = stats['bytes_limit']
+    used = stats["bytes_in_use"]
+    limit = stats["bytes_limit"]
     hbm_used.append((used, limit))
   return hbm_used
 
 
-def show_hbm_usage(title=''):
+def show_hbm_usage(title=""):
   """Prints the current HBM usage.
 
   Args:
@@ -127,21 +144,61 @@ def show_hbm_usage(title=''):
   gc.collect()
 
   if utils.pathways_available():
-    logging.info('%s - Using Pathways compatible HBM stats collector', title)
+    logging.info("%s - Using Pathways compatible HBM stats collector", title)
     hbm_stats = pathways_hbm_usage_gb(devices)
     for i, (used, _) in enumerate(hbm_stats):
-      logging.info('Using %s on %s', fmt_size(used), devices[i])
+      logging.info("Using %s on %s", fmt_size(used), devices[i])
   else:
     logging.info(
-        '%s - Pathways not available. Using defaultHBM stats collector', title
+        "%s - Pathways not available. Using defaultHBM stats collector", title
     )
     hbm_stats = jax_hbm_usage_gb(devices)
 
     for i, (used, limit) in enumerate(hbm_stats):
       logging.info(
-          'Using %s / %s (%s) on %s',
+          "Using %s / %s (%s) on %s",
           fmt_size(used),
           fmt_size(limit),
           used / limit,
           devices[i],
       )
+
+
+def put_params_on_memory_kind(
+    params: jaxtyping.PyTree,
+    memory_kind: str,
+) -> jaxtyping.PyTree:
+  """Puts params on the given memory kind."""
+  assert memory_kind in [
+      "device",
+      "pinned_host",
+      "unpinned_host",
+  ], f"Unsupported memory kind: {memory_kind}"
+  original_shardings = jax.tree.map(lambda x: x.sharding, params)
+  logging.info("original_shardings: %s", original_shardings)
+  is_on_device = jax.tree_util.tree_reduce(
+      operator.or_,
+      jax.tree.map(lambda x: x.memory_kind == "device", original_shardings),
+  )
+  if (is_on_device and memory_kind == "device") or (
+      not is_on_device and memory_kind == "pinned_host"
+  ):
+    logging.info(
+        "Params are already on the requested memory kind: %s", memory_kind
+    )
+    return params
+
+  def _get_new_sharding(x):
+    if isinstance(x, jax.NamedSharding):
+      return jax.NamedSharding(x.mesh, x.spec, memory_kind=memory_kind)
+    else:
+      return x.with_memory_kind(memory_kind)
+
+  new_shardings = jax.tree.map(_get_new_sharding, original_shardings)
+  params_on_memory_kind = jax.device_put(
+      params,
+      new_shardings,
+  )
+  shardings = jax.tree.map(lambda x: x.sharding, params_on_memory_kind)
+  logging.info("params_on_memory_kind shardings: %s", shardings)
+  return params_on_memory_kind

@@ -234,10 +234,34 @@ class Sampler(base_sampler.BaseSampler):
         )
 
       def check_shape_dtype_sharding(x, y):
+
+        def equivalent_sharding(x, y):
+          # Lift the condition on memory_kind due to offloading.
+          # Besides it seems jax.jit might change some shardings of the params
+          # to equivalent representation so here we check if the specs are
+          # equivalent instead of checking the identity.
+          if isinstance(
+              x.sharding, jax.sharding.SingleDeviceSharding
+          ) and isinstance(y.sharding, jax.sharding.SingleDeviceSharding):
+            return x.sharding.device_set == y.sharding.device_set
+          if not (
+              isinstance(x.sharding, jax.sharding.NamedSharding)
+              and isinstance(y.sharding, jax.sharding.NamedSharding)
+          ):
+            return False
+          if x.sharding.mesh != y.sharding.mesh:
+            return False
+          mesh = x.sharding.mesh
+          diff_spec = list(set(x.sharding.spec) - set(y.sharding.spec))
+          for spec in diff_spec:
+            if spec and mesh.shape[spec] != 1:
+              return False
+          return True
+
         return (
             jnp.shape(x) == jnp.shape(y)
             and jnp.dtype(x) == jnp.dtype(y)
-            and x.sharding == y.sharding
+            and equivalent_sharding(x, y)
         )
 
       if not all(

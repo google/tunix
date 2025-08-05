@@ -16,6 +16,7 @@
 
 from flax import nnx
 import jax
+import jaxtyping
 from tunix.rl import common
 
 
@@ -81,3 +82,13 @@ class InferenceWorker:
         pad_id,
         eos_id,
     )
+
+  def get_model(self, role: str) -> nnx.Module:
+    if role not in self._models:
+      raise ValueError(f"Model role {role} is not available.")
+    return self._models[role]
+
+  def update_model(self, role: str, params: jaxtyping.PyTree):
+    if role not in self._models:
+      raise ValueError(f"Model role {role} is not available.")
+    nnx.update(self._models[role], params)

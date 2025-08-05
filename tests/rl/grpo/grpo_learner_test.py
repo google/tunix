@@ -446,8 +446,11 @@ class GrpoLearnerTest(parameterized.TestCase):
         ('fsdp', 'tp'),
     )
     vocab = tc.MockVocab()
+    ref_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
     actor_model = tc.get_lora_model(
-        tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()),
+        ref_model,
         mesh=mesh1,
     )
     original_base_params = jax.tree.map(
@@ -455,9 +458,6 @@ class GrpoLearnerTest(parameterized.TestCase):
     )
     original_lora_variables = jax.tree.map(
         jnp.copy, nnx.state(actor_model, nnx.LoRAParam)
-    )
-    ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
     cluster_config = rl_cluster_lib.ClusterConfig(
         role_to_mesh={
