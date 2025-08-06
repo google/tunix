@@ -47,6 +47,7 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...]
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -64,6 +65,7 @@ class ShardingConfig:
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
+        score_weight_d1=(fsdp, None),
     )
 
 
@@ -956,6 +958,38 @@ class Transformer(nnx.Module):
             (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
         ),
     }
+
+
+class TransformerWithScoreHead(nnx.Module):
+  """Gemma transformer with a score head."""
+
+  def __init__(self, transformer: Transformer, rngs: nnx.Rngs):
+    """Initializes the transformer with a score head.
+
+    Args:
+      transformer: The transformer backbone.
+      rngs: The random number generator.
+    """
+
+    self.transformer = transformer
+    self.score = nnx.Linear(
+        in_features=transformer.embed_dim,
+        out_features=1,
+        use_bias=False,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.normal(),
+            transformer.config.shd_config.score_weight_d1,
+        ),
+        rngs=rngs,
+    )
+
+  def __call__(self, *args, **kwargs):
+    self.transformer(*args, **kwargs, output_hidden_states=True)
+    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
+        'all_hidden_states'
+    ].value[-1]
+    score = self.score(hidden_states)
+    return score
 
 
 def make_causal_attn_mask(

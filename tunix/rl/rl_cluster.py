@@ -16,10 +16,12 @@
 
 import collections
 import contextlib
+import copy
 import dataclasses
 import enum
 import gc
 import operator
+import os
 from typing import Any, Union
 from absl import logging
 from flax import nnx
@@ -281,6 +283,11 @@ class RLCluster:
 
     # 3. Initialize trainer.
     self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
+    actor_config = copy.deepcopy(self.cluster_config.training_config)
+    if actor_config.checkpoint_root_directory is not None:
+      actor_config.checkpoint_root_directory = os.path.join(
+          actor_config.checkpoint_root_directory, "actor"
+      )
     self._actor_trainer = rl_trainer.Trainer(
         model=self.train_actor,
         optimizer=self.cluster_config.training_config.actor_optimizer,
@@ -292,11 +299,15 @@ class RLCluster:
         self.critic
         and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
     ):
-      self._maybe_load_model_from_cpu(self.critic, Role.CRITIC)
+      critic_config = copy.deepcopy(self.cluster_config.training_config)
+      if critic_config.checkpoint_root_directory is not None:
+        critic_config.checkpoint_root_directory = os.path.join(
+            critic_config.checkpoint_root_directory, "critic"
+        )
       self._critic_trainer = rl_trainer.Trainer(
           model=self.critic,
           optimizer=self.cluster_config.training_config.critic_optimizer,
-          training_config=self.cluster_config.training_config,
+          training_config=critic_config,
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)

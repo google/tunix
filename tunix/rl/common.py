@@ -214,9 +214,10 @@ def compute_score(
       prompt_tokens, completion_tokens, pad_id, eos_id
   )
 
-  per_token_scores = model.score(
+  per_token_scores = model(
       prompt_completion_ids,
       positions=positions,
+      cache=None,
       attention_mask=attn_mask,
   )
   # The model returns a tensor of shape [B, T, 1]. We squeeze the last

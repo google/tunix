@@ -100,6 +100,8 @@ class ToyTransformer(nnx.Module):
     self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
     self.output = nnx.Linear(in_features=16, out_features=vocab_size, rngs=rngs)
 
+    self.head_dim = 16
+
   def __call__(
       self, x, positions, cache, attention_mask, output_hidden_states=False
   ):
@@ -117,28 +119,6 @@ class ToyTransformer(nnx.Module):
   @property
   def num_embed(self) -> int:
     return self.emb.num_embeddings
-
-
-class ToyScoreModel(ToyTransformer):
-  """Toy transformer which outputs a score."""
-
-  def __init__(
-      self, rngs: nnx.Rngs, vocab_size: int = 256, num_layers: int = 4
-  ):
-    super().__init__(rngs, vocab_size, num_layers)
-
-    self.score_layer = nnx.Linear(
-        in_features=16,
-        out_features=1,
-        rngs=rngs,
-    )
-
-  def score(self, x, positions, attention_mask):
-    x = self.emb(x)
-    for layer in self.layers:
-      x = layer(x)
-
-    return self.score_layer(x)
 
 
 def get_lora_model(
@@ -213,3 +193,31 @@ class MockVocab(spm.SentencePieceProcessor):
   def EncodeAsIds(self, text: str) -> list[int]:  # pylint: disable=invalid-name
     words = text.split(' ')
     return [self._mapping_text_to_id[word] for word in words]
+
+
+class MockTransformerWithScoreHead(nnx.Module):
+  """Gemma transformer with a score head."""
+
+  def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
+    """Initializes the transformer with a score head.
+
+    Args:
+      transformer: The transformer backbone.
+      rngs: The random number generator.
+    """
+
+    self.transformer = transformer
+    self.score = nnx.Linear(
+        in_features=transformer.head_dim,
+        out_features=1,
+        use_bias=False,
+        rngs=rngs,
+    )
+
+  def __call__(self, *args, **kwargs):
+    self.transformer(*args, **kwargs, output_hidden_states=True)
+    hidden_states = nnx.pop(self.transformer, nnx.Intermediate)[
+        'all_hidden_states'
+    ].value[-1]
+    score = self.score(hidden_states)
+    return score
