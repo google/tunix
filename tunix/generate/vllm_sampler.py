@@ -108,10 +108,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def update_params(self, updated_weights: jaxtyping.PyTree):
     utils.transfer_state_with_mappings(
         src_state=updated_weights,
-        tgt_state=self.transformer_state,
-        mappings=self.mappings,
+        dst_state=self.transformer_state,
+        key_mappings=self.mappings,
         transpose_keys=self.to_hf_transpose_keys,
-        shard=reshard.reshard_pytree,
+        reshard_fn=reshard.reshard_pytree,
     )
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
