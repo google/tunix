@@ -461,7 +461,7 @@ class RLCluster:
 
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
-    if jax.devices():
+    if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
       cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))
