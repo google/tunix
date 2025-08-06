@@ -24,7 +24,9 @@ import json
 import os
 import pprint
 import re
+import shutil
 
+from absl import logging
 from flax import nnx
 import grain
 import huggingface_hub
@@ -43,6 +45,8 @@ from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 
+
+logging.set_verbosity(logging.INFO)
 
 show_hbm_usage = utils.show_hbm_usage
 
@@ -64,6 +68,14 @@ parser.add_argument(
     required=False,
     help="The root dir of model, data, etc.",
 )
+parser.add_argument(
+    "--model-version",
+    type=str,
+    # default="meta-llama/Llama-3.1-8B-Instruct"
+    default="meta-llama/Llama-3.2-3B-Instruct",
+    required=False,
+    help="The model version to use.",
+)
 
 # Parse arguments
 args = parser.parse_args()
@@ -77,7 +89,7 @@ args = parser.parse_args()
 GCS_BUCKET_PREFIX = "gcs://tunix/"
 TRAIN_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_train.json"
 TEST_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_test.json"
-HF_MODEL_VERSION = "meta-llama/Llama-3.1-8B-Instruct"
+HF_MODEL_VERSION = args.model_version
 
 TRAIN_FRACTION = 1.0
 
@@ -171,7 +183,7 @@ CKPT_DIR = os.path.join(
 SAVE_INTERVAL_STEPS = (
     500  # To speed up for quick workflow validation, we can change it to e.g. 2
 )
-MAX_TO_KEEP = 4
+MAX_TO_KEEP = 1
 DO_MEM_PROFILING = False
 DO_MODEL_DISPLAY = False
 
@@ -187,8 +199,23 @@ GENERATION_CONFIGS = {
 
 # ====== Profiler ======
 PROFILER_PATH = os.path.join(
-    args.root_dir, "tunix/rl/grpo/demo/experiments/llama3/profiler"
+    args.root_dir, "rl/grpo/demo/experiments/llama3/profiler"
 )
+
+
+def delete_directory(path: str):
+  if os.path.exists(path):
+    if os.path.isdir(path):
+      shutil.rmtree(path)
+      print(f"Deleted directory: {path}")
+    else:
+      print(f"Path exists but is not a directory: {path}")
+  else:
+    print(f"Directory does not exist: {path}")
+
+
+# Delete local checkpoint directory
+delete_directory(CKPT_DIR)
 
 for name, obj in list(globals().items()):
   if isinstance(obj, jnp.ndarray):
@@ -814,7 +841,7 @@ show_hbm_usage("After training the reference lora model")
 
 trained_ckpt_path = os.path.join(CKPT_DIR, str(MAX_STEPS), "model_params")
 
-filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Params
+filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
 abs_params = jax.tree.map(
     lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
     nnx.state(lora_transformer, filter_type),
