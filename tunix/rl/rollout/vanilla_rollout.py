@@ -17,12 +17,14 @@
 import dataclasses
 import functools
 import operator
-from typing import Any
+from typing import Any, Optional, Tuple
+
 from flax import nnx
 import jax
 import jaxtyping
 from tunix.generate import sampler
 from tunix.rl import common
+from tunix.rl import reshard
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 
@@ -82,8 +84,17 @@ class VanillaRollout(base_rollout.BaseRollout):
         eos_id=self.eos_id(),
     )
 
-  def update_params(self, params: jaxtyping.PyTree) -> None:
-    flat_new_params, _ = utils.to_flat_dict(params)
+  def update_params(
+      self,
+      params: jaxtyping.PyTree,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+  ) -> None:
+    if filter_types is not None:
+      dst_params = nnx.state(self.model(), filter_types)
+      resharded_params = reshard.reshard_pytree(params, dst_params)
+    else:
+      resharded_params = params
+    flat_new_params, _ = utils.to_flat_dict(resharded_params)
     flat_old_params, tree_def = utils.to_flat_dict(
         self._sampler.transformer_state
     )

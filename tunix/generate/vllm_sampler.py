@@ -105,7 +105,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
-  def update_params(self, updated_weights: jaxtyping.PyTree):
+  def update_params(
+      self,
+      updated_weights: jaxtyping.PyTree,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+  ):
+    del filter_types
     utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
@@ -117,7 +122,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
     if isinstance(path_or_weights, jaxtyping.PyTree):
-      self.update_params(updated_weights=path_or_weights)
+      self.update_params(updated_weights=path_or_weights, filter_types=None)
     else:
       raise NotImplementedError("Only support in memory weight sync as of now.")
 

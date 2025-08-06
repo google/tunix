@@ -14,7 +14,7 @@
 
 """vLLM rollout worker with Tunix sampler."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from flax import nnx
 import jax
 import jaxtyping
@@ -88,8 +88,12 @@ class VllmRollout(base_rollout.BaseRollout):
     # May need to validate if there will be any difference from recalculation
     return self.output.logprobs
 
-  def update_params(self, params: jaxtyping.PyTree) -> None:
-    self._sampler.update_params(params)
+  def update_params(
+      self,
+      params: jaxtyping.PyTree,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+  ) -> None:
+    self._sampler.update_params(params, filter_types)
 
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()

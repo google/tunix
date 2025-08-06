@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import Any
+from typing import Any, Optional, Tuple
 import jax
 import jaxtyping
 
@@ -112,7 +112,11 @@ class BaseRollout(abc.ABC):
     """Returns per-token log probabilities from the model."""
 
   @abc.abstractmethod
-  def update_params(self, params: jaxtyping.PyTree) -> None:
+  def update_params(
+      self,
+      params: jaxtyping.PyTree,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+  ) -> None:
     """Updates the rollout model parameters."""
 
   @abc.abstractmethod

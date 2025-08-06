@@ -468,18 +468,13 @@ class RLCluster:
     else:
       cm = contextlib.nullcontext()
     with cm:
-      if peft_trainer.is_lora_enabled(self.actor_trainer.model):
-        src_lora_params = nnx.state(self.actor_trainer.model, nnx.LoRAParam)
-        dst_lora_params = nnx.state(self.rollout.model(), nnx.LoRAParam)
-        resharded_lora_params = reshard.reshard_pytree(
-            src_lora_params, dst_lora_params
-        )
-        self.rollout.update_params(resharded_lora_params)
-      else:
-        src_params = nnx.state(self.actor_trainer.model, nnx.Param)
-        dst_params = nnx.state(self.rollout.model(), nnx.Param)
-        resharded_params = reshard.reshard_pytree(src_params, dst_params)
-        self.rollout.update_params(resharded_params)
+      filter_types = (
+          nnx.LoRAParam
+          if peft_trainer.is_lora_enabled(self.actor_trainer.model)
+          else nnx.Param,
+      )
+      src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
+      self.rollout.update_params(src_filtered_params, filter_types)
 
   def get_values(
       self,
