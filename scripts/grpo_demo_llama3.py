@@ -100,6 +100,7 @@ NNX_CKPT_DIR = os.path.join(args.root_dir, "rl/grpo/models/", HF_MODEL_VERSION)
 SEED = 42
 
 # ====== LoRA ======
+ENABLE_LORA = False
 RANK = 64
 ALPHA = 64.0
 
@@ -386,9 +387,10 @@ if DO_MODEL_DISPLAY:
 
 # Policy model
 # TODO(b/434959964): Supports lora in vLLM Jax backend
-# lora_transformer = get_lora_model(transformer, mesh=mesh)
+lora_transformer = (
+    get_lora_model(transformer, model_mesh=mesh) if ENABLE_LORA else transformer
+)
 
-lora_transformer = transformer
 if DO_MODEL_DISPLAY:
   nnx.display(lora_transformer)
 
@@ -812,9 +814,10 @@ show_hbm_usage("After training the reference lora model")
 
 trained_ckpt_path = os.path.join(CKPT_DIR, str(MAX_STEPS), "model_params")
 
+filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Params
 abs_params = jax.tree.map(
     lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
-    nnx.state(lora_transformer, nnx.LoRAParam),
+    nnx.state(lora_transformer, filter_type),
 )
 checkpointer = ocp.StandardCheckpointer()
 trained_lora_params = checkpointer.restore(trained_ckpt_path, target=abs_params)
@@ -823,7 +826,7 @@ nnx.update(
     lora_transformer,
     jax.tree.map(
         lambda a, b: b,
-        nnx.state(lora_transformer, nnx.LoRAParam),
+        nnx.state(lora_transformer, filter_type),
         trained_lora_params,
     ),
 )
