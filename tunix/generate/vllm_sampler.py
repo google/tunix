@@ -25,8 +25,8 @@ import jaxtyping
 from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.tokenizer_adapter as tok_adapter
-from tunix.rl.utils import reshard
-from vllm.entrypoints.llm import LLM
+from tunix.rl import reshard
+from vllm import LLM
 from vllm.outputs import RequestOutput
 
 
