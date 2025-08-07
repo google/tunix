@@ -48,6 +48,7 @@ class ShardingConfig:
   act_btnh: Tuple[str | None, ...]
   exp_weight_cdf: Tuple[str | None, ...]
   exp_weight_cfd: Tuple[str | None, ...]
+  qkv_bias: Tuple[str | None, ...]
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -67,6 +68,7 @@ class ShardingConfig:
         act_btnh=('fsdp', None, 'tp', None),
         exp_weight_cdf=('fsdp', None, 'tp'),
         exp_weight_cfd=('fsdp', 'tp', None),
+        qkv_bias=('tp',),
     )
 
 
@@ -252,17 +254,19 @@ class Attention(nnx.Module):
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_heads * config.head_dim
         ),
+        sharding=shd_config.qkv_bias,
     )
     self.k_bias = nnx.Param(
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_kv_heads * config.head_dim
         ),
-        sharding=shd_config.kv_weight_ndh,
+        sharding=shd_config.qkv_bias,
     )
     self.v_bias = nnx.Param(
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_kv_heads * config.head_dim
         ),
+        sharding=shd_config.qkv_bias,
     )
 
   @jax.named_scope('attention')
