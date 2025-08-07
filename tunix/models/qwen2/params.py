@@ -80,6 +80,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           r"layers.\1.post_attention_layernorm.w",
           None,
       ),
+      r"lm_head\.weight": ("lm_head.w", ((1, 0), None)),
   }
 
 

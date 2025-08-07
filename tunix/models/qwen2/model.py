@@ -85,6 +85,7 @@ class ModelConfig:
   num_kv_heads: int
   rope_theta: int
   norm_eps: float
+  use_tied_embedding: bool = False
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
@@ -99,7 +100,24 @@ class ModelConfig:
         num_kv_heads=2,
         norm_eps=1e-06,
         rope_theta=1_000_000,
+        use_tied_embedding=True,
     )
+
+  @classmethod
+  def qwen2_5_7_b(cls):  # qwen2.5-7B
+    return cls(
+        num_layers=28,
+        vocab_size=152064,
+        embed_dim=3584,
+        hidden_dim=18944,
+        num_heads=28,
+        head_dim=128,
+        num_kv_heads=4,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        use_tied_embedding=False,
+    )
+
   # TODO(linchai): add other qwen2.5 model configs.
 
 
@@ -494,6 +512,15 @@ class Qwen2(nnx.Module):
         norm_eps=config.norm_eps,
         shd_config=shd_config,
     )
+    if self.config.use_tied_embedding:
+      self.lm_head = self.embedder
+    else:
+      self.lm_head = Einsum(
+          einsum_str='BTD,DV->BTV',
+          shape=(config.embed_dim, config.vocab_size),
+          rngs=rngs,
+          sharding=shd_config.emb_dv,
+      )
 
   def __call__(
       self,
@@ -537,6 +564,12 @@ class Qwen2(nnx.Module):
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
     # Qwen2.5 0.5B-3B uses tied embedding, sharing weights for input and output.
-    logits = self.embedder.decode(x)
+    if self.config.use_tied_embedding:
+      assert isinstance(
+          self.lm_head, Embedder
+      ), 'lm_head shares the same weights as input embedding.'
+      logits = self.lm_head.decode(x)
+    else:
+      logits = self.lm_head(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
