@@ -116,7 +116,7 @@ def reshard_pytree(
       # No-op if already initialized.
       pathwaysutils.initialize()
     except ImportError:
-      logging.error(
+      logging.info(
           'Cannot import PathwaysUtils and experimental reshard API. Make sure'
           ' //third_party/py/pathwaysutils/experimental:reshard is linked to'
           ' your binary.'
