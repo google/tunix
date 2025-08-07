@@ -82,9 +82,10 @@ class ModelConfig:
   rope_theta: int
   norm_eps: float
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
+  weight_tying: bool = False  # Llama3.2 features
 
   @classmethod
-  def llama3_1b(cls):
+  def llama3_2_1b(cls):
     return cls(
         num_layers=16,
         vocab_size=128256,
@@ -95,11 +96,12 @@ class ModelConfig:
         num_kv_heads=8,
         norm_eps=1e-05,
         rope_theta=500_000,
+        weight_tying=True,
     )
 
   # Llama3.2 3B
   @classmethod
-  def llama3_3b(cls):
+  def llama3_2_3b(cls):
     return cls(
         num_layers=28,  # ← from num_hidden_layers
         vocab_size=128256,  # ← from vocab_size
@@ -110,10 +112,11 @@ class ModelConfig:
         num_kv_heads=8,  # ← from num_key_value_heads
         norm_eps=1e-05,  # ← from rms_norm_eps
         rope_theta=500_000,  # ← from rope_theta
+        weight_tying=True,
     )
 
   @classmethod
-  def llama3_8b(cls):
+  def llama3_1_8b(cls):
     return cls(
         num_layers=32,
         vocab_size=128256,
@@ -124,6 +127,7 @@ class ModelConfig:
         num_kv_heads=8,
         norm_eps=1e-05,
         rope_theta=500_000,
+        weight_tying=False,
     )
 
 
@@ -491,12 +495,13 @@ class Llama3(nnx.Module):
         norm_eps=config.norm_eps,
         shd_config=shd_config,
     )
-    self.lm_head = Einsum(
-        einsum_str='BTD,DV->BTV',
-        shape=(config.embed_dim, config.vocab_size),
-        rngs=rngs,
-        sharding=shd_config.emb_dv,
-    )
+    if not config.weight_tying:
+      self.lm_head = Einsum(
+          einsum_str='BTD,DV->BTV',
+          shape=(config.embed_dim, config.vocab_size),
+          rngs=rngs,
+          sharding=shd_config.emb_dv,
+      )
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer."""
@@ -552,7 +557,11 @@ class Llama3(nnx.Module):
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
-    logits = self.lm_head(x)
+
+    if self.config.weight_tying:
+      logits = self.embedder.decode(x)
+    else:
+      logits = self.lm_head(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
 

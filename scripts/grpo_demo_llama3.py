@@ -350,9 +350,9 @@ for ele in train_dataset[:1]:
   pprint.pprint(ele)
 
 MODEL_CONFIG = {
-    "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_1b,
-    "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_3b,
-    "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_8b,
+    "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
+    "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
+    "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
 }
 
 

@@ -80,8 +80,8 @@ class VllmSamplerTest(absltest.TestCase):
       self, model_version: str = "llama3-1b", enable_lora: bool = False
   ):
     model_config = {
-        "llama3-1b": llama_lib.ModelConfig.llama3_1b,
-        "llama3-8b": llama_lib.ModelConfig.llama3_8b,
+        "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
+        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
     }
     assert (
         model_version in model_config
@@ -123,15 +123,8 @@ class VllmSamplerTest(absltest.TestCase):
     return out
 
   def test_vllm_sampler(self):
-    if "8B" in self.repo_id:
-      tunix_model_type = "llama3-8b"
-    elif "1B" in self.repo_id:
-      tunix_model_type = "llama3-1b"
-    else:
-      raise ValueError(f"Unsupported model type: {self.repo_id}")
-
     tunix_model = self.load_llama3_model(
-        tunix_model_type, enable_lora=self.enable_lora
+        self.repo_id, enable_lora=self.enable_lora
     )
 
     args = {}

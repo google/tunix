@@ -46,7 +46,7 @@ print(f"Downloaded {filtered_files} to: {MODEL_CP_PATH}")
 
 mesh = jax.make_mesh((1, len(jax.devices())), ("fsdp", "tp"))
 config = (
-    model.ModelConfig.llama3_8b()
+    model.ModelConfig.llama3_1_8b()
 )  # pick corresponding config based on model version
 llama3 = params.create_model_from_safe_tensors(MODEL_CP_PATH, config, mesh)
 nnx.display(llama3)
