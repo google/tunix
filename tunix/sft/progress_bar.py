@@ -42,21 +42,17 @@ class ProgressBar:
     """Update metric corresponding to `metric_name`."""
 
     mode_str = str(mode)
-    if (
-        not self.metrics_logger.metric_exists(metric_name, mode)
-        and metric_name not in self.disable_warning_for_metrics
-    ):
+    if self.metrics_logger.metric_exists(metric_name, mode):
+      self.metrics[f"{mode_str}_{metric_name}"] = round(
+          self.metrics_logger.get_metric(metric_name, mode).item(),
+          ndigits,
+      )
+    elif metric_name not in self.disable_warning_for_metrics:
       logging.warning(
           "Metric %s not found for mode %s. Not logging metric.",
           metric_name,
           mode_str,
       )
-      return
-
-    self.metrics[f"{mode_str}_{metric_name}"] = round(
-        self.metrics_logger.get_metric(metric_name, mode).item(),
-        ndigits,
-    )
 
   def update_metrics(
       self, metric_names: list[str], mode: ml.Mode, ndigits: int = 3
