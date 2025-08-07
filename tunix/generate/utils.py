@@ -412,12 +412,40 @@ def transfer_state_with_mappings(
     ):
       value = jnp.transpose(value, transpose_keys[src_keys[-1]])
 
-    # Shape check
+    # Shape check and general padding support
     if tgt_param.value.shape != value.shape:
-      raise ValueError(
-          f'Shape mismatch for {flat_key}: {tgt_param.value.shape} vs'
-          f' {value.shape}'
+      if len(value.shape) != len(tgt_param.value.shape):
+        raise ValueError(
+            f'Rank mismatch for {flat_key}: {value.shape} vs'
+            f' {tgt_param.value.shape}'
+        )
+
+      pad_width = []
+      for i, (src_dim, tgt_dim) in enumerate(
+          zip(value.shape, tgt_param.value.shape)
+      ):
+        if src_dim < tgt_dim:
+          # Optional: enforce vLLM padding constraint only on padded dims
+          assert tgt_dim == 128, (
+              f'vLLM only supports padding to 128, but got {tgt_dim} in dim'
+              f' {i} for {flat_key}'
+          )
+          pad_width.append((0, tgt_dim - src_dim))
+        elif src_dim == tgt_dim:
+          pad_width.append((0, 0))
+        else:
+          raise ValueError(
+              f'Cannot shrink shape for {flat_key}: {value.shape} ->'
+              f' {tgt_param.value.shape}'
+          )
+
+      logging.info(
+          'Padding %s from shape %s to %s',
+          flat_key,
+          value.shape,
+          tgt_param.value.shape,
       )
+      value = jnp.pad(value, pad_width)
 
     # Type cast if needed
     if tgt_param.value.dtype != value.dtype:

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from flax import nnx
 import jax
 from jax import sharding
 import jax.numpy as jnp
@@ -220,3 +221,31 @@ class UtilsTest(absltest.TestCase):
     self.assertEqual(
         new_tgt_state.params["encoder.layer_1.weight"].sharding, tgt_sharding
     )
+
+  def test_transfer_state_with_padding(self):
+    # Create source module with smaller head dim
+    class DstModule(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.zeros((2, 4, 128)))  # padded target shape
+
+    class SrcModule(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((2, 4, 64)))  # smaller than target
+
+    src = SrcModule()
+    dst = DstModule()
+
+    mappings = {
+        "w": ("w", None),
+    }
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    # Validate shape
+    self.assertEqual(result.w.value.shape, (2, 4, 128))
+    # Validate original values copied correctly
+    self.assertTrue(jnp.allclose(result.w.value[:, :, :64], 1.0))
+    # Validate padded values are zero
+    self.assertTrue(jnp.allclose(result.w.value[:, :, 64:], 0.0))
