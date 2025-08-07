@@ -19,7 +19,7 @@ import functools
 import math
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 from absl import logging
 import jax
 import jaxtyping
@@ -55,6 +55,86 @@ def callback_on_ready(
 
 
 #
+#
+
+
+def _get_reshard_fn_pathwaysutils(
+    *,
+    cache_resharding_plans: bool,
+    donate: bool,
+    use_experimental_pre_reshard: bool = False,  # pylint: disable=unused-argument
+):
+  """Returns a reshard function using pathwaysutils.
+
+  Args:
+    cache_resharding_plans: Whether to cache resharding plans.
+    donate: Whether to donate the input buffer.
+    use_experimental_pre_reshard: Ignored.
+
+  Returns:
+    A reshard function.
+  """
+  # This import is expected to fail sometimes internally if pathwaysutils is
+  # not linked to the binary.
+  try:
+    from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+  except ImportError:
+    logging.info(
+        'Cannot import PathwaysUtils and experimental reshard API. Make sure'
+        ' //third_party/py/pathwaysutils/experimental:reshard is linked to'
+        ' your binary.'
+    )
+    raise
+  else:
+    return functools.partial(
+        experimental_reshard.reshard,
+        donate=donate,
+        cache_resharding_plans=cache_resharding_plans,
+    )
+
+
+def _get_reshard_fn_jax_device_put(
+    *,
+    donate: bool,
+    cache_resharding_plans: bool = False,  # pylint: disable=unused-argument
+    use_experimental_pre_reshard: bool = False,  # pylint: disable=unused-argument
+):
+  return functools.partial(
+      jax.device_put,
+      donate=donate,
+  )
+
+
+def _get_reshard_fn(
+    cache_resharding_plans: bool,
+    donate: bool,
+    use_experimental_pre_reshard: bool,
+    get_reshard_fns: list[Callable[..., Any]],
+):
+  """Returns a reshard function.
+
+  Args:
+    cache_resharding_plans: Whether to cache resharding plans.
+    donate: Whether to donate the input buffer.
+    use_experimental_pre_reshard: Whether to use experimental pre-reshard.
+    get_reshard_fns: A list of reshard functions to try to use.
+
+  Returns:
+    A reshard function.
+  """
+  for get_reshard_fn in get_reshard_fns:
+    try:
+      reshard_fn = get_reshard_fn(
+          cache_resharding_plans=cache_resharding_plans,
+          donate=donate,
+          use_experimental_pre_reshard=use_experimental_pre_reshard,
+      )
+    except (ImportError, EnvironmentError):
+      logging.debug('Could not support {get_reshard_fn=}.', exc_info=True)
+    else:
+      return reshard_fn
+
+  raise ValueError('Could not find a reshard function from {get_reshard_fns=}.')
 
 
 def reshard_pytree(
@@ -74,7 +154,7 @@ def reshard_pytree(
       sharding information. This can be a pytree containing jax.Array or
       jax.sharding.NamedSharding.
     cache_plan: Whether to cache the resharding plan. This can largely speed up
-      the resharding process. Turn off with cautious.
+      the resharding process. Turn off with caution.
     donate_input: Whether to donate the input (source) to the reshard.
     use_experimental_pre_reshard: Whether to use the experimental pre-reshard
       API.
@@ -100,36 +180,20 @@ def reshard_pytree(
       target,
   )
 
+  reshard_fn = _get_reshard_fn(
+      cache_resharding_plans=cache_plan,
+      donate=donate_input,
+      use_experimental_pre_reshard=use_experimental_pre_reshard,
+      get_reshard_fns=[
+          #
+          _get_reshard_fn_pathwaysutils,
+          _get_reshard_fn_jax_device_put,
+      ],
+  )
+
   start = time.time()
 
-  reshardfn = None
-
-  #
-
-  # Do not remove this check. It's used in google internally.
-  if reshardfn is None:
-    try:
-      import pathwaysutils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-      from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-
-      reshardfn = functools.partial(experimental_reshard.reshard, x=source)
-      # No-op if already initialized.
-      pathwaysutils.initialize()
-    except ImportError:
-      logging.info(
-          'Cannot import PathwaysUtils and experimental reshard API. Make sure'
-          ' //third_party/py/pathwaysutils/experimental:reshard is linked to'
-          ' your binary.'
-      )
-  if reshardfn is None:
-    logging.info('No resharding API is available. Fallback to device_put.')
-    resharded_array = jax.device_put(source, dst_shardings)
-  else:
-    resharded_array = reshardfn(
-        sharding=dst_shardings,
-        donate_input=donate_input,
-        cache_resharding_plans=cache_plan,
-    )
+  resharded_array = reshard_fn(source, dst_shardings)
 
   callback_on_ready(
       resharded_array,
