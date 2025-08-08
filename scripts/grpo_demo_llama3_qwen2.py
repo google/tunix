@@ -286,6 +286,8 @@ def load_json_from_local(path):
 
 show_hbm_usage()
 
+model_tokenizer = transformers.AutoTokenizer.from_pretrained(VLLM_MODEL_VERSION)
+
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"
 solution_start = "<answer>"
@@ -328,8 +330,18 @@ def get_dataset(path: str) -> grain.MapDataset:
       .map(
           lambda x: {
               # passed to model forward pass
-              "prompts": TEMPLATE.format(
-                  system_prompt=SYSTEM_PROMPT, question=x["question"]
+              "prompts": model_tokenizer.apply_chat_template(
+                  [
+                      {
+                          "role": "user",
+                          "content": TEMPLATE.format(
+                              system_prompt=SYSTEM_PROMPT,
+                              question=x["question"],
+                          ),
+                      },
+                  ],
+                  tokenize=False,
+                  add_generation_prompt=True,
               ),
               # passed to reward functions
               "question": x["question"],
@@ -725,8 +737,6 @@ def evaluate(
     return to_return, response_lst
   return to_return
 
-
-model_tokenizer = transformers.AutoTokenizer.from_pretrained(VLLM_MODEL_VERSION)
 
 show_hbm_usage("After creating a raw sampler")
 
