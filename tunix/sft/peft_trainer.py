@@ -36,7 +36,6 @@ from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
-from tunix.sft import system_metrics_calculator
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
@@ -191,12 +190,7 @@ class PeftTrainer:
     self._mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
-    self._total_model_params = sum(
-        p.size
-        for p in jax.tree_util.tree_leaves(
-            nnx.state(self.model).filter(nnx.Param, nnx.LoRAParam)
-        )
-    )
+    self._tflops: float | None = None
 
     self._train_steps = self.checkpoint_manager.maybe_restore(
         self.model, restore_only_lora_params=self._lora_enabled
@@ -380,6 +374,44 @@ class PeftTrainer:
     """Override this function for post processing aux data from eval step."""
     pass
 
+  def _calculate_and_log_tflops(
+      self, train_step: Callable[..., Any], train_example: Any
+  ) -> None:
+    """Performs a one-time calculation of FLOPs and TFLOPS."""
+    assert hasattr(
+        train_step, "lower"
+    ), "train_step must be a JIT-compiled function to calculate TFLOPS."
+    logging.info("Performing one-time FLOPs and TFLOPS calculation...")
+
+    # 1. Calculate FLOPs using cost_analysis
+    compiled_for_cost = train_step.lower(
+        self.model, self.optimizer, train_example
+    ).compile()
+    cost = compiled_for_cost.cost_analysis()
+    flops_per_step = cost[0]["flops"]
+    logging.info("Total FLOPs per step: %d", flops_per_step)
+
+    # 2. Perform a warm-up run to exclude compilation time
+    logging.info("Warming up for TFLOPS calculation...")
+    warmup_loss, _ = train_step(self.model, self.optimizer, train_example)
+    warmup_loss.block_until_ready()
+
+    # 3. Perform an accurately timed run
+    step_start_time = time.perf_counter()
+    timed_loss, _ = train_step(self.model, self.optimizer, train_example)
+    timed_loss.block_until_ready()
+    step_end_time = time.perf_counter()
+    step_time_delta = step_end_time - step_start_time
+
+    # 4. Calculate, store, and log the TFLOPS value once
+    self._tflops = flops_per_step / ((step_time_delta + 1e-9) * 1e12)
+    logging.info("Calculated TFLOPS: %.2f", self._tflops)
+
+    # 5. Log it to the metrics logger immediately
+    self.metrics_logger.log(
+        "tflops", self._tflops, self._mode, self._train_steps
+    )
+
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
     try:
@@ -396,13 +428,10 @@ class PeftTrainer:
       self,
       loss: ArrayLike,
       step: int | None = None,
-      tflops: float | None = None,
   ):
     """Logs the metrics to the metrics logger."""
     self.metrics_logger.log("loss", loss, self._mode, step)
     self.metrics_logger.log("perplexity", jnp.exp(loss), self._mode, step)
-    if tflops is not None:
-      self.metrics_logger.log("tflops", tflops, self._mode, step)
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
       self.metrics_logger.log("learning_rate", learning_rate, self._mode, step)
@@ -493,22 +522,15 @@ class PeftTrainer:
 
           train_example = self._prepare_inputs(train_example)
           train_example = self._shard_input(train_example)
-          global_batch_size = _calculate_global_batch_size(train_example)
+
+          if self._tflops is None and not skip_jit:
+            self._calculate_and_log_tflops(train_step, train_example)
 
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
-          step_start_time = time.perf_counter()
           train_loss, aux = train_step(
               self.model, self.optimizer, train_example
-          )
-          step_end_time = time.perf_counter()
-          step_time_delta = step_end_time - step_start_time
-
-          tflops = system_metrics_calculator.tflops(
-              total_model_params=self._total_model_params,
-              global_batch_size=global_batch_size,
-              step_time_delta=step_time_delta,
           )
 
           self._throttler.add_computation(train_loss)
@@ -517,7 +539,6 @@ class PeftTrainer:
           self._log_metrics(
               train_loss,
               self._train_steps,
-              tflops,
           )
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
 
