@@ -31,7 +31,7 @@ import jax
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
-from tunix.rl.rollout import vllm_rollout
+# Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils
@@ -254,6 +254,7 @@ class RLCluster:
       )
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
+      from tunix.rl.rollout import vllm_rollout
       # TODO(linchai): maybe support offloading for vllm rollout.
       self._rollout = vllm_rollout.VllmRollout(
           self.rollout_actor,
