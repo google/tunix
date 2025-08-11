@@ -25,6 +25,7 @@ dependencies = [
   "sentencepiece",
   "tensorboardX",
   "tqdm",
+  "grain",
 ]
 
 [project.urls]
