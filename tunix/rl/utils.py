@@ -13,6 +13,8 @@
 # limitations under the License.
 
 """Simple utils used by RL algorithms."""
+
+import collections
 import gc
 import operator
 from typing import Any, List, Optional, Tuple
@@ -105,7 +107,7 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
     device.
   """
   live_arrays = jax.live_arrays()
-  hbm_used = dict(int)
+  hbm_used = collections.defaultdict(int)
   # TODO(lancewang): Find a way to get the accurate hbm limit on Pathways.
   hbm_limit = None
   for array in live_arrays:
