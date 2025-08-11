@@ -13,10 +13,14 @@
 # limitations under the License.
 """Utils for OSS code."""
 
+import os
+
 import humanize
 
 
 def pathways_available() -> bool:
+  if "proxy" not in os.getenv("JAX_PLATFORMS", ""):
+    return False
   try:
     import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import
 
