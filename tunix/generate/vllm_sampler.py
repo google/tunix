@@ -30,15 +30,8 @@ from vllm import LLM
 from vllm.outputs import RequestOutput
 
 
-# vLLM recommends use the old model design
-# os.environ["NEW_MODEL_DESIGN"]= "True"
-# Enable Jax backend
-os.environ["TPU_BACKEND_TYPE"] = "jax"
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-# Init vLLM model with random weights because model weights are synced from
-# trainer later on
-os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
 
 @dataclasses.dataclass
@@ -47,6 +40,17 @@ class MappingConfig:
   lora_to_hf_mappings: Optional[Dict[str, str]]
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]]
   lora_config: Optional[Dict[str, Any]]
+
+
+@dataclasses.dataclass
+class VllmConfig:
+  model_version: str
+  max_model_len: int
+  mesh: jax.sharding.Mesh
+  hbm_utilization: int
+  init_with_random_weights: bool
+  tpu_backend_type: str
+  mapping_config: MappingConfig
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -62,38 +66,29 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def __init__(
       self,
       tokenizer: Any,
-      mesh: jax.sharding.Mesh,
-      max_model_len: int,
-      model_version: str,
-      mapping_config: MappingConfig,
-      hbm_utilization: Optional[float] = 0.3,
+      config: VllmConfig,
   ):
     """Initializes the VllmSampler.
 
     Args:
         tokenizer (Any): A tokenizer compatible with the model.
-        mesh (jax.sharding.Mesh): The JAX mesh for parallel execution.
-        max_model_len (int): Maximum sequence (prompt + generation) length
-          supported by vLLM.
-        model_version (Optional[str]): The model version identifier.
-        mapping_config: The config for weight name mappings from external model
-          to vLLM model, including to_hf_mappings, lora_to_hf_mappings,
-          to_hf_transpose_keys and lora_config.
-        hbm_utilization (Optional[float], optional): Fraction of HBM memory to
-          utilize for vLLM. Mainly for KV cache size tuning. Defaults to 0.3.
+        config: The vllm related configurations
     """
-    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
-    self.model_version = model_version
-    self.max_model_len = max_model_len
-    self.mesh = mesh
-    self.lora_config = mapping_config.lora_config
-    self.hbm_utilization = hbm_utilization
 
-    self.args = self._vllm_config()
+    # Select vllm TPU backend type, there are jax, torchax and torchxla
+    if config.tpu_backend_type:
+      os.environ["TPU_BACKEND_TYPE"] = config.tpu_backend_type
+    # Init vLLM model with random weights to speed up bootstrap time, because model weights are synced from
+    # trainer later on
+    if config.init_with_random_weights:
+      os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+
+    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.args = self._vllm_config(config)
     self.llm = LLM(**self.args)
 
-    self.mappings = mapping_config.to_hf_mappings
-    self.to_hf_transpose_keys = mapping_config.to_hf_transpose_keys
+    self.mappings = config.mapping_config.to_hf_mappings
+    self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
 
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
@@ -129,12 +124,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def _vllm_config(self):
     args = {}
     args["additional_config"] = {}
-    args["model"] = self.model_version
-    args["max_model_len"] = self.max_model_len
-    args["tensor_parallel_size"] = self.mesh.shape["tp"]
-    args["gpu_memory_utilization"] = self.hbm_utilization
-    if self.lora_config is not None:
-      args["additional_config"]["lora_config"] = self.lora_config
+    args["model"] = config.model_version
+    args["max_model_len"] = config.max_model_len
+    args["tensor_parallel_size"] = config.mesh.shape["tp"]
+    args["gpu_memory_utilization"] = config.hbm_utilization
+    if config.mapping_config.lora_config is not None:
+      args["additional_config"]["lora_config"] = config.mapping_config.lora_config
     return args
 
   @property

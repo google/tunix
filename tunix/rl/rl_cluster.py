@@ -93,8 +93,11 @@ class ClusterConfig:
   training_config: RLTrainingConfig
   rollout_config: base_rollout.RolloutConfig
 
-  rollout_model_version: str = ""
-  rollout_lora_config: dict[str, Any] | None = None
+  rollout_vllm_model_version: str
+  rollout_vllm_lora_config: Optional[dict[str, Any]] = None
+  rollout_vllm_hbm_utilization: Optional[int] = 0.2
+  rollout_vllm_init_with_random_weights: Optional[bool] = True
+  rollout_vllm_tpu_backend_type: Optional[str] = None
 
 
 class RLCluster:
@@ -255,14 +258,20 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
+      if rollout_vllm_model_version is None:
+        raise ValueError("Rollout vllm model version or path is missing!")
+
       # TODO(linchai): maybe support offloading for vllm rollout.
       self._rollout = vllm_rollout.VllmRollout(
           self.rollout_actor,
           self.tokenizer,
           cache_config_or_size=self.cluster_config.rollout_config.kv_cache_size,
           mesh=self.r2m[Role.ROLLOUT],
-          lora_config=self.cluster_config.rollout_lora_config,
-          model_version=self.cluster_config.rollout_model_version,
+          model_version=self.cluster_config.rollout_vllm_model_version,
+          hbm_utilization=self.cluster_config.rollout_vllm_hbm_utilization,
+          init_with_random_weights=self.cluster_config.rollout_vllm_init_with_random_weights,
+          tpu_backend_type=self.cluster_config.rollout_vllm_tpu_backend_type,
+          lora_config=self.cluster_config.rollout_vllm_lora_config,
       )
     else:
       raise NotImplementedError(
