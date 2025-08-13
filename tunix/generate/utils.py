@@ -415,10 +415,18 @@ def transfer_state_with_mappings(
     # Shape check and general padding support
     if tgt_param.value.shape != value.shape:
       if len(value.shape) != len(tgt_param.value.shape):
-        raise ValueError(
-            f'Rank mismatch for {flat_key}: {value.shape} vs'
-            f' {tgt_param.value.shape}'
-        )
+        if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(flat_key):
+          # Special case for qkv bias, which needs to be reshaped.
+          new_shape = (
+              tgt_param.value.shape[0],
+              value.shape[0] // tgt_param.value.shape[0],
+          )
+          value = jnp.reshape(value, new_shape)
+        else:
+          raise ValueError(
+              f'Rank mismatch for {flat_key}: {value.shape} vs'
+              f' {tgt_param.value.shape}'
+          )
 
       pad_width = []
       for i, (src_dim, tgt_dim) in enumerate(

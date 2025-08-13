@@ -125,8 +125,10 @@ RANK = 64
 ALPHA = 64.0
 
 # ====== Sharding ======
-if "Qwen2.5-0.5B" in args.model_version:
+if "Qwen2.5-0.5B-Instruct" in args.model_version:
   TOTAL_TPU_TO_USE = 2
+elif "Qwen2.5-7B-Instruct" in args.model_version:
+  TOTAL_TPU_TO_USE = 4
 else:
   TOTAL_TPU_TO_USE = jax.device_count()
 
@@ -379,7 +381,8 @@ MODEL_CONFIG = {
     "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
     "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
     "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
-    "Qwen/Qwen2.5-0.5B": qwen2_lib.ModelConfig.qwen2_5_0_5_b,
+    "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2_5_0_5_b,
+    "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2_5_7_b,
 }
 
 

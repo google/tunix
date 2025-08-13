@@ -512,9 +512,7 @@ class Qwen2(nnx.Module):
         norm_eps=config.norm_eps,
         shd_config=shd_config,
     )
-    if self.config.use_tied_embedding:
-      self.lm_head = self.embedder
-    else:
+    if not self.config.use_tied_embedding:
       self.lm_head = Einsum(
           einsum_str='BTD,DV->BTV',
           shape=(config.embed_dim, config.vocab_size),
@@ -565,10 +563,7 @@ class Qwen2(nnx.Module):
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
     # Qwen2.5 0.5B-3B uses tied embedding, sharing weights for input and output.
     if self.config.use_tied_embedding:
-      assert isinstance(
-          self.lm_head, Embedder
-      ), 'lm_head shares the same weights as input embedding.'
-      logits = self.lm_head.decode(x)
+      logits = self.embedder.decode(x)
     else:
       logits = self.lm_head(x)
 
@@ -627,7 +622,7 @@ class Qwen2(nnx.Module):
             ('model', None),
         ),
         'final_norm.w': ('model.norm.scale', (None,)),
-        'lm_head': ('lm_head', (None, 'model')),
+        'lm_head.w': ('lm_head', (None, 'model')),
     }
 
   @staticmethod
