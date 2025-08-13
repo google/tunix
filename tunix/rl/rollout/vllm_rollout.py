@@ -40,19 +40,19 @@ class VllmRollout(base_rollout.BaseRollout):
     self.mesh = mesh
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
-        vllm_sampler.VllmConfig(
-          max_model_len=cache_config_or_size,
-          mesh=mesh,
-          model_version=model_version,
-          hbm_utilization=hbm_utilization,
-          init_with_random_weights=init_with_random_weights,
-          tpu_backend_type=tpu_backend_type,
-          mapping_config=vllm_sampler.MappingConfig(
-              to_hf_mappings=model.to_hf_mappings(),
-              to_hf_transpose_keys=model.to_hf_transpose_keys(),
-              lora_to_hf_mappings=model.lora_to_hf_mappings(),
-              lora_config=lora_config,
-          ),
+        config=vllm_sampler.VllmConfig(
+            max_model_len=cache_config_or_size,
+            mesh=mesh,
+            model_version=model_version,
+            hbm_utilization=hbm_utilization,
+            init_with_random_weights=init_with_random_weights,
+            tpu_backend_type=tpu_backend_type,
+            mapping_config=vllm_sampler.MappingConfig(
+                to_hf_mappings=model.to_hf_mappings(),
+                to_hf_transpose_keys=model.to_hf_transpose_keys(),
+                lora_to_hf_mappings=model.lora_to_hf_mappings(),
+                lora_config=lora_config,
+            ),
         )
     )
     state = nnx.state(model)
