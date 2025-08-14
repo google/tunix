@@ -802,7 +802,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
     ),
-    rollout_model_version=VLLM_MODEL_VERSION,
+    rollout_vllm_model_version=VLLM_MODEL_VERSION,
+    rollout_vllm_hbm_utilization=0.2,
+    rollout_vllm_tpu_backend_type="jax",
 )
 
 grpo_config = grpo_learner.GrpoConfig(

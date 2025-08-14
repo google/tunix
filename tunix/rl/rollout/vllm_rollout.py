@@ -31,21 +31,28 @@ class VllmRollout(base_rollout.BaseRollout):
       tokenizer: Any,
       cache_config_or_size: base_rollout.CacheConfig | int,
       mesh: jax.sharding.Mesh,
+      model_version: str,
+      hbm_utilization: float,
+      init_with_random_weights: bool,
+      tpu_backend_type: str,
       lora_config: Optional[Dict[str, str]] = None,
-      model_version: str = "meta-llama/Llama-3.1-8B",
   ):
     self.mesh = mesh
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
-        max_model_len=cache_config_or_size,
-        mesh=mesh,
-        model_version=model_version,
-        hbm_utilization=0.3,
-        mapping_config=vllm_sampler.MappingConfig(
-            to_hf_mappings=model.to_hf_mappings(),
-            to_hf_transpose_keys=model.to_hf_transpose_keys(),
-            lora_to_hf_mappings=model.lora_to_hf_mappings(),
-            lora_config=lora_config,
+        config=vllm_sampler.VllmConfig(
+            max_model_len=cache_config_or_size,
+            mesh=mesh,
+            model_version=model_version,
+            hbm_utilization=hbm_utilization,
+            init_with_random_weights=init_with_random_weights,
+            tpu_backend_type=tpu_backend_type,
+            mapping_config=vllm_sampler.MappingConfig(
+                to_hf_mappings=model.to_hf_mappings(),
+                to_hf_transpose_keys=model.to_hf_transpose_keys(),
+                lora_to_hf_mappings=model.lora_to_hf_mappings(),
+                lora_config=lora_config,
+            ),
         ),
     )
     state = nnx.state(model)
@@ -61,13 +68,13 @@ class VllmRollout(base_rollout.BaseRollout):
     self.output = self._sampler(
         input_strings=prompts,
         total_generation_steps=rollout_config.max_tokens_to_generate,
-        max_prompt_length=kwargs.get("max_prompt_length", None),
+        max_prompt_length=rollout_config.max_prompt_length,
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
         seed=rollout_config.seed,
         echo=False,
-        pad_output=kwargs.get("max_prompt_length", True),
+        pad_output=True,
     )
 
     return base_rollout.RolloutOutput(
