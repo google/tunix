@@ -575,211 +575,117 @@ class Llama3(nnx.Module):
   def to_hf_mappings():
     if os.environ.get('NEW_MODEL_DESIGN') == 'True':
       return {
-          'lm_head.w': ('lm_head.input_embedding_table_DV', (None, 'model')),
-          'embedder.input_embedding': (
+          'lm_head.w': 'lm_head.input_embedding_table_DV',
+          'embedder.input_embedding':
               'embedder.input_embedding_table_VD',
-              ('model', None),
-          ),
-          'layers.*.input_layernorm.w': (
+          'layers.*.input_layernorm.w':
               'layers.*.pre_attention_norm.scale',
-              (None,),
-          ),
-          'layers.*.mlp.down_proj.kernel': (
+          'layers.*.mlp.down_proj.kernel':
               'layers.*.mlp.kernel_down_proj_FD',
-              ('model', None),
-          ),
-          'layers.*.mlp.gate_proj.kernel': (
+          'layers.*.mlp.gate_proj.kernel':
               'layers.*.mlp.kernel_gating_DF',
-              (None, 'model'),
-          ),
-          'layers.*.mlp.up_proj.kernel': (
+          'layers.*.mlp.up_proj.kernel':
               'layers.*.mlp.kernel_up_proj_DF',
-              (None, 'model'),
-          ),
-          'layers.*.post_attention_layernorm.w': (
+          'layers.*.post_attention_layernorm.w':
               'layers.*.pre_mlp_norm.scale',
-              (None,),
-          ),
-          'layers.*.attn.k_proj.w': (
+          'layers.*.attn.k_proj.w':
               'layers.*.attn.kernel_k_proj_DKH',
-              (None, 'model', None),
-          ),
-          'layers.*.attn.o_proj.w': (
+          'layers.*.attn.o_proj.w':
               'layers.*.attn.kernel_o_proj_NHD',
-              ('model', None, None),
-          ),
-          'layers.*.attn.q_proj.w': (
+          'layers.*.attn.q_proj.w':
               'layers.*.attn.kernel_q_proj_DNH',
-              (None, 'model', None),
-          ),
-          'layers.*.attn.v_proj.w': (
+          'layers.*.attn.v_proj.w':
               'layers.*.attn.kernel_v_proj_DKH',
-              (None, 'model', None),
-          ),
-          'final_norm.w': ('final_norm.scale', (None,)),
+          'final_norm.w': 'final_norm.scale',
       }
     else:
       return {
-          'lm_head.w': ('lm_head', (None, 'model')),
-          'embedder.input_embedding': ('embed.embedding', ('model', None)),
-          'layers.*.input_layernorm.w': (
+          'lm_head.w': 'lm_head',
+          'embedder.input_embedding': 'embed.embedding',
+          'layers.*.input_layernorm.w':
               'model.layers.*.input_layernorm.scale',
-              (None,),
-          ),
-          'layers.*.mlp.down_proj.kernel': (
+          'layers.*.mlp.down_proj.kernel':
               'model.layers.*.mlp.down_proj.kernel',
-              ('model', None),
-          ),
-          'layers.*.mlp.gate_proj.kernel': (
+          'layers.*.mlp.gate_proj.kernel':
               'model.layers.*.mlp.gate_proj.kernel',
-              (None, 'model'),
-          ),
-          'layers.*.mlp.up_proj.kernel': (
+          'layers.*.mlp.up_proj.kernel':
               'model.layers.*.mlp.up_proj.kernel',
-              (None, 'model'),
-          ),
-          'layers.*.post_attention_layernorm.w': (
+          'layers.*.post_attention_layernorm.w':
               'model.layers.*.post_attention_layernorm.scale',
-              (None,),
-          ),
-          'layers.*.attn.k_proj.w': (
+          'layers.*.attn.k_proj.w':
               'model.layers.*.self_attn.k_proj.kernel',
-              (None, 'model', None),
-          ),
-          'layers.*.attn.o_proj.w': (
+          'layers.*.attn.o_proj.w':
               'model.layers.*.self_attn.o_proj.kernel',
-              ('model', None, None),
-          ),
-          'layers.*.attn.q_proj.w': (
+          'layers.*.attn.q_proj.w':
               'model.layers.*.self_attn.q_proj.kernel',
-              (None, 'model', None),
-          ),
-          'layers.*.attn.v_proj.w': (
+          'layers.*.attn.v_proj.w':
               'model.layers.*.self_attn.v_proj.kernel',
-              (None, 'model', None),
-          ),
-          'final_norm.w': ('model.norm.scale', (None,)),
+          'final_norm.w': 'model.norm.scale',
       }
 
   @staticmethod
   def lora_to_hf_mappings():
     if os.environ.get('NEW_MODEL_DESIGN') == 'True':
       return {
-          'layers.*.mlp.gate_proj.kernel_lora_a': (
+          'layers.*.mlp.gate_proj.kernel_lora_a':
               'layers.*.mlp.kernel_gating_DF_lora_a',
-              (None, None),
-          ),
-          'layers.*.mlp.gate_proj.kernel_lora_b': (
+          'layers.*.mlp.gate_proj.kernel_lora_b':
               'layers.*.mlp.kernel_gating_DF_lora_b',
-              (None, 'model'),
-          ),
-          'layers.*.mlp.up_proj.kernel_lora_a': (
+          'layers.*.mlp.up_proj.kernel_lora_a':
               'layers.*.mlp.kernel_up_proj_DF_lora_a',
-              (None, None),
-          ),
-          'layers.*.mlp.up_proj.kernel_lora_b': (
+          'layers.*.mlp.up_proj.kernel_lora_b':
               'layers.*.mlp.kernel_up_proj_DF_lora_b',
-              (None, 'model'),
-          ),
-          'layers.*.mlp.down_proj.kernel_lora_a': (
+          'layers.*.mlp.down_proj.kernel_lora_a':
               'layers.*.mlp.kernel_down_proj_FD_lora_a',
-              ('model', None),
-          ),
-          'layers.*.mlp.down_proj.kernel_lora_b': (
+          'layers.*.mlp.down_proj.kernel_lora_b':
               'layers.*.mlp.kernel_down_proj_FD_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.q_proj.w_lora_a': (
+          'layers.*.attn.q_proj.w_lora_a':
               'layers.*.attn.kernel_q_proj_DNH_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.q_proj.w_lora_b': (
+          'layers.*.attn.q_proj.w_lora_b':
               'layers.*.attn.kernel_q_proj_DNH_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.k_proj.w_lora_a': (
+          'layers.*.attn.k_proj.w_lora_a':
               'layers.*.attn.kernel_k_proj_DKH_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.k_proj.w_lora_b': (
+          'layers.*.attn.k_proj.w_lora_b':
               'layers.*.attn.kernel_k_proj_DKH_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.v_proj.w_lora_a': (
+          'layers.*.attn.v_proj.w_lora_a':
               'layers.*.attn.kernel_v_proj_DKH_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.v_proj.w_lora_b': (
+          'layers.*.attn.v_proj.w_lora_b':
               'layers.*.attn.kernel_v_proj_DKH_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.o_proj.w_lora_a': (
+          'layers.*.attn.o_proj.w_lora_a':
               'layers.*.attn.kernel_o_proj_NHD_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.o_proj.w_lora_b': (
+          'layers.*.attn.o_proj.w_lora_b':
               'layers.*.attn.kernel_o_proj_NHD_lora_b',
-              (None, None),
-          ),
       }
     else:
       return {
-          'layers.*.mlp.gate_proj.kernel_lora_a': (
+          'layers.*.mlp.gate_proj.kernel_lora_a':
               'model.layers.*.mlp.gate_proj.kernel_lora_a',
-              (None, None),
-          ),
-          'layers.*.mlp.gate_proj.kernel_lora_b': (
+          'layers.*.mlp.gate_proj.kernel_lora_b':
               'model.layers.*.mlp.gate_proj.kernel_lora_b',
-              (None, 'model'),
-          ),
-          'layers.*.mlp.up_proj.kernel_lora_a': (
+          'layers.*.mlp.up_proj.kernel_lora_a':
               'model.layers.*.mlp.up_proj.kernel_lora_a',
-              (None, None),
-          ),
-          'layers.*.mlp.up_proj.kernel_lora_b': (
+          'layers.*.mlp.up_proj.kernel_lora_b':
               'model.layers.*.mlp.up_proj.kernel_lora_b',
-              (None, 'model'),
-          ),
-          'layers.*.mlp.down_proj.kernel_lora_a': (
+          'layers.*.mlp.down_proj.kernel_lora_a':
               'model.layers.*.mlp.down_proj.kernel_lora_a',
-              ('model', None),
-          ),
-          'layers.*.mlp.down_proj.kernel_lora_b': (
+          'layers.*.mlp.down_proj.kernel_lora_b':
               'model.layers.*.mlp.down_proj.kernel_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.q_proj.w_lora_a': (
+          'layers.*.attn.q_proj.w_lora_a':
               'layers.*.self_attn.q_proj.kernel_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.q_proj.w_lora_b': (
+          'layers.*.attn.q_proj.w_lora_b':
               'layers.*.self_attn.q_proj.kernel_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.k_proj.w_lora_a': (
+          'layers.*.attn.k_proj.w_lora_a':
               'layers.*.self_attn.k_proj.kernel_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.k_proj.w_lora_b': (
+          'layers.*.attn.k_proj.w_lora_b':
               'layers.*.self_attn.k_proj.kernel_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.v_proj.w_lora_a': (
+          'layers.*.attn.v_proj.w_lora_a':
               'layers.*.self_attn.v_proj.kernel_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.v_proj.w_lora_b': (
+          'layers.*.attn.v_proj.w_lora_b':
               'layers.*.self_attn.v_proj.kernel_lora_b',
-              (None, None),
-          ),
-          'layers.*.attn.o_proj.w_lora_a': (
+          'layers.*.attn.o_proj.w_lora_a':
               'layers.*.self_attn.o_proj.kernel_lora_a',
-              ('model', None),
-          ),
-          'layers.*.attn.o_proj.w_lora_b': (
+          'layers.*.attn.o_proj.w_lora_b':
               'layers.*.self_attn.o_proj.kernel_lora_b',
-              (None, None),
-          ),
       }
 
   @staticmethod
