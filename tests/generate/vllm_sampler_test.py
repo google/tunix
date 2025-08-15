@@ -19,7 +19,7 @@ from flax import nnx
 import huggingface_hub
 import jax
 import numpy as np
-from qwix import lora
+import qwix
 import transformers
 from tunix.generate import sampler as vanilla_sampler
 from tunix.generate import vllm_sampler
@@ -56,7 +56,7 @@ class VllmSamplerTest(absltest.TestCase):
     self.enable_lora = False
 
   def get_lora_model(self, base_model):
-    lora_provider = lora.LoraProvider(
+    lora_provider = qwix.LoraProvider(
         module_path=(
             ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
         ),
@@ -65,7 +65,7 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     model_input = base_model.get_model_input()
-    lora_model = lora.apply_lora_to_model(
+    lora_model = qwix.apply_lora_to_model(
         base_model, lora_provider, **model_input
     )
 
