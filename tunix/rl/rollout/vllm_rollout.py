@@ -46,6 +46,7 @@ class VllmRollout(base_rollout.BaseRollout):
             to_hf_transpose_keys=model.to_hf_transpose_keys(),
             lora_to_hf_mappings=model.lora_to_hf_mappings(),
             lora_config=lora_config,
+            to_hf_hook_fns=model.to_hf_hook_fns(),
         ),
     )
     state = nnx.state(model)

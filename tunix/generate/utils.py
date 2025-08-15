@@ -388,6 +388,7 @@ def transfer_state_with_mappings(
     src_state,
     dst_state,
     key_mappings,
+    key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
 ):
@@ -420,6 +421,10 @@ def transfer_state_with_mappings(
         and 'lora' not in src_keys[-1]
     ):
       value = jnp.transpose(value, transpose_keys[src_keys[-1]])
+
+    # Optional hook fn
+    if (flat_key in key_mapping_hook_fns):
+      value = key_mapping_hook_fns[flat_key](value)
 
     # Shape check and general padding support
     if tgt_param.value.shape != value.shape:
