@@ -11,7 +11,7 @@ class ProgressBarTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-        log_dir=self.create_tempdir().full_path
+        metrics_log_dir=self.create_tempdir().full_path
     )
     self.metrics_logger = metrics_logger.MetricsLogger(metrics_logging_options)
 

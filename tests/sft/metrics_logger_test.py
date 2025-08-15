@@ -22,7 +22,7 @@ class MetricLoggerTest(absltest.TestCase):
     log_dir = self.create_tempdir().full_path
     logger = metrics_logger.MetricsLogger(
         metrics_logger.MetricsLoggerOptions(
-            log_dir=log_dir, flush_every_n_steps=1
+            metrics_log_dir=log_dir, flush_every_n_steps=1
         )
     )
     self.assertLen(os.listdir(log_dir), 1)

@@ -24,7 +24,7 @@ _DEFAULT_STEP = 0
 
 @dataclasses.dataclass
 class MetricsLoggerOptions:
-  log_dir: str
+  metrics_log_dir: str
   flush_every_n_steps: int = 100
 
 
@@ -102,7 +102,7 @@ def register_jax_monitoring(metrics_logger_options: MetricsLoggerOptions):
   """
   # Register TensorBoard backend.
   tensorboard_summary_writer = writer.SummaryWriter(
-      logdir=metrics_logger_options.log_dir
+      logdir=metrics_logger_options.metrics_log_dir
   )
   jax.monitoring.register_scalar_listener(
       functools.partial(
