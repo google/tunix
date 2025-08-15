@@ -256,7 +256,7 @@ class PeftTrainer:
     return self
 
   def _train_step(
-      self, model: nnx.Module, optimizer: nnx.ModelAndOptimizer, inputs: Any
+      self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     """Main body for one train step.
 
