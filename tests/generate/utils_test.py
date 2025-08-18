@@ -394,3 +394,134 @@ class UtilsTest(absltest.TestCase):
         ),
         "Regular parameter with transpose mismatch",
     )
+
+  def test_verify_state_closeness(self):
+    """Test verify_state_closeness function with various scenarios."""
+
+    # Test case 1: Identical states should return True
+    identical_params = {
+        "layer.0.weight": jnp.array([[1.0, 2.0], [3.0, 4.0]]),
+        "layer.0.bias": jnp.array([0.1, 0.2]),
+        "layer.1.weight": jnp.array([[5.0, 6.0], [7.0, 8.0]]),
+    }
+    golden_state_identical = MockState(
+        {k: MockParam(v) for k, v in identical_params.items()}
+    )
+    test_state_identical = MockState(
+        {k: MockParam(v) for k, v in identical_params.items()}
+    )
+
+    self.assertTrue(
+        utils.verify_state_closeness(
+            golden_state_identical, test_state_identical
+        )
+    )
+
+    # Test case 2: States with values within tolerance should return True
+    golden_params = {
+        "layer.0.weight": jnp.array([[1.0, 2.0], [3.0, 4.0]]),
+        "layer.0.bias": jnp.array([0.1, 0.2]),
+    }
+    close_params = {
+        "layer.0.weight": jnp.array(
+            [[1.005, 2.003], [3.001, 4.002]]
+        ),  # Within default atol=1e-2
+        "layer.0.bias": jnp.array([0.105, 0.198]),
+    }
+    golden_state_close = MockState(
+        {k: MockParam(v) for k, v in golden_params.items()}
+    )
+    test_state_close = MockState(
+        {k: MockParam(v) for k, v in close_params.items()}
+    )
+
+    self.assertTrue(
+        utils.verify_state_closeness(
+            golden_state_close, test_state_close, atol=1e-2
+        )
+    )
+
+    # Test case 3: States with values outside tolerance should return False
+    far_params = {
+        "layer.0.weight": jnp.array(
+            [[1.05, 2.03], [3.01, 4.02]]
+        ),  # Outside default atol=1e-2
+        "layer.0.bias": jnp.array([0.15, 0.25]),
+    }
+    test_state_far = MockState({k: MockParam(v) for k, v in far_params.items()})
+
+    self.assertFalse(
+        utils.verify_state_closeness(
+            golden_state_close, test_state_far, atol=1e-2
+        )
+    )
+
+    # Test case 4: Different keys should return False
+    different_keys_params = {
+        "layer.0.weight": jnp.array([[1.0, 2.0], [3.0, 4.0]]),
+        "layer.0.different_bias": jnp.array([0.1, 0.2]),  # Different key name
+    }
+    test_state_diff_keys = MockState(
+        {k: MockParam(v) for k, v in different_keys_params.items()}
+    )
+
+    self.assertFalse(
+        utils.verify_state_closeness(golden_state_close, test_state_diff_keys)
+    )
+
+    # Test case 5: Missing keys should return False
+    missing_key_params = {
+        "layer.0.weight": jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        # Missing "layer.0.bias"
+    }
+    test_state_missing = MockState(
+        {k: MockParam(v) for k, v in missing_key_params.items()}
+    )
+
+    self.assertFalse(
+        utils.verify_state_closeness(golden_state_close, test_state_missing)
+    )
+
+    # Test case 6: Custom tolerance should work
+    custom_tolerance_params = {
+        "layer.0.weight": jnp.array(
+            [[1.08, 2.07], [3.06, 4.05]]
+        ),  # Within atol=0.1
+        "layer.0.bias": jnp.array([0.18, 0.27]),
+    }
+    test_state_custom_tol = MockState(
+        {k: MockParam(v) for k, v in custom_tolerance_params.items()}
+    )
+
+    # Should fail with default tolerance
+    self.assertFalse(
+        utils.verify_state_closeness(golden_state_close, test_state_custom_tol)
+    )
+
+    # Should pass with custom tolerance
+    self.assertTrue(
+        utils.verify_state_closeness(
+            golden_state_close, test_state_custom_tol, atol=0.1
+        )
+    )
+
+    # Test case 7: Empty states should return True
+    empty_golden = MockState({})
+    empty_test = MockState({})
+
+    self.assertTrue(utils.verify_state_closeness(empty_golden, empty_test))
+
+    # Test case 8: Different shapes should return False
+    different_shape_params = {
+        "layer.0.weight": jnp.array(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+        ),  # Different shape
+        "layer.0.bias": jnp.array([0.1, 0.2]),
+    }
+    test_state_diff_shape = MockState(
+        {k: MockParam(v) for k, v in different_shape_params.items()}
+    )
+
+    self.assertFalse(
+        utils.verify_state_closeness(golden_state_close, test_state_diff_shape)
+    )
