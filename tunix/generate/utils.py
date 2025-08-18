@@ -545,3 +545,47 @@ def transfer_state_with_mappings(
     process_entry(src_keys, src_val)
 
   return dst_state.from_flat_path(tgt_flat)
+
+
+def verify_state_closeness(golden_state, state, atol=1e-2):
+  """Check if the golden NNX state is close to the other NNX state.
+  Helper function for validating weight mapping correctness.
+  """
+  golden_state_flatten = {
+      '.'.join(str(key) for key in keys): v
+      for keys, v in golden_state.flat_state()
+  }
+
+  state_flatten = {
+      '.'.join(str(key) for key in keys): v for keys, v in state.flat_state()
+  }
+
+  # Check that keys match
+  if not golden_state_flatten.keys() == state_flatten.keys():
+    logging.info('Keys do not match.')
+    return False
+
+  # Check that weights match
+  matched = True
+  for key in golden_state_flatten.keys():
+
+    if golden_state_flatten[key].value.shape != state_flatten[key].value.shape:
+      logging.info(
+          'Shape mismatch for key %s: golden %s, loaded %s',
+          key,
+          golden_state_flatten[key].value.shape,
+          state_flatten[key].value.shape,
+      )
+      matched = False
+      continue
+
+    if not jax.numpy.allclose(
+        golden_state_flatten[key].value, state_flatten[key].value, atol=atol
+    ):
+      logging.info('Weights for key {} do not match.'.format(key))
+      logging.info(
+          'Golden state:', golden_state_flatten[key].value.ravel()[:10]
+      )
+      logging.info('Loaded state:', state_flatten[key].value.ravel()[:10])
+      matched = False
+  return matched
