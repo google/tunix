@@ -400,6 +400,9 @@ def transfer_state_with_mappings(
     key_mappings: A dictionary defining how to map keys from the source state to
       the target state. The keys of the dictionary are the source keys, and the
       values are tuples containing the target key and the sharding information.
+    key_mapping_hook_fns: A dictionary mapping keys to hook functions that
+      modify the values before assignment. The hook fn will be called after
+      the transpose operation if transpose were to be applied.
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
@@ -423,7 +426,7 @@ def transfer_state_with_mappings(
       value = jnp.transpose(value, transpose_keys[src_keys[-1]])
 
     # Optional hook fn
-    if (flat_key in key_mapping_hook_fns):
+    if key_mapping_hook_fns and flat_key in key_mapping_hook_fns:
       value = key_mapping_hook_fns[flat_key](value)
 
     # Shape check and general padding support
@@ -500,11 +503,10 @@ def transfer_state_with_mappings(
     return None
 
   def _should_skip_parameter(param_key):
-    """Check if a parameter should be skipped during transfer."""
+    """Check if a parameter should be skipped."""
     skip_patterns = [
         'rng',
     ]
-
     return any(pattern in param_key for pattern in skip_patterns)
 
   def process_entry(src_keys, src_val):
