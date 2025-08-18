@@ -198,16 +198,20 @@ class UtilsTest(absltest.TestCase):
     transpose_keys = {
         "weight": (1, 0),
     }
+    hook_fns = {
+        "encoder.layer_0.weight": lambda x: x * 2,
+    }
 
     new_tgt_state = utils.transfer_state_with_mappings(
         src_state,
         tgt_state,
         key_mappings=mappings,
+        key_mapping_hook_fns=hook_fns,
         transpose_keys=transpose_keys,
         reshard_fn=reshard.reshard_pytree,
     )
 
-    expected_layer_0_weight = jnp.arange(16).reshape(2, 8).T
+    expected_layer_0_weight = jnp.arange(16).reshape(2, 8).T * 2
     self.assertTrue(
         jnp.array_equal(
             new_tgt_state.params["decoder.layer_0.weight"],

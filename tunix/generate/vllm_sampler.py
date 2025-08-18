@@ -93,7 +93,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
 
-
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
     if (
