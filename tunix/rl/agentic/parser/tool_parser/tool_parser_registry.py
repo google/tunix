@@ -1,5 +1,5 @@
-from tunix.rl.multi_turn.parser.tool_parser.tool_parser_base import ToolParser
-from tunix.rl.multi_turn.parser.tool_parser.qwen_parser import QwenToolParser
+from tunix.rl.agentic.parser.tool_parser.tool_parser_base import ToolParser
+from tunix.rl.agentic.parser.tool_parser.qwen_parser import QwenToolParser
 
 _PARSER_REGISTRY = {
     "qwen": QwenToolParser,

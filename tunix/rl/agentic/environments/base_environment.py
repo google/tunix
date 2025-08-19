@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any
-
+import asyncio
 
 class BaseEnv(ABC):
     """
@@ -45,6 +45,13 @@ class BaseEnv(ABC):
             A tuple (next_observation, reward, done, info)
         """
         pass
+
+    async def step_async(self, action: Any) -> tuple[Any, float, bool, dict]:
+        """
+        Async wrapper for step().
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.step, action)
 
     def close(self):
         """Clean up any resources (optional override)."""

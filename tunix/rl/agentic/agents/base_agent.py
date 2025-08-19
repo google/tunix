@@ -1,10 +1,16 @@
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
+import asyncio
 
 # ────────────────────────────────────────────────────────────────
 # Basic Data Structures
 # ────────────────────────────────────────────────────────────────
+
+@dataclass
+class Action:
+    # Container for structured action; content depends on the specific environment
+    action: Any = None
 
 @dataclass
 class Step:
@@ -15,7 +21,7 @@ class Step:
     thought: str = ""
 
     # Structured action parsed from LLM output (e.g., tool invocation parameters)
-    action: Any = None
+    action: Action = None
 
     # Observation returned by the environment after executing the action (could be text, JSON, image, etc.)
     observation: Any = None
@@ -34,12 +40,6 @@ class Step:
 
     # Discounted return from this step to the end (Monte Carlo return), filled in by the engine
     mc_return: float = 0.0
-
-
-@dataclass
-class Action:
-    # Container for structured action; content depends on the specific environment
-    action: Any = None
 
 
 @dataclass
@@ -102,6 +102,11 @@ class BaseAgent(ABC):
         """
         ...
 
+    async def update_from_env_async(self, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.update_from_env, *args, **kwargs)
+
+
     # —— Interaction with Model ————————————————————————————————
 
     @abstractmethod
@@ -112,7 +117,11 @@ class BaseAgent(ABC):
           2. Write response / thought into the latest Step
         The returned Action will be executed in the environment.
         """
-        return Action()
+        ...
+
+    async def update_from_model_async(self, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.update_from_model, *args, **kwargs)
 
     # —— Lifecycle Control ————————————————————————————————
 

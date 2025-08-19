@@ -1,9 +1,9 @@
 import asyncio
-from tunix.rl.multi_turn.agents.tool_agent import ToolAgent
-from tunix.rl.multi_turn.environments.tool_environment import ToolEnvironment
-from tunix.rl.multi_turn.TrajectoryCollector.trajectory_collect_engine import TrajectoryCollectEngine
-from tunix.rl.multi_turn.tools.calculator_tool import CalculatorTool
-from tunix.rl.multi_turn.rewards.reward import is_two_reward
+from tunix.rl.agentic.agents.tool_agent import ToolAgent
+from tunix.rl.agentic.environments.tool_environment import ToolEnvironment
+from tunix.rl.agentic.TrajectoryCollector.trajectory_collect_engine import TrajectoryCollectEngine
+from tunix.rl.agentic.tools.calculator_tool import CalculatorTool
+from tunix.rl.agentic.rewards.reward import is_two_reward
 
 from openai import OpenAI
 from typing import List, Dict

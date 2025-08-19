@@ -1,4 +1,4 @@
-from tunix.rl.multi_turn.tools.base_tool import BaseTool, ToolOutput
+from tunix.rl.agentic.tools.base_tool import BaseTool, ToolOutput
 
 
 class CalculatorTool(BaseTool):
