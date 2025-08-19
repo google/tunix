@@ -2,15 +2,6 @@ from abc import ABC, abstractmethod
 from typing import Any
 from dataclasses import dataclass
 
-
-# @dataclass
-# class ToolCall:
-#     """
-#     A unified representation of a tool call extracted from LLM response.
-#     """
-#     name: str
-#     arguments: dict[str, Any]
-
 @dataclass
 class ToolCall:
 
