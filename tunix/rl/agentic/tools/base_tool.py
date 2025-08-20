@@ -18,7 +18,7 @@ class ToolOutput:
     error: Optional[str] = None
     metadata: Optional[dict] = None
 
-    def to_string(self) -> str:
+    def __repr__(self) -> str:
         if self.error:
             return f"Error: {self.error}"
         if self.output is None:
@@ -31,7 +31,7 @@ class ToolOutput:
 
 class BaseTool(ABC):
     """
-    Abstract base class for all tools. Each tool should implement either `forward` or `async_forward`.
+    Abstract base class for all tools. Each tool should implement either `apply` or `apply_async`.
     """
 
     def __init__(self, name: str, description: str):
@@ -65,15 +65,15 @@ class BaseTool(ABC):
         """
         pass
 
-    def forward(self, **kwargs) -> ToolOutput:
+    def apply(self, **kwargs) -> ToolOutput:
         """Synchronous tool call. Can be overridden."""
-        raise NotImplementedError("Tool must implement either `forward()` or `async_forward()`")
+        raise NotImplementedError("Tool must implement either `apply()` or `apply_async()`")
 
-    async def async_forward(self, **kwargs) -> ToolOutput:
+    async def apply_async(self, **kwargs) -> ToolOutput:
         """Async version of tool call. Can be overridden."""
-        return self.forward(**kwargs)
+        return self.apply(**kwargs)
 
     def __call__(self, *args, use_async=False, **kwargs):
         if use_async:
-            return self.async_forward(*args, **kwargs)
-        return self.forward(*args, **kwargs)
+            return self.apply_async(*args, **kwargs)
+        return self.apply(*args, **kwargs)
