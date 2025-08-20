@@ -1,0 +1,165 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""g3 BUILD file for Tunix TAP tests."""
+
+load("@rules_python//python:defs.bzl", "py_test", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test_suite")
+
+# TAP test runner binary
+py_binary(
+    name = "tap_runner",
+    srcs = ["tap_runner.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tunix",
+    ],
+)
+
+# Individual TAP test modules
+py_test(
+    name = "basic_tap_tests",
+    srcs = ["basic_tests.py"],
+    main = "basic_tests.py",
+    deps = [
+        ":tap_runner",
+        "//tunix",
+    ],
+    tags = ["tap", "unit"],
+)
+
+py_test(
+    name = "model_tap_tests",
+    srcs = ["model_tests.py"],
+    main = "model_tests.py",
+    deps = [
+        ":tap_runner",
+        "//tunix",
+    ],
+    tags = ["tap", "unit"],
+)
+
+py_test(
+    name = "rl_tap_tests",
+    srcs = ["rl_tests.py"],
+    main = "rl_tests.py",
+    deps = [
+        ":tap_runner",
+        "//tunix",
+    ],
+    tags = ["tap", "unit"],
+)
+
+py_test(
+    name = "sft_tap_tests",
+    srcs = ["sft_tests.py"],
+    main = "sft_tests.py",
+    deps = [
+        ":tap_runner",
+        "//tunix",
+    ],
+    tags = ["tap", "unit"],
+)
+
+py_test(
+    name = "distillation_tap_tests",
+    srcs = ["distillation_tests.py"],
+    main = "distillation_tests.py",
+    deps = [
+        ":tap_runner",
+        "//tunix",
+    ],
+    tags = ["tap", "unit"],
+)
+
+py_test(
+    name = "generation_tap_tests",
+    srcs = ["generation_tests.py"],
+    main = "generation_tests.py",
+    deps = [
+        ":tap_runner",
+        "//tunix",
+    ],
+    tags = ["tap", "unit"],
+)
+
+py_test(
+    name = "simple_tap_tests",
+    srcs = ["simple_tests.py"],
+    main = "simple_tests.py",
+    deps = [
+        ":tap_runner",
+    ],
+    tags = ["tap", "unit"],
+)
+
+# Infrastructure tests
+py_test(
+    name = "tap_infrastructure_tests",
+    srcs = ["test_tap_infrastructure.py"],
+    main = "test_tap_infrastructure.py",
+    deps = [
+        ":tap_runner",
+    ],
+    tags = ["tap", "unit"],
+)
+
+# Test suite that runs all TAP tests
+py_test_suite(
+    name = "all_tap_tests",
+    tests = [
+        ":basic_tap_tests",
+        ":model_tap_tests",
+        ":rl_tap_tests",
+        ":sft_tap_tests",
+        ":distillation_tap_tests",
+        ":generation_tap_tests",
+        ":simple_tap_tests",
+        ":tap_infrastructure_tests",
+    ],
+    tags = ["tap", "unit"],
+)
+
+# Main test runner binary
+py_binary(
+    name = "run_all_tap_tests",
+    srcs = ["run_all_tap_tests.py"],
+    main = "run_all_tap_tests.py",
+    deps = [
+        ":tap_runner",
+        "//tunix",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Demo binary
+py_binary(
+    name = "tap_demo",
+    srcs = ["demo.py"],
+    main = "demo.py",
+    deps = [
+        ":tap_runner",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Filegroup for all TAP test files
+filegroup(
+    name = "tap_test_files",
+    srcs = glob([
+        "*.py",
+        "*.md",
+    ]),
+    visibility = ["//visibility:public"],
+)

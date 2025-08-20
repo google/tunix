@@ -26,6 +26,8 @@ dependencies = [
   "tensorboardX",
   "tqdm",
   "grain",
+  "safetensors",
+  "etils",
 ]
 
 [project.urls]

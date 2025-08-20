@@ -1,17 +1,29 @@
+# Python
 *.pyc
 *.so
 *.egg-info
 *.whl
 /dist/
+
+# Jupyter
 .ipynb_checkpoints
+
+# OS
 .DS_Store
+
+# Type checking
 .mypy_cache/
 .pytype/
-.idea
-.vscode
+
+# IDEs and editors
+.idea/
+.vscode/
 .envrc
 
-# virtualenv/venv directories
+# Python version (pyenv)
+.python-version
+
+# Virtual environments
 /venv/
 /bin/
 /include/
