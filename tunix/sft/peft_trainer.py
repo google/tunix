@@ -191,12 +191,7 @@ class PeftTrainer:
     self._mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
-    self._total_model_params = sum(
-        p.size
-        for p in jax.tree_util.tree_leaves(
-            nnx.state(self.model).filter(nnx.Param, nnx.LoRAParam)
-        )
-    )
+    self._flops_measured: bool = False
 
     self._train_steps = self.checkpoint_manager.maybe_restore(
         self.model, restore_only_lora_params=self._lora_enabled
@@ -396,16 +391,21 @@ class PeftTrainer:
       self,
       loss: ArrayLike,
       step: int | None = None,
-      tflops: float | None = None,
+      step_time_delta: float | None = None,
   ):
     """Logs the metrics to the metrics logger."""
     self.metrics_logger.log("loss", loss, self._mode, step)
     self.metrics_logger.log("perplexity", jnp.exp(loss), self._mode, step)
-    if tflops is not None:
-      self.metrics_logger.log("tflops", tflops, self._mode, step)
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
       self.metrics_logger.log("learning_rate", learning_rate, self._mode, step)
+    if step_time_delta is not None:
+      self.metrics_logger.log(
+          "step_time_sec", step_time_delta, self._mode, step
+      )
+      self.metrics_logger.log(
+          "steps_per_sec", 1.0 / (step_time_delta + 1e-9), self._mode, step
+      )
 
   @contextlib.contextmanager
   def _switch_mode(self, mode: metrics_logger.Mode):
@@ -418,7 +418,7 @@ class PeftTrainer:
 
   @property
   def _tqdm_train_metrics(self) -> list[str]:
-    return ["loss", "perplexity", "tflops", "learning_rate"]
+    return ["loss", "perplexity", "steps_per_sec", "learning_rate"]
 
   @property
   def _tqdm_eval_metrics(self) -> list[str]:
@@ -454,6 +454,7 @@ class PeftTrainer:
 
     train_iterator = iter(train_ds)
     index = 0
+    last_step_completion_time = time.perf_counter()
     with time_measure("Train loop"):
       while True:
         self._prof.maybe_activate(self._train_steps)
@@ -493,23 +494,31 @@ class PeftTrainer:
 
           train_example = self._prepare_inputs(train_example)
           train_example = self._shard_input(train_example)
-          global_batch_size = _calculate_global_batch_size(train_example)
+
+          if not self._flops_measured and not skip_jit:
+            self._flops_measured = True
+
+            tflops_per_step = system_metrics_calculator.measure_tflops_per_step(
+                train_step_fn=train_step,
+                model=self.model,
+                optimizer=self.optimizer,
+                train_example=train_example,
+            )
+            if tflops_per_step is not None:
+              self.metrics_logger.log(
+                  "tflops_per_step", tflops_per_step, self._mode, 0
+              )
 
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
-          step_start_time = time.perf_counter()
           train_loss, aux = train_step(
               self.model, self.optimizer, train_example
           )
-          step_end_time = time.perf_counter()
-          step_time_delta = step_end_time - step_start_time
 
-          tflops = system_metrics_calculator.tflops(
-              total_model_params=self._total_model_params,
-              global_batch_size=global_batch_size,
-              step_time_delta=step_time_delta,
-          )
+          current_time = time.perf_counter()
+          step_time_delta = current_time - last_step_completion_time
+          last_step_completion_time = current_time
 
           self._throttler.add_computation(train_loss)
           self._train_steps += 1
@@ -517,7 +526,7 @@ class PeftTrainer:
           self._log_metrics(
               train_loss,
               self._train_steps,
-              tflops,
+              step_time_delta,
           )
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
 

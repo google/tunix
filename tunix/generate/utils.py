@@ -359,28 +359,12 @@ def build_flat_dict(
           else:
             src_parts.append(part)
         actual_src = '.'.join(src_parts)
-        # Check if this is a scanned parameter (has 'layer' in sharding spec)
-        if sharding and 'layer' in sharding:
-          if actual_src not in new_flat_dict:
-            new_flat_dict[actual_src] = ([], sharding)
-          layer_number = int(matched.groups()[0])
-          new_flat_dict[actual_src][0].append((layer_number, v))
-        else:
-          # Regular (non-scanned) parameter
-          new_flat_dict[actual_src] = v, sharding
-
+        new_flat_dict[actual_src] = v, sharding
         mapped = True
         break
     # There are no mappings for rng related params.
     if not mapped:
-      logging.warning('!!! No mapping for flat state: %s', path)
-
-  # Sort layers
-  for key, (layers, sharding) in new_flat_dict.items():
-    if isinstance(layers, list):
-      layers.sort(key=lambda x: x[0])
-      new_flat_dict[key] = ([layer for _, layer in layers], sharding)
-
+      logging.warning('!!! No mapping for flat state: %s', keys)
   return new_flat_dict
 
 
@@ -388,7 +372,6 @@ def transfer_state_with_mappings(
     src_state,
     dst_state,
     key_mappings,
-    key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
 ):
@@ -400,9 +383,6 @@ def transfer_state_with_mappings(
     key_mappings: A dictionary defining how to map keys from the source state to
       the target state. The keys of the dictionary are the source keys, and the
       values are tuples containing the target key and the sharding information.
-    key_mapping_hook_fns: A dictionary mapping keys to hook functions that
-      modify the values before assignment. The hook fn will be called after
-      the transpose operation if transpose were to be applied.
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
@@ -413,10 +393,17 @@ def transfer_state_with_mappings(
 
   src_flat = src_state.flat_state()
   tgt_flat = dst_state.flat_state()
-  # Maps source keys to target tensor(s) and sharding spec
   new_src_dict = build_flat_dict(tgt_flat, key_mappings)
 
-  def _process_and_assign_value(value, tgt_param, flat_key, src_keys):
+  def process_entry(src_keys, src_val):
+    flat_key = '.'.join(str(k) for k in src_keys)
+    if flat_key not in new_src_dict:
+      logging.error('!!! No mapping for source key: %s', flat_key)
+      return
+
+    tgt_param, _ = new_src_dict[flat_key]
+    value = src_val.value
+
     # Optional transpose
     if (
         transpose_keys
@@ -424,10 +411,6 @@ def transfer_state_with_mappings(
         and 'lora' not in src_keys[-1]
     ):
       value = jnp.transpose(value, transpose_keys[src_keys[-1]])
-
-    # Optional hook fn
-    if key_mapping_hook_fns and flat_key in key_mapping_hook_fns:
-      value = key_mapping_hook_fns[flat_key](value)
 
     # Shape check and general padding support
     if tgt_param.value.shape != value.shape:
@@ -488,104 +471,8 @@ def transfer_state_with_mappings(
     )
     tgt_param.value = new_value
 
-  def _extract_layer_from_scanned_tensor(tensor, layer_idx, layer_axis):
-    """Extract a specific layer from a scanned tensor."""
-    idx = [slice(None)] * tensor.ndim
-    idx[layer_axis] = layer_idx
-    return tensor[tuple(idx)]
-
-  def _get_layer_axis_from_sharding_spec(sharding_spec):
-    """Determine which axis contains the layer dimension from sharding specification."""
-    if isinstance(sharding_spec, (list, tuple)):
-      for i, spec in enumerate(sharding_spec):
-        if spec == 'layer':
-          return i
-    return None
-
-  def _should_skip_parameter(param_key):
-    """Check if a parameter should be skipped."""
-    skip_patterns = [
-        'rng',
-    ]
-    return any(pattern in param_key for pattern in skip_patterns)
-
-  def process_entry(src_keys, src_val):
-    flat_key = '.'.join(str(k) for k in src_keys)
-
-    if flat_key not in new_src_dict:
-      # Skip RNG states that don't need mapping
-      if _should_skip_parameter(flat_key):
-        logging.debug('Skipping parameter: %s', flat_key)
-      else:
-        logging.error('!!! No mapping for source key: %s', flat_key)
-        return
-      return
-
-    tgt_param, sharding_spec = new_src_dict[flat_key]
-    value = src_val.value
-
-    layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
-
-    if layer_axis is not None:
-      # This is a scanned parameter
-      num_layers = len(tgt_param)
-      for layer_idx in range(0, num_layers):
-        layer_tensor = _extract_layer_from_scanned_tensor(
-            value, layer_idx, layer_axis
-        )
-        _process_and_assign_value(
-            layer_tensor, tgt_param[layer_idx], flat_key, src_keys
-        )
-    else:
-      # This is a normal parameter
-      _process_and_assign_value(value, tgt_param, flat_key, src_keys)
-
   # Loop through each parameter
   for src_keys, src_val in src_flat:
     process_entry(src_keys, src_val)
 
   return dst_state.from_flat_path(tgt_flat)
-
-
-def verify_state_closeness(golden_state, state, atol=1e-2):
-  """Check if the golden NNX state is close to the other NNX state.
-  Helper function for validating weight mapping correctness.
-  """
-  golden_state_flatten = {
-      '.'.join(str(key) for key in keys): v
-      for keys, v in golden_state.flat_state()
-  }
-
-  state_flatten = {
-      '.'.join(str(key) for key in keys): v for keys, v in state.flat_state()
-  }
-
-  # Check that keys match
-  if not golden_state_flatten.keys() == state_flatten.keys():
-    logging.info('Keys do not match.')
-    return False
-
-  # Check that weights match
-  matched = True
-  for key in golden_state_flatten.keys():
-
-    if golden_state_flatten[key].value.shape != state_flatten[key].value.shape:
-      logging.info(
-          'Shape mismatch for key %s: golden %s, loaded %s',
-          key,
-          golden_state_flatten[key].value.shape,
-          state_flatten[key].value.shape,
-      )
-      matched = False
-      continue
-
-    if not jax.numpy.allclose(
-        golden_state_flatten[key].value, state_flatten[key].value, atol=atol
-    ):
-      logging.info('Weights for key {} do not match.'.format(key))
-      logging.info(
-          'Golden state:', golden_state_flatten[key].value.ravel()[:10]
-      )
-      logging.info('Loaded state:', state_flatten[key].value.ravel()[:10])
-      matched = False
-  return matched

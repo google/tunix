@@ -50,7 +50,6 @@ class VllmRollout(base_rollout.BaseRollout):
             mapping_config=vllm_sampler.MappingConfig(
                 to_hf_mappings=model.to_hf_mappings(),
                 to_hf_transpose_keys=model.to_hf_transpose_keys(),
-                to_hf_hook_fns=model.to_hf_hook_fns(),
                 lora_to_hf_mappings=model.lora_to_hf_mappings(),
                 lora_config=lora_config,
             ),
