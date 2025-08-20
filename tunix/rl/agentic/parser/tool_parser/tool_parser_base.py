@@ -1,14 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, List, Literal
 from dataclasses import dataclass
+import json
+from tunix.rl.agentic.tools.base_tool import BaseTool
 
 @dataclass
 class ToolCall:
-
-    name: str                  
-    arguments: dict[str, Any]   
-
-
+    name: str
+    arguments: dict[str, Any]
 
 class ToolParser(ABC):
     """
@@ -32,17 +31,41 @@ class ToolParser(ABC):
         pass
 
     @abstractmethod
-    def get_tool_prompt(self, tools_schema: str) -> str:
+    def get_tool_prompt(
+        self,
+        tools: List[BaseTool],
+        *,
+        schema_style: Literal["openai", "mcp", "gemini"] = "openai",
+    ) -> str:
         """
-        Generate tool usage instruction prompt from schema (e.g. tool definitions).
+        Generate tool-usage instruction prompt from a list of tools.
 
         Args:
-            tools_schema (str): Tool spec in JSON/XML/OpenAPI format.
+            tools: List of tool instances (BaseTool).
+            schema_style: "openai" -> use tool.json (OpenAI function-calling style)
+                          "mcp"    -> use tool.to_mcp_json() (MCP-compatible format)
+                          "gemini" -> use Gemini-compatible schema
 
         Returns:
-            str: Prompt to feed into the model.
+            str: Prompt text to feed into the model (includes tool schemas).
         """
         pass
+
+    def _tools_schema_dump(
+        self,
+        tools: List[BaseTool],
+        *,
+        schema_style: Literal["openai", "mcp", "gemini"] = "openai",
+    ) -> str:
+        if schema_style == "mcp":
+            schemas = [t.to_mcp_json() for t in tools]
+        elif schema_style == "gemini":
+            # Gemini also uses JSON schema, same as OpenAI
+            schemas = [t.json for t in tools]
+        else:
+            schemas = [t.json for t in tools]
+        return json.dumps(schemas, ensure_ascii=False, indent=2)
+
 
     def parse_tool_outputs(self, model_response: str) -> dict[str, Any]:
         """

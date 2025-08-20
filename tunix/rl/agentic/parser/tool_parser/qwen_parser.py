@@ -1,9 +1,9 @@
 import json
-from typing import Any
+from typing import Any, List
 
 from tunix.rl.agentic.parser.tool_parser.tool_parser_base import ToolParser
 from tunix.rl.agentic.tools.base_tool import ToolCall
-
+from tunix.rl.agentic.tools.base_tool import BaseTool
 
 class QwenToolParser(ToolParser):
     def __init__(self):
@@ -70,7 +70,13 @@ class QwenToolParser(ToolParser):
 
         return tool_calls
 
-    def get_tool_prompt(self, tools_schema: str) -> str:
+    def get_tool_prompt(
+        self,
+        tools: List[BaseTool],
+        *,
+        schema_style: str = "openai",
+    ) -> str:
+        tools_schema = self._tools_schema_dump(tools, schema_style=schema_style)
         return f"""
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
@@ -79,6 +85,6 @@ You are provided with function signatures within <tools></tools> XML tags:
 
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
-{{"name": <function-name>, "arguments": <args-json-object>}}
+{{"name": "<function-name>", "arguments": <args-json-object>}}
 </tool_call><|im_end|>
-"""
+""".strip()
