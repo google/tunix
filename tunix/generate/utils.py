@@ -344,7 +344,7 @@ def build_flat_dict(
   for keys, v in flat_state:
     path = '.'.join(str(key) for key in keys)
     mapped = False
-    for src, (tgt, sharding) in mappings.items():
+    for src, tgt in mappings.items():
       regex = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
       matched = re.match(regex, path)
       if matched:
@@ -359,7 +359,7 @@ def build_flat_dict(
           else:
             src_parts.append(part)
         actual_src = '.'.join(src_parts)
-        new_flat_dict[actual_src] = v, sharding
+        new_flat_dict[actual_src] = v
         mapped = True
         break
     # There are no mappings for rng related params.
@@ -401,7 +401,7 @@ def transfer_state_with_mappings(
       logging.error('!!! No mapping for source key: %s', flat_key)
       return
 
-    tgt_param, _ = new_src_dict[flat_key]
+    tgt_param = new_src_dict[flat_key]
     value = src_val.value
 
     # Optional transpose
