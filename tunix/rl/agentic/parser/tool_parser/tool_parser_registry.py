@@ -1,8 +1,10 @@
 from tunix.rl.agentic.parser.tool_parser.tool_parser_base import ToolParser
 from tunix.rl.agentic.parser.tool_parser.qwen_parser import QwenToolParser
+from tunix.rl.agentic.parser.tool_parser.gemini_parser import GeminiToolParser
 
 _PARSER_REGISTRY = {
     "qwen": QwenToolParser,
+    "gemini": GeminiToolParser
     # "openai": OpenAIFunctionToolParser,
 }
 
