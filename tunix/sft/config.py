@@ -40,6 +40,17 @@ def string_to_bool(s: str) -> bool:
   raise ValueError(f"Can't convert {s} to bool")
 
 
+def validate_model_name(s: str) -> bool:
+  """Validate provided model name."""
+  # currently supported models
+  valid_model_names = ("llama3.1-8b", "gemma-2b", "gemma-7bgemma2-2b")
+  if s not in valid_model_names:
+    raise ValueError(
+        f"Invalid model name was passed. Got {s}, Valid options"
+        f" {valid_model_names}"
+    )
+
+
 # Map optimizer names to their optax functions
 _OPTIMIZER_MAP: dict[
     str, collections.abc.Callable[..., optax.GradientTransformation]
@@ -129,7 +140,7 @@ class HyperParameters:
       raise ValueError("axis_shapes and axis_names must have the same length.")
 
     self.mesh = (tuple(axis_shapes), tuple(axis_names))
-    
+
   def _validate_training_config_and_assign(self, raw_keys):
     """Validate the complex configuration. Raise ValueError if invalid."""
     training_config = raw_keys["training_config"]

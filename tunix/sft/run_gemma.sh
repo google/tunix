@@ -21,3 +21,8 @@ set -x # Enable xtrace
 
 python3 -m tunix.sft.peft_main \
   base_config.yaml \
+  model_name="gemma-2b" \
+  ckpt_dir="google/gemma/flax/2b" \
+  ckpt_source="kaggle"
+
+
