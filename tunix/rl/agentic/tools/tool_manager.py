@@ -1,10 +1,8 @@
 from __future__ import annotations
-import queue
-import threading
 import uuid
 from typing import Dict, List, Type, Any
-from tunix.rl.multi_turn.tools.base_tool import BaseTool, ToolCall, ToolOutput
-
+from tunix.rl.agentic.tools.base_tool import BaseTool, ToolCall, ToolOutput
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class ToolManager:
     """
@@ -58,36 +56,34 @@ class ToolManager:
     def execute_calls(self, calls: List[ToolCall], parallel: bool = True) -> Dict[str, str]:
         """
         Execute a batch of tool calls.
-
         Args:
             calls: List[ToolCall], each containing a tool name and arguments.
             parallel: Whether to execute in parallel using threads.
-
         Returns:
             Dict[str, str]: Mapping from call_id to ToolOutput.to_string() results.
         """
-        outputs, q = {}, queue.Queue()
+        outputs = {}
 
-        def _worker(call: ToolCall, cid: str):
-            res = self.run(tool_name=call.name, **call.arguments)
-            q.put((cid, res.to_string()))
+        if not parallel:
+            for call in calls:
+                cid = getattr(call, "id", None) or str(uuid.uuid4())
+                res = self.run(tool_name=call.name, **call.arguments)
+                outputs[cid] = res.to_string()
+            return outputs
 
-        threads = []
-        for call in calls:
-            cid = getattr(call, "id", None) or str(uuid.uuid4())
-            if parallel:
-                t = threading.Thread(target=_worker, args=(call, cid))
-                threads.append(t)
-                t.start()
-            else:
-                _worker(call, cid)
+        with ThreadPoolExecutor() as executor:
+            future_to_id = {}
+            for call in calls:
+                cid = getattr(call, "id", None) or str(uuid.uuid4())
+                future = executor.submit(self.run, tool_name=call.name, **call.arguments)
+                future_to_id[future] = cid
 
-        # Wait for all threads to complete if running in parallel
-        for t in threads:
-            t.join()
-
-        while not q.empty():
-            k, v = q.get()
-            outputs[k] = v
+            for future in as_completed(future_to_id):
+                cid = future_to_id[future]
+                try:
+                    res = future.result()
+                    outputs[cid] = res.to_string()
+                except Exception as e:
+                    outputs[cid] = f"Error: {type(e).__name__}: {e}"
 
         return outputs

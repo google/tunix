@@ -1,5 +1,5 @@
 from typing import Any, Dict, Callable
-from tunix.rl.multi_turn.rewards.reward_types import RewardOutput
+from tunix.rl.agentic.rewards.reward_types import RewardOutput
 
 # ---------- ① Registry ----------
 _REGISTRY: Dict[str, Callable[[Dict, str], RewardOutput]] = {}

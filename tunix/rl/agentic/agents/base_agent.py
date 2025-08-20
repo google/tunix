@@ -112,7 +112,7 @@ class BaseAgent(ABC):
           2. Write response / thought into the latest Step
         The returned Action will be executed in the environment.
         """
-        return Action()
+        ...
 
     # —— Lifecycle Control ————————————————————————————————
 

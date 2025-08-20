@@ -1,12 +1,11 @@
-# tunix/rl/multi_turn/environments/tool_env.py
 import json
 import warnings
 from typing import Any, Dict, List
 import uuid
-from tunix.rl.multi_turn.environments.base_environment import BaseEnv
-from tunix.rl.multi_turn.rewards.reward import zero_reward
-from tunix.rl.multi_turn.tools.tool_manager import ToolManager
-from tunix.rl.multi_turn.tools.base_tool import ToolCall, BaseTool
+from tunix.rl.agentic.environments.base_environment import BaseEnv
+from tunix.rl.agentic.rewards.reward import zero_reward
+from tunix.rl.agentic.tools.tool_manager import ToolManager
+from tunix.rl.agentic.tools.base_tool import ToolCall, BaseTool
 
 
 class ToolEnvironment(BaseEnv):

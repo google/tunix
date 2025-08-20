@@ -1,8 +1,8 @@
 import json
 from typing import Any
 
-from tunix.rl.multi_turn.parser.tool_parser.tool_parser_base import ToolParser
-from tunix.rl.multi_turn.tools.base_tool import ToolCall
+from tunix.rl.agentic.parser.tool_parser.tool_parser_base import ToolParser
+from tunix.rl.agentic.tools.base_tool import ToolCall
 
 
 class QwenToolParser(ToolParser):

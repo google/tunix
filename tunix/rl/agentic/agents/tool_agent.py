@@ -1,16 +1,14 @@
-# tunix/rl/multi_turn/agents/tool_agent.py
-
 import copy
 import json
 import logging
 import uuid
 from typing import Any
 
-from tunix.rl.multi_turn.agents.base_agent import LLMBaseAgent, Step, Action, Trajectory
-from tunix.rl.multi_turn.tools.base_tool import BaseTool
-from tunix.rl.multi_turn.tools.tool_manager import ToolManager
-from tunix.rl.multi_turn.parser.tool_parser.tool_parser_registry import get_tool_parser
-from tunix.rl.multi_turn.parser.tool_parser.tool_parser_base import ToolParser
+from tunix.rl.agentic.agents.base_agent import LLMBaseAgent, Step, Action, Trajectory
+from tunix.rl.agentic.tools.base_tool import BaseTool
+from tunix.rl.agentic.tools.tool_manager import ToolManager
+from tunix.rl.agentic.parser.tool_parser.tool_parser_registry import get_tool_parser
+from tunix.rl.agentic.parser.tool_parser.tool_parser_base import ToolParser
 
 logger = logging.getLogger(__name__)
 
