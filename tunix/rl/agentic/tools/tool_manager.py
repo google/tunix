@@ -31,6 +31,18 @@ class ToolManager:
     def json(self) -> List[dict]:
         """Returns the JSON Schemas of all tools, for prompt template injection."""
         return [tool.json for tool in self._tool_dict.values()]
+    
+    @property
+    def mcp_json(self) -> List[dict]:
+        """Returns MCP-compatible tool metadata (Gemini/Claude standard)."""
+        return [tool.to_mcp_json() for tool in self._tool_dict.values()]
+    
+    # ---------- Tool Registration ----------
+    def register_mcp_tool(self, tool: BaseTool):
+        """
+        Register a MCP-compatible tool instance directly.
+        """
+        self._tool_dict[tool.name] = tool
 
     # ---------- Single Tool Execution ----------
     def run(self, tool_name: str, **kwargs) -> ToolOutput:
