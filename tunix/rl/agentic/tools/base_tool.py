@@ -65,6 +65,29 @@ class BaseTool(ABC):
         """
         pass
 
+    def to_mcp_json(self) -> dict[str, Any]:
+        """
+        Return MCP (Model Context Protocol) compliant tool registration.
+
+        Format:
+        {
+          "type": "function",
+          "function": {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.inputSchema,
+          }
+        }
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": getattr(self, "inputSchema", {}),
+            },
+        }
+
     def apply(self, **kwargs) -> ToolOutput:
         """Synchronous tool call. Can be overridden."""
         raise NotImplementedError("Tool must implement either `apply()` or `apply_async()`")

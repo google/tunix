@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
+import asyncio
 
 # ────────────────────────────────────────────────────────────────
 # Basic Data Structures
@@ -102,6 +103,11 @@ class BaseAgent(ABC):
         """
         ...
 
+    async def update_from_env_async(self, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.update_from_env, *args, **kwargs)
+
+
     # —— Interaction with Model ————————————————————————————————
 
     @abstractmethod
@@ -113,6 +119,10 @@ class BaseAgent(ABC):
         The returned Action will be executed in the environment.
         """
         ...
+
+    async def update_from_model_async(self, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.update_from_model, *args, **kwargs)
 
     # —— Lifecycle Control ————————————————————————————————
 

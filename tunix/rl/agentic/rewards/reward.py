@@ -7,6 +7,8 @@ _REGISTRY: Dict[str, Callable[[Dict, str], RewardOutput]] = {}
 def register(name: str):
     """Decorator: register the function into the registry"""
     def _wrap(fn):
+        if name in _REGISTRY:
+            raise ValueError(f"Reward {name} already registered.")
         _REGISTRY[name] = fn
         return fn
     return _wrap
@@ -15,6 +17,29 @@ def get_reward_fn(name: str):
     return _REGISTRY[name]
 
 # ---------- ② Built-in reward strategies ----------
+
+# task: Dict[str, Any]
+# ---------------------
+# A flexible container to describe one tool execution task.
+# Typically includes:
+#   - "id":        unique identifier for the task (str)
+#   - "name":      tool name to call (str)
+#   - "arguments": parameters for the tool (dict)
+#   - "metadata":  optional info such as user, priority, timestamp (dict/any)
+#
+# Purpose:
+#   • Provide a standard, extensible way to describe tool calls
+#   • Align with MCP / RLLM task format (JSON-like schema)
+#   • Allow attaching extra context (e.g., retry count, timeout) 
+#     without changing the method signature
+#
+# Example:
+# task = {
+#     "id": "12345",
+#     "name": "search",
+#     "arguments": {"query": "weather in SF"},
+#     "metadata": {"priority": "high"}
+# }
 
 @register("zero")
 def zero_reward(task: Dict[str, Any], action: str) -> RewardOutput:
@@ -29,7 +54,7 @@ def exact_match(task: Dict[str, Any], action: str) -> RewardOutput:
     return RewardOutput(score, {"exact_match": score})
 
 # ---------- ③ Aggregator (Optional) ----------
-def make_linear(weights: Dict[str, float]) -> Callable[[Dict, str], RewardOutput]:
+def combine_rewards(weights: Dict[str, float]) -> Callable[[Dict, str], RewardOutput]:
     """
     Linearly combines multiple sub-reward strategies according to weights.
     Example: {"exact_match": 1.0, "zero": 0.0}
