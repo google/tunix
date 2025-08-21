@@ -27,6 +27,7 @@ from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
+import numpy as np
 
 
 class VanillaRollout(base_rollout.BaseRollout):
@@ -51,6 +52,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
+    print("begin rollout generate")
     output = self._sampler(
         input_strings=prompts,
         total_generation_steps=rollout_config.max_tokens_to_generate,
@@ -70,12 +72,81 @@ class VanillaRollout(base_rollout.BaseRollout):
         logprobs=None,
     )
 
+#   def _aggregate_outputs(
+#       self,
+#       outputs: list[Any]
+#   ) -> base_rollout.RolloutOutput:
+#       """Aggregates the outputs from multiple micro-batches into a single one."""
+#       if not outputs:
+#           return base_rollout.RolloutOutput(
+#               text=[], logits=np.array([]), tokens=np.array([]),
+#               left_padded_prompt_tokens=np.array([]), logprobs=None
+#           )
+
+#       # Use np.concatenate for array-like outputs (logits, tokens)
+#       # and list extension for simple lists (text).
+#       aggregated_text = [item for output in outputs for item in output.text]
+#       aggregated_logits = np.concatenate([output.logits for output in outputs], axis=0)
+#       aggregated_tokens = np.concatenate([output.tokens for output in outputs], axis=0)
+#       aggregated_padded_tokens = np.concatenate(
+#           [output.padded_prompt_tokens for output in outputs], axis=0
+#       )
+
+#       return base_rollout.RolloutOutput(
+#           text=aggregated_text,
+#           logits=aggregated_logits,
+#           tokens=aggregated_tokens,
+#           left_padded_prompt_tokens=aggregated_padded_tokens,
+#           logprobs=None,
+#       )
+
+#   def generate(
+#       self,
+#       prompts: list[str],
+#       rollout_config: base_rollout.RolloutConfig,
+#       **kwargs,
+#   ) -> base_rollout.RolloutOutput:
+#       """
+#       Generates samples from the model using micro-batching to prevent OOM errors.
+#       """
+#       print("Begin rollout generate with micro-batching.")
+      
+#       # Default to a batch size of 1 if not specified or invalid
+#       micro_batch_size = 8
+#       if micro_batch_size <= 0:
+#           micro_batch_size = len(prompts)
+          
+#       all_outputs = []
+      
+#       # Process prompts in micro-batches
+#       for i in range(0, len(prompts), micro_batch_size):
+#           batch_prompts = prompts[i:i + micro_batch_size]
+#           print(f"Processing batch {i // micro_batch_size + 1} with {len(batch_prompts)} prompts...")
+          
+#           output = self._sampler(
+#               input_strings=batch_prompts,
+#               total_generation_steps=rollout_config.max_tokens_to_generate,
+#               max_prompt_length=rollout_config.max_prompt_length,
+#               echo=False,
+#               temperature=rollout_config.temperature,
+#               top_p=rollout_config.top_p,
+#               top_k=rollout_config.top_k,
+#               seed=rollout_config.seed,
+#               pad_output=True,
+#               **kwargs # Pass along any other kwargs
+#           )
+#           all_outputs.append(output)
+
+#       # Aggregate the results from all micro-batches
+#       return self._aggregate_outputs(all_outputs)
+
   def get_per_token_logps(
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
+    print("begin rollout logps compute")
     return common.compute_per_token_logps(
         self.model(),
         prompt_tokens=prompt_tokens,
