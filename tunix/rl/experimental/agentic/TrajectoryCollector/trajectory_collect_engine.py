@@ -1,10 +1,9 @@
-# tunix/rl/multi_turn/execution/trajectory_collector.py
 import asyncio
 import time
 from typing import Any, Callable, Dict, Optional, Tuple, List, AsyncGenerator
 
-from tunix.rl.agentic.agents.base_agent import BaseAgent, Trajectory
-from tunix.rl.agentic.environments.base_environment import BaseEnv
+from tunix.rl.experimental.agentic.agents.base_agent import BaseAgent, Trajectory
+from tunix.rl.experimental.agentic.environments.base_environment import BaseEnv
 
 
 class TrajectoryCollectEngine:

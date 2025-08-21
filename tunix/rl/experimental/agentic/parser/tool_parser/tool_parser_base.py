@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Literal
 from dataclasses import dataclass
 import json
-from tunix.rl.agentic.tools.base_tool import BaseTool
+from tunix.rl.experimental.agentic.tools.base_tool import BaseTool
 
 @dataclass
 class ToolCall:
