@@ -28,6 +28,8 @@ Tunix is still under development, here's a glimpse of the current features:
 * **Reinforcement Learning (RL):**
     * Group Relative Policy Optimization (GRPO)
     * Direct Preference Optimization (DPO)
+    * Proximal Policy Optimization (PPO)
+    * token-level Group Sequence Policy Optimization (GSPO-token)
 * **Knowledge Distillation:**
     * Logit Strategy: A classic approach where the student learns to match the teacher's output probability distribution.
     * Attention Transfer & Projection Strategies: Methods to align the attention mechanisms between the student and teacher models.
