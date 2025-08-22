@@ -15,33 +15,52 @@ logger = logging.getLogger(__name__)
 
 class ToolAgent(LLMBaseAgent):
     """
-    An Agent implementation that supports tool usage, conforming to the LLMBaseAgent abstract interface.
-    Supports injecting tool_map and parsing with a specified parser.
+    Agent implementation that supports tool usage within the LLMBaseAgent framework.
+    
+    This agent extends the base agent functionality to enable structured tool calling
+    capabilities. It manages a collection of tools through a ToolManager, parses LLM
+    responses to extract tool calls using configurable parsers, and maintains conversation
+    context across multi-turn interactions with both the environment and tool systems.
+    
+    The agent automatically handles tool call formatting, response parsing, and fallback
+    mechanisms when tool parsing fails. It supports dependency injection of custom
+    tool sets and parser implementations for maximum flexibility.
     """
 
     def __init__(
         self,
         system_prompt: str,
-        parser_name: str = "qwen",
+        model_parser_name: str = "qwen",
         tool_map: dict[str, type[BaseTool]] | None = None,
     ):
+        """
+        Initialize the ToolAgent with system prompt, parser, and tool configuration.
+        
+        Args:
+            system_prompt (str): Base system prompt that defines the agent's behavior
+                and instructions. Will be combined with auto-generated tool documentation.
+            model_parser_name (str): Name of the tool parser to use for extracting tool calls
+                from LLM responses. Must be registered in the tool parser registry.
+            tool_map (dict[str, type[BaseTool]] | None): Mapping of tool names to their
+                implementation classes. If None, agent will operate without tools.
+        """
         self.system_prompt = system_prompt
 
-        # Tool manager (Router)
+        # Tool management system for routing and executing tool calls
         self.tool_manager = ToolManager(tool_map=tool_map or {})
 
-        # Parser (converts LLM responses to tool calls)
-        parser_cls: type[ToolParser] = get_tool_parser(parser_name)
+        # Parser component for converting LLM responses to structured tool calls
+        parser_cls: type[ToolParser] = get_tool_parser(model_parser_name)
         self.tool_parser = parser_cls()
         
-        # Build tools prompt: inject JSON Schema
+        # Generate tool documentation by injecting JSON Schema into parser template
         tools_json = json.dumps(self.tool_manager.json, indent=2)
         self.tools_prompt = self.tool_parser.get_tool_prompt(tools_json)
         
-        # Internal state
+        # Internal state management
         self._trajectory = Trajectory()
         self._messages: list[dict[str, Any]] = []
-        self._obs_cache = None  # Caches the last observation
+        self._obs_cache = None  # Caches the last observation for step recording
 
         self.reset()
 
@@ -51,10 +70,28 @@ class ToolAgent(LLMBaseAgent):
 
     @property
     def chat_completions(self) -> list[dict[str, str]]:
+        """
+        Get the current conversation context for LLM inference.
+        
+        Returns the complete message history including system prompt with tool
+        documentation, user inputs, assistant responses, and tool call results.
+        
+        Returns:
+            list[dict[str, str]]: Messages in OpenAI Chat Completions format
+        """
         return self._messages
 
     @property
     def trajectory(self) -> Trajectory:
+        """
+        Get the complete trajectory for the current episode.
+        
+        Contains the full sequence of interaction steps including tool calls,
+        environment responses, and performance metrics for analysis and storage.
+        
+        Returns:
+            Trajectory: Complete episode trace with all steps and metadata
+        """
         return self._trajectory
 
     # ─────────────────────────────────────────────────────────────
@@ -62,7 +99,21 @@ class ToolAgent(LLMBaseAgent):
     # ─────────────────────────────────────────────────────────────
 
     def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **kwargs):
-        """Write observation / reward and update context"""
+        """
+        Process environment feedback and update conversation context.
+        
+        Handles different observation formats including structured tool outputs
+        and plain text responses. Updates the current step with environment
+        feedback and converts observations to appropriate message format.
+        
+        Args:
+            observation (Any): Environment response - can be dict with tool_outputs,
+                dict with question field, or plain string
+            reward (float): Numerical reward signal from environment
+            done (bool): Episode termination flag
+            info (dict): Additional environment metadata
+            **kwargs: Extended parameters for future compatibility
+        """
         step = self.get_current_state()
         if step:
             step.observation = observation
@@ -70,12 +121,13 @@ class ToolAgent(LLMBaseAgent):
             step.done = done
             step.info = info or {}
 
-        # Cache the observation for next round of generation
+        # Cache observation for inclusion in next step record
         self._obs_cache = observation
 
-        # Convert to messages
+        # Convert observation to appropriate message format for conversation context
         if isinstance(observation, dict):
             if "tool_outputs" in observation:
+                # Handle structured tool execution results
                 for call_id, output in observation["tool_outputs"].items():
                     self._messages.append({
                         "role": "user",
@@ -83,11 +135,13 @@ class ToolAgent(LLMBaseAgent):
                         "content": "Tool returned result: " + output,
                     })
             elif "question" in observation:
+                # Handle question-based task inputs
                 self._messages.append({
                     "role": "user",
                     "content": observation["question"],
                 })
         elif isinstance(observation, str):
+            # Handle plain text observations
             self._messages.append({"role": "user", "content": observation})
 
     # ─────────────────────────────────────────────────────────────
@@ -95,14 +149,28 @@ class ToolAgent(LLMBaseAgent):
     # ─────────────────────────────────────────────────────────────
 
     def update_from_model(self, response: str, **kwargs) -> Action:
-        """Parse model output, construct Action, and record Step"""
+        """
+        Parse LLM response to extract tool calls and create structured action.
+        
+        Attempts to parse the model response for tool calls using the configured
+        parser. If parsing fails or no tools are detected, falls back to a
+        'finish' function call with the raw response. Records the complete
+        interaction step in the trajectory.
+        
+        Args:
+            response (str): Raw text output from the language model
+            **kwargs: Additional model response metadata
+            
+        Returns:
+            Action: Structured action containing tool calls ready for environment execution
+        """
         try:
             tool_calls = self.tool_parser.parse(response)
         except Exception as e:
             logger.warning(f"ToolParser failed: {e}")
             tool_calls = []
 
-        # Fallback: no tool call → use finish function
+        # Fallback mechanism: if no tool calls detected, use finish function
         if not tool_calls:
             tool_calls_dict = [{
                 "id": str(uuid.uuid4()),
@@ -115,6 +183,7 @@ class ToolAgent(LLMBaseAgent):
                 }
             }]
         else:
+            # Convert parsed tool calls to standard format
             tool_calls_dict = []
             for tool_call in tool_calls:
                 args = tool_call.arguments
@@ -129,10 +198,10 @@ class ToolAgent(LLMBaseAgent):
                     }
                 })
 
-        # Append assistant's response
+        # Add assistant's response to conversation history
         self._messages.append({"role": "assistant", "content": response})
 
-        # Record Step
+        # Record complete step with conversation context and parsed action
         step = Step(
             chat_completions=copy.deepcopy(self._messages),
             model_response=response,
@@ -148,6 +217,13 @@ class ToolAgent(LLMBaseAgent):
     # ─────────────────────────────────────────────────────────────
 
     def reset(self):
+        """
+        Reset agent state for a new episode.
+        
+        Clears the trajectory history, message context, and observation cache.
+        Reinitializes the conversation with the system prompt combined with
+        tool documentation to prepare for fresh interaction sequence.
+        """
         self._trajectory = Trajectory()
         self._obs_cache = None
         self._messages = [{

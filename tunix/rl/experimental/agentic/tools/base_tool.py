@@ -5,20 +5,54 @@ from typing import Any, Optional
 
 @dataclass
 class ToolCall:
-    """Represents a single tool call with function name and arguments."""
+    """
+    Represents a single tool invocation request.
+    
+    Contains the function name and arguments needed to execute a specific
+    tool. This standardized format enables consistent tool calling across
+    different agents and environments.
+    
+    Attributes:
+        name (str): The name of the tool function to invoke
+        arguments (dict[str, Any]): Key-value pairs of parameters to pass to the tool
+    """
     name: str
     arguments: dict[str, Any]
 
 
 @dataclass
 class ToolOutput:
-    """Standardized output of a tool call."""
+    """
+    Standardized container for tool execution results.
+    
+    Provides a unified interface for tool outputs that can handle successful
+    results, errors, and metadata. The flexible output field accommodates
+    various data types while maintaining consistent error handling.
+    
+    Attributes:
+        name (str): Name of the tool that produced this output
+        output (Optional[str | list | dict]): The tool's result data.
+            Can be string, structured data, or None for no output.
+        error (Optional[str]): Error message if tool execution failed.
+            None indicates successful execution.
+        metadata (Optional[dict]): Additional information about the execution
+            such as timing, confidence scores, or debug data.
+    """
     name: str
     output: Optional[str | list | dict] = None
     error: Optional[str] = None
     metadata: Optional[dict] = None
 
     def __repr__(self) -> str:
+        """
+        Generate human-readable string representation of the tool output.
+        
+        Prioritizes error messages, then formats structured data as JSON,
+        with fallback to string conversion for other types.
+        
+        Returns:
+            str: Formatted representation suitable for display or logging
+        """
         if self.error:
             return f"Error: {self.error}"
         if self.output is None:
@@ -31,14 +65,27 @@ class ToolOutput:
 
 class BaseTool(ABC):
     """
-    Abstract base class for all tools. Each tool should implement either `apply` or `apply_async`.
+    Abstract base class defining the interface for all agent tools.
+    
+    Tools are reusable components that extend agent capabilities by providing
+    access to external systems, computations, or data sources. This base class
+    establishes the contract for tool registration, execution, and metadata
+    that enables dynamic tool discovery and integration.
+    
+    Subclasses must implement the tool's specific functionality through either
+    synchronous or asynchronous execution methods, along with JSON schema
+    definitions for parameter validation and documentation.
     """
 
     def __init__(self, name: str, description: str):
         """
+        Initialize the base tool with identification and documentation.
+        
         Args:
-            name: Tool name for referencing in tool calls.
-            description: Tool usage description.
+            name (str): Unique identifier for the tool, used in tool calls
+                and registration. Should be descriptive and follow naming conventions.
+            description (str): Human-readable explanation of the tool's purpose
+                and functionality, used for agent understanding and documentation.
         """
         self.name = name
         self.description = description
@@ -47,37 +94,46 @@ class BaseTool(ABC):
     @abstractmethod
     def json(self) -> dict[str, Any]:
         """
-        Return OpenAI-compatible function metadata for tool registration.
-
-        Should follow format:
-        {
-            "type": "function",
-            "function": {
-                "name": "tool_name",
-                "description": "What it does...",
-                "parameters": {
-                    "type": "object",
-                    "properties": { ... },
-                    "required": [ ... ]
+        Generate OpenAI-compatible function metadata for tool registration.
+        
+        Provides the schema definition needed for LLM function calling systems
+        to understand the tool's interface, parameters, and usage constraints.
+        
+        Returns:
+            dict[str, Any]: Tool metadata in OpenAI function calling format:
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "tool_name",
+                        "description": "What the tool does...",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { ... },
+                            "required": [ ... ]
+                        }
+                    }
                 }
-            }
-        }
         """
         pass
 
     def to_mcp_json(self) -> dict[str, Any]:
         """
-        Return MCP (Model Context Protocol) compliant tool registration.
-
-        Format:
-        {
-          "type": "function",
-          "function": {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.inputSchema,
-          }
-        }
+        Generate MCP (Model Context Protocol) compliant tool registration.
+        
+        Converts the tool definition to the standardized MCP format for
+        cross-platform tool discovery and integration. Uses the inputSchema
+        attribute if available, otherwise falls back to empty schema.
+        
+        Returns:
+            dict[str, Any]: MCP-formatted tool metadata:
+                {
+                    "type": "function",
+                    "function": {
+                        "name": self.name,
+                        "description": self.description,
+                        "parameters": self.inputSchema,
+                    }
+                }
         """
         return {
             "type": "function",
@@ -89,14 +145,57 @@ class BaseTool(ABC):
         }
 
     def apply(self, **kwargs) -> ToolOutput:
-        """Synchronous tool call. Can be overridden."""
+        """
+        Execute the tool synchronously with the provided arguments.
+        
+        Default implementation raises NotImplementedError. Subclasses should
+        override either this method or apply_async() to provide the tool's
+        core functionality.
+        
+        Args:
+            **kwargs: Tool-specific parameters as defined in the JSON schema
+            
+        Returns:
+            ToolOutput: Standardized result containing output, error, or metadata
+            
+        Raises:
+            NotImplementedError: If neither apply() nor apply_async() is implemented
+        """
         raise NotImplementedError("Tool must implement either `apply()` or `apply_async()`")
 
     async def apply_async(self, **kwargs) -> ToolOutput:
-        """Async version of tool call. Can be overridden."""
+        """
+        Execute the tool asynchronously with the provided arguments.
+        
+        Default implementation delegates to the synchronous apply() method.
+        Tools that perform I/O operations or long-running computations should
+        override this method to provide true asynchronous execution.
+        
+        Args:
+            **kwargs: Tool-specific parameters as defined in the JSON schema
+            
+        Returns:
+            ToolOutput: Standardized result containing output, error, or metadata
+        """
         return self.apply(**kwargs)
 
     def __call__(self, *args, use_async=False, **kwargs):
+        """
+        Convenience method for tool invocation with execution mode selection.
+        
+        Provides a unified interface for calling tools either synchronously
+        or asynchronously based on the use_async flag. Useful for generic
+        tool execution systems that need runtime execution mode selection.
+        
+        Args:
+            *args: Positional arguments passed to the execution method
+            use_async (bool): Whether to use asynchronous execution
+            **kwargs: Keyword arguments passed to the execution method
+            
+        Returns:
+            ToolOutput or Coroutine: Direct result if synchronous,
+                coroutine object if asynchronous
+        """
         if use_async:
             return self.apply_async(*args, **kwargs)
         return self.apply(*args, **kwargs)

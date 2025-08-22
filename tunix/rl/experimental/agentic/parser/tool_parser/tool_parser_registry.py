@@ -5,7 +5,6 @@ from tunix.rl.experimental.agentic.parser.tool_parser.gemini_parser import Gemin
 _PARSER_REGISTRY = {
     "qwen": QwenToolParser,
     "gemini": GeminiToolParser
-    # "openai": OpenAIFunctionToolParser,
 }
 
 

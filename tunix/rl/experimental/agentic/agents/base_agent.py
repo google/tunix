@@ -1,90 +1,60 @@
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
 from typing import Any
 import asyncio
 
-# ────────────────────────────────────────────────────────────────
-# Basic Data Structures
-# ────────────────────────────────────────────────────────────────
-
-@dataclass
-class Action:
-    # Container for structured action; content depends on the specific environment
-    action: Any = None
-
-@dataclass
-class Step:
-    # The conversational context sent to the LLM, equivalent to OpenAI Chat API's `messages`
-    chat_completions: list[dict[str, str]] = field(default_factory=list)
-
-    # The reasoning or chain-of-thought notes inferred by the Agent at this step
-    thought: str = ""
-
-    # Structured action parsed from LLM output (e.g., tool invocation parameters)
-    action: Action = None
-
-    # Observation returned by the environment after executing the action (could be text, JSON, image, etc.)
-    observation: Any = None
-
-    # Raw text response from the LLM
-    model_response: str = ""
-
-    # Additional metadata: timestamp, debugging info, trace id, etc.
-    info: dict = field(default_factory=dict)
-
-    # Immediate reward for this step, calculated by the environment
-    reward: float = 0.0
-
-    # Whether the task is terminated (True means the episode is over)
-    done: bool = False
-
-    # Discounted return from this step to the end (Monte Carlo return), filled in by the engine
-    mc_return: float = 0.0
-
-
-@dataclass
-class Trajectory:
-    # Description of the current task or episode (question, initial prompt, etc.)
-    task: Any = None
-
-    # List of Steps stacked in temporal order under this task
-    steps: list[Step] = field(default_factory=list)
-
-    # Total reward of the entire episode (either accumulated or provided at once by the environment)
-    reward: float = 0.0
-
-    def to_dict(self):
-        """Convert to dictionary format for serialization or logging"""
-        return {
-            "steps": [asdict(step) for step in self.steps],
-            "reward": float(self.reward),
-        }
-
-
-# ────────────────────────────────────────────────────────────────
-# Abstract Base Class for Agent
-# ────────────────────────────────────────────────────────────────
+from tunix.rl.experimental.agentic.agents.agent_types import Action, Step, Trajectory
 
 class LLMBaseAgent(ABC):
-    # —— Property Interface ————————————————————————————————
+    """
+    Abstract base class for Large Language Model powered agents.
+    
+    This class defines the standard interface for agents that can:
+    - Maintain conversation history and state
+    - Generate structured actions from LLM responses  
+    - Process environment feedback
+    - Support both synchronous and asynchronous operation
+    
+    Subclasses must implement the core interaction methods while this base
+    class provides common utilities and enforces the interface contract.
+    """
+
+    # ──────────────────────────────────────────────────────────────
+    # State Access Properties
+    # ──────────────────────────────────────────────────────────────
 
     @property
     def chat_completions(self) -> list[dict[str, str]]:
         """
-        Returns the list of messages to send to the LLM.
-        Subclasses typically construct this from internal state (e.g., history, tool calls).
+        Get the current conversation context for the LLM.
+        
+        Returns the list of messages that should be sent to the language model
+        for the next inference call. Subclasses typically construct this from
+        internal state including conversation history, system prompts, and
+        tool call contexts.
+        
+        Returns:
+            list[dict[str, str]]: Messages in OpenAI Chat Completions format
+                Each dict should have 'role' and 'content' keys at minimum
         """
         return []
 
     @property
     def trajectory(self) -> Trajectory:
         """
-        Returns the full trajectory object of the current task.
-        The engine uses this object to read/write Steps.
+        Get the complete trajectory for the current task/episode.
+        
+        The trajectory object serves as the primary data structure that the
+        execution engine uses to read agent state and append new Steps.
+        Subclasses should maintain this as their canonical episode record.
+        
+        Returns:
+            Trajectory: Complete episode trace including all steps and metadata
         """
         return Trajectory()
 
-    # —— Interaction with Environment ————————————————————————————————
+    # ──────────────────────────────────────────────────────────────
+    # Environment Interaction Interface
+    # ──────────────────────────────────────────────────────────────
 
     @abstractmethod
     def update_from_env(
@@ -94,52 +64,119 @@ class LLMBaseAgent(ABC):
         done: bool,
         info: dict,
         **kwargs,
-    ):
+    ) -> None:
         """
-        Called after one step of environment execution, used to:
-          1. Write observation / reward into the latest Step
-          2. Update internal state (e.g., memory, tool cache)
+        Process feedback from environment after action execution.
+        
+        Called by the execution engine after the environment processes an action.
+        The agent should use this information to:
+        1. Update the current Step with observation and reward data
+        2. Update any internal state (memory, caches, belief state, etc.)
+        3. Prepare for the next interaction cycle if episode continues
+        
+        Args:
+            observation (Any): Environment's response to the executed action
+                Can be text, structured data, images, or any environment-specific format
+            reward (float): Numerical reward signal for the action taken
+            done (bool): Whether the episode has terminated (success, failure, or timeout)
+            info (dict): Additional environment metadata (debug info, metrics, etc.)
+            **kwargs: Additional parameters for extensibility
         """
         ...
 
-    async def update_from_env_async(self, *args, **kwargs):
+    async def update_from_env_async(self, *args, **kwargs) -> None:
+        """
+        Asynchronous version of update_from_env.
+        
+        Wraps the synchronous update_from_env method in an executor to avoid
+        blocking the event loop. Override this method if the agent needs
+        to perform actual async I/O operations during environment updates.
+        
+        Args:
+            *args: Positional arguments passed to update_from_env
+            **kwargs: Keyword arguments passed to update_from_env
+        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.update_from_env, *args, **kwargs)
 
-
-    # —— Interaction with Model ————————————————————————————————
+    # ──────────────────────────────────────────────────────────────
+    # Model Interaction Interface
+    # ──────────────────────────────────────────────────────────────
 
     @abstractmethod
     def update_from_model(self, response: str, **kwargs) -> Action:
         """
-        Called after the LLM generates a response:
-          1. Parse response → structured Action
-          2. Write response / thought into the latest Step
-        The returned Action will be executed in the environment.
+        Process LLM response and extract structured action.
+        
+        Called by the execution engine after the language model generates a response.
+        The agent should:
+        1. Parse the raw response text to extract reasoning and action components
+        2. Create a structured Action object that the environment can execute
+        3. Update the current Step with response text and extracted thought process
+        
+        Args:
+            response (str): Raw text output from the language model
+            **kwargs: Additional parameters (model metadata, generation settings, etc.)
+            
+        Returns:
+            Action: Structured action object ready for environment execution
+                The action content should match the expected format for the target environment
         """
         ...
 
-    async def update_from_model_async(self, *args, **kwargs):
+    async def update_from_model_async(self, *args, **kwargs) -> Action:
+        """
+        Asynchronous version of update_from_model.
+        
+        Wraps the synchronous update_from_model method in an executor to avoid
+        blocking the event loop. Override this method if the agent needs
+        to perform actual async I/O operations during response processing.
+        
+        Args:
+            *args: Positional arguments passed to update_from_model
+            **kwargs: Keyword arguments passed to update_from_model
+            
+        Returns:
+            Action: Structured action object from update_from_model
+        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.update_from_model, *args, **kwargs)
 
-    # —— Lifecycle Control ————————————————————————————————
+    # ──────────────────────────────────────────────────────────────
+    # Lifecycle Management
+    # ──────────────────────────────────────────────────────────────
 
     @abstractmethod
-    def reset(self):
+    def reset(self) -> None:
         """
-        Called at the beginning of a new episode to clear historical state:
-          - Reset trajectory
-          - Reset internal caches
+        Reset agent state for a new episode.
+        
+        Called at the beginning of each new task/episode to ensure clean state.
+        The agent should:
+        1. Clear or reset the trajectory object
+        2. Reset any internal caches, memory, or accumulated state
+        3. Prepare for a fresh interaction sequence
+        
+        This method is critical for multi-episode training or evaluation to
+        prevent information leakage between different tasks.
         """
         ...
 
-    # —— Debugging Helper ————————————————————————————————
+    # ──────────────────────────────────────────────────────────────
+    # Debugging and Introspection
+    # ──────────────────────────────────────────────────────────────
 
     def get_current_state(self) -> Step | None:
         """
-        For debugging: directly access the latest Step.
-        Returns None if no Step has been generated yet.
+        Get the most recent step for debugging and introspection.
+        
+        Provides direct access to the latest Step object in the trajectory
+        for debugging, logging, or real-time monitoring purposes. Useful
+        for understanding agent state during execution or post-mortem analysis.
+        
+        Returns:
+            Step | None: The most recently created Step object, or None if
+                no steps have been generated yet in the current episode
         """
         if not self.trajectory.steps:
             return None

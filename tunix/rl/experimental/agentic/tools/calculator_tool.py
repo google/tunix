@@ -3,11 +3,28 @@ from tunix.rl.experimental.agentic.tools.base_tool import BaseTool, ToolOutput
 
 class CalculatorTool(BaseTool):
     """
-    A basic calculator that supports addition, subtraction, multiplication, and division.
+    A basic calculator tool that performs arithmetic operations.
+    
+    Supports the four fundamental arithmetic operations: addition, subtraction,
+    multiplication, and division. Provides proper error handling for edge cases
+    such as division by zero and invalid operators. Returns numerical results
+    in a standardized ToolOutput format for consistent integration with agent systems.
     """
 
     @property
     def json(self) -> dict:
+        """
+        Generate OpenAI-compatible function schema for the calculator tool.
+        
+        Defines the tool's interface with strongly typed parameters and
+        enumerated operator values to ensure valid inputs. The schema
+        enables LLMs to understand how to properly invoke the calculator
+        with appropriate arguments and constraints.
+        
+        Returns:
+            dict: OpenAI function calling format schema with parameter
+                specifications, types, and usage constraints
+        """
         return {
             "type": "function",
             "function": {
@@ -35,7 +52,23 @@ class CalculatorTool(BaseTool):
             }
         }
 
-    def forward(self, a: float, b: float, op: str) -> ToolOutput:
+    def apply(self, a: float, b: float, op: str) -> ToolOutput:
+        """
+        Execute the arithmetic operation with the provided operands and operator.
+        
+        Performs the requested calculation while handling edge cases and potential
+        errors. Validates the operator and provides specific error messages for
+        common failure scenarios like division by zero.
+        
+        Args:
+            a (float): The first operand for the arithmetic operation
+            b (float): The second operand for the arithmetic operation
+            op (str): The arithmetic operator ("+", "-", "*", "/")
+        
+        Returns:
+            ToolOutput: Result containing either the calculated value or
+                detailed error information if the operation fails
+        """
         try:
             if op == "+":
                 result = a + b

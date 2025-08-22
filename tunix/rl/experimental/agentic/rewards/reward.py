@@ -1,11 +1,24 @@
 from typing import Any, Dict, Callable
 from tunix.rl.experimental.agentic.rewards.reward_types import RewardOutput
 
-# ---------- ① Registry ----------
 _REGISTRY: Dict[str, Callable[[Dict, str], RewardOutput]] = {}
 
 def register(name: str):
-    """Decorator: register the function into the registry"""
+    """
+    Decorator for registering reward functions into the global registry.
+    
+    Enables reward functions to be discovered and instantiated by name,
+    supporting configuration-driven reward selection in experimental settings.
+    
+    Args:
+        name (str): Unique identifier for the reward function
+        
+    Returns:
+        Callable: The decorated function, registered in the system
+        
+    Raises:
+        ValueError: If a reward function with the given name already exists
+    """
     def _wrap(fn):
         if name in _REGISTRY:
             raise ValueError(f"Reward {name} already registered.")
@@ -13,51 +26,86 @@ def register(name: str):
         return fn
     return _wrap
 
+def unregister(name: str) -> bool:
+    """
+    Remove a reward function from the registry.
+    
+    Enables cleanup of registered functions, particularly useful for
+    unit testing to prevent state leakage between test cases.
+    
+    Args:
+        name (str): Name of the reward function to remove
+        
+    Returns:
+        bool: True if the function was removed, False if it wasn't registered
+    """
+    if name in _REGISTRY:
+        del _REGISTRY[name]
+        return True
+    return False
+
 def get_reward_fn(name: str):
+    """
+    Retrieve a registered reward function by name.
+    
+    Args:
+        name (str): The registered name of the reward function
+        
+    Returns:
+        Callable: The reward function implementation
+    """
     return _REGISTRY[name]
-
-# ---------- ② Built-in reward strategies ----------
-
-# task: Dict[str, Any]
-# ---------------------
-# A flexible container to describe one tool execution task.
-# Typically includes:
-#   - "id":        unique identifier for the task (str)
-#   - "name":      tool name to call (str)
-#   - "arguments": parameters for the tool (dict)
-#   - "metadata":  optional info such as user, priority, timestamp (dict/any)
-#
-# Purpose:
-#   • Provide a standard, extensible way to describe tool calls
-#   • Align with MCP / RLLM task format (JSON-like schema)
-#   • Allow attaching extra context (e.g., retry count, timeout) 
-#     without changing the method signature
-#
-# Example:
-# task = {
-#     "id": "12345",
-#     "name": "search",
-#     "arguments": {"query": "weather in SF"},
-#     "metadata": {"priority": "high"}
-# }
 
 @register("zero")
 def zero_reward(task: Dict[str, Any], action: str) -> RewardOutput:
-    """Always returns 0 score, used as a placeholder"""
+    """
+    Baseline reward function that always returns zero.
+    
+    Used as a control baseline in experiments or placeholder during development.
+    
+    Args:
+        task (Dict[str, Any]): Task context (unused)
+        action (str): Agent's response (unused)
+        
+    Returns:
+        RewardOutput: Zero reward with empty metadata
+    """
     return RewardOutput(0.0, {})
 
 @register("exact_match")
 def exact_match(task: Dict[str, Any], action: str) -> RewardOutput:
-    """Returns 1.0 if the answer exactly matches ground_truth, otherwise 0"""
+    """
+    Binary reward based on exact string matching with ground truth.
+    
+    Returns 1.0 for perfect matches after whitespace normalization,
+    0.0 for any deviation. Suitable for deterministic answer tasks.
+    
+    Args:
+        task (Dict[str, Any]): Task context containing 'ground_truth' field
+        action (str): Agent's response to evaluate
+        
+    Returns:
+        RewardOutput: Binary reward (1.0 or 0.0) with match status
+    """
     truth = str(task.get("ground_truth", "")).strip()
     score = 1.0 if action.strip() == truth else 0.0
     return RewardOutput(score, {"exact_match": score})
 
-# ---------- ③ Aggregator (Optional) ----------
 def combine_rewards(weights: Dict[str, float]) -> Callable[[Dict, str], RewardOutput]:
     """
-    Linearly combines multiple sub-reward strategies according to weights.
-    Example: {"exact_match": 1.0, "zero": 0.0}
+    Create a composite reward function from multiple registered functions.
+    
+    Performs weighted linear combination of multiple reward components,
+    enabling complex reward engineering through composition.
+    
+    Args:
+        weights (Dict[str, float]): Mapping from reward function names to weights
+        
+    Returns:
+        Callable: Composite reward function that computes weighted sum
+        
+    Example:
+        composite_fn = combine_rewards({"exact_match": 1.0, "zero": 0.0})
     """
     def _fn(task: Dict[str, Any], action: str):
         total, meta = 0.0, {}
@@ -72,7 +120,19 @@ def combine_rewards(weights: Dict[str, float]) -> Callable[[Dict, str], RewardOu
 # -------- Example Reward Function --------
 @register("is_two")
 def is_two_reward(task: Dict[str, Any], action: str) -> RewardOutput:
-    """Returns 1.0 if the action equals 2 (either number or string), otherwise 0.0"""
+    """
+    Specialized reward function that checks if action represents the number 2.
+    
+    Attempts to parse the action as numeric value and returns 1.0 if it equals 2.0,
+    otherwise returns 0.0. Handles both string and numeric representations.
+    
+    Args:
+        task (Dict[str, Any]): Task context (unused)
+        action (str): Agent's response to evaluate
+        
+    Returns:
+        RewardOutput: Binary reward with parsing status in metadata
+    """
     try:
         value = float(action.strip())
         score = 1.0 if value == 2.0 else 0.0
