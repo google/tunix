@@ -65,7 +65,7 @@ class Trajectory:
 # Abstract Base Class for Agent
 # ────────────────────────────────────────────────────────────────
 
-class BaseAgent(ABC):
+class LLMBaseAgent(ABC):
     # —— Property Interface ————————————————————————————————
 
     @property
