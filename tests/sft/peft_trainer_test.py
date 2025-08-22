@@ -160,7 +160,10 @@ class PeftTrainerTest(parameterized.TestCase):
     expected_training_hooks_calls = (
         [mock.call.on_train_start(trainer)]
         + [mock.call.on_train_step_start(trainer) for _ in range(4)]
-        + [mock.call.on_train_step_end(trainer, mock.ANY) for _ in range(4)]
+        + [
+            mock.call.on_train_step_end(trainer, mock.ANY, mock.ANY)
+            for _ in range(4)
+        ]
         + [mock.call.on_eval_step_start(trainer) for _ in range(4)]
         + [mock.call.on_eval_step_end(trainer, mock.ANY) for _ in range(2)]
         + [mock.call.on_train_end(trainer)]

@@ -544,7 +544,9 @@ class PeftTrainer:
               save_only_lora_params=self._lora_enabled,
           )
           if self.training_hooks:
-            self.training_hooks.on_train_step_end(self, train_loss)
+            self.training_hooks.on_train_step_end(
+                self, train_loss, step_time_delta
+            )
         self._prof.maybe_deactivate(self._train_steps)
 
     self._throttler.wait_for_all()

@@ -40,7 +40,10 @@ class TrainingHooks(abc.ABC):
 
   @abc.abstractmethod
   def on_train_step_end(
-      self, train_ctx: "PeftTrainer.PeftTrainer", train_loss: float
+      self,
+      train_ctx: "PeftTrainer.PeftTrainer",
+      train_loss: float,
+      step_time: float,
   ):
     """Called at the end of a training step."""
     pass
