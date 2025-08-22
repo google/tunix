@@ -140,6 +140,13 @@ class ToolAgent(LLMBaseAgent):
                     "role": "user",
                     "content": observation["question"],
                 })
+            else:
+                # Handle unexpected dict observation formats
+                logger.warning(f"Unknown dict observation format: {observation}")
+                self._messages.append({
+                    "role": "user",
+                    "content": f"Environment response: {json.dumps(observation)}"
+                })
         elif isinstance(observation, str):
             # Handle plain text observations
             self._messages.append({"role": "user", "content": observation})
