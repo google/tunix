@@ -27,7 +27,6 @@ from tunix.generate import utils
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
 from vllm import LLM
-from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 
 
@@ -241,7 +240,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
     outputs = self.llm.generate(
-        prompts=[TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
+        prompts=None,
+        prompt_token_ids=prompt_ids,
         sampling_params=self.sampling_params,
         use_tqdm=True,
     )

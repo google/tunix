@@ -61,9 +61,6 @@ class RolloutConfig:
   https://docs.vllm.ai/en/v0.6.4/dev/sampling_params.html
   """
 
-  # Number of output sequences to return for the given prompt.
-  n: int = 1
-
   # Maximum number of tokens to generate per output sequence
   max_tokens_to_generate: int = 64
 
