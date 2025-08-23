@@ -176,18 +176,25 @@ class VllmSamplerTest(absltest.TestCase):
         echo=False,
         pad_output=True,  # Use padding for output
     )
-
-    vl_sampler = vllm_sampler.VllmSampler(
-        tokenizer=model_tokenizer,
-        mesh=self.mesh,
-        max_model_len=512,  # Set to 1024 for vLLM
+    
+    vllm_config = vllm_sampler.VllmConfig(
         model_version=self.model_path,
+        max_model_len=512,  # Set to 1024 for vLLM
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type=None,
         mapping_config=vllm_sampler.MappingConfig(
             to_hf_mappings=tunix_model.to_hf_mappings(),
             to_hf_transpose_keys=tunix_model.to_hf_transpose_keys(),
             lora_to_hf_mappings=tunix_model.lora_to_hf_mappings(),
             lora_config=args["additional_config"]["lora_config"],
         ),
+    )
+
+    vl_sampler = vllm_sampler.VllmSampler(
+        tokenizer=model_tokenizer,
+        config=vllm_config,
     )
     state = nnx.state(tunix_model)
     vl_sampler.load_checkpoint(state)
@@ -209,7 +216,7 @@ class VllmSamplerTest(absltest.TestCase):
     print("-" * 50)
     print(f"Vanilla Generated text: {vanilla_output.text}")
     self.assertEqual(
-        vanilla_output.text, ["Nice to meet you. What's your name?", "Paris."]
+        vanilla_output.text, ["Nice to meet you. What's your name?", "The capital of France is Paris."]
     )
 
     print("-" * 50)
