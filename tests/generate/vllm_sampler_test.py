@@ -176,10 +176,10 @@ class VllmSamplerTest(absltest.TestCase):
         echo=False,
         pad_output=True,  # Use padding for output
     )
-    
+
     vllm_config = vllm_sampler.VllmConfig(
         model_version=self.model_path,
-        max_model_len=512,  # Set to 1024 for vLLM
+        max_model_len=512,
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
@@ -216,7 +216,11 @@ class VllmSamplerTest(absltest.TestCase):
     print("-" * 50)
     print(f"Vanilla Generated text: {vanilla_output.text}")
     self.assertEqual(
-        vanilla_output.text, ["Nice to meet you. What's your name?", "The capital of France is Paris."]
+        vanilla_output.text,
+        [
+            "Nice to meet you. What's your name?",
+            "The capital of France is Paris.",
+        ],
     )
 
     print("-" * 50)
