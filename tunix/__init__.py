@@ -22,6 +22,7 @@ from tunix.rl.dpo.dpo_trainer import DpoTrainer, DpoTrainingConfig
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner, RewardFn
 from tunix.rl.rl_cluster import ClusterConfig, RLCluster, RLTrainingConfig, Role
 from tunix.rl.rollout.base_rollout import RolloutConfig
+from tunix.sft.checkpoint_manager import CheckpointManager
 from tunix.sft.metrics_logger import MetricsLogger, MetricsLoggerOptions
 from tunix.sft.peft_trainer import PeftTrainer, TrainingConfig
 
