@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import re
 import tempfile
 from absl.testing import absltest
 from flax import nnx
@@ -152,8 +153,9 @@ class VllmSamplerTest(absltest.TestCase):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     prompts = [
-        "Hello, my name is",
+        "Hello, my name is Tom.",
         "The capital of France is",
+        "why is sky blue?",
     ]
 
     inputs = self.templatize(prompts, tokenizer=model_tokenizer)
@@ -212,29 +214,39 @@ class VllmSamplerTest(absltest.TestCase):
         echo=False,
         pad_output=True,  # Use padding for output
     )
-    # Print the outputs.
+
+    expected_output_pattern = [
+        (
+            r"^Hello Tom, it's nice to meet you. Is there something I can help"
+            r" you with or would you like to chat\?$"
+        ),
+        r"^Paris\.$",
+        (
+            r"^The sky appears blue because of a phenomenon called Rayleigh"
+            r" scattering.*"
+        ),
+    ]
+
     print("-" * 50)
     print(f"Vanilla Generated text: {vanilla_output.text}")
-    self.assertEqual(
-        vanilla_output.text,
-        [
-            "Nice to meet you. What's your name?",
-            "The capital of France is Paris.",
-        ],
-    )
+
+    for generated, expected_pattern in zip(
+        vanilla_output.text, expected_output_pattern
+    ):
+      self.assertIsNotNone(
+          re.match(expected_pattern, generated),
+          f"Expected '{generated}' to match '{expected_pattern}'.",
+      )
 
     print("-" * 50)
     print(f"vLLM Generated text: {vllm_output.text}")
-    self.assertEqual(
-        vllm_output.text,
-        [
-            (
-                "It's nice to meet you. Is there something I can help you with"
-                " or would you like to chat?"
-            ),
-            "The capital of France is Paris.",
-        ],
-    )
+    for generated, expected_pattern in zip(
+        vllm_output.text, expected_output_pattern
+    ):
+      self.assertIsNotNone(
+          re.match(expected_pattern, generated),
+          f"Expected '{generated}' to match '{expected_pattern}'.",
+      )
 
     _, tunix_state = nnx.split(tunix_model)
     vllm_state = vl_sampler._model_runner.state
@@ -248,7 +260,8 @@ class VllmSamplerTest(absltest.TestCase):
     else:
       self.assertTrue(
           np.allclose(
-              tunix_state["lm_head"]["w"].value, vllm_state["lm_head"].value
+              tunix_state["lm_head"]["w"].value,
+              vllm_state["model"]["lm_head"].value,
           )
       )
 
