@@ -44,6 +44,13 @@ from tunix.sft import peft_trainer
 ModelOrPath = Union[nnx.Module, str]
 
 
+class Mode(enum.Enum):
+  """Mode of RolloutConfig."""
+
+  TRAIN = "train"
+  EVAL = "eval"
+
+
 class Role(enum.Enum):
   """Role of the model."""
 
@@ -81,7 +88,8 @@ class ClusterConfig:
     rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm".
     offload_to_cpu: Whether to offload models to CPU at each step..
     training_config: RL training config.
-    rollout_config: Rollout config.
+    rollout_config: Rollout config. It may be different for different modes,
+      e.g. TRAIN vs EVAL.
     rollout_vllm_model_version: Model version for vllm rollout engine.
     rollout_vllm_lora_config: LoRA config for vllm rollout engine.
     rollout_vllm_hbm_utilization: The percentage of TPU/GPU HBM allocated the
@@ -97,7 +105,9 @@ class ClusterConfig:
   offload_to_cpu: bool = False
 
   training_config: RLTrainingConfig
-  rollout_config: base_rollout.RolloutConfig
+  rollout_config: (
+      dict[Mode, base_rollout.RolloutConfig] | base_rollout.RolloutConfig
+  )
 
   rollout_vllm_model_version: str = ""
   rollout_vllm_lora_config: Optional[dict[str, Any]] = None
@@ -244,6 +254,14 @@ class RLCluster:
         "vanilla",
         "vllm",
     ], f"Unsupported rollout engine: {self.cluster_config.rollout_engine}"
+    if isinstance(self.cluster_config.rollout_config, dict):
+      max_kv_cache_size = max(
+          self.cluster_config.rollout_config[Mode.TRAIN].kv_cache_size,
+          self.cluster_config.rollout_config[Mode.EVAL].kv_cache_size,
+      )
+    else:
+      max_kv_cache_size = self.cluster_config.rollout_config.kv_cache_size
+
     if self.cluster_config.rollout_engine == "vanilla":
       assert hasattr(
           self.rollout_actor, "config"
@@ -255,7 +273,7 @@ class RLCluster:
           self.rollout_actor,
           self.tokenizer,
           cache_config_or_size=base_rollout.CacheConfig(
-              cache_size=self.cluster_config.rollout_config.kv_cache_size,
+              cache_size=max_kv_cache_size,
               num_layers=self.rollout_actor.config.num_layers,
               num_kv_heads=self.rollout_actor.config.num_kv_heads,
               head_dim=self.rollout_actor.config.head_dim,
@@ -271,7 +289,7 @@ class RLCluster:
       self._rollout = vllm_rollout.VllmRollout(
           self.rollout_actor,
           self.tokenizer,
-          cache_config_or_size=self.cluster_config.rollout_config.kv_cache_size,
+          cache_config_or_size=max_kv_cache_size,
           mesh=self.r2m[Role.ROLLOUT],
           model_version=self.cluster_config.rollout_vllm_model_version,
           hbm_utilization=self.cluster_config.rollout_vllm_hbm_utilization,
@@ -420,11 +438,12 @@ class RLCluster:
       self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
-  def generate(self, prompts: list[str]):
+  def generate(self, prompts: list[str], mode: Mode = Mode.TRAIN):
     """Generates text from the given prompts.
 
     Args:
       prompts: A list of prompts to generate text from.
+      mode: The mode of rollout, either TRAIN or EVAL.
 
     Returns:
       A list of generated text.
@@ -434,9 +453,13 @@ class RLCluster:
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+      if isinstance(self.cluster_config.rollout_config, dict):
+        rollout_config = self.cluster_config.rollout_config[mode]
+      else:
+        rollout_config = self.cluster_config.rollout_config
       output = self.rollout.generate(
           prompts,
-          self.cluster_config.rollout_config,
+          rollout_config,
       )
       model = self.rollout.model()
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
