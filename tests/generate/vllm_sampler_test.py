@@ -235,7 +235,7 @@ class VllmSamplerTest(absltest.TestCase):
     ):
       self.assertIsNotNone(
           re.match(expected_pattern, generated),
-          f"Expected '{generated}' to match '{expected_pattern}'."
+          f"Expected '{generated}' to match '{expected_pattern}'.",
       )
 
     print("-" * 50)
@@ -245,7 +245,7 @@ class VllmSamplerTest(absltest.TestCase):
     ):
       self.assertIsNotNone(
           re.match(expected_pattern, generated),
-          f"Expected '{generated}' to match '{expected_pattern}'."
+          f"Expected '{generated}' to match '{expected_pattern}'.",
       )
 
     _, tunix_state = nnx.split(tunix_model)
