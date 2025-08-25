@@ -16,7 +16,10 @@
 
 import dataclasses
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from functools import partial
+import itertools
+import time
 
 from absl import logging
 import jax
@@ -29,11 +32,62 @@ from tunix.rl import reshard
 from vllm import LLM
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
+import multiprocessing
 
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
+def parallel_execute(
+    func: Callable,
+    data: List[Tuple[Any]],
+    num_processes: int = None
+) -> List[Any]:
+    """
+    Executes a function in parallel across multiple CPU cores using a process pool.
+
+    Args:
+        func: The function to be executed in parallel. This function should accept a single
+              argument.
+        data: A list of arguments to pass to the function. Each element in the list will
+              be processed by a separate worker process.
+        num_processes: The number of worker processes to use. If None, it defaults to the
+                       number of CPU cores on the machine.
+
+    Returns:
+        A list of results in the same order as the input data.
+    """
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        results = pool.starmap(func, data)
+    return results
+
+
+def detokenize(
+      input_string: str, request_output: RequestOutput, tokenizer, 
+  ) -> Tuple[List[str], List[float], List[int]]:
+    decoded_outputs = []
+    out_logprobs = []
+    out_tokens = []
+    for idx, single_output in enumerate(request_output.outputs):
+      # vLLM still returns 1 eos id even if we ask it to stop at eos.
+      if single_output.token_ids[-1] == tokenizer.eos_id():
+        single_output.token_ids = single_output.token_ids[:-1]
+        single_output.logprobs = single_output.logprobs[:-1]
+
+      out_tokens.append(single_output.token_ids)
+      decoded_outputs.append(
+          tokenizer.decode(single_output.token_ids)
+      )
+      logprobs = utils.get_logprobs_from_vllm_output(
+          single_output.token_ids, single_output.logprobs
+      )
+      out_logprobs.append(logprobs)
+      logging.debug(
+          "Prompt: %r\n\nGenerated text: %r\n\n ",
+          input_string,
+          decoded_outputs[idx][-1],
+      )
+    return decoded_outputs, out_logprobs, out_tokens
 
 @dataclasses.dataclass
 class MappingConfig:
@@ -245,9 +299,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params=self.sampling_params,
         use_tqdm=True,
     )
-    decoded_outputs, out_logprobs, out_tokens = self.detokenize(
-        input_strings, outputs
+    start = time.time()
+    # decoded_outputs, out_logprobs, out_tokens = self.detokenize(
+    #     input_strings, outputs
+    # )
+    out = parallel_execute(
+      partial(detokenize, tokenizer=self.tokenizer),
+      zip(input_strings, outputs),
+      num_processes=2,
     )
+    decoded_outputs, out_logprobs, out_tokens = zip(*out)
+    decoded_outputs = [list(itertools.chain(*decoded_outputs))]
+    out_logprobs = [list(itertools.chain(*out_logprobs))]
+    out_tokens = [list(itertools.chain(*out_tokens))]
+    end = time.time()
+    print(f"execution time: {end - start:.4f} seconds")
 
     max_tokens_length = max(len(x) for x in prompt_ids)
 
