@@ -243,14 +243,24 @@ class PpoLearnerTest(parameterized.TestCase):
           'testcase_name': 'with_reward_model',
           'use_reward_model': True,
           'reward_fns': None,
+          'use_different_rollout_config': True,
       },
       {
           'testcase_name': 'with_reward_fn',
           'use_reward_model': False,
           'reward_fns': [reward_1, reward_2],
+          'use_different_rollout_config': False,
+      },
+      {
+          'testcase_name': 'with_reward_model_diff_rollout_config',
+          'use_reward_model': True,
+          'reward_fns': None,
+          'use_different_rollout_config': True,
       },
   )
-  def test_ppo_learner(self, use_reward_model, reward_fns):
+  def test_ppo_learner(
+      self, use_reward_model, reward_fns, use_different_rollout_config
+  ):
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
     original_model_variables = jax.tree.map(
@@ -277,6 +287,24 @@ class PpoLearnerTest(parameterized.TestCase):
       reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
     mesh = pxla.thread_resources.env.physical_mesh
+    default_rollout_config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=10,
+        max_prompt_length=256,
+        kv_cache_size=1024,
+    )
+    if use_different_rollout_config:
+      another_rollout_config = base_rollout.RolloutConfig(
+          max_tokens_to_generate=10,
+          max_prompt_length=256,
+          kv_cache_size=1024,
+          temperature=0.5,
+      )
+      rollout_config = {
+          rl_cluster_lib.Mode.TRAIN: default_rollout_config,
+          rl_cluster_lib.Mode.EVAL: another_rollout_config,
+      }
+    else:
+      rollout_config = default_rollout_config
     cluster_config = rl_cluster_lib.ClusterConfig(
         role_to_mesh={
             rl_cluster_lib.Role.ACTOR: mesh,
@@ -294,11 +322,7 @@ class PpoLearnerTest(parameterized.TestCase):
             max_steps=10,
             gradient_accumulation_steps=1,
         ),
-        rollout_config=base_rollout.RolloutConfig(
-            max_tokens_to_generate=10,
-            max_prompt_length=256,
-            kv_cache_size=1024,
-        ),
+        rollout_config=rollout_config,
     )
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
