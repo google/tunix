@@ -620,8 +620,11 @@ class Llama3(nnx.Module):
       }
     else:
       return {
-          'lm_head.w': ('lm_head', (None, 'model')),
-          'embedder.input_embedding': ('embed.embedding', ('model', None)),
+          'lm_head.w': ('model.lm_head', (None, 'model')),
+          'embedder.input_embedding': (
+              'model.embed.embedding',
+              ('model', None),
+          ),
           'layers.*.input_layernorm.w': (
               'model.layers.*.input_layernorm.scale',
               (None,),
