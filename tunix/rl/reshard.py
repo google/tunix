@@ -17,6 +17,7 @@
 from concurrent import futures
 import functools
 import math
+import os
 import threading
 import time
 from typing import Any, Callable
@@ -86,6 +87,11 @@ def _get_reshard_fn_pathwaysutils(
     )
     raise
   else:
+    if 'proxy' not in os.getenv('JAX_PLATFORMS', ''):
+      raise EnvironmentError(
+          'Pathways proxy is not available. Make sure you have enabled Pathways'
+          ' proxy as jax backend, e.g. os.environ["JAX_PLATFORMS"] = "proxy".'
+      )
     return functools.partial(
         experimental_reshard.reshard,
         donate=donate,
