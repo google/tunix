@@ -204,6 +204,7 @@ class PeftTrainer:
         max_step=self.config.max_steps,
         profiler_options=self.config.profiler_options,
     )
+    self._buffered_train_metrics: tuple[ArrayLike, int, float] | None = None
     self.training_hooks = None
     self.data_hooks = None
 
@@ -393,9 +394,10 @@ class PeftTrainer:
       step: int | None = None,
       step_time_delta: float | None = None,
   ):
-    """Logs the metrics to the metrics logger."""
+    """Logs the metrics to the metrics logger and console."""
+    perplexity = jnp.exp(loss)
     self.metrics_logger.log("loss", loss, self._mode, step)
-    self.metrics_logger.log("perplexity", jnp.exp(loss), self._mode, step)
+    self.metrics_logger.log("perplexity", perplexity, self._mode, step)
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
       self.metrics_logger.log("learning_rate", learning_rate, self._mode, step)
@@ -406,6 +408,48 @@ class PeftTrainer:
       self.metrics_logger.log(
           "steps_per_sec", 1.0 / (step_time_delta + 1e-9), self._mode, step
       )
+
+    if self._mode == metrics_logger.Mode.TRAIN:
+      logging.info(
+          "Train step %d training loss: %f  - training perplexity: %f",
+          step,
+          loss,
+          perplexity,
+      )
+
+  def _buffer_and_write_train_metrics(
+      self,
+      loss: ArrayLike,
+      step: int,
+      step_time_delta: float,
+  ):
+    """Buffers metrics for the current step and writes metrics from the previous one.
+
+    This strategy is a performance optimization that allows the I/O for logging
+    (which can be slow) to be overlapped with the accelerator's computation of
+    the next training step. This keeps the training pipeline full and maximizes
+    throughput.
+
+    Note on timing: The metrics written for a given step `N` will contain the
+    `loss` calculated during step `N`, but the `step_time_delta` will be the
+    measurement from the completion of step `N-1`.
+
+    Args:
+      loss: The loss value from the current training step.
+      step: The current step number.
+      step_time_delta: The wall-clock time measured for the previous step.
+    """
+    if self._buffered_train_metrics is not None:
+      # Write the buffered metrics from step N-1.
+      prev_loss, prev_step, prev_step_time = self._buffered_train_metrics
+      self._log_metrics(
+          loss=prev_loss,
+          step=prev_step,
+          step_time_delta=prev_step_time,
+      )
+
+    # Buffer step N metrics to be written in the next iteration.
+    self._buffered_train_metrics = (loss, step, step_time_delta)
 
   @contextlib.contextmanager
   def _switch_mode(self, mode: metrics_logger.Mode):
@@ -523,19 +567,12 @@ class PeftTrainer:
           self._throttler.add_computation(train_loss)
           self._train_steps += 1
           self._post_process_train_step(aux)
-          self._log_metrics(
-              train_loss,
-              self._train_steps,
-              step_time_delta,
+          self._buffer_and_write_train_metrics(
+              loss=train_loss,
+              step=self._train_steps,
+              step_time_delta=step_time_delta,
           )
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
-
-          logging.info(
-              "Train step %d training loss: %f  - training perplexity: %f",
-              self._train_steps,
-              self.metrics_logger.get_metric("loss", "train"),
-              self.metrics_logger.get_metric("perplexity", "train"),
-          )
 
           # Actual checkpoint frequency is configured by checkpointing_options.
           self.checkpoint_manager.save(
@@ -571,6 +608,20 @@ class PeftTrainer:
     return self._train_steps
 
   def close(self):
+    """Closes the trainer and its associated resources.
+
+    This includes writing any buffered metrics, saving the last checkpoint,
+    and closing the checkpoint manager and metrics logger.
+    """
+    if self._buffered_train_metrics is not None:
+      loss, step, step_time = self._buffered_train_metrics
+      self._log_metrics(
+          loss=loss,
+          step=step,
+          step_time_delta=step_time,
+      )
+      self._buffered_train_metrics = None
+
     self._save_last_checkpoint()
     self.checkpoint_manager.close()
     self.metrics_logger.close()
