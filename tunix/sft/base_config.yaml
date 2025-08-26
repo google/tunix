@@ -12,18 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-model_version: 2b
+
+model_name: "llama3.1-8b"
 
 # Replace it with your own model checkpoint directory.
-# ckpt_dir: "gs://sizhi-dev/gemma/"
-ckpt_dir: "google/gemma/flax/2b"
-ckpt_source: kaggle
+# GCS bucket. For kaggle,"google/gemma/flax/2b" for gemma 2b.
+ckpt_dir: "meta-llama/Llama-3.1-8B"
+# change source accordingly. Example: "kaggle" | "hf" | None
+# Currently, kaggle only support gemma 2b, gemma 7b,  hf only supports llama3.1. Non default 
+ckpt_source: "huggingface"
 
 # For Kaggle login
 # If download checkpoint from kaggle, specify your kaggle credentials in envrionment variable starts with prefix `T_`
 kaggle_username: None
 kaggle_key: None
 
+# For huggingface login
+# If download checkpoint from hugging face, specifcy your hf credentials in environnebt variable starts with prefix `T_`
+hf_token: None
+# for model downloaded from huggingface, copy model to directory.
+hf_cp_base_model_directory: "/tmp/models"
+
+visualize_model: false
 
 
 intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
@@ -32,16 +42,16 @@ intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
 mesh: [[1, 8], ["fsdp", "tp"]]
 
 # data
-dataset_name: "mtnt/en-fr"
+dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 max_target_length: 256
 
 # LoRA config
 lora_config:
-  rank: 16
-  alpha: 2.0
-  weight_qtype: "nf4"
-  tile_size: 256
+  # rank: 16
+  # alpha: 2.0
+  # weight_qtype: "nf4"
+  # tile_size: 256
 
 # Train
 num_train_epochs: 1
@@ -53,9 +63,9 @@ optimizer: "adamw"
 
 # Peft trainer training config.
 training_config:
-  eval_every_n_steps: 2
-  max_steps: 10
-  gradient_accumulation_steps: 1
+  eval_every_n_steps: 2 # change back to 20
+  max_steps: 10 # change back to 100
+  gradient_accumulation_steps: 1 # just change
   checkpoint_root_directory: "/tmp/ckpts"
   checkpointing_options:
     max_to_keep: 1
@@ -66,6 +76,6 @@ training_config:
   profiler_options:
     log_dir: "/tmp/profiling"
     skip_first_n_steps: 1
-    profiler_steps: 10
+    profiler_steps: 9 # change back to 10
   data_sharding_axis: ["fsdp"]
   max_inflight_computations: 2

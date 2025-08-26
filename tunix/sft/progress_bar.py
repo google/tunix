@@ -78,7 +78,7 @@ class ProgressBar:
 
     self.metrics = sorted_metrics
 
-  def update(self, n: int = 1):
+  def update(self, n: int = 3):
     """Update progress bar."""
     if self.metrics:
       self._sort_metrics()

@@ -40,6 +40,17 @@ def string_to_bool(s: str) -> bool:
   raise ValueError(f"Can't convert {s} to bool")
 
 
+def validate_model_name(s: str) -> bool:
+  """Validate provided model name."""
+  # currently supported models
+  valid_model_names = ("llama3.1-8b", "gemma-2b", "gemma-7bgemma2-2b")
+  if s not in valid_model_names:
+    raise ValueError(
+        f"Invalid model name was passed. Got {s}, Valid options"
+        f" {valid_model_names}"
+    )
+
+
 # Map optimizer names to their optax functions
 _OPTIMIZER_MAP: dict[
     str, collections.abc.Callable[..., optax.GradientTransformation]
@@ -53,7 +64,7 @@ _OPTIMIZER_MAP: dict[
 }
 
 
-_yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool}
+_yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool, peft_trainer.TrainingConfig: peft_trainer.TrainingConfig}
 
 
 class HyperParameters:
@@ -129,7 +140,7 @@ class HyperParameters:
       raise ValueError("axis_shapes and axis_names must have the same length.")
 
     self.mesh = (tuple(axis_shapes), tuple(axis_names))
-    
+
   def _validate_training_config_and_assign(self, raw_keys):
     """Validate the complex configuration. Raise ValueError if invalid."""
     training_config = raw_keys["training_config"]
@@ -171,11 +182,13 @@ class HyperParameters:
       self, raw_keys, raw_data_from_yaml, argv, **kwargs
   ):
     """Update the configuration from the environment and command line."""
+    # 1. CLI and Kwargs Overrides
     cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
     # Also create a configuration from any extra keyword arguments.
     kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
     # Merge command-line and keyword arguments.
     cmdline_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
+    
     raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(
         cmdline_cfg, resolve=True
     )
@@ -208,9 +221,7 @@ class HyperParameters:
       else:
         new_proposal = os.environ.get(yaml_key_to_env_key(k))
 
-      if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and (
-          type(raw_data_from_yaml[k]) not in _yaml_types_to_parser
-      ):
+      if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and (type(raw_data_from_yaml[k]) not in _yaml_types_to_parser):
         raise ValueError(
             f"For key '{k}', type {type(raw_data_from_yaml[k])} not in"
             f" {_yaml_types_to_parser.keys()}, can't pass at the CLI or ENV"

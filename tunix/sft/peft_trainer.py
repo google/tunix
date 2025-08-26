@@ -18,7 +18,7 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import time
-from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple, List
 from absl import logging
 import flax
 from flax import nnx
@@ -37,10 +37,51 @@ from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import system_metrics_calculator
+import humanize
+import gc 
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 
+
+def jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
+  hbm_used = []
+  for d in devices:
+    stats = d.memory_stats()
+    used = stats["bytes_in_use"]
+    limit = stats["bytes_limit"]
+    hbm_used.append((used, limit))
+  return hbm_used
+
+
+def humanize_binary_size(size: float) -> str:
+  return humanize.naturalsize(size, binary=True, gnu=False, format='%.1f')
+
+def show_hbm_usage(title=""):
+  """Prints the current HBM usage.
+
+  Args:
+    title: The title to print before the HBM usage.
+  """
+  fmt_size = humanize_binary_size
+  devices = jax.devices()
+  # Force a GC sweep to catch recently deallocated arrays
+  gc.collect()
+
+
+  logging.info(
+      "%s - Pathways not available. Using defaultHBM stats collector", title
+  )
+  hbm_stats = jax_hbm_usage_gb(devices)
+
+  for i, (used, limit) in enumerate(hbm_stats):
+    logging.info(
+        "Using %s / %s (%s) on %s",
+        fmt_size(used),
+        fmt_size(limit),
+        used / limit,
+        devices[i],
+    )
 
 @contextlib.contextmanager
 def time_measure(context: str = ""):
@@ -161,10 +202,12 @@ class PeftTrainer:
     self.model = model
     self.config = training_config
     self._lora_enabled = is_lora_enabled(self.model)
-    if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(
-          optimizer, training_config.gradient_accumulation_steps
-      )
+ 
+    # if training_config.gradient_accumulation_steps is not None:
+    #   optimizer = optax.MultiSteps(
+    #       optimizer, training_config.gradient_accumulation_steps
+    #   )
+    
     if self._lora_enabled:
       self.optimizer = nnx.ModelAndOptimizer(
           self.model, optimizer, wrt=nnx.LoRAParam
@@ -266,7 +309,7 @@ class PeftTrainer:
       inputs: The training input.
 
     Returns:
-      The loss and auxiliary data if has_aux is True, otherwise the loss.
+      The loss, auxiliary data and learning rate if has_aux is True, otherwise the loss and learning rate.
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -277,11 +320,13 @@ class PeftTrainer:
     )
     out, grads = grad_fn(model, **inputs)
     optimizer.update(grads)
+    lr = self._try_get_learning_rate()
+  
     if self._has_aux:
       loss, aux = out
-      return loss, aux
+      return loss, aux, lr
     else:
-      return out, None
+      return out, None, lr
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -379,18 +424,26 @@ class PeftTrainer:
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
     try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"]
+      ret = self.optimizer.opt_state.hyperparams["learning_rate"].value
+      
+      logging.info("389 type of ret %s",type(ret))
+      logging.info("ret %s",ret)
+      return ret 
     except AttributeError:
       for chainpart in self.optimizer.opt_state:
         if isinstance(chainpart, optax.EmptyState):
           break
         if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"]
+          ret = chainpart.hyperparams["learning_rate"].value
+          logging.info("398 type of ret %s",type(ret))
+          logging.info("ret %s",ret)
+          return ret 
       return None
 
   def _log_metrics(
       self,
       loss: ArrayLike,
+      learning_rate: float | None,
       step: int | None = None,
       step_time_delta: float | None = None,
   ):
@@ -400,7 +453,9 @@ class PeftTrainer:
     self.metrics_logger.log("perplexity", perplexity, self._mode, step)
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
-      self.metrics_logger.log("learning_rate", learning_rate, self._mode, step)
+      logging.info("learning_rate is not none")
+      lr_item = jax.device_get(learning_rate)
+      self.metrics_logger.log("learning_rate", lr_item, self._mode, step)
     if step_time_delta is not None:
       self.metrics_logger.log(
           "step_time_sec", step_time_delta, self._mode, step
@@ -499,6 +554,7 @@ class PeftTrainer:
     train_iterator = iter(train_ds)
     index = 0
     last_step_completion_time = time.perf_counter()
+    show_hbm_usage("before train loop")
     with time_measure("Train loop"):
       while True:
         self._prof.maybe_activate(self._train_steps)
@@ -538,27 +594,16 @@ class PeftTrainer:
 
           train_example = self._prepare_inputs(train_example)
           train_example = self._shard_input(train_example)
-
-          if not self._flops_measured and not skip_jit:
-            self._flops_measured = True
-
-            tflops_per_step = system_metrics_calculator.measure_tflops_per_step(
-                train_step_fn=train_step,
-                model=self.model,
-                optimizer=self.optimizer,
-                train_example=train_example,
-            )
-            if tflops_per_step is not None:
-              self.metrics_logger.log(
-                  "tflops_per_step", tflops_per_step, self._mode, 0
-              )
-
+          global_batch_size = _calculate_global_batch_size(train_example)
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
-          train_loss, aux = train_step(
+
+          show_hbm_usage("before train step %d" % self._train_steps)
+          train_loss, aux, lr = train_step(
               self.model, self.optimizer, train_example
           )
+          show_hbm_usage("after train step %d" % self._train_steps)
 
           current_time = time.perf_counter()
           step_time_delta = current_time - last_step_completion_time
@@ -569,10 +614,19 @@ class PeftTrainer:
           self._post_process_train_step(aux)
           self._buffer_and_write_train_metrics(
               loss=train_loss,
+              lr = lr, 
               step=self._train_steps,
               step_time_delta=step_time_delta,
           )
+          
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
+          show_hbm_usage("after log and update %d" % self._train_steps)
+          logging.info(
+              "Train step %d training loss: %f  - training perplexity: %f",
+              self._train_steps,
+              self.metrics_logger.get_metric("loss", "train"),
+              self.metrics_logger.get_metric("perplexity", "train"),
+          )
 
           # Actual checkpoint frequency is configured by checkpointing_options.
           self.checkpoint_manager.save(
@@ -580,6 +634,7 @@ class PeftTrainer:
               self.model,
               save_only_lora_params=self._lora_enabled,
           )
+          show_hbm_usage("after save to checkpoint %d" % self._train_steps)
           if self.training_hooks:
             self.training_hooks.on_train_step_end(
                 self, train_loss, step_time_delta

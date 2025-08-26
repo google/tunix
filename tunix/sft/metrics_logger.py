@@ -165,6 +165,7 @@ class MetricsLogger:
           f"Metric {metric_name} not found for mode {mode}. Available metrics"
           f" for mode {mode}: {self._metrics[mode].keys()}"
       )
+    value = self._metrics[mode][metric_name]
     if metric_name == "perplexity":
       return _calculate_geometric_mean(
           jnp.stack(self._metrics[mode][metric_name])

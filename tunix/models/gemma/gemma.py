@@ -820,6 +820,7 @@ class Transformer(nnx.Module):
         assign_val_fn=_assign_linen_params_to_nnx_state,
     )
 
+
   def __init__(
       self,
       config: TransformerConfig,
