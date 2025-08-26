@@ -318,7 +318,7 @@ def run_peft_trainer(hyperparms: config.HyperParameters):
     model = llama3_params_lib.create_model_from_safe_tensors(
         model_cp_path, model_config, mesh
     )
-    hf_tokenizer = transformers.AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", add_bos_token=True, add_eos_token=True, token= "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")
+    hf_tokenizer = transformers.AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct", add_bos_token=True, add_eos_token=True, token= os.environ.get('T_HF_TOKEN'))
     if hf_tokenizer.pad_token_id is not None:
       pad_id = hf_tokenizer.pad_token_id
     else:
