@@ -265,6 +265,62 @@ class VllmSamplerTest(absltest.TestCase):
           )
       )
 
+  def test_generation_length_exceed_max_model_len(self):
+    tunix_model = self.load_llama3_model(
+        self.repo_id, enable_lora=self.enable_lora
+    )
+
+    args = {}
+    args["model"] = self.model_path
+    args["additional_config"] = {}
+    args["additional_config"]["lora_config"] = None
+
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path
+    )
+    prompts = [
+        "Hello, my name is Tom.",
+        "The capital of France is",
+        "why is sky blue?",
+    ]
+
+    inputs = self.templatize(prompts, tokenizer=model_tokenizer)
+
+    vllm_config = vllm_sampler.VllmConfig(
+        model_version=self.model_path,
+        max_model_len=128,
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type=None,
+        mapping_config=vllm_sampler.MappingConfig(
+            to_hf_mappings=tunix_model.to_hf_mappings(),
+            to_hf_transpose_keys=tunix_model.to_hf_transpose_keys(),
+            lora_to_hf_mappings=tunix_model.lora_to_hf_mappings(),
+            lora_config=args["additional_config"]["lora_config"],
+        ),
+    )
+
+    vl_sampler = vllm_sampler.VllmSampler(
+        tokenizer=model_tokenizer,
+        config=vllm_config,
+    )
+    state = nnx.state(tunix_model)
+    vl_sampler.load_checkpoint(state)
+
+    with self.assertRaisesRegex(ValueError, ".*exceeds max_model_len.*"):
+      vl_sampler(
+          input_strings=inputs,
+          total_generation_steps=128,  # Changed from 768 to 128 for vLLM
+          max_prompt_length=None,  # Use default max prompt length
+          temperature=0.0,
+          # top_p=0.9,
+          top_k=1,
+          seed=0,
+          echo=False,
+          pad_output=True,  # Use padding for output
+      )
+
 
 if __name__ == "__main__":
   absltest.main()
