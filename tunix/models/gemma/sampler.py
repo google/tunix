@@ -509,7 +509,7 @@ class Sampler:
   def __call__(
       self,
       input_strings: Sequence[str],
-      total_generation_steps: int,
+      max_generation_steps: int,
       max_prompt_length: int | None = None,
       echo: bool = False,
       return_logits: bool = False,
@@ -523,7 +523,7 @@ class Sampler:
 
     Args:
       input_strings: input prompts to feed to the model for sampling.
-      total_generation_steps: number of generation steps. will correspond to the
+      max_generation_steps: number of generation steps. will correspond to the
         longest prompt in the batch.
       max_prompt_length: maximum length of the prompt. Specify to avoid
         recompilation on different prompt lengths.
@@ -564,7 +564,7 @@ class Sampler:
         )
         for x in tokens
     ])
-    total_sampling_steps = max_prompt_length + total_generation_steps
+    total_sampling_steps = max_prompt_length + max_generation_steps
 
     if seed is None:
       seed = jax.random.PRNGKey(0)

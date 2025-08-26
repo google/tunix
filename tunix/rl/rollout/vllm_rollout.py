@@ -67,7 +67,7 @@ class VllmRollout(base_rollout.BaseRollout):
     """Generates samples from the model."""
     self.output = self._sampler(
         input_strings=prompts,
-        total_generation_steps=rollout_config.max_tokens_to_generate,
+        max_generation_steps=rollout_config.max_tokens_to_generate,
         max_prompt_length=rollout_config.max_prompt_length,
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,

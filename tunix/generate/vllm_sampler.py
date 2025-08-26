@@ -200,7 +200,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def __call__(
       self,
       input_strings: List[str],
-      total_generation_steps: int,
+      max_generation_steps: int,
       max_prompt_length: int = None,
       temperature: float = 0.0,
       top_p: float = None,
@@ -215,14 +215,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if beam_size is not None:
       self.sampling_params = self.llm.sampling_params.BeamSearchParams(
           beam_width=beam_size,
-          max_tokens=total_generation_steps,  # max number of tokens to generate
+          max_tokens=max_generation_steps,  # max number of tokens to generate
           ignore_eos=False,
           temperature=temperature,
       )
     else:
       self.sampling_params = self.llm.get_default_sampling_params()
       self.sampling_params.detokenize = False
-      self.sampling_params.max_tokens = total_generation_steps
+      self.sampling_params.max_tokens = max_generation_steps
       self.sampling_params.n = multi_sampling
       self.sampling_params.temperature = temperature
       self.sampling_params.logprobs = 1  # b/428730696
@@ -238,10 +238,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     prompt_ids = [self.tokenize(x) for x in input_strings]
     max_input_length = max(len(x) for x in prompt_ids)
 
-    if max_input_length + total_generation_steps > self.args["max_model_len"]:
+    if max_input_length + max_generation_steps > self.args["max_model_len"]:
       raise ValueError(
           f"Sum of max_input_length {max_input_length} and"
-          f" total_generation_steps {total_generation_steps} exceeds"
+          f" max_generation_steps {max_generation_steps} exceeds"
           f" max_model_len {self.args['max_model_len']}."
       )
 
@@ -270,7 +270,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     all_output_ids = [
         utils.pad_to_length(
             jnp.array(x),
-            target_length=total_generation_steps,
+            target_length=max_generation_steps,
             pad_value=self.tokenizer.pad_id(),
             left=False,
         )

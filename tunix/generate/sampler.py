@@ -621,7 +621,7 @@ class Sampler(base_sampler.BaseSampler):
   def __call__(
       self,
       input_strings: Sequence[str],
-      total_generation_steps: int,
+      max_generation_steps: int,
       max_prompt_length: int | None = None,
       echo: bool = False,
       return_logits: bool = False,
@@ -641,7 +641,7 @@ class Sampler(base_sampler.BaseSampler):
 
     Args:
       input_strings: input prompts to feed to the model for sampling.
-      total_generation_steps: number of generation steps. will correspond to the
+      max_generation_steps: number of generation steps. will correspond to the
         longest prompt in the batch.
       max_prompt_length: maximum length of the prompt. Specify to avoid
         recompilation on different prompt lengths.
@@ -655,8 +655,8 @@ class Sampler(base_sampler.BaseSampler):
       beam_size: beam size for beam search.
       seed: random seed for sampling.
       pad_output: whether to pad the output to maximum length. If this set as
-        True, the output len will be total_generation_steps if echo is False,
-        otherwise it will be total_generation_steps + max_prompt_length. The
+        True, the output len will be max_generation_steps if echo is False,
+        otherwise it will be max_generation_steps + max_prompt_length. The
         padding now only supports right padding. Can modify to support left
         padding if needed.
 
@@ -688,7 +688,7 @@ class Sampler(base_sampler.BaseSampler):
         )
         for x in tokens
     ])
-    total_sampling_steps = max_prompt_length + total_generation_steps
+    total_sampling_steps = max_prompt_length + max_generation_steps
     if total_sampling_steps > self.cache_config.cache_size:
       raise ValueError(
           'Total sampling steps must be less than the cache size'
@@ -733,7 +733,7 @@ class Sampler(base_sampler.BaseSampler):
       # finalize_beam_search_state
       del sampling_state
     if pad_output:
-      max_len = total_sampling_steps if echo else total_generation_steps
+      max_len = total_sampling_steps if echo else max_generation_steps
       lengths, out_tokens, out_logits = utils.padded_fill_tokens_and_logits(
           token_buffers,
           logits_buffers,

@@ -91,7 +91,7 @@ sampler = sampler.Sampler(
         cache_size=256, num_layers=32, num_kv_heads=8, head_dim=128
     ),
 )
-out = sampler(inputs, total_generation_steps=128, echo=True, top_p=None)
+out = sampler(inputs, max_generation_steps=128, echo=True, top_p=None)
 
 for t in out.text:
   print(t)

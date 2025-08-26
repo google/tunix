@@ -632,7 +632,7 @@ def generate(
 
   out_data = sampler(
       input_strings=input_batch,
-      total_generation_steps=768,
+      max_generation_steps=768,
       temperature=temperature,
       top_k=top_k,
       top_p=top_p,
