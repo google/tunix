@@ -234,9 +234,13 @@ class PpoLearner:
     """
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
-    max_prompt_length = (
-        self.rl_cluster.cluster_config.rollout_config.max_prompt_length
-    )
+    if isinstance(self.rl_cluster.cluster_config.rollout_config, dict):
+      rollout_config = self.rl_cluster.cluster_config.rollout_config[
+          rl_cluster_lib.Mode[mode.name]
+      ]
+    else:
+      rollout_config = self.rl_cluster.cluster_config.rollout_config
+    max_prompt_length = rollout_config.max_prompt_length
 
     # ===== Generation ======
     # Generate. We use `model`, i.e., the policy model for generating the
