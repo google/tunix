@@ -72,10 +72,10 @@ class SamplerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
-    total_generation_steps = 10
+    max_generation_steps = 10
     result_padded = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=total_generation_steps,
+        max_generation_steps=max_generation_steps,
         return_logits=return_logits,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -84,7 +84,7 @@ class SamplerTest(parameterized.TestCase):
 
     result_not_padded = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=total_generation_steps,
+        max_generation_steps=max_generation_steps,
         return_logits=return_logits,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -107,7 +107,7 @@ class SamplerTest(parameterized.TestCase):
         )
         if not echo:
           np.testing.assert_equal(
-              result_padded.tokens[i].shape[0], total_generation_steps
+              result_padded.tokens[i].shape[0], max_generation_steps
           )
 
   @parameterized.named_parameters(
@@ -149,7 +149,7 @@ class SamplerTest(parameterized.TestCase):
     )
     result = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        max_generation_steps=10,
         return_logits=True,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -165,7 +165,7 @@ class SamplerTest(parameterized.TestCase):
     # same as the greedy output
     result_beam_search_1 = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        max_generation_steps=10,
         return_logits=True,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -177,7 +177,7 @@ class SamplerTest(parameterized.TestCase):
     # Check with multiple beams, it still works.
     result_beam_search_2 = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        max_generation_steps=10,
         return_logits=True,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -187,7 +187,7 @@ class SamplerTest(parameterized.TestCase):
 
     top_p_result = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        max_generation_steps=10,
         temperature=9,
         top_p=0.95,
         echo=echo,
@@ -197,7 +197,7 @@ class SamplerTest(parameterized.TestCase):
 
     top_p_result_2 = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        max_generation_steps=10,
         temperature=9,
         top_p=0.95,
         seed=42,
@@ -208,7 +208,7 @@ class SamplerTest(parameterized.TestCase):
 
     top_k_result = sampler(
         ['input string', 'hello world'],
-        total_generation_steps=10,
+        max_generation_steps=10,
         temperature=9,
         top_p=0.95,
         top_k=3,
@@ -236,18 +236,18 @@ class SamplerTest(parameterized.TestCase):
     self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 0)  # pytype: disable=attribute-error
     sampler(
         ['input', 'hello'],
-        total_generation_steps=10,
+        max_generation_steps=10,
     )
     self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 1)  # pytype: disable=attribute-error
 
     sampler(
         ['input input input input input', 'hello hello'],
-        total_generation_steps=10,
+        max_generation_steps=10,
     )
 
     sampler(
         ['input input input input input input', 'hello hello'],
-        total_generation_steps=10,
+        max_generation_steps=10,
     )
     self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)  # pytype: disable=attribute-error
 
@@ -268,7 +268,7 @@ class SamplerTest(parameterized.TestCase):
     )
     input_strings = ['input string', 'hello world']
     original_logits = sampler(
-        input_strings, total_generation_steps=10, return_logits=True
+        input_strings, max_generation_steps=10, return_logits=True
     ).logits
 
     new_transformer = tc.ToyTransformer(
@@ -276,7 +276,7 @@ class SamplerTest(parameterized.TestCase):
     )
     sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
     new_logits = sampler(
-        input_strings, total_generation_steps=10, return_logits=True
+        input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
       for orig, new in zip(original_logits, new_logits):
@@ -300,7 +300,7 @@ class SamplerTest(parameterized.TestCase):
     )
     input_strings = ['input string', 'hello world']
     original_logits = sampler(
-        input_strings, total_generation_steps=10, return_logits=True
+        input_strings, max_generation_steps=10, return_logits=True
     ).logits
 
     new_transformer = tc.get_lora_model(
@@ -314,7 +314,7 @@ class SamplerTest(parameterized.TestCase):
 
     sampler.transformer_state = new_lora_params
     new_logits = sampler(
-        input_strings, total_generation_steps=10, return_logits=True
+        input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
       for orig, new in zip(original_logits, new_logits):

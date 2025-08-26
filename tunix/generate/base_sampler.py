@@ -58,7 +58,7 @@ class BaseSampler(abc.ABC):
   def __call__(
       self,
       input_strings: List[str],
-      total_generation_steps,
+      max_generation_steps,
       max_prompt_length=None,
       temperature=0.0,
       top_p=None,

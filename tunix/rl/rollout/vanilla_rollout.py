@@ -53,7 +53,7 @@ class VanillaRollout(base_rollout.BaseRollout):
     """Generates samples from the model."""
     output = self._sampler(
         input_strings=prompts,
-        total_generation_steps=rollout_config.max_tokens_to_generate,
+        max_generation_steps=rollout_config.max_tokens_to_generate,
         max_prompt_length=rollout_config.max_prompt_length,
         echo=False,
         temperature=rollout_config.temperature,

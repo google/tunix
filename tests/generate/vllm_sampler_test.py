@@ -169,7 +169,7 @@ class VllmSamplerTest(absltest.TestCase):
     )
     vanilla_output = vn_sampler(
         input_strings=inputs,
-        total_generation_steps=128,  # Changed from 768 to 128 for vLLM
+        max_generation_steps=128,  # Changed from 768 to 128 for vLLM
         max_prompt_length=None,  # Use default max prompt length
         temperature=0.0,
         # top_p=0.9,
@@ -205,7 +205,7 @@ class VllmSamplerTest(absltest.TestCase):
 
     vllm_output = vl_sampler(
         input_strings=inputs,
-        total_generation_steps=128,  # Changed from 768 to 128 for vLLM
+        max_generation_steps=128,  # Changed from 768 to 128 for vLLM
         max_prompt_length=None,  # Use default max prompt length
         temperature=0.0,
         # top_p=0.9,
@@ -311,7 +311,7 @@ class VllmSamplerTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, ".*exceeds max_model_len.*"):
       vl_sampler(
           input_strings=inputs,
-          total_generation_steps=128,  # Changed from 768 to 128 for vLLM
+          max_generation_steps=128,  # Changed from 768 to 128 for vLLM
           max_prompt_length=None,  # Use default max prompt length
           temperature=0.0,
           # top_p=0.9,
