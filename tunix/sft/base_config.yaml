@@ -39,7 +39,7 @@ visualize_model: false
 intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
 
 # model mesh
-mesh: [[1, 8], ["fsdp", "tp"]]
+mesh: [[2, 2], ["fsdp", "tp"]]
 
 # data
 dataset_name: "Helsinki-NLP/opus-100"

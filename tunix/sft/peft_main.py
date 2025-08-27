@@ -40,6 +40,7 @@ from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen3 import model as qwen3_lib
 from tunix.sft import config
 from tunix.sft import peft_trainer
+from tunix.rl import utils
 
 # Map prefixes to the target object containing the methods.
 CONFIG_MAP = {
@@ -265,7 +266,7 @@ def run_peft_trainer(hyperparms: config.HyperParameters):
 
   # Currently, we only support limited workflow.
   _validate_current_workflow(model_name, ckpt_source)
-
+  utils.show_hbm_usage("at startup")
   if _is_gemma(model_name):
     if ckpt_source == 'kaggle':
       ckpt_path = _kaggle_pipeline(hyperparms)
@@ -277,20 +278,22 @@ def run_peft_trainer(hyperparms: config.HyperParameters):
     params = gemma_params_lib.load_and_format_params(
         os.path.join(ckpt_path, model_version)
     )
-
+    utils.show_hbm_usage("after load params")
     model = gemma_lib.Transformer.from_params(params, version=model_version)
+    utils.show_hbm_usage("after load models")
     if _source_third_party(ckpt_source):
       # Load the model and save to checkpoint locally, then reload the model
       # sharded. This is a workaround, as the checkpoint on 3rd party don't work
       # with NNX. This takes a long time. Skip if conversion is not needed.
       model, mesh = _gemma_conversion(hyperparms, model, params)
+      utils.show_hbm_usage("after gemma conversion")
     else:
       mesh = jax.make_mesh(*hyperparms.mesh)
 
     tokenizer = data_lib.GemmaTokenizer(
         os.path.join(ckpt_path, 'tokenizer.model')
     )
-
+    utils.show_hbm_usage("after create token")
     def gen_model_input_fn(x: peft_trainer.TrainingInput):
       pad_mask = x.input_tokens != tokenizer.pad_id()
       positions = gemma_lib.build_positions_from_mask(pad_mask)
@@ -308,7 +311,7 @@ def run_peft_trainer(hyperparms: config.HyperParameters):
       max_target_length=hyperparms.config['max_target_length'],
       num_train_epochs=hyperparms.config['num_train_epochs'],
       tokenizer=tokenizer)
-    
+    utils.show_hbm_usage("after create dataset")
   elif model_name.startswith('llama3.1') and ckpt_source == 'huggingface':
     model_cp_path = hyperparms.config['hf_cp_base_model_directory']
     _hf_pipeline(hyperparms)
@@ -357,14 +360,16 @@ def run_peft_trainer(hyperparms: config.HyperParameters):
       nnx.display(model)
 
 
-  # optimizer = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(learning_rate=1e-5)
-  optimizer = optax.adamw(1e-5)
-
+  optimizer = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(learning_rate=1e-5)
+  # optimizer = optax.adamw(1e-5)
+  utils.show_hbm_usage("after optimizer init")
   trainer = peft_trainer.PeftTrainer(
       model, optimizer, hyperparms.training_config
   )
+  utils.show_hbm_usage("after peft trainer init")
   trainer = trainer.with_gen_model_input_fn(gen_model_input_fn)
   with mesh:
+    utils.show_hbm_usage("before train happen")
     trainer.train(train_ds, None)
 
 

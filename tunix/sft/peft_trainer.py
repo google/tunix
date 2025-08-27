@@ -203,10 +203,10 @@ class PeftTrainer:
     self.config = training_config
     self._lora_enabled = is_lora_enabled(self.model)
  
-    # if training_config.gradient_accumulation_steps is not None:
-    #   optimizer = optax.MultiSteps(
-    #       optimizer, training_config.gradient_accumulation_steps
-    #   )
+    if training_config.gradient_accumulation_steps is not None:
+      optimizer = optax.MultiSteps(
+          optimizer, training_config.gradient_accumulation_steps
+      )
     
     if self._lora_enabled:
       self.optimizer = nnx.ModelAndOptimizer(
@@ -475,6 +475,7 @@ class PeftTrainer:
   def _buffer_and_write_train_metrics(
       self,
       loss: ArrayLike,
+      lr : float,
       step: int,
       step_time_delta: float,
   ):
@@ -496,15 +497,16 @@ class PeftTrainer:
     """
     if self._buffered_train_metrics is not None:
       # Write the buffered metrics from step N-1.
-      prev_loss, prev_step, prev_step_time = self._buffered_train_metrics
+      prev_loss, prev_lr, prev_step, prev_step_time = self._buffered_train_metrics
       self._log_metrics(
           loss=prev_loss,
+          learning_rate = prev_lr,
           step=prev_step,
           step_time_delta=prev_step_time,
       )
 
     # Buffer step N metrics to be written in the next iteration.
-    self._buffered_train_metrics = (loss, step, step_time_delta)
+    self._buffered_train_metrics = (loss, lr, step, step_time_delta)
 
   @contextlib.contextmanager
   def _switch_mode(self, mode: metrics_logger.Mode):
@@ -621,13 +623,6 @@ class PeftTrainer:
           
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
           show_hbm_usage("after log and update %d" % self._train_steps)
-          logging.info(
-              "Train step %d training loss: %f  - training perplexity: %f",
-              self._train_steps,
-              self.metrics_logger.get_metric("loss", "train"),
-              self.metrics_logger.get_metric("perplexity", "train"),
-          )
-
           # Actual checkpoint frequency is configured by checkpointing_options.
           self.checkpoint_manager.save(
               self._train_steps,
@@ -669,9 +664,10 @@ class PeftTrainer:
     and closing the checkpoint manager and metrics logger.
     """
     if self._buffered_train_metrics is not None:
-      loss, step, step_time = self._buffered_train_metrics
+      loss, lr, step, step_time = self._buffered_train_metrics
       self._log_metrics(
           loss=loss,
+          learning_rate=lr,
           step=step,
           step_time_delta=step_time,
       )
