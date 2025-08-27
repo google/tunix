@@ -22,6 +22,7 @@ from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple
 from absl import logging
 import flax
 from flax import nnx
+from flax import linen as nn
 import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
@@ -312,12 +313,29 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
-    optimizer_state = nnx.state(
+    optimizer_state_arrays = nnx.state(
         self.optimizer, nnx.optimizer.OptState
     )  # select only the optimizer state
-    optimizer_shardings = nnx.get_named_sharding(optimizer_state, mesh)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state_arrays)
+
+    def _adjust_pspec(pspec, state):
+      if pspec is None:
+        return None
+      # state can be a scalar, which is not an array.
+      state_ndim = getattr(state, 'ndim', 0)
+      if len(pspec) > state_ndim:
+        return shd.PartitionSpec(*pspec[:state_ndim])
+      return pspec
+
+    adjusted_pspecs = jax.tree.map(
+        _adjust_pspec, optimizer_pspecs, optimizer_state_arrays
+    )
+    optimizer_shardings = nn.logical_to_mesh_sharding(
+        adjusted_pspecs,
+        mesh,
+    )
     optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state, optimizer_shardings
+        optimizer_state_arrays, optimizer_shardings
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
@@ -353,14 +371,31 @@ class PeftTrainer:
     if mesh.empty:
       return input_data
 
+    pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
+
+    def _get_sharding(x):
+      # Only shard arrays with rank > 0.
+      if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:
+        return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
+
+      # Don't shard if rank is not sufficient.
+      if x.ndim < len(pspec):
+        return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
+
+      # Check for divisibility for all sharded axes.
+      for i, axis_name in enumerate(pspec):
+        if axis_name is not None:
+          axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
+          for name in axis_names:
+            axis_size = mesh.shape[name]
+            if x.shape[i] % axis_size != 0:
+              # Replicate if not evenly divisible.
+              return shd.NamedSharding(mesh, shd.PartitionSpec())
+      return shd.NamedSharding(mesh, pspec)
+
     with jax.transfer_guard("allow"):
       return jax.tree.map(
-          lambda x: jax.make_array_from_process_local_data(
-              shd.NamedSharding(
-                  mesh, shd.PartitionSpec(*self.config.data_sharding_axis)
-              ),
-              x,
-          ),
+                lambda x: jax.make_array_from_process_local_data(_get_sharding(x), x),
           input_data,
       )
 

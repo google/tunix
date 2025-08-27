@@ -54,7 +54,7 @@ class VllmRollout(base_rollout.BaseRollout):
                 lora_to_hf_mappings=model.lora_to_hf_mappings(),
                 lora_config=lora_config,
             ),
-        ),
+        )
     )
     state = nnx.state(model)
     self._sampler.load_checkpoint(state)
