@@ -8,7 +8,7 @@ import functools
 import logging
 
 import jax
-from jax import numpy as jnp
+import numpy as np
 from tensorboardX import writer
 
 try:
@@ -121,9 +121,9 @@ def register_jax_monitoring(metrics_logger_options: MetricsLoggerOptions):
   return [tensorboard_summary_writer]
 
 
-def _calculate_geometric_mean(x: jax.Array) -> jax.Array:
+def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
   """Calculates geometric mean of a batch of values."""
-  return jnp.exp(jnp.mean(jnp.log(x)))
+  return np.exp(np.mean(np.log(x)))
 
 
 class MetricsLogger:
@@ -167,9 +167,9 @@ class MetricsLogger:
       )
     if metric_name == "perplexity":
       return _calculate_geometric_mean(
-          jnp.stack(self._metrics[mode][metric_name])
+          np.stack(self._metrics[mode][metric_name])
       )
-    return jnp.mean(jnp.stack(self._metrics[mode][metric_name]))
+    return np.mean(np.stack(self._metrics[mode][metric_name]))
 
   def get_metric_history(self, metric_name: str, mode: Mode | str):
     """Returns the all past metric values for the given metric name and mode."""
@@ -178,7 +178,7 @@ class MetricsLogger:
           f"Metric {metric_name} not found for mode {mode}. Available metrics"
           f" for mode {mode}: {self._metrics[mode].keys()}"
       )
-    return jnp.stack(self._metrics[mode][metric_name])
+    return np.stack(self._metrics[mode][metric_name])
 
   def close(self):
     """Closes the metrics logger."""
