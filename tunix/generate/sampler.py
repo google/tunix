@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import dataclasses
-from typing import Any
-from typing import Optional
+from typing import Any, Optional
+import warnings
 
 from absl import logging
 import flax
@@ -34,6 +34,7 @@ from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
+
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -336,14 +337,24 @@ class Sampler(base_sampler.BaseSampler):
 
     done = jnp.zeros((batch_size,), dtype=jnp.bool_)
 
-    cache = _init_cache(
-        n_layers=self.cache_config.num_layers,
-        cache_size=self.cache_config.cache_size,
-        batch_size=batch_size,
-        num_kv_heads=self.cache_config.num_kv_heads,
-        head_dim=self.cache_config.head_dim,
-        dtype=self.dtype,
-    )
+    if hasattr(self.transformer, 'init_cache'):
+      cache = self.transformer.init_cache(
+          batch_size, self.cache_config.cache_size, self.dtype
+      )
+    else:
+      warnings.warn(
+          'Using deprecated _init_cache in Tunix sampler. Models are now'
+          ' required to have their own init_cache attribute.',
+          DeprecationWarning,
+      )
+      cache = _init_cache(
+          n_layers=self.cache_config.num_layers,
+          cache_size=self.cache_config.cache_size,
+          batch_size=batch_size,
+          num_kv_heads=self.cache_config.num_kv_heads,
+          head_dim=self.cache_config.head_dim,
+          dtype=self.dtype,
+      )
 
     if include_logits:
       logits_buffer = jnp.zeros(

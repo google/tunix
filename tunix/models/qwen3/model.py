@@ -616,6 +616,22 @@ class Qwen3(nnx.Module):
         sharding=shd_config.emb_dv,
     )
 
+  def init_cache(
+      self, batch_size: int, cache_size: int, dtype: jnp.dtype
+  ) -> Cache:
+    """Initializes the cache for the model."""
+    cache = {}
+    config = self.config
+    shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
+    for i in range(config.num_layers):
+      layer_cache = {
+          'k': jnp.zeros(shape, dtype=dtype),
+          'v': jnp.zeros(shape, dtype=dtype),
+          'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
+      }
+      cache[f'layer_{i}'] = layer_cache
+    return cache
+
   def __call__(
       self,
       input_tokens: jaxtyping.Array,  # [B, L]
