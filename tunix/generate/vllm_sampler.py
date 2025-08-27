@@ -37,9 +37,12 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 @dataclasses.dataclass
 class MappingConfig:
+  # Mappings for parameter names
   to_hf_mappings: Optional[Dict[str, str]]
-  to_hf_hook_fns: Optional[Dict[str, callable]]
   lora_to_hf_mappings: Optional[Dict[str, str]]
+  # Mapping for weight transformations (e.g. rescaling)
+  to_hf_hook_fns: Optional[Dict[str, callable]]
+  # Parameters that need to be transposed
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]]
   lora_config: Optional[Dict[str, Any]]
 
