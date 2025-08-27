@@ -23,6 +23,7 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import optax
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import utils
 from tunix.rl.ppo import ppo_learner as ppo_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
@@ -271,10 +272,7 @@ class PpoLearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
 
-    value_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(1), vocab_size=vocab.GetPieceSize()
-    )
-    value_model = tc.MockTransformerWithScoreHead(value_model, nnx.Rngs(1))
+    value_model = utils.create_critic_model(model)
     var_filter = nnx.All(nnx.Param, lambda path, x: 'output' not in path)
     original_value_model_variables = jax.tree.map(
         jnp.copy, nnx.state(value_model, var_filter)
@@ -499,10 +497,7 @@ class PpoLearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
     )
 
-    value_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(1), vocab_size=vocab.GetPieceSize()
-    )
-    value_model = tc.MockTransformerWithScoreHead(value_model, nnx.Rngs(1))
+    value_model = utils.create_critic_model(model)
     var_filter = nnx.All(nnx.Param, lambda path, x: 'output' not in path)
     original_value_model_variables = jax.tree.map(
         jnp.copy, nnx.state(value_model, var_filter)

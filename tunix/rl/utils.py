@@ -24,6 +24,7 @@ from flax import nnx
 from flax.nnx import filterlib
 from flax.nnx import statelib
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 from tunix.oss import utils
@@ -204,3 +205,29 @@ def put_params_on_memory_kind(
   shardings = jax.tree.map(lambda x: x.sharding, params_on_memory_kind)
   logging.info("params_on_memory_kind shardings: %s", shardings)
   return params_on_memory_kind
+
+
+def create_critic_model(
+    actor_model: nnx.Module, seed: int = 0, lm_head_to_replace: str = "lm_head"
+) -> nnx.Module:
+  """Creates a critic model from an actor model."""
+  g, state = nnx.split(actor_model)
+  # TODO(tsbao): if actor model is a LoRA model, then we can potentially share
+  # backbone of base weights with critic model. Do it later as an optimization.
+  copied_state = jax.tree.map(jnp.copy, state)
+  critic_model = nnx.merge(g, copied_state)
+  lm_head = getattr(critic_model, lm_head_to_replace)
+  hidden_dim = (
+      lm_head.shape[0] if hasattr(lm_head, "shape") else lm_head.in_features
+  )
+  setattr(
+      critic_model,
+      lm_head_to_replace,
+      nnx.Linear(
+          in_features=hidden_dim,
+          out_features=1,
+          use_bias=False,
+          rngs=nnx.Rngs(seed),
+      ),
+  )
+  return critic_model
