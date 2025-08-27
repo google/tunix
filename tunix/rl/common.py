@@ -214,12 +214,13 @@ def compute_score(
       prompt_tokens, completion_tokens, pad_id, eos_id
   )
 
-  per_token_scores = model(
+  out = model(
       prompt_completion_ids,
       positions=positions,
       cache=None,
       attention_mask=attn_mask,
   )
+  per_token_scores = out[0] if isinstance(out, tuple) else out
   # The model returns a tensor of shape [B, T, 1]. We squeeze the last
   # dimension to get a tensor of shape [B, T].
   per_token_scores = jnp.squeeze(per_token_scores, axis=-1)

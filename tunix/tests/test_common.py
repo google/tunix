@@ -98,7 +98,9 @@ class ToyTransformer(nnx.Module):
     )
     self.emb = nnx.Embed(vocab_size, 16, rngs=rngs)
     self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
-    self.output = nnx.Linear(in_features=16, out_features=vocab_size, rngs=rngs)
+    self.lm_head = nnx.Linear(
+        in_features=16, out_features=vocab_size, rngs=rngs
+    )
 
     self.head_dim = 16
 
@@ -114,7 +116,7 @@ class ToyTransformer(nnx.Module):
           'all_hidden_states',
           x,
       )
-    return self.output(x), cache
+    return self.lm_head(x), cache
 
   @property
   def num_embed(self) -> int:

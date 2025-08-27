@@ -17,7 +17,9 @@ import chex
 from flax import nnx
 import jax
 from jax import sharding
+import jax.numpy as jnp
 import numpy as np
+from tunix.rl import common
 from tunix.rl import utils
 from tunix.tests import test_common as tc
 
@@ -78,6 +80,18 @@ class UtilsTest(absltest.TestCase):
     self.assertFalse(utils.is_sharing_weights(m1, m2))
     self.assertFalse(utils.is_sharing_weights(m2, m3))
     self.assertTrue(utils.is_sharing_weights(m1, m3))
+
+  def test_create_critic_model(self):
+    actor_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+    )
+    critic_model = utils.create_critic_model(actor_model)
+
+    x = jnp.array([[1, 2, 3], [4, 5, 6]])
+    positions = jnp.arange(x.shape[1])
+    attn_mask = common.make_causal_attn_mask(jnp.ones_like(x))
+    out, _ = critic_model(x, positions, None, attn_mask)
+    self.assertEqual(out.shape, (2, 3, 1))
 
 
 if __name__ == '__main__':
