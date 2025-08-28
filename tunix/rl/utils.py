@@ -15,14 +15,15 @@
 """Simple utils used by RL algorithms."""
 
 import collections
+import functools
 import gc
 import operator
 from typing import Any, List, Optional, Tuple
-
 from absl import logging
 from flax import nnx
 from flax.nnx import filterlib
 from flax.nnx import statelib
+import humanize
 import jax
 import jax.numpy as jnp
 import jaxtyping
@@ -141,7 +142,7 @@ def show_hbm_usage(title=""):
   Args:
     title: The title to print before the HBM usage.
   """
-  fmt_size = utils.humanize_binary_size
+  fmt_size = functools.partial(humanize.naturalsize, binary=True)
   devices = jax.devices()
   # Force a GC sweep to catch recently deallocated arrays
   gc.collect()

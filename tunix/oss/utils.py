@@ -15,8 +15,6 @@
 
 import os
 
-import humanize
-
 
 def pathways_available() -> bool:
   if "proxy" not in os.getenv("JAX_PLATFORMS", ""):
@@ -27,7 +25,3 @@ def pathways_available() -> bool:
     return True
   except ImportError:
     return False
-
-
-def humanize_binary_size(size: float) -> str:
-  return humanize.naturalsize(size, binary=True)
