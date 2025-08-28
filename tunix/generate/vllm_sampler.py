@@ -121,8 +121,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
     )
-    # utils.verify_state_closeness(self.copied_original_state, self.transformer_state)
-
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
