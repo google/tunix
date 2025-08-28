@@ -37,8 +37,12 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 @dataclasses.dataclass
 class MappingConfig:
+  # Mappings for parameter names
   to_hf_mappings: Optional[Dict[str, str]]
   lora_to_hf_mappings: Optional[Dict[str, str]]
+  # Mapping for weight transformations (e.g. rescaling)
+  to_hf_hook_fns: Optional[Dict[str, callable]]
+  # Parameters that need to be transposed
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]]
   lora_config: Optional[Dict[str, Any]]
 
@@ -90,6 +94,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     self.mappings = config.mapping_config.to_hf_mappings
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
+    self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
 
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
@@ -111,6 +116,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         src_state=updated_weights,
         dst_state=self.transformer_state,
         key_mappings=self.mappings,
+        key_mapping_hook_fns=self.to_hf_hook_fns,
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
     )
