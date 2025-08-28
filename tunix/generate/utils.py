@@ -550,7 +550,13 @@ def transfer_state_with_mappings(
 def verify_state_closeness(golden_state, state, atol=1e-2):
   """Check if the golden NNX state is close to the other NNX state.
 
-  Helper function for validating weight mapping correctness.
+  Args:
+    golden_state: The golden NNX state.
+    state: The NNX state to compare with the golden state.
+    atol: The absolute tolerance value for comparing weights.
+
+  Returns:
+    True if all weights have the same values within the specified tolerance
   """
   golden_state_flatten = {
       '.'.join(str(key) for key in keys): v
@@ -562,8 +568,12 @@ def verify_state_closeness(golden_state, state, atol=1e-2):
   }
 
   # Check that keys match
-  if not golden_state_flatten.keys() == state_flatten.keys():
+  if golden_state_flatten.keys() != state_flatten.keys():
+    missing_keys = set(golden_state_flatten.keys()) - set(state_flatten.keys())
+    extra_keys = set(state_flatten.keys()) - set(golden_state_flatten.keys())
     logging.info('Keys do not match.')
+    logging.info('Missing keys: %s', missing_keys)
+    logging.info('Extra keys: %s', extra_keys)
     return False
 
   # Check that weights match
@@ -583,10 +593,10 @@ def verify_state_closeness(golden_state, state, atol=1e-2):
     if not jax.numpy.allclose(
         golden_state_flatten[key].value, state_flatten[key].value, atol=atol
     ):
-      logging.info('Weights for key {} do not match.'.format(key))
+      logging.info('Weights for key %s do not match.', key)
       logging.info(
-          'Golden state:', golden_state_flatten[key].value.ravel()[:10]
+          'Golden state: %s', golden_state_flatten[key].value.ravel()[:10]
       )
-      logging.info('Loaded state:', state_flatten[key].value.ravel()[:10])
+      logging.info('Loaded state: %s', state_flatten[key].value.ravel()[:10])
       matched = False
   return matched

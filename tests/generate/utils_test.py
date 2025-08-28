@@ -348,14 +348,6 @@ class UtilsTest(absltest.TestCase):
       layer_key = f"decoder.layer.{layer_idx}.weight"
       transferred = new_tgt_state.params[layer_key]
 
-      # Expected: extract layer from axis 0, then transpose
-      extracted_layer = scanned_weights[
-          layer_idx
-      ]  # Shape: (embed_dim, vocab_size)
-      expected = jnp.transpose(
-          extracted_layer, (1, 0)
-      )  # Shape: (vocab_size, embed_dim)
-
       self.assertEqual(transferred.shape, (vocab_size, embed_dim))
       self.assertTrue(
           jnp.allclose(
@@ -470,10 +462,10 @@ class UtilsTest(absltest.TestCase):
     )
 
     # Test case 5: Missing keys should return False
-    missing_key_params = {
-        "layer.0.weight": jnp.array([[1.0, 2.0], [3.0, 4.0]])
-        # Missing "layer.0.bias"
-    }
+
+    # Missing "layer.0.bias"
+    missing_key_params = {"layer.0.weight": jnp.array([[1.0, 2.0], [3.0, 4.0]])}
+
     test_state_missing = MockState(
         {k: MockParam(v) for k, v in missing_key_params.items()}
     )
