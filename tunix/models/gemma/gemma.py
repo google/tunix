@@ -383,24 +383,6 @@ class Attention(nnx.Module):
   def use_gqa(self):
     return self.num_kv_heads != self.num_heads and self.num_kv_heads > 1
 
-  def init_cache(
-      self,
-      cache_size: int,
-      batch_size: int,
-      dtype: jnp.dtype = jnp.bfloat16,
-  ) -> LayerCache:
-    return {
-        'v': jnp.zeros(
-            (batch_size, cache_size, self.num_kv_heads, self.head_dim),
-            dtype=dtype,
-        ),
-        'k': jnp.zeros(
-            (batch_size, cache_size, self.num_kv_heads, self.head_dim),
-            dtype=dtype,
-        ),
-        'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
-    }
-
 
 class FeedForward(nnx.Module):
   """Feed forward module."""
@@ -538,18 +520,6 @@ class Block(nnx.Module):
   @property
   def use_post_ffw_norm(self):
     return hasattr(self, 'post_ffw_norm') and self.post_ffw_norm is not None
-
-  def init_cache(
-      self,
-      cache_size: int,
-      batch_size: int,
-      dtype: jnp.dtype = jnp.bfloat16,
-  ) -> LayerCache:
-    return self.attn.init_cache(
-        cache_size=cache_size,
-        batch_size=batch_size,
-        dtype=dtype,
-    )
 
 
 class RMSNorm(nnx.Module):
@@ -921,22 +891,20 @@ class Transformer(nnx.Module):
     return len(self.layers)
 
   def init_cache(
-      self,
-      cache_size: int,
-      batch_size: int,
-      dtype: jnp.dtype = jnp.bfloat16,
+      self, batch_size: int, cache_size: int, dtype: jnp.dtype
   ) -> Cache:
-    """Initializes a new Transformer cache."""
-    return {
-        f'layer_{i}': (
-            self.layers[i].init_cache(
-                cache_size=cache_size,
-                batch_size=batch_size,
-                dtype=dtype,
-            )
-        )
-        for i in range(self.num_layers)
-    }
+    """Initializes the cache for the model."""
+    cache = {}
+    config = self.config
+    shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
+    for i in range(config.num_layers):
+      layer_cache = {
+          'k': jnp.zeros(shape, dtype=dtype),
+          'v': jnp.zeros(shape, dtype=dtype),
+          'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
+      }
+      cache[f'layer_{i}'] = layer_cache
+    return cache
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.
