@@ -521,13 +521,15 @@ class PeftTrainer:
               index += 1
             except StopIteration:
               pass
-          if train_example is None:
-            break
+
           if (
               eval_ds
               and self._train_steps % self.config.eval_every_n_steps == 0
           ):
             self._run_eval(eval_ds, eval_step)
+
+          if train_example is None:
+            break
 
           # Stop training if max_steps is reached.
           if (
@@ -635,6 +637,7 @@ class PeftTrainer:
       eval_step: Callable[..., Any],
   ) -> None:
     """Runs evaluation loop."""
+    logging.info("Running evaluation on train step %d.", self._train_steps)
     eval_iterator = iter(eval_ds)
     with self._switch_mode(metrics_logger.Mode.EVAL):
       eval_loss, local_eval_steps = 0, 0

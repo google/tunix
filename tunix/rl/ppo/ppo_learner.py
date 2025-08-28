@@ -606,7 +606,13 @@ class PpoLearner:
             curr_train_ds = train_data_queue.get(block=True)
             if curr_train_ds is None:
               break
-            if eval_ds and not curr_eval_ds:
+            if (
+                eval_ds
+                and not curr_eval_ds
+                and self.rl_cluster.actor_trainer.train_steps
+                % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
+                == 0
+            ):
               self._prepare_data(
                   iterator=iter(eval_ds),
                   mini_batch_size=None,

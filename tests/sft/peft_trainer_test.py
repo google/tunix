@@ -458,7 +458,7 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
-    self.assertEqual(eval_invoke, {'foo': 1, 'bar': 4})
+    self.assertEqual(eval_invoke, {'foo': 1, 'bar': 16})
 
   def test_injected_params(self):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)

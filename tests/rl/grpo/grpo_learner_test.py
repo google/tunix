@@ -55,10 +55,10 @@ def reward_2(prompts, answer, **kargs):  # pylint: disable=unused-argument
 
 class MySource(grain.RandomAccessDataSource):
 
-  def __init__(self, data=None):
+  def __init__(self, data=None, repeat=1):
     if data is None:
       data = _DUMMY_DATA
-    self._data = data
+    self._data = data * repeat
 
   def __getitem__(self, idx):
     return self._data[idx]
@@ -196,7 +196,7 @@ class GrpoLearnerTest(parameterized.TestCase):
         offload_to_cpu=False,
         training_config=rl_cluster_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
-            eval_every_n_steps=1,
+            eval_every_n_steps=2,
             max_steps=10,
             gradient_accumulation_steps=1,
         ),
@@ -225,17 +225,46 @@ class GrpoLearnerTest(parameterized.TestCase):
     )
     self.assertFalse(grpo_trainer.should_sync_weights)
     self.assertFalse(grpo_trainer.can_enable_async_rollout)
-    train_ds = eval_ds = _dummy_dataset(batch_size=2)
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
+    eval_ds = _dummy_dataset(batch_size=1)
+
+    def wrap_prepare_data(fn, fn_call_at_step, learner):
+      def wrapper(*args, **kwargs):
+        if str(kwargs['mode']) == 'train':
+          fn_call_at_step['train'].append(learner._train_steps)
+        else:
+          fn_call_at_step['eval'].append(learner._eval_steps)
+        return fn(*args, **kwargs)
+
+      return wrapper
+
+    prepare_data_call_at_step = {'train': [], 'eval': []}
+    grpo_trainer._prepare_data = wrap_prepare_data(
+        grpo_trainer._prepare_data,
+        prepare_data_call_at_step,
+        grpo_trainer,
+    )
+
     grpo_trainer.train(train_ds, eval_ds)
 
     variables = nnx.state(model, nnx.Param)
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
-    self.assertEqual(grpo_trainer._train_steps, 2)
-    self.assertEqual(grpo_trainer._eval_steps, 4)
+    self.assertEqual(grpo_trainer._train_steps, 10)  # max_steps
+    # max_steps / eval_every_n_steps * (#_rows_in_eval_ds / eval_batch_size)
+    # = 10 / 2 * (4 / 1) = 20
+    self.assertEqual(grpo_trainer._eval_steps, 20)
     self.assertEqual(
         grpo_trainer.rl_cluster.actor_trainer._train_steps,
         grpo_trainer._train_steps,
+    )
+    expected_prepare_data_call_at_step = {
+        'train': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        'eval': [0, 4, 8, 12, 16],
+    }
+    self.assertEqual(
+        prepare_data_call_at_step,
+        expected_prepare_data_call_at_step,
     )
 
     metric_logger = grpo_trainer._metrics_logger

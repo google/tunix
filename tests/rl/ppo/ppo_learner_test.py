@@ -49,10 +49,10 @@ def reward_2(prompts, answer, **kargs):  # pylint: disable=unused-argument
 
 class MySource(grain.RandomAccessDataSource):
 
-  def __init__(self, data=None):
+  def __init__(self, data=None, repeat=1):
     if data is None:
       data = _DUMMY_DATA
-    self._data = data
+    self._data = data * repeat
 
   def __getitem__(self, idx):
     return self._data[idx]
@@ -316,7 +316,7 @@ class PpoLearnerTest(parameterized.TestCase):
         training_config=rl_cluster_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             critic_optimizer=optax.sgd(1e-3),
-            eval_every_n_steps=1,
+            eval_every_n_steps=2,
             max_steps=10,
             gradient_accumulation_steps=1,
         ),
@@ -339,7 +339,8 @@ class PpoLearnerTest(parameterized.TestCase):
     self.assertFalse(ppo_learner.should_sync_weights)
     self.assertFalse(ppo_learner.can_enable_async_rollout)
 
-    train_ds = eval_ds = _dummy_dataset(batch_size=2)
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
+    eval_ds = _dummy_dataset(batch_size=2)
     ppo_learner.train(train_ds, eval_ds)
 
     model_variables = nnx.state(model, nnx.Param)
@@ -354,8 +355,10 @@ class PpoLearnerTest(parameterized.TestCase):
         value_model_variables,
     )
 
-    self.assertEqual(ppo_learner._train_steps, 2)
-    self.assertEqual(ppo_learner._eval_steps, 4)
+    self.assertEqual(ppo_learner._train_steps, 10)
+    # max_steps / eval_every_n_steps * (#_rows_in_eval_ds / eval_batch_size)
+    # = 10 / 2 * (4 / 2) = 10
+    self.assertEqual(ppo_learner._eval_steps, 10)
     self.assertEqual(
         ppo_learner.rl_cluster.actor_trainer._train_steps,
         ppo_learner._train_steps,
@@ -385,10 +388,9 @@ class PpoLearnerTest(parameterized.TestCase):
             ppo_learner._eval_steps,
         )
       elif metric_name == 'loss':
-        # Eval is logged only twice, since it is logged outside the eval loop.
         self.assertLen(
             actor_metric_logger.get_metric_history(metric_name, 'eval'),
-            2,
+            5,  # eval loss is aggregated, so # equal to # of eval invocations.
         )
     self.assertLen(
         ppo_learner._critic_metrics_logger.get_metric_history(
