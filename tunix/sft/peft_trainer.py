@@ -203,10 +203,10 @@ class PeftTrainer:
     self.config = training_config
     self._lora_enabled = is_lora_enabled(self.model)
  
-    if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(
-          optimizer, training_config.gradient_accumulation_steps
-      )
+    # if training_config.gradient_accumulation_steps is not None:
+    #   optimizer = optax.MultiSteps(
+    #       optimizer, training_config.gradient_accumulation_steps
+    #   )
     
     if self._lora_enabled:
       self.optimizer = nnx.ModelAndOptimizer(
@@ -426,8 +426,8 @@ class PeftTrainer:
     try:
       ret = self.optimizer.opt_state.hyperparams["learning_rate"].value
       
-      logging.info("389 type of ret %s",type(ret))
-      logging.info("ret %s",ret)
+      # logging.info("389 type of ret %s",type(ret))
+      # logging.info("ret %s",ret)
       return ret 
     except AttributeError:
       for chainpart in self.optimizer.opt_state:
@@ -435,8 +435,8 @@ class PeftTrainer:
           break
         if hasattr(chainpart, "hyperparams"):
           ret = chainpart.hyperparams["learning_rate"].value
-          logging.info("398 type of ret %s",type(ret))
-          logging.info("ret %s",ret)
+          # logging.info("398 type of ret %s",type(ret))
+          # logging.info("ret %s",ret)
           return ret 
       return None
 

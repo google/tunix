@@ -18,6 +18,7 @@ set -x # Enable xtrace
 # pip install -q git+https://github.com/google/qwix
 # pip install -q datasets
 # pip install -q tensorflow
+# ckpt_dir="google/gemma/flax/2b" \
 
 python3 -m tunix.sft.peft_main \
   base_config.yaml \
