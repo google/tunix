@@ -401,8 +401,8 @@ def transfer_state_with_mappings(
       the target state. The keys of the dictionary are the source keys, and the
       values are tuples containing the target key and the sharding information.
     key_mapping_hook_fns: A dictionary mapping keys to hook functions that
-      modify the values before assignment. The hook fn will be called after
-      the transpose operation if transpose were to be applied.
+      modify the values before assignment. The hook fn will be called after the
+      transpose operation if transpose were to be applied.
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
@@ -549,6 +549,7 @@ def transfer_state_with_mappings(
 
 def verify_state_closeness(golden_state, state, atol=1e-2):
   """Check if the golden NNX state is close to the other NNX state.
+
   Helper function for validating weight mapping correctness.
   """
   golden_state_flatten = {
