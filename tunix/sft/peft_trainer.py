@@ -19,14 +19,16 @@ import contextlib
 import dataclasses
 import time
 from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple
+
 from absl import logging
 import flax
+from flax import linen as nn
 from flax import nnx
 import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+from jax.typing import ArrayLike
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -36,6 +38,7 @@ from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
+from tunix.sft import sharding_utils
 from tunix.sft import system_metrics_calculator
 
 _ModelInputT = Dict[str, ArrayLike]
@@ -312,12 +315,29 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
-    optimizer_state = nnx.state(
+    optimizer_state_arrays = nnx.state(
         self.optimizer, nnx.optimizer.OptState
     )  # select only the optimizer state
-    optimizer_shardings = nnx.get_named_sharding(optimizer_state, mesh)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state_arrays)
+
+    def _adjust_pspec(pspec, state):
+      if pspec is None:
+        return None
+      # state can be a scalar, which is not an array.
+      state_ndim = getattr(state, "ndim", 0)
+      if len(pspec) > state_ndim:
+        return shd.PartitionSpec(*pspec[:state_ndim])
+      return pspec
+
+    adjusted_pspecs = jax.tree.map(
+        _adjust_pspec, optimizer_pspecs, optimizer_state_arrays
+    )
+    optimizer_shardings = nn.logical_to_mesh_sharding(
+        adjusted_pspecs,
+        mesh,
+    )
     optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state, optimizer_shardings
+        optimizer_state_arrays, optimizer_shardings
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
@@ -353,13 +373,12 @@ class PeftTrainer:
     if mesh.empty:
       return input_data
 
+    pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
+
     with jax.transfer_guard("allow"):
       return jax.tree.map(
           lambda x: jax.make_array_from_process_local_data(
-              shd.NamedSharding(
-                  mesh, shd.PartitionSpec(*self.config.data_sharding_axis)
-              ),
-              x,
+              sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec), x
           ),
           input_data,
       )

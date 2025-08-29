@@ -15,6 +15,7 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import dataclasses
+import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,7 +28,6 @@ from tunix.generate import utils
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
 from vllm import LLM
-from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 
 
@@ -128,12 +128,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise NotImplementedError("Only support in memory weight sync as of now.")
 
+  def _find_tp_size(self, mesh: jax.sharding.Mesh) -> int:
+    """Finds the tensor parallel size from the mesh."""
+    # since vllm doesn't support DP yet, simply return the total rank size.
+    return math.prod(mesh.shape.values())
+
   def _vllm_config(self, config: VllmConfig):
     args = {}
     args["additional_config"] = {}
     args["model"] = config.model_version
     args["max_model_len"] = config.max_model_len
-    args["tensor_parallel_size"] = config.mesh.shape["tp"]
+    args["tensor_parallel_size"] = self._find_tp_size(config.mesh)
     args["gpu_memory_utilization"] = config.hbm_utilization
     if config.mapping_config.lora_config is not None:
       args["additional_config"][
@@ -218,10 +223,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       echo: bool = False,
       pad_output: bool = False,
   ) -> base_sampler.SamplerOutput:
+    # max_tokens: maximum number of tokens to generate
+    assert (
+        max_generation_steps <= self.args["max_model_len"]
+    ), f"{max_generation_steps} > {self.args['max_model_len']}"
     if beam_size is not None:
       self.sampling_params = self.llm.sampling_params.BeamSearchParams(
           beam_width=beam_size,
-          max_tokens=max_generation_steps,  # max number of tokens to generate
+          max_tokens=max_generation_steps,
           ignore_eos=False,
           temperature=temperature,
       )
@@ -242,17 +251,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         self.sampling_params.top_k = top_k
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    max_input_length = max(len(x) for x in prompt_ids)
-
-    if max_input_length + max_generation_steps > self.args["max_model_len"]:
-      raise ValueError(
-          f"Sum of max_input_length {max_input_length} and"
-          f" max_generation_steps {max_generation_steps} exceeds"
-          f" max_model_len {self.args['max_model_len']}."
-      )
-
     outputs = self.llm.generate(
-        prompts=[TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
+        prompts=None,
+        prompt_token_ids=prompt_ids,
         sampling_params=self.sampling_params,
         use_tqdm=True,
     )
@@ -260,8 +261,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         input_strings, outputs
     )
 
-    if max_prompt_length is None or max_prompt_length < max_input_length:
-      max_prompt_length = utils.next_power_of_2(max_input_length)
+    max_tokens_length = max(len(x) for x in prompt_ids)
+
+    if max_prompt_length is None or max_prompt_length < max_tokens_length:
+      max_prompt_length = utils.next_power_of_2(max_tokens_length)
     all_input_ids = [
         utils.pad_to_length(
             jnp.array(x),
