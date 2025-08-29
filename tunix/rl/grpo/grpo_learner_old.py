@@ -68,7 +68,7 @@ class GrpoConfig:
   """
 
   num_generations: int = 2
-  num_iterations: int = 1
+  num_iterations: int = 2
   beta: float = 0.04
   epsilon: float = 0.2
   loss_algo: str = "grpo"  # grpo or gspo-token
@@ -364,7 +364,7 @@ class GrpoLearner:
       None. Examples are put into the data queue.
     """
     print("[old version] begin prepare data")
-    print(async_loading)
+    print("async_loading: " , async_loading)
     example_list = []
 
     def _put_list_of_examples_to_data_queue():
@@ -385,10 +385,13 @@ class GrpoLearner:
         #   self._train_steps += 1
         #   print('skip')
         example = next(iterator)
+        print("example: ", example)
         example = jax.tree.map(
             lambda x: np.repeat(x, sample_repeat, axis=0),
             example,
         )  # [B] -> [B * G]
+        print("example after repeat: ", example)
+
 
         with jax.profiler.StepTraceAnnotation(
             "sampler",
@@ -396,9 +399,9 @@ class GrpoLearner:
             if mode == metrics_logger.Mode.TRAIN
             else self._eval_steps,
         ):
-          print("begin generate and compute advantage")
+          print("begin generate and compute advantage of one example")
           advantage = self._generate_and_compute_advantage(example, mode)
-          print('-------')
+          print('------------------------------------------------------')
           print(advantage.advantages)
         if async_loading:
           data_queue.put([advantage])
