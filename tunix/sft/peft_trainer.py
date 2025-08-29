@@ -38,6 +38,7 @@ from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import system_metrics_calculator
+from tunix.sft import sharding_utils
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
@@ -373,29 +374,9 @@ class PeftTrainer:
 
     pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
 
-    def _get_sharding(x):
-      # Only shard arrays with rank > 0.
-      if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:
-        return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
-
-      # Don't shard if rank is not sufficient.
-      if x.ndim < len(pspec):
-        return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
-
-      # Check for divisibility for all sharded axes.
-      for i, axis_name in enumerate(pspec):
-        if axis_name is not None:
-          axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
-          for name in axis_names:
-            axis_size = mesh.shape[name]
-            if x.shape[i] % axis_size != 0:
-              # Replicate if not evenly divisible.
-              return shd.NamedSharding(mesh, shd.PartitionSpec())
-      return shd.NamedSharding(mesh, pspec)
-
     with jax.transfer_guard("allow"):
       return jax.tree.map(
-                lambda x: jax.make_array_from_process_local_data(_get_sharding(x), x),
+                lambda x: jax.make_array_from_process_local_data(sharding_utils._get_sharding(x, mesh=mesh, pspec=pspec), x),
           input_data,
       )
 
