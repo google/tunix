@@ -567,7 +567,6 @@ class PeftTrainer:
           last_step_completion_time = current_time
 
           self._throttler.add_computation(train_loss)
-          self._train_steps += 1
           self._post_process_train_step(aux)
           self._buffer_and_write_train_metrics(
               loss=train_loss,
@@ -575,6 +574,7 @@ class PeftTrainer:
               step_time_delta=step_time_delta,
           )
           self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
+          self._train_steps += 1
 
           # Actual checkpoint frequency is configured by checkpointing_options.
           self.checkpoint_manager.save(
