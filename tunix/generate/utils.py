@@ -486,15 +486,6 @@ def transfer_state_with_mappings(
     new_value = (
         reshard_fn(value, tgt_param.value.sharding) if reshard_fn else value
     )
-    atol = 1e-2
-    if not jax.numpy.allclose(
-        tgt_param.value, new_value, atol=atol
-    ):
-      logging.debug('Weights for key %s do not match, Updating weights.', 
-                    tgt_param)
-      logging.debug(
-          'Previous value: %s, new value: %s',
-           tgt_param.value.ravel()[:10], new_value.ravel()[:10])
     tgt_param.value = new_value
 
   def _extract_layer_from_scanned_tensor(tensor, layer_idx, layer_axis):
