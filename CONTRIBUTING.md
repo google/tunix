@@ -97,3 +97,49 @@ sure you run the pre-commit hooks manually):
 ```
 git commit -m "<message>" --no-verify
 ```
+
+## Documentation
+
+The Tunix documentation website is built using [Sphinx](https://www.sphinx-doc.org) and [MyST](https://myst-parser.readthedocs.io/en/latest/). Documents can be written in [MyST Markdown syntax](https://myst-parser.readthedocs.io/en/latest/syntax/typography.html#syntax-core) or [reStructuredText](https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html).
+
+### Building the documentation locally (optional)
+
+If you are writing documentation for Tunix, you may want to preview the
+documentation site locally to ensure things work as expected before a
+deployment.
+
+First, make sure you install the necessary dependencies. You can do this by
+navigating to your local clone of the Tunix repo and running:
+
+```bash
+pip install ".[docs]"
+```
+
+Once the dependencies are installed, you can navigate to the `docs/` folder and
+run:
+
+```bash
+make html
+```
+
+This will generate the documentation in the `docs/_build/html` directory. These
+files can be opened in a web browser directly, or you can use a simple HTTP
+server to serve the files. For example, you can run:
+
+```bash
+python -m http.server -d docs/_build/html
+```
+
+Then, open your web browser and navigate to `http://localhost:8000` to view the
+documentation.
+
+### Adding new documentation files
+
+If you are adding a new document, make sure it is included in the `toctree`
+directive corresponding to the section where the new document should live.
+For example, if adding a new page, make sure it is listed in the `toctree`
+directive in `docs/index.md`.
+
+<!-- ### Documentation deployment
+
+The Tunix documentation is deployed to [https://tunix.readthedocs.io](https://tunix.readthedocs.io) on any successful merge to the main branch. -->
