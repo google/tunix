@@ -31,6 +31,7 @@ from tunix.rl import utils
 from tunix.rl.grpo import grpo_helpers
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import metrics_logger
+import math
 
 _TrainingInputT = Dict[str, List[str] | ArrayLike]
 
@@ -80,14 +81,14 @@ class GrpoConfig:
     )
 
 
-# 放到文件顶部 imports 附近
-import math
-
 def _lcm3(a: int, b: int, c: int) -> int:
   return (a * b) // math.gcd(a, b) * c // math.gcd(((a * b) // math.gcd(a, b)), c)
 
 def _chunk_slices_by_size(n: int, micro: int):
-  """按样本数 micro 返回 [slice(...), ...] 切片列表。最后一块允许 < micro。"""
+  """
+  Returns a list of slices `[slice(...), ...]` for n samples, chunked by micro.
+  The last chunk is allowed to be smaller than micro.
+  """
   i = 0
   out = []
   while i < n:
@@ -202,21 +203,34 @@ class GrpoLearner:
     self.old_logps_micro_batch_size = 2
 
   
-  # 放在 GrpoLearner 类里（与之前给你的 _rollout_in_chunks / _per_token_logps_in_chunks 类似）
   def _rollout_by_micro(self, prompts: list[str], micro: int):
+    """
+    Performs rollouts in smaller batches (micro-batches) to manage memory.
+    """
     outs_tokens = []
     outs_text = []
     outs_left_padded = []
-    print("现在的数据中有" + str(len(prompts)) + "条prompt")
+    
+    # Log the total number of prompts to be processed.
+    print(f"Processing {len(prompts)} prompts in this batch.")
+    
+    # Iterate through the prompts in micro-batches.
     for slc in _chunk_slices_by_size(len(prompts), micro):
       sub_prompts = prompts[slc]
-      print("generate" + str(slc) + "次")
+      print(f"Generating for slice: {slc}")
+      
+      # Generate completions for the current sub-batch.
       out = self.rl_cluster.generate(prompts=sub_prompts)
-      outs_tokens.append(out.tokens)                         # [b, T_out]
+      
+      # Store the results from the generation.
+      outs_tokens.append(out.tokens)                         # Shape: [batch_size, output_seq_len]
       outs_text.extend(out.text)
-      outs_left_padded.append(out.left_padded_prompt_tokens) # [b, T_in]
+      outs_left_padded.append(out.left_padded_prompt_tokens) # Shape: [batch_size, input_seq_len]
+      
+    # Concatenate the results from all micro-batches.
     completion_ids = jnp.concatenate(outs_tokens, axis=0)
     left_padded = jnp.concatenate(outs_left_padded, axis=0)
+    
     return completion_ids, left_padded, outs_text
 
   def _ref_logps_by_micro(self, prompt_ids: jnp.ndarray, completion_ids: jnp.ndarray, micro: int):
@@ -255,26 +269,28 @@ class GrpoLearner:
       training_input: _TrainingInputT,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
   ) -> TrainExample:
+    """Generates completions and computes advantages for a given batch of prompts."""
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
 
     prompts: List[str] = training_input["prompts"]
 
-    # === 1) rollout：按 rollout_micro 分块 ===
-    print("[new]begin rollout")
+    # === 1) Rollout: Process in chunks by rollout_micro_batch_size ===
+    print("[new] Beginning rollout...")
     completion_ids, prompt_ids, completion_text = self._rollout_by_micro(
-        prompts, self.rollout_micro_batch_size 
+        prompts, self.rollout_micro_batch_size
     )
 
-    print("[new]begin mask")
-    # === 2) 组 mask ===
+    # === 2) Assemble masks ===
+    print("[new] Assembling masks...")
     prompt_mask = (prompt_ids != pad_value).astype("int32")
     completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype("int32")
     completion_mask = common.make_completion_mask(completion_ids, eos_tok=eos_value)
+    # Apply the padding mask to the completion mask.
     completion_mask = completion_mask * completion_padding_mask
 
-    print("[new]begin logps")
-    # === 3) ref / old logps：按各自 micro 分块 ===
+    # === 3) Calculate ref/old logps: Process in their respective micro-batches ===
+    print("[new] Calculating log probabilities...")
     if self.grpo_config.beta != 0.0:
       ref_per_token_logps = self._ref_logps_by_micro(
           prompt_ids, completion_ids, self.ref_logps_micro_batch_size
@@ -289,7 +305,7 @@ class GrpoLearner:
     else:
       old_per_token_logps = None
 
-    # === 4) reward 与 advantage（与原逻辑一致）===
+    # === 4) Compute rewards and advantages (consistent with original logic) ===
     rewards = self._compute_rewards(
         prompts=prompts,
         completions=completion_text,
@@ -300,14 +316,14 @@ class GrpoLearner:
         rewards, self.grpo_config.num_generations
     )
 
-    # === 5) 记录长度指标（原样）===
+    # === 5) Log length metrics (unchanged from original) ===
     agg_completion_mask = completion_mask.sum(axis=-1)
     steps = self._get_metric_logging_steps(mode)
     self._metrics_logger.log("completions/mean_length", agg_completion_mask.mean(), mode, steps)
     self._metrics_logger.log("completions/max_length", agg_completion_mask.max(), mode, steps)
     self._metrics_logger.log("completions/min_length", agg_completion_mask.min(), mode, steps)
 
-    # === 6) 返回 TrainExample ===
+    # === 6) Return the TrainExample object ===
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -363,169 +379,23 @@ class GrpoLearner:
 
     return rewards
 
-  # def _prepare_data(
-  #     self,
-  #     iterator: Iterator[_TrainingInputT],
-  #     proceed_num_steps: int,
-  #     sample_repeat: int,
-  #     batch_repeat: int,
-  #     data_queue: queue_lib.AbstractDataQueue[
-  #         list[TrainExample] | common.RepeatIterable | None
-  #     ],
-  #     async_loading: bool = False,
-  #     mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
-  # ) -> None:
-  #   print("[new feature] begin prepare data")
-
-  #   # === LCM 作为服务批大小（不考虑对齐与上下限）===
-  #   service_target_bs = _lcm3(
-  #       self.rollout_micro_batch_size,
-  #       self.ref_logps_micro_batch_size,
-  #       self.old_logps_micro_batch_size,
-  #   )
-
-  #   buf: list[_TrainingInputT] = []
-  #   buf_sizes: list[int] = []   # 每个训练 micro 的样本数
-  #   buf_B = 0                   # 聚合的总样本数（未 repeat）
-  #   example_list: list[TrainExample] = []
-  #   consumed_steps = 0          # 按“训练 micro 个数”计数（不是样本条数）
-
-  #   print("end init")
-
-  #   def _flush(force: bool = False):
-  #     nonlocal buf, buf_sizes, buf_B, example_list
-  #     if not buf:
-  #       return
-  #     if (not force) and (buf_B < service_target_bs):
-  #       print("数据不够，出去了")
-  #       return
-  #     print("数据够了，进来了")
-      
-  #     # 1) 合并多个训练 micro 成 single batch（未 repeat）
-  #     merged: dict = {}
-  #     keys = buf[0].keys()
-  #     for k in keys:
-  #       merged[k] = buf[0][k]
-  #     for i in range(1, len(buf)):
-  #       for k in keys:
-  #         a, b = merged[k], buf[i][k]
-  #         if isinstance(a, list) and isinstance(b, list):
-  #           merged[k] = a + b
-  #         else:
-  #           merged[k] = np.concatenate([np.asarray(a), np.asarray(b)], axis=0)
-      
-  #     print('merged 之后的数据:')
-  #     print(merged)
-  #     # 2) 一次性 repeat G（等价于逐 micro repeat 再拼）
-  #     merged_repeated = jax.tree.map(
-  #         lambda x: np.repeat(x, sample_repeat, axis=0),
-  #         merged,
-  #     )  # [sum(B_i)] -> [sum(B_i) * G]
-
-  #     print('repeat后的数据:')
-  #     print(merged_repeated)
-
-  #     # 3) 大批执行（内部按各阶段 micro 重新切分）
-  #     with jax.profiler.StepTraceAnnotation(
-  #         "sampler",
-  #         step_num=self._train_steps if mode == metrics_logger.Mode.TRAIN else self._eval_steps,
-  #     ):
-  #       big_example = self._generate_and_compute_advantage(merged_repeated, mode)
-
-  #     # 4) 按原训练 micro 边界（×G）切回，构造多个 TrainExample
-  #     offset = 0
-  #     for n in buf_sizes:
-  #       token_sl = slice(offset * sample_repeat, (offset + n) * sample_repeat)
-  #       te_small = TrainExample(
-  #           prompt_ids=big_example.prompt_ids[token_sl],
-  #           prompt_mask=big_example.prompt_mask[token_sl],
-  #           completion_ids=big_example.completion_ids[token_sl],
-  #           completion_mask=big_example.completion_mask[token_sl],
-  #           ref_per_token_logps=None if big_example.ref_per_token_logps is None else big_example.ref_per_token_logps[token_sl],
-  #           advantages=big_example.advantages[token_sl],  # 每序列一个 advantage → 跟随 repeat 后的序列切
-  #           old_per_token_logps=None if big_example.old_per_token_logps is None else big_example.old_per_token_logps[token_sl],
-  #       )
-  #       example_list.append(te_small)
-  #       offset += n
-
-  #     # 5) 入队（与原逻辑一致）
-  #     if not async_loading:
-  #       data_queue.put(common.RepeatIterable(example_list, batch_repeat))
-  #       example_list = []
-  #     else:
-  #       for te_small in example_list:
-  #         data_queue.put([te_small])
-  #       if batch_repeat > 1:
-  #         data_queue.put(common.RepeatIterable(example_list, batch_repeat - 1))
-  #       example_list = []
-
-  #     # 6) 清空缓冲
-  #     buf.clear()
-  #     buf_sizes.clear()
-  #     buf_B = 0
-
-  #   try:
-  #     while True:
-  #       print('开始一次循环')
-  #       # 从 checkpoint 恢复时快进（原逻辑保留）
-  #       while (mode == metrics_logger.Mode.TRAIN and self._train_steps < self._last_train_step):
-  #         next(iterator)
-  #         self._train_steps += 1
-
-  #       # 取一个“训练 microbatch”
-  #       example = next(iterator)
-  #       B = len(example["prompts"])
-  #       buf.append(example)
-  #       buf_sizes.append(B)
-  #       buf_B += B
-  #       consumed_steps += 1
-  #       print("看看buf里的b有多少" + str(buf_B))
-
-  #       print("let's see the current example:")
-  #       print(example)
-  #       print("going to _flush function")
-  #       # 达到 LCM 就 flush 一次
-  #       _flush(force=False)
-  #       print("out")
-
-  #       # 步数计数（原逻辑保留）
-  #       if mode == metrics_logger.Mode.TRAIN:
-  #         self._train_steps += 1
-  #       else:
-  #         self._eval_steps += 1
-
-  #       # 只推进固定个数的 micro 时，达到上限强制 flush 并返回
-  #       if proceed_num_steps > 0 and consumed_steps >= proceed_num_steps:
-  #         _flush(force=True)
-  #         return
-
-  #   except StopIteration as e:
-  #     if proceed_num_steps > 0:
-  #       raise e
-  #     else:
-  #       _flush(force=True)
-  #       return
-  #   finally:
-  #     data_queue.put(None)
-
-
 
   def _prepare_data(
-      self,
-      iterator: Iterator[_TrainingInputT],
-      proceed_num_steps: int,
-      sample_repeat: int,
-      batch_repeat: int,
-      data_queue: queue_lib.AbstractDataQueue[
-          list[TrainExample] | common.RepeatIterable | None
-      ],
-      async_loading: bool = False,
-      mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
-  ) -> None:
-    print("[new feature] begin prepare data")
-    print(async_loading)
+    self,
+    iterator: Iterator[_TrainingInputT],
+    proceed_num_steps: int,
+    sample_repeat: int,
+    batch_repeat: int,
+    data_queue: queue_lib.AbstractDataQueue[
+        list[TrainExample] | common.RepeatIterable | None
+    ],
+    async_loading: bool = False,
+    mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
+) -> None:
+    print("[new feature] Beginning data preparation...")
+    print(f"Async loading enabled: {async_loading}")
 
-    # === LCM 作为服务批大小（不考虑对齐与上下限）===
+    # === Use LCM as the service batch size (ignoring alignment or size limits) ===
     service_target_bs = _lcm3(
         self.rollout_micro_batch_size,
         self.ref_logps_micro_batch_size,
@@ -533,60 +403,61 @@ class GrpoLearner:
     )
 
     buf: list[_TrainingInputT] = []
-    buf_sizes: list[int] = []   # 每个训练 micro 的样本数
-    buf_B = 0                   # 聚合的总样本数（未 repeat）
-    consumed_steps = 0          # 按“训练 micro 个数”计数（不是样本条数）
-    pending_examples: list[TrainExample] = []  # 等待在 proceed 边界统一入队
+    buf_sizes: list[int] = []   # Number of samples in each training micro-batch
+    buf_B = 0                   # Total aggregated samples (before repeating)
+    consumed_steps = 0          # Counts the number of training micro-batches (not individual samples)
+    pending_examples: list[TrainExample] = []  # Awaiting to be enqueued at the 'proceed' boundary
 
-    print("end init")
+    print("Initialization complete.")
 
     def _flush(force: bool = False) -> list[TrainExample]:
-      """聚合→G倍repeat→大批执行→按训练micro切回；只产出，不入队。"""
+      """
+      Aggregates -> repeats 'sample_repeat' times -> executes as a large batch -> splits back by training micro-batch size.
+      This function only produces examples; it does not enqueue them.
+      """
       nonlocal buf, buf_sizes, buf_B
       produced: list[TrainExample] = []
 
       if not buf:
         return produced
       if (not force) and (buf_B < service_target_bs):
-        print("数据不够，出去了")
+        print("Not enough data, skipping flush.")
         return produced
-      print("数据够了，进来了")
+      print("Sufficient data, proceeding with flush.")
 
-      # 1) 合并多个训练 micro 成 single batch（未 repeat）
+      # 1) Merge multiple training micro-batches into a single batch (before repeating)
       merged: dict = {}
       keys = buf[0].keys()
       for k in keys:
-        merged[k] = buf[0][k]
+        merged[k] = list(buf[0][k])
       for i in range(1, len(buf)):
         for k in keys:
           a, b = merged[k], buf[i][k]
           if isinstance(a, list) and isinstance(b, list):
-            merged[k] = a + b
+            merged[k].extend(b)
           else:
             merged[k] = np.concatenate([np.asarray(a), np.asarray(b)], axis=0)
 
-      print('merged 之后的数据:')
+      print('Data after merging:')
       print(merged)
 
-      # 2) 一次性 repeat G（等价于逐 micro repeat 再拼）
+      # 2) Repeat 'sample_repeat' times at once (equivalent to repeating each micro-batch and then concatenating)
       merged_repeated = jax.tree.map(
           lambda x: np.repeat(x, sample_repeat, axis=0),
           merged,
-      )  # [sum(B_i)] -> [sum(B_i) * G]
+      )  # Shape changes from [sum(B_i)] to [sum(B_i) * sample_repeat]
 
-      print('repeat后的数据:')
+      print('Data after repeating:')
       print(merged_repeated)
 
-      # 3) 大批执行（内部按各阶段 micro 重新切分）
+      # 3) Execute as a large batch (internally re-split by micro-batch sizes for each stage)
       with jax.profiler.StepTraceAnnotation(
           "sampler",
           step_num=self._train_steps if mode == metrics_logger.Mode.TRAIN else self._eval_steps,
       ):
         big_example = self._generate_and_compute_advantage(merged_repeated, mode)
       
-        
-
-      # 4) 按原训练 micro 边界（×G）切回，构造多个 TrainExample
+      # 4) Split back according to original training micro-batch boundaries (multiplied by sample_repeat)
       offset = 0
       for n in buf_sizes:
         token_sl = slice(offset * sample_repeat, (offset + n) * sample_repeat)
@@ -596,16 +467,16 @@ class GrpoLearner:
             completion_ids=big_example.completion_ids[token_sl],
             completion_mask=big_example.completion_mask[token_sl],
             ref_per_token_logps=None if big_example.ref_per_token_logps is None else big_example.ref_per_token_logps[token_sl],
-            # advantages 为“每序列一个”，随 repeat 后的序列切片
+            # 'advantages' is one per sequence, so we slice it along with the repeated sequences.
             advantages=big_example.advantages[token_sl],
             old_per_token_logps=None if big_example.old_per_token_logps is None else big_example.old_per_token_logps[token_sl],
         )
         print("-------------------")
-        print(te_small.advantages)
+        print(f"Advantages for small TrainExample: {te_small.advantages}")
         produced.append(te_small)
         offset += n
 
-      # 5) 清空缓冲（仅清空，不入队）
+      # 5) Clear the buffer
       buf.clear()
       buf_sizes.clear()
       buf_B = 0
@@ -614,60 +485,55 @@ class GrpoLearner:
 
     try:
       while True:
-        print('开始一次循环')
-        # 从 checkpoint 恢复时快进（原逻辑保留）
-        print(self._train_steps)
+        print('Starting a new loop iteration...')
+        # Fast-forward when resuming from a checkpoint (original logic retained)
         # while (mode == metrics_logger.Mode.TRAIN and self._train_steps < self._last_train_step):
-        #   print("skip")
+        #   print("Skipping step to catch up with checkpoint...")
         #   next(iterator)
         #   self._train_steps += 1
           
-        print(self._train_steps)
-        # 取一个“训练 microbatch”
+        # Fetch one "training micro-batch"
         example = next(iterator)
         B = len(example["prompts"])
         buf.append(example)
         buf_sizes.append(B)
         buf_B += B
         consumed_steps += 1
-        print("看看buf里的b有多少" + str(buf_B))
+        print(f"Current number of samples in buffer: {buf_B}")
 
-        print("let's see the current example:")
+        print("Current example fetched:")
         print(example)
-        print("going to _flush function")
+        print("Checking if buffer should be flushed...")
 
-        # 达到 LCM 就生产一批（不入队，先放入 pending）
+        # Once the LCM batch size is reached, produce a batch (add to pending, but don't enqueue yet)
         produced_now = _flush(force=False)
         if produced_now:
           pending_examples.extend(produced_now)
-        print("out")
+        print("Exited _flush function.")
 
-        # 步数计数（原逻辑保留）
+        # Step counting (original logic retained)
         if mode == metrics_logger.Mode.TRAIN:
           self._train_steps += 1
         else:
           self._eval_steps += 1
 
-        # 大部分情况不可能出现尾巴，尾巴的意义是，steps设置为4，但big bench是3，那么会有1的尾巴没有刷新。但实际上，big bench往往是steps的因子，一般都是正好可以整除的
-        # 只推进固定个数的 micro 时，达到上限：把“缓冲尾巴也生产”→ 再统一入队（a a b b …）
+        # The 'tail' logic handles cases where the dataset isn't perfectly divisible by 'proceed_num_steps'.
+        # For instance, if proceed_num_steps=4 but the dataset has only 3 batches, this ensures the last 3 are processed.
+        # This is rare, as dataset sizes are typically factors of step counts.
         if proceed_num_steps > 0 and consumed_steps >= proceed_num_steps:
-          tail = _flush(force=True)  # 可能还有未达 LCM 的尾巴
+          tail = _flush(force=True)  # Flush any remaining tail that didn't reach the LCM threshold
           if tail:
             pending_examples.extend(tail)
 
-          # === 最终 repeat：不再维持 a a b b，直接 repeat 整个列表 ===
           if pending_examples:
-            print('开始放数据')
+            print('Starting to enqueue data...')
             if not async_loading:
-              print('开始')
-              # 同步：直接重复 pending_examples 共 batch_repeat 轮
-              print(pending_examples)
-              print(len(pending_examples))
+              # Synchronous: Directly repeat pending_examples for a total of batch_repeat times.
+              print(f"Enqueuing {len(pending_examples)} examples, repeated {batch_repeat} times.")
               data_queue.put(common.RepeatIterable(pending_examples, batch_repeat))
-              print('长度是:')
-              print(len(data_queue))
+              print(f'Queue length is now: {len(data_queue)}')
             else:
-              # 异步：前面已经入队过第1轮，这里只补 (batch_repeat-1) 轮
+              # Asynchronous: The first repetition was already enqueued, so only add the remaining (batch_repeat - 1).
               if batch_repeat > 1:
                 data_queue.put(common.RepeatIterable(pending_examples, batch_repeat - 1))
 
@@ -678,11 +544,12 @@ class GrpoLearner:
       if proceed_num_steps > 0:
         raise e
       else:
-        # 尾巴：强制生产
+        # End of iterator: force flush any remaining data.
         tail = _flush(force=True)
         if tail:
           pending_examples.extend(tail)
-        # 统一 repeat 入队
+        
+        # Enqueue all repeated examples together.
         if pending_examples:
           if not async_loading:
             data_queue.put(common.RepeatIterable(pending_examples, batch_repeat))
@@ -691,8 +558,7 @@ class GrpoLearner:
               data_queue.put(common.RepeatIterable(pending_examples, batch_repeat - 1))
         return
     finally:
-      data_queue.put(None)
-
+      data_queue.put(None) # Signal that data preparation is complete.
 
 
 
@@ -773,7 +639,7 @@ class GrpoLearner:
         ):
           while True:
             curr_train_ds = train_data_queue.get(block=True)
-            print('来了一个example')
+            print('here is an example')
             print(curr_train_ds)
             for item in curr_train_ds:
               print('-------------------')
