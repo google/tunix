@@ -1,7 +1,7 @@
 """Unit tests for `progress_bar`."""
 
 from absl.testing import absltest
-from jax import numpy as jnp
+import numpy as np
 from tunix.sft import metrics_logger
 from tunix.sft import progress_bar
 
@@ -25,10 +25,8 @@ class ProgressBarTest(absltest.TestCase):
     self.assertDictEqual(self.progress_bar.metrics, {})
 
   def test_update_metric(self):
-    self.metrics_logger.log(
-        "loss", jnp.array(0.5), metrics_logger.Mode.TRAIN, 1
-    )
-    self.metrics_logger.log("loss", jnp.array(0.6), metrics_logger.Mode.EVAL, 1)
+    self.metrics_logger.log("loss", np.array(0.5), metrics_logger.Mode.TRAIN, 1)
+    self.metrics_logger.log("loss", np.array(0.6), metrics_logger.Mode.EVAL, 1)
 
     self.progress_bar._update_metric("loss", metrics_logger.Mode.TRAIN)
     self.assertDictEqual(self.progress_bar.metrics, {"train_loss": 0.5})
@@ -39,21 +37,19 @@ class ProgressBarTest(absltest.TestCase):
 
   def test_update_metrics(self):
     # update `metrics_logger`.
+    self.metrics_logger.log("loss", np.array(0.8), metrics_logger.Mode.TRAIN, 2)
+    self.metrics_logger.log("loss", np.array(0.9), metrics_logger.Mode.EVAL, 2)
     self.metrics_logger.log(
-        "loss", jnp.array(0.8), metrics_logger.Mode.TRAIN, 2
-    )
-    self.metrics_logger.log("loss", jnp.array(0.9), metrics_logger.Mode.EVAL, 2)
-    self.metrics_logger.log(
-        "perplexity", jnp.array(2.2255), metrics_logger.Mode.TRAIN, 2
+        "perplexity", np.array(2.2255), metrics_logger.Mode.TRAIN, 2
     )
     self.metrics_logger.log(
-        "perplexity", jnp.array(2.4596), metrics_logger.Mode.EVAL, 2
+        "perplexity", np.array(2.4596), metrics_logger.Mode.EVAL, 2
     )
 
     self.progress_bar.update_metrics(
         ["loss", "perplexity"], metrics_logger.Mode.TRAIN
     )
-    exp_output = {"train_loss": 0.8, "train_perplexity": 2.226}
+    exp_output = {"train_loss": 0.8, "train_perplexity": 2.225}
     self.assertDictEqual(self.progress_bar.metrics, exp_output)
 
     self.progress_bar.update_metrics(

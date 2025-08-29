@@ -414,7 +414,7 @@ class PeftTrainer:
       step_time_delta: float | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
-    perplexity = jnp.exp(loss)
+    perplexity = np.exp(loss)
     self.metrics_logger.log("loss", loss, self._mode, step)
     self.metrics_logger.log("perplexity", perplexity, self._mode, step)
     learning_rate = self._try_get_learning_rate()

@@ -25,6 +25,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+import numpy as np
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils
@@ -364,25 +365,25 @@ class PpoLearner:
 
     # Log raw scores from the reward model/fn
     self._actor_metrics_logger.log(
-        "score/mean", last_token_scores.mean(), mode, step
+        "score/mean", np.mean(last_token_scores), mode, step
     )
     self._actor_metrics_logger.log(
-        "score/max", last_token_scores.max(), mode, step
+        "score/max", np.max(last_token_scores), mode, step
     )
     self._actor_metrics_logger.log(
-        "score/min", last_token_scores.min(), mode, step
+        "score/min", np.min(last_token_scores), mode, step
     )
 
     # Log final rewards (scores + KL penalty)
     sequence_rewards = rewards.sum(-1)
     self._actor_metrics_logger.log(
-        "reward/mean", sequence_rewards.mean(), mode, step
+        "reward/mean", np.mean(sequence_rewards), mode, step
     )
     self._actor_metrics_logger.log(
-        "reward/max", sequence_rewards.max(), mode, step
+        "reward/max", np.max(sequence_rewards), mode, step
     )
     self._actor_metrics_logger.log(
-        "reward/min", sequence_rewards.min(), mode, step
+        "reward/min", np.min(sequence_rewards), mode, step
     )
     if self.ppo_config.beta != 0.0:
       # Average of the per-sequence mean KL
@@ -397,19 +398,19 @@ class PpoLearner:
     agg_completion_mask = completion_mask.sum(axis=-1)
     self._actor_metrics_logger.log(
         "completions/mean_length",
-        agg_completion_mask.mean(),
+        np.mean(agg_completion_mask),
         mode,
         self._get_metric_logging_steps(mode),
     )
     self._actor_metrics_logger.log(
         "completions/max_length",
-        agg_completion_mask.max(),
+        np.max(agg_completion_mask),
         mode,
         self._get_metric_logging_steps(mode),
     )
     self._actor_metrics_logger.log(
         "completions/min_length",
-        agg_completion_mask.min(),
+        np.min(agg_completion_mask),
         mode,
         self._get_metric_logging_steps(mode),
     )

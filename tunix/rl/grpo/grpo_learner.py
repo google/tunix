@@ -257,19 +257,19 @@ class GrpoLearner:
     steps = self._get_metric_logging_steps(mode)
     self._metrics_logger.log(
         "completions/mean_length",
-        agg_completion_mask.mean(),
+        np.mean(agg_completion_mask),
         mode,
         steps,
     )
     self._metrics_logger.log(
         "completions/max_length",
-        agg_completion_mask.max(),
+        np.max(agg_completion_mask),
         mode,
         steps,
     )
     self._metrics_logger.log(
         "completions/min_length",
-        agg_completion_mask.min(),
+        np.min(agg_completion_mask.min),
         mode,
         steps,
     )
@@ -313,7 +313,7 @@ class GrpoLearner:
 
       self._metrics_logger.log(
           f"rewards/{reward_fn.__name__}",
-          r.mean(),
+          np.mean(r),
           mode,
           steps,
       )
@@ -322,7 +322,7 @@ class GrpoLearner:
 
     self._metrics_logger.log(
         "rewards/overall",
-        rewards.mean(),
+        np.mean(rewards),
         mode,
         steps,
     )
