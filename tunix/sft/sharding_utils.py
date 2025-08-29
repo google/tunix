@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utilities for sharding tensors."""
+
+import jax
 import jax.sharding as shd
 import numpy as np
-import jax
 
-def _get_sharding(x, mesh, pspec):
+
+def get_sharding(x, mesh, pspec):
+  """Get a sharding for an tensor given a mesh and partition spec."""
   # Only shard arrays with rank > 0.
   if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated

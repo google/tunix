@@ -19,15 +19,16 @@ import contextlib
 import dataclasses
 import time
 from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple
+
 from absl import logging
 import flax
-from flax import nnx
 from flax import linen as nn
+from flax import nnx
 import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+from jax.typing import ArrayLike
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -37,8 +38,8 @@ from tunix.sft import inflight_throttler
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
-from tunix.sft import system_metrics_calculator
 from tunix.sft import sharding_utils
+from tunix.sft import system_metrics_calculator
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
@@ -323,7 +324,7 @@ class PeftTrainer:
       if pspec is None:
         return None
       # state can be a scalar, which is not an array.
-      state_ndim = getattr(state, 'ndim', 0)
+      state_ndim = getattr(state, "ndim", 0)
       if len(pspec) > state_ndim:
         return shd.PartitionSpec(*pspec[:state_ndim])
       return pspec
@@ -376,8 +377,9 @@ class PeftTrainer:
 
     with jax.transfer_guard("allow"):
       return jax.tree.map(
-                lambda x: jax.make_array_from_process_local_data(sharding_utils._get_sharding(x, mesh=mesh, pspec=pspec), x),
-          input_data,
+          lambda x: jax.make_array_from_process_local_data(
+            sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec), x),
+            input_data,
       )
 
   def _prepare_inputs(self, input_data: Any) -> Any:
