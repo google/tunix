@@ -161,7 +161,7 @@ class PeftTrainerTest(parameterized.TestCase):
         [mock.call.on_train_start(trainer)]
         + [mock.call.on_train_step_start(trainer) for _ in range(4)]
         + [
-            mock.call.on_train_step_end(trainer, mock.ANY, mock.ANY)
+            mock.call.on_train_step_end(trainer, mock.ANY, mock.ANY, mock.ANY)
             for _ in range(4)
         ]
         + [mock.call.on_eval_step_start(trainer) for _ in range(4)]

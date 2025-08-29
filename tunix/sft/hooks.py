@@ -42,6 +42,7 @@ class TrainingHooks(abc.ABC):
   def on_train_step_end(
       self,
       train_ctx: "PeftTrainer.PeftTrainer",
+      train_step: int,
       train_loss: float,
       step_time: float,
   ):

@@ -447,6 +447,13 @@ class PeftTrainer:
           step=prev_step,
           step_time_delta=prev_step_time,
       )
+      self._may_update_pbar(
+          self._tqdm_train_metrics,
+          increment_steps=True,
+          step=prev_step,
+          loss=prev_loss,
+          step_time=prev_step_time,
+      )
 
     # Buffer step N metrics to be written in the next iteration.
     self._buffered_train_metrics = (loss, step, step_time_delta)
@@ -468,11 +475,22 @@ class PeftTrainer:
   def _tqdm_eval_metrics(self) -> list[str]:
     return ["loss", "perplexity"]
 
-  def _may_update_pbar(self, metrics, increment_steps: bool = False):
+  def _may_update_pbar(
+      self,
+      metrics,
+      increment_steps: bool = False,
+      step: int | None = None,
+      loss: ArrayLike | None = None,
+      step_time: float | None = None,
+  ):
+    """Updates the progress bar with the given metrics if available."""
     if self._pbar is not None:
       self._pbar.update_metrics(metrics, self._mode, ndigits=3)
       if increment_steps:
         self._pbar.update()
+
+    if self.training_hooks and self._mode == metrics_logger.Mode.TRAIN:
+      self.training_hooks.on_train_step_end(self, step, loss, step_time)
 
   def train(
       self,
@@ -573,7 +591,6 @@ class PeftTrainer:
               step=self._train_steps,
               step_time_delta=step_time_delta,
           )
-          self._may_update_pbar(self._tqdm_train_metrics, increment_steps=True)
           self._train_steps += 1
 
           # Actual checkpoint frequency is configured by checkpointing_options.
@@ -582,10 +599,7 @@ class PeftTrainer:
               self.model,
               save_only_lora_params=self._lora_enabled,
           )
-          if self.training_hooks:
-            self.training_hooks.on_train_step_end(
-                self, train_loss, step_time_delta
-            )
+
         self._prof.maybe_deactivate(self._train_steps)
 
     self._throttler.wait_for_all()
@@ -621,6 +635,13 @@ class PeftTrainer:
           loss=loss,
           step=step,
           step_time_delta=step_time,
+      )
+      self._may_update_pbar(
+          self._tqdm_train_metrics,
+          increment_steps=True,
+          step=step,
+          loss=loss,
+          step_time=step_time,
       )
       self._buffered_train_metrics = None
 
