@@ -269,7 +269,7 @@ class GrpoLearner:
     )
     self._metrics_logger.log(
         "completions/min_length",
-        np.min(agg_completion_mask.min),
+        np.min(agg_completion_mask),
         mode,
         steps,
     )
