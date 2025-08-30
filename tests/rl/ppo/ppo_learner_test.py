@@ -376,7 +376,8 @@ class PpoLearnerTest(parameterized.TestCase):
         'score/mean',
         'reward/mean',
         'loss',  # policy loss
-        'kl/mean',
+        'reward_kl_penalty',
+        'pg_clipfrac',
     ]:
       self.assertLen(
           actor_metric_logger.get_metric_history(metric_name, 'train'),
@@ -392,18 +393,21 @@ class PpoLearnerTest(parameterized.TestCase):
             actor_metric_logger.get_metric_history(metric_name, 'eval'),
             5,  # eval loss is aggregated, so # equal to # of eval invocations.
         )
-    self.assertLen(
-        ppo_learner._critic_metrics_logger.get_metric_history(
-            'loss/vf', 'train'
-        ),
-        ppo_learner._train_steps,
-    )
-    self.assertLen(
-        ppo_learner._critic_metrics_logger.get_metric_history(
-            'loss/vf', 'eval'
-        ),
-        ppo_learner._eval_steps,
-    )
+
+    for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:
+      self.assertLen(
+          ppo_learner._critic_metrics_logger.get_metric_history(
+              metric_name, 'train'
+          ),
+          ppo_learner._train_steps,
+      )
+      eval_steps = 5 if metric_name == 'loss' else ppo_learner._eval_steps
+      self.assertLen(
+          ppo_learner._critic_metrics_logger.get_metric_history(
+              metric_name, 'eval'
+          ),
+          eval_steps,
+      )
 
   @parameterized.named_parameters(
       dict(
