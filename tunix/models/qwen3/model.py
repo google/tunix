@@ -88,6 +88,20 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
+  def qwen3_minimal(cls):  # for testing
+    return cls(
+        num_layers=2,
+        vocab_size=151936,
+        embed_dim=16,
+        hidden_dim=24,
+        num_heads=16,
+        head_dim=2,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+    )
+
+  @classmethod
   def qwen3_0_6_b(cls):  # qwen3-0.6B
     return cls(
         num_layers=28,
@@ -356,7 +370,7 @@ class Attention(nnx.Module):
     attn = attn.reshape((b, qh, t, s))
 
     if attn_mask is not None:
-      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
+      attn = jnp.where((jnp.expand_dims(attn_mask, axis=(1, 2))), attn, K_MASK)
 
     attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
         key_proj.dtype

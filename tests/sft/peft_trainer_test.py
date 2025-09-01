@@ -13,10 +13,12 @@
 # limitations under the License.
 
 """Peft trainer unittest."""
+
 import functools
 import os
 from typing import Any, Tuple
 from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -27,6 +29,7 @@ import jax.sharding as shd
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+import tunix.models.qwen3.model as qwen3_model
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
@@ -274,6 +277,27 @@ class PeftTrainerTest(parameterized.TestCase):
         jax._src.lib.xla_client.SingleDeviceSharding,
     )
     jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)
+
+  def test_qwen3_dist_training(self):
+    mesh = shd.Mesh(
+        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
+    )
+    rngs = nnx.Rngs(0)
+    cfg = qwen3_model.ModelConfig.qwen3_minimal()
+    model = qwen3_model.Qwen3(cfg, rngs=rngs)
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=2)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with mesh:
+      trainer.train(self.train_ds, self.eval_ds)
+    variables = nnx.state(model, nnx.Param)
+
+    self.assertEqual(
+        variables.layers[0].mlp.up_proj.kernel.sharding,
+        ('fsdp', 'tp'),
+    )
 
   def test_custom_loss_fn(self):
     def custom_loss_fn(
