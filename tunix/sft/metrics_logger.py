@@ -46,7 +46,7 @@ def log_to_tensorboard(
     summary_writer: writer.SummaryWriter,
     flush_every_n_steps: int,
     event: str,
-    scalar_value: float | jax.Array,
+    scalar_value: float | np.ndarray,
     **kwargs: str | int,
 ):
   """Creates a TensorBoard event listener for jax.monitoring.
@@ -71,7 +71,7 @@ def log_to_tensorboard(
 
 def log_to_wandb(
     event: str,
-    scalar_value: float | jax.Array,
+    scalar_value: float | np.ndarray,
     **kwargs: str | int,
 ):
   """Creates a W&B event listener for jax.monitoring.
@@ -144,7 +144,7 @@ class MetricsLogger:
   def log(
       self,
       metric_name: str,
-      scalar_value: float | jax.Array,
+      scalar_value: float | np.ndarray,
       mode: Mode | str,
       step: int,
   ):

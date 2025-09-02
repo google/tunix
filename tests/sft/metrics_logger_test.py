@@ -4,7 +4,6 @@ import os
 from unittest import mock
 
 from absl.testing import absltest
-from jax import numpy as jnp
 import numpy as np
 from tunix.sft import metrics_logger
 
@@ -30,20 +29,20 @@ class MetricLoggerTest(absltest.TestCase):
         os.path.join(log_dir, os.listdir(log_dir)[0])
     )
 
-    logger.log("loss", jnp.array(1.0), metrics_logger.Mode.TRAIN, 1)
-    logger.log("perplexity", jnp.exp(1.0), metrics_logger.Mode.TRAIN, 1)
-    logger.log("loss", jnp.array(4.0), "train", 2)
-    logger.log("perplexity", jnp.exp(4.0), "train", 2)
-    logger.log("loss", jnp.array(7.0), metrics_logger.Mode.EVAL, 2)
-    logger.log("loss", jnp.array(10.0), "eval", 2)
+    logger.log("loss", np.array(1.0), metrics_logger.Mode.TRAIN, 1)
+    logger.log("perplexity", np.exp(1.0), metrics_logger.Mode.TRAIN, 1)
+    logger.log("loss", np.array(4.0), "train", 2)
+    logger.log("perplexity", np.exp(4.0), "train", 2)
+    logger.log("loss", np.array(7.0), metrics_logger.Mode.EVAL, 2)
+    logger.log("loss", np.array(10.0), "eval", 2)
 
     train_loss = logger.get_metric("loss", metrics_logger.Mode.TRAIN)
     self.assertEqual(train_loss, 2.5)
     train_perplexity = logger.get_metric("perplexity", "train")
-    self.assertEqual(train_perplexity, jnp.exp(2.5))
+    self.assertEqual(train_perplexity, np.exp(2.5))
 
     eval_loss_history = logger.get_metric_history("loss", "eval")
-    np.testing.assert_array_equal(eval_loss_history, jnp.array([7.0, 10.0]))
+    np.testing.assert_array_equal(eval_loss_history, np.array([7.0, 10.0]))
 
     self.assertLen(os.listdir(log_dir), 1)
     file_size_after = os.path.getsize(
@@ -55,7 +54,7 @@ class MetricLoggerTest(absltest.TestCase):
     mock_wandb.init.assert_called_once_with(
         project="tunix", name=fixed_timestamp_str, anonymous="allow"
     )
-    self.assertGreater(mock_wandb.log.call_count, 6)
+    self.assertEqual(mock_wandb.log.call_count, 6)
 
     logger.close()
     mock_wandb.finish.assert_called_once()

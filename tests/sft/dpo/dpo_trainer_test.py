@@ -22,7 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from tunix.rl import common
-from tunix.rl.dpo import dpo_trainer as dpo_lib
+from tunix.sft.dpo import dpo_trainer as dpo_lib
 from tunix.tests import test_common as tc
 
 jax.config.update("jax_threefry_partitionable", False)
