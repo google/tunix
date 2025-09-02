@@ -569,6 +569,27 @@ class Qwen2(nnx.Module):
 
     return logits, new_cache  # pytype: disable=bad-return-type
 
+  def get_model_input(self):
+    """Returns a dummy model input for the transformer.
+
+    This dummy input has a batch size compatible with FSDP sharding on a
+    2-device axis.
+    """
+    dummy_batch_size = 2
+    dummy_seq_len = 1
+    return {
+        'input_tokens': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
+
   @staticmethod
   def to_hf_mappings():
     return {
