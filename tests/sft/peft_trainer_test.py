@@ -73,6 +73,7 @@ def dummy_datasets(batch_size: int, repeat: int = 1):
       for x in dummy_input
   ] * repeat
 
+
 global_counter = 0
 
 
@@ -477,6 +478,19 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.metrics_logger.get_metric('learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
+
+  def test_invalid_config(self):
+    # eval_every_n_steps must be divisible by gradient_accumulation_steps.
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        gradient_accumulation_steps=3,
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(rngs=rngs)
+    optimizer = optax.sgd(1e-3)
+    with self.assertRaises(ValueError):
+      peft_trainer.PeftTrainer(model, optimizer, config)
 
 
 if __name__ == '__main__':

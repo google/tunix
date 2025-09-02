@@ -524,7 +524,7 @@ class PpoLearnerTest(parameterized.TestCase):
         training_config=rl_cluster_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             critic_optimizer=optax.sgd(1e-3),
-            eval_every_n_steps=10,
+            eval_every_n_steps=12,
             max_steps=10,
             gradient_accumulation_steps=gradient_accumulation_steps,
         ),

@@ -161,6 +161,7 @@ class PeftTrainer:
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
   ):
+    self._validate_config(training_config)
     self.model = model
     self.config = training_config
     self._lora_enabled = is_lora_enabled(self.model)
@@ -210,6 +211,19 @@ class PeftTrainer:
     self._buffered_train_metrics: tuple[ArrayLike, int, float] | None = None
     self.training_hooks = None
     self.data_hooks = None
+
+  def _validate_config(self, training_config: TrainingConfig):
+    if (
+        training_config.gradient_accumulation_steps is not None
+        and training_config.eval_every_n_steps
+        % training_config.gradient_accumulation_steps
+        != 0
+    ):
+      raise ValueError(
+          "eval_every_n_steps must be divisible by gradient_accumulation_steps,"
+          f" but got {training_config.eval_every_n_steps} and"
+          f" {training_config.gradient_accumulation_steps}"
+      )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
