@@ -142,9 +142,9 @@ PEFT trainer for LoRA. Only LoRA parameters are updated.
 
 `with_training_hooks(training_hooks: hooks.TrainingHooks) -> PeftTrainer`
 :   Sets the training hooks for the trainer.
-    - **Parameters:**
-        - `training_hooks`: An object implementing the `TrainingHooks` protocol.
-    - **Returns:** The trainer instance with the hooks configured.
+  - **Parameters:**
+    - `training_hooks`: An object implementing the `TrainingHooks` protocol.
+  - **Returns:** The trainer instance with the hooks configured.
 
 `with_data_hooks(data_hooks: hooks.DataHooks) -> PeftTrainer`
 :   Sets the data hooks for the trainer.
