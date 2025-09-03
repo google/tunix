@@ -444,24 +444,28 @@ class GrpoLearner:
       async_loading: bool = False,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
   ) -> None:
-    """按 micro 流水准备数据：合并→repeat(sample)→一次前向→按原 micro 切回。
-    入队策略：
-      - 永远只 put 长度为 1 的小 list（[TrainExample]）。
-      - 同步：每批先累计到 pending_examples，边界/收尾时一次性 repeat = batch_repeat。
-      - 异步：每批先入队 1 次；若 batch_repeat>1，同时缓存到 pending_examples，
-              边界/收尾时统一补齐 (batch_repeat - 1) 次。
+    """Data preparation pipeline by micro steps: merge → repeat(sample) → single large
+    forward pass → split back by original micro boundaries.
+
+    Enqueue policy:
+      - Always put a *small list* of length 1 into the queue: [TrainExample].
+      - Sync: accumulate each produced micro-batch into `pending_examples`, then at the
+        boundary/finalize time enqueue with `repeat = batch_repeat`.
+      - Async: enqueue each produced micro-batch *once immediately*; if `batch_repeat>1`,
+        also cache it in `pending_examples` so that at the boundary/finalize we enqueue the
+        *remaining* `(batch_repeat - 1)` repeats.
     """
 
-    # =============== 工具函数 ===============
-    def _put_as_singleton(examples: list[TrainExample], times: int) -> None:
-      """把每个 TrainExample 单独包成 [TrainExample]，重复 times 次放入队列。"""
+    # =============== Utilities ===============
+    def _enqueue_examples(examples: list[TrainExample], times: int) -> None:
+      """Wrap each TrainExample as [TrainExample] and put it into the queue, repeated `times`."""
       if times <= 0 or not examples:
         return
       for _ in range(times):
         for ex in examples:
           data_queue.put([ex])
 
-    # 用三处 micro 的 LCM 作为一次服务目标批大小（跨阶段对齐）
+    # Use the LCM of three micro-batch sizes as the service target batch size (align stages)
     service_target_bs = _lcm3(
         self.rollout_micro_batch_size,
         self.ref_logps_micro_batch_size,
@@ -469,15 +473,17 @@ class GrpoLearner:
     )
 
     buf: list[_TrainingInputT] = []
-    buf_sizes: list[int] = []   # 各训练 micro-batch 的样本数
-    buf_b = 0                   # 聚合样本总数（repeat 前）
-    consumed_steps = 0          # 已消耗的训练 micro-batch 数
+    buf_sizes: list[int] = []   # Number of samples for each training micro-batch
+    buf_b = 0                   # Aggregated sample count (before repeating)
+    consumed_steps = 0          # Number of consumed training micro-batches
 
-    # 同步/异步共同使用：用于“重复补齐”的缓存（异步时也会使用）
+    # Shared buffer for "repeat completion" (used by both sync and async; in async it's also used)
     pending_examples: list[TrainExample] = []
 
-    def _flush(force: bool = False) -> list[TrainExample]:
-      """聚合→按 sample_repeat 重复→大批生成与打分→切回原 micro→返回小批列表。"""
+    def _aggregate_and_compute_advantages(force: bool = False) -> list[TrainExample]:
+      """Merge → repeat(sample) → one large forward pass & advantage → split back by
+      original micro boundaries → return a list of small TrainExample chunks.
+      """
       nonlocal buf, buf_sizes, buf_b
       produced: list[TrainExample] = []
 
@@ -486,7 +492,7 @@ class GrpoLearner:
       if (not force) and (buf_b < service_target_bs):
         return produced
 
-      # 1) 合并多个训练 micro-batch
+      # 1) Merge multiple training micro-batches
       merged: dict = {}
       keys = buf[0].keys()
       for k in keys:
@@ -499,20 +505,20 @@ class GrpoLearner:
           else:
             merged[k] = np.concatenate([np.asarray(a), np.asarray(b)], axis=0)
 
-      # 2) repeat 样本（等价于每个 micro 重复后再拼接）
+      # 2) Repeat samples (equivalent to repeating each micro then concatenating)
       merged_repeated = jax.tree.map(
           lambda x: np.repeat(x, sample_repeat, axis=0),
           merged,
       )
 
-      # 3) 执行一次大批生成 + 计算优势
+      # 3) Single large forward pass + advantage computation
       with jax.profiler.StepTraceAnnotation(
           "sampler",
           step_num=self._train_steps if mode == metrics_logger.Mode.TRAIN else self._eval_steps,
       ):
         big_example = self._generate_and_compute_advantage(merged_repeated, mode)
 
-      # 4) 切回原训练 micro 边界（乘以 sample_repeat）
+      # 4) Split back to original training micro boundaries (multiplied by sample_repeat)
       offset = 0
       for n in buf_sizes:
         token_sl = slice(offset * sample_repeat, (offset + n) * sample_repeat)
@@ -532,7 +538,7 @@ class GrpoLearner:
         produced.append(te_small)
         offset += n
 
-      # 5) 清空缓冲
+      # 5) Clear buffers
       buf.clear()
       buf_sizes.clear()
       buf_b = 0
@@ -541,7 +547,7 @@ class GrpoLearner:
 
     try:
       while True:
-        # 拉取一个训练 micro-batch
+        # Fetch one training micro-batch
         example = next(iterator)
         B = len(example["prompts"])
         buf.append(example)
@@ -549,30 +555,30 @@ class GrpoLearner:
         buf_b += B
         consumed_steps += 1
 
-        # 达到 LCM 阈值就产出一批
-        produced_now = _flush(force=False)
+        # If the LCM threshold is reached, produce one batch
+        produced_now = _aggregate_and_compute_advantages(force=False)
         if produced_now:
           if async_loading:
-            # 异步：先入队一次，并缓存以便后续补 (batch_repeat - 1)
-            _put_as_singleton(produced_now, 1)
+            # Async: enqueue once immediately, and cache for later repeats (batch_repeat - 1)
+            _enqueue_examples(produced_now, 1)
             if batch_repeat > 1:
               pending_examples.extend(produced_now)
           else:
-            # 同步：先累计，尾声统一入队 batch_repeat 次
+            # Sync: accumulate; at boundary finalize with batch_repeat times
             pending_examples.extend(produced_now)
 
-        # 维护日志步数
+        # Maintain logging steps
         if mode == metrics_logger.Mode.TRAIN:
           self._train_steps += 1
         else:
           self._eval_steps += 1
 
-        # 到达 proceed 边界：处理尾巴 + 入队 repeats
-        if proceed_num_steps > 0 and consumed_steps >= proceed_num_steps:
-          tail = _flush(force=True)
+        # On proceed boundary: handle tail + enqueue repeats
+        if proceed_num_steps > 0 and consumed_steps == proceed_num_steps:
+          tail = _aggregate_and_compute_advantages(force=True)
           if tail:
             if async_loading:
-              _put_as_singleton(tail, 1)
+              _enqueue_examples(tail, 1)
               if batch_repeat > 1:
                 pending_examples.extend(tail)
             else:
@@ -580,25 +586,25 @@ class GrpoLearner:
 
           if pending_examples:
             if not async_loading:
-              _put_as_singleton(pending_examples, batch_repeat)
+              _enqueue_examples(pending_examples, batch_repeat)
             else:
               rem = batch_repeat - 1
               if rem > 0:
-                _put_as_singleton(pending_examples, rem)
+                _enqueue_examples(pending_examples, rem)
             pending_examples.clear()
 
           consumed_steps = 0
           return
 
     except StopIteration as e:
-      # 外部要求固定步数时，StopIteration 交给上层（训练路径通常不会走到这里）
+      # If a fixed number of steps is required by the caller, propagate StopIteration (train path usually won't hit this)
       if proceed_num_steps > 0:
         raise e
-      # 否则是整集遍历（如 eval）：做最终 tail + repeats
-      tail = _flush(force=True)
+      # Otherwise this is "exhaust dataset" mode (e.g., eval): do final tail + repeats
+      tail = _aggregate_and_compute_advantages(force=True)
       if tail:
         if async_loading:
-          _put_as_singleton(tail, 1)
+          _enqueue_examples(tail, 1)
           if batch_repeat > 1:
             pending_examples.extend(tail)
         else:
@@ -606,17 +612,18 @@ class GrpoLearner:
 
       if pending_examples:
         if not async_loading:
-          _put_as_singleton(pending_examples, batch_repeat)
+          _enqueue_examples(pending_examples, batch_repeat)
         else:
           rem = batch_repeat - 1
           if rem > 0:
-            _put_as_singleton(pending_examples, rem)
+            _enqueue_examples(pending_examples, rem)
         pending_examples.clear()
       return
 
     finally:
-      # 结束标记
+      # Sentinel to indicate completion
       data_queue.put(None)
+
 
 
   def train(
