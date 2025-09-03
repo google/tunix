@@ -1,5 +1,9 @@
 # Tunix: A JAX-native LLM Post-Training Library
 
+```{warning}
+Tunix is in **early development** stage and it is not yet feature complete.
+```
+
 ```{include} ../README.md
 :start-line: 2
 ```
