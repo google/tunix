@@ -148,50 +148,50 @@ PEFT trainer for LoRA. Only LoRA parameters are updated.
 
 `with_data_hooks(data_hooks: hooks.DataHooks) -> PeftTrainer`
 :   Sets the data hooks for the trainer.
-    - **Parameters:**
-        - `data_hooks`: An object implementing the `DataHooks` protocol.
-    - **Returns:** The trainer instance with the hooks configured.
+  - **Parameters:**
+      - `data_hooks`: An object implementing the `DataHooks` protocol.
+  - **Returns:** The trainer instance with the hooks configured.
 
 `clear_jit_cache()`
 :   Clears the JIT cache of the train and eval step functions. This function should be called when the trainer is being reused after overiding the training related states, for example, the loss function.
 
 `with_loss_fn(loss_fn: Callable[...], has_aux: bool = False) -> PeftTrainer`
 :   Sets the loss function for the trainer.
-    - **Parameters:**
-        - `loss_fn`: The loss function. It should take the model as the first argument, followed by the model inputs. It can optionally return auxiliary data.
-        - `has_aux`: Whether the loss function returns auxiliary data as a second element in a tuple.
-    - **Returns:** The trainer instance with the loss function configured.
+  - **Parameters:**
+      - `loss_fn`: The loss function. It should take the model as the first argument, followed by the model inputs. It can optionally return auxiliary data.
+      - `has_aux`: Whether the loss function returns auxiliary data as a second element in a tuple.
+  - **Returns:** The trainer instance with the loss function configured.
 
 `with_gen_model_input_fn(gen_model_input_fn: Callable[...]) -> PeftTrainer`
 :   Generates model input from training input. NB: output of this function will be passed to the loss function, so the args should match what loss function expects.
-    - **Parameters:**
-        - `gen_model_input_fn`: A function that generates model input from training input.
-    - **Returns:** The trainer instance with the input generation function configured.
+  - **Parameters:**
+      - `gen_model_input_fn`: A function that generates model input from training input.
+  - **Returns:** The trainer instance with the input generation function configured.
 
 `create_train_step_fn() -> Callable[...]`
 :   Creates the train step function.
-    - **Returns:** A callable that executes one training step, taking the model, optimizer state, and a batch of data as input, and returning the updated model, optimizer state, and metrics.
+  - **Returns:** A callable that executes one training step, taking the model, optimizer state, and a batch of data as input, and returning the updated model, optimizer state, and metrics.
 
 `create_eval_step_fn() -> Callable[...]`
 :   Creates the eval step function.
-    - **Returns:** A callable that executes one evaluation step, taking the model and a batch of data as input, and returning the evaluation metrics.
+  - **Returns:** A callable that executes one evaluation step, taking the model and a batch of data as input, and returning the evaluation metrics.
 
 `jit_train_and_eval_step(skip_jit: bool = False) -> Tuple[Callable, Callable]`
 :   Creates and returns the train and eval step functions. This function will return the cached ones if available.
-    - **Parameters:**
-        - `skip_jit`: If True, the train and eval step functions will not be JITed.
-    - **Returns:** A tuple of train and eval step functions.
+  - **Parameters:**
+      - `skip_jit`: If True, the train and eval step functions will not be JITed.
+  - **Returns:** A tuple of train and eval step functions.
 
 `train(train_ds: Iterable[Any], eval_ds: Iterable[Any] | None = None, skip_jit: bool = False)`
 :   Training loop.
-    - **Parameters:**
-        - `train_ds`: An iterable providing training batches.
-        - `eval_ds`: An optional iterable providing evaluation batches.
-        - `skip_jit`: If True, the train and eval step functions will not be JITed.
+  - **Parameters:**
+      - `train_ds`: An iterable providing training batches.
+      - `eval_ds`: An optional iterable providing evaluation batches.
+      - `skip_jit`: If True, the train and eval step functions will not be JITed.
 
 `train_steps() -> int`
 :   Returns the number of train steps taken.
-    - **Returns:** The total number of training steps completed.
+  - **Returns:** The total number of training steps completed.
 
 `close()`
 :   Closes resources used by the trainer, such as the metrics logger.
@@ -206,10 +206,10 @@ Configuration for the trainer. This dataclass holds all hyperparameters and sett
 
 `get_with_default(key: str, default: Any) -> Any`
 :   Gets a configuration value by key, returning a default if not set.
-    - **Parameters:**
-        - `key`: The name of the configuration attribute.
-        - `default`: The value to return if the attribute is not found.
-    - **Returns:** The value of the configuration attribute or the default value.
+  - **Parameters:**
+      - `key`: The name of the configuration attribute.
+      - `default`: The value to return if the attribute is not found.
+  - **Returns:** The value of the configuration attribute or the default value.
 
 ---
 ##### `TrainingInput`
@@ -223,7 +223,7 @@ A dataclass representing the input for a single training step. This class serves
 
 Checks if the model has LoRA layers enabled. This utility function inspects the model's parameters to determine if any LoRA-specific parameters exist, which indicates that LoRA is active.
 - **Parameters:**
-    - `model`: The `nnx.Module` to inspect.
+  - `model`: The `nnx.Module` to inspect.
 - **Returns:** `True` if LoRA parameters are found, `False` otherwise.
 
 ---
@@ -232,7 +232,7 @@ Checks if the model has LoRA layers enabled. This utility function inspects the 
 
 A context manager for measuring the execution time of a code block. It logs the elapsed time upon exiting the context, prefixed with the provided context string.
 - **Parameters:**
-    - `context`: An optional string to identify the timed code block in logs.
+  - `context`: An optional string to identify the timed code block in logs.
 - **Returns:** A context manager that yields nothing.
 - **Example:**
   ```python
@@ -262,31 +262,31 @@ Users can create a subclass of `TrainingHooks` and override the methods correspo
 
 `on_train_start(train_ctx: 'PeftTrainer.PeftTrainer')`
 :   Called at the beginning of training. This hook is executed once, after the trainer has been initialized but before the first training step begins.
-    - **Parameters:** `train_ctx` – The training context object, providing access to the trainer’s state, model, and configuration.
+  - **Parameters:** `train_ctx` – The training context object, providing access to the trainer’s state, model, and configuration.
 
 `on_train_end(train_ctx: 'PeftTrainer.PeftTrainer')`
 :   Called at the end of training. This hook is executed once after the training loop has completed.
-    - **Parameters:** `train_ctx` – The training context object.
+  - **Parameters:** `train_ctx` – The training context object.
 
 `on_train_step_start(train_ctx: 'PeftTrainer.PeftTrainer')`
 :   Called at the beginning of a training step. This hook is executed before the forward and backward pass of each training step.
-    - **Parameters:** `train_ctx` – The training context object.
+  - **Parameters:** `train_ctx` – The training context object.
 
 `on_train_step_end(train_ctx: 'PeftTrainer.PeftTrainer', train_loss: float)`
 :   Called at the end of a training step. This hook is executed after the model parameters have been updated. It receives the loss computed for the current step.
-    - **Parameters:**
-        - `train_ctx`: The training context object.
-        - `train_loss`: The loss value for the completed training step.
+  - **Parameters:**
+      - `train_ctx`: The training context object.
+      - `train_loss`: The loss value for the completed training step.
 
 `on_eval_step_start(train_ctx: 'PeftTrainer.PeftTrainer')`
 :   Called at the beginning of an evaluation step. This hook is executed before a batch of evaluation data is processed.
-    - **Parameters:** `train_ctx` – The training context object.
+  - **Parameters:** `train_ctx` – The training context object.
 
 `on_eval_step_end(train_ctx: 'PeftTrainer.PeftTrainer', eval_loss: float)`
 :   Called at the end of an evaluation step. This hook is executed after an evaluation batch has been processed.
-    - **Parameters:**
-        - `train_ctx`: The training context object.
-        - `eval_loss`: The loss value for the completed evaluation step.
+  - **Parameters:**
+      - `train_ctx`: The training context object.
+      - `eval_loss`: The loss value for the completed evaluation step.
 
 ---
 ##### `DataHooks`
@@ -298,13 +298,13 @@ Hooks to wire in external data loader and processing logic. This class provides 
 
 `load_next_train_batch(train_ctx: 'PeftTrainer.PeftTrainer') -> Any`
 :   Loads the next batch of data for training. This method is called by the trainer at the beginning of each training step.
-    - **Parameters:** `train_ctx` – The training context object.
-    - **Returns:** A batch of training data.
+  - **Parameters:** `train_ctx` – The training context object.
+  - **Returns:** A batch of training data.
 
 `load_next_eval_batch(train_ctx: 'PeftTrainer.PeftTrainer') -> Any`
 :   Loads the next batch of data for evaluation. This method is called by the trainer during the evaluation phase.
-    - **Parameters:** `train_ctx` – The training context object.
-    - **Returns:** A batch of evaluation data.
+  - **Parameters:** `train_ctx` – The training context object.
+  - **Returns:** A batch of evaluation data.
 
 ### Distillation
 
@@ -332,31 +332,31 @@ Orchestrates the knowledge distillation process from a larger teacher model to a
 
 `with_gen_model_input_fn(gen_model_input_fn: Callable[[Any], dict[str, ArrayLike]]) -> DistillationTrainer`
 :   Sets a custom function to generate model inputs from a data batch. This allows for flexible data preprocessing.
-    - **Parameters:** `gen_model_input_fn` – A callable that takes a raw data batch and returns a dictionary of model inputs.
-    - **Returns:** The trainer instance, allowing for method chaining.
+  - **Parameters:** `gen_model_input_fn` – A callable that takes a raw data batch and returns a dictionary of model inputs.
+  - **Returns:** The trainer instance, allowing for method chaining.
 
 `with_loss_fn(loss_fn: Callable[..., ArrayLike | Tuple[ArrayLike, Any]], has_aux: bool = False) -> DistillationTrainer`
 :   Overrides the default loss computation with a custom function.
-    - **Parameters:**
-        - `loss_fn`: A callable that computes the loss. It will receive the student model, teacher output, and inputs as arguments.
-        - `has_aux`: If `True`, `loss_fn` is expected to return a tuple `(loss, auxiliary_data)`.
-    - **Returns:** The trainer instance, allowing for method chaining.
+  - **Parameters:**
+      - `loss_fn`: A callable that computes the loss. It will receive the student model, teacher output, and inputs as arguments.
+      - `has_aux`: If `True`, `loss_fn` is expected to return a tuple `(loss, auxiliary_data)`.
+  - **Returns:** The trainer instance, allowing for method chaining.
 
 `get_train_loss(model: nnx.Module, teacher_output: Any, inputs: dict[str, ArrayLike]) -> ArrayLike | Tuple[ArrayLike, Any]`
 :   Computes the distillation loss for a training step.
-    - **Parameters:**
-        - `model`: The student model with updated parameters for the current step.
-        - `teacher_output`: The pre-computed output from the teacher model.
-        - `inputs`: A dictionary of input tensors for the models.
-    - **Returns:** The computed loss scalar, or `(loss, auxiliary_data)`.
+  - **Parameters:**
+      - `model`: The student model with updated parameters for the current step.
+      - `teacher_output`: The pre-computed output from the teacher model.
+      - `inputs`: A dictionary of input tensors for the models.
+  - **Returns:** The computed loss scalar, or `(loss, auxiliary_data)`.
 
 `get_eval_loss(model: nnx.Module, teacher_output: Any, inputs: dict[str, ArrayLike]) -> ArrayLike | Tuple[ArrayLike, Any]`
 :   Computes the distillation loss for an evaluation step.
-    - **Parameters:**
-        - `model`: The student model being evaluated.
-        - `teacher_output`: The pre-computed output from the teacher model.
-        - `inputs`: A dictionary of input tensors for the models.
-    - **Returns:** The computed loss scalar, or `(loss, auxiliary_data)`.
+  - **Parameters:**
+      - `model`: The student model being evaluated.
+      - `teacher_output`: The pre-computed output from the teacher model.
+      - `inputs`: A dictionary of input tensors for the models.
+  - **Returns:** The computed loss scalar, or `(loss, auxiliary_data)`.
 
 `close() -> None`
 :   Closes resources used by the trainer, such as loggers and profilers.
