@@ -22,7 +22,6 @@ from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple
 
 from absl import logging
 import flax
-from flax import linen as nn
 from flax import nnx
 import jax
 from jax.interpreters import pxla
@@ -170,11 +169,9 @@ class PeftTrainer:
           optimizer, training_config.gradient_accumulation_steps
       )
     if self._lora_enabled:
-      self.optimizer = nnx.ModelAndOptimizer(
-          self.model, optimizer, wrt=nnx.LoRAParam
-      )
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
-      self.optimizer = nnx.ModelAndOptimizer(self.model, optimizer)
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
@@ -273,7 +270,7 @@ class PeftTrainer:
     return self
 
   def _train_step(
-      self, model: nnx.Module, optimizer: nnx.ModelAndOptimizer, inputs: Any
+      self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     """Main body for one train step.
 
@@ -293,7 +290,7 @@ class PeftTrainer:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
-    optimizer.update(grads)
+    optimizer.update(model, grads)
     if self._has_aux:
       loss, aux = out
       return loss, aux
@@ -329,29 +326,11 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
-    optimizer_state_arrays = nnx.state(
-        self.optimizer, nnx.optimizer.OptState
-    )  # select only the optimizer state
-    optimizer_pspecs = nnx.get_partition_spec(optimizer_state_arrays)
+    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
-    def _adjust_pspec(pspec, state):
-      if pspec is None:
-        return None
-      # state can be a scalar, which is not an array.
-      state_ndim = getattr(state, "ndim", 0)
-      if len(pspec) > state_ndim:
-        return shd.PartitionSpec(*pspec[:state_ndim])
-      return pspec
-
-    adjusted_pspecs = jax.tree.map(
-        _adjust_pspec, optimizer_pspecs, optimizer_state_arrays
-    )
-    optimizer_shardings = nn.logical_to_mesh_sharding(
-        adjusted_pspecs,
-        mesh,
-    )
     optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state_arrays, optimizer_shardings
+        optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
