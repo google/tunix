@@ -112,11 +112,11 @@ The Tunix library exhibits a mature and robust software architecture. By emphasi
 #### PEFT Trainer
 | Class/Function | Description |
 |---|---|
-| `PeftTrainer(...)` | PEFT trainer for LoRA. Only LoRA parameters are updated. |
-| `TrainingConfig()` | Configuration for the trainer. |
-| `TrainingInput()` | Dataclass representing the input for a single training step. |
-| `is_lora_enabled(model)` | Checks if the model has LoRA layers enabled. |
-| `time_measure([context])` | A context manager for measuring the execution time of a code block. |
+| [`PeftTrainer(...)`](#pefttrainer) | PEFT trainer for LoRA. Only LoRA parameters are updated. |
+| [`TrainingConfig()`](#trainingconfig) | Configuration for the trainer. |
+| [`TrainingInput()`](#traininginput) | Dataclass representing the input for a single training step. |
+| [`is_lora_enabled(model)`](#is-lora-enabled) | Checks if the model has LoRA layers enabled. |
+| [`time_measure([context])`](#time-measure) | A context manager for measuring the execution time of a code block. |
 
 ---
 
