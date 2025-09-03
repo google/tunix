@@ -43,7 +43,6 @@ RewardFn = Callable[..., List[float]]
 class TrainExample(common.TrainExample):
   returns: jax.Array
   old_values: jax.Array
-  completion_plus_one_mask: jax.Array
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -160,19 +159,18 @@ class PpoLearner:
     self.rl_cluster.critic_trainer.is_managed_externally = True
 
     # ===== Configure the metrics logger =====
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
+        {"pg_clipfrac": "pg_clipfrac"}
+    )
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         "score/mean",
         "reward/mean",
-        lambda: "kl" if self.ppo_config.beta != 0.0 else None,
+        lambda: "reward_kl_penalty" if self.ppo_config.beta != 0.0 else None,
     ])
 
-    # TODO(abheesht): Are we okay with two TQDM bars and two metric loggers?
     self.rl_cluster.critic_trainer.with_rl_metrics_to_log(
-        {"loss/vf": "vf_loss"}
+        {"vpred_mean": "vpred_mean", "vf_clipfrac": "vf_clipfrac"}
     )
-    self.rl_cluster.critic_trainer.with_tqdm_metrics_to_display([
-        "loss/vf",
-    ])
 
     self._actor_metrics_logger = rl_cluster.actor_trainer.metrics_logger
     self._critic_metrics_logger = rl_cluster.critic_trainer.metrics_logger
@@ -235,13 +233,9 @@ class PpoLearner:
     """
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
-    if isinstance(self.rl_cluster.cluster_config.rollout_config, dict):
-      rollout_config = self.rl_cluster.cluster_config.rollout_config[
-          rl_cluster_lib.Mode[mode.name]
-      ]
-    else:
-      rollout_config = self.rl_cluster.cluster_config.rollout_config
-    max_prompt_length = rollout_config.max_prompt_length
+
+    # TODO(abheesht): verl allows specifying different micro batch sizes for
+    # computing log probs, values, rewards, etc. We can do that here.
 
     # ===== Generation ======
     # Generate. We use `model`, i.e., the policy model for generating the
@@ -253,6 +247,7 @@ class PpoLearner:
     prompt_ids = completion_output.left_padded_prompt_tokens
 
     batch_size = completion_ids.shape[0]
+    logits_to_keep = completion_ids.shape[1]
     prompt_mask = (prompt_ids != pad_value).astype("int32")
     completion_mask = common.make_completion_mask(
         completion_ids, eos_tok=eos_value
@@ -261,14 +256,8 @@ class PpoLearner:
         common.build_positions_from_mask(completion_mask),
         axis=-1,
     )
-    is_padding_token = jnp.any(~completion_mask, axis=-1)
-    completion_plus_one_mask = completion_mask.at[
-        jnp.arange(batch_size)[is_padding_token],
-        (eos_idx + 1)[is_padding_token],
-    ].set(True)
 
     # ===== Compute log probs ======
-    logits_to_keep = completion_ids.shape[1]
     # Compute log probs from the reference model. Shape = `[B, T]`.
     if self.ppo_config.beta != 0.0:
       ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
@@ -276,12 +265,6 @@ class PpoLearner:
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-      )
-      # Set log probs to 1 for padding tokens.
-      ref_per_token_logps = jnp.where(
-          completion_mask,
-          ref_per_token_logps,
-          jnp.array(1).astype(ref_per_token_logps.dtype),
       )
     else:
       ref_per_token_logps = None
@@ -295,12 +278,6 @@ class PpoLearner:
         prompt_tokens=prompt_ids,
         completion_tokens=completion_ids,
     )
-    # Set log probs to 1 for padding tokens.
-    old_per_token_logps = jnp.where(
-        completion_mask,
-        old_per_token_logps,
-        jnp.array(1).astype(old_per_token_logps.dtype),
-    )
 
     # ===== Value computation ======
     # Get values from the value model before model weights are updated.
@@ -312,12 +289,7 @@ class PpoLearner:
     )
     # `values` start from the last *prompt* token. Shape: `[B, T]`.
     values = values[:, -logits_to_keep - 1 : -1]
-    # Set `values` corresponding to padding tokens to 0.
-    values = jnp.where(
-        completion_plus_one_mask,
-        values,
-        jnp.array(0).astype(values.dtype),
-    )
+    values = values * completion_mask
 
     # ===== Reward computation ======
     # Get rewards from the reward model. Eventual shape: `[B, T]`.
@@ -327,14 +299,9 @@ class PpoLearner:
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-      )
+      )[:, -logits_to_keep:]
       # We use the score corresponding to the last non-padding token.
-      # Remember, completion is padded on the right, and the prompt is padded on
-      # the left.
-      last_token_scores = scores[
-          jnp.arange(batch_size),
-          eos_idx + max_prompt_length,
-      ]
+      last_token_scores = scores[jnp.arange(batch_size), eos_idx]
     else:
       last_token_scores = self._compute_rewards(
           prompts=training_input["prompts"],
@@ -342,28 +309,36 @@ class PpoLearner:
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
 
-    # This is how rewards are computed. This is in accordance with TRL and
-    # with verl's `NaiveRewardManager`. This is a different from GRPO, where
-    # we don't consider rewards at the token level.
+    # Reward computation is in accordance with TRL and verl's
+    # `BatchRewardManager` (token-level rewards).
     # 1. Set all rewards (i.e., for every token) to 0s.
-    # 2. Subtract KL divergence from the reward tensor of all 0s.
-    # 3. A positive reward is given only at the final timestep, so we add that
-    # to the reward tensor from (2).
+    # 2. A positive reward is given only at the final timestep, so we add that
+    # to the tensor of zeros.
+    # 3. Subtract KL divergence from the reward tensor.
     rewards = jnp.zeros_like(completion_ids)
+    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(last_token_scores)
     if self.ppo_config.beta != 0.0:
+      # TODO(abheesht): Add a toggle - KL can either be added directly to
+      # rewards or computed in the loss function.
       kl = common.compute_kl_divergence(
           old_per_token_logps, ref_per_token_logps
       )
+      kl = kl * completion_mask
       rewards = rewards - self.ppo_config.beta * kl
 
-    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(last_token_scores)
+    # ===== Compute advantages using Generalised Advantage Estimation ======
+    advantages, returns = ppo_helpers.compute_gae_advantages(
+        rewards=rewards,
+        values=values,
+        completion_mask=completion_mask,
+        gamma=self.ppo_config.gamma,
+        gae_lambda=self.ppo_config.gae_lambda,
+    )
 
     # ===== Metric logging ======
-    # TODO(abheesht): Verify metric logging. We should move these to losses,
-    # because the rollout batch can be split into mini-batches.
     step = self._get_metric_logging_steps(mode)
 
-    # Log raw scores from the reward model/fn
+    # Log raw scores from the reward model fn
     self._actor_metrics_logger.log(
         "score/mean", np.mean(last_token_scores), mode, step
     )
@@ -391,7 +366,7 @@ class PpoLearner:
           kl, completion_mask, axis=-1  # pylint: disable=undefined-variable
       )
       self._actor_metrics_logger.log(
-          "kl/mean", per_sequence_mean_kl.mean(), mode, step
+          "reward_kl_penalty", per_sequence_mean_kl.mean(), mode, step
       )
 
     # Log completion lengths.
@@ -415,22 +390,11 @@ class PpoLearner:
         self._get_metric_logging_steps(mode),
     )
 
-    # ===== Compute advantages using Generalised Advantage Estimation ======
-    advantages, returns = ppo_helpers.compute_gae_advantages(
-        rewards=rewards,
-        values=values,
-        gamma=self.ppo_config.gamma,
-        gae_lambda=self.ppo_config.gae_lambda,
-    )
-    # Normalize advantages.
-    advantages = ppo_helpers.normalize_advantages(advantages, completion_mask)
-
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
         completion_ids=completion_ids,
         completion_mask=completion_mask,
-        completion_plus_one_mask=completion_plus_one_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         returns=returns,
@@ -665,10 +629,10 @@ def ppo_value_loss_fn(
 ):
   """Computes the value loss for PPO."""
 
-  prompt_ids, completion_ids, completion_plus_one_mask = (
+  prompt_ids, completion_ids, completion_mask = (
       train_example.prompt_ids,
       train_example.completion_ids,
-      train_example.completion_plus_one_mask,
+      train_example.completion_mask,
   )
   logits_to_keep = completion_ids.shape[1]
 
@@ -685,23 +649,23 @@ def ppo_value_loss_fn(
       stop_gradient=False,
   )
   vpreds = vpreds[:, -logits_to_keep - 1 : -1]
-  vpreds = jnp.where(
-      completion_plus_one_mask,
-      vpreds,
-      jnp.array(0).astype(vpreds.dtype),
-  )
   vpred_clipped = jnp.clip(
       vpreds, values - clip_range_value, values + clip_range_value
   )
   vf_losses1 = jnp.square(vpreds - returns)
   vf_losses2 = jnp.square(vpred_clipped - returns)
 
-  clipped_vf_losses = ppo_helpers.masked_mean(
-      jnp.maximum(vf_losses1, vf_losses2), completion_plus_one_mask
-  )
-  vf_loss = 0.5 * clipped_vf_losses
+  clipped_vf_losses = jnp.maximum(vf_losses1, vf_losses2)
+  # "token mean" style of normalisation.
+  vf_loss = ppo_helpers.masked_mean(clipped_vf_losses, completion_mask)
+  vf_loss = 0.5 * vf_loss
 
-  aux = {"vf_loss": vf_loss}
+  aux = {
+      "vpred_mean": ppo_helpers.masked_mean(vpreds, completion_mask),
+      "vf_clipfrac": ppo_helpers.masked_mean(
+          (vf_losses2 > vf_losses1).astype(jnp.float32), completion_mask
+      ),
+  }
   return vf_coef * vf_loss, aux
 
 
@@ -729,24 +693,21 @@ def ppo_policy_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
   )
-  # Set log probs to 1 for padding tokens.
-  per_token_logps = jnp.where(
-      completion_mask,
-      per_token_logps,
-      jnp.array(1).astype(per_token_logps.dtype),
-  )
 
   advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
   coef_1 = jnp.exp(per_token_logps - old_per_token_logps)
   coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
-  policy_loss = jnp.maximum(
-      -coef_1 * jnp.expand_dims(advantages, 1),
-      -coef_2 * jnp.expand_dims(advantages, 1),
-  )
-  # TODO(abheesht): Verify these losses, especially the normalisation part.
+  pg_losses1 = -coef_1 * jnp.expand_dims(advantages, 1)
+  pg_losses2 = -coef_2 * jnp.expand_dims(advantages, 1)
+  policy_loss = jnp.maximum(pg_losses1, pg_losses2)
+
+  # "token mean" style of normalisation.
   policy_loss = ppo_helpers.masked_mean(policy_loss, completion_mask)
 
-  # TODO(abheesht): We should log entropy.
-  aux = {}
+  aux = {
+      "pg_clipfrac": ppo_helpers.masked_mean(
+          (pg_losses2 > pg_losses1).astype(jnp.float32), completion_mask
+      )
+  }
   return policy_loss, aux
