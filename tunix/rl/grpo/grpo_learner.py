@@ -446,19 +446,6 @@ class GrpoLearner:
   ) -> None:
     """Data preparation pipeline by micro steps: merge → repeat(sample) → single large.
 
-    forward pass → split back by original micro boundaries.
-
-    Enqueue policy:
-      - Always put a *small list* of length 1 into the queue: [TrainExample].
-      - Sync: accumulate each produced micro-batch into `pending_examples`, then
-      at the
-        boundary/finalize time enqueue with `repeat = batch_repeat`.
-      - Async: enqueue each produced micro-batch *once immediately*; if
-      `batch_repeat>1`,
-        also cache it in `pending_examples` so that at the boundary/finalize we
-        enqueue the
-        *remaining* `(batch_repeat - 1)` repeats.
-
     Args:
       iterator: An iterator yielding `_TrainingInputT` examples.
       proceed_num_steps: The number of training micro-batches to process before
@@ -644,7 +631,7 @@ class GrpoLearner:
         if pending_examples:
           data_queue.put(common.RepeatIterable(pending_examples, batch_repeat))
           pending_examples.clear()
-      return
+        return
 
     finally:
       data_queue.put(None)
