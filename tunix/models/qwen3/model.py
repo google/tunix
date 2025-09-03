@@ -582,7 +582,7 @@ class DecoderLayer(nnx.Module):
     return cache, outputs
 
 
-class Qwen3(nnx.Module):
+class Qwen3(nnx.Module, pytree=False):
   """Qwen3 model."""
 
   def __init__(

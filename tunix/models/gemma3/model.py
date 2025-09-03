@@ -698,7 +698,7 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
-class Gemma3(nnx.Module):
+class Gemma3(nnx.Module, pytree=False):
   """Gemma transformer."""
 
   def __init__(self, config: Gemma3Config, *, rngs: nnx.Rngs):

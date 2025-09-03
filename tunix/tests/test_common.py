@@ -84,7 +84,7 @@ class ModelConfig:
   head_dim: int
 
 
-class ToyTransformer(nnx.Module):
+class ToyTransformer(nnx.Module, pytree=False):
   """Toy transformer for testing."""
 
   def __init__(

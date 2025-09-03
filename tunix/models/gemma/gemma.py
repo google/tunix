@@ -764,7 +764,7 @@ def _assign_linen_params_to_nnx_state(
   return state
 
 
-class Transformer(nnx.Module):
+class Transformer(nnx.Module, pytree=False):
   """Gemma transformer."""
 
   @classmethod
