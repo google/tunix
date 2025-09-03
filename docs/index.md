@@ -10,4 +10,5 @@
 code-of-conduct.md
 contributing.md
 gallery.rst
+_api/Tunix_API_DOCUMENTATION.md
 ```
