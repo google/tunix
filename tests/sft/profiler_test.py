@@ -46,7 +46,9 @@ class ProfilerTest(parameterized.TestCase):
     self.assertEqual(p._last_profile_step, 15)
 
     p.maybe_activate(10)  # Activate at the correct step
-    mock_start_trace.assert_called_once_with(self.log_dir)
+    mock_start_trace.assert_called_once_with(
+        log_dir=self.log_dir, profiler_options=mock.ANY
+    )
 
     p.maybe_deactivate(15)  # Deactivate at the correct step
     mock_stop_trace.assert_called_once()
@@ -149,7 +151,9 @@ class ProfilerTest(parameterized.TestCase):
     )
     p.maybe_activate(current_step)
     if expect_start_called:
-      mock_start_trace.assert_called_once_with(self.log_dir)
+      mock_start_trace.assert_called_once_with(
+          log_dir=self.log_dir, profiler_options=mock.ANY
+      )
     else:
       mock_start_trace.assert_not_called()
 
