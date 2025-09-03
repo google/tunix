@@ -11,6 +11,8 @@
 .vscode
 .envrc
 
+build/
+
 # virtualenv/venv directories
 /venv/
 /bin/
@@ -22,3 +24,4 @@
 /docs/_build/
 /docs/_collections/
 /docs/sg_execution_times.rst
+
