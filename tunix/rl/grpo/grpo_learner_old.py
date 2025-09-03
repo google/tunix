@@ -365,15 +365,27 @@ class GrpoLearner:
     """
     print("[old version] begin prepare data")
     print("async_loading: " , async_loading)
+    print("sample_repeat:", sample_repeat)
+    print("batch_repeat:", batch_repeat)
+
     example_list = []
 
     def _put_list_of_examples_to_data_queue():
+      # if not async_loading:
+      #   data_queue.put(example_list * batch_repeat)
+      # elif batch_repeat > 1:
+      #   # Since we have already loaded the batch in data_queue once, we only
+      #   # need to repeat batch_repeat - 1 times.
+      #   data_queue.put(example_list * (batch_repeat - 1))
+    
       if not async_loading:
-        data_queue.put(common.RepeatIterable(example_list, batch_repeat))
+          for _ in range(batch_repeat):
+              for adv in example_list:
+                  data_queue.put([adv])   
       elif batch_repeat > 1:
-        # Since we have already loaded the batch in data_queue once, we only
-        # need to repeat batch_repeat - 1 times.
-        data_queue.put(common.RepeatIterable(example_list, batch_repeat - 1))
+          for _ in range(batch_repeat - 1):
+              for adv in example_list:
+                  data_queue.put([adv])
 
     try:
       while True:
@@ -475,7 +487,7 @@ class GrpoLearner:
         # reserve 1 for None and the other for repeated interable
         # if batch_repeat > 1
         train_data_queue = queue_lib.SimpleDataQueue(
-            maxsize=self.grad_acc_steps + 2
+            maxsize=self.grad_acc_steps * self.grpo_config.num_iterations + 1
         )
         # reserve 1 for None
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)

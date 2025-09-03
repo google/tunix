@@ -470,8 +470,7 @@ class GrpoLearner:
     print("[new feature] Beginning data preparation...")
     print(f"Async loading enabled: {async_loading}")
 
-    # === Use LCM as the service batch size (ignoring alignment or size limits)
-    # ===
+    # Use LCM as the service batch size (ignoring alignment or size limits)
     service_target_bs = _lcm3(
         self.rollout_micro_batch_size,
         self.ref_logps_micro_batch_size,
@@ -734,7 +733,7 @@ class GrpoLearner:
             maxsize=self.grad_acc_steps + 2
         )
         # reserve 1 for None
-        print("it's" + str(self.grad_acc_steps))
+        print("the grad_acc_steps is" + str(self.grad_acc_steps))
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
         initial_train_steps = self._train_steps
         future = self.executor.submit(
