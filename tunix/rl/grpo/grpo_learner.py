@@ -476,8 +476,7 @@ class GrpoLearner:
         `metrics_logger.Mode.EVAL`.
     """
 
-    # =============== Utilities ===============
-    def _enqueue_examples(examples: list[TrainExample], times: int) -> None:
+    def enqueue_examples(examples: list[TrainExample], times: int) -> None:
       """Wrap each TrainExample as [TrainExample] and put it into the queue, repeated `times`."""
       if times <= 0 or not examples:
         return
@@ -486,7 +485,6 @@ class GrpoLearner:
           data_queue.put([ex])
 
     # Use the LCM of three micro-batch sizes as the service target batch size
-    # (align stages)
     service_target_bs = _lcm3(
         self.rollout_micro_batch_size,
         self.ref_logps_micro_batch_size,
@@ -498,10 +496,9 @@ class GrpoLearner:
     buf_b = 0  # Aggregated sample count (before repeating)
     consumed_steps = 0  # Number of consumed training micro-batches
 
-    # Shared buffer for "repeat completion"
     pending_examples: list[TrainExample] = []
 
-    def _aggregate_and_compute_advantages(
+    def aggregate_and_compute_advantages(
         force: bool = False,
     ) -> list[TrainExample]:
       """Merge → repeat(sample) → one large forward pass & advantage → split back by.
@@ -524,7 +521,7 @@ class GrpoLearner:
       if (not force) and (buf_b < service_target_bs):
         return produced
 
-      # 1) Merge multiple training micro-batches
+      # Merge multiple training micro-batches
       merged: _TrainingInputT = {}
       keys = buf[0].keys()
       for k in keys:
@@ -541,13 +538,13 @@ class GrpoLearner:
           else:
             merged[k] = np.concatenate([np.asarray(a), np.asarray(b)], axis=0)
 
-      # 2) Repeat samples (equivalent to repeating each micro, then concat)
+      # Repeat samples (equivalent to repeating each micro, then concat)
       merged_repeated = jax.tree.map(
           lambda x: np.repeat(x, sample_repeat, axis=0),
           merged,
       )
 
-      # 3) Single large forward pass + advantage computation
+      # Single large forward pass + advantage computation
       with jax.profiler.StepTraceAnnotation(
           "sampler",
           step_num=self._train_steps
@@ -558,8 +555,7 @@ class GrpoLearner:
             merged_repeated, mode
         )
 
-      # 4) Split back to original training micro boundaries
-      #    (multiplied by sample_repeat)
+      # Split back to original training micro size
       offset = 0
       for n in buf_sizes:
         token_sl = slice(offset * sample_repeat, (offset + n) * sample_repeat)
@@ -579,7 +575,7 @@ class GrpoLearner:
         produced.append(te_small)
         offset += n
 
-      # 5) Clear buffers
+      # Clear buffers
       buf.clear()
       buf_sizes.clear()
       buf_b = 0
@@ -597,12 +593,12 @@ class GrpoLearner:
         consumed_steps += 1
 
         # If the LCM threshold is reached, produce one batch
-        produced_now = _aggregate_and_compute_advantages(force=False)
+        produced_now = aggregate_and_compute_advantages(force=False)
         if produced_now:
           if async_loading:
             # Async: Enqueue immediately; cache for later repeats
             # (batch_repeat - 1).
-            _enqueue_examples(produced_now, 1)
+            enqueue_examples(produced_now, 1)
             if batch_repeat > 1:
               pending_examples.extend(produced_now)
           else:
@@ -617,10 +613,10 @@ class GrpoLearner:
 
         # On proceed boundary: handle tail + enqueue repeats
         if proceed_num_steps > 0 and consumed_steps == proceed_num_steps:
-          tail = _aggregate_and_compute_advantages(force=True)
+          tail = aggregate_and_compute_advantages(force=True)
           if tail:
             if async_loading:
-              _enqueue_examples(tail, 1)
+              enqueue_examples(tail, 1)
               if batch_repeat > 1:
                 pending_examples.extend(tail)
             else:
@@ -628,42 +624,29 @@ class GrpoLearner:
 
           if pending_examples:
             if not async_loading:
-              _enqueue_examples(pending_examples, batch_repeat)
+              enqueue_examples(pending_examples, batch_repeat)
             else:
               rem = batch_repeat - 1
               if rem > 0:
-                _enqueue_examples(pending_examples, rem)
+                enqueue_examples(pending_examples, rem)
             pending_examples.clear()
 
           consumed_steps = 0
           return
 
     except StopIteration as e:
-      # If a fixed number of steps is required by the caller, propagate
-      # StopIteration (train path usually won't hit this).
       if proceed_num_steps > 0:
         raise e
-      tail = _aggregate_and_compute_advantages(force=True)
-      if tail:
-        if async_loading:
-          _enqueue_examples(tail, 1)
-          if batch_repeat > 1:
-            pending_examples.extend(tail)
-        else:
+      else:
+        tail = aggregate_and_compute_advantages(force=True)
+        if tail:
           pending_examples.extend(tail)
-
-      if pending_examples:
-        if not async_loading:
-          _enqueue_examples(pending_examples, batch_repeat)
-        else:
-          rem = batch_repeat - 1
-          if rem > 0:
-            _enqueue_examples(pending_examples, rem)
-        pending_examples.clear()
+        if pending_examples:
+          data_queue.put(common.RepeatIterable(pending_examples, batch_repeat))
+          pending_examples.clear()
       return
 
     finally:
-      # Sentinel to indicate completion
       data_queue.put(None)
 
   def train(
@@ -720,7 +703,7 @@ class GrpoLearner:
         # reserve 1 for None and the other for repeated interable
         # if batch_repeat > 1
         train_data_queue = queue_lib.SimpleDataQueue(
-            maxsize=self.grad_acc_steps + 2
+            maxsize=self.grad_acc_steps * self.grpo_config.num_iterations + 1
         )
         # reserve 1 for None
         print("the grad_acc_steps is" + str(self.grad_acc_steps))
