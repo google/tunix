@@ -25,43 +25,43 @@ import jax.tree_util as jtu
 class RepeatIterable(Iterable[Any]):
   """An iterable that processes a list of rollout batches.
 
-  For each rollout batch, it shuffles its contents, slices it into mini-batches,
-  and yields them sequentially before moving to the next rollout batch. This
-  entire process is repeated for a specified number of epochs.
+  For each rollout batch, it shuffles its contents, slices it into
+  micro-batches, and yields them sequentially before moving to the next rollout
+  batch. This entire process is repeated for a specified number of epochs.
   """
 
   def __init__(
       self,
       data: list[Any],
       repeat: int,
-      mini_batch_size: int | None = None,
+      micro_batch_size: int | None = None,
       shuffle: bool = False,
       key: jnp.ndarray | None = None,
   ):
     self._data = data
 
     self.repeat = repeat
-    self.mini_batch_size = mini_batch_size
+    self.micro_batch_size = micro_batch_size
 
     self.shuffle = shuffle
     self.key = key if key is not None else jax.random.PRNGKey(0)
 
-    # Maintain a private, mutable `mini_batch_size`, for simpler code.
-    self._mini_batch_size = mini_batch_size
+    # Maintain a private, mutable `micro_batch_size`, for simpler code.
+    self._micro_batch_size = micro_batch_size
 
   def _shuffle_and_slice_one_batch(self, rollout_batch: Any):
     """A generator that shuffles and slices a single rollout batch."""
     leaves, _ = jtu.tree_flatten(rollout_batch)
     rollout_batch_size = leaves[0].shape[0]
 
-    if self.mini_batch_size is None:
-      self._mini_batch_size = rollout_batch_size
+    if self.micro_batch_size is None:
+      self._micro_batch_size = rollout_batch_size
 
-    if rollout_batch_size % self._mini_batch_size != 0:
+    if rollout_batch_size % self._micro_batch_size != 0:
       raise ValueError(
-          "Each rollout batch's size must be divisible by `mini_batch_size`."
+          "Each rollout batch's size must be divisible by `micro_batch_size`."
       )
-    num_mini_batches = rollout_batch_size // self._mini_batch_size
+    num_micro_batches = rollout_batch_size // self._micro_batch_size
 
     # Shuffle indices.
     if self.shuffle:
@@ -70,16 +70,16 @@ class RepeatIterable(Iterable[Any]):
     else:
       shuffled_indices = jnp.arange(rollout_batch_size)
 
-    # Slice the rollout batch into mini-batches.
-    for i in range(num_mini_batches):
-      start = i * self._mini_batch_size
-      end = start + self._mini_batch_size
+    # Slice the rollout batch into micro-batches.
+    for i in range(num_micro_batches):
+      start = i * self._micro_batch_size
+      end = start + self._micro_batch_size
       batch_indices = shuffled_indices[start:end]
 
-      mini_batch = jtu.tree_map(
+      micro_batch = jtu.tree_map(
           lambda leaf, indices=batch_indices: leaf[indices], rollout_batch
       )
-      yield mini_batch
+      yield micro_batch
 
   def __iter__(self):
     """The main generator for the iterable."""

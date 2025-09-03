@@ -22,6 +22,7 @@ import jax.numpy as jnp
 def compute_gae_advantages(
     rewards: jax.Array,
     values: jax.Array,
+    completion_mask: jax.Array,
     gamma: float,
     gae_lambda: float,
 ) -> tuple[jax.Array, jax.Array]:
@@ -54,6 +55,7 @@ def compute_gae_advantages(
   Args:
     rewards: A 2D array of rewards for each step in the rollout.
     values: A 2D array of value estimates from the critic for each step.
+    completion_mask: A 2D mask, which is 0 for padding tokens.
     gamma: The discount factor, `γ`.
     gae_lambda: The GAE lambda parameter, `λ`.
 
@@ -63,15 +65,20 @@ def compute_gae_advantages(
   batch_size = values.shape[0]
 
   next_values = jnp.concatenate(
-      (values[..., 1:], jnp.zeros((batch_size, 1))), axis=1
+      ((values * completion_mask)[..., 1:], jnp.zeros((batch_size, 1))), axis=1
   )
 
   # Compute Temporal Difference (TD).
   deltas = rewards + gamma * next_values - values
 
-  def gae_step(gae_t_plus_1, delta_t):
+  def gae_step(gae_t_plus_1, xs):
+    delta_t, mask_t = xs
     # `A_t = delta_t + (gamma * lambda) * A_{t+1}`.
-    gae_t = delta_t + gamma * gae_lambda * gae_t_plus_1
+    # Only update gae_t if mask_t is 1, otherwise, carry it over from the
+    # previous step.
+    gae_t = (delta_t + gamma * gae_lambda * gae_t_plus_1) * mask_t + (
+        1 - mask_t
+    ) * gae_t_plus_1
 
     # New state to carry over is `gae_t`. Output for this step is also `gae_t`.
     return gae_t, gae_t
@@ -79,36 +86,34 @@ def compute_gae_advantages(
   _, advantages_transposed = jax.lax.scan(
       gae_step,
       init=jnp.zeros((batch_size,)),
-      xs=jnp.transpose(jnp.array(deltas)),
+      xs=(
+          jnp.transpose(jnp.array(deltas)),
+          jnp.transpose(jnp.array(completion_mask)),
+      ),
       reverse=True,
   )
   advantages = jnp.transpose(advantages_transposed)
   returns = advantages + values
+
+  # Normalise advantages.
+  advantages = masked_whiten(advantages, completion_mask)
   return advantages, returns
 
 
 @jax.jit
-def normalize_advantages(
-    advantages: jax.Array,
+def masked_whiten(
+    x: jax.Array,
     completion_mask: jax.Array,
 ) -> jax.Array:
-  """Normalize advantages."""
-  advantages_mean = masked_mean(advantages, completion_mask)
-  advantages_var = masked_var(
-      advantages,
+  """Normalize the input array."""
+  x_mean = masked_mean(x, completion_mask)
+  x_var = masked_var(
+      x,
       completion_mask,
-      advantages_mean,
+      x_mean,
   )
-  advantages = (advantages - advantages_mean) * jax.lax.rsqrt(
-      advantages_var + 1e-8
-  )
-  # Zero out advantages corresponding to padding tokens.
-  advantages = jnp.where(
-      completion_mask,
-      advantages,
-      jnp.array(0).astype(advantages.dtype),
-  )
-  return advantages
+  x = (x - x_mean) * jax.lax.rsqrt(x_var + 1e-8)
+  return x
 
 
 @functools.partial(jax.jit, static_argnames=('axis',))
@@ -117,7 +122,9 @@ def masked_mean(
 ) -> jax.Array:
   """Compute the mean of a masked array."""
   cast_mask = mask.astype(x.dtype)
-  return jnp.sum(x * cast_mask, axis=axis) / jnp.sum(cast_mask, axis=axis)
+  return jnp.sum(x * cast_mask, axis=axis) / (
+      jnp.sum(cast_mask, axis=axis) + 1e-8
+  )
 
 
 @jax.jit

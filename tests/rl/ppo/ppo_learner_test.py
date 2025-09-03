@@ -95,18 +95,18 @@ class PpoLearnerTest(parameterized.TestCase):
 
     empty_trainer = _EmptyTrainer()
 
-    def _prepare(dataset, batch_repeat, grad_acc_steps, mini_batch_size=None):
+    def _prepare(dataset, batch_repeat, mini_batch_size=None):
       iterator = iter(dataset)
       while True:
         try:
           data_queue = queue_lib.SimpleDataQueue(maxsize=2)
           empty_trainer._prepare_data(
               iterator=iterator,
-              mini_batch_size=mini_batch_size,
-              proceed_num_steps=grad_acc_steps,
+              micro_batch_size=mini_batch_size,
               batch_repeat=batch_repeat,
               data_queue=data_queue,
               async_loading=False,
+              training=True,
               shuffle_data=True,
           )
           yield data_queue.get(block=True)
@@ -117,7 +117,7 @@ class PpoLearnerTest(parameterized.TestCase):
     dataset = _dummy_dataset([i for i in range(8)], 4)
     res = [
         d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 1, 1))
+        for d in itertools.chain.from_iterable(_prepare(dataset, 1))
     ]
     expected = [[3, 2, 1, 0], [5, 6, 4, 7]]
     self.assertEqual(res, expected)
@@ -126,7 +126,7 @@ class PpoLearnerTest(parameterized.TestCase):
     dataset = _dummy_dataset([i for i in range(8)], 4)
     res = [
         d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 3, 1))
+        for d in itertools.chain.from_iterable(_prepare(dataset, 3))
     ]
     expected = [
         [3, 1, 2, 0],
@@ -138,104 +138,34 @@ class PpoLearnerTest(parameterized.TestCase):
     ]
     self.assertEqual(res, expected)
 
-    # Case 3: batch repeat = 1, grad_acc_steps = 3
-    empty_trainer._data_shuffle_key = jax.random.PRNGKey(42)
-    dataset = _dummy_dataset([i for i in range(16)], 4)
-    res = [
-        d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 1, 3))
-    ]
-    expected = [
-        [3, 2, 1, 0],
-        [5, 6, 4, 7],
-        [11, 9, 10, 8],
-        # [12, 13, 14, 15]  # dropped, cannot meet size of grad_acc_steps
-    ]
-    self.assertEqual(res, expected)
-
-    # Case 4: batch repeat = 2, grad_acc_steps = 3
-    dataset = _dummy_dataset([i for i in range(16)], 4)
-    res = [
-        d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 2, 3))
-    ]
-    expected = [
-        [1, 2, 0, 3],
-        [7, 5, 6, 4],
-        [9, 10, 8, 11],
-        [0, 1, 3, 2],
-        [5, 7, 4, 6],
-        [11, 9, 10, 8],
-    ]
-    self.assertEqual(res, expected)
-
-    # Case 5: batch repeat = 1, grad_acc_steps = 1, mini_batch_size = 2
+    # Case 3: batch repeat = 1, mini_batch_size = 2
     dataset = _dummy_dataset([i for i in range(8)], 4)
     res = [
         d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 1, 1, 2))
+        for d in itertools.chain.from_iterable(_prepare(dataset, 1, 2))
     ]
-    expected = [[3, 1], [2, 0], [5, 6], [4, 7]]
+    expected = [[0, 1], [3, 2], [5, 7], [4, 6]]
     self.assertEqual(res, expected)
 
-    # Case 6: batch repeat = 3, grad_acc_steps = 1, mini_batch_size = 2
+    # Case 4: batch repeat = 3, grad_acc_steps = 1, mini_batch_size = 2
     dataset = _dummy_dataset([i for i in range(8)], 4)
     res = [
         d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 3, 1, 2))
-    ]
-    expected = [
-        [0, 1],
-        [3, 2],
-        [1, 3],
-        [0, 2],
-        [3, 1],
-        [2, 0],
-        [5, 7],
-        [4, 6],
-        [7, 5],
-        [6, 4],
-        [5, 4],
-        [6, 7],
-    ]
-    self.assertEqual(res, expected)
-
-    # Case 7: batch repeat = 1, grad_acc_steps = 3, mini_batch_size = 2
-    dataset = _dummy_dataset([i for i in range(16)], 4)
-    res = [
-        d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 1, 3, 2))
+        for d in itertools.chain.from_iterable(_prepare(dataset, 3, 2))
     ]
     expected = [
         [3, 1],
         [2, 0],
-        [5, 4],
-        [6, 7],
-        [8, 11],
-        [9, 10],
-        # [12, 13], [14, 15],  # dropped, cannot meet size of grad_acc_steps
-    ]
-    self.assertEqual(res, expected)
-
-    # Case 8: batch repeat = 2, grad_acc_steps = 3, mini_batch_size = 2
-    dataset = _dummy_dataset([i for i in range(16)], 4)
-    res = [
-        d.get('prompts').tolist()
-        for d in itertools.chain.from_iterable(_prepare(dataset, 2, 3, 2))
-    ]
-    expected = [
         [1, 0],
         [2, 3],
+        [0, 3],
+        [1, 2],
+        [5, 4],
+        [6, 7],
         [4, 7],
         [5, 6],
-        [9, 10],
-        [8, 11],
-        [2, 3],
-        [0, 1],
-        [7, 5],
-        [4, 6],
-        [11, 10],
-        [9, 8],
+        [5, 6],
+        [4, 7],
     ]
     self.assertEqual(res, expected)
 
@@ -376,7 +306,8 @@ class PpoLearnerTest(parameterized.TestCase):
         'score/mean',
         'reward/mean',
         'loss',  # policy loss
-        'kl/mean',
+        'reward_kl_penalty',
+        'pg_clipfrac',
     ]:
       self.assertLen(
           actor_metric_logger.get_metric_history(metric_name, 'train'),
@@ -392,53 +323,113 @@ class PpoLearnerTest(parameterized.TestCase):
             actor_metric_logger.get_metric_history(metric_name, 'eval'),
             5,  # eval loss is aggregated, so # equal to # of eval invocations.
         )
-    self.assertLen(
-        ppo_learner._critic_metrics_logger.get_metric_history(
-            'loss/vf', 'train'
-        ),
-        ppo_learner._train_steps,
-    )
-    self.assertLen(
-        ppo_learner._critic_metrics_logger.get_metric_history(
-            'loss/vf', 'eval'
-        ),
-        ppo_learner._eval_steps,
-    )
+
+    for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:
+      self.assertLen(
+          ppo_learner._critic_metrics_logger.get_metric_history(
+              metric_name, 'train'
+          ),
+          ppo_learner._train_steps,
+      )
+      eval_steps = 5 if metric_name == 'loss' else ppo_learner._eval_steps
+      self.assertLen(
+          ppo_learner._critic_metrics_logger.get_metric_history(
+              metric_name, 'eval'
+          ),
+          eval_steps,
+      )
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='multi_iter_without_gradient_accumulation',
+          testcase_name='multi_iter',
+          input_data_size=2,
+          batch_size=1,
+          mini_batch_size=None,
           num_ppo_epochs=2,
           beta=0.04,
           gradient_accumulation_steps=None,
-          expected_gen_fn_call_at_step=[0, 2, 4, 6, 8],
-          expected_inference_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
-          expected_rollout_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
+          expected_gen_fn_call_at_step=[0, 1, 2, 3, 4, 5, 6, 7],
+          expected_inference_worker_logps_fn_call_at_step=[
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+          ],
+          expected_rollout_worker_logps_fn_call_at_step=[
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+          ],
+          raise_error=False,
       ),
       dict(
           testcase_name='multi_iter_with_gradient_accumulation',
+          input_data_size=2,
+          batch_size=1,
+          mini_batch_size=None,
           num_ppo_epochs=2,
           beta=0.04,
           gradient_accumulation_steps=3,
-          expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_inference_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_rollout_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
+          expected_gen_fn_call_at_step=None,
+          expected_inference_worker_logps_fn_call_at_step=None,
+          expected_rollout_worker_logps_fn_call_at_step=None,
+          raise_error=True,
+      ),
+      dict(
+          testcase_name='multi_iter_with_mini_batching',
+          input_data_size=6,
+          batch_size=8,
+          mini_batch_size=2,
+          num_ppo_epochs=2,
+          beta=0.04,
+          gradient_accumulation_steps=None,
+          expected_gen_fn_call_at_step=[0, 1, 2],
+          expected_inference_worker_logps_fn_call_at_step=[0, 1, 2],
+          expected_rollout_worker_logps_fn_call_at_step=[0, 1, 2],
+          raise_error=False,
+      ),
+      dict(
+          testcase_name=(
+              'multi_iter_with_mini_batching_and_gradient_accumulation'
+          ),
+          input_data_size=6,
+          batch_size=8,
+          mini_batch_size=4,
+          num_ppo_epochs=2,
+          beta=0.04,
+          gradient_accumulation_steps=4,
+          expected_gen_fn_call_at_step=[0, 1, 2],
+          expected_inference_worker_logps_fn_call_at_step=[0, 1, 2],
+          expected_rollout_worker_logps_fn_call_at_step=[0, 1, 2],
+          raise_error=False,
       ),
       dict(
           testcase_name='single_iter_with_gradient_accumulation',
+          input_data_size=2,
+          batch_size=1,
+          mini_batch_size=None,
           num_ppo_epochs=1,
           beta=0.04,
           gradient_accumulation_steps=3,
-          expected_gen_fn_call_at_step=[0, 0, 0, 3, 3, 3, 6, 6],
-          expected_inference_worker_logps_fn_call_at_step=(
-              [0, 0, 0, 3, 3, 3, 6, 6]
-          ),
-          expected_rollout_worker_logps_fn_call_at_step=(
-              [0, 0, 0, 3, 3, 3, 6, 6]
-          ),
+          expected_gen_fn_call_at_step=None,
+          expected_inference_worker_logps_fn_call_at_step=None,
+          expected_rollout_worker_logps_fn_call_at_step=None,
+          raise_error=True,
       ),
       dict(
-          testcase_name='single_iter_without_gradient_accumulation',
+          testcase_name='single_iter',
+          input_data_size=2,
+          batch_size=1,
+          mini_batch_size=None,
           num_ppo_epochs=1,
           beta=0.04,
           gradient_accumulation_steps=None,
@@ -449,9 +440,13 @@ class PpoLearnerTest(parameterized.TestCase):
           expected_rollout_worker_logps_fn_call_at_step=(
               [0, 1, 2, 3, 4, 5, 6, 7]
           ),
+          raise_error=False,
       ),
       dict(
           testcase_name='single_iter_without_kl',
+          input_data_size=2,
+          batch_size=1,
+          mini_batch_size=None,
           num_ppo_epochs=1,
           beta=0.0,
           gradient_accumulation_steps=None,
@@ -467,16 +462,34 @@ class PpoLearnerTest(parameterized.TestCase):
               6,
               7,
           ],
+          raise_error=False,
+      ),
+      dict(
+          testcase_name='single_iter_with_mini_batching',
+          input_data_size=6,
+          batch_size=8,
+          mini_batch_size=2,
+          num_ppo_epochs=1,
+          beta=0.04,
+          gradient_accumulation_steps=None,
+          expected_gen_fn_call_at_step=[0, 1, 2],
+          expected_inference_worker_logps_fn_call_at_step=[0, 1, 2],
+          expected_rollout_worker_logps_fn_call_at_step=[0, 1, 2],
+          raise_error=False,
       ),
   )
   def test_multi_iteration_training(
       self,
+      input_data_size,
+      batch_size,
+      mini_batch_size,
       num_ppo_epochs,
       beta,
       gradient_accumulation_steps,
       expected_gen_fn_call_at_step,
       expected_inference_worker_logps_fn_call_at_step,
       expected_rollout_worker_logps_fn_call_at_step,
+      raise_error,
   ):
     gen_fn_call_at_step = []
     rollout_worker_logps_fn_call_at_step = []
@@ -543,7 +556,11 @@ class PpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    ppo_config = ppo_lib.PpoConfig(num_ppo_epochs=num_ppo_epochs, beta=beta)
+    ppo_config = ppo_lib.PpoConfig(
+        num_ppo_epochs=num_ppo_epochs,
+        mini_batch_size=mini_batch_size,
+        beta=beta,
+    )
     ppo_learner = ppo_lib.PpoLearner(
         rl_cluster=rl_cluster,
         ppo_config=ppo_config,
@@ -566,7 +583,14 @@ class PpoLearnerTest(parameterized.TestCase):
         ppo_learner.rl_cluster.actor_trainer,
     )
 
-    train_ds = _dummy_dataset(_DUMMY_DATA * 2, batch_size=1)
+    train_ds = _dummy_dataset(
+        _DUMMY_DATA * input_data_size, batch_size=batch_size
+    )
+
+    if raise_error:
+      with self.assertRaises(ValueError):
+        ppo_learner.train(train_ds, None)
+      return
     ppo_learner.train(train_ds, None)
 
     model_variables = nnx.state(model, nnx.Param)

@@ -322,10 +322,11 @@ class RLCluster:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
+    actor_config.pbar_prefix = "Actor Training"
     self._actor_trainer = rl_trainer.Trainer(
         model=self.train_actor,
         optimizer=self.cluster_config.training_config.actor_optimizer,
-        training_config=self.cluster_config.training_config,
+        training_config=actor_config,
     )
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -338,6 +339,7 @@ class RLCluster:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
         )
+      critic_config.pbar_prefix = "Critic Training"
       self._critic_trainer = rl_trainer.Trainer(
           model=self.critic,
           optimizer=self.cluster_config.training_config.critic_optimizer,
@@ -426,16 +428,24 @@ class RLCluster:
   def critic_trainer(self) -> rl_trainer.Trainer:
     return self._critic_trainer
 
-  def update_actor(self, train_ds, eval_ds, skip_jit=False):
+  def update_actor(
+      self, train_ds, eval_ds, skip_jit=False, logging_every_n_steps=1
+  ):
     with self.cluster_config.role_to_mesh[Role.ACTOR]:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+      self.actor_trainer.train(
+          train_ds, eval_ds, skip_jit, logging_every_n_steps
+      )
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
-  def update_critic(self, train_ds, eval_ds, skip_jit=False):
+  def update_critic(
+      self, train_ds, eval_ds, skip_jit=False, logging_every_n_steps=1
+  ):
     with self.cluster_config.role_to_mesh[Role.CRITIC]:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      self._critic_trainer.train(train_ds, eval_ds, skip_jit)
+      self._critic_trainer.train(
+          train_ds, eval_ds, skip_jit, logging_every_n_steps
+      )
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
   def generate(self, prompts: list[str], mode: Mode = Mode.TRAIN):

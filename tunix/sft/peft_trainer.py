@@ -28,7 +28,7 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -79,6 +79,8 @@ class TrainingConfig:
 
   # Controls how many train_steps can be scheduled ahead of time.
   max_inflight_computations: int = 2
+
+  pbar_prefix: str = "Training"
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -211,6 +213,9 @@ class PeftTrainer:
     self._buffered_train_metrics: tuple[ArrayLike, int, float] | None = None
     self.training_hooks = None
     self.data_hooks = None
+
+    # Running average of metrics.
+    self._running_sum = {}
 
   def _validate_config(self, training_config: TrainingConfig):
     if (
@@ -508,6 +513,16 @@ class PeftTrainer:
   def _tqdm_eval_metrics(self) -> list[str]:
     return ["loss", "perplexity"]
 
+  def _compute_running_sum(self, metrics: dict[str, jax.Array]) -> None:
+    for metric_name, metric_value in metrics.items():
+      if metric_name not in self._running_sum:
+        self._running_sum[metric_name] = metric_value
+      else:
+        self._running_sum[metric_name] += metric_value
+
+  def _reset_running_sum(self) -> None:
+    self._running_sum = {}
+
   def _may_update_pbar(
       self,
       metrics,
@@ -530,10 +545,18 @@ class PeftTrainer:
       train_ds: Iterable[Any],
       eval_ds: Iterable[Any] | None = None,
       skip_jit: bool = False,
+      logging_every_n_steps: int = 1,
   ) -> None:
     """Training loop."""
     mesh = pxla.thread_resources.env.physical_mesh
     logging.info("Training with mesh: %s", mesh)
+
+    if logging_every_n_steps > 1 and not self.is_managed_externally:
+      raise ValueError(
+          "logging_every_n_steps must be 1 when the trainer is not managed "
+          f"externally. Received: {logging_every_n_steps=}, "
+          f"{self.is_managed_externally=}"
+      )
 
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
 
@@ -542,6 +565,7 @@ class PeftTrainer:
           metrics_logger=self.metrics_logger,
           initial_steps=self._train_steps,
           max_steps=self.config.max_steps,
+          pbar_prefix=self.config.pbar_prefix,
       )
 
     if self.training_hooks:
@@ -549,10 +573,12 @@ class PeftTrainer:
 
     train_iterator = iter(train_ds)
     index = 0
+    local_train_idx = 0
     last_step_completion_time = time.perf_counter()
     with time_measure("Train loop"):
       while True:
         self._prof.maybe_activate(self._train_steps)
+
         with jax.profiler.StepTraceAnnotation(
             "train", step_num=self._train_steps
         ):
@@ -603,7 +629,7 @@ class PeftTrainer:
             )
             if tflops_per_step is not None:
               self.metrics_logger.log(
-                  "tflops_per_step", tflops_per_step, self._mode, 0
+                  "tflops_per_update_step", tflops_per_step, self._mode, 0
               )
 
           self._throttler.wait_for_next()
@@ -613,25 +639,41 @@ class PeftTrainer:
               self.model, self.optimizer, train_example
           )
 
-          current_time = time.perf_counter()
-          step_time_delta = current_time - last_step_completion_time
-          last_step_completion_time = current_time
-
           self._throttler.add_computation(train_loss)
-          self._post_process_train_step(aux)
-          self._buffer_and_write_train_metrics(
-              loss=train_loss,
-              step=self._train_steps,
-              step_time_delta=step_time_delta,
-          )
-          self._train_steps += 1
 
-          # Actual checkpoint frequency is configured by checkpointing_options.
-          self.checkpoint_manager.save(
-              self._train_steps,
-              self.model,
-              save_only_lora_params=self._lora_enabled,
-          )
+          # Increment `local_train_idx` for every model weight update.
+          local_train_idx += 1
+          local_metrics_dict = {"loss": train_loss}
+          if aux is not None:
+            local_metrics_dict.update(aux)
+          self._compute_running_sum(local_metrics_dict)
+
+          # Logging, etc. happen every `logging_every_n_steps`.
+          if local_train_idx % logging_every_n_steps == 0:
+            current_time = time.perf_counter()
+            step_time_delta = current_time - last_step_completion_time
+            last_step_completion_time = current_time
+
+            for metric_name in self._running_sum:
+              self._running_sum[metric_name] /= logging_every_n_steps
+
+            self._post_process_train_step(self._running_sum)
+            self._buffer_and_write_train_metrics(
+                loss=self._running_sum["loss"],
+                step=self._train_steps,
+                step_time_delta=step_time_delta,
+            )
+
+            self._train_steps += 1
+            self._reset_running_sum()
+
+            # Actual checkpoint frequency is configured by
+            # `checkpointing_options`.
+            self.checkpoint_manager.save(
+                self._train_steps,
+                self.model,
+                save_only_lora_params=self._lora_enabled,
+            )
 
         self._prof.maybe_deactivate(self._train_steps)
 

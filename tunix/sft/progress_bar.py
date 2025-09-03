@@ -15,13 +15,14 @@ class ProgressBar:
       metrics_logger: ml.MetricsLogger,
       initial_steps: int,
       max_steps: int,
+      pbar_prefix: str = "Training",
   ):
 
     # Initialise progress bar.
     self.tqdm_bar = tqdm(
         total=max_steps,
         initial=initial_steps,
-        desc="Training",
+        desc=pbar_prefix if pbar_prefix else "Training",
         unit="step",
         dynamic_ncols=True,
         leave=True,
