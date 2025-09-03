@@ -440,37 +440,28 @@ class GrpoLearner:
       proceed_num_steps: int,
       sample_repeat: int,
       batch_repeat: int,
-      data_queue: queue_lib.AbstractDataQueue[
-          list[TrainExample] | common.RepeatIterable | None
-      ],
+      data_queue: queue_lib.AbstractDataQueue[list[TrainExample] | None],
       async_loading: bool = False,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
   ) -> None:
-    """Prepares and enqueues training/evaluation data by processing micro-batches.
-
-    This method reads data from the provided iterator, groups it into larger
-    batches based on the Least Common Multiple (LCM) of micro-batch sizes
-    used in different stages (rollout, ref_logps, old_logps), repeats samples
-    as required, and enqueues the resulting `TrainExample`s.
-
-    Args:
-      iterator: An iterator providing `_TrainingInputT` examples.
-      proceed_num_steps: The number of training micro-batches to process before
-        flushing and enqueuing. If -1, processes until `StopIteration`.
-      sample_repeat: The number of times each sample should be repeated within a
-        generated batch (corresponds to `num_generations`).
-      batch_repeat: The number of times the entire produced batch of
-        `TrainExample`s should be repeated when enqueued (corresponds to
-        `num_iterations`).
-      data_queue: The queue to which the prepared `TrainExample`s are added.
-      async_loading: Whether asynchronous loading is enabled. This affects how
-        `batch_repeat` is handled when enqueuing.
-      mode: The mode for metric logging, either TRAIN or EVAL.
+    """按 micro 流水准备数据：合并→repeat(sample)→一次前向→按原 micro 切回。
+    入队策略：
+      - 永远只 put 长度为 1 的小 list（[TrainExample]）。
+      - 同步：每批先累计到 pending_examples，边界/收尾时一次性 repeat = batch_repeat。
+      - 异步：每批先入队 1 次；若 batch_repeat>1，同时缓存到 pending_examples，
+              边界/收尾时统一补齐 (batch_repeat - 1) 次。
     """
-    print("[new feature] Beginning data preparation...")
-    print(f"Async loading enabled: {async_loading}")
 
-    # Use LCM as the service batch size (ignoring alignment or size limits)
+    # =============== 工具函数 ===============
+    def _put_as_singleton(examples: list[TrainExample], times: int) -> None:
+      """把每个 TrainExample 单独包成 [TrainExample]，重复 times 次放入队列。"""
+      if times <= 0 or not examples:
+        return
+      for _ in range(times):
+        for ex in examples:
+          data_queue.put([ex])
+
+    # 用三处 micro 的 LCM 作为一次服务目标批大小（跨阶段对齐）
     service_target_bs = _lcm3(
         self.rollout_micro_batch_size,
         self.ref_logps_micro_batch_size,
@@ -478,79 +469,50 @@ class GrpoLearner:
     )
 
     buf: list[_TrainingInputT] = []
-    buf_sizes: list[int] = []  # Number of samples in each training micro-batch
-    buf_b = 0  # Total aggregated samples (before repeating)
-    consumed_steps = 0  # Counts training micro-batches (not individual samples)
-    pending_examples: list[TrainExample] = (
-        []
-    )  # Awaiting to be enqueued at the 'proceed' boundary
+    buf_sizes: list[int] = []   # 各训练 micro-batch 的样本数
+    buf_b = 0                   # 聚合样本总数（repeat 前）
+    consumed_steps = 0          # 已消耗的训练 micro-batch 数
 
-    print("Initialization complete.")
+    # 同步/异步共同使用：用于“重复补齐”的缓存（异步时也会使用）
+    pending_examples: list[TrainExample] = []
 
     def _flush(force: bool = False) -> list[TrainExample]:
-      """Aggregates -> repeats 'sample_repeat' times -> executes as a large batch -> splits back by training micro-batch size.
-
-      This function only produces examples; it does not enqueue them.
-
-      Args:
-        force: If True, forces a flush even if the buffer size is less than
-          `service_target_bs`.
-
-      Returns:
-        A list of `TrainExample` objects, split according to the original
-        training micro-batch boundaries and repeated `sample_repeat` times.
-      """
+      """聚合→按 sample_repeat 重复→大批生成与打分→切回原 micro→返回小批列表。"""
       nonlocal buf, buf_sizes, buf_b
       produced: list[TrainExample] = []
 
       if not buf:
         return produced
       if (not force) and (buf_b < service_target_bs):
-        print("Not enough data, skipping flush.")
         return produced
-      print("Sufficient data, proceeding with flush.")
 
-      # 1) Merge multiple training micro-batches into a single batch
-      #    (before repeating)
+      # 1) 合并多个训练 micro-batch
       merged: dict = {}
       keys = buf[0].keys()
       for k in keys:
-        merged[k] = list(buf[0][k])
+        merged[k] = list(buf[0][k]) if isinstance(buf[0][k], list) else np.asarray(buf[0][k])
       for i in range(1, len(buf)):
         for k in keys:
           a, b = merged[k], buf[i][k]
           if isinstance(a, list) and isinstance(b, list):
-            merged[k].extend(b)
+            a.extend(b)
           else:
             merged[k] = np.concatenate([np.asarray(a), np.asarray(b)], axis=0)
 
-      print("Data after merging:")
-      print(merged)
-
-      # 2) Repeat 'sample_repeat' times at once (equivalent to repeating each
-      # micro-batch and then concatenating)
+      # 2) repeat 样本（等价于每个 micro 重复后再拼接）
       merged_repeated = jax.tree.map(
           lambda x: np.repeat(x, sample_repeat, axis=0),
           merged,
-      )  # Shape changes from [sum(B_i)] to [sum(B_i) * sample_repeat]
+      )
 
-      print("Data after repeating:")
-      print(merged_repeated)
-
-      # 3) Execute as a large batch (internally re-split by micro-batch sizes
-      #    for each stage)
+      # 3) 执行一次大批生成 + 计算优势
       with jax.profiler.StepTraceAnnotation(
           "sampler",
-          step_num=self._train_steps
-          if mode == metrics_logger.Mode.TRAIN
-          else self._eval_steps,
+          step_num=self._train_steps if mode == metrics_logger.Mode.TRAIN else self._eval_steps,
       ):
-        big_example = self._generate_and_compute_advantage(
-            merged_repeated, mode
-        )
+        big_example = self._generate_and_compute_advantage(merged_repeated, mode)
 
-      # 4) Split back according to original training micro-batch boundaries
-      #    (multiplied by sample_repeat)
+      # 4) 切回原训练 micro 边界（乘以 sample_repeat）
       offset = 0
       for n in buf_sizes:
         token_sl = slice(offset * sample_repeat, (offset + n) * sample_repeat)
@@ -560,20 +522,17 @@ class GrpoLearner:
             completion_ids=big_example.completion_ids[token_sl],
             completion_mask=big_example.completion_mask[token_sl],
             ref_per_token_logps=None
-            if big_example.ref_per_token_logps is None
-            else big_example.ref_per_token_logps[token_sl],
-            # 'advantages' is per sequence, so slice with repeated sequences.
+                if big_example.ref_per_token_logps is None
+                else big_example.ref_per_token_logps[token_sl],
             advantages=big_example.advantages[token_sl],
             old_per_token_logps=None
-            if big_example.old_per_token_logps is None
-            else big_example.old_per_token_logps[token_sl],
+                if big_example.old_per_token_logps is None
+                else big_example.old_per_token_logps[token_sl],
         )
-        print("-------------------")
-        print(f"Advantages for small TrainExample: {te_small.advantages}")
         produced.append(te_small)
         offset += n
 
-      # 5) Clear the buffer
+      # 5) 清空缓冲
       buf.clear()
       buf_sizes.clear()
       buf_b = 0
@@ -582,99 +541,83 @@ class GrpoLearner:
 
     try:
       while True:
-        print("Starting a new loop iteration...")
-        # Fast-forward when resuming from a checkpoint (original logic retained)
-        # while (mode == metrics_logger.Mode.TRAIN and
-        #        self._train_steps < self._last_train_step):
-        #   print("Skipping step to catch up with checkpoint...")
-        #   next(iterator)
-        #   self._train_steps += 1
-
-        # Fetch one "training micro-batch"
+        # 拉取一个训练 micro-batch
         example = next(iterator)
         B = len(example["prompts"])
         buf.append(example)
         buf_sizes.append(B)
         buf_b += B
         consumed_steps += 1
-        print(f"Current number of samples in buffer: {buf_b}")
 
-        print("Current example fetched:")
-        print(example)
-        print("Checking if buffer should be flushed...")
-
-        # Once the LCM batch size is reached, produce a batch (add to pending, but
-        # don't enqueue yet)
+        # 达到 LCM 阈值就产出一批
         produced_now = _flush(force=False)
         if produced_now:
-          pending_examples.extend(produced_now)
-        print("Exited _flush function.")
+          if async_loading:
+            # 异步：先入队一次，并缓存以便后续补 (batch_repeat - 1)
+            _put_as_singleton(produced_now, 1)
+            if batch_repeat > 1:
+              pending_examples.extend(produced_now)
+          else:
+            # 同步：先累计，尾声统一入队 batch_repeat 次
+            pending_examples.extend(produced_now)
 
-        # Step counting (original logic retained)
+        # 维护日志步数
         if mode == metrics_logger.Mode.TRAIN:
           self._train_steps += 1
         else:
           self._eval_steps += 1
 
-        # The 'tail' logic handles cases where the dataset isn't perfectly
-        # divisible by 'proceed_num_steps'. For instance, if proceed_num_steps=4
-        # but the dataset has only 3 batches, this ensures the last 3 are
-        # processed. This is rare, as dataset sizes are typically factors of
-        # step counts.
+        # 到达 proceed 边界：处理尾巴 + 入队 repeats
         if proceed_num_steps > 0 and consumed_steps >= proceed_num_steps:
-          tail = _flush(
-              force=True
-          )  # Flush any remaining tail that didn't reach the LCM threshold
+          tail = _flush(force=True)
           if tail:
-            pending_examples.extend(tail)
+            if async_loading:
+              _put_as_singleton(tail, 1)
+              if batch_repeat > 1:
+                pending_examples.extend(tail)
+            else:
+              pending_examples.extend(tail)
 
           if pending_examples:
-            print("Starting to enqueue data...")
             if not async_loading:
-              # Synchronous: Directly repeat pending_examples for a total of
-              # batch_repeat times.
-              print(
-                  f"Enqueuing {len(pending_examples)} examples, repeated"
-                  f" {batch_repeat} times."
-              )
-              data_queue.put(
-                  common.RepeatIterable(pending_examples, batch_repeat)
-              )
-              print(f"Queue length is now: {len(data_queue)}")
+              _put_as_singleton(pending_examples, batch_repeat)
             else:
-              # Asynchronous: The first repetition was already enqueued,
-              # so only add the remaining (batch_repeat - 1).
-              if batch_repeat > 1:
-                data_queue.put(
-                    common.RepeatIterable(pending_examples, batch_repeat - 1)
-                )
+              rem = batch_repeat - 1
+              if rem > 0:
+                _put_as_singleton(pending_examples, rem)
+            pending_examples.clear()
 
-          pending_examples.clear()
           consumed_steps = 0
           return
+
     except StopIteration as e:
+      # 外部要求固定步数时，StopIteration 交给上层（训练路径通常不会走到这里）
       if proceed_num_steps > 0:
         raise e
-      else:
-        # End of iterator: force flush any remaining data.
-        tail = _flush(force=True)
-        if tail:
+      # 否则是整集遍历（如 eval）：做最终 tail + repeats
+      tail = _flush(force=True)
+      if tail:
+        if async_loading:
+          _put_as_singleton(tail, 1)
+          if batch_repeat > 1:
+            pending_examples.extend(tail)
+        else:
           pending_examples.extend(tail)
 
-        # Enqueue all repeated examples together.
-        if pending_examples:
-          if not async_loading:
-            data_queue.put(
-                common.RepeatIterable(pending_examples, batch_repeat)
-            )
-          else:
-            if batch_repeat > 1:
-              data_queue.put(
-                  common.RepeatIterable(pending_examples, batch_repeat - 1)
-              )
-        return
+      if pending_examples:
+        if not async_loading:
+          _put_as_singleton(pending_examples, batch_repeat)
+        else:
+          rem = batch_repeat - 1
+          if rem > 0:
+            _put_as_singleton(pending_examples, rem)
+        pending_examples.clear()
+      return
+
     finally:
-      data_queue.put(None)  # Signal that data preparation is complete.
+      # 结束标记
+      data_queue.put(None)
+
 
   def train(
       self,
