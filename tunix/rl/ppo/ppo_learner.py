@@ -160,7 +160,7 @@ class PpoLearner:
 
     # ===== Configure the metrics logger =====
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
-        {"pg_clipfrac": "pg_clipfrac"}
+        {"pg_clipfrac": np.mean}
     )
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         "score/mean",
@@ -168,9 +168,10 @@ class PpoLearner:
         lambda: "reward_kl_penalty" if self.ppo_config.beta != 0.0 else None,
     ])
 
-    self.rl_cluster.critic_trainer.with_rl_metrics_to_log(
-        {"vpred_mean": "vpred_mean", "vf_clipfrac": "vf_clipfrac"}
-    )
+    self.rl_cluster.critic_trainer.with_rl_metrics_to_log({
+        "vpred_mean": np.mean,
+        "vf_clipfrac": np.mean,
+    })
 
     self._actor_metrics_logger = rl_cluster.actor_trainer.metrics_logger
     self._critic_metrics_logger = rl_cluster.critic_trainer.metrics_logger

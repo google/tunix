@@ -383,15 +383,18 @@ class PpoLearnerTest(parameterized.TestCase):
           actor_metric_logger.get_metric_history(metric_name, 'train'),
           ppo_learner._iter_steps,
       )
-      if metric_name not in ('loss', 'kl'):  # KL is not logged in eval mode.
+      if metric_name in ('loss', 'pg_clipfrac'):
+        self.assertLen(
+            actor_metric_logger.get_metric_history(metric_name, 'eval'),
+            ppo_learner.rl_cluster.actor_trainer.train_steps
+            / cluster_config.training_config.eval_every_n_steps,
+            msg=f'metric_name: {metric_name}',
+        )
+      else:
         self.assertLen(
             actor_metric_logger.get_metric_history(metric_name, 'eval'),
             ppo_learner._eval_steps,
-        )
-      elif metric_name == 'loss':
-        self.assertLen(
-            actor_metric_logger.get_metric_history(metric_name, 'eval'),
-            5,  # eval loss is aggregated, so # equal to # of eval invocations.
+            msg=f'metric_name: {metric_name}',
         )
 
     for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:
@@ -399,14 +402,14 @@ class PpoLearnerTest(parameterized.TestCase):
           ppo_learner._critic_metrics_logger.get_metric_history(
               metric_name, 'train'
           ),
-          ppo_learner._iter_steps,
+          ppo_learner.rl_cluster.critic_trainer.train_steps,
       )
-      eval_steps = 5 if metric_name == 'loss' else ppo_learner._eval_steps
       self.assertLen(
           ppo_learner._critic_metrics_logger.get_metric_history(
               metric_name, 'eval'
           ),
-          eval_steps,
+          ppo_learner.rl_cluster.critic_trainer.train_steps
+          / cluster_config.training_config.eval_every_n_steps,
       )
 
   @parameterized.named_parameters(

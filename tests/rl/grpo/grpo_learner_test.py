@@ -276,19 +276,31 @@ class GrpoLearnerTest(parameterized.TestCase):
         'completions/mean_length',
         'completions/max_length',
         'completions/min_length',
-        'kl',
     ]:
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
       self.assertLen(
           metric_logger.get_metric_history(metric_name, 'train'),
           grpo_trainer._iter_steps,
+          msg=f'metric_name: {metric_name}',
       )
-      if metric_name != 'kl':  # KL is not logged in eval mode.
-        self.assertLen(
-            metric_logger.get_metric_history(metric_name, 'eval'),
-            grpo_trainer._eval_steps,
-        )
+      self.assertLen(
+          metric_logger.get_metric_history(metric_name, 'eval'),
+          grpo_trainer._eval_steps,
+          msg=f'metric_name: {metric_name}',
+      )
+    for metric_name in ['loss', 'kl']:
+      self.assertLen(
+          metric_logger.get_metric_history(metric_name, 'train'),
+          grpo_trainer.rl_cluster.actor_trainer.train_steps,
+          msg=f'metric_name: {metric_name}',
+      )
+      self.assertLen(
+          metric_logger.get_metric_history(metric_name, 'eval'),
+          grpo_trainer.rl_cluster.actor_trainer.train_steps
+          / cluster_config.training_config.eval_every_n_steps,
+          msg=f'metric_name: {metric_name}',
+      )
 
   @parameterized.named_parameters(
       dict(
@@ -496,6 +508,10 @@ class GrpoLearnerTest(parameterized.TestCase):
         // cluster_config.training_config.get_with_default(
             'gradient_accumulation_steps', 1
         ),
+    )
+    self.assertLen(
+        grpo_trainer._metrics_logger.get_metric_history('kl', 'train'),
+        grpo_trainer.rl_cluster.actor_trainer.train_steps,
     )
 
   def test_grpo_with_lora_model(self):
