@@ -75,9 +75,30 @@ class GrpoConfig:
   loss_algo: str = "grpo"  # grpo or gspo-token
 
   # Microbatch size configurations
-  rollout_micro_batch_size: int = 2
-  ref_logps_micro_batch_size: int = 4
-  old_logps_micro_batch_size: int = 4
+
+  training_micro_batch_size: int = None
+  rollout_micro_batch_size: int = -1
+  ref_logps_micro_batch_size: int = -1
+  old_logps_micro_batch_size: int = -1
+
+  # Check if training_micro_batch_size is provided
+  if training_micro_batch_size is None:
+      warnings.warn(
+          "training_micro_batch_size is required but not provided. "
+          "Please set training_micro_batch_size explicitly.",
+          UserWarning
+      )
+      raise ValueError("training_micro_batch_size must be provided")
+
+  # Set other parameters to training_micro_batch_size if they are -1 (not set)
+  if rollout_micro_batch_size == -1:
+      rollout_micro_batch_size = training_micro_batch_size
+
+  if ref_logps_micro_batch_size == -1:
+      ref_logps_micro_batch_size = training_micro_batch_size
+
+  if old_logps_micro_batch_size == -1:
+      old_logps_micro_batch_size = training_micro_batch_size
 
   def __post_init__(self):
     assert self.num_generations > 1, (
@@ -221,13 +242,9 @@ class GrpoLearner:
     outs_text = []
     outs_left_padded = []
 
-    # Log the total number of prompts to be processed.
-    print(f"Processing {len(prompts)} prompts in this batch.")
-
     # Iterate through the prompts in micro-batches.
     for slc in _chunk_slices_by_size(len(prompts), micro):
       sub_prompts = prompts[slc]
-      print(f"Generating for slice: {slc}")
 
       # Generate completions for the current sub-batch.
       out = self.rl_cluster.generate(prompts=sub_prompts)
@@ -264,7 +281,6 @@ class GrpoLearner:
     outs = []
     batch_size = prompt_ids.shape[0]
     for slc in _chunk_slices_by_size(batch_size, micro):
-      print("算了一次")
       outs.append(
           self.rl_cluster.get_ref_per_token_logps(
               prompt_tokens=prompt_ids[slc],
@@ -319,14 +335,12 @@ class GrpoLearner:
 
     prompts: List[str] = training_input["prompts"]
 
-    # === 1) Rollout: Process in chunks by rollout_micro_batch_size ===
-    print("[new] Beginning rollout...")
+    # Rollout: Process in chunks by rollout_micro_batch_size
     completion_ids, prompt_ids, completion_text = self._rollout_by_micro(
         prompts, self.rollout_micro_batch_size * sample_repeat
     )
 
-    # === 2) Assemble masks ===
-    print("[new] Assembling masks...")
+    # Assemble masks 
     prompt_mask = (prompt_ids != pad_value).astype("int32")
     completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype(
         "int32"
@@ -337,8 +351,7 @@ class GrpoLearner:
     # Apply the padding mask to the completion mask.
     completion_mask = completion_mask * completion_padding_mask
 
-    # === 3) Calculate ref/old logps in their respective micro-batches ===
-    print("[new] Calculating log probabilities...")
+    # Calculate ref/old logps in their respective micro-batches
     if self.grpo_config.beta != 0.0:
       ref_per_token_logps = self._ref_logps_by_micro(
           prompt_ids,
@@ -357,7 +370,7 @@ class GrpoLearner:
     else:
       old_per_token_logps = None
 
-    # === 4) Compute rewards and advantages (consistent with original logic) ===
+    # Compute rewards and advantages (consistent with original logic) 
     rewards = self._compute_rewards(
         prompts=prompts,
         completions=completion_text,
@@ -368,7 +381,7 @@ class GrpoLearner:
         rewards, self.grpo_config.num_generations
     )
 
-    # === 5) Log length metrics (unchanged from original) ===
+    # Log length metrics (unchanged from original)
     agg_completion_mask = completion_mask.sum(axis=-1)
     steps = self._get_metric_logging_steps(mode)
     self._metrics_logger.log(
@@ -390,7 +403,7 @@ class GrpoLearner:
         steps,
     )
 
-    # === 6) Return the TrainExample object ===
+    # Return the TrainExample object
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -599,7 +612,6 @@ class GrpoLearner:
         ):  # fast forward the iterator if loading from a previous checkpoint.
           next(iterator)
           self._iter_steps += 1
-          print('skip')
 
         # Fetch one training micro-batch
         example = next(iterator)
@@ -613,8 +625,7 @@ class GrpoLearner:
         produced_now = aggregate_and_compute_advantages(force=False)
         if produced_now:
           if async_loading:
-            # Async: Enqueue immediately; cache for later repeats
-            # (batch_repeat - 1).
+            # Async: Enqueue immediately
             enqueue_examples(produced_now, 1)
             if batch_repeat > 1:
               pending_examples.extend(produced_now)
@@ -707,13 +718,7 @@ class GrpoLearner:
         dictionary containing the key 'prompts'.
       skip_jit: Whether to skip JIT compilation of the training loop.
     """
-    print("[new version] begin grpo training step")
     train_iterator = iter(train_ds)
-    # i = 0
-    # while i < 3:
-    #   i += 1
-    #   item = next(train_iterator)
-    #   print(item)
 
     while True:  # loop over M
       try:
@@ -723,7 +728,6 @@ class GrpoLearner:
             maxsize=self.grad_acc_steps * self.grpo_config.num_iterations + 1
         )
         # reserve 1 for None
-        print("the grad_acc_steps is " + str(self.grad_acc_steps))
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
         initial_steps = self._iter_steps
         future = self.executor.submit(
@@ -745,12 +749,6 @@ class GrpoLearner:
             
             if curr_train_ds is None:
               break
-            print("here is an example")
-            for item in curr_train_ds:
-              print('-------------------')
-              print(item.advantages)
-              print(item.ref_per_token_logps)
-              print('-------------------')
             if (
                 eval_ds
                 and not curr_eval_ds
@@ -758,7 +756,6 @@ class GrpoLearner:
                 % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
                 == 0
             ):
-              print("begin prepare evaluation data")
               self._prepare_data(
                   iterator=iter(eval_ds),
                   proceed_num_steps=-1,
