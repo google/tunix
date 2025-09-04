@@ -205,7 +205,7 @@ class GrpoLearner:
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_train_step = self.rl_cluster.actor_trainer.train_steps
 
-    self.rollout_micro_batch_size = 2
+    self.rollout_micro_batch_size = 1
     self.ref_logps_micro_batch_size = 2
     self.old_logps_micro_batch_size = 2
 
@@ -545,20 +545,28 @@ class GrpoLearner:
       # Split back to original training micro size
       offset = 0
       for n in buf_sizes:
-        token_sl = slice(offset * sample_repeat, (offset + n) * sample_repeat)
+        # Calculate slice indices
+        start_idx = offset * sample_repeat
+        end_idx = (offset + n) * sample_repeat
+        token_sl = slice(start_idx, end_idx)
+        
+        # Create TrainExample for this micro-batch
         te_small = TrainExample(
             prompt_ids=big_example.prompt_ids[token_sl],
             prompt_mask=big_example.prompt_mask[token_sl],
             completion_ids=big_example.completion_ids[token_sl],
             completion_mask=big_example.completion_mask[token_sl],
-            ref_per_token_logps=None
-            if big_example.ref_per_token_logps is None
-            else big_example.ref_per_token_logps[token_sl],
+            ref_per_token_logps=(
+                None if big_example.ref_per_token_logps is None
+                else big_example.ref_per_token_logps[token_sl]
+            ),
             advantages=big_example.advantages[token_sl],
-            old_per_token_logps=None
-            if big_example.old_per_token_logps is None
-            else big_example.old_per_token_logps[token_sl],
+            old_per_token_logps=(
+                None if big_example.old_per_token_logps is None
+                else big_example.old_per_token_logps[token_sl]
+            ),
         )
+        
         produced.append(te_small)
         offset += n
 
