@@ -75,7 +75,6 @@ class GrpoConfig:
   loss_algo: str = "grpo"  # grpo or gspo-token
 
   # Microbatch size configurations
-
   training_micro_batch_size: int = None
   rollout_micro_batch_size: int = -1
   ref_logps_micro_batch_size: int = -1
@@ -90,7 +89,7 @@ class GrpoConfig:
       )
       raise ValueError("training_micro_batch_size must be provided")
 
-  # Set other parameters to training_micro_batch_size if they are -1 (not set)
+  # Set other parameters to training_micro_batch_size if they are not set
   if rollout_micro_batch_size == -1:
       rollout_micro_batch_size = training_micro_batch_size
 
