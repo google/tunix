@@ -38,8 +38,7 @@ Tunix is still under development, here's a glimpse of the current features:
     * Components are designed to be reusable and composable
     * Easy to customize and extend
 * **Efficiency:**
-    * Native support of common model sharding strategies such as DP, FSDP and
-    TP
+    * Native support of common model sharding strategies such as DP, FSDP and TP
     * Designed for distributed training on accelerators (TPU)
 
 ## Upcoming
@@ -71,7 +70,7 @@ To get started, we have a bunch of detailed examples and tutorials.
 - [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_demo.ipynb)
 - [Logit Distillation using Gemma models](https://github.com/google/tunix/blob/main/examples/logit_distillation.ipynb)
 
-To setup Jupyter notebook on single host GCP TPU VM, please refer to the [setup script](./scripts/setup_notebook_tpu_single_host.sh).
+To setup Jupyter notebook on single host GCP TPU VM, please refer to the [setup script](https://github.com/google/tunix/blob/main/scripts/setup_notebook_tpu_single_host.sh).
 
 We plan to provide clear, concise documentation and more examples in the near
 future.
