@@ -187,7 +187,7 @@ class GrpoLearner:
         )
     )
 
-    self._train_steps = 0
+    self._iter_steps = 0
     self._eval_steps = 0
 
     # Sync weights if the actor model and rollout model are not sharing weights.
@@ -208,7 +208,7 @@ class GrpoLearner:
         ]
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
-    self._last_train_step = self.rl_cluster.actor_trainer.train_steps
+    self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
     # Use microbatch sizes from config instead of hardcoded values
     self.rollout_micro_batch_size = grpo_config.rollout_micro_batch_size
@@ -302,7 +302,7 @@ class GrpoLearner:
 
   def _get_metric_logging_steps(self, mode: metrics_logger.Mode) -> int:
     return (
-        self._train_steps
+        self._iter_steps
         if mode == metrics_logger.Mode.TRAIN
         else self._eval_steps
     )
@@ -546,7 +546,7 @@ class GrpoLearner:
       # Single large forward pass + advantage computation
       with jax.profiler.StepTraceAnnotation(
           "sampler",
-          step_num=self._train_steps
+          step_num=self._iter_steps
           if mode == metrics_logger.Mode.TRAIN
           else self._eval_steps,
       ):
@@ -593,6 +593,14 @@ class GrpoLearner:
 
     try:
       while True:
+        while (
+            mode == metrics_logger.Mode.TRAIN
+            and self._iter_steps < self._last_iter_step
+        ):  # fast forward the iterator if loading from a previous checkpoint.
+          next(iterator)
+          self._iter_steps += 1
+          print('skip')
+
         # Fetch one training micro-batch
         example = next(iterator)
         cur_batch_size = len(example["prompts"])
@@ -616,7 +624,7 @@ class GrpoLearner:
 
         # Maintain logging steps
         if mode == metrics_logger.Mode.TRAIN:
-          self._train_steps += 1
+          self._iter_steps += 1
         else:
           self._eval_steps += 1
 
@@ -717,7 +725,7 @@ class GrpoLearner:
         # reserve 1 for None
         print("the grad_acc_steps is " + str(self.grad_acc_steps))
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
-        initial_train_steps = self._train_steps
+        initial_steps = self._iter_steps
         future = self.executor.submit(
             self._prepare_data,
             iterator=train_iterator,
@@ -730,7 +738,7 @@ class GrpoLearner:
         )
         curr_eval_ds = None
         with jax.profiler.StepTraceAnnotation(
-            "trainer", step_num=initial_train_steps
+            "trainer", step_num=initial_steps
         ):
           while True:
             curr_train_ds = train_data_queue.get(block=True)
@@ -768,18 +776,18 @@ class GrpoLearner:
             )  # loop over μ
         # call to throw stop iteration as a singal to break the loop
         future.result()
-        # sync the train steps with internel trainer, this is based on the
-        # assumption that the trainer internally doesn't reset the train steps.
+        # sync the iter steps with internel trainer, this is based on the
+        # assumption that the trainer internally doesn't reset the iter steps.
         # there is current a unit test to ensure this assumption.
-        self._train_steps = self.rl_cluster.actor_trainer.train_steps
+        self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
 
         if self.should_sync_weights:
           with jax.profiler.StepTraceAnnotation(
-              "sync_sampler_weights", step_num=initial_train_steps
+              "sync_sampler_weights", step_num=initial_steps
           ):
             self.rl_cluster.sync_weights()
         if (
-            self._train_steps
+            self.rl_cluster.actor_trainer.train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps
         ):
           break
