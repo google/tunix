@@ -1,0 +1,228 @@
+[old version1] begin grpo training step
+[old version] begin prepare data
+async_loading:  False
+example:  {'answer': array(['13', '7'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nJane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nCarmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U535'), 'question': array(['Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?',
+       'Carmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?'],
+      dtype='<U260')}
+example after repeat:  {'answer': array(['13', '13', '7', '7'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nJane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nJane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nCarmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nCarmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U535'), 'question': array(['Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?',
+       'Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?',
+       'Carmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?',
+       'Carmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?'],
+      dtype='<U260')}
+begin generate and compute advantage of one example
+begin generate
+begin rollout generate
+begin get ref logs
+begin ref logps compute
+get old per logps
+begin rollout logps compute
+START ============================
+Question: Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?
+Answer: 13
+Response: <reasoning> Jane needs 2 minutes for the base coat, 2 * 3 = 6 minutes for the color coats, and 5 minutes for the top coat.  The total time is 2 + 6 + 5 = 13 minutes. <answer> 13 </answer>
+<end_of_turn>
+Extracted: 13
+END ==============================
+------------------------------------------------------
+[-0.70709246  0.70709246  0.70709246 -0.70709246]
+------------------------------------------------------
+example:  {'answer': array(['248', '16'], dtype='<U3'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nHenry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nA store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U471'), 'question': array(['Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?',
+       'A store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?'],
+      dtype='<U196')}
+example after repeat:  {'answer': array(['248', '248', '16', '16'], dtype='<U3'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nHenry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nHenry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nA store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nA store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U471'), 'question': array(['Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?',
+       'Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?',
+       'A store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?',
+       'A store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?'],
+      dtype='<U196')}
+begin generate and compute advantage of one example
+begin generate
+begin rollout generate
+begin get ref logs
+begin ref logps compute
+get old per logps
+begin rollout logps compute
+START ============================
+Question: Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?
+Answer: 248
+Response: <reasoning> To find Henry's total score across the four subjects, we need to do the following: 1. Find the average of his Geography, Math, and English scores. 2. Once we have this average, multiply that average by 4 to get his History score.
+
+<answer> 460.0</answer>
+<end_of_turn>
+Extracted: 460.0
+END ==============================
+------------------------------------------------------
+[-0.7070735  0.7070735 -0.7070667  0.7070667]
+------------------------------------------------------
+example:  {'answer': array(['50', '13'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nWill and Henry go fishing in a river. Will catches 16 catfish and 10 eels. Henry challenges himself to catch 3 trout for every catfish Will catches. Due to environmental concerns, Henry decides to return half his catch after meeting his own challenge. How many fishes do they have altogether now?<end_of_turn>\n<start_of_turn>model',
+       "<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nDaisy is a poodle puppy who loves to play with her dog toys. She often loses them in various ways, and her owner needs to replace them. On Monday, Daisy played with 5 dog toys. On Tuesday, Daisy had 3 dog toys left after losing some, and her owner went to the store and got her 3 more. On Wednesday, all of Daisy's old and new dog toys were missing, so her owner went to the store and bought her 5 more. If Daisy's owner found all the lost dog toys, including the new dog toys, how many dog toys would Daisy have now?<end_of_turn>\n<start_of_turn>model"],
+      dtype='<U792'), 'question': array(['Will and Henry go fishing in a river. Will catches 16 catfish and 10 eels. Henry challenges himself to catch 3 trout for every catfish Will catches. Due to environmental concerns, Henry decides to return half his catch after meeting his own challenge. How many fishes do they have altogether now?',
+       "Daisy is a poodle puppy who loves to play with her dog toys. She often loses them in various ways, and her owner needs to replace them. On Monday, Daisy played with 5 dog toys. On Tuesday, Daisy had 3 dog toys left after losing some, and her owner went to the store and got her 3 more. On Wednesday, all of Daisy's old and new dog toys were missing, so her owner went to the store and bought her 5 more. If Daisy's owner found all the lost dog toys, including the new dog toys, how many dog toys would Daisy have now?"],
+      dtype='<U517')}
+example after repeat:  {'answer': array(['50', '50', '13', '13'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nWill and Henry go fishing in a river. Will catches 16 catfish and 10 eels. Henry challenges himself to catch 3 trout for every catfish Will catches. Due to environmental concerns, Henry decides to return half his catch after meeting his own challenge. How many fishes do they have altogether now?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nWill and Henry go fishing in a river. Will catches 16 catfish and 10 eels. Henry challenges himself to catch 3 trout for every catfish Will catches. Due to environmental concerns, Henry decides to return half his catch after meeting his own challenge. How many fishes do they have altogether now?<end_of_turn>\n<start_of_turn>model',
+       "<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nDaisy is a poodle puppy who loves to play with her dog toys. She often loses them in various ways, and her owner needs to replace them. On Monday, Daisy played with 5 dog toys. On Tuesday, Daisy had 3 dog toys left after losing some, and her owner went to the store and got her 3 more. On Wednesday, all of Daisy's old and new dog toys were missing, so her owner went to the store and bought her 5 more. If Daisy's owner found all the lost dog toys, including the new dog toys, how many dog toys would Daisy have now?<end_of_turn>\n<start_of_turn>model",
+       "<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nDaisy is a poodle puppy who loves to play with her dog toys. She often loses them in various ways, and her owner needs to replace them. On Monday, Daisy played with 5 dog toys. On Tuesday, Daisy had 3 dog toys left after losing some, and her owner went to the store and got her 3 more. On Wednesday, all of Daisy's old and new dog toys were missing, so her owner went to the store and bought her 5 more. If Daisy's owner found all the lost dog toys, including the new dog toys, how many dog toys would Daisy have now?<end_of_turn>\n<start_of_turn>model"],
+      dtype='<U792'), 'question': array(['Will and Henry go fishing in a river. Will catches 16 catfish and 10 eels. Henry challenges himself to catch 3 trout for every catfish Will catches. Due to environmental concerns, Henry decides to return half his catch after meeting his own challenge. How many fishes do they have altogether now?',
+       'Will and Henry go fishing in a river. Will catches 16 catfish and 10 eels. Henry challenges himself to catch 3 trout for every catfish Will catches. Due to environmental concerns, Henry decides to return half his catch after meeting his own challenge. How many fishes do they have altogether now?',
+       "Daisy is a poodle puppy who loves to play with her dog toys. She often loses them in various ways, and her owner needs to replace them. On Monday, Daisy played with 5 dog toys. On Tuesday, Daisy had 3 dog toys left after losing some, and her owner went to the store and got her 3 more. On Wednesday, all of Daisy's old and new dog toys were missing, so her owner went to the store and bought her 5 more. If Daisy's owner found all the lost dog toys, including the new dog toys, how many dog toys would Daisy have now?",
+       "Daisy is a poodle puppy who loves to play with her dog toys. She often loses them in various ways, and her owner needs to replace them. On Monday, Daisy played with 5 dog toys. On Tuesday, Daisy had 3 dog toys left after losing some, and her owner went to the store and got her 3 more. On Wednesday, all of Daisy's old and new dog toys were missing, so her owner went to the store and bought her 5 more. If Daisy's owner found all the lost dog toys, including the new dog toys, how many dog toys would Daisy have now?"],
+      dtype='<U517')}
+begin generate and compute advantage of one example
+begin generate
+begin rollout generate
+begin get ref logs
+begin ref logps compute
+get old per logps
+begin rollout logps compute
+START ============================
+Question: Will and Henry go fishing in a river. Will catches 16 catfish and 10 eels. Henry challenges himself to catch 3 trout for every catfish Will catches. Due to environmental concerns, Henry decides to return half his catch after meeting his own challenge. How many fishes do they have altogether now?
+Answer: 50
+Response: <reasoning>
+First, we need to figure out the number of trout Henry catches.  Will catches 16 catfish and Henry catches 3 trout for each catfish, so Henry catches 3 * 16 = 48 trout. Then, since Henry returns half of his catch, he keeps 48 / 2 = 24 trout. <br>
+
+Now, since he catches 48 trout, Henry has a total of 24 + 48 = 72 trout.  Then we add his other fish to find the total. This would give us the total number of fish they have.
+<answer>180</answer>
+<end_of_turn>
+Extracted: 180
+END ==============================
+------------------------------------------------------
+[-0.707095   0.707095  -0.7070833  0.7070833]
+------------------------------------------------------
+example:  {'answer': array(['186', '32'], dtype='<U3'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nNathan planted 5 strawberry plants and 7 tomato plants. He harvested 14 strawberries from each plant and 16 tomatoes from each plant. He then distributed the strawberries and tomatoes into baskets of 7. He sold a basket of strawberries for $9 and a basket of tomatoes for $6. How much money does Nathan make from his harvest?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nLast night, Jim bought a $7 lamp and a bulb which cost $4 less. If he bought 2 lamps and 6 bulbs, how much did Jim pay in all?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U600'), 'question': array(['Nathan planted 5 strawberry plants and 7 tomato plants. He harvested 14 strawberries from each plant and 16 tomatoes from each plant. He then distributed the strawberries and tomatoes into baskets of 7. He sold a basket of strawberries for $9 and a basket of tomatoes for $6. How much money does Nathan make from his harvest?',
+       'Last night, Jim bought a $7 lamp and a bulb which cost $4 less. If he bought 2 lamps and 6 bulbs, how much did Jim pay in all?'],
+      dtype='<U325')}
+example after repeat:  {'answer': array(['186', '186', '32', '32'], dtype='<U3'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nNathan planted 5 strawberry plants and 7 tomato plants. He harvested 14 strawberries from each plant and 16 tomatoes from each plant. He then distributed the strawberries and tomatoes into baskets of 7. He sold a basket of strawberries for $9 and a basket of tomatoes for $6. How much money does Nathan make from his harvest?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nNathan planted 5 strawberry plants and 7 tomato plants. He harvested 14 strawberries from each plant and 16 tomatoes from each plant. He then distributed the strawberries and tomatoes into baskets of 7. He sold a basket of strawberries for $9 and a basket of tomatoes for $6. How much money does Nathan make from his harvest?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nLast night, Jim bought a $7 lamp and a bulb which cost $4 less. If he bought 2 lamps and 6 bulbs, how much did Jim pay in all?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nLast night, Jim bought a $7 lamp and a bulb which cost $4 less. If he bought 2 lamps and 6 bulbs, how much did Jim pay in all?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U600'), 'question': array(['Nathan planted 5 strawberry plants and 7 tomato plants. He harvested 14 strawberries from each plant and 16 tomatoes from each plant. He then distributed the strawberries and tomatoes into baskets of 7. He sold a basket of strawberries for $9 and a basket of tomatoes for $6. How much money does Nathan make from his harvest?',
+       'Nathan planted 5 strawberry plants and 7 tomato plants. He harvested 14 strawberries from each plant and 16 tomatoes from each plant. He then distributed the strawberries and tomatoes into baskets of 7. He sold a basket of strawberries for $9 and a basket of tomatoes for $6. How much money does Nathan make from his harvest?',
+       'Last night, Jim bought a $7 lamp and a bulb which cost $4 less. If he bought 2 lamps and 6 bulbs, how much did Jim pay in all?',
+       'Last night, Jim bought a $7 lamp and a bulb which cost $4 less. If he bought 2 lamps and 6 bulbs, how much did Jim pay in all?'],
+      dtype='<U325')}
+begin generate and compute advantage of one example
+begin generate
+begin rollout generate
+begin get ref logs
+begin ref logps compute
+get old per logps
+begin rollout logps compute
+START ============================
+Question: Nathan planted 5 strawberry plants and 7 tomato plants. He harvested 14 strawberries from each plant and 16 tomatoes from each plant. He then distributed the strawberries and tomatoes into baskets of 7. He sold a basket of strawberries for $9 and a basket of tomatoes for $6. How much money does Nathan make from his harvest?
+Answer: 186
+Response: <reasoning>
+First, we need to calculate the total number of strawberries and tomatoes Nathan harvested. He harvested 14 strawberries from each plant * 5 plants = 70 strawberries and 16 tomatoes from each plant * 7 plants = 112 tomatoes.
+
+Next, we need to figure out how many baskets of strawberries and tomatoes Nathan sold. 70 strawberries / 7 strawberries per basket = 10 basket of strawberries and 112 tomatoes / 7 tomatoes per basket = 16 basket of tomatoes.
+
+Then, we can calculate his total earnings by multiplying the number of baskets sold by the price per basket. He earned (10 * $9) + (16 * $6). </reasoning>
+<answer>150</answer><end_of_turn>
+Extracted: 150
+END ==============================
+------------------------------------------------------
+[ 0.7070068 -0.7070068  0.         0.       ]
+------------------------------------------------------
+Heres an example
+-------------------
+[-0.70709246  0.70709246  0.70709246 -0.70709246]
+[[-1.0175855e-02 -1.7689820e-03 -6.4369501e-06 ... -3.1728062e+01
+  -3.1597982e+01 -3.1669952e+01]
+ [-1.0175855e-02 -1.7689820e-03 -6.4369501e-06 ... -3.1408119e+01
+  -3.1325153e+01 -3.1426979e+01]
+ [-3.9744540e-03 -5.8242492e-03 -5.9600343e-06 ... -3.2349640e+01
+  -3.2326027e+01 -3.2335930e+01]
+ [-3.9744540e-03 -5.8242492e-03 -5.9600343e-06 ... -3.2059963e+01
+  -3.2026024e+01 -3.1996414e+01]]
+-------------------
+-------------------
+[-0.7070735  0.7070735 -0.7070667  0.7070667]
+[[-7.3494636e-03 -1.9062827e-03 -5.0065059e-06 ... -3.1118933e+01
+  -3.1181555e+01 -3.1147747e+01]
+ [-7.3494636e-03 -1.9062827e-03 -5.0065059e-06 ... -3.1673603e+01
+  -3.1727346e+01 -3.1731228e+01]
+ [-2.7842831e-03 -1.6077374e-03 -3.8151629e-06 ... -3.2304821e+01
+  -3.2244942e+01 -3.2248852e+01]
+ [-2.7842831e-03 -1.6077374e-03 -3.8151629e-06 ... -3.2656307e+01
+  -3.2471107e+01 -3.2402035e+01]]
+-------------------
+-------------------
+[-0.707095   0.707095  -0.7070833  0.7070833]
+[[-1.0437202e-02 -2.5455998e-03 -9.2980736e-06 ... -3.1836792e+01
+  -3.1927841e+01 -3.1940634e+01]
+ [-1.0437202e-02 -2.5455998e-03 -9.2980736e-06 ... -3.2068684e+01
+  -3.2218479e+01 -3.2394951e+01]
+ [-4.3625082e-03 -1.3315846e-03 -5.0065059e-06 ... -3.1602879e+01
+  -3.1629303e+01 -3.1548197e+01]
+ [-4.3625082e-03 -1.3315846e-03 -5.0065059e-06 ... -3.1558834e+01
+  -3.1612417e+01 -3.1641323e+01]]
+-------------------
+-------------------
+[ 0.7070068 -0.7070068  0.         0.       ]
+[[-6.0100700e-03 -2.3447613e-03 -7.8685371e-06 ... -3.1896837e+01
+  -3.1921738e+01 -3.1875471e+01]
+ [-6.0100700e-03 -2.3447613e-03 -7.8685371e-06 ... -3.1453722e+01
+  -3.1522709e+01 -3.1631010e+01]
+ [-4.6069138e-03 -3.3807687e-03 -5.2448504e-06 ... -3.1959705e+01
+  -3.1990704e+01 -3.2124935e+01]
+ [-4.6069138e-03 -3.3807687e-03 -5.2448504e-06 ... -3.1856457e+01
+  -3.1761587e+01 -3.1748938e+01]]
+-------------------
+-------------------
+[-0.70709246  0.70709246  0.70709246 -0.70709246]
+[[-1.0175855e-02 -1.7689820e-03 -6.4369501e-06 ... -3.1728062e+01
+  -3.1597982e+01 -3.1669952e+01]
+ [-1.0175855e-02 -1.7689820e-03 -6.4369501e-06 ... -3.1408119e+01
+  -3.1325153e+01 -3.1426979e+01]
+ [-3.9744540e-03 -5.8242492e-03 -5.9600343e-06 ... -3.2349640e+01
+  -3.2326027e+01 -3.2335930e+01]
+ [-3.9744540e-03 -5.8242492e-03 -5.9600343e-06 ... -3.2059963e+01
+  -3.2026024e+01 -3.1996414e+01]]
+-------------------
+-------------------
+[-0.7070735  0.7070735 -0.7070667  0.7070667]
+[[-7.3494636e-03 -1.9062827e-03 -5.0065059e-06 ... -3.1118933e+01
+  -3.1181555e+01 -3.1147747e+01]
+ [-7.3494636e-03 -1.9062827e-03 -5.0065059e-06 ... -3.1673603e+01
+  -3.1727346e+01 -3.1731228e+01]
+ [-2.7842831e-03 -1.6077374e-03 -3.8151629e-06 ... -3.2304821e+01
+  -3.2244942e+01 -3.2248852e+01]
+ [-2.7842831e-03 -1.6077374e-03 -3.8151629e-06 ... -3.2656307e+01
+  -3.2471107e+01 -3.2402035e+01]]
+-------------------
+-------------------
+[-0.707095   0.707095  -0.7070833  0.7070833]
+[[-1.0437202e-02 -2.5455998e-03 -9.2980736e-06 ... -3.1836792e+01
+  -3.1927841e+01 -3.1940634e+01]
+ [-1.0437202e-02 -2.5455998e-03 -9.2980736e-06 ... -3.2068684e+01
+  -3.2218479e+01 -3.2394951e+01]
+ [-4.3625082e-03 -1.3315846e-03 -5.0065059e-06 ... -3.1602879e+01
+  -3.1629303e+01 -3.1548197e+01]
+ [-4.3625082e-03 -1.3315846e-03 -5.0065059e-06 ... -3.1558834e+01
+  -3.1612417e+01 -3.1641323e+01]]
+-------------------
+-------------------
+[ 0.7070068 -0.7070068  0.         0.       ]
+[[-6.0100700e-03 -2.3447613e-03 -7.8685371e-06 ... -3.1896837e+01
+  -3.1921738e+01 -3.1875471e+01]
+ [-6.0100700e-03 -2.3447613e-03 -7.8685371e-06 ... -3.1453722e+01
+  -3.1522709e+01 -3.1631010e+01]
+ [-4.6069138e-03 -3.3807687e-03 -5.2448504e-06 ... -3.1959705e+01
+  -3.1990704e+01 -3.2124935e+01]
+ [-4.6069138e-03 -3.3807687e-03 -5.2448504e-06 ... -3.1856457e+01
+  -3.1761587e+01 -3.1748938e+01]]
+-------------------
+update actor

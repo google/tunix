@@ -206,8 +206,8 @@ class GrpoLearner:
     self._last_train_step = self.rl_cluster.actor_trainer.train_steps
 
     self.rollout_micro_batch_size = 1
-    self.ref_logps_micro_batch_size = 2
-    self.old_logps_micro_batch_size = 2
+    self.ref_logps_micro_batch_size = 1
+    self.old_logps_micro_batch_size = 1
 
   def _rollout_by_micro(self, prompts: list[str], micro: int):
     """Performs rollouts in smaller batches (micro-batches) to manage memory."""
@@ -304,6 +304,7 @@ class GrpoLearner:
       self,
       training_input: _TrainingInputT,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
+      sample_repeat: int = 1
   ) -> TrainExample:
     """Generates completions and computes advantages for a given batch of prompts."""
     pad_value = self.rl_cluster.rollout.pad_id()
@@ -314,7 +315,7 @@ class GrpoLearner:
     # === 1) Rollout: Process in chunks by rollout_micro_batch_size ===
     print("[new] Beginning rollout...")
     completion_ids, prompt_ids, completion_text = self._rollout_by_micro(
-        prompts, self.rollout_micro_batch_size
+        prompts, self.rollout_micro_batch_size * sample_repeat
     )
 
     # === 2) Assemble masks ===
@@ -457,8 +458,8 @@ class GrpoLearner:
       batch_repeat: The number of times the produced `TrainExample` batch should
         be enqueued. This is typically `grpo_config.num_iterations`.
       data_queue: The queue to which lists of `TrainExample` are added.
-      async_loading: If True, enqueue each produced micro-batch immediately
-        in async mode. Otherwise, accumulate and enqueue at the boundary.
+      async_loading: If True, enqueue each produced micro-batch immediately in
+        async mode. Otherwise, accumulate and enqueue at the boundary.
       mode: The metrics logger mode, either `metrics_logger.Mode.TRAIN` or
         `metrics_logger.Mode.EVAL`.
     """
@@ -477,6 +478,7 @@ class GrpoLearner:
         self.ref_logps_micro_batch_size,
         self.old_logps_micro_batch_size,
     )
+    service_target_bs = 1
 
     buf: list[_TrainingInputT] = []
     buf_sizes: list[int] = []  # Number of samples for each training micro-batch
@@ -539,7 +541,7 @@ class GrpoLearner:
           else self._eval_steps,
       ):
         big_example = self._generate_and_compute_advantage(
-            merged_repeated, mode
+            merged_repeated, mode, sample_repeat
         )
 
       # Split back to original training micro size
@@ -549,7 +551,7 @@ class GrpoLearner:
         start_idx = offset * sample_repeat
         end_idx = (offset + n) * sample_repeat
         token_sl = slice(start_idx, end_idx)
-        
+
         # Create TrainExample for this micro-batch
         te_small = TrainExample(
             prompt_ids=big_example.prompt_ids[token_sl],
@@ -557,16 +559,18 @@ class GrpoLearner:
             completion_ids=big_example.completion_ids[token_sl],
             completion_mask=big_example.completion_mask[token_sl],
             ref_per_token_logps=(
-                None if big_example.ref_per_token_logps is None
+                None
+                if big_example.ref_per_token_logps is None
                 else big_example.ref_per_token_logps[token_sl]
             ),
             advantages=big_example.advantages[token_sl],
             old_per_token_logps=(
-                None if big_example.old_per_token_logps is None
+                None
+                if big_example.old_per_token_logps is None
                 else big_example.old_per_token_logps[token_sl]
             ),
         )
-        
+
         produced.append(te_small)
         offset += n
 
@@ -685,7 +689,7 @@ class GrpoLearner:
         dictionary containing the key 'prompts'.
       skip_jit: Whether to skip JIT compilation of the training loop.
     """
-    print("begin grpo training step")
+    print("[new version] begin grpo training step")
     train_iterator = iter(train_ds)
     # i = 0
     # while i < 3:
@@ -701,7 +705,7 @@ class GrpoLearner:
             maxsize=self.grad_acc_steps * self.grpo_config.num_iterations + 1
         )
         # reserve 1 for None
-        print("the grad_acc_steps is" + str(self.grad_acc_steps))
+        print("the grad_acc_steps is " + str(self.grad_acc_steps))
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
         initial_train_steps = self._train_steps
         future = self.executor.submit(
@@ -721,12 +725,13 @@ class GrpoLearner:
           while True:
             curr_train_ds = train_data_queue.get(block=True)
             print("here is an example")
-            print(curr_train_ds)
             for item in curr_train_ds:
               print("-------------------")
               print(item.advantages)
               print(item.ref_per_token_logps)
               print("-------------------")
+            
+            continue
             if curr_train_ds is None:
               break
             if (

@@ -415,7 +415,6 @@ class RLCluster:
     Returns:
       A list of generated text.
     """
-    print("begin generate")
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
@@ -441,7 +440,6 @@ class RLCluster:
     """Gets the per-token logps of the reference model."""
     # TODO(linchai): Need to transfer the prompt and completion tokens to the
     # reference model's mesh if rollout and reference are on different meshes.
-    print("begin get ref logs")
     with self.cluster_config.role_to_mesh[Role.REFERENCE]:
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
@@ -460,7 +458,6 @@ class RLCluster:
       completion_tokens: jax.Array,
   ) -> jax.Array:
     """Gets the per-token logps of the current policy model."""
-    print("get old per logps")
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)

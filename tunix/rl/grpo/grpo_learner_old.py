@@ -365,27 +365,15 @@ class GrpoLearner:
     """
     print("[old version] begin prepare data")
     print("async_loading: " , async_loading)
-    print("sample_repeat:", sample_repeat)
-    print("batch_repeat:", batch_repeat)
-
     example_list = []
 
     def _put_list_of_examples_to_data_queue():
-      # if not async_loading:
-      #   data_queue.put(example_list * batch_repeat)
-      # elif batch_repeat > 1:
-      #   # Since we have already loaded the batch in data_queue once, we only
-      #   # need to repeat batch_repeat - 1 times.
-      #   data_queue.put(example_list * (batch_repeat - 1))
-    
       if not async_loading:
-          for _ in range(batch_repeat):
-              for adv in example_list:
-                  data_queue.put([adv])   
+        data_queue.put(common.RepeatIterable(example_list, batch_repeat))
       elif batch_repeat > 1:
-          for _ in range(batch_repeat - 1):
-              for adv in example_list:
-                  data_queue.put([adv])
+        # Since we have already loaded the batch in data_queue once, we only
+        # need to repeat batch_repeat - 1 times.
+        data_queue.put(common.RepeatIterable(example_list, batch_repeat - 1))
 
     try:
       while True:
@@ -404,7 +392,6 @@ class GrpoLearner:
         )  # [B] -> [B * G]
         print("example after repeat: ", example)
 
-
         with jax.profiler.StepTraceAnnotation(
             "sampler",
             step_num=self._train_steps
@@ -413,8 +400,9 @@ class GrpoLearner:
         ):
           print("begin generate and compute advantage of one example")
           advantage = self._generate_and_compute_advantage(example, mode)
-          print('------------------------------------------------------')
+          print('----------------------below--------------------------------')
           print(advantage.advantages)
+          print('-----------------------above-------------------------------')
         if async_loading:
           data_queue.put([advantage])
 
@@ -422,9 +410,13 @@ class GrpoLearner:
           self._train_steps += 1
         else:
           self._eval_steps += 1
-
+        print("准备将数据放入queue")
         example_list.append(advantage)
+        print(len(example_list))
+        print("proceed_num_steps: " + str(proceed_num_steps))
         if proceed_num_steps > 0 and len(example_list) == proceed_num_steps:
+          print("进来了")
+          print(data_queue.qsize())
           _put_list_of_examples_to_data_queue()
           return
     except StopIteration as e:
@@ -480,14 +472,14 @@ class GrpoLearner:
         dictionary containing the key 'prompts'.
       skip_jit: Whether to skip JIT compilation of the training loop.
     """
-    print('[old version] begin grpo training step')
+    print('[old version1] begin grpo training step')
     train_iterator = iter(train_ds)
     while True:  # loop over M
       try:
         # reserve 1 for None and the other for repeated interable
         # if batch_repeat > 1
         train_data_queue = queue_lib.SimpleDataQueue(
-            maxsize=self.grad_acc_steps * self.grpo_config.num_iterations + 1
+            maxsize=self.grad_acc_steps + 2
         )
         # reserve 1 for None
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
@@ -508,13 +500,15 @@ class GrpoLearner:
         ):
           while True:
             curr_train_ds = train_data_queue.get(block=True)
-            print('来了一个example')
-            print(curr_train_ds)
+            print('Heres an example')
+            if not curr_train_ds:
+              continue
             for item in curr_train_ds:
               print('-------------------')
               print(item.advantages)
               print(item.ref_per_token_logps)
               print('-------------------')
+            continue
             if curr_train_ds is None:
               break
             if eval_ds and not curr_eval_ds:

@@ -1,0 +1,29 @@
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_setup.py:_flush():80] Current SDK version is 0.21.0
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_setup.py:_flush():80] Configure stats pid to 2544
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_setup.py:_flush():80] Loading settings from /root/.config/wandb/settings
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_setup.py:_flush():80] Loading settings from /workspace/tunix/wandb/settings
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_setup.py:_flush():80] Loading settings from environment variables
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_init.py:setup_run_log_directory():703] Logging user logs to /workspace/tunix/wandb/run-20250904_084814-9wbq5s2a/logs/debug.log
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_init.py:setup_run_log_directory():704] Logging internal logs to /workspace/tunix/wandb/run-20250904_084814-9wbq5s2a/logs/debug-internal.log
+2025-09-04 08:48:14,652 INFO    MainThread:2544 [wandb_init.py:monkeypatch_ipython():622] configuring jupyter hooks <wandb.sdk.wandb_init._WandbInit object at 0x7f54a01823d0>
+2025-09-04 08:48:14,653 INFO    MainThread:2544 [wandb_init.py:init():830] calling init triggers
+2025-09-04 08:48:14,653 INFO    MainThread:2544 [wandb_init.py:init():835] wandb.init called with sweep_config: {}
+config: {'_wandb': {}}
+2025-09-04 08:48:14,653 INFO    MainThread:2544 [wandb_init.py:init():871] starting backend
+2025-09-04 08:48:14,867 INFO    MainThread:2544 [wandb_init.py:init():874] sending inform_init request
+2025-09-04 08:48:14,871 INFO    MainThread:2544 [wandb_init.py:init():882] backend started and connected
+2025-09-04 08:48:14,876 INFO    MainThread:2544 [wandb_run.py:_label_probe_notebook():1304] probe notebook
+2025-09-04 08:48:19,892 INFO    MainThread:2544 [wandb_run.py:_label_probe_notebook():1314] Unable to probe notebook: 'NoneType' object has no attribute 'get'
+2025-09-04 08:48:19,892 INFO    MainThread:2544 [wandb_init.py:init():953] updated telemetry
+2025-09-04 08:48:19,895 INFO    MainThread:2544 [wandb_init.py:init():977] communicating run to backend with 90.0 second timeout
+2025-09-04 08:48:20,116 INFO    MainThread:2544 [wandb_init.py:init():1029] starting run threads in backend
+2025-09-04 08:48:20,506 INFO    MainThread:2544 [wandb_run.py:_console_start():2458] atexit reg
+2025-09-04 08:48:20,507 INFO    MainThread:2544 [wandb_run.py:_redirect():2306] redirect: wrap_raw
+2025-09-04 08:48:20,507 INFO    MainThread:2544 [wandb_run.py:_redirect():2375] Wrapping output streams.
+2025-09-04 08:48:20,507 INFO    MainThread:2544 [wandb_run.py:_redirect():2398] Redirects installed.
+2025-09-04 08:48:20,511 INFO    MainThread:2544 [wandb_init.py:init():1075] run started, returning control to user process
+2025-09-04 08:48:20,949 INFO    MainThread:2544 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
+2025-09-04 08:48:21,002 INFO    MainThread:2544 [jupyter.py:save_ipynb():404] [no run ID] not saving jupyter notebook
+2025-09-04 08:48:21,002 INFO    MainThread:2544 [wandb_init.py:_pre_run_cell_hook():581] [no run ID] pausing backend
+2025-09-04 08:50:17,508 INFO    MainThread:2544 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
+2025-09-04 08:57:06,633 INFO    MsgRouterThr:2544 [mailbox.py:close():129] [no run ID] Closing mailbox, abandoning 1 handles.

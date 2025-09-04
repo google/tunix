@@ -54,7 +54,6 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
   ):
-    print('begin ref logps compute')
     ref_model = self._models.get("reference")
     if ref_model is None:
       raise ValueError("Reference model is not available.")
@@ -65,61 +64,6 @@ class InferenceWorker:
         pad_id=pad_id,
         eos_id=eos_id,
     )
-
- 
-  
-
-  # # This is the function from your inference_worker that needs to be changed.
-  # def get_ref_per_token_logps(
-  #     self,
-  #     prompt_tokens: jax.Array,
-  #     completion_tokens: jax.Array,
-  #     pad_id: int,
-  #     eos_id: int,
-  #     # Add a parameter for micro-batch size with a safe default
-  #     micro_batch_size: int = 4,
-  # ):
-  #   """
-  #   Computes reference log-probabilities using micro-batching to avoid OOM errors.
-  #   """
-  #   print('Begin ref logps compute with micro-batching.')
-  #   ref_model = self._models.get("reference")
-  #   if ref_model is None:
-  #       raise ValueError("Reference model is not available.")
-
-  #   # Get the total number of samples to process.
-  #   total_batch_size = prompt_tokens.shape[0]
-  #   if total_batch_size == 0:
-  #       return jnp.array([])
-
-  #   all_logps = []
-  #   print(
-  #       f"Processing {total_batch_size} samples in micro-batches of"
-  #       f" {micro_batch_size}..."
-  #   )
-
-  #   # Loop through the entire batch in smaller chunks (micro-batches).
-  #   for i in range(0, total_batch_size, micro_batch_size):
-  #       # Create slices for the current micro-batch.
-  #       start_index = i
-  #       end_index = i + micro_batch_size
-  #       print(f"  -> Processing batch slice [{start_index}:{end_index}]")
-
-  #       batch_prompt_tokens = prompt_tokens[start_index:end_index]
-  #       batch_completion_tokens = completion_tokens[start_index:end_index]
-
-  #       # Run the expensive computation only on the small chunk.
-  #       batch_logps = common.compute_per_token_logps(
-  #           ref_model,
-  #           prompt_tokens=batch_prompt_tokens,
-  #           completion_tokens=batch_completion_tokens,
-  #           pad_id=pad_id,
-  #           eos_id=eos_id,
-  #       )
-  #       all_logps.append(batch_logps)
-
-  #   # Concatenate the results from all micro-batches into a single tensor.
-  #   return jnp.concatenate(all_logps, axis=0)
 
   def get_values(
       self,

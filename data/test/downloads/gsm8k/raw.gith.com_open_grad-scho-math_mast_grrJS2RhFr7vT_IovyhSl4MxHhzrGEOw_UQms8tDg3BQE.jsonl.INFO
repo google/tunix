@@ -1,0 +1,1 @@
+{"dataset_names": ["gsm8k"], "original_fname": "test.jsonl", "url_info": {"checksum": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14", "filename": "test.jsonl", "size": 749738}, "urls": ["https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"]}

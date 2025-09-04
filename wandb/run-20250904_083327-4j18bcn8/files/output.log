@@ -1,0 +1,166 @@
+[old version1] begin grpo training step
+[old version] begin prepare data
+async_loading:  False
+example:  {'answer': array(['13'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nJane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U535'), 'question': array(['Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?'],
+      dtype='<U260')}
+example after repeat:  {'answer': array(['13', '13'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nJane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nJane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U535'), 'question': array(['Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?',
+       'Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?'],
+      dtype='<U260')}
+begin generate and compute advantage of one example
+START ============================
+Question: Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?
+Answer: 13
+Response: <reasoning> Jane needs 2 minutes for the base coat, 2 * 3 = 6 minutes for the color coats, and 5 minutes for the top coat.  The total time is 2 + 6 + 5 = 13 minutes. <answer> 13 </answer>
+<end_of_turn>
+Extracted: 13
+END ==============================
+----------------------below--------------------------------
+[-0.70709246  0.70709246]
+-----------------------above-------------------------------
+准备将数据放入queue
+1
+proceed_num_steps: 4
+example:  {'answer': array(['7'], dtype='<U1'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nCarmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U403'), 'question': array(['Carmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?'],
+      dtype='<U128')}
+example after repeat:  {'answer': array(['7', '7'], dtype='<U1'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nCarmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nCarmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U403'), 'question': array(['Carmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?',
+       'Carmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?'],
+      dtype='<U128')}
+begin generate and compute advantage of one example
+START ============================
+Question: Carmen had 28 cats and 18 dogs before she gave 3 of the cats up for adoption. How many more cats than dogs does Carmen have now?
+Answer: 7
+Response: <reasoning> To solve this problem, we need to find the difference in the number of cats and dogs Carmen has. We need to start with the number of cats and then consider the number of cats given up for adoption and subtract.  Then we will do the same for the number of dogs and subtract.
+The number of cats Carmen has after giving up 3 cats is 28 - 3 = 25.
+The difference between this number of cats and dogs is 25 - 18 = 7.
+</reasoning>
+
+<answer>7</answer>
+<end_of_turn>
+Extracted: 7
+END ==============================
+----------------------below--------------------------------
+[0. 0.]
+-----------------------above-------------------------------
+准备将数据放入queue
+2
+proceed_num_steps: 4
+example:  {'answer': array(['248'], dtype='<U3'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nHenry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U471'), 'question': array(['Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?'],
+      dtype='<U196')}
+example after repeat:  {'answer': array(['248', '248'], dtype='<U3'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nHenry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nHenry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U471'), 'question': array(['Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?',
+       'Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?'],
+      dtype='<U196')}
+begin generate and compute advantage of one example
+START ============================
+Question: Henry scored 50 points on his Geography test, 70 on his Math test and 66 on his English test. If his History score is the average of these 3 scores, what was his total score across all 4 subjects?
+Answer: 248
+Response: <reasoning> To find Henry's total score across the four subjects, we need to do the following: 1. Find the average of his Geography, Math, and English scores. 2. Once we have this average, multiply that average by 4 to get his History score.
+
+<answer> 460.0</answer>
+<end_of_turn>
+Extracted: 460.0
+END ==============================
+----------------------below--------------------------------
+[-0.7070735  0.7070735]
+-----------------------above-------------------------------
+准备将数据放入queue
+3
+proceed_num_steps: 4
+example:  {'answer': array(['16'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nA store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U380'), 'question': array(['A store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?'],
+      dtype='<U105')}
+example after repeat:  {'answer': array(['16', '16'], dtype='<U2'), 'prompts': array(['<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nA store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?<end_of_turn>\n<start_of_turn>model',
+       '<start_of_turn>user\nYou are given a problem. Think about the problem and provide your reasoning. Place it between <reasoning> and </reasoning>. Then, provide the final answer (i.e., just one numerical value) between <answer> and </answer>.\n\nA store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?<end_of_turn>\n<start_of_turn>model'],
+      dtype='<U380'), 'question': array(['A store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?',
+       'A store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?'],
+      dtype='<U105')}
+begin generate and compute advantage of one example
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 1. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 2. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+START ============================
+Question: A store has an 8% discount on all items. If Shara paid $184 for a pair of shoes, how much did Shara save?
+Answer: 16
+Response: <reasoning> To find the amount Shara saved, first we need to figure out the original price of the shoes. Then, we can subtract the original price from the discounted price to find the savings. Here's how to approach the problem:
+* Calculate the discount amount: 8% of the original price.
+* Calculate the original price: Let x represent the original price, and the discount is 0.08x
+* Now we find the price of the shoes after the discount.
+
+<answer>$12.32 </answer>
+<end_of_turn>
+Extracted: 12.32
+END ==============================
+----------------------below--------------------------------
+[-0.707095  0.707095]
+-----------------------above-------------------------------
+准备将数据放入queue
+4
+proceed_num_steps: 4
+进来了
+0
+Heres an example
+-------------------
+[-0.70709246  0.70709246]
+[[-9.8347105e-03 -1.7040119e-03 -6.3177117e-06 ... -3.1750519e+01
+  -3.1727112e+01 -3.1756989e+01]
+ [-9.8347105e-03 -1.7040119e-03 -6.3177117e-06 ... -3.1389217e+01
+  -3.1408228e+01 -3.1480520e+01]]
+-------------------
+-------------------
+[0. 0.]
+[[-3.8628764e-03 -5.3789737e-03 -5.9600343e-06 ... -3.2152412e+01
+  -3.2019936e+01 -3.2067913e+01]
+ [-3.8628764e-03 -5.3789737e-03 -5.9600343e-06 ... -3.2009102e+01
+  -3.1956921e+01 -3.1823849e+01]]
+-------------------
+-------------------
+[-0.7070735  0.7070735]
+[[-7.7448981e-03 -1.9784425e-03 -5.1256748e-06 ... -3.1042194e+01
+  -3.1224644e+01 -3.1169180e+01]
+ [-7.7448981e-03 -1.9784425e-03 -5.1256748e-06 ... -3.1811039e+01
+  -3.1744055e+01 -3.1639221e+01]]
+-------------------
+-------------------
+[-0.707095  0.707095]
+[[-2.8374267e-03 -1.5441828e-03 -3.9342685e-06 ... -3.1491484e+01
+  -3.1527796e+01 -3.1691221e+01]
+ [-2.8374267e-03 -1.5441828e-03 -3.9342685e-06 ... -3.2216331e+01
+  -3.2219753e+01 -3.2060040e+01]]
+-------------------
+-------------------
+[-0.70709246  0.70709246]
+[[-9.8347105e-03 -1.7040119e-03 -6.3177117e-06 ... -3.1750519e+01
+  -3.1727112e+01 -3.1756989e+01]
+ [-9.8347105e-03 -1.7040119e-03 -6.3177117e-06 ... -3.1389217e+01
+  -3.1408228e+01 -3.1480520e+01]]
+-------------------
+-------------------
+[0. 0.]
+[[-3.8628764e-03 -5.3789737e-03 -5.9600343e-06 ... -3.2152412e+01
+  -3.2019936e+01 -3.2067913e+01]
+ [-3.8628764e-03 -5.3789737e-03 -5.9600343e-06 ... -3.2009102e+01
+  -3.1956921e+01 -3.1823849e+01]]
+-------------------
+-------------------
+[-0.7070735  0.7070735]
+[[-7.7448981e-03 -1.9784425e-03 -5.1256748e-06 ... -3.1042194e+01
+  -3.1224644e+01 -3.1169180e+01]
+ [-7.7448981e-03 -1.9784425e-03 -5.1256748e-06 ... -3.1811039e+01
+  -3.1744055e+01 -3.1639221e+01]]
+-------------------
+-------------------
+[-0.707095  0.707095]
+[[-2.8374267e-03 -1.5441828e-03 -3.9342685e-06 ... -3.1491484e+01
+  -3.1527796e+01 -3.1691221e+01]
+ [-2.8374267e-03 -1.5441828e-03 -3.9342685e-06 ... -3.2216331e+01
+  -3.2219753e+01 -3.2060040e+01]]
+-------------------
+update actor
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.

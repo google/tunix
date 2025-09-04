@@ -1,0 +1,31 @@
+{
+  "os":  "Linux-5.19.0-1022-gcp-x86_64-with-glibc2.35",
+  "python":  "CPython 3.11.13",
+  "startedAt":  "2025-09-04T07:26:40.670230Z",
+  "program":  "micro-batch",
+  "git":  {
+    "remote":  "https://github.com/google/tunix.git"
+  },
+  "root":  "/workspace/tunix",
+  "host":  "t1v-n-5f7fd7e7-w-0",
+  "executable":  "/usr/bin/python3",
+  "colab":  "https://colab.research.google.com/notebook#fileId=1QJi7P3bbG6xRjwoCBEWGofgKF_iehG_n",
+  "cpu_count":  56,
+  "cpu_count_logical":  112,
+  "disk":  {
+    "/":  {
+      "total":  "101296349184",
+      "used":  "66272952320"
+    }
+  },
+  "memory":  {
+    "total":  "202592702464"
+  },
+  "tpu":  {
+    "name":  "v5e",
+    "hbmGib":  16,
+    "devicesPerChip":  1,
+    "count":  4
+  },
+  "writerId":  "v7eei0oyb14eleaqiu5cc8z7dw4e475r"
+}

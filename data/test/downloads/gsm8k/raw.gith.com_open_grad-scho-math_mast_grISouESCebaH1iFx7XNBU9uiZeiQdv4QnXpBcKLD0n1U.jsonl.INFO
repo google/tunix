@@ -1,0 +1,1 @@
+{"dataset_names": ["gsm8k"], "original_fname": "test_socratic.jsonl", "url_info": {"checksum": "c96673362fa7a699f4836a9b6474a067448f95fe58064727501ee63ba4c3fdb6", "filename": "test_socratic.jsonl", "size": 972978}, "urls": ["https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test_socratic.jsonl"]}
