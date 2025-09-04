@@ -74,6 +74,11 @@ class GrpoConfig:
   epsilon: float = 0.2
   loss_algo: str = "grpo"  # grpo or gspo-token
 
+  # Microbatch size configurations
+  rollout_micro_batch_size: int = 2
+  ref_logps_micro_batch_size: int = 4
+  old_logps_micro_batch_size: int = 4
+
   def __post_init__(self):
     assert self.num_generations > 1, (
         "num_generations must be greater than 1. Received: "
@@ -205,9 +210,10 @@ class GrpoLearner:
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_train_step = self.rl_cluster.actor_trainer.train_steps
 
-    self.rollout_micro_batch_size = 2
-    self.ref_logps_micro_batch_size = 4
-    self.old_logps_micro_batch_size = 4
+    # Use microbatch sizes from config instead of hardcoded values
+    self.rollout_micro_batch_size = grpo_config.rollout_micro_batch_size
+    self.ref_logps_micro_batch_size = grpo_config.ref_logps_micro_batch_size
+    self.old_logps_micro_batch_size = grpo_config.old_logps_micro_batch_size
 
   def _rollout_by_micro(self, prompts: list[str], micro: int):
     """Performs rollouts in smaller batches (micro-batches) to manage memory."""
