@@ -85,9 +85,9 @@ class PpoLearnerTest(parameterized.TestCase):
       def __init__(self):
         self._data_shuffle_key = jax.random.PRNGKey(42)
         self.rollout_worker_mesh = pxla.thread_resources.env.physical_mesh
-        self._train_steps = 0
+        self._iter_steps = 0
         self._eval_steps = 0
-        self._last_train_step = 0
+        self._last_iter_step = 0
 
       @override
       def _generate_and_compute_advantage(self, example, mode='train'):
@@ -355,17 +355,17 @@ class PpoLearnerTest(parameterized.TestCase):
         value_model_variables,
     )
 
-    self.assertEqual(ppo_learner._train_steps, 10)
+    self.assertEqual(ppo_learner._iter_steps, 10)
     # max_steps / eval_every_n_steps * (#_rows_in_eval_ds / eval_batch_size)
     # = 10 / 2 * (4 / 2) = 10
     self.assertEqual(ppo_learner._eval_steps, 10)
     self.assertEqual(
-        ppo_learner.rl_cluster.actor_trainer._train_steps,
-        ppo_learner._train_steps,
+        ppo_learner.rl_cluster.actor_trainer._iter_steps,
+        ppo_learner._iter_steps,
     )
     self.assertEqual(
-        ppo_learner.rl_cluster.critic_trainer._train_steps,
-        ppo_learner._train_steps,
+        ppo_learner.rl_cluster.critic_trainer._iter_steps,
+        ppo_learner._iter_steps,
     )
 
     actor_metric_logger = ppo_learner._actor_metrics_logger
@@ -381,7 +381,7 @@ class PpoLearnerTest(parameterized.TestCase):
     ]:
       self.assertLen(
           actor_metric_logger.get_metric_history(metric_name, 'train'),
-          ppo_learner._train_steps,
+          ppo_learner._iter_steps,
       )
       if metric_name not in ('loss', 'kl'):  # KL is not logged in eval mode.
         self.assertLen(
@@ -399,7 +399,7 @@ class PpoLearnerTest(parameterized.TestCase):
           ppo_learner._critic_metrics_logger.get_metric_history(
               metric_name, 'train'
           ),
-          ppo_learner._train_steps,
+          ppo_learner._iter_steps,
       )
       eval_steps = 5 if metric_name == 'loss' else ppo_learner._eval_steps
       self.assertLen(
@@ -424,9 +424,27 @@ class PpoLearnerTest(parameterized.TestCase):
           num_ppo_epochs=2,
           beta=0.04,
           gradient_accumulation_steps=3,
-          expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_inference_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_rollout_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
+          expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6, 12, 12],
+          expected_inference_worker_logps_fn_call_at_step=[
+              0,
+              0,
+              0,
+              6,
+              6,
+              6,
+              12,
+              12,
+          ],
+          expected_rollout_worker_logps_fn_call_at_step=[
+              0,
+              0,
+              0,
+              6,
+              6,
+              6,
+              12,
+              12,
+          ],
       ),
       dict(
           testcase_name='single_iter_with_gradient_accumulation',
@@ -488,7 +506,7 @@ class PpoLearnerTest(parameterized.TestCase):
 
     def wrap_fn(fn, fn_call_at_step, trainer):
       def wrapper(*args, **kwargs):
-        fn_call_at_step.append(trainer.train_steps)
+        fn_call_at_step.append(trainer.iter_steps)
         return fn(*args, **kwargs)
 
       return wrapper

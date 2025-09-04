@@ -89,10 +89,10 @@ class GrpoLearnerTest(parameterized.TestCase):
       """A trainer that does nothing but used to test the iterator preparation."""
 
       def __init__(self):
-        self._train_steps = 0
+        self._iter_steps = 0
         self._eval_steps = 0
         self.rollout_worker_mesh = pxla.thread_resources.env.physical_mesh
-        self._last_train_step = 0
+        self._last_iter_step = 0
 
       @override
       def _generate_and_compute_advantage(self, example, mode='train'):
@@ -231,7 +231,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     def wrap_prepare_data(fn, fn_call_at_step, learner):
       def wrapper(*args, **kwargs):
         if str(kwargs['mode']) == 'train':
-          fn_call_at_step['train'].append(learner._train_steps)
+          fn_call_at_step['train'].append(learner._iter_steps)
         else:
           fn_call_at_step['eval'].append(learner._eval_steps)
         return fn(*args, **kwargs)
@@ -250,13 +250,13 @@ class GrpoLearnerTest(parameterized.TestCase):
     variables = nnx.state(model, nnx.Param)
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
-    self.assertEqual(grpo_trainer._train_steps, 10)  # max_steps
+    self.assertEqual(grpo_trainer._iter_steps, 10)  # max_steps
     # max_steps / eval_every_n_steps * (#_rows_in_eval_ds / eval_batch_size)
     # = 10 / 2 * (4 / 1) = 20
     self.assertEqual(grpo_trainer._eval_steps, 20)
     self.assertEqual(
-        grpo_trainer.rl_cluster.actor_trainer._train_steps,
-        grpo_trainer._train_steps,
+        grpo_trainer.rl_cluster.actor_trainer.iter_steps,
+        grpo_trainer._iter_steps,
     )
     expected_prepare_data_call_at_step = {
         'train': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -282,7 +282,7 @@ class GrpoLearnerTest(parameterized.TestCase):
         continue
       self.assertLen(
           metric_logger.get_metric_history(metric_name, 'train'),
-          grpo_trainer._train_steps,
+          grpo_trainer._iter_steps,
       )
       if metric_name != 'kl':  # KL is not logged in eval mode.
         self.assertLen(
@@ -305,18 +305,45 @@ class GrpoLearnerTest(parameterized.TestCase):
           num_iterations=2,
           beta=0.04,
           gradient_accumulation_steps=3,
-          expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_inference_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
-          expected_rollout_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
+          expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6, 12, 12],
+          expected_inference_worker_logps_fn_call_at_step=[
+              0,
+              0,
+              0,
+              6,
+              6,
+              6,
+              12,
+              12,
+          ],
+          expected_rollout_worker_logps_fn_call_at_step=[
+              0,
+              0,
+              0,
+              6,
+              6,
+              6,
+              12,
+              12,
+          ],
       ),
       dict(
           testcase_name='multi_iter_without_kl',
           num_iterations=2,
           beta=0,
           gradient_accumulation_steps=3,
-          expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6],
+          expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6, 12, 12],
           expected_inference_worker_logps_fn_call_at_step=[],
-          expected_rollout_worker_logps_fn_call_at_step=[0, 0, 0, 6, 6, 6],
+          expected_rollout_worker_logps_fn_call_at_step=[
+              0,
+              0,
+              0,
+              6,
+              6,
+              6,
+              12,
+              12,
+          ],
       ),
       dict(
           testcase_name='singler_iter_with_gradient_accumulation',
@@ -379,7 +406,7 @@ class GrpoLearnerTest(parameterized.TestCase):
 
     def wrap_fn(fn, fn_call_at_step, trainer):
       def wrapper(*args, **kwargs):
-        fn_call_at_step.append(trainer.train_steps)
+        fn_call_at_step.append(trainer.iter_steps)
         return fn(*args, **kwargs)
 
       return wrapper
@@ -462,6 +489,13 @@ class GrpoLearnerTest(parameterized.TestCase):
     self.assertEqual(
         rollout_worker_logps_fn_call_at_step,
         expected_rollout_worker_logps_fn_call_at_step,
+    )
+    self.assertEqual(
+        grpo_trainer.rl_cluster.actor_trainer.train_steps,
+        grpo_trainer.rl_cluster.actor_trainer.iter_steps
+        // cluster_config.training_config.get_with_default(
+            'gradient_accumulation_steps', 1
+        ),
     )
 
   def test_grpo_with_lora_model(self):
@@ -701,7 +735,7 @@ class GrpoLearnerTest(parameterized.TestCase):
         reward_fns=reward_1,
         grpo_config=grpo_config,
     )
-    assert grpo_trainer2._last_train_step == 1
+    assert grpo_trainer2._last_iter_step == 1
     grpo_trainer2.train(train_ds_full, None)
 
     variables1 = nnx.state(model, nnx.Param)
