@@ -25,3 +25,4 @@ config: {'_wandb': {}}
 2025-09-04 09:06:20,032 INFO    MainThread:10084 [jupyter.py:save_ipynb():404] [no run ID] not saving jupyter notebook
 2025-09-04 09:06:20,032 INFO    MainThread:10084 [wandb_init.py:_pre_run_cell_hook():581] [no run ID] pausing backend
 2025-09-04 09:08:09,220 INFO    MainThread:10084 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
+2025-09-04 10:03:49,595 INFO    MsgRouterThr:10084 [mailbox.py:close():129] [no run ID] Closing mailbox, abandoning 2 handles.

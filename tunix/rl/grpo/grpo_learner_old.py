@@ -500,17 +500,15 @@ class GrpoLearner:
         ):
           while True:
             curr_train_ds = train_data_queue.get(block=True)
-            print('Heres an example')
-            if not curr_train_ds:
-              continue
+            if curr_train_ds is None:
+              break
+            print("here is an example")
             for item in curr_train_ds:
               print('-------------------')
               print(item.advantages)
               print(item.ref_per_token_logps)
               print('-------------------')
-            continue
-            if curr_train_ds is None:
-              break
+              
             if eval_ds and not curr_eval_ds:
               print("begin prepare evaluation data")
               self._prepare_data(

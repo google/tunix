@@ -205,9 +205,9 @@ class GrpoLearner:
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_train_step = self.rl_cluster.actor_trainer.train_steps
 
-    self.rollout_micro_batch_size = 1
-    self.ref_logps_micro_batch_size = 1
-    self.old_logps_micro_batch_size = 1
+    self.rollout_micro_batch_size = 2
+    self.ref_logps_micro_batch_size = 4
+    self.old_logps_micro_batch_size = 4
 
   def _rollout_by_micro(self, prompts: list[str], micro: int):
     """Performs rollouts in smaller batches (micro-batches) to manage memory."""
@@ -258,6 +258,7 @@ class GrpoLearner:
     outs = []
     batch_size = prompt_ids.shape[0]
     for slc in _chunk_slices_by_size(batch_size, micro):
+      print("算了一次")
       outs.append(
           self.rl_cluster.get_ref_per_token_logps(
               prompt_tokens=prompt_ids[slc],
@@ -304,7 +305,7 @@ class GrpoLearner:
       self,
       training_input: _TrainingInputT,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
-      sample_repeat: int = 1
+      sample_repeat: int = 1,
   ) -> TrainExample:
     """Generates completions and computes advantages for a given batch of prompts."""
     pad_value = self.rl_cluster.rollout.pad_id()
@@ -334,14 +335,18 @@ class GrpoLearner:
     print("[new] Calculating log probabilities...")
     if self.grpo_config.beta != 0.0:
       ref_per_token_logps = self._ref_logps_by_micro(
-          prompt_ids, completion_ids, self.ref_logps_micro_batch_size
+          prompt_ids,
+          completion_ids,
+          self.ref_logps_micro_batch_size * sample_repeat,
       )
     else:
       ref_per_token_logps = None
 
     if self.grpo_config.num_iterations > 1:
       old_per_token_logps = self._old_logps_by_micro(
-          prompt_ids, completion_ids, self.old_logps_micro_batch_size
+          prompt_ids,
+          completion_ids,
+          self.old_logps_micro_batch_size * sample_repeat,
       )
     else:
       old_per_token_logps = None
@@ -478,7 +483,6 @@ class GrpoLearner:
         self.ref_logps_micro_batch_size,
         self.old_logps_micro_batch_size,
     )
-    service_target_bs = 1
 
     buf: list[_TrainingInputT] = []
     buf_sizes: list[int] = []  # Number of samples for each training micro-batch
@@ -724,16 +728,15 @@ class GrpoLearner:
         ):
           while True:
             curr_train_ds = train_data_queue.get(block=True)
-            print("here is an example")
-            for item in curr_train_ds:
-              print("-------------------")
-              print(item.advantages)
-              print(item.ref_per_token_logps)
-              print("-------------------")
             
-            continue
             if curr_train_ds is None:
               break
+            print("here is an example")
+            for item in curr_train_ds:
+              print('-------------------')
+              print(item.advantages)
+              print(item.ref_per_token_logps)
+              print('-------------------')
             if (
                 eval_ds
                 and not curr_eval_ds

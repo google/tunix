@@ -1,0 +1,105 @@
+[new version] begin grpo training step
+the grad_acc_steps is 4
+[new] Beginning rollout...
+Processing 8 prompts in this batch.
+Generating for slice: slice(0, 4, None)
+Generating for slice: slice(4, 8, None)
+[new] Assembling masks...
+[new] Calculating log probabilities...
+算了一次
+START ============================
+Question: Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?
+Answer: 13
+Response: <reasoning> Jane needs 2 minutes for the base coat, 2 * 3 = 6 minutes for the color coats, and 5 minutes for the top coat.  The total time is 2 + 6 + 5 = 13 minutes. <answer> 13 </answer>
+<end_of_turn>
+Extracted: 13
+END ==============================
+here is an example
+-------------------
+[-0.70709246  0.70709246]
+[[-9.4399173e-03 -1.7348316e-03 -6.4369501e-06 ... -3.1630411e+01
+  -3.1608263e+01 -3.1610512e+01]
+ [-9.4399173e-03 -1.7348316e-03 -6.4369501e-06 ... -3.1416252e+01
+  -3.1353922e+01 -3.1393425e+01]]
+-------------------
+update actor
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+-------------------
+[ 0.70709246 -0.70709246]
+[[-3.9245686e-03 -5.5965423e-03 -5.8408214e-06 ... -3.2215885e+01
+  -3.2186710e+01 -3.2249840e+01]
+ [-3.9245686e-03 -5.5965423e-03 -5.8408214e-06 ... -3.2025951e+01
+  -3.2055401e+01 -3.2056442e+01]]
+-------------------
+update actor
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 1 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+-------------------
+[-0.7070735  0.7070735]
+[[-7.4425736e-03 -1.9453033e-03 -4.7681870e-06 ... -3.1154446e+01
+  -3.1287741e+01 -3.1324837e+01]
+ [-7.4425736e-03 -1.9453033e-03 -4.7681870e-06 ... -3.1678185e+01
+  -3.1706821e+01 -3.1747225e+01]]
+-------------------
+update actor
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+-------------------
+[-0.7070667  0.7070667]
+[[-2.7407652e-03 -1.5277578e-03 -3.9342685e-06 ... -3.2243546e+01
+  -3.2212997e+01 -3.2104122e+01]
+ [-2.7407652e-03 -1.5277578e-03 -3.9342685e-06 ... -3.2703224e+01
+  -3.2539139e+01 -3.2366238e+01]]
+-------------------
+update actor
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+-------------------
+[-0.70709246  0.70709246]
+[[-9.4399173e-03 -1.7348316e-03 -6.4369501e-06 ... -3.1630411e+01
+  -3.1608263e+01 -3.1610512e+01]
+ [-9.4399173e-03 -1.7348316e-03 -6.4369501e-06 ... -3.1416252e+01
+  -3.1353922e+01 -3.1393425e+01]]
+-------------------
+update actor
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+-------------------
+[ 0.70709246 -0.70709246]
+[[-3.9245686e-03 -5.5965423e-03 -5.8408214e-06 ... -3.2215885e+01
+  -3.2186710e+01 -3.2249840e+01]
+ [-3.9245686e-03 -5.5965423e-03 -5.8408214e-06 ... -3.2025951e+01
+  -3.2055401e+01 -3.2056442e+01]]
+-------------------
+update actor
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+-------------------
+[-0.7070735  0.7070735]
+[[-7.4425736e-03 -1.9453033e-03 -4.7681870e-06 ... -3.1154446e+01
+  -3.1287741e+01 -3.1324837e+01]
+ [-7.4425736e-03 -1.9453033e-03 -4.7681870e-06 ... -3.1678185e+01
+  -3.1706821e+01 -3.1747225e+01]]
+-------------------
+update actor
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+-------------------
+[-0.7070667  0.7070667]
+[[-2.7407652e-03 -1.5277578e-03 -3.9342685e-06 ... -3.2243546e+01
+  -3.2212997e+01 -3.2104122e+01]
+ [-2.7407652e-03 -1.5277578e-03 -3.9342685e-06 ... -3.2703224e+01
+  -3.2539139e+01 -3.2366238e+01]]
+-------------------
+update actor
+WARNING:absl:Metric learning_rate not found for mode train. Not logging metric.
+here is an example
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 2 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 4. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 5. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 6. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 7. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 8. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.

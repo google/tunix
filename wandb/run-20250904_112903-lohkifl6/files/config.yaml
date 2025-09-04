@@ -1,0 +1,65 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            h7iwbhz5dxozr2drjhswp60u9v2itr4z:
+                colab: https://colab.research.google.com/notebook#fileId=1QJi7P3bbG6xRjwoCBEWGofgKF_iehG_n
+                cpu_count: 56
+                cpu_count_logical: 112
+                disk:
+                    /:
+                        total: "101296349184"
+                        used: "66261385216"
+                executable: /usr/bin/python3
+                git:
+                    remote: https://github.com/google/tunix.git
+                host: t1v-n-5f7fd7e7-w-0
+                memory:
+                    total: "202592702464"
+                os: Linux-5.19.0-1022-gcp-x86_64-with-glibc2.35
+                program: micro-batch
+                python: CPython 3.11.13
+                root: /workspace/tunix
+                startedAt: "2025-09-04T11:29:03.153317Z"
+                tpu:
+                    count: 4
+                    devicesPerChip: 1
+                    hbmGib: 16
+                    name: v5e
+                writerId: h7iwbhz5dxozr2drjhswp60u9v2itr4z
+        m: []
+        python_version: 3.11.13
+        t:
+            "1":
+                - 1
+                - 2
+                - 3
+                - 5
+                - 12
+                - 45
+                - 49
+                - 51
+                - 53
+                - 105
+            "2":
+                - 1
+                - 2
+                - 3
+                - 5
+                - 12
+                - 45
+                - 49
+                - 51
+                - 53
+                - 105
+            "3":
+                - 2
+                - 13
+                - 61
+            "4": 3.11.13
+            "5": 0.21.0
+            "8":
+                - 1
+                - 12
+            "12": 0.21.0
+            "13": linux-x86_64

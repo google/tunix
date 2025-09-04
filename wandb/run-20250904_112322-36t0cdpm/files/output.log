@@ -1,0 +1,18 @@
+[new version] begin grpo training step
+the grad_acc_steps is 4
+[new] Beginning rollout...
+Processing 8 prompts in this batch.
+Generating for slice: slice(0, 4, None)
+Generating for slice: slice(4, 8, None)
+[new] Assembling masks...
+[new] Calculating log probabilities...
+算了一次
+START ============================
+Question: Jane is painting her fingernails. She applies a base coat that takes 2 minutes to dry, two color coats that take 3 minutes each to dry, and a clear top coat that takes 5 minutes to dry. How many minutes total does Jane spend waiting for her nail polish to dry?
+Answer: 13
+Response: <reasoning> Jane needs 2 minutes for the base coat, 2 * 3 = 6 minutes for the color coats, and 5 minutes for the top coat.  The total time is 2 + 6 + 5 = 13 minutes. <answer> 13 </answer>
+<end_of_turn>
+Extracted: 13
+END ==============================
+here is an example
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.

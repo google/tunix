@@ -1,0 +1,9 @@
+[new version] begin grpo training step
+the grad_acc_steps is 4
+[new] Beginning rollout...
+Processing 8 prompts in this batch.
+Generating for slice: slice(0, 4, None)
+Generating for slice: slice(4, 8, None)
+[new] Assembling masks...
+[new] Calculating log probabilities...
+算了一次
