@@ -19,9 +19,8 @@ from tunix.models.llama3 import model as model_lib
 from tunix.models import safetensors_loader
 
 
-def _get_llama3_key_mapping(cfg: model_lib.ModelConfig):
-    """Get complete Llama3 key mappings."""
-    # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule))
+def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
+    # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
     return {
         r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
         # attention projection weights
@@ -54,8 +53,8 @@ def _get_llama3_key_mapping(cfg: model_lib.ModelConfig):
             r"layers.\1.mlp.down_proj.kernel",
             ((1, 0), None),
         ),
-        # norms
         r"model\.norm\.weight": ("final_norm.w", None),
+        # norms
         r"model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
             r"layers.\1.attn.q_norm.w",
             None,
@@ -77,19 +76,26 @@ def _get_llama3_key_mapping(cfg: model_lib.ModelConfig):
     }
 
 
+# Keep original function names for backward compatibility
+def _torch_key_to_jax_key(mapping, source_key):
+    return safetensors_loader.torch_key_to_jax_key(mapping, source_key)
+
+
+def _stoi(s):
+    return safetensors_loader.stoi(s)
+
+
 def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
 ) -> model_lib.Llama3:
     """Load tensors from the safetensors file and create a Llama3 model."""
-    key_mapping = _get_llama3_key_mapping(config)
-    
-    return safetensors_loader.create_model_from_safetensors(
+    return safetensors_loader.load_and_create_model(
         file_dir=file_dir,
         model_class=model_lib.Llama3,
         config=config,
-        key_mapping=key_mapping,
+        key_mapping=_get_key_and_transform_mapping,
         mesh=mesh,
-        preprocess_fn=None,  # Llama3 doesn't need preprocessing
+        preprocess_fn=None,
     )

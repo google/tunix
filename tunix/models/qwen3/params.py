@@ -21,34 +21,21 @@ from tunix.models.qwen3 import model as model_lib
 from tunix.models import safetensors_loader
 
 
-def _stack_moe_experts(params: dict[str, jax.Array]) -> dict[str, jax.Array]:
-    """Stack experts in loaded pytorch params for MoE architecture.
-    
-    Qwen3 uses Mixture of Experts (MoE) where expert parameters are stored
-    separately and need to be stacked into a single tensor dimension.
-    
-    Args:
-        params: Dictionary of loaded parameters
-        
-    Returns:
-        Dictionary with expert parameters stacked
-    """
-    key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))
+def _stack_experts(params: dict[str, jax.Array]):
+    """Stack experts in the loaded pytorch params."""
+    key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))  # pytype: disable=attribute-error
     new_params = dict(params).copy()
-    
     for kw in ["gate", "up", "down"]:
         pattern = r"(.*?)experts\.(.*?)\.{}_proj\.(.*)".format(kw)
         keys = [k for k in params.keys() if re.match(pattern, k)]
-        prefix_groups = set([re.match(pattern, k).group(1) for k in keys])
-        
+        prefix_groups = set([re.match(pattern, k).group(1) for k in keys])  # pytype: disable=attribute-error
         for prefix in prefix_groups:
             keys_to_merge = list(
                 sorted([k for k in keys if k.startswith(prefix)], key=key_fn)
             )
             for k in keys_to_merge:
                 del new_params[k]
-            suffix = re.match(pattern, keys_to_merge[0]).group(3)
-            
+            suffix = re.match(pattern, keys_to_merge[0]).group(3)  # pytype: disable=attribute-error
             with jax.default_device(jax.devices("cpu")[0]):
                 new_params[f"{prefix}experts.{kw}_proj.{suffix}"] = jnp.stack(
                     [params[k] for k in keys_to_merge], 0
@@ -56,9 +43,8 @@ def _stack_moe_experts(params: dict[str, jax.Array]) -> dict[str, jax.Array]:
     return new_params
 
 
-def _get_qwen3_key_mapping(cfg: model_lib.ModelConfig):
-    """Get complete Qwen3 key mappings."""
-    # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule))
+def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
+    # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
     return {
         r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
         # attention projection weights
@@ -78,7 +64,7 @@ def _get_qwen3_key_mapping(cfg: model_lib.ModelConfig):
             r"layers.\1.attn.o_proj.w",
             ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
         ),
-        # mlp (standard layers)
+        # mlp
         r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
             r"layers.\1.mlp.gate_proj.kernel",
             ((1, 0), None),
@@ -91,12 +77,11 @@ def _get_qwen3_key_mapping(cfg: model_lib.ModelConfig):
             r"layers.\1.mlp.down_proj.kernel",
             ((1, 0), None),
         ),
-        # MoE router/gate
+        # moe
         r"model\.layers\.([0-9]+)\.mlp\.gate\.weight": (
             r"layers.\1.mlp.router.kernel",
             ((1, 0), None),
         ),
-        # MoE experts (after stacking by preprocessing)
         r"model\.layers\.([0-9]+)\.mlp\.experts\.gate_proj\.weight": (
             r"layers.\1.mlp.gate_proj",
             ((0, 2, 1), None),
@@ -132,19 +117,26 @@ def _get_qwen3_key_mapping(cfg: model_lib.ModelConfig):
     }
 
 
+# Keep original function names for backward compatibility
+def _torch_key_to_jax_key(mapping, source_key):
+    return safetensors_loader.torch_key_to_jax_key(mapping, source_key)
+
+
+def _stoi(s):
+    return safetensors_loader.stoi(s)
+
+
 def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
 ) -> model_lib.Qwen3:
     """Load tensors from the safetensors file and create a Qwen3 model."""
-    key_mapping = _get_qwen3_key_mapping(config)
-    
-    return safetensors_loader.create_model_from_safetensors(
+    return safetensors_loader.load_and_create_model(
         file_dir=file_dir,
         model_class=model_lib.Qwen3,
         config=config,
-        key_mapping=key_mapping,
+        key_mapping=_get_key_and_transform_mapping,
         mesh=mesh,
-        preprocess_fn=_stack_moe_experts,  # Qwen3 needs MoE expert stacking
+        preprocess_fn=_stack_experts,
     )

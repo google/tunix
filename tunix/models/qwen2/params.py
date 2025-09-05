@@ -19,9 +19,8 @@ from tunix.models.qwen2 import model as model_lib
 from tunix.models import safetensors_loader
 
 
-def _get_qwen2_key_mapping(cfg: model_lib.ModelConfig):
-    """Get complete Qwen2 key mappings."""
-    # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule))
+def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
+    # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
     return {
         r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
         # attention projection weights
@@ -41,7 +40,6 @@ def _get_qwen2_key_mapping(cfg: model_lib.ModelConfig):
             r"layers.\1.attn.o_proj.w",
             ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
         ),
-        # attention biases (Qwen2 specific)
         r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.bias": (
             r"layers.\1.attn.q_bias",
             None,
@@ -82,19 +80,26 @@ def _get_qwen2_key_mapping(cfg: model_lib.ModelConfig):
     }
 
 
+# Keep original function names for backward compatibility
+def _torch_key_to_jax_key(mapping, source_key):
+    return safetensors_loader.torch_key_to_jax_key(mapping, source_key)
+
+
+def _stoi(s):
+    return safetensors_loader.stoi(s)
+
+
 def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
 ) -> model_lib.Qwen2:
     """Load tensors from the safetensors file and create a Qwen2 model."""
-    key_mapping = _get_qwen2_key_mapping(config)
-    
-    return safetensors_loader.create_model_from_safetensors(
+    return safetensors_loader.load_and_create_model(
         file_dir=file_dir,
         model_class=model_lib.Qwen2,
         config=config,
-        key_mapping=key_mapping,
+        key_mapping=_get_key_and_transform_mapping,
         mesh=mesh,
-        preprocess_fn=None,  # Qwen2 doesn't need preprocessing
+        preprocess_fn=None,
     )
