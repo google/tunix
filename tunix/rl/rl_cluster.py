@@ -473,6 +473,7 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     # TODO(linchai): Need to transfer the prompt and completion tokens to the
@@ -482,7 +483,7 @@ class RLCluster:
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
       ref_per_token_logps = self.inference_worker.get_ref_per_token_logps(
-          prompt_tokens, completion_tokens, pad_id, eos_id
+          prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
       )
       self._maybe_offload_model_to_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
@@ -493,6 +494,7 @@ class RLCluster:
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the current policy model."""
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
@@ -501,7 +503,7 @@ class RLCluster:
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
       per_token_logps = self.rollout.get_per_token_logps(
-          prompt_tokens, completion_tokens
+          prompt_tokens, completion_tokens, completion_mask
       )
       model = self.rollout.model()
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
@@ -532,10 +534,11 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     with self.cluster_config.role_to_mesh[Role.CRITIC]:
       return self.inference_worker.get_values(
-          prompt_tokens, completion_tokens, pad_id, eos_id
+          prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
       )
 
   def get_rewards(
