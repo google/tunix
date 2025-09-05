@@ -18,7 +18,9 @@ from __future__ import annotations
 
 from concurrent import futures
 import dataclasses
+import math
 from typing import Callable, Dict, Iterable, Iterator, List, Sequence
+import warnings
 
 import flax
 import jax
@@ -48,6 +50,15 @@ class GrpoConfig:
   """Configuration for GRPO algorithm.
 
   Attributes:
+    training_micro_batch_size: The microbatch size used for training.
+    rollout_micro_batch_size: The microbatch size used for model rollouts. If
+      -1, it defaults to `training_micro_batch_size`.
+    ref_logps_micro_batch_size: The microbatch size used for computing reference
+      model log probabilities. If -1, it defaults to
+      `training_micro_batch_size`.
+    old_logps_micro_batch_size: The microbatch size used for computing old
+      policy log probabilities. If -1, it defaults to
+      `training_micro_batch_size`.
     num_generations: The number of times the policy generates multiple responses
       for a given prompt within a single training step. This corresponds to 'G'
       in Algorithm 1 in the paper. A higher value means more samples are used to
@@ -73,11 +84,57 @@ class GrpoConfig:
   epsilon: float = 0.2
   loss_algo: str = "grpo"  # grpo or gspo-token
 
+  # Microbatch size configurations
+  training_micro_batch_size: int = None  # pytype: disable=annotation-type-mismatch
+  rollout_micro_batch_size: int = -1
+  ref_logps_micro_batch_size: int = -1
+  old_logps_micro_batch_size: int = -1
+
+  # Set other parameters to training_micro_batch_size if they are not set
+  if rollout_micro_batch_size == -1:
+    rollout_micro_batch_size = training_micro_batch_size
+
+  if ref_logps_micro_batch_size == -1:
+    ref_logps_micro_batch_size = training_micro_batch_size
+
+  if old_logps_micro_batch_size == -1:
+    old_logps_micro_batch_size = training_micro_batch_size
+
   def __post_init__(self):
-    assert self.num_generations > 1, (
-        "num_generations must be greater than 1. Received: "
-        f"{self.num_generations}"
-    )
+    """Validates the configuration after initialization."""
+    if self.training_micro_batch_size is None:
+      warnings.warn(
+          "training_micro_batch_size is None, it should be provided.",
+          DeprecationWarning,
+      )
+      raise ValueError(
+          "GrpoConfig instance requires training_micro_batch_size to be set."
+      )
+    elif self.training_micro_batch_size <= 0:
+      raise ValueError("training_micro_batch_size must be positive.")
+
+
+def _lcm3(a: int, b: int, c: int) -> int:
+  return (
+      (a * b) // math.gcd(a, b) * c // math.gcd(((a * b) // math.gcd(a, b)), c)
+  )
+
+
+def _chunk_slices_by_size(n: int, micro: int):
+  """Returns a list of slices `[slice(...), ...]` for n samples, chunked by micro.
+
+  The last chunk is allowed to be smaller than micro.
+
+  Args:
+    n: The total number of samples.
+    micro: The maximum size of each chunk.
+  """
+  i = 0
+  out = []
+  while i < n:
+    out.append(slice(i, min(i + micro, n)))
+    i += micro
+  return out
 
 
 class GrpoLearner:
@@ -181,6 +238,91 @@ class GrpoLearner:
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
+    # Use microbatch sizes from config instead of hardcoded values
+    self.rollout_micro_batch_size = grpo_config.rollout_micro_batch_size
+    self.ref_logps_micro_batch_size = grpo_config.ref_logps_micro_batch_size
+    self.old_logps_micro_batch_size = grpo_config.old_logps_micro_batch_size
+
+  def _rollout_by_micro(self, prompts: list[str], micro: int):
+    """Performs rollouts in smaller batches (micro-batches) to manage memory."""
+    outs_tokens = []
+    outs_text = []
+    outs_left_padded = []
+
+    # Iterate through the prompts in micro-batches.
+    for slc in _chunk_slices_by_size(len(prompts), micro):
+      sub_prompts = prompts[slc]
+
+      # Generate completions for the current sub-batch.
+      out = self.rl_cluster.generate(prompts=sub_prompts)
+
+      # Store the results from the generation.
+      outs_tokens.append(out.tokens)  # Shape: [batch_size, output_seq_len]
+      outs_text.extend(out.text)
+      outs_left_padded.append(
+          out.left_padded_prompt_tokens
+      )  # Shape: [batch_size, input_seq_len]
+
+    # Concatenate the results from all micro-batches.
+    completion_ids = jnp.concatenate(outs_tokens, axis=0)
+    left_padded = jnp.concatenate(outs_left_padded, axis=0)
+
+    return completion_ids, left_padded, outs_text
+
+  def _ref_logps_by_micro(
+      self, prompt_ids: jnp.ndarray, completion_ids: jnp.ndarray, micro: int
+  ):
+    """Computes reference per-token log probabilities in micro-batches.
+
+    Args:
+      prompt_ids: Token IDs of the prompts.
+      completion_ids: Token IDs of the completions.
+      micro: The maximum size of each micro-batch.
+
+    Returns:
+      A JAX array containing the per-token log probabilities from the reference
+      model, concatenated from all micro-batches.
+    """
+    pad_id = self.rl_cluster.rollout.pad_id()
+    eos_id = self.rl_cluster.rollout.eos_id()
+    outs = []
+    batch_size = prompt_ids.shape[0]
+    for slc in _chunk_slices_by_size(batch_size, micro):
+      outs.append(
+          self.rl_cluster.get_ref_per_token_logps(
+              prompt_tokens=prompt_ids[slc],
+              completion_tokens=completion_ids[slc],
+              pad_id=pad_id,
+              eos_id=eos_id,
+          )
+      )
+    return jnp.concatenate(outs, axis=0)
+
+  def _old_logps_by_micro(
+      self, prompt_ids: jnp.ndarray, completion_ids: jnp.ndarray, micro: int
+  ):
+    """Computes old policy per-token log probabilities in micro-batches.
+
+    Args:
+      prompt_ids: Token IDs of the prompts.
+      completion_ids: Token IDs of the completions.
+      micro: The maximum size of each micro-batch.
+
+    Returns:
+      A JAX array containing the per-token log probabilities from the old policy
+      model, concatenated from all micro-batches.
+    """
+    outs = []
+    batch_size = prompt_ids.shape[0]
+    for slc in _chunk_slices_by_size(batch_size, micro):
+      outs.append(
+          self.rl_cluster.get_old_per_token_logps(
+              prompt_tokens=prompt_ids[slc],
+              completion_tokens=completion_ids[slc],
+          )
+      )
+    return jnp.concatenate(outs, axis=0)
+
   def _get_metric_logging_steps(self, mode: metrics_logger.Mode) -> int:
     return (
         self._iter_steps
@@ -208,13 +350,13 @@ class GrpoLearner:
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
 
-    # Generate, and pad output.
-    completion_output = self.rl_cluster.generate(
-        prompts=training_input["prompts"],
+    # Rollout: Process in chunks by rollout_micro_batch_size
+    completion_ids, prompt_ids, completion_text = self._rollout_by_micro(
+        training_input["prompts"],
+        self.rollout_micro_batch_size * self.grpo_config.num_generations,
     )
-    completion_ids = completion_output.tokens
-    prompt_ids = completion_output.left_padded_prompt_tokens
 
+    # Assemble masks
     prompt_mask = (prompt_ids != pad_value).astype("int32")
     completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype(
         "int32"
@@ -222,37 +364,40 @@ class GrpoLearner:
     completion_mask = common.make_completion_mask(
         completion_ids, eos_tok=eos_value
     )
+    # Apply the padding mask to the completion mask.
     completion_mask = completion_mask * completion_padding_mask
 
+    # Calculate ref/old logps in their respective micro-batches
     if self.grpo_config.beta != 0.0:
-      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
+      ref_per_token_logps = self._ref_logps_by_micro(
+          prompt_ids,
+          completion_ids,
+          self.ref_logps_micro_batch_size * self.grpo_config.num_generations,
       )
     else:
       ref_per_token_logps = None
 
     if self.grpo_config.num_iterations > 1:
-      old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-          prompt_tokens=prompt_ids, completion_tokens=completion_ids
+      old_per_token_logps = self._old_logps_by_micro(
+          prompt_ids,
+          completion_ids,
+          self.old_logps_micro_batch_size * self.grpo_config.num_generations,
       )
     else:
       old_per_token_logps = None
 
+    # Compute rewards and advantages (consistent with original logic)
     rewards = self._compute_rewards(
         prompts=training_input["prompts"],
-        completions=completion_output.text,
+        completions=completion_text,
         mode=mode,
         **{k: v for k, v in training_input.items() if k != "prompts"},
     )
-
     advantages = grpo_helpers.compute_advantages(
         rewards, self.grpo_config.num_generations
     )
 
-    # Log completion lengths.
+    # Log length metrics (unchanged from original)
     agg_completion_mask = completion_mask.sum(axis=-1)
     steps = self._get_metric_logging_steps(mode)
     self._metrics_logger.log(
@@ -274,6 +419,7 @@ class GrpoLearner:
         steps,
     )
 
+    # Return the TrainExample object
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -335,44 +481,145 @@ class GrpoLearner:
       proceed_num_steps: int,
       sample_repeat: int,
       batch_repeat: int,
-      data_queue: queue_lib.AbstractDataQueue[
-          list[TrainExample] | common.RepeatIterable | None
-      ],
+      data_queue: queue_lib.AbstractDataQueue[list[TrainExample] | None],
       async_loading: bool = False,
       mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
   ) -> None:
-    """Prepares the data for training.
-
-    Includes rollout generation and advantage computation.
+    """Data preparation pipeline by micro steps: merge → repeat(sample) → single large.
 
     Args:
-      iterator: The input iterator of the dataset.
-      proceed_num_steps: The number of steps to proceed for the iterator if set
-        to a positive number. If it's set to a non positive number, the function
-        will exhaust the iterator. If the input iterator is exhausted before the
-        number of steps is reached, the function will return the empty result.
-      sample_repeat: The number of times to repeat the sample within a batch.
-      batch_repeat: The number of times to repeat the batch in the final
-        dataset.
-      data_queue: The data queue to use for putting the examples into.
-      async_loading: Whether to load the batch asynchronously, if not async
-        loading, then all the examples needed will be processed and then loaded
-        into the data queue.
-      mode: The mode to use for logging metrics.
-
-    Returns:
-      None. Examples are put into the data queue.
+      iterator: An iterator yielding `_TrainingInputT` examples.
+      proceed_num_steps: The number of training micro-batches to process before
+        returning. If > 0, the function will stop after consuming this many
+        steps. If -1, it will continue until the iterator is exhausted.
+      sample_repeat: The number of times each sample in a micro-batch is
+        repeated during the advantage computation. This is typically
+        `grpo_config.num_generations`.
+      batch_repeat: The number of times the produced `TrainExample` batch should
+        be enqueued. This is typically `grpo_config.num_iterations`.
+      data_queue: The queue to which lists of `TrainExample` are added.
+      async_loading: If True, enqueue each produced micro-batch immediately in
+        async mode. Otherwise, accumulate and enqueue at the boundary.
+      mode: The metrics logger mode, either `metrics_logger.Mode.TRAIN` or
+        `metrics_logger.Mode.EVAL`.
     """
 
-    example_list = []
+    def enqueue_examples(examples: list[TrainExample], times: int) -> None:
+      """Wrap each TrainExample as [TrainExample] and put it into the queue, repeated `times`."""
+      if times <= 0 or not examples:
+        return
+      for _ in range(times):
+        for ex in examples:
+          data_queue.put([ex])
 
-    def _put_list_of_examples_to_data_queue():
-      if not async_loading:
-        data_queue.put(common.RepeatIterable(example_list, batch_repeat))
-      elif batch_repeat > 1:
-        # Since we have already loaded the batch in data_queue once, we only
-        # need to repeat batch_repeat - 1 times.
-        data_queue.put(common.RepeatIterable(example_list, batch_repeat - 1))
+    # Use the LCM of three micro-batch sizes as the service target batch size
+    service_target_bs = _lcm3(
+        self.rollout_micro_batch_size,
+        self.ref_logps_micro_batch_size,
+        self.old_logps_micro_batch_size,
+    )
+
+    buf: list[_TrainingInputT] = []
+    buf_sizes: list[int] = []  # Number of samples for each training micro-batch
+    buf_b = 0  # Aggregated sample count (before repeating)
+    consumed_steps = 0  # Number of consumed training micro-batches
+
+    pending_examples: list[TrainExample] = []
+
+    def aggregate_and_compute_advantages(
+        force: bool = False,
+    ) -> list[TrainExample]:
+      """Merge → repeat(sample) → one large forward pass & advantage → split back by.
+
+      original micro boundaries.
+
+
+      Args:
+        force: If True, forces the aggregation and computation even if the
+          buffer size is less than `service_target_bs`.
+
+      Returns:
+        A list of small TrainExample chunks, split back by original micro
+        boundaries.
+      """
+      nonlocal buf, buf_sizes, buf_b
+      produced: list[TrainExample] = []
+
+      if not buf:
+        return produced
+      if (not force) and (buf_b < service_target_bs):
+        return produced
+
+      # Merge multiple training micro-batches
+      merged: _TrainingInputT = {}
+      keys = buf[0].keys()
+      for k in keys:
+        merged[k] = (
+            list(buf[0][k])
+            if isinstance(buf[0][k], list)
+            else np.asarray(buf[0][k])
+        )
+      for i in range(1, len(buf)):
+        for k in keys:
+          a, b = merged[k], buf[i][k]
+          if isinstance(a, list) and isinstance(b, list):
+            a.extend(b)
+          else:
+            merged[k] = np.concatenate([np.asarray(a), np.asarray(b)], axis=0)
+
+      # Repeat samples (equivalent to repeating each micro, then concat)
+      merged_repeated = jax.tree.map(
+          lambda x: np.repeat(x, sample_repeat, axis=0),
+          merged,
+      )
+
+      # Single large forward pass + advantage computation
+      with jax.profiler.StepTraceAnnotation(
+          "sampler",
+          step_num=self._iter_steps
+          if mode == metrics_logger.Mode.TRAIN
+          else self._eval_steps,
+      ):
+        big_example = self._generate_and_compute_advantage(
+            merged_repeated, mode
+        )
+
+      # Split back to original training micro size
+      offset = 0
+      for n in buf_sizes:
+        # Calculate slice indices
+        start_idx = offset * sample_repeat
+        end_idx = (offset + n) * sample_repeat
+        token_sl = slice(start_idx, end_idx)
+
+        # Create TrainExample for this micro-batch
+        te_small = TrainExample(
+            prompt_ids=big_example.prompt_ids[token_sl],
+            prompt_mask=big_example.prompt_mask[token_sl],
+            completion_ids=big_example.completion_ids[token_sl],
+            completion_mask=big_example.completion_mask[token_sl],
+            ref_per_token_logps=(
+                None
+                if big_example.ref_per_token_logps is None
+                else big_example.ref_per_token_logps[token_sl]
+            ),
+            advantages=big_example.advantages[token_sl],
+            old_per_token_logps=(
+                None
+                if big_example.old_per_token_logps is None
+                else big_example.old_per_token_logps[token_sl]
+            ),
+        )
+
+        produced.append(te_small)
+        offset += n
+
+      # Clear buffers
+      buf.clear()
+      buf_sizes.clear()
+      buf_b = 0
+
+      return produced
 
     try:
       while True:
@@ -382,41 +629,68 @@ class GrpoLearner:
         ):  # fast forward the iterator if loading from a previous checkpoint.
           next(iterator)
           self._iter_steps += 1
-        example = next(iterator)
-        example = jax.tree.map(
-            lambda x: np.repeat(x, sample_repeat, axis=0),
-            example,
-        )  # [B] -> [B * G]
 
-        with jax.profiler.StepTraceAnnotation(
-            "sampler",
-            step_num=self._iter_steps
-            if mode == metrics_logger.Mode.TRAIN
-            else self._eval_steps,
-        ):
-          advantage = self._generate_and_compute_advantage(example, mode)
-        if async_loading:
-          data_queue.put([advantage])
+        # Fetch one training micro-batch
+        example = next(iterator)
+        cur_batch_size = len(example["prompts"])
+        buf.append(example)
+        buf_sizes.append(cur_batch_size)
+        buf_b += cur_batch_size
+        consumed_steps += 1
+
+        # If the LCM threshold is reached, produce one batch
+        produced_now = aggregate_and_compute_advantages(force=False)
+        if produced_now:
+          if async_loading:
+            # Async: Enqueue immediately
+            enqueue_examples(produced_now, 1)
+            if batch_repeat > 1:
+              pending_examples.extend(produced_now)
+          else:
+            # Sync: accumulate; at boundary finalize with batch_repeat times
+            pending_examples.extend(produced_now)
 
         if mode == metrics_logger.Mode.TRAIN:
           self._iter_steps += 1
         else:
           self._eval_steps += 1
 
-        example_list.append(advantage)
-        if proceed_num_steps > 0 and len(example_list) == proceed_num_steps:
-          _put_list_of_examples_to_data_queue()
+        # On proceed boundary: handle tail + enqueue repeats
+        if proceed_num_steps > 0 and consumed_steps == proceed_num_steps:
+          tail = aggregate_and_compute_advantages(force=True)
+          if tail:
+            if async_loading:
+              enqueue_examples(tail, 1)
+              if batch_repeat > 1:
+                pending_examples.extend(tail)
+            else:
+              pending_examples.extend(tail)
+
+          if pending_examples:
+            if not async_loading:
+              enqueue_examples(pending_examples, batch_repeat)
+            else:
+              rem = batch_repeat - 1
+              if rem > 0:
+                enqueue_examples(pending_examples, rem)
+            pending_examples.clear()
+
+          consumed_steps = 0
           return
     except StopIteration as e:
       if proceed_num_steps > 0:
         raise e
       else:
-        _put_list_of_examples_to_data_queue()
+        tail = aggregate_and_compute_advantages(force=True)
+        if tail:
+          pending_examples.extend(tail)
+        if pending_examples:
+          data_queue.put(common.RepeatIterable(pending_examples, batch_repeat))
+          pending_examples.clear()
         return
     except Exception as e:
       raise e
     finally:
-      # Signal no more iterable to be loaded.
       data_queue.put(None)
 
   def train(
@@ -466,7 +740,7 @@ class GrpoLearner:
         # reserve 1 for None and the other for repeated interable
         # if batch_repeat > 1
         train_data_queue = queue_lib.SimpleDataQueue(
-            maxsize=self.grad_acc_steps + 2
+            maxsize=self.grad_acc_steps * self.grpo_config.num_iterations + 1
         )
         # reserve 1 for None
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
