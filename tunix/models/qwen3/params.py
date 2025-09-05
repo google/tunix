@@ -15,11 +15,9 @@
 """Utils for loading and converting Qwen3 PT weights."""
 
 import re
-from etils import epath
-from flax import nnx
 import jax
 import jax.numpy as jnp
-import safetensors.flax as safetensors
+from tunix.models import safetensors_loader
 from tunix.models.qwen3 import model as model_lib
 
 
@@ -112,139 +110,17 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   }
 
 
-def _torch_key_to_jax_key(mapping, source_key):
-  subs = [
-      (re.sub(pat, repl, source_key), reshape)
-      for pat, (repl, reshape) in mapping.items()
-      if re.match(pat, source_key)
-  ]
-  if len(subs) != 1:
-    raise ValueError(f"Only one key should be found: {subs[0]}")
-  else:
-    return subs[0]
-
-
-def _assign_weights(keys, tensor, state_dict, torch_key, transform):
-  """Convert weights and assign to nnx state_dict."""
-  key = keys[0]
-  if len(keys) == 1:
-    try:
-      if transform is not None:
-        permute, reshape = transform
-        tensor = tensor.transpose(permute) if permute else tensor
-        tensor = tensor.reshape(reshape) if reshape else tensor
-    except Exception as e:
-      raise RuntimeError(
-          f"Failed to transform tensor {torch_key} with shape"
-          f" {tensor.shape}: {e}"
-      ) from e
-
-    if tensor.shape != state_dict[key].shape:
-      raise ValueError(
-          f"shape must match for {torch_key}, got {tensor.shape} vs"
-          f" {state_dict[key].shape}"
-      )
-    state_dict[key] = tensor
-    return state_dict
-  else:
-    if key not in state_dict:
-      raise ValueError(f"Unfound key {key} in {state_dict}")
-    _assign_weights(keys[1:], tensor, state_dict[key], torch_key, transform)
-    return state_dict
-
-
-def _stoi(s):
-  try:
-    return int(s)
-  except ValueError:
-    return s
-
-
 def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
 ) -> model_lib.Qwen3:
   """Load tensors from the safetensors file and create a Qwen3 model."""
-  files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
-
-  if not files:
-    raise ValueError(f"No safetensors found in {file_dir}")
-
-  qwen3 = nnx.eval_shape(
-      lambda: model_lib.Qwen3(config, rngs=nnx.Rngs(params=0))
+  return safetensors_loader.load_and_create_model(
+      file_dir=file_dir,
+      model_class=model_lib.Qwen3,
+      config=config,
+      key_mapping=_get_key_and_transform_mapping,
+      mesh=mesh,
+      preprocess_fn=_stack_experts,
   )
-
-  graph_def, abs_state = nnx.split(qwen3)
-  state_dict = abs_state.to_pure_dict()
-
-  if mesh is not None:
-    sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
-  else:
-    sharding_dict = None
-
-  key_map = _get_key_and_transform_mapping(config)
-
-  def path_to_key(path):
-    return ".".join(
-        str(_stoi(key.key if hasattr(key, "key") else key)) for key in path
-    )
-
-  for f in files:
-    file_loaded_tensors = {}
-    with safetensors.safe_open(f, framework="numpy") as sf:
-      for k_name in sf.keys():
-        try:
-          v = sf.get_tensor(k_name)
-          jax_key_mapped, transform = _torch_key_to_jax_key(key_map, k_name)
-
-          if transform is not None:
-            permute, reshape = transform
-            if permute:
-              v = v.transpose(permute)
-            if reshape:
-              v = v.reshape(reshape)
-
-          current_arr = jax.numpy.array(v)
-
-          if jax_key_mapped in file_loaded_tensors:
-            raise ValueError(
-                f"Duplicate key {jax_key_mapped} found within file {f.name}."
-            )
-          file_loaded_tensors[jax_key_mapped] = current_arr
-
-        except Exception as e:
-          raise RuntimeError(
-              f"Failed to load tensor {k_name} from file {f.name}: {e}"
-          ) from e
-
-    def make_update_tensor_fn(current_file_tensors):
-      def update_tensor(path, param, shard=None):
-        current_path_key = path_to_key(path)
-        if current_path_key in current_file_tensors:
-          loaded_arr = current_file_tensors[current_path_key]
-          if loaded_arr.shape != param.shape:
-            raise ValueError(
-                f"Shape mismatch for {current_path_key}: got"
-                f" {loaded_arr.shape}, expected {param.shape}"
-            )
-          if shard is not None:
-            return jax.device_put(loaded_arr, shard)
-          else:
-            return jax.device_put(loaded_arr, jax.devices()[0])
-        return param
-
-      return update_tensor
-
-    current_file_update_tensor = make_update_tensor_fn(file_loaded_tensors)
-
-    if sharding_dict is not None:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict, sharding_dict
-      )
-    else:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict
-      )
-
-  return nnx.merge(graph_def, state_dict)
