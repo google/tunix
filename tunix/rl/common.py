@@ -219,12 +219,17 @@ def process_ids(
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
+    completion_mask: jax.Array | None = None,
 ):
   """Processes prompt and completion ids."""
 
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
   prompt_mask = prompt_tokens != pad_id
-  completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+  if completion_mask is None:
+    completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+  else:
+    # Normalise dtype/values to int32 {0,1}
+    completion_mask = (completion_mask > 0).astype(jnp.int32)
   prompt_completion_mask = jnp.concatenate(
       [prompt_mask, completion_mask], axis=-1
   )
@@ -242,10 +247,11 @@ def compute_per_token_logps(
     pad_id: int,
     eos_id: int,
     stop_gradient: bool = True,
+    completion_mask: jax.Array | None = None,
 ) -> jax.Array:
   """Computes the per-token log probabilities."""
   prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id
+      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
   per_token_logps = get_per_token_logps(
       model,
@@ -267,6 +273,7 @@ def compute_per_token_logps_and_logits(
     pad_id: int,
     eos_id: int,
     stop_gradient: bool = True,
+    completion_mask: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
   """Computes per-token log probabilities and returns the logits slice.
 
@@ -275,7 +282,7 @@ def compute_per_token_logps_and_logits(
     logits_slice:    [B, T, V]
   """
   prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id
+      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
   per_token_logps, logits_slice = get_per_token_logps_and_logits(
       model,
@@ -297,10 +304,11 @@ def compute_score(
     pad_id: int,
     eos_id: int,
     stop_gradient: bool = True,
+    completion_mask: jax.Array | None = None,
 ):
   """Computes reward using the provided model."""
   prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id
+      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
 
   out = model(

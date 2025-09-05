@@ -53,6 +53,7 @@ class InferenceWorker:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      completion_mask: jax.Array | None = None,
   ):
     ref_model = self._models.get("reference")
     if ref_model is None:
@@ -63,6 +64,7 @@ class InferenceWorker:
         completion_tokens=completion_tokens,
         pad_id=pad_id,
         eos_id=eos_id,
+        completion_mask=completion_mask,
     )
 
   def get_values(
@@ -71,6 +73,7 @@ class InferenceWorker:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     critic_model = self._models.get("critic")
     if critic_model is None:
@@ -81,6 +84,7 @@ class InferenceWorker:
         completion_tokens,
         pad_id,
         eos_id,
+        completion_mask=completion_mask,
     )
 
   def get_model(self, role: str) -> nnx.Module:
