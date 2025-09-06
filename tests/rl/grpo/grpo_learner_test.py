@@ -266,9 +266,12 @@ class GrpoLearnerTest(parameterized.TestCase):
         prepare_data_call_at_step,
         expected_prepare_data_call_at_step,
     )
+    self.assertEqual(
+        grpo_trainer.rl_cluster.global_steps,
+        10,  # max_steps / num_iterations
+    )
 
-    metric_logger = grpo_trainer._metrics_logger
-    self.assertNotEqual(metric_logger.get_metric('rewards/overall', 'train'), 0)
+    rl_metric_logger = grpo_trainer.rl_cluster._rl_metrics_logger
     for metric_name in [
         'rewards/overall',
         'rewards/reward_1',
@@ -280,15 +283,18 @@ class GrpoLearnerTest(parameterized.TestCase):
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
       self.assertLen(
-          metric_logger.get_metric_history(metric_name, 'train'),
-          grpo_trainer._iter_steps,
+          rl_metric_logger.get_metric_history(metric_name, 'train'),
+          grpo_trainer.rl_cluster.global_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
-          metric_logger.get_metric_history(metric_name, 'eval'),
-          grpo_trainer._eval_steps,
+          rl_metric_logger.get_metric_history(metric_name, 'eval'),
+          grpo_trainer.rl_cluster.actor_trainer.train_steps
+          / cluster_config.training_config.eval_every_n_steps,
           msg=f'metric_name: {metric_name}',
       )
+
+    metric_logger = grpo_trainer._metrics_logger
     for metric_name in ['loss', 'kl']:
       self.assertLen(
           metric_logger.get_metric_history(metric_name, 'train'),

@@ -700,6 +700,11 @@ class PeftTrainer:
     """Returns the number of iterator steps taken."""
     return self._iter_steps
 
+  @property
+  def mode(self) -> metrics_logger.Mode:
+    """Returns the current mode of the trainer."""
+    return self._mode
+
   def close(self):
     """Closes the trainer and its associated resources.
 
