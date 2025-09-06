@@ -212,7 +212,8 @@ class PeftTrainer:
         root_directory=self.config.checkpoint_root_directory,
         options=self.config.checkpointing_options,
     )
-    self.metrics_logger = metrics_logger.MetricsLogger(
+    # The only change is on the next line
+    self.metrics_logger = metrics_logger.AsyncMetricsLogger(
         self.config.metrics_logging_options
     )
     self.is_managed_externally = False
@@ -580,7 +581,7 @@ class PeftTrainer:
     train_iterator = iter(train_ds)
     index = 0
     last_step_completion_time = time.perf_counter()
-    with time_measure("Train loop"):
+    with self.metrics_logger as logger, time_measure("Train loop"):
       while True:
         self._prof.maybe_activate(self._iter_steps)
         with jax.profiler.StepTraceAnnotation(
@@ -626,9 +627,7 @@ class PeftTrainer:
                 train_example=train_example,
             )
             if tflops_per_step is not None:
-              self.metrics_logger.log(
-                  "tflops_per_step", tflops_per_step, self._mode, 0
-              )
+              logger.log("tflops_per_step", tflops_per_step, self._mode, 0)
 
           self._throttler.wait_for_next()
           if self.training_hooks:
@@ -709,7 +708,7 @@ class PeftTrainer:
     self._write_train_metrics()
     self._save_last_checkpoint()
     self.checkpoint_manager.close()
-    self.metrics_logger.close()
+    # self.metrics_logger.close() is handled by the `with` statement
     if self._pbar is not None:
       self._pbar.close()
       self._pbar = None

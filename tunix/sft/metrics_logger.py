@@ -6,6 +6,8 @@ import datetime
 import enum
 import functools
 import logging
+import queue
+import threading
 
 import jax
 import numpy as np
@@ -126,6 +128,75 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
   return np.exp(np.mean(np.log(x)))
 
 
+# --- Start of new asynchronous logic ---
+class AsyncMetricsLogger:
+  """A wrapper to run MetricsLogger in a separate, non-blocking thread."""
+
+  def __init__(self, options: MetricsLoggerOptions | None):
+    # This is the actual, synchronous logger that will run in the background.
+    self._logger = MetricsLogger(options)
+    self._queue = queue.Queue()
+    # The 'None' item is a sentinel to signal the thread to stop.
+    self._thread = threading.Thread(target=self._worker, daemon=True)
+    self._active = False
+
+  def _worker(self):
+    """The target function for the background thread."""
+    while True:
+      # Wait for an item to be put on the queue.
+      item = self._queue.get()
+      if item is None:
+        # Sentinel received, signal task completion and exit the loop.
+        self._queue.task_done()
+        break
+
+      # Unpack the arguments and call the real synchronous logger.
+      metric_name, scalar_value, mode, step = item
+      self._logger.log(metric_name, scalar_value, mode, step)
+      self._queue.task_done()
+
+    # After the loop finishes, close the underlying logger to flush writers.
+    self._logger.close()
+
+  def log(
+      self,
+      metric_name: str,
+      scalar_value: float | np.ndarray,
+      mode: Mode | str,
+      step: int,
+  ):
+    """Asynchronously logs a metric by putting its data on the queue."""
+    if not self._active:
+      raise RuntimeError(
+          "Logger is not active. Use 'with AsyncMetricsLogger(...) as logger:'"
+      )
+    self._queue.put((metric_name, scalar_value, mode, step))
+
+  def close(self):
+    """Waits for all pending metrics to be logged and stops the thread."""
+    if not self._active:
+      return
+    # Add the sentinel to the queue to signal the worker to stop.
+    self._queue.put(None)
+    # Wait for the queue to become empty, ensuring all logs are processed.
+    self._queue.join()
+    # Wait for the thread to terminate completely.
+    self._thread.join()
+    self._active = False
+
+  def __enter__(self):
+    """Starts the background thread when entering a 'with' block."""
+    logging.info("Starting async metrics logger thread...")
+    self._thread.start()
+    self._active = True
+    return self
+
+  def __exit__(self, exc_type, exc_val, exc_tb):
+    """Closes the logger when exiting a 'with' block."""
+    logging.info("Closing async metrics logger...")
+    self.close()
+
+
 class MetricsLogger:
   """Simple Metrics logger."""
 
@@ -186,5 +257,5 @@ class MetricsLogger:
       # TODO(b/413717077): Solution for destructing lister in jax.monitoring.
       for summary_writer in self._summary_writers:
         summary_writer.close()
-    if wandb is not None:
+    if wandb is not None and wandb.run:
       wandb.finish()
