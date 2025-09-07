@@ -116,16 +116,6 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
         r"lm_head\.weight": ("lm_head.w", ((1, 0), None)),
     }
 
-
-# Keep original function names for backward compatibility
-def _torch_key_to_jax_key(mapping, source_key):
-    return safetensors_loader.torch_key_to_jax_key(mapping, source_key)
-
-
-def _stoi(s):
-    return safetensors_loader.stoi(s)
-
-
 def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
