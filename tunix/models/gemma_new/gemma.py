@@ -608,7 +608,7 @@ class TransformerConfig:
     num_layers = 26
     return cls(
         num_layers=num_layers,
-        num_embed=256128,
+        num_embed=256000,
         embed_dim=2304,
         hidden_dim=9216,
         num_heads=8,
