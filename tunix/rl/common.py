@@ -100,9 +100,9 @@ class TrainExample:
 
 
 def compute_kl_divergence(
-    per_token_logps: jax.Array, 
-    ref_per_token_logps: jax.Array, 
-    method: str = "low_var_kl"
+    per_token_logps: jax.Array,
+    ref_per_token_logps: jax.Array,
+    method: str = "low_var_kl",
 ) -> jax.Array:
   """Compute per token KL divergence between trained and reference policy.
 
@@ -120,8 +120,10 @@ def compute_kl_divergence(
     KL divergence.
   """
   if method not in ("kl", "mse_kl", "low_var_kl"):
-    raise ValueError(f"`method` must be one of 'kl', 'mse_kl', 'low_var_kl'. Received: {method}")
-  
+    raise ValueError(
+        f"`method` must be one of 'kl', 'mse_kl', 'low_var_kl'. Received: {method}"
+    )
+
   if method == "kl":
     return per_token_logps - ref_per_token_logps
 
@@ -129,9 +131,12 @@ def compute_kl_divergence(
     return 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
 
   if method == "low_var_kl":
-    return jnp.exp(ref_per_token_logps - per_token_logps) \
-           - (ref_per_token_logps - per_token_logps) - 1
-  
+    return (
+        jnp.exp(ref_per_token_logps - per_token_logps)
+        - (ref_per_token_logps - per_token_logps)
+        - 1
+    )
+
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   """Compute the log probablity based on the input ids.
@@ -149,6 +154,7 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
+
 
 @nnx.jit(static_argnums=(4, 5))
 def get_per_token_logps(
@@ -173,7 +179,7 @@ def get_per_token_logps(
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@nnx.jit(static_argnames=('pad_id', 'eos_id'))
+@nnx.jit(static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
@@ -199,7 +205,7 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask
 
 
-@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_per_token_logps(
     model: nnx.Module,
     prompt_tokens: jax.Array,
@@ -225,7 +231,7 @@ def compute_per_token_logps(
   return per_token_logps
 
 
-@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_per_token_logps_and_logits(
     model: nnx.Module,
     prompt_tokens: jax.Array,
@@ -256,9 +262,9 @@ def compute_per_token_logps_and_logits(
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
     logits_slice = jax.lax.stop_gradient(logits_slice)
   return per_token_logps, logits_slice
-  
 
-@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
+
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_score(
     model,
     prompt_tokens: jax.Array,
