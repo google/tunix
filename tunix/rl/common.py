@@ -102,46 +102,36 @@ class TrainExample:
 def compute_kl_divergence(
     per_token_logps: jax.Array, 
     ref_per_token_logps: jax.Array, 
-    method: str | None = None
+    method: str = "low_var_kl"
 ) -> jax.Array:
   """Compute per token KL divergence between trained and reference policy.
-  kl: Unbiased, high-variance estimator - simple forward KL: logp - ref_logp
-  mse_kl: Biased, low-variance estimator - squared log-difference: 0.5 * (logp - ref_logp)^2
-  low_var_kl: Unbiased, low-variance estimator - J. Schulman low-variance approx: (r - 1) - log r, where r = q/p = exp(ref_logp - logp)
 
-  references:
-  J. Schulman KL approx: http://joschu.net/blog/kl-approx.html
-  Verl code: https://github.com/volcengine/verl/blob/f9035b70166b102de5e84c1819e2172b64a0ae30/verl/trainer/ppo/core_algos.py#L1323-L1358
+  Based of `method`, we compute one of three kinds of KL divergence:
+  "kl": Unbiased, high-variance estimator. Simple Forward KL: `logp - ref_logp`
+  "mse_kl": Biased, low-variance estimator. Squared log-difference: `0.5 * (logp - ref_logp)^2`
+  "low_var_kl": Unbiased, low-variance estimator. J. Schulman low-variance approx: `(r - 1) - log r`, where `r = q/p = exp(ref_logp - logp)`
 
   Args:
     per_token_logps: Per token log probabilities from the trained policy.
     ref_per_token_logps: Per token log probabilities from the reference policy.
-    method: KL penalty method. If None, defaults to "low_var_kl"..
+    method: KL penalty method. Defaults to "low_var_kl".
 
   Returns:
     KL divergence.
   """
-  delta = per_token_logps - ref_per_token_logps
-
+  if method not in ("kl", "mse_kl", "low_var_kl"):
+    raise ValueError(f"`method` must be one of 'kl', 'mse_kl', 'low_var_kl'. Received: {method}")
+  
   if method == "kl":
-    # Unbiased but high variance.
-    return delta
+    return per_token_logps - ref_per_token_logps
 
   if method == "mse_kl":
-    # Biased but low variance.
-    return 0.5 * jnp.square(delta)
+    return 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
 
   if method == "low_var_kl":
-    # Default to low-variance, unbiased estimator.
-    # (r - 1) - log(r) = exp(ref_logp - logp) - (ref_logp - logp) - 1
     return jnp.exp(ref_per_token_logps - per_token_logps) \
            - (ref_per_token_logps - per_token_logps) - 1
   
-  # Default to low-variance, unbiased estimator.
-  return jnp.exp(ref_per_token_logps - per_token_logps) \
-           - (ref_per_token_logps - per_token_logps) - 1
-
-
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   """Compute the log probablity based on the input ids.
@@ -160,45 +150,25 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
 
-@nnx.jit(static_argnums=(4,))
+@nnx.jit(static_argnums=(4, 5))
 def get_per_token_logps(
     model: nnx.Module,
     input_tokens: jax.Array,
     positions: jax.Array,
     attn_mask: jax.Array,
     logits_to_keep: int,
-) -> jax.Array:
+    return_logits: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
   logits, _ = model(
       input_tokens, positions=positions, attention_mask=attn_mask, cache=None
   )
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]
-  return selective_log_softmax(logits, input_tokens)
-
-# Need raw logits for entropy regularization
-@nnx.jit(static_argnums=(4,))
-def get_per_token_logps_and_logits(
-    model: nnx.Module,
-    input_tokens: jax.Array,
-    positions: jax.Array,
-    attn_mask: jax.Array,
-    logits_to_keep: int,
-) -> tuple[jax.Array, jax.Array]:
-  """Computes per-token log probabilities and also returns sliced logits.
-
-  Returns:
-    (per_token_logps, logits_slice)
-      per_token_logps: [B, T]
-      logits_slice:    [B, T, V]
-  """
-  logits, _ = model(
-      input_tokens, positions=positions, attention_mask=attn_mask, cache=None
-  )
-  logits_slice = logits[:, -logits_to_keep - 1 : -1, :]
-  selected_tokens = input_tokens[:, -logits_to_keep:]
-  per_token_logps = selective_log_softmax(logits_slice, selected_tokens)
-  return per_token_logps, logits_slice
+  per_token_logps = selective_log_softmax(logits, input_tokens)
+  if return_logits:
+    return per_token_logps, logits
+  return per_token_logps
 
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
@@ -274,17 +244,19 @@ def compute_per_token_logps_and_logits(
   prompt_completion_ids, positions, attn_mask = process_ids(
       prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
-  per_token_logps, logits_slice = get_per_token_logps_and_logits(
+  per_token_logps, logits_slice = get_per_token_logps(
       model,
       input_tokens=prompt_completion_ids,
       positions=positions,
       attn_mask=attn_mask,
       logits_to_keep=completion_tokens.shape[1],
+      return_logits=True,
   )
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
     logits_slice = jax.lax.stop_gradient(logits_slice)
   return per_token_logps, logits_slice
+  
 
 @nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
 def compute_score(
