@@ -34,7 +34,7 @@ class SimpleLayer(nnx.Module):
     return x + self.param.value
 
 
-class Block(nnx.Module):
+class Block(nnx.Module, pytree=False):
   """A block containing nested layers."""
 
   def __init__(self, tag: str):

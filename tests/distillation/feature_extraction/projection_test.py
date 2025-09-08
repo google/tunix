@@ -32,7 +32,7 @@ class DummyModel(nnx.Module):
     self.linear = nnx.LinearGeneral(
         in_features=in_features,
         out_features=out_features,
-        axis=jnp.arange(len(in_features)),
+        axis=tuple(range(len(in_features))),
         rngs=nnx.Rngs(0),
     )
 

@@ -18,11 +18,10 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import time
-from typing import Any, Callable, Concatenate, Dict, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
 from absl import logging
 import flax
-from flax import linen as nn
 from flax import nnx
 import jax
 from jax.interpreters import pxla
@@ -94,6 +93,39 @@ class TrainingInput:
 
   # A mask that determines which input tokens are valid.
   input_mask: jax.Array | np.ndarray
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class MetricsBuffer:
+  """Metrics collected for a specific step.
+
+  Attributes:
+    step: The training step number.
+    losses: A list of loss values recorded within this step (e.g., across
+      gradient accumulation steps).
+    step_time_deltas: A list of time deltas for each computation within this
+      step.
+    additional_metrics: Dictionary for storing additional metrics. The key is
+      the metric name, and the value is a tuple containing a list of metric
+      values and a callable to aggregate them.
+  """
+
+  step: int
+  losses: List[ArrayLike]
+  step_time_deltas: List[float]
+  additional_metrics: Dict[
+      str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
+  ] = dataclasses.field(default_factory=dict)
+
+  @property
+  def loss(self):
+    """Returns the mean of the recorded losses for the step."""
+    return np.mean(self.losses)
+
+  @property
+  def step_time_delta(self):
+    """Returns the mean of the recorded step time deltas for the step."""
+    return np.mean(self.step_time_deltas)
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -170,11 +202,9 @@ class PeftTrainer:
           optimizer, training_config.gradient_accumulation_steps
       )
     if self._lora_enabled:
-      self.optimizer = nnx.ModelAndOptimizer(
-          self.model, optimizer, wrt=nnx.LoRAParam
-      )
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
-      self.optimizer = nnx.ModelAndOptimizer(self.model, optimizer)
+      self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
@@ -187,8 +217,8 @@ class PeftTrainer:
     )
     self.is_managed_externally = False
 
-    self._train_steps = 0
-    self._eval_steps = 0
+    self._train_steps = 0  # represent # of times model has been updated
+    self._iter_steps = 0  # represent # of times trainer has looped
     self._throttler = inflight_throttler.InflightThrottler(
         max_inflight=training_config.max_inflight_computations
     )
@@ -197,18 +227,23 @@ class PeftTrainer:
     self._pbar = None
     self._flops_measured: bool = False
 
-    self._train_steps = self.checkpoint_manager.maybe_restore(
+    self._iter_steps = self.checkpoint_manager.maybe_restore(
         self.model, restore_only_lora_params=self._lora_enabled
+    )
+    self._train_steps = self._iter_steps // self.config.get_with_default(
+        "gradient_accumulation_steps", 1
     )
 
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
     self._prof = profiler.Profiler(
-        initial_step=self._train_steps,
+        initial_step=self._iter_steps,
         max_step=self.config.max_steps,
         profiler_options=self.config.profiler_options,
     )
-    self._buffered_train_metrics: tuple[ArrayLike, int, float] | None = None
+    self._buffered_train_metrics: MetricsBuffer | None = None
+    self._prev_buffered_train_metrics: MetricsBuffer | None = None
+    self._buffered_eval_metrics: MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
 
@@ -273,7 +308,7 @@ class PeftTrainer:
     return self
 
   def _train_step(
-      self, model: nnx.Module, optimizer: nnx.ModelAndOptimizer, inputs: Any
+      self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     """Main body for one train step.
 
@@ -293,7 +328,7 @@ class PeftTrainer:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
-    optimizer.update(grads)
+    optimizer.update(model, grads)
     if self._has_aux:
       loss, aux = out
       return loss, aux
@@ -329,29 +364,11 @@ class PeftTrainer:
     """
     if mesh.empty:
       return
-    optimizer_state_arrays = nnx.state(
-        self.optimizer, nnx.optimizer.OptState
-    )  # select only the optimizer state
-    optimizer_pspecs = nnx.get_partition_spec(optimizer_state_arrays)
+    optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
+    optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
-    def _adjust_pspec(pspec, state):
-      if pspec is None:
-        return None
-      # state can be a scalar, which is not an array.
-      state_ndim = getattr(state, "ndim", 0)
-      if len(pspec) > state_ndim:
-        return shd.PartitionSpec(*pspec[:state_ndim])
-      return pspec
-
-    adjusted_pspecs = jax.tree.map(
-        _adjust_pspec, optimizer_pspecs, optimizer_state_arrays
-    )
-    optimizer_shardings = nn.logical_to_mesh_sharding(
-        adjusted_pspecs,
-        mesh,
-    )
     optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state_arrays, optimizer_shardings
+        optimizer_state, optimizer_pspecs
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
@@ -426,6 +443,7 @@ class PeftTrainer:
       loss: ArrayLike,
       step: int | None = None,
       step_time_delta: float | None = None,
+      additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
     perplexity = np.exp(loss)
@@ -449,47 +467,61 @@ class PeftTrainer:
           loss,
           perplexity,
       )
+    for k, v in (additional_metrics or {}).items():
+      self.metrics_logger.log(k, v, self._mode, step)
 
-  def _buffer_and_write_train_metrics(
+  def _buffer_metrics(
       self,
+      metrics_buffer: MetricsBuffer | None,
       loss: ArrayLike,
       step: int,
-      step_time_delta: float,
-  ):
-    """Buffers metrics for the current step and writes metrics from the previous one.
-
-    This strategy is a performance optimization that allows the I/O for logging
-    (which can be slow) to be overlapped with the accelerator's computation of
-    the next training step. This keeps the training pipeline full and maximizes
-    throughput.
-
-    Note on timing: The metrics written for a given step `N` will contain the
-    `loss` calculated during step `N`, but the `step_time_delta` will be the
-    measurement from the completion of step `N-1`.
-
-    Args:
-      loss: The loss value from the current training step.
-      step: The current step number.
-      step_time_delta: The wall-clock time measured for the previous step.
-    """
-    if self._buffered_train_metrics is not None:
-      # Write the buffered metrics from step N-1.
-      prev_loss, prev_step, prev_step_time = self._buffered_train_metrics
-      self._log_metrics(
-          loss=prev_loss,
-          step=prev_step,
-          step_time_delta=prev_step_time,
+      step_time_delta: float = 0.0,
+  ) -> MetricsBuffer:
+    """Buffers metrics for the current step."""
+    if metrics_buffer is None:
+      metrics_buffer = MetricsBuffer(
+          step=step, losses=[loss], step_time_deltas=[step_time_delta]
       )
-      self._may_update_pbar(
-          self._tqdm_train_metrics,
-          increment_steps=True,
-          step=prev_step,
-          loss=prev_loss,
-          step_time=prev_step_time,
-      )
+    else:
+      assert metrics_buffer.step == step
+      metrics_buffer.losses.append(loss)
+      metrics_buffer.step_time_deltas.append(step_time_delta or 0)
+    return metrics_buffer
 
-    # Buffer step N metrics to be written in the next iteration.
-    self._buffered_train_metrics = (loss, step, step_time_delta)
+  def _write_train_metrics(self):
+    """Writes previous buffered train metrics."""
+    if self._prev_buffered_train_metrics is None:
+      # skip the first step so we can overlap I/O with next step.
+      self._prev_buffered_train_metrics = self._buffered_train_metrics
+      self._buffered_train_metrics = None
+      return
+    # increment the step by one for logging purpose, because train_step is not
+    # incremented until the next model update.
+    self._prev_buffered_train_metrics.step += 1
+    self._write_metrics(self._prev_buffered_train_metrics)
+    self._may_update_pbar(
+        self._tqdm_train_metrics,
+        increment_steps=True,
+        step=self._prev_buffered_train_metrics.step,
+        loss=self._prev_buffered_train_metrics.loss,
+        step_time=self._prev_buffered_train_metrics.step_time_delta,
+    )
+    self._prev_buffered_train_metrics = self._buffered_train_metrics
+    self._buffered_train_metrics = None
+
+  def _write_metrics(self, metrics_buffer: MetricsBuffer):
+    self._log_metrics(
+        loss=metrics_buffer.loss,
+        step=metrics_buffer.step,
+        step_time_delta=metrics_buffer.step_time_delta,
+        additional_metrics={
+            k: op(v)
+            for k, (
+                v,
+                op,
+            ) in metrics_buffer.additional_metrics.items()
+        },
+    )
 
   @contextlib.contextmanager
   def _switch_mode(self, mode: metrics_logger.Mode):
@@ -504,13 +536,9 @@ class PeftTrainer:
   def _tqdm_train_metrics(self) -> list[str]:
     return ["loss", "perplexity", "steps_per_sec", "learning_rate"]
 
-  @property
-  def _tqdm_eval_metrics(self) -> list[str]:
-    return ["loss", "perplexity"]
-
   def _may_update_pbar(
       self,
-      metrics,
+      metrics: list[str],
       increment_steps: bool = False,
       step: int | None = None,
       loss: ArrayLike | None = None,
@@ -536,6 +564,8 @@ class PeftTrainer:
     logging.info("Training with mesh: %s", mesh)
 
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
+    if eval_ds:
+      self._run_eval(eval_ds, eval_step)
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
@@ -552,9 +582,9 @@ class PeftTrainer:
     last_step_completion_time = time.perf_counter()
     with time_measure("Train loop"):
       while True:
-        self._prof.maybe_activate(self._train_steps)
+        self._prof.maybe_activate(self._iter_steps)
         with jax.profiler.StepTraceAnnotation(
-            "train", step_num=self._train_steps
+            "train", step_num=self._iter_steps
         ):
           train_example = None
           if self.data_hooks:
@@ -565,19 +595,13 @@ class PeftTrainer:
               if not self.is_managed_externally:
                 # TODO(mridulsahu): Add support to restore the iterator state
                 # instead of skipping the already trained examples.
-                if index < self._train_steps:
+                if index < self._iter_steps:
                   # Skip the examples that are already trained.
                   index += 1
                   continue
               index += 1
             except StopIteration:
               pass
-
-          if (
-              eval_ds
-              and self._train_steps % self.config.eval_every_n_steps == 0
-          ):
-            self._run_eval(eval_ds, eval_step)
 
           if train_example is None:
             break
@@ -618,22 +642,37 @@ class PeftTrainer:
           last_step_completion_time = current_time
 
           self._throttler.add_computation(train_loss)
-          self._post_process_train_step(aux)
-          self._buffer_and_write_train_metrics(
+          self._buffered_train_metrics = self._buffer_metrics(
+              self._buffered_train_metrics,
               loss=train_loss,
               step=self._train_steps,
               step_time_delta=step_time_delta,
           )
-          self._train_steps += 1
+          # NB: put this after self._buffer_metrics is important
+          self._post_process_train_step(aux)
+          self._iter_steps += 1
 
           # Actual checkpoint frequency is configured by checkpointing_options.
           self.checkpoint_manager.save(
-              self._train_steps,
+              self._iter_steps,
               self.model,
               save_only_lora_params=self._lora_enabled,
           )
 
-        self._prof.maybe_deactivate(self._train_steps)
+          if (
+              self._iter_steps
+              % self.config.get_with_default("gradient_accumulation_steps", 1)
+              == 0
+          ):
+            self._train_steps += 1
+            self._write_train_metrics()
+            if (
+                eval_ds
+                and self._train_steps % self.config.eval_every_n_steps == 0
+            ):
+              self._run_eval(eval_ds, eval_step)
+
+        self._prof.maybe_deactivate(self._iter_steps)
 
     self._throttler.wait_for_all()
     if self.training_hooks:
@@ -643,9 +682,9 @@ class PeftTrainer:
 
   def _save_last_checkpoint(self):
     last_saved_step = self.checkpoint_manager.latest_step()
-    if last_saved_step is None or last_saved_step < self._train_steps:
+    if last_saved_step is None or last_saved_step < self._iter_steps:
       self.checkpoint_manager.save(
-          self._train_steps,
+          self._iter_steps,
           self.model,
           save_only_lora_params=self._lora_enabled,
           force=True,
@@ -656,28 +695,18 @@ class PeftTrainer:
     """Returns the number of train steps taken."""
     return self._train_steps
 
+  @property
+  def iter_steps(self) -> int:
+    """Returns the number of iterator steps taken."""
+    return self._iter_steps
+
   def close(self):
     """Closes the trainer and its associated resources.
 
     This includes writing any buffered metrics, saving the last checkpoint,
     and closing the checkpoint manager and metrics logger.
     """
-    if self._buffered_train_metrics is not None:
-      loss, step, step_time = self._buffered_train_metrics
-      self._log_metrics(
-          loss=loss,
-          step=step,
-          step_time_delta=step_time,
-      )
-      self._may_update_pbar(
-          self._tqdm_train_metrics,
-          increment_steps=True,
-          step=step,
-          loss=loss,
-          step_time=step_time,
-      )
-      self._buffered_train_metrics = None
-
+    self._write_train_metrics()
     self._save_last_checkpoint()
     self.checkpoint_manager.close()
     self.metrics_logger.close()
@@ -694,7 +723,7 @@ class PeftTrainer:
     logging.info("Running evaluation on train step %d.", self._train_steps)
     eval_iterator = iter(eval_ds)
     with self._switch_mode(metrics_logger.Mode.EVAL):
-      eval_loss, local_eval_steps = 0, 0
+      eval_loss, eval_steps = 0, 0
       while True:
         if self.data_hooks:
           eval_example = self.data_hooks.load_next_eval_batch(self)
@@ -711,19 +740,23 @@ class PeftTrainer:
           self.training_hooks.on_eval_step_start(self)
         loss, aux = eval_step(self.model, eval_example)
         loss = jax.lax.stop_gradient(loss)
-        self._eval_steps += 1
+        self._buffered_eval_metrics = self._buffer_metrics(
+            self._buffered_eval_metrics,
+            loss=loss,
+            step=self._train_steps,
+        )
         self._post_process_eval_step(aux)
         eval_loss += loss
-        local_eval_steps += 1
-      self._log_metrics(eval_loss / local_eval_steps, self._train_steps)
-      self._may_update_pbar(self._tqdm_eval_metrics)
+        eval_steps += 1
 
+      self._write_metrics(self._buffered_eval_metrics)
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
           self._train_steps,
           self.metrics_logger.get_metric("loss", "eval"),
           self.metrics_logger.get_metric("perplexity", "eval"),
       )
+      self._buffered_eval_metrics = None
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
 

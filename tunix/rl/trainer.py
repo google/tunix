@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""RL trainer."""
+"""RL Trainer."""
 
-from collections.abc import Callable
-from typing import Any
+from typing import Any, Callable
 from flax import nnx
+from jax.typing import ArrayLike
 import optax
 from tunix.sft import peft_trainer
 from typing_extensions import override
@@ -39,7 +39,10 @@ class Trainer(peft_trainer.PeftTrainer):
     self.rl_metrics_to_log = {}  # Metric name -> key in aux.
     self.tqdm_metrics_to_display = []
 
-  def with_rl_metrics_to_log(self, rl_metrics_to_log: dict[str, str]) -> None:
+  def with_rl_metrics_to_log(
+      self,
+      rl_metrics_to_log: dict[str, Callable[[ArrayLike], ArrayLike]],
+  ) -> None:
     self.rl_metrics_to_log = rl_metrics_to_log
 
   def with_tqdm_metrics_to_display(
@@ -49,17 +52,31 @@ class Trainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:
-    for metric_name, metric_key in self.rl_metrics_to_log.items():
-      self.metrics_logger.log(
-          metric_name, aux[metric_key], self._mode, self._train_steps
-      )
+    assert self._buffered_train_metrics is not None
+    for metric_name, op in self.rl_metrics_to_log.items():
+      if metric_name not in self._buffered_train_metrics.additional_metrics:
+        self._buffered_train_metrics.additional_metrics[metric_name] = (
+            [aux[metric_name]],
+            op,
+        )
+      else:
+        self._buffered_train_metrics.additional_metrics[metric_name][0].append(
+            aux[metric_name]
+        )
 
   @override
   def _post_process_eval_step(self, aux: Any) -> None:
-    for metric_name, metric_key in self.rl_metrics_to_log.items():
-      self.metrics_logger.log(
-          metric_name, aux[metric_key], self._mode, self._eval_steps
-      )
+    assert self._buffered_eval_metrics is not None
+    for metric_name, op in self.rl_metrics_to_log.items():
+      if metric_name not in self._buffered_eval_metrics.additional_metrics:
+        self._buffered_eval_metrics.additional_metrics[metric_name] = (
+            [aux[metric_name]],
+            op,
+        )
+      else:
+        self._buffered_eval_metrics.additional_metrics[metric_name][0].append(
+            aux[metric_name]
+        )
 
   def _get_additional_tqdm_metrics(self) -> list[str]:
     metrics = set()
@@ -73,11 +90,5 @@ class Trainer(peft_trainer.PeftTrainer):
   @property
   def _tqdm_train_metrics(self) -> list[str]:
     metrics = super()._tqdm_train_metrics
-    metrics.extend(self._get_additional_tqdm_metrics())
-    return metrics
-
-  @property
-  def _tqdm_eval_metrics(self) -> list[str]:
-    metrics = super()._tqdm_eval_metrics
     metrics.extend(self._get_additional_tqdm_metrics())
     return metrics

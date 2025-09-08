@@ -369,15 +369,15 @@ class PeftTrainerTest(parameterized.TestCase):
           trainer.metrics_logger.get_metric('learning_rate', 'train'),
           TEST_LEARNING_RATE,
       )
-      return nnx.state(model, nnx.Param)
+      return nnx.state(model, nnx.Param), trainer
 
     train_ds = dummy_datasets(batch_size=4, repeat=4)
-    params = train(
+    params, trainer = train(
         train_ds,
         gradient_accumulation_steps=None,
         learning_rate_schedule=learning_rate_schedule,
     )
-    params_with_grad_accumulation = train(
+    (params_with_grad_accumulation, grad_accu_trainer) = train(
         dummy_datasets(batch_size=2, repeat=4),
         gradient_accumulation_steps=2,
         learning_rate_schedule=learning_rate_schedule,
@@ -386,6 +386,14 @@ class PeftTrainerTest(parameterized.TestCase):
         functools.partial(tc.assert_close, atol=1e-7, rtol=1e-7),
         params,
         params_with_grad_accumulation,
+    )
+    self.assertEqual(trainer.train_steps, grad_accu_trainer.train_steps)
+    self.assertEqual(trainer.iter_steps * 2, grad_accu_trainer.iter_steps)
+    np.testing.assert_allclose(
+        trainer.metrics_logger.get_metric('loss', 'train'),
+        grad_accu_trainer.metrics_logger.get_metric('loss', 'train'),
+        atol=1e-5,
+        rtol=1e-5,
     )
 
   @mock.patch.object(checkpoint_manager, 'CheckpointManager')

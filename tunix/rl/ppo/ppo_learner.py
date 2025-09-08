@@ -160,7 +160,7 @@ class PpoLearner:
 
     # ===== Configure the metrics logger =====
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
-        {"pg_clipfrac": "pg_clipfrac"}
+        {"pg_clipfrac": np.mean}
     )
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         "score/mean",
@@ -168,9 +168,10 @@ class PpoLearner:
         lambda: "reward_kl_penalty" if self.ppo_config.beta != 0.0 else None,
     ])
 
-    self.rl_cluster.critic_trainer.with_rl_metrics_to_log(
-        {"vpred_mean": "vpred_mean", "vf_clipfrac": "vf_clipfrac"}
-    )
+    self.rl_cluster.critic_trainer.with_rl_metrics_to_log({
+        "vpred_mean": np.mean,
+        "vf_clipfrac": np.mean,
+    })
 
     self._actor_metrics_logger = rl_cluster.actor_trainer.metrics_logger
     self._critic_metrics_logger = rl_cluster.critic_trainer.metrics_logger
@@ -186,7 +187,7 @@ class PpoLearner:
       self._data_shuffle_key = 0
     self._data_shuffle_key = jax.random.PRNGKey(self._data_shuffle_key)
 
-    self._train_steps = 0
+    self._iter_steps = 0
     self._eval_steps = 0
 
     # Sync weights if the actor model and rollout model are not sharing weights.
@@ -207,11 +208,11 @@ class PpoLearner:
         ]
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
-    self._last_train_step = self.rl_cluster.actor_trainer.train_steps
+    self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
   def _get_metric_logging_steps(self, mode: metrics_logger.Mode) -> int:
     return (
-        self._train_steps
+        self._iter_steps
         if mode == metrics_logger.Mode.TRAIN
         else self._eval_steps
     )
@@ -498,15 +499,15 @@ class PpoLearner:
       try:
         while (
             mode == metrics_logger.Mode.TRAIN
-            and self._train_steps < self._last_train_step
+            and self._iter_steps < self._last_iter_step
         ):
           next(iterator)
-          self._train_steps += 1
+          self._iter_steps += 1
         example = next(iterator)
 
         with jax.profiler.StepTraceAnnotation(
             "sampler",
-            step_num=self._train_steps
+            step_num=self._iter_steps
             if mode == metrics_logger.Mode.TRAIN
             else self._eval_steps,
         ):
@@ -515,7 +516,7 @@ class PpoLearner:
           data_queue.put([advantage])
 
         if mode == metrics_logger.Mode.TRAIN:
-          self._train_steps += 1
+          self._iter_steps += 1
         else:
           self._eval_steps += 1
         example_list.append(advantage)
@@ -552,7 +553,7 @@ class PpoLearner:
         )
         # reserve 1 for None
         eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
-        initial_train_steps = self._train_steps
+        initial_steps = self._iter_steps
         future = self.executor.submit(
             self._prepare_data,
             iterator=train_iterator,
@@ -565,7 +566,7 @@ class PpoLearner:
         )
         curr_eval_ds = None
         with jax.profiler.StepTraceAnnotation(
-            "trainer", step_num=initial_train_steps
+            "trainer", step_num=initial_steps
         ):
           while True:
             curr_train_ds = train_data_queue.get(block=True)
@@ -600,16 +601,16 @@ class PpoLearner:
             )  # loop over μ
         # call to throw stop iteration as a signal to break the loop
         future.result()
-        # Sync the train steps with internal trainer, this is based on the
-        # assumption that the trainer internally doesn't reset the train steps.
-        self._train_steps = self.rl_cluster.actor_trainer.train_steps
+        # Sync the iter steps with internal trainer, this is based on the
+        # assumption that the trainer internally doesn't reset the iter steps.
+        self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
         if self.should_sync_weights:
           with jax.profiler.StepTraceAnnotation(
-              "sync_sampler_weights", step_num=initial_train_steps
+              "sync_sampler_weights", step_num=initial_steps
           ):
             self.rl_cluster.sync_weights()
         if (
-            self._train_steps
+            self.rl_cluster.actor_trainer.train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps
         ):
           break

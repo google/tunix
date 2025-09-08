@@ -79,22 +79,15 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           r"layers.\1.mlp.down_proj.kernel",
           ((1, 0), None),
       ),
-      # moe
+      # MoE router/gate
       r"model\.layers\.([0-9]+)\.mlp\.gate\.weight": (
           r"layers.\1.mlp.router.kernel",
           ((1, 0), None),
       ),
-      r"model\.layers\.([0-9]+)\.mlp\.experts\.gate_proj\.weight": (
-          r"layers.\1.mlp.gate_proj",
-          ((0, 2, 1), None),
-      ),
-      r"model\.layers\.([0-9]+)\.mlp\.experts\.up_proj\.weight": (
-          r"layers.\1.mlp.up_proj",
-          ((0, 2, 1), None),
-      ),
-      r"model\.layers\.([0-9]+)\.mlp\.experts\.down_proj\.weight": (
-          r"layers.\1.mlp.down_proj",
-          ((0, 2, 1), None),
+      # MoE experts.
+      r"model\.layers\.([0-9]+)\.mlp\.experts\.([0-9]+)\.(gate|up|down)_proj\.weight": (
+          r"layers.\1.mlp.experts.\2.\3_proj.kernel",
+          ((1, 0), None),
       ),
       # norms
       r"model\.norm\.weight": ("final_norm.w", None),
