@@ -9,7 +9,7 @@ from flax import nnx
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-
+from typing import Callable
 from tunix.models.siglip import model as siglip_lib
 from tunix.models.gemma3 import model as gemma_lib  # or tunix.models.gemma.gemma if you prefer Gemma2
 
@@ -36,15 +36,39 @@ class ShardingConfig:
         act_btd=gcfg.act_btd,
     )
 
+# ---- Add these classmethods on PaLIGemmaConfig ----
 @dataclasses.dataclass(frozen=True)
 class PaLIGemmaConfig:
   vision: siglip_lib.SigLIPConfig
   text: gemma_lib.Gemma3Config
-  max_vision_tokens: int = 256  # cap to keep seq length sane
+  max_vision_tokens: int = 256
   shd: ShardingConfig = None
 
   def with_sharding(self):
     return dataclasses.replace(self, shd=ShardingConfig.from_gemma_sharding(self.text.shd_config))
+
+  # NEW: build from explicit component configs you already have
+  @classmethod
+  def from_components(cls, vision_cfg, text_cfg, max_vision_tokens=256):
+    return cls(vision=vision_cfg, text=text_cfg, max_vision_tokens=max_vision_tokens).with_sharding()
+
+  # NEW: a simple preset factory so your script can call a single line
+  @classmethod
+  def from_presets(
+      cls,
+      vision_factory: Callable[[], siglip_lib.SigLIPConfig] = siglip_lib.SigLIPConfig.so400m_patch14_384,
+      text_factory: Callable[[], gemma_lib.Gemma3Config] = None,
+      max_vision_tokens: int = 256,
+  ) -> "PaLIGemmaConfig":
+    """
+    vision_factory: a zero-arg callable returning SigLIPConfig (defaults to so400m_patch14_384)
+    text_factory: a zero-arg callable returning Gemma3Config (must be provided)
+    """
+    if text_factory is None:
+      raise ValueError("You must pass a Gemma3 text_factory, e.g., gemma_lib.Gemma3Config.gemma3_4b_it")
+    vcfg = vision_factory()
+    tcfg = text_factory()
+    return cls.from_components(vcfg, tcfg, max_vision_tokens=max_vision_tokens)
 
 class VisionProjector(nnx.Module):
   """Project SigLIP tokens D_v -> D_text."""
