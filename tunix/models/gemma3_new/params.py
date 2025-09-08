@@ -80,6 +80,13 @@ def _get_key_and_transform_mapping(cfg: model_lib.Gemma3Config):
         r"model\.layers\.([0-9]+)\.self_attn\.qkv_proj\.weight": (
             r"unused.layers.\1.attn.qkv_proj.weight", None
         ),
+        r"model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
+            r"layers.\1.pre_ffw_norm.scale", None
+        ),
+        r"model\.layers\.([0-9]+)\.(pre_ffn_layernorm|pre_ffw_layernorm)\.weight": (
+            r"layers.\1.pre_ffw_norm.scale", None
+        ),
+
     }
 
 
