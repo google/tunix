@@ -1,0 +1,8 @@
+{"image": "./dummy_vqa/images/img1.png", "question": "How many red squares are in the image?", "answer": "1"}
+{"image": "./dummy_vqa/images/img2.png", "question": "How many red squares are in the image?", "answer": "2"}
+{"image": "./dummy_vqa/images/img3.png", "question": "How many blue circles are in the image?", "answer": "3"}
+{"image": "./dummy_vqa/images/img4.png", "question": "How many blue circles are in the image?", "answer": "1"}
+{"image": "./dummy_vqa/images/img5.png", "question": "How many green triangles are there?", "answer": "2"}
+{"image": "./dummy_vqa/images/img6.png", "question": "How many green triangles are there?", "answer": "3"}
+{"image": "./dummy_vqa/images/img7.png", "question": "Count the red squares.", "answer": "3"}
+{"image": "./dummy_vqa/images/img8.png", "question": "Count the blue circles.", "answer": "2"}
