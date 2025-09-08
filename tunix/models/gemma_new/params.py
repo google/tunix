@@ -9,50 +9,69 @@ from tunix.models import safetensors_loader
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.TransformerConfig):
-   return {
-       r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
-       
-       r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
-           r"tmp.layers.\1.attn.q",
-           ((1, 0), (cfg.num_heads, cfg.embed_dim, cfg.head_dim)),
-       ),
-       r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
-           r"tmp.layers.\1.attn.k",
-           ((1, 0), (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim)),
-       ),
-       r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
-           r"tmp.layers.\1.attn.v",
-           ((1, 0), (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim)),
-       ),
-       r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
-           r"layers.\1.attn.attn_vec_einsum.w",
-           ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
-       ),
-       
-       r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
-           r"layers.\1.mlp.gate_proj.kernel", ((1, 0), None)
-       ),
-       r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
-           r"layers.\1.mlp.up_proj.kernel", ((1, 0), None)
-       ),
-       r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
-           r"layers.\1.mlp.down_proj.kernel", ((1, 0), None)
-       ),
-       
-       r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (
-           r"layers.\1.pre_attention_norm.scale", None
-       ),
-       r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
-           r"layers.\1.post_attn_norm.scale", None
-       ),
-       r"model\.norm\.weight": ("final_norm.scale", None),
-       
-       r"lm_head\.weight": ("unused.lm_head.weight", None),
-       r"lm_head\.bias": ("unused.lm_head.bias", None),
-       r"model\.layers\.([0-9]+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.bias": (
-           r"unused.layers.\1.attn.\2.bias", None
-       ),
-   }
+    mapping = {
+        r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
+        
+        # Attention projections
+        r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+            r"tmp.layers.\1.attn.q",
+            ((1, 0), (cfg.num_heads, cfg.embed_dim, cfg.head_dim)),
+        ),
+        r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+            r"tmp.layers.\1.attn.k",
+            ((1, 0), (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim)),
+        ),
+        r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+            r"tmp.layers.\1.attn.v",
+            ((1, 0), (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim)),
+        ),
+        r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
+            r"layers.\1.attn.attn_vec_einsum.w",
+            ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
+        ),
+        
+        # MLP
+        r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
+            r"layers.\1.mlp.gate_proj.kernel", ((1, 0), None)
+        ),
+        r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
+            r"layers.\1.mlp.up_proj.kernel", ((1, 0), None)
+        ),
+        r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
+            r"layers.\1.mlp.down_proj.kernel", ((1, 0), None)
+        ),
+        
+        # Layer norms
+        r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (
+            r"layers.\1.pre_attention_norm.scale", None
+        ),
+        r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
+            r"layers.\1.post_attn_norm.scale", None
+        ),
+        
+        # Gemma2 特有的额外 norm（如果存在）
+        r"model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
+            r"layers.\1.pre_ffw_norm.scale", None
+        ),
+        r"model\.layers\.([0-9]+)\.post_feedforward_layernorm\.weight": (
+            r"layers.\1.post_ffw_norm.scale", None
+        ),
+        
+        # Final norm
+        r"model\.norm\.weight": ("final_norm.scale", None),
+        
+        # 忽略的权重 - 使用更宽泛的匹配
+        r"lm_head\.weight": ("unused.lm_head.weight", None),
+        r"lm_head\.bias": ("unused.lm_head.bias", None),
+        
+        # 可能存在的其他权重
+        r"model\.layers\.([0-9]+)\.self_attn\.rotary_emb\..*": (
+            r"unused.rotary.\1", None
+        ),
+        r".*\.bias": (r"unused.bias", None),  # 捕获所有 bias
+    }
+    
+    return mapping
 
 
 def _make_preprocess_fn(cfg: model_lib.TransformerConfig):
