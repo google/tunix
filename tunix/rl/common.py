@@ -100,57 +100,47 @@ class TrainExample:
 
 
 def compute_kl_divergence(
-    per_token_logps: jax.Array,
-    ref_per_token_logps: jax.Array,
-    method: str | None = None,
+    per_token_logps: jax.Array, 
+    ref_per_token_logps: jax.Array, 
+    method: str | None = None
 ) -> jax.Array:
-  """Compute per-token KL-style penalty between trained and reference policy.
+  """Compute per token KL divergence between trained and reference policy.
+  kl: Unbiased, high-variance estimator - simple forward KL: logp - ref_logp
+  mse_kl: Biased, low-variance estimator - squared log-difference: 0.5 * (logp - ref_logp)^2
+  low_var_kl: Unbiased, low-variance estimator - J. Schulman low-variance approx: (r - 1) - log r, where r = q/p = exp(ref_logp - logp)
 
-  Supports multiple approximations (aligned with TRL):
-  - "kl"/"k1": forward KL approx → (logp - ref_logp)
-  - "abs": absolute difference → |logp - ref_logp|
-  - "mse"/"k2": 0.5 * (logp - ref_logp)^2
-  - "low_var_kl"/"k3": J. Schulman low-variance approx
+  references:
+  J. Schulman KL approx: http://joschu.net/blog/kl-approx.html
+  Verl code: https://github.com/volcengine/verl/blob/f9035b70166b102de5e84c1819e2172b64a0ae30/verl/trainer/ppo/core_algos.py#L1323-L1358
 
   Args:
-    per_token_logps: Per-token log probabilities from the trained policy.
-    ref_per_token_logps: Per-token log probabilities from the reference policy.
-    method: KL penalty method. If None, defaults to "k3" (low-var KL).
+    per_token_logps: Per token log probabilities from the trained policy.
+    ref_per_token_logps: Per token log probabilities from the reference policy.
+    method: KL penalty method. If None, defaults to "low_var_kl"..
 
   Returns:
-    Per-token penalty array with same shape as inputs.
-
-  reference: https://github.com/volcengine/verl/blob/f9035b70166b102de5e84c1819e2172b64a0ae30/verl/trainer/ppo/core_algos.py#L1323-L1358
+    KL divergence.
   """
-  if method is None:
-    method = "k3"
-
   delta = per_token_logps - ref_per_token_logps
 
-  if method in ("kl", "k1"):
+  if method == "kl":
+    # Unbiased but high variance.
     return delta
 
-  if method == "abs":
-    return jnp.abs(delta)
-
-  if method in ("mse", "k2"):
+  if method == "mse_kl":
+    # Biased but low variance.
     return 0.5 * jnp.square(delta)
 
-  if method in ("low_var_kl", "k3"):
-    # J. Schulman. Approximating KL divergence, 2020.
-    # http://joschu.net/blog/kl-approx.html
-    kl = ref_per_token_logps - per_token_logps
-    kl = jnp.clip(kl, a_min=-20.0, a_max=20.0)
-    ratio = jnp.exp(kl)
-    kld = ratio - kl - 1.0
-    return jnp.clip(kld, a_min=-10.0, a_max=10.0)
+  if method == "low_var_kl":
+    # Default to low-variance, unbiased estimator.
+    # (r - 1) - log(r) = exp(ref_logp - logp) - (ref_logp - logp) - 1
+    return jnp.exp(ref_per_token_logps - per_token_logps) \
+           - (ref_per_token_logps - per_token_logps) - 1
+  
+  # Default to low-variance, unbiased estimator.
+  return jnp.exp(ref_per_token_logps - per_token_logps) \
+           - (ref_per_token_logps - per_token_logps) - 1
 
-  # Fallback to low-var KL if unknown method
-  kl = ref_per_token_logps - per_token_logps
-  kl = jnp.clip(kl, a_min=-20.0, a_max=20.0)
-  ratio = jnp.exp(kl)
-  kld = ratio - kl - 1.0
-  return jnp.clip(kld, a_min=-10.0, a_max=10.0)
 
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
