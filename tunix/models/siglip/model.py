@@ -11,7 +11,7 @@ import jax.numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-
+import dataclasses
 
 def shard(x: jnp.ndarray, s: Tuple[str | None, ...]):
   """Apply named sharding if a mesh is present; no-op on CPU."""
@@ -56,14 +56,14 @@ class ShardingConfig:
 
 @dataclasses.dataclass(frozen=True)
 class SigLIPConfig:
-  """Configuration for SigLIP encoder (ViT-style)."""
-
   image_size: int = 224
   patch_size: int = 16
   embed_dim: int = 768
   depth: int = 12
   num_heads: int = 12
   mlp_ratio: float = 4.0
+  # NEW: explicit hidden size if provided
+  mlp_hidden_dim: int | None = None
   drop_rate: float = 0.0
   attn_drop_rate: float = 0.0
   use_cls_token: bool = False
@@ -88,7 +88,8 @@ class SigLIPConfig:
         embed_dim=1152,
         depth=27,
         num_heads=16,
-        mlp_ratio=3.0,
+        mlp_ratio=3.0,            # keep whatever; it’ll be ignored
+        mlp_hidden_dim=4304,      # THIS drives the shapes
         use_cls_token=False,
         use_abs_pos_emb=True,
         shd_config=ShardingConfig.get_default_sharding(),
@@ -130,7 +131,7 @@ class MLP(nnx.Module):
 
   def __init__(self, cfg: SigLIPConfig, *, rngs: nnx.Rngs):
     self.cfg = cfg
-    hidden = int(cfg.embed_dim * cfg.mlp_ratio)
+    hidden = cfg.mlp_hidden_dim or int(cfg.embed_dim * cfg.mlp_ratio)
     self.fc1 = nnx.Linear(
         in_features=cfg.embed_dim,
         out_features=hidden,

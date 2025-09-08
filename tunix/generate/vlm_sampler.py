@@ -44,12 +44,15 @@ class VLMSampler(BaseSampler):
     return nnx.state(self._transformer)
 
   def pad_id(self) -> int:
-    return int(self._tokenizer.pad_id)
+    # was: return int(self._tokenizer.pad_id)
+    return int(self._tokenizer.pad_id())
 
   def eos_id(self) -> int:
-    return int(self._tokenizer.eos_id)
+    # was: return int(self._tokenizer.eos_id)
+    return int(self._tokenizer.eos_id())
 
   def tokenize(self, input_string: str) -> jax.Array:
+    # (this one is already a method call in your code, but keep as:)
     ids = self._tokenizer.encode(input_string)
     return jnp.asarray(ids, dtype=jnp.int32)
 
@@ -77,7 +80,7 @@ class VLMSampler(BaseSampler):
         ],
         dtype=jnp.int32,
     )
-    return toks, jnp.asarray(token_lists, dtype=object)  # ragged reference
+    return toks, token_lists  # ragged reference
 
   def _sample_logits(self, logits, temperature, top_k, top_p, rng):
     # logits: [B, V]
@@ -137,13 +140,9 @@ class VLMSampler(BaseSampler):
     assert multi_sampling == 1, "multi_sampling not implemented in VLMSampler v1"
 
     # preprocess images to SigLIP size (+ normalize)
-    if images.dtype != jnp.float32 and images.dtype != jnp.uint8:
-      raise ValueError("images must be uint8 or float32")
-    if images.dtype == jnp.uint8:
-      imgs = images.astype(jnp.float32)
-    else:
-      imgs = images
-    imgs = siglip_pp.preprocess(imgs, self._image_size)  # [B,S,S,3]
+    if images.dtype != jnp.uint8:
+        images = images.astype(jnp.uint8)
+    imgs = siglip_pp.preprocess(images, self._image_size)  # [B,S,S,3]
 
     # tokenize batch
     prompt_tokens, _ragged = self._prep_batch(input_strings, imgs, max_prompt_length)
