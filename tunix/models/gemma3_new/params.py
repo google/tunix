@@ -80,8 +80,6 @@ def _get_key_and_transform_mapping(cfg: model_lib.Gemma3Config):
         r"model\.layers\.([0-9]+)\.self_attn\.qkv_proj\.weight": (
             r"unused.layers.\1.attn.qkv_proj.weight", None
         ),
-
-        r".+": ("unused.unmatched_catchall", None),
     }
 
 
