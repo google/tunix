@@ -42,6 +42,11 @@ def _get_step(kwargs: dict[str, str | int]) -> int:
   return _DEFAULT_STEP if step is None else int(step)
 
 
+def _preprocess_event_name(event_name: str) -> str:
+  """Preprocesses the event name before logging."""
+  return event_name.lstrip("/")  # Remove leading slashes
+
+
 def log_to_tensorboard(
     summary_writer: writer.SummaryWriter,
     flush_every_n_steps: int,
@@ -64,6 +69,7 @@ def log_to_tensorboard(
     ValueError: If 'step' is not provided in `kwargs`.
   """
   current_step = _get_step(kwargs)
+  event = _preprocess_event_name(event)
   summary_writer.add_scalar(event, scalar_value, current_step)
   if current_step % flush_every_n_steps == 0:
     summary_writer.flush()
@@ -87,6 +93,7 @@ def log_to_wandb(
   current_step = _get_step(kwargs)
 
   if wandb is not None:
+    event = _preprocess_event_name(event)
     wandb.log({event: scalar_value}, step=current_step)
 
 
