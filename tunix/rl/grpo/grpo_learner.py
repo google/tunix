@@ -30,7 +30,6 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils
 from tunix.rl.grpo import grpo_helpers
 from tunix.rl.queue import data_queue as queue_lib
-from tunix.sft import metrics_logger
 
 _TrainingInputT = Dict[str, List[str] | ArrayLike]
 
@@ -100,6 +99,9 @@ class GrpoLearner:
       rl_cluster: rl_cluster_lib.RLCluster,
       reward_fns: RewardFn | List[RewardFn],
       grpo_config: GrpoConfig,
+      metric_fns: (
+          Sequence[Callable[..., rl_cluster_lib.MetricsT]] | None
+      ) = None,
   ):
     """Initializes the `GrpoTrainer`.
 
@@ -111,6 +113,13 @@ class GrpoLearner:
         list of float rewards.
       grpo_config: An instance of `GrpoConfig` containing all GRPO specific
         parameters.
+      metric_fns: A sequence of callables that compute metrics for the
+        completions. Each callable should accept `prompts`, `completions`,
+        `rewards`, `advantages` and optional keyword arguments, and return a
+        dictionary of metric names to tuples of (metric_value, aggregation_fn):
+        >>> def metric_fn(prompts, completions, rewards, advantages, **kargs):
+        ...    return { ...        "prompt_min_len": (min(len(p) for p in
+        prompts), np.min), ...        ... ...    }
     """
     assert grpo_config.loss_algo in ["grpo", "gspo-token"], (
         "loss_algo should be either grpo or gspo-token. Received: "
@@ -121,6 +130,7 @@ class GrpoLearner:
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
+    self.metric_fns = metric_fns or []
 
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
@@ -150,7 +160,11 @@ class GrpoLearner:
     ])
     self.rl_cluster.actor_trainer.is_managed_externally = True
 
-    self._metrics_logger = self.rl_cluster.actor_trainer.metrics_logger
+    # adjust global steps based on the number of iterations.
+    self.rl_cluster.global_steps = (
+        self.rl_cluster.actor_trainer.train_steps
+        // self.grpo_config.num_iterations
+    )
 
     self.grad_acc_steps = (
         self.rl_cluster.cluster_config.training_config.get_with_default(
@@ -181,17 +195,10 @@ class GrpoLearner:
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
-  def _get_metric_logging_steps(self, mode: metrics_logger.Mode) -> int:
-    return (
-        self._iter_steps
-        if mode == metrics_logger.Mode.TRAIN
-        else self._eval_steps
-    )
-
   def _generate_and_compute_advantage(
       self,
       training_input: _TrainingInputT,
-      mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
   ) -> TrainExample:
     """Generates text completions and computes the advantages for GRPO training.
 
@@ -254,25 +261,32 @@ class GrpoLearner:
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
-    steps = self._get_metric_logging_steps(mode)
-    self._metrics_logger.log(
-        "completions/mean_length",
-        np.mean(agg_completion_mask),
-        mode,
-        steps,
+    self.rl_cluster.buffer_metrics(
+        {
+            "completions/mean_length": (
+                np.mean(agg_completion_mask),
+                np.mean,
+            ),
+            "completions/max_length": (
+                np.max(agg_completion_mask),
+                np.max,
+            ),
+            "completions/min_length": (
+                np.min(agg_completion_mask),
+                np.min,
+            ),
+        },
+        mode=mode,
     )
-    self._metrics_logger.log(
-        "completions/max_length",
-        np.max(agg_completion_mask),
-        mode,
-        steps,
-    )
-    self._metrics_logger.log(
-        "completions/min_length",
-        np.min(agg_completion_mask),
-        mode,
-        steps,
-    )
+    for m_fn in self.metric_fns:
+      user_defined_metric = m_fn(
+          prompts=training_input["prompts"],
+          completions=completion_output.text,
+          advances=advantages,
+          rewards=rewards,
+          **{k: v for k, v in training_input.items() if k != "prompts"},
+      )
+      self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
 
     return TrainExample(
         prompt_ids=prompt_ids,
@@ -288,7 +302,7 @@ class GrpoLearner:
       self,
       prompts: List[str],
       completions: List[str],
-      mode: metrics_logger.Mode,
+      mode: rl_cluster_lib.Mode,
       **kargs,
   ):
     """Computes the rewards for completions using the provided reward functions.
@@ -305,27 +319,53 @@ class GrpoLearner:
       reward functions.
     """
     rewards = jnp.zeros((len(prompts), len(self.reward_fns)))
-    steps = self._get_metric_logging_steps(mode)
     for i, reward_fn in enumerate(self.reward_fns):
       r = reward_fn(prompts=prompts, completions=completions, **kargs)
       r = jnp.array(r)
       rewards = rewards.at[:, i].set(r)
-
-      self._metrics_logger.log(
-          f"rewards/{reward_fn.__name__}",
-          np.mean(r),
-          mode,
-          steps,
+      self.rl_cluster.buffer_metrics(
+          {
+              f"rewards/{reward_fn.__name__}": (
+                  np.mean(r),
+                  np.mean,
+              ),
+          },
+          mode=mode,
       )
 
     rewards = jnp.nansum(rewards, axis=1)
-
-    self._metrics_logger.log(
-        "rewards/overall",
-        np.mean(rewards),
-        mode,
-        steps,
+    self.rl_cluster.buffer_metrics(
+        {
+            "rewards/overall": (
+                np.mean(rewards),
+                np.mean,
+            ),
+        },
+        mode=mode,
     )
+    self.rl_cluster.buffer_metrics(
+        {
+            "rewards/min": (
+                np.min(rewards),
+                np.min,
+            ),
+        },
+        mode=mode,
+    )
+    for p, c in zip(prompts, completions):
+      self.rl_cluster.buffer_metrics(
+          {
+              "prompts": (
+                  p,
+                  None,
+              ),
+              "completions": (
+                  c,
+                  None,
+              ),
+          },
+          mode=mode,
+      )
 
     return rewards
 
@@ -339,7 +379,7 @@ class GrpoLearner:
           list[TrainExample] | common.RepeatIterable | None
       ],
       async_loading: bool = False,
-      mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
   ) -> None:
     """Prepares the data for training.
 
@@ -377,7 +417,7 @@ class GrpoLearner:
     try:
       while True:
         while (
-            mode == metrics_logger.Mode.TRAIN
+            mode == rl_cluster_lib.Mode.TRAIN
             and self._iter_steps < self._last_iter_step
         ):  # fast forward the iterator if loading from a previous checkpoint.
           next(iterator)
@@ -391,14 +431,14 @@ class GrpoLearner:
         with jax.profiler.StepTraceAnnotation(
             "sampler",
             step_num=self._iter_steps
-            if mode == metrics_logger.Mode.TRAIN
+            if mode == rl_cluster_lib.Mode.TRAIN
             else self._eval_steps,
         ):
           advantage = self._generate_and_compute_advantage(example, mode)
         if async_loading:
           data_queue.put([advantage])
 
-        if mode == metrics_logger.Mode.TRAIN:
+        if mode == rl_cluster_lib.Mode.TRAIN:
           self._iter_steps += 1
         else:
           self._eval_steps += 1
@@ -479,7 +519,7 @@ class GrpoLearner:
             batch_repeat=self.grpo_config.num_iterations,
             data_queue=train_data_queue,
             async_loading=self.can_enable_async_rollout,
-            mode=metrics_logger.Mode.TRAIN,
+            mode=rl_cluster_lib.Mode.TRAIN,
         )
         curr_eval_ds = None
         with jax.profiler.StepTraceAnnotation(
@@ -503,7 +543,7 @@ class GrpoLearner:
                   batch_repeat=1,
                   data_queue=eval_data_queue,
                   async_loading=False,
-                  mode=metrics_logger.Mode.EVAL,
+                  mode=rl_cluster_lib.Mode.EVAL,
               )
               curr_eval_ds = eval_data_queue.get(block=True)
             self.rl_cluster.update_actor(
@@ -523,6 +563,10 @@ class GrpoLearner:
               "sync_sampler_weights", step_num=initial_steps
           ):
             self.rl_cluster.sync_weights()
+        else:
+          self.rl_cluster.global_steps += (
+              1  # manually increment the global steps.
+          )
         if (
             self.rl_cluster.actor_trainer.train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps
@@ -530,7 +574,7 @@ class GrpoLearner:
           break
       except StopIteration:
         break
-    self.rl_cluster.actor_trainer.close()
+    self.rl_cluster.close()
 
 
 def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):

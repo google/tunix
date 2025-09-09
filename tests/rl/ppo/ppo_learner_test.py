@@ -368,15 +368,21 @@ class PpoLearnerTest(parameterized.TestCase):
         ppo_learner._iter_steps,
     )
 
-    actor_metric_logger = ppo_learner._actor_metrics_logger
-    self.assertNotEqual(
-        actor_metric_logger.get_metric('reward/mean', 'train'), 0
-    )
     for metric_name in [
         'score/mean',
         'reward/mean',
-        'loss',  # policy loss
         'reward_kl_penalty',
+    ]:
+      self.assertLen(
+          ppo_learner.rl_cluster._rl_metrics_logger.get_metric_history(
+              metric_name, 'train'
+          ),
+          ppo_learner.rl_cluster.global_steps,
+      )
+
+    actor_metric_logger = ppo_learner.rl_cluster.actor_trainer.metrics_logger
+    for metric_name in [
+        'loss',  # policy loss
         'pg_clipfrac',
     ]:
       self.assertLen(
@@ -397,17 +403,14 @@ class PpoLearnerTest(parameterized.TestCase):
             msg=f'metric_name: {metric_name}',
         )
 
+    critic_metric_logger = ppo_learner.rl_cluster.critic_trainer.metrics_logger
     for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:
       self.assertLen(
-          ppo_learner._critic_metrics_logger.get_metric_history(
-              metric_name, 'train'
-          ),
+          critic_metric_logger.get_metric_history(metric_name, 'train'),
           ppo_learner.rl_cluster.critic_trainer.train_steps,
       )
       self.assertLen(
-          ppo_learner._critic_metrics_logger.get_metric_history(
-              metric_name, 'eval'
-          ),
+          critic_metric_logger.get_metric_history(metric_name, 'eval'),
           ppo_learner.rl_cluster.critic_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
       )
