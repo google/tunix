@@ -698,7 +698,7 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
-class Gemma3(nnx.Module):
+class Gemma3(nnx.Module, pytree=False):
   """Gemma transformer."""
 
   def __init__(self, config: Gemma3Config, *, rngs: nnx.Rngs):
@@ -783,6 +783,27 @@ class Gemma3(nnx.Module):
     logits = self.embedder.decode(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
+
+  def get_model_input(self):
+    """Returns a dummy model input for the transformer.
+
+    This dummy input has a batch size compatible with FSDP sharding on a
+    2-device axis.
+    """
+    dummy_batch_size = 2
+    dummy_seq_len = 1
+    return {
+        'last_tokens': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
 
   @property
   def embed_dim(self) -> int:

@@ -16,46 +16,94 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
+import jax.numpy as jnp
 import numpy as np
 from tunix.rl.ppo import ppo_helpers
 
 
 def _ref_compute_gae_advantages(
-    rewards: jax.Array,
-    values: jax.Array,
-    gamma: float,
-    gae_lambda: float,
-    seq_len: int,
-) -> jax.Array:
+    token_level_rewards,
+    values,
+    response_mask,
+    gamma,
+    lam,
+):
+  """Verl implementation of GAE advantages computation."""
+
+  def masked_sum(values, mask, axis=None):
+    return (values * mask).sum(axis=axis)
+
+  def masked_mean(values, mask, axis=None):
+    s = masked_sum(values, mask, axis)
+    return s / (mask.sum(axis=axis) + 1e-8)
+
+  def masked_var(values, mask):
+    mean = masked_mean(values, mask)
+    centered_values = values - mean
+    variance = masked_mean(centered_values**2, mask)
+    mask_sum = mask.sum()
+
+    bessel_correction = mask_sum / (mask_sum - 1)
+    variance = variance * bessel_correction
+    return variance
+
+  def masked_whiten(values, mask):
+    mean, var = masked_mean(values, mask), masked_var(values, mask)
+    whitened = (values - mean) / np.sqrt(var + 1e-8)
+    return whitened
+
+  nextvalues = 0
   lastgaelam = 0
   advantages_reversed = []
-  for t in reversed(range(seq_len)):
-    nextvalues = values[:, t + 1] if t < seq_len - 1 else 0.0
-    delta = rewards[:, t] + gamma * nextvalues - values[:, t]
-    lastgaelam = delta + gamma * gae_lambda * lastgaelam
-    advantages_reversed.append(lastgaelam)
+  gen_len = token_level_rewards.shape[-1]
 
+  for t in reversed(range(gen_len)):
+    delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
+    lastgaelam_ = delta + gamma * lam * lastgaelam
+
+    # skip values and TD-error on observation tokens
+    nextvalues = (
+        values[:, t] * response_mask[:, t]
+        + (1 - response_mask[:, t]) * nextvalues
+    )
+    lastgaelam = (
+        lastgaelam_ * response_mask[:, t]
+        + (1 - response_mask[:, t]) * lastgaelam
+    )
+
+    advantages_reversed.append(lastgaelam)
   advantages = np.stack(advantages_reversed[::-1], axis=1)
-  return advantages
+
+  returns = advantages + values
+  advantages = masked_whiten(advantages, response_mask)
+  return advantages, returns
 
 
 class PpoHelpersTest(parameterized.TestCase):
 
   def test_compute_gae_advantages(self):
-    bsz, seq_len = 2, 4
+    bsz, seq_len = 2, 10
     rewards = jax.random.uniform(jax.random.PRNGKey(0), (bsz, seq_len))
     values = jax.random.uniform(jax.random.PRNGKey(1), (bsz, seq_len))
-
-    advantages, _ = ppo_helpers.compute_gae_advantages(
-        rewards, values, gamma=0.9, gae_lambda=0.7
+    response_mask = jnp.array(
+        [[1, 1, 1, 1, 1, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]]
     )
-    expected_advantages = _ref_compute_gae_advantages(
-        rewards, values, gamma=0.9, gae_lambda=0.7, seq_len=seq_len
+
+    advantages, returns = ppo_helpers.compute_gae_advantages(
+        np.array(rewards),
+        np.array(values),
+        np.array(response_mask),
+        gamma=0.9,
+        gae_lambda=0.7,
+    )
+    expected_advantages, expected_returns = _ref_compute_gae_advantages(
+        rewards, values, response_mask, gamma=0.9, lam=0.7
     )
 
     np.testing.assert_allclose(
         advantages, expected_advantages, rtol=1e-5, atol=1e-5
     )
+    np.testing.assert_allclose(returns, expected_returns, rtol=1e-5, atol=1e-5)
 
   @parameterized.named_parameters(
       dict(
