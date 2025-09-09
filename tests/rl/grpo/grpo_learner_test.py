@@ -16,6 +16,7 @@ import itertools
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
+import flax
 from flax import nnx
 from flax.nnx import filterlib
 from grain import python as grain
@@ -82,6 +83,9 @@ class GrpoLearnerTest(parameterized.TestCase):
     self.num_cpus = 2
     chex.set_n_cpu_devices(self.num_cpus)
     assert len(jax.devices()) == self.num_cpus
+    self.mesh = jax.make_mesh(((1, 1)), ('fsdp', 'tp'))
+    if hasattr(flax.config, 'flax_always_shard_variable'):
+      flax.config.update('flax_always_shard_variable', False)
 
   def test_iterator(self):
 

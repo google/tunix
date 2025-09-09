@@ -14,6 +14,7 @@
 
 from absl.testing import absltest
 import chex
+import flax
 from flax import nnx
 import jax
 import numpy as np
@@ -33,6 +34,8 @@ class RlClusterTest(absltest.TestCase):
     self.num_cpus = 4
     chex.set_n_cpu_devices(self.num_cpus)
     assert len(jax.devices()) == self.num_cpus
+    if hasattr(flax.config, 'flax_always_shard_variable'):
+      flax.config.update('flax_always_shard_variable', False)
 
   def test_model_loading_with_resharding(self):
     actor_mesh = Mesh(
