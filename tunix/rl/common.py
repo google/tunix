@@ -106,7 +106,7 @@ def compute_kl_divergence(
 ) -> jax.Array:
   """Compute per token KL divergence between trained and reference policy.
 
-  Based of `method`, we compute one of three kinds of KL divergence:
+  Based on `method`, we compute one of three kinds of KL divergence:
   "kl": Unbiased, high-variance estimator. Simple Forward KL: `logp - ref_logp`
   "mse_kl": Biased, low-variance estimator. Squared log-difference: `0.5 * (logp - ref_logp)^2`
   "low_var_kl": Unbiased, low-variance estimator. J. Schulman low-variance approx: `(r - 1) - log r`, where `r = q/p = exp(ref_logp - logp)`
@@ -191,11 +191,12 @@ def process_ids(
 
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
   prompt_mask = prompt_tokens != pad_id
+
   if completion_mask is None:
     completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
   else:
-    # Normalise dtype/values to int32 {0,1}
-    completion_mask = (completion_mask > 0).astype(jnp.int32)
+    completion_mask = completion_mask
+
   prompt_completion_mask = jnp.concatenate(
       [prompt_mask, completion_mask], axis=-1
   )
@@ -205,63 +206,40 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask
 
 
-@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"))
 def compute_per_token_logps(
     model: nnx.Module,
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
-    stop_gradient: bool = True,
     completion_mask: jax.Array | None = None,
-) -> jax.Array:
+    stop_gradient: bool = True,
+    return_logits: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
   prompt_completion_ids, positions, attn_mask = process_ids(
       prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
-  per_token_logps = get_per_token_logps(
+  per_token = get_per_token_logps(
       model,
       input_tokens=prompt_completion_ids,
       positions=positions,
       attn_mask=attn_mask,
       logits_to_keep=completion_tokens.shape[1],
+      return_logits=return_logits,
   )
-  if stop_gradient:
-    per_token_logps = jax.lax.stop_gradient(per_token_logps)
-  return per_token_logps
-
-
-@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
-def compute_per_token_logps_and_logits(
-    model: nnx.Module,
-    prompt_tokens: jax.Array,
-    completion_tokens: jax.Array,
-    pad_id: int,
-    eos_id: int,
-    stop_gradient: bool = True,
-    completion_mask: jax.Array | None = None,
-) -> tuple[jax.Array, jax.Array]:
-  """Computes per-token log probabilities and returns the logits slice.
-
-  Returns:
-    per_token_logps: [B, T]
-    logits_slice:    [B, T, V]
-  """
-  prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
-  )
-  per_token_logps, logits_slice = get_per_token_logps(
-      model,
-      input_tokens=prompt_completion_ids,
-      positions=positions,
-      attn_mask=attn_mask,
-      logits_to_keep=completion_tokens.shape[1],
-      return_logits=True,
-  )
-  if stop_gradient:
-    per_token_logps = jax.lax.stop_gradient(per_token_logps)
-    logits_slice = jax.lax.stop_gradient(logits_slice)
-  return per_token_logps, logits_slice
+  if return_logits:
+    per_token_logps, logits_slice = per_token
+    if stop_gradient:
+      per_token_logps = jax.lax.stop_gradient(per_token_logps)
+      logits_slice = jax.lax.stop_gradient(logits_slice)
+    return per_token_logps, logits_slice
+  else:
+    per_token_logps = per_token
+    if stop_gradient:
+      per_token_logps = jax.lax.stop_gradient(per_token_logps)
+    return per_token_logps
 
 
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
@@ -271,8 +249,8 @@ def compute_score(
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
-    stop_gradient: bool = True,
     completion_mask: jax.Array | None = None,
+    stop_gradient: bool = True,
 ):
   """Computes reward using the provided model."""
   prompt_completion_ids, positions, attn_mask = process_ids(
