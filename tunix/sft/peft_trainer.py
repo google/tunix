@@ -501,7 +501,6 @@ class PeftTrainer:
     self._write_metrics(self._prev_buffered_train_metrics)
     self._may_update_pbar(
         self._tqdm_train_metrics,
-        increment_steps=True,
         step=self._prev_buffered_train_metrics.step,
         loss=self._prev_buffered_train_metrics.loss,
         step_time=self._prev_buffered_train_metrics.step_time_delta,
@@ -539,7 +538,6 @@ class PeftTrainer:
   def _may_update_pbar(
       self,
       metrics: list[str],
-      increment_steps: bool = False,
       step: int | None = None,
       loss: ArrayLike | None = None,
       step_time: float | None = None,
@@ -547,8 +545,7 @@ class PeftTrainer:
     """Updates the progress bar with the given metrics if available."""
     if self._pbar is not None:
       self._pbar.update_metrics(metrics, self._mode, ndigits=3)
-      if increment_steps:
-        self._pbar.update()
+      self._pbar.update()
 
     if self.training_hooks and self._mode == metrics_logger.Mode.TRAIN:
       self.training_hooks.on_train_step_end(self, step, loss, step_time)
