@@ -26,6 +26,11 @@ from tunix.tests import test_common as tc
 
 class SamplerTest(parameterized.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    self.mesh = jax.make_mesh(((1, 1)), ('fsdp', 'tp'))
+    self.enter_context(jax.set_mesh(self.mesh))
+
   def assertReasonableTensor(self, array, expected_shape=None):
     self.assertIsNotNone(array)
     if expected_shape is not None:

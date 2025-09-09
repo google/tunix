@@ -20,6 +20,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
+import flax
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -84,6 +85,8 @@ class PeftTrainerTest(parameterized.TestCase):
     self.num_cpus = 4
     chex.set_n_cpu_devices(self.num_cpus)
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
+    if hasattr(flax.config, 'flax_always_shard_variable'):
+      flax.config.update('flax_always_shard_variable', False)
 
   def test_compile_once(self):
     class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):

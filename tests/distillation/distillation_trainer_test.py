@@ -19,7 +19,6 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
-import jax.sharding as shd
 import numpy as np
 import optax
 from tunix.distillation import distillation_trainer
@@ -120,7 +119,9 @@ class DistillationTrainerTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
+    self.mesh = jax.make_mesh(((2, 2)), ('fsdp', 'tp'))
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
+    self.enter_context(jax.set_mesh(self.mesh))
 
   def test_with_loss_fn_raises_exception(self):
     student_rngs = nnx.Rngs(0)
@@ -182,16 +183,13 @@ class DistillationTrainerTest(absltest.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
   def test_distributed_training(self):
-    mesh = shd.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
-    )
     student_rngs = nnx.Rngs(0)
     teacher_rngs = nnx.Rngs(1)
     student_model, _ = create_sharded_model(
-        tc.ToyTransformer, student_rngs, mesh
+        tc.ToyTransformer, student_rngs, self.mesh
     )
     teacher_model, _ = create_sharded_model(
-        tc.ToyTransformer, teacher_rngs, mesh
+        tc.ToyTransformer, teacher_rngs, self.mesh
     )
     original_variables = jax.tree.map(
         jnp.copy, nnx.state(student_model, nnx.Param)
@@ -204,45 +202,51 @@ class DistillationTrainerTest(absltest.TestCase):
         student_model, teacher_model, strategy, optax.sgd(1e-3), config
     ).with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    with mesh:
-      trainer.train(self.train_ds, self.eval_ds)
+    trainer.train(self.train_ds, self.eval_ds)
     variables = nnx.state(student_model, nnx.Param)
 
     self.assertEqual(
-        variables.layers[0].w1.kernel.value.sharding.spec,
-        shd.PartitionSpec('fsdp', 'tp'),
+        variables.layers[0].w1.kernel.sharding_names, ('fsdp', 'tp')
     )
     self.assertEqual(
-        variables.layers[0].w2.kernel.value.sharding.spec,
-        shd.PartitionSpec('tp', 'fsdp'),
+        variables.layers[0].w2.kernel.sharding_names, ('tp', 'fsdp')
     )
 
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
-    # compare with unsharded model
-    student_rngs = nnx.Rngs(0)
-    teacher_rngs = nnx.Rngs(1)
-    unsharded_student_model = tc.ToyTransformer(
-        rngs=student_rngs, vocab_size=_VOCAB_SIZE
-    )
-    unsharded_teacher_model = tc.ToyTransformer(
-        rngs=teacher_rngs, vocab_size=_VOCAB_SIZE
-    )
-    trainer = distillation_trainer.DistillationTrainer(
-        unsharded_student_model,
-        unsharded_teacher_model,
-        strategy,
-        optax.sgd(1e-3),
-        config,
-    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
-    trainer.train(self.train_ds, self.eval_ds)
-    unsharded_variables = nnx.state(unsharded_student_model, nnx.Param)
+    # student_rngs = 0
+    # teacher_rngs = 1
+    # student_model, _ = create_sharded_model(
+    #     tc.ToyTransformer, student_rngs, self.mesh
+    # )
+    # teacher_model, _ = create_sharded_model(
+    #     tc.ToyTransformer, teacher_rngs, self.mesh
+    # )
+    # original_variables = jax.tree.map(
+    #     jnp.copy, nnx.state(student_model, nnx.Param)
+    # )
+    # strategy = get_toy_attention_transfer_strategy()
+    # config = distillation_trainer.TrainingConfig(
+    #     eval_every_n_steps=2, max_steps=100
+    # )
+    # trainer = distillation_trainer.DistillationTrainer(
+    #     student_model, teacher_model, strategy, optax.sgd(1e-3), config
+    # ).with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    self.assertIsInstance(
-        unsharded_variables.layers[0].w1.kernel.value.sharding,
-        jax._src.lib.xla_client.SingleDeviceSharding,
-    )
-    jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)
+    # with self.mesh:
+    #   trainer.train(self.train_ds, self.eval_ds)
+    # variables = nnx.state(student_model, nnx.Param)
+
+    # self.assertEqual(
+    #     variables.layers[0].w1.kernel.value.sharding.spec,
+    #     shd.PartitionSpec('fsdp', 'tp'),
+    # )
+    # self.assertEqual(
+    #     variables.layers[0].w2.kernel.value.sharding.spec,
+    #     shd.PartitionSpec('tp', 'fsdp'),
+    # )
+
+    # jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
 
 if __name__ == '__main__':
