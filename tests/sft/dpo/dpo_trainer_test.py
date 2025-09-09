@@ -64,6 +64,11 @@ def _dummy_dataset(
 
 class DpoTrainerTest(parameterized.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    self.mesh = jax.make_mesh(((1, 1)), ("fsdp", "tp"))
+    self.enter_context(jax.set_mesh(self.mesh))
+
   @parameterized.named_parameters(
       dict(
           testcase_name="chosen_reject_equal_length",

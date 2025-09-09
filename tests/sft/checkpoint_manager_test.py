@@ -17,6 +17,7 @@
 import os
 from absl.testing import absltest
 from etils import epath
+import flax
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -80,6 +81,11 @@ def create_sharded_model(model_ctor, rngs, mesh):
 
 
 class CheckpointManagerTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    if hasattr(flax.config, 'flax_always_shard_variable'):
+      flax.config.update('flax_always_shard_variable', False)
 
   def test_empty_root_directory(self):
     peft_checkpoint_manager = checkpoint_manager.CheckpointManager(

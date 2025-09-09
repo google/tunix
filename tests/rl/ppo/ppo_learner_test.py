@@ -76,6 +76,8 @@ class PpoLearnerTest(parameterized.TestCase):
     self.num_cpus = 2
     chex.set_n_cpu_devices(self.num_cpus)
     assert len(jax.devices()) == self.num_cpus
+    self.mesh = jax.make_mesh(((1, 1)), ('fsdp', 'tp'))
+    self.enter_context(jax.set_mesh(self.mesh))
 
   def test_iterator(self):
 

@@ -25,6 +25,11 @@ jax.config.update("jax_threefry_partitionable", False)
 
 class CommonTest(absltest.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    self.mesh = jax.make_mesh(((1, 1)), ("fsdp", "tp"))
+    self.enter_context(jax.set_mesh(self.mesh))
+
   def test_compute_kl_divergence(self):
     rng = jax.random.PRNGKey(0)
     k1, k2 = jax.random.split(rng)
