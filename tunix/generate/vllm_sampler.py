@@ -254,7 +254,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     prompt_ids = [self.tokenize(x) for x in input_strings]
     outputs = self.llm.generate(
         prompts=[TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
-        prompt_token_ids=prompt_ids,
         sampling_params=self.sampling_params,
         use_tqdm=True,
     )

@@ -16,12 +16,10 @@
 """Utility functions for sampler."""
 
 import functools
-import itertools
+import gc
 import logging
 import re
 from typing import Any, Dict, Iterator, List, Optional
-from collections import defaultdict
-import gc
 
 from flax import nnx
 import jax
@@ -266,7 +264,15 @@ def single_padded_fill_tokens_and_logits(
 
 
 def build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
-  """Computes the `positions` from the `input_mask`. """
+  """Computes the `positions` from the `input_mask`.
+
+  Args:
+    input_mask: The tokens `input_mask`, True for non-padded tokens only.
+
+  Returns:
+    The indices to use for RoPE and absolute position encodings for the given
+    input mask.
+  """
   positions = jnp.cumsum(input_mask, axis=-1)
   # Subtract one for all positions from the first valid one as they are
   # 0-indexed
@@ -409,21 +415,15 @@ def transfer_state_with_mappings(
   Returns:
     The target state with the transferred values.
   """
-  src_flat = {
-      '.'.join(str(k) for k in keys): v for keys, v in src_state.flat_state()
-  }
-  logging.info('Source state has %d parameters.', len(src_flat))
-  logging.info("Source state: %s", src_flat)
   tgt_flat_list = dst_state.flat_state()
+  sharding_dict = None
   if reshard_fn:
-    sharding_dict = dict([(key, tgt_params.value.sharding) for key, tgt_params in tgt_flat_list])
-  logging.info('Target state has %d parameters.', len(tgt_flat_list))
-  logging.info("Target state: %s", tgt_flat_list)
+    sharding_dict = dict(
+        [(key, tgt_params.value.sharding) for key, tgt_params in tgt_flat_list]
+    )
 
   # Maps source keys to target tensor(s) and sharding spec
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
-  logging.info('Source to target mapping has %d entries.', len(src_to_tgt_map))
-  logging.info('Source to target mapping: %s', src_to_tgt_map)
 
   # Flatten the source state, unrolling any scanned layers.
   unscanned_src_to_tgt_flat = {}
@@ -437,7 +437,6 @@ def transfer_state_with_mappings(
       continue
 
     tgt_param, _, sharding_spec = src_to_tgt_map[src_key]
-    # logging.warning("Processing source key: %s with sharding spec: %s, tgt_param: %s", src_key, sharding_spec, tgt_param)
 
     def _get_layer_axis_from_sharding_spec(sharding_spec):
       if isinstance(sharding_spec, (list, tuple)):
@@ -452,40 +451,45 @@ def transfer_state_with_mappings(
       # values = []
       for i in range(num_layers):
         idx = [slice(None)] * src_val.value.ndim
-        # logging.info("src_key: %s, sharding_spec: %s, src_val shape: %s, idx before setting layer axis: %s, layer_axis: %s", src_key, sharding_spec, src_val.value.shape, idx, layer_axis)
         idx[layer_axis] = i
         layer_val = src_val.value[tuple(idx)]
-        # logging.warning("Unscanning layer %d for key %s, layer val shape: %s, value: %s", i, src_key, layer_val.shape, layer_val)
         # Construct the flattened key, e.g. layers.0.attention.wq
         layer_key = src_to_tgt_map[src_key][1][i]
-        # logging.warning("Unscanning layer %d for key %s to %s", i, src_key, layer_key)
-        unscanned_src_to_tgt_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
+        unscanned_src_to_tgt_flat[(src_key, layer_key)] = (
+            layer_val,
+            tgt_param[i],
+        )
     else:
-      unscanned_src_to_tgt_flat[(src_key, src_to_tgt_map[src_key][1])] = (src_val.value, tgt_param)
-  # logging.warning("Unscanned source flat: %s", unscanned_src_to_tgt_flat)
-  for (flat_src_key, tgt_key), (val, tgt_param) in unscanned_src_to_tgt_flat.items():
-    # val = src_val.value
-
+      unscanned_src_to_tgt_flat[(src_key, src_to_tgt_map[src_key][1])] = (
+          src_val.value,
+          tgt_param,
+      )
+  for (flat_src_key, tgt_key), (
+      val,
+      tgt_param,
+  ) in unscanned_src_to_tgt_flat.items():
     last_key = flat_src_key.split('.')[-1]
-    # logging.warning("Transferring %s to %s, val shape: %s, tgt shape: %s, src_val: %s", flat_src_key, tgt_key, val.shape, tgt_param.value.shape, val)
-    if transpose_keys and (last_key in transpose_keys) and 'lora' not in last_key:
+    if (
+        transpose_keys
+        and (last_key in transpose_keys)
+        and 'lora' not in last_key
+    ):
       val = jnp.transpose(val, transpose_keys[last_key])
-
     # Optional hook fn
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
       val = key_mapping_hook_fns[flat_src_key](val)
-    
     if tgt_param.value.shape != val.shape:
       if len(val.shape) != len(tgt_param.value.shape):
         if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(flat_src_key):
           new_shape = (
-            tgt_param.value.shape[0],
-            val.shape[0] // tgt_param.value.shape[0],
-            )
+              tgt_param.value.shape[0],
+              val.shape[0] // tgt_param.value.shape[0],
+          )
           val = jnp.reshape(val, new_shape)
         else:
           raise ValueError(
-              f'Rank mismatch for {tgt_key}: {val.shape} vs {tgt_param.value.shape}'
+              f'Rank mismatch for {tgt_key}: {val.shape} vs '
+              f'{tgt_param.value.shape}'
           )
       pad_width = []
       for src_dim, tgt_dim in zip(val.shape, tgt_param.value.shape):
@@ -502,23 +506,28 @@ def transfer_state_with_mappings(
 
     # Type cast
     if tgt_param.value.dtype != val.dtype:
+      logging.warning(
+          'Type mismatch on %s: %s -> %s',
+          flat_src_key,
+          val.dtype,
+          tgt_param.value.dtype,
+      )
       val = val.astype(tgt_param.value.dtype)
     tgt_param.value = val
-    # logging.warning("Assigned %s to %s, val: %s, tgt: %s", flat_src_key, tgt_key, val, tgt_param.value)
 
-  # for (flat_src_key, tgt_key), (val, tgt_param) in unscanned_src_to_tgt_flat.items():
-  #   logging.warning("After assignment, %s to %s, val: %s, tgt: %s", flat_src_key, tgt_key, val, tgt_param.value)
-  # logging.warning("unscanned_src_flat: %s", unscanned_src_to_tgt_flat)
+  del unscanned_src_to_tgt_flat
+  gc.collect()
 
   # Batch reshard and assign
   if reshard_fn:
-    tgt_flat_dict = dict([(key, tgt_params.value) for key, tgt_params in tgt_flat_list])
-    # logging.warning("Shardings flat: %s", sharding_dict)
-    # logging.warning("Resharding with reshard_fn: %s", reshard_fn)
-    # logging.warning("Before resharding, tgt_flat_dict: %s", tgt_flat_dict)
+    tgt_flat_dict = dict(
+        [(key, tgt_params.value) for key, tgt_params in tgt_flat_list]
+    )
     resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
     for tgt_key, tgt_param in tgt_flat_list:
-      assert tgt_key in resharded_values_flat_dict, f"Key {tgt_key} not in resharded values"
+      assert (
+          tgt_key in resharded_values_flat_dict
+      ), f'Key {tgt_key} not in resharded values'
       tgt_param.value = resharded_values_flat_dict[tgt_key]
 
   return dst_state.from_flat_path(tgt_flat_list)
