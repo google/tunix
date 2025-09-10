@@ -9,5 +9,6 @@
 
 code-of-conduct.md
 contributing.md
+api.md
 gallery.rst
 ```

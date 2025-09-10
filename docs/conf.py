@@ -15,9 +15,13 @@ author = "Tunix Developers"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    "myst_nb",
-    "sphinx_gallery.gen_gallery",
-    "sphinxcontrib.collections",
+    'myst_nb',
+    'sphinx_gallery.gen_gallery',
+    'sphinxcontrib.collections',
+    # api docs
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.napoleon",
 ]
 
 templates_path = ["_templates"]
@@ -76,4 +80,11 @@ collections = {
     }
 }
 
+
 suppress_warnings = ["misc.highlighting_failure"]
+
+
+# -- Options for the API reference
+
+napoleon_include_init_with_doc = False
+
