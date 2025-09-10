@@ -28,10 +28,12 @@ def is_lora_enabled(model: nnx.Module) -> bool:
 
 
 @contextlib.contextmanager
-def time_measure(context: str = ""):
+def time_measure(context: str = "", suppress_logging: bool = False):
   start = time.perf_counter()
   try:
-    yield
+    yield lambda: time.perf_counter() - start
   finally:
-    end = time.perf_counter()
-    logging.info("%s finished in: %.4f seconds", context, end - start)
+    if not suppress_logging:
+      logging.info(
+          "%s finished in: %.4f seconds", context, time.perf_counter() - start
+      )

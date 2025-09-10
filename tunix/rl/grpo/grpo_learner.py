@@ -27,9 +27,10 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl import utils
+from tunix.rl import utils as rl_utils
 from tunix.rl.grpo import grpo_helpers
 from tunix.rl.queue import data_queue as queue_lib
+from tunix.sft import utils as sft_utils
 
 _TrainingInputT = Dict[str, List[str] | ArrayLike]
 
@@ -177,7 +178,7 @@ class GrpoLearner:
 
     # Sync weights if the actor model and rollout model are not sharing weights.
     self.should_sync_weights = not (
-        utils.is_sharing_weights(
+        rl_utils.is_sharing_weights(
             self.rl_cluster.actor_trainer.model,
             self.rl_cluster.rollout.model(),
         )
@@ -559,9 +560,23 @@ class GrpoLearner:
             "trainer", step_num=initial_steps
         ):
           while True:
-            curr_train_ds = train_data_queue.get(block=True)
+            with sft_utils.time_measure(suppress_logging=True) as timer:
+              curr_train_ds = train_data_queue.get(block=True)
+
             if curr_train_ds is None:
               break
+
+            if self.can_enable_async_rollout:
+              self.rl_cluster.buffer_metrics(
+                  {
+                      "actor_dequeue_time": (
+                          timer(),
+                          np.mean,
+                      ),
+                  },
+                  mode=rl_cluster_lib.Mode.TRAIN,
+              )
+
             if (
                 eval_ds
                 and not curr_eval_ds
