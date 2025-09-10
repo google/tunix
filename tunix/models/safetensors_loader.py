@@ -18,6 +18,7 @@ import re
 from etils import epath
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import safetensors.flax as safetensors
 
 
@@ -56,6 +57,7 @@ def load_and_create_model(
     key_mapping,
     mesh=None,
     preprocess_fn=None,
+    dtype: jnp.dtype | None = None,
 ):
   """Generic function to load model from safetensors files.
 
@@ -66,6 +68,7 @@ def load_and_create_model(
       key_mapping: Function that returns key mapping dictionary
       mesh: Optional JAX mesh for sharding
       preprocess_fn: Optional function to preprocess loaded parameters
+      dtype: Optional dtype to cast loaded parameters to
 
   Returns:
       Model instance with loaded weights
@@ -103,7 +106,9 @@ def load_and_create_model(
             if reshape:
               v = v.reshape(reshape)
 
-          current_arr = jax.numpy.array(v)
+          current_arr = jnp.array(v)
+          if dtype and current_arr.dtype != dtype:
+            current_arr = current_arr.astype(dtype)
 
           if jax_key_mapped in file_loaded_tensors:
             raise ValueError(

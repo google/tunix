@@ -114,6 +114,7 @@ def create_model_from_safe_tensors(
     file_dir: str,
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
+    dtype: jnp.dtype | None = None,
 ) -> model_lib.Qwen3:
   """Load tensors from the safetensors file and create a Qwen3 model."""
   return safetensors_loader.load_and_create_model(
@@ -123,4 +124,5 @@ def create_model_from_safe_tensors(
       key_mapping=_get_key_and_transform_mapping,
       mesh=mesh,
       preprocess_fn=_stack_experts,
+      dtype=dtype,
   )
