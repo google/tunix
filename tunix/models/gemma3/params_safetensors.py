@@ -1,9 +1,10 @@
-# Copyright 2025 Google
+# Copyright 2025 Google LLC
 # Licensed under the Apache License, Version 2.0
 
 """Loads Gemma3 parameters from safetensors files."""
 
 import re
+
 import jax
 import jax.numpy as jnp
 from tunix.models import safetensors_loader
@@ -11,20 +12,20 @@ from tunix.models.gemma3 import model as model_lib
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.Gemma3Config):
-  # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
+  """Mapping of torch_keys to (nnx_keys, (permute_rule, reshape_rule))."""
   return {
       r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
       r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
           r"tmp.layers.\1.attn.q",
-          ((1, 0), (cfg.num_heads, cfg.embed_dim, cfg.head_dim)),
+          ((1, 0), (cfg.embed_dim, cfg.num_heads, cfg.head_dim)),
       ),
       r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
           r"tmp.layers.\1.attn.k",
-          ((1, 0), (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim)),
+          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
       ),
       r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
           r"tmp.layers.\1.attn.v",
-          ((1, 0), (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim)),
+          ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
       ),
       r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
           r"layers.\1.attn.attn_vec_einsum.w",
@@ -98,15 +99,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.Gemma3Config):
 
 
 def _make_preprocess_fn(cfg: model_lib.Gemma3Config):
-  """Creates a preprocess function to fuse 'q', 'k', and 'v' tensors.
-
-  Args:
-    cfg: The Gemma3 model configuration.
-
-  Returns:
-    A function that takes a dictionary of tensors and returns a new dictionary
-    with 'q', 'k', and 'v' tensors potentially fused.
-  """
+  """Creates a tensor preprocessing function for Gemma3 safetensors, fusing q, k, and v projections."""
   q_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.q$")
   k_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.k$")
   v_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.v$")
@@ -118,6 +111,25 @@ def _make_preprocess_fn(cfg: model_lib.Gemma3Config):
     raise ValueError(
         f"Gemma3 head_dim must be even for RoPE, got {cfg.head_dim}"
     )
+
+  def _to_ndh(q: jnp.ndarray) -> jnp.ndarray:
+    # Expected shape: (N, D, H)
+    if q.shape == (cfg.num_heads, cfg.embed_dim, cfg.head_dim):
+      return q
+    if q.shape == (cfg.embed_dim, cfg.num_heads, cfg.head_dim):  # D,N,H
+      return jnp.transpose(q, (1, 0, 2))  # -> N,D,H
+    if q.shape == (cfg.num_heads, cfg.head_dim, cfg.embed_dim):  # N,H,D
+      return jnp.transpose(q, (0, 2, 1))  # -> N,D,H
+    raise ValueError(f"[gemma3 preprocess] unexpected q shape: {q.shape}")
+
+  def _to_kdh(x: jnp.ndarray) -> jnp.ndarray:
+    if x.shape == (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim):
+      return x
+    if x.shape == (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim):  # D,K,H
+      return jnp.transpose(x, (1, 0, 2))  # -> K,D,H
+    if x.shape == (cfg.num_kv_heads, cfg.head_dim, cfg.embed_dim):  # K,H,D
+      return jnp.transpose(x, (0, 2, 1))  # -> K,D,H
+    raise ValueError(f"[gemma3 preprocess] unexpected kv shape: {x.shape}")
 
   def preprocess(tensors: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
     out = dict(tensors)
@@ -138,41 +150,35 @@ def _make_preprocess_fn(cfg: model_lib.Gemma3Config):
 
       if fused_qkv:
         if (q is not None) and (k is not None) and (v is not None):
-          exp_qkv = (cfg.num_heads, cfg.embed_dim, cfg.head_dim)
-          if not (q.shape == k.shape == v.shape == exp_qkv):
+          q = _to_ndh(q)
+          k = _to_kdh(k)
+          v = _to_kdh(v)
+          exp = (cfg.num_heads, cfg.embed_dim, cfg.head_dim)
+          if not (q.shape == k.shape == v.shape == exp):
             raise ValueError(
-                f"[gemma3 preprocess] layer {layer_id}: q/k/v shape mismatch:"
-                f" q={getattr(q, 'shape', None)},"
+                f"[gemma3 preprocess] layer {layer_id}: fused q/k/v shape"
+                f" mismatch: q={getattr(q, 'shape', None)},"
                 f" k={getattr(k, 'shape', None)},"
-                f" v={getattr(v, 'shape', None)},"
-                f" expected={exp_qkv}"
+                f" v={getattr(v, 'shape', None)}, expected={exp}"
             )
           out[f"layers.{layer_id}.attn.qkv_einsum.w"] = jnp.stack(
               [q, k, v], axis=0
-          )
+          )  # (3,N,D,H)
           del pending[layer_id]
       else:
         wrote = False
         if q is not None:
-          exp_q = (cfg.num_heads, cfg.embed_dim, cfg.head_dim)
-          if q.shape != exp_q:
-            raise ValueError(
-                f"[gemma3 preprocess] layer {layer_id}: q shape mismatch:"
-                f" got {q.shape}, expected {exp_q}"
-            )
+          q = _to_ndh(q)
           out[f"layers.{layer_id}.attn.q_einsum.w"] = q
-          slots.pop("q")
+          slots.pop("q", None)
           wrote = True
 
         if (k is not None) and (v is not None):
-          exp_kv = (cfg.num_kv_heads, cfg.embed_dim, cfg.head_dim)
-          if not (k.shape == v.shape == exp_kv):
-            raise ValueError(
-                f"[gemma3 preprocess] layer {layer_id}: k/v shape mismatch:"
-                f" k={getattr(k, 'shape', None)},"
-                f" v={getattr(v, 'shape', None)}, expected={exp_kv}"
-            )
-          out[f"layers.{layer_id}.attn.kv_einsum.w"] = jnp.stack([k, v], axis=0)
+          k = _to_kdh(k)
+          v = _to_kdh(v)
+          out[f"layers.{layer_id}.attn.kv_einsum.w"] = jnp.stack(
+              [k, v], axis=0
+          )  # (2,K,D,H)
           slots.pop("k", None)
           slots.pop("v", None)
           wrote = True
