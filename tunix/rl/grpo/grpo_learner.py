@@ -63,8 +63,8 @@ class GrpoConfig:
       For GSPO, we use gspo-token loss which is more flexible.
 
   References:
-  - GRPO: https://arxiv.org/abs/2402.03300
-  - GSPO: https://www.arxiv.org/pdf/2507.18071
+    - GRPO: https://arxiv.org/abs/2402.03300
+    - GSPO: https://www.arxiv.org/pdf/2507.18071
   """
 
   num_generations: int = 2
