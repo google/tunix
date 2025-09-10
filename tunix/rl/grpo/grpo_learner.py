@@ -93,7 +93,7 @@ class GrpoLearner:
   group's performance to update the policy.
 
   References:
-  - https://arxiv.org/abs/2402.03300
+    - https://arxiv.org/abs/2402.03300
   """
 
   def __init__(
@@ -514,31 +514,37 @@ class GrpoLearner:
   ) -> None:
     """GRPO training loop.
 
-    Algorithm as below: extract from https://arxiv.org/abs/2402.03300
-    Input initial policy model πθinit; reward models rφ; task prompts D;
-    hyperparameters ε, β, μ
+    Algorithm as below: extract from https://arxiv.org/abs/2402.03300 ::
 
-    policy model πθ ← πθinit
-    for iteration = 1, ..., I do
-      reference model πref ← πθ
-      for step = 1, ..., M do
-        Sample a batch D♭ from D
-        Update the old policy model πθold ← πθ
-        Sample G outputs {oi}G_i=1 ~ πθold(· | q) for each question q ∈ D♭
-        Compute rewards {ri}G_i=1 for each sampled output oi by running rφ
-        Compute Âi,t for the t-th token of oi through group relative advantage
-        estimation.
-        for GRPO iteration = 1, ..., μ do
-          Update the policy model πθ by maximizing the GRPO objective (Equation
-          21)
-      Update rφ through continuous training using a replay mechanism.
-    Output πθ
+        Input:
+            initial policy model πθinit;
+            reward models rφ;
+            task prompts D;
+            hyperparameters ε, β, μ
 
-    NOTE:
-    1. The outer loop (I) is ignored for now because we never update the
-    reference model for now.
-    2. Currently sample and train hold the same referece to the model. So we
-    also omit the step to update the sampler model.
+        policy model πθ ← πθinit
+        for iteration = 1, ..., I do
+          reference model πref ← πθ
+          for step = 1, ..., M do
+            Sample a batch D♭ from D
+            Update the old policy model πθold ← πθ
+            Sample G outputs {oi}G_i=1 ~ πθold(· | q) for each question q ∈ D♭
+            Compute rewards {ri}G_i=1 for each sampled output oi by running rφ
+            Compute Âi,t for the t-th token of oi through group relative advantage
+            estimation.
+            for GRPO iteration = 1, ..., μ do
+              Update the policy model πθ by maximizing the GRPO objective (Equation
+              21)
+          Update rφ through continuous training using a replay mechanism.
+        Output πθ
+
+    .. note::
+
+        1. The outer loop (I) is ignored for now because we never update the
+           reference model for now.
+
+        2. Currently sample and train hold the same referece to the model. So we
+           also omit the step to update the sampler model.
 
     Args:
       train_ds: An iterable of training input data, where each element is a
