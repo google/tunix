@@ -488,6 +488,7 @@ class RLCluster:
       self, external_metrics_logger: Callable[[MetricsBuffer], None]
   ):
     self._external_metrics_logger = external_metrics_logger
+    return self
 
   def buffer_metrics(
       self,

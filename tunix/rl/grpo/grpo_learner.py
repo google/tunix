@@ -369,6 +369,34 @@ class GrpoLearner:
 
     return rewards
 
+  def _compute_trajectory_ids(self, example: _TrainingInputT) -> List[str]:
+    """Computes the trajectory ID for each prompt in the batch.
+
+    Trajectory id is a string of format {row_offset}_{group_offset} where
+    row_offset is the row index of the example data source and
+    group_offset is the group index of the example in the generation group.
+
+    Args:
+      example: The training input data.
+
+    Returns:
+      A list of trajectory IDs, one for each prompt in the batch.
+    """
+    batch_size = len(example["prompts"]) // self.grpo_config.num_generations
+    row_offset = self._iter_steps * batch_size
+    row_offsets = np.repeat(
+        np.arange(row_offset, row_offset + batch_size),
+        self.grpo_config.num_generations,
+        axis=0,
+    )
+    group_offsets = np.tile(
+        np.arange(self.grpo_config.num_generations),
+        batch_size,
+    )
+    return [
+        f"{r_off}_{g_off}" for r_off, g_off in zip(row_offsets, group_offsets)
+    ]
+
   def _prepare_data(
       self,
       iterator: Iterator[_TrainingInputT],
@@ -428,22 +456,27 @@ class GrpoLearner:
             example,
         )  # [B] -> [B * G]
 
+        if mode == rl_cluster_lib.Mode.TRAIN:
+          trajectory_ids = self._compute_trajectory_ids(example)
+          assert "trajectory_ids" not in example
+          example["trajectory_ids"] = trajectory_ids
+
         with jax.profiler.StepTraceAnnotation(
             "sampler",
             step_num=self._iter_steps
             if mode == rl_cluster_lib.Mode.TRAIN
             else self._eval_steps,
         ):
-          advantage = self._generate_and_compute_advantage(example, mode)
+          training_input = self._generate_and_compute_advantage(example, mode)
         if async_loading:
-          data_queue.put([advantage])
+          data_queue.put([training_input])
 
         if mode == rl_cluster_lib.Mode.TRAIN:
           self._iter_steps += 1
         else:
           self._eval_steps += 1
 
-        example_list.append(advantage)
+        example_list.append(training_input)
         if proceed_num_steps > 0 and len(example_list) == proceed_num_steps:
           _put_list_of_examples_to_data_queue()
           return

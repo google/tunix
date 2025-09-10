@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import itertools
 
+import itertools
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -88,17 +88,21 @@ class GrpoLearnerTest(parameterized.TestCase):
     class _EmptyTrainer(grpo_lib.GrpoLearner):
       """A trainer that does nothing but used to test the iterator preparation."""
 
-      def __init__(self):
+      def __init__(self, grpo_config):
         self._iter_steps = 0
         self._eval_steps = 0
         self.rollout_worker_mesh = pxla.thread_resources.env.physical_mesh
         self._last_iter_step = 0
+        self.grpo_config = grpo_config
 
       @override
       def _generate_and_compute_advantage(self, example, mode='train'):
+        del example['trajectory_ids']
         return example
 
-    empty_trainer = _EmptyTrainer()
+    empty_trainer = _EmptyTrainer(
+        grpo_lib.GrpoConfig(num_generations=2, num_iterations=1)
+    )
 
     def _prepare(dataset, sample_repeat, batch_repeat, grad_acc_steps):
       iterator = iter(dataset)
@@ -774,6 +778,90 @@ class GrpoLearnerTest(parameterized.TestCase):
     variables1 = nnx.state(model, nnx.Param)
     variables2 = nnx.state(model2, nnx.Param)
     jax.tree.map_with_path(tc.assert_equal, variables1, variables2)
+
+  def test_trajectory_ids(self):
+    def my_reward_fn(trajectories, prompts, **kwargs):
+      if 'trajectory_ids' in kwargs:
+        for t_id, prompt in zip(kwargs['trajectory_ids'], prompts):
+          trajectories[t_id] = prompt
+      return 1.0
+
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+
+    ref_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+
+    def create_rl_cluster(grad_accu_steps):
+      cluster_config = rl_cluster_lib.ClusterConfig(
+          role_to_mesh={
+              rl_cluster_lib.Role.ACTOR: mesh,
+              rl_cluster_lib.Role.REFERENCE: mesh,
+              rl_cluster_lib.Role.ROLLOUT: mesh,
+          },
+          rollout_engine='vanilla',
+          offload_to_cpu=False,
+          training_config=rl_cluster_lib.RLTrainingConfig(
+              actor_optimizer=optax.sgd(1e-3),
+              eval_every_n_steps=grad_accu_steps * 2,
+              max_steps=10,
+              gradient_accumulation_steps=grad_accu_steps,
+          ),
+          rollout_config=base_rollout.RolloutConfig(
+              max_tokens_to_generate=10,
+              max_prompt_length=256,
+              kv_cache_size=1024,
+          ),
+      )
+      rl_cluster = rl_cluster_lib.RLCluster(
+          actor=model,
+          reference=ref_model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+      return rl_cluster.with_external_metrics_logger(print)
+
+    grpo_config = grpo_lib.GrpoConfig(
+        num_generations=2,
+        num_iterations=1,
+    )
+    first_trajectories = {}
+    grpo_learner = grpo_lib.GrpoLearner(
+        rl_cluster=create_rl_cluster(1),
+        reward_fns=lambda **kwargs: my_reward_fn(
+            trajectories=first_trajectories, **kwargs
+        ),
+        grpo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {'test_metric': (1.0, np.mean)}],
+    )
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=4)
+    eval_ds = _dummy_dataset(batch_size=1)
+
+    grpo_learner.train(train_ds, eval_ds)
+
+    # Execute with different batch size and gradient accumulation steps.
+    second_trajectories = {}
+    grpo_learner = grpo_lib.GrpoLearner(
+        rl_cluster=create_rl_cluster(4),
+        reward_fns=lambda **kwargs: my_reward_fn(
+            trajectories=second_trajectories, **kwargs
+        ),
+        grpo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {'test_metric': (1.0, np.mean)}],
+    )
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=1)
+    eval_ds = _dummy_dataset(batch_size=1)
+
+    grpo_learner.train(train_ds, eval_ds)
+
+    # Check that the trajectories are the same.
+    self.assertEqual(first_trajectories, second_trajectories)
+    self.assertLen(
+        first_trajectories, 80
+    )  # max_steps * batch_size * num_generations
 
 
 if __name__ == '__main__':
