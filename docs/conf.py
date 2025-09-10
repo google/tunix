@@ -82,3 +82,9 @@ suppress_warnings = ['misc.highlighting_failure']
 # -- Options for the API reference
 
 napoleon_include_init_with_doc = False
+
+autodoc_default_options = {
+   'members': True,
+   'imported-members': True,
+   'undoc-members': True,
+}
