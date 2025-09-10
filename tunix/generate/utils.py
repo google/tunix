@@ -130,7 +130,7 @@ def find_first_non_pad_idx(ids, pad_id):
       jnp.any(mask),
       lambda operands: jnp.argmax(operands[0]),
       lambda operands: 0,
-      (mask,)
+      (mask,),
   )
 
 
