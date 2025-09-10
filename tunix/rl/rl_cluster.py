@@ -35,12 +35,13 @@ import optax
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
-from tunix.rl import utils
+from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
+from tunix.sft import utils as sft_utils
 
 
 ModelOrPath = nnx.Module | str
@@ -163,7 +164,7 @@ class RLCluster:
     if reference:
       self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
       if Role.REFERENCE in self._backbone_sharing_map[Role.ACTOR]:
-        if not utils.is_sharing_backbone(self.reference, self.train_actor):
+        if not rl_utils.is_sharing_backbone(self.reference, self.train_actor):
           logging.warning(
               "Reference model and actor model are colocated but do not share"
               " the same backbone. This will result in an unnecessary model"
@@ -221,7 +222,7 @@ class RLCluster:
         reference and not isinstance(reference, nnx.Module)
     ):
       return
-    if peft_trainer.is_lora_enabled(actor):
+    if sft_utils.is_lora_enabled(actor):
       if reference and self.r2m[Role.ACTOR] == self.r2m[Role.REFERENCE]:
         self._backbone_sharing_map[Role.ACTOR].append(Role.REFERENCE)
         self._backbone_sharing_map[Role.REFERENCE].append(Role.ACTOR)
@@ -243,7 +244,7 @@ class RLCluster:
       The model loaded on the given mesh.
     """
     if isinstance(model_or_path, nnx.Module):
-      model_mesh = utils.get_pytree_mesh_info(nnx.state(model_or_path))
+      model_mesh = rl_utils.get_pytree_mesh_info(nnx.state(model_or_path))
       original_shardings = jax.tree_util.tree_map(
           lambda x: x.sharding, nnx.state(model_or_path)
       )
@@ -272,7 +273,7 @@ class RLCluster:
         )
       if is_on_device and self.cluster_config.offload_to_cpu:
         graph, state = nnx.split(model_or_path)
-        new_params = utils.put_params_on_memory_kind(state, "pinned_host")
+        new_params = rl_utils.put_params_on_memory_kind(state, "pinned_host")
         model_or_path = nnx.merge(graph, new_params)
       return model_or_path
     else:
@@ -391,7 +392,7 @@ class RLCluster:
         "device",
     ], f"Unsupported memory kind: {memory_kind}"
     original_variables = nnx.variables(model)
-    new_variables = utils.put_params_on_memory_kind(
+    new_variables = rl_utils.put_params_on_memory_kind(
         original_variables, memory_kind
     )
     nnx.update(model, new_variables)
@@ -626,7 +627,7 @@ class RLCluster:
     with cm:
       filter_types = (
           nnx.LoRAParam
-          if peft_trainer.is_lora_enabled(self.actor_trainer.model)
+          if sft_utils.is_lora_enabled(self.actor_trainer.model)
           else nnx.Param,
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)

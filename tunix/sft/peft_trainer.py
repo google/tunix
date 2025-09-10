@@ -39,19 +39,10 @@ from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import system_metrics_calculator
+from tunix.sft import utils
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
-
-
-@contextlib.contextmanager
-def time_measure(context: str = ""):
-  start = time.perf_counter()
-  try:
-    yield
-  finally:
-    end = time.perf_counter()
-    logging.info("%s finished in: %.4f seconds", context, end - start)
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -159,13 +150,6 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-def is_lora_enabled(model: nnx.Module) -> bool:
-  for _, value in nnx.iter_graph(model):
-    if isinstance(value, nnx.LoRAParam):
-      return True
-  return False
-
-
 class PeftTrainer:
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -196,7 +180,7 @@ class PeftTrainer:
     self._validate_config(training_config)
     self.model = model
     self.config = training_config
-    self._lora_enabled = is_lora_enabled(self.model)
+    self._lora_enabled = utils.is_lora_enabled(self.model)
     if training_config.gradient_accumulation_steps is not None:
       optimizer = optax.MultiSteps(
           optimizer, training_config.gradient_accumulation_steps
@@ -577,7 +561,7 @@ class PeftTrainer:
     train_iterator = iter(train_ds)
     index = 0
     last_step_completion_time = time.perf_counter()
-    with time_measure("Train loop"):
+    with utils.time_measure("Train loop"):
       while True:
         self._prof.maybe_activate(self._iter_steps)
         with jax.profiler.StepTraceAnnotation(
