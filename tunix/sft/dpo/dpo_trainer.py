@@ -121,6 +121,9 @@ def process_dpo_record(
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class DpoTrainingConfig(peft_trainer.TrainingConfig):
+  """DPO Training Config.
+  """
+
   beta: float = 0.1  # 𝛽 for KL penalty https://arxiv.org/pdf/2305.18290
   label_smoothing: float = 0.0
   padding_value: int = 0  # Padding value from tokenizer, default to 0.
