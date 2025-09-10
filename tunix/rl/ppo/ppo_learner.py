@@ -44,7 +44,7 @@ class TrainExample(common.TrainExample):
 class PPOConfig:
   """Configuration for PPO learner.
 
-  Attributes:
+  Parameters:
     num_ppo_epochs: The number of optimization epochs per batch of rollouts.
     mini_batch_size: The batch size on which the actual model updates happen.
       The rollout phase (`generate_and_compute_advantages`) happen on a larger

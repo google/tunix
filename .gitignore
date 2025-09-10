@@ -22,3 +22,5 @@
 /docs/_build/
 /docs/_collections/
 /docs/sg_execution_times.rst
+/docs/generated
+build/*

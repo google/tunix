@@ -18,6 +18,11 @@ extensions = [
     "myst_nb",
     "sphinx_gallery.gen_gallery",
     "sphinxcontrib.collections",
+    # api docs
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "sphinx.ext.intersphinx",
+    "sphinx.ext.napoleon",
 ]
 
 templates_path = ["_templates"]
@@ -76,4 +81,25 @@ collections = {
     }
 }
 
+
 suppress_warnings = ["misc.highlighting_failure"]
+
+
+# -- Options for the API reference
+
+default_role = "py:obj"
+
+napoleon_include_init_with_doc = False
+
+autodoc_default_options = {
+    "members": True,
+    "imported-members": True,
+    "undoc-members": True,
+}
+
+
+intersphinx_mapping = {
+    "optax": ("https://optax.readthedocs.io/en/latest/", None),
+    "flax": ("https://flax.readthedocs.io/en/stable/", None),
+    "jax": ("https://docs.jax.dev/en/latest/", None),
+}
