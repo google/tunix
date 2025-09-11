@@ -32,23 +32,25 @@ from typing_extensions import override
 
 @flax.struct.dataclass(frozen=True)
 class TrainingInput:
-  prompt_ids: jax.Array | np.ndarray  # Prompt ids should be left padded.
-  prompt_mask: jax.Array | np.ndarray
-  chosen_ids: jax.Array | np.ndarray  # Chosen ids should be right padded.
-  chosen_mask: jax.Array | np.ndarray
-  rejected_ids: jax.Array | np.ndarray  # Rejected ids should be right padded.
-  rejected_mask: jax.Array | np.ndarray
+    prompt_ids: jax.Array | np.ndarray  # Prompt ids should be left padded.
+    prompt_mask: jax.Array | np.ndarray
+    chosen_ids: jax.Array | np.ndarray  # Chosen ids should be right padded.
+    chosen_mask: jax.Array | np.ndarray
+    rejected_ids: jax.Array | np.ndarray  # Rejected ids should be right padded.
+    rejected_mask: jax.Array | np.ndarray
+    images: jax.Array | np.ndarray  # Vision inputs (e.g., image embeddings)
 
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample:
-  input_ids: jax.Array  # Concatenated [prompt_ids, completion_ids]
-  positions: jax.Array
-  attention_mask: jax.Array
-  ref_chosen_logps: jax.Array
-  ref_rejected_logps: jax.Array
-  completion_mask: jax.Array
-  logits_to_keep: int = flax.struct.field(pytree_node=False)
+    input_ids: jax.Array  # Concatenated [prompt_ids, completion_ids]
+    positions: jax.Array
+    attention_mask: jax.Array
+    ref_chosen_logps: jax.Array
+    ref_rejected_logps: jax.Array
+    completion_mask: jax.Array
+    logits_to_keep: int = flax.struct.field(pytree_node=False)
+    images: jax.Array | None = None  # Vision inputs
 
 
 def _generate_ids_and_masks(
@@ -134,21 +136,23 @@ def compute_logps(
     attention_mask,
     logits_to_keep,
     completion_mask,
+    images=None,  # Add vision inputs
 ):
-  """Computes the log probabilities for chosen and rejected tokens."""
-  token_logps = common.get_per_token_logps(
-      model,
-      input_tokens=input_ids,
-      positions=positions,
-      attn_mask=attention_mask,
-      logits_to_keep=logits_to_keep,
-  )
-  token_logps = (token_logps * completion_mask).sum(axis=-1)
+    """Computes the log probabilities for chosen and rejected tokens."""
+    token_logps = common.get_per_token_logps(
+        model,
+        input_tokens=input_ids,
+        positions=positions,
+        attn_mask=attention_mask,
+        logits_to_keep=logits_to_keep,
+        images=images,  # Pass vision inputs
+    )
+    token_logps = (token_logps * completion_mask).sum(axis=-1)
 
-  batch_size = token_logps.shape[0]
-  chosen_logps = token_logps[: batch_size // 2]
-  rejected_logps = token_logps[batch_size // 2 :]
-  return chosen_logps, rejected_logps
+    batch_size = token_logps.shape[0]
+    chosen_logps = token_logps[: batch_size // 2]
+    rejected_logps = token_logps[batch_size // 2 :]
+    return chosen_logps, rejected_logps
 
 
 class DpoTrainer(peft_trainer.PeftTrainer):
@@ -217,6 +221,13 @@ class DpoTrainer(peft_trainer.PeftTrainer):
         logits_to_keep,
         completion_mask,
     )
+
+    # Include vision inputs if available
+    if training_input.images is not None:
+        images = jnp.concatenate([training_input.images, training_input.images])
+    else:
+        images = None
+
     return TrainExample(
         input_ids=input_ids,
         positions=positions,
@@ -225,6 +236,7 @@ class DpoTrainer(peft_trainer.PeftTrainer):
         ref_rejected_logps=ref_rejected_logps,
         completion_mask=completion_mask,
         logits_to_keep=logits_to_keep,
+        images=images,
     )
 
   @override
@@ -245,30 +257,31 @@ def dpo_loss_fn(
     beta: float,
     label_smoothing: float,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-  """DPO loss function."""
-  chosen_logps, rejected_logps = compute_logps(
-      model,
-      train_example.input_ids,
-      train_example.positions,
-      train_example.attention_mask,
-      train_example.logits_to_keep,
-      train_example.completion_mask,
-  )
+    """DPO loss function."""
+    chosen_logps, rejected_logps = compute_logps(
+        model,
+        train_example.input_ids,
+        train_example.positions,
+        train_example.attention_mask,
+        train_example.logits_to_keep,
+        train_example.completion_mask,
+        images=train_example.images,  # Pass vision inputs
+    )
 
-  chosen_rewards = chosen_logps - train_example.ref_chosen_logps
-  rejected_rewards = rejected_logps - train_example.ref_rejected_logps
-  margin = chosen_rewards - rejected_rewards
+    chosen_rewards = chosen_logps - train_example.ref_chosen_logps
+    rejected_rewards = rejected_logps - train_example.ref_rejected_logps
+    margin = chosen_rewards - rejected_rewards
 
-  losses = (
-      -jax.nn.log_sigmoid(beta * margin) * (1 - label_smoothing)
-      - jax.nn.log_sigmoid(-beta * margin) * label_smoothing
-  )
+    losses = (
+        -jax.nn.log_sigmoid(beta * margin) * (1 - label_smoothing)
+        - jax.nn.log_sigmoid(-beta * margin) * label_smoothing
+    )
 
-  aux = {
-      "chosen_rewards": chosen_rewards.mean(),
-      "rejected_rewards": rejected_rewards.mean(),
-      "rewards_margin": margin.mean(),
-      "rewards_accuracy": (chosen_rewards > rejected_rewards).mean(),
-  }
+    aux = {
+        "chosen_rewards": chosen_rewards.mean(),
+        "rejected_rewards": rejected_rewards.mean(),
+        "rewards_margin": margin.mean(),
+        "rewards_accuracy": (chosen_rewards > rejected_rewards).mean(),
+    }
 
-  return losses.mean(), aux
+    return losses.mean(), aux
