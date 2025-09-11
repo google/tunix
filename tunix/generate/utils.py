@@ -448,7 +448,6 @@ def transfer_state_with_mappings(
     layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
     if layer_axis is not None:
       num_layers = src_val.value.shape[layer_axis]
-      # values = []
       for i in range(num_layers):
         idx = [slice(None)] * src_val.value.ndim
         idx[layer_axis] = i
