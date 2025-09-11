@@ -79,9 +79,10 @@ future.
 ## Contributing and Feedbacks
 
 We welcome contributions! As Tunix is in early development, the contribution
-process is still being formalized. In the meantime, you can make feature
-requests, report issues and ask questions in our [Tunix GitHub discussion
-forum](https://github.com/google/tunix/discussions).
+process is still being formalized. A rough draft of the contribution process is
+present [here](https://github.com/google/tunix/blob/main/CONTRIBUTING.md). In
+the meantime, you can make feature requests, report issues and ask questions in
+our [Tunix GitHub discussion forum](https://github.com/google/tunix/discussions).
 
 ## Stay Tuned!
 
