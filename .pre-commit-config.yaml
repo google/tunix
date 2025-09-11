@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/google/pyink
+    rev: '24.10.1'
+    hooks:
+      - id: pyink
+        types: [python]
+
+  - repo: https://github.com/pylint-dev/pylint
+    rev: v3.3.8
+    hooks:
+      - id: pylint
+        name: pylint
+        types: [python]
+        verbose: true
+        args:
+          - --rcfile=.pylintrc
+          # Prevents pylint from failing the pre-commit hook. This is necessary
+          # because pylint is very strict.
+          - --exit-zero
