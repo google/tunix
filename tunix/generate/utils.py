@@ -363,12 +363,13 @@ def build_flat_dict(
         # Check if this is a scanned parameter (has 'layer' in sharding spec)
         if sharding and 'layer' in sharding:
           if actual_src not in new_flat_dict:
-            new_flat_dict[actual_src] = ([], sharding)
+            new_flat_dict[actual_src] = ([], [], sharding)
           layer_number = int(matched.groups()[0])
-          new_flat_dict[actual_src][0].append((layer_number, v, path))
+          new_flat_dict[actual_src][0].append((layer_number, v))
+          new_flat_dict[actual_src][1].append((layer_number, path))
         else:
           # Regular (non-scanned) parameter
-          new_flat_dict[actual_src] = (v, path), sharding
+          new_flat_dict[actual_src] = v, path, sharding
 
         mapped = True
         break
@@ -377,14 +378,13 @@ def build_flat_dict(
       logging.warning('!!! No mapping for flat state: %s', path)
 
   # Sort layers
-  for key, (layers, sharding) in new_flat_dict.items():
+  for key, (layers, paths, sharding) in new_flat_dict.items():
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
-      values = [v for _, v, _ in layers]
-      paths = [p for _, _, p in layers]
+      paths.sort(key=lambda x: x[0])
+      values = [v for _, v in layers]
+      paths = [p for _, p in paths]
       new_flat_dict[key] = (values, paths, sharding)
-    else:
-      new_flat_dict[key] = layers + (sharding,)
 
   return new_flat_dict
 
@@ -436,7 +436,7 @@ def transfer_state_with_mappings(
         logging.error('!!! No mapping for source key: %s', src_key)
       continue
 
-    tgt_param, _, sharding_spec = src_to_tgt_map[src_key]
+    tgt_param, tgt_path, sharding_spec = src_to_tgt_map[src_key]
 
     def _get_layer_axis_from_sharding_spec(sharding_spec):
       if isinstance(sharding_spec, (list, tuple)):
@@ -453,13 +453,13 @@ def transfer_state_with_mappings(
         idx[layer_axis] = i
         layer_val = src_val.value[tuple(idx)]
         # Construct the flattened key, e.g. layers.0.attention.wq
-        layer_key = src_to_tgt_map[src_key][1][i]
+        layer_key = tgt_path[i]
         unscanned_src_to_tgt_flat[(src_key, layer_key)] = (
             layer_val,
             tgt_param[i],
         )
     else:
-      unscanned_src_to_tgt_flat[(src_key, src_to_tgt_map[src_key][1])] = (
+      unscanned_src_to_tgt_flat[(src_key, tgt_path)] = (
           src_val.value,
           tgt_param,
       )
