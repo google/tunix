@@ -88,7 +88,7 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
-  def qwen3_0_6_b(cls):  # qwen3-0.6B
+  def qwen3_0_6b(cls):  # qwen3-0.6B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -102,7 +102,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_1_7_b(cls):  # qwen3-1.7B
+  def qwen3_1_7b(cls):  # qwen3-1.7B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -116,7 +116,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_14_b(cls):  # qwen3-14B
+  def qwen3_14b(cls):  # qwen3-14B
     return cls(
         num_layers=40,
         vocab_size=151936,
@@ -130,7 +130,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_30_b(cls):  # qwen3-30B
+  def qwen3_30b(cls):  # qwen3-30B
     return cls(
         num_layers=48,
         vocab_size=151936,
@@ -599,10 +599,10 @@ class Qwen3(nnx.Module, pytree=False):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.layers = [
+    self.layers = nnx.List([
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
         for _ in range(config.num_layers)
-    ]
+    ])
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,

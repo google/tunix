@@ -89,7 +89,7 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
   @classmethod
-  def qwen2_5_0_5_b(cls):  # qwen2.5-0.5B
+  def qwen2_5_0_5b(cls):  # qwen2.5-0.5B
     return cls(
         num_layers=24,
         vocab_size=151936,
@@ -104,7 +104,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen2_5_7_b(cls):  # qwen2.5-7B
+  def qwen2_5_7b(cls):  # qwen2.5-7B
     return cls(
         num_layers=28,
         vocab_size=152064,
@@ -502,10 +502,10 @@ class Qwen2(nnx.Module):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.layers = [
+    self.layers = nnx.List([
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
         for _ in range(config.num_layers)
-    ]
+    ])
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,

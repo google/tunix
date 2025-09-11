@@ -31,7 +31,6 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils
 from tunix.rl.ppo import ppo_helpers
 from tunix.rl.queue import data_queue as queue_lib
-from tunix.sft import metrics_logger
 
 _TrainingInputT = Dict[str, List[str] | ArrayLike]
 
@@ -62,7 +61,7 @@ class PpoConfig:
     clip_range_value: The range for clipping the value function loss.
   """
 
-  num_ppo_epochs: int = 4
+  num_ppo_epochs: int = 1
   mini_batch_size: int | None = None
 
   # PPO loss and advantage computation configs.
@@ -145,6 +144,12 @@ class PpoLearner:
     )
     self.rl_cluster.actor_trainer.is_managed_externally = True
 
+    # adjust global steps based on the number of iterations.
+    self.rl_cluster.global_steps = (
+        self.rl_cluster.actor_trainer.train_steps
+        // self.ppo_config.num_ppo_epochs
+    )
+
     # ===== Configure the critic (value) trainer =====
     self.rl_cluster.critic_trainer.with_loss_fn(ppo_value_loss_fn, has_aux=True)
     self.rl_cluster.critic_trainer.with_gen_model_input_fn(
@@ -162,6 +167,9 @@ class PpoLearner:
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
         {"pg_clipfrac": np.mean}
     )
+    # TODO(tsbao): this need to be fixed, currently it won't display in tqdm
+    # since these metrics are logged in rl_cluster and aggregated at global step
+    # level.
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         "score/mean",
         "reward/mean",
@@ -172,9 +180,6 @@ class PpoLearner:
         "vpred_mean": np.mean,
         "vf_clipfrac": np.mean,
     })
-
-    self._actor_metrics_logger = rl_cluster.actor_trainer.metrics_logger
-    self._critic_metrics_logger = rl_cluster.critic_trainer.metrics_logger
 
     self.grad_acc_steps = (
         rl_cluster.cluster_config.training_config.get_with_default(
@@ -210,17 +215,17 @@ class PpoLearner:
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
-  def _get_metric_logging_steps(self, mode: metrics_logger.Mode) -> int:
+  def _get_metric_logging_steps(self, mode: rl_cluster_lib.Mode) -> int:
     return (
         self._iter_steps
-        if mode == metrics_logger.Mode.TRAIN
+        if mode == rl_cluster_lib.Mode.TRAIN
         else self._eval_steps
     )
 
   def _generate_and_compute_advantage(
       self,
       training_input: _TrainingInputT,
-      mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
   ) -> TrainExample:
     """Generates completions and computes advantages for PPO training.
 
@@ -337,58 +342,59 @@ class PpoLearner:
     )
 
     # ===== Metric logging ======
-    step = self._get_metric_logging_steps(mode)
-
     # Log raw scores from the reward model fn
-    self._actor_metrics_logger.log(
-        "score/mean", np.mean(last_token_scores), mode, step
-    )
-    self._actor_metrics_logger.log(
-        "score/max", np.max(last_token_scores), mode, step
-    )
-    self._actor_metrics_logger.log(
-        "score/min", np.min(last_token_scores), mode, step
+    self.rl_cluster.buffer_metrics(
+        {
+            "score/mean": (np.mean(last_token_scores), np.mean),
+            "score/max": (np.max(last_token_scores), np.max),
+            "score/min": (np.min(last_token_scores), np.min),
+        },
+        mode=mode,
     )
 
     # Log final rewards (scores + KL penalty)
     sequence_rewards = rewards.sum(-1)
-    self._actor_metrics_logger.log(
-        "reward/mean", np.mean(sequence_rewards), mode, step
-    )
-    self._actor_metrics_logger.log(
-        "reward/max", np.max(sequence_rewards), mode, step
-    )
-    self._actor_metrics_logger.log(
-        "reward/min", np.min(sequence_rewards), mode, step
+    self.rl_cluster.buffer_metrics(
+        {
+            "reward/mean": (np.mean(sequence_rewards), np.mean),
+            "reward/max": (np.max(sequence_rewards), np.max),
+            "reward/min": (np.min(sequence_rewards), np.min),
+        },
+        mode=mode,
     )
     if self.ppo_config.beta != 0.0:
       # Average of the per-sequence mean KL
       per_sequence_mean_kl = ppo_helpers.masked_mean(
           kl, completion_mask, axis=-1  # pylint: disable=undefined-variable
       )
-      self._actor_metrics_logger.log(
-          "reward_kl_penalty", per_sequence_mean_kl.mean(), mode, step
+      self.rl_cluster.buffer_metrics(
+          {
+              "reward_kl_penalty": (
+                  per_sequence_mean_kl.mean(),
+                  np.mean,
+              ),
+          },
+          mode=mode,
       )
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
-    self._actor_metrics_logger.log(
-        "completions/mean_length",
-        np.mean(agg_completion_mask),
-        mode,
-        self._get_metric_logging_steps(mode),
-    )
-    self._actor_metrics_logger.log(
-        "completions/max_length",
-        np.max(agg_completion_mask),
-        mode,
-        self._get_metric_logging_steps(mode),
-    )
-    self._actor_metrics_logger.log(
-        "completions/min_length",
-        np.min(agg_completion_mask),
-        mode,
-        self._get_metric_logging_steps(mode),
+    self.rl_cluster.buffer_metrics(
+        {
+            "completions/mean_length": (
+                np.mean(agg_completion_mask),
+                np.mean,
+            ),
+            "completions/max_length": (
+                np.max(agg_completion_mask),
+                np.max,
+            ),
+            "completions/min_length": (
+                np.min(agg_completion_mask),
+                np.min,
+            ),
+        },
+        mode=mode,
     )
 
     return TrainExample(
@@ -442,7 +448,7 @@ class PpoLearner:
       ],
       async_loading: bool = False,
       shuffle_data: bool = False,
-      mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
   ) -> None:
     """Prepares the dataset for training.
 
@@ -498,7 +504,7 @@ class PpoLearner:
     while True:
       try:
         while (
-            mode == metrics_logger.Mode.TRAIN
+            mode == rl_cluster_lib.Mode.TRAIN
             and self._iter_steps < self._last_iter_step
         ):
           next(iterator)
@@ -508,14 +514,14 @@ class PpoLearner:
         with jax.profiler.StepTraceAnnotation(
             "sampler",
             step_num=self._iter_steps
-            if mode == metrics_logger.Mode.TRAIN
+            if mode == rl_cluster_lib.Mode.TRAIN
             else self._eval_steps,
         ):
           advantage = self._generate_and_compute_advantage(example, mode)
         if async_loading:
           data_queue.put([advantage])
 
-        if mode == metrics_logger.Mode.TRAIN:
+        if mode == rl_cluster_lib.Mode.TRAIN:
           self._iter_steps += 1
         else:
           self._eval_steps += 1
@@ -562,7 +568,7 @@ class PpoLearner:
             batch_repeat=self.ppo_config.num_ppo_epochs,
             data_queue=train_data_queue,
             async_loading=self.can_enable_async_rollout,
-            mode=metrics_logger.Mode.TRAIN,
+            mode=rl_cluster_lib.Mode.TRAIN,
         )
         curr_eval_ds = None
         with jax.profiler.StepTraceAnnotation(
@@ -586,7 +592,7 @@ class PpoLearner:
                   batch_repeat=1,
                   data_queue=eval_data_queue,
                   async_loading=False,
-                  mode=metrics_logger.Mode.EVAL,
+                  mode=rl_cluster_lib.Mode.EVAL,
               )
               curr_eval_ds = eval_data_queue.get(block=True)
             self.rl_cluster.update_actor(
@@ -609,6 +615,10 @@ class PpoLearner:
               "sync_sampler_weights", step_num=initial_steps
           ):
             self.rl_cluster.sync_weights()
+        else:
+          self.rl_cluster.global_steps += (
+              1  # manually increment the global steps.
+          )
         if (
             self.rl_cluster.actor_trainer.train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps
@@ -616,8 +626,7 @@ class PpoLearner:
           break
       except StopIteration:
         break
-    self.rl_cluster.actor_trainer.close()
-    self.rl_cluster.critic_trainer.close()
+    self.rl_cluster.close()
 
 
 def ppo_value_loss_fn(
