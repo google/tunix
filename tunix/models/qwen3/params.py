@@ -24,7 +24,7 @@ from tunix.models.qwen3 import model as model_lib
 def _stack_experts(params: dict[str, jax.Array]):
   """Stack experts in the loaded pytorch params."""
   key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))  # pytype: disable=attribute-error
-  new_params = dict(params).copy()
+  updated_dict = dict(params).copy()
   for kw in ["gate", "up", "down"]:
     pattern = r"(.*?)experts\.(.*?)\.{}_proj\.(.*)".format(kw)
     keys = [k for k in params.keys() if re.match(pattern, k)]
@@ -34,13 +34,12 @@ def _stack_experts(params: dict[str, jax.Array]):
           sorted([k for k in keys if k.startswith(prefix)], key=key_fn)
       )
       for k in keys_to_merge:
-        del new_params[k]
-      suffix = re.match(pattern, keys_to_merge[0]).group(3)  # pytype: disable=attribute-error
+        del updated_dict[k]
       with jax.default_device(jax.devices("cpu")[0]):
-        new_params[f"{prefix}experts.{kw}_proj.{suffix}"] = jnp.stack(
+        updated_dict[f"{prefix}{kw}_proj"] = jnp.stack(
             [params[k] for k in keys_to_merge], 0
         )
-  return new_params
+  return updated_dict
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
