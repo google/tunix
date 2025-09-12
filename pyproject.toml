@@ -19,13 +19,20 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+  "datasets",
+  "flax",
+  "grain",
+  "huggingface_hub",
   "jax",
   "jaxtyping",
-  "flax",
+  "kagglehub",
+  "omegaconf",
+  "qwix@git+https://github.com/google/qwix", # TODO: change to proper release
   "sentencepiece",
   "tensorboardX",
+  "tensorflow_datasets",
   "tqdm",
-  "grain",
+  "transformers",
 ]
 
 [project.urls]
