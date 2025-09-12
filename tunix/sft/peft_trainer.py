@@ -720,7 +720,7 @@ class PeftTrainer:
   def _run_eval(
       self,
       eval_ds: Iterable[Any],
-      eval_step: Callable[..., Any],
+      eval_step_fn: Callable[..., Any],
   ) -> None:
     """Runs evaluation loop."""
     logging.info("Running evaluation on train step %d.", self._train_steps)
@@ -741,7 +741,7 @@ class PeftTrainer:
         eval_example = self._shard_input(eval_example)
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
-        loss, aux = eval_step(self.model, eval_example)
+        loss, aux = eval_step_fn(self.model, eval_example)
         loss = jax.lax.stop_gradient(loss)
         self._buffered_eval_metrics = self._buffer_metrics(
             self._buffered_eval_metrics,
@@ -751,6 +751,12 @@ class PeftTrainer:
         self._post_process_eval_step(aux)
         eval_loss += loss
         eval_steps += 1
+
+      if eval_steps == 0:
+        logging.warning(
+            "No eval examples found. Skipping eval metrics logging."
+        )
+        return
 
       self._write_metrics(self._buffered_eval_metrics)
       logging.info(
