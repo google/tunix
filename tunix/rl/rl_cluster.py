@@ -22,12 +22,13 @@ import enum
 import gc
 import operator
 import os
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 from absl import logging
 from flax import nnx
 from flax.nnx import filterlib
 from flax.nnx import statelib
 import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
@@ -45,6 +46,22 @@ from tunix.sft import utils as sft_utils
 
 
 ModelOrPath = nnx.Module | str
+
+
+def _chunk_slices_by_size(n: int, micro: int):
+  """Yields slices `slice(...)` for n samples, chunked by micro.
+
+  The last chunk is allowed to be smaller than micro.
+
+  Args:
+    n: The total number of samples.
+    micro: The maximum size of each chunk.
+  """
+  i = 0
+  while i < n:
+    yield slice(i, min(i + micro, n))
+    i += micro
+
 
 MetricsT = Dict[
     str, Tuple[ArrayLike | str, Callable[[jax.Array], jax.Array] | None]
@@ -91,11 +108,36 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
       will be trained in the same optimizer as the actor model.
     actor_critic_share_backbone: Whether to share the backbone of the actor and
       critic models.
+    training_micro_batch_size: The microbatch size used for training.
+    rollout_micro_batch_size: The microbatch size used for model rollouts. If
+      None, it defaults to `training_micro_batch_size`.
+    ref_logps_micro_batch_size: The microbatch size used for computing reference
+      model log probabilities. If None, it defaults to
+      `training_micro_batch_size`.
+    old_logps_micro_batch_size: The microbatch size used for computing old
+      policy log probabilities. If None, it defaults to
+      `training_micro_batch_size`.
   """
 
   actor_optimizer: optax.GradientTransformation
   critic_optimizer: optax.GradientTransformation | None = None
   actor_critic_share_backbone: bool = False  # TODO(tsbao): support this.
+  training_micro_batch_size: int
+  rollout_micro_batch_size: int | None = None
+  ref_logps_micro_batch_size: int | None = None
+  old_logps_micro_batch_size: int | None = None
+
+  def __post_init__(self):
+    """Validates the configuration after initialization."""
+    if self.training_micro_batch_size <= 0:
+      raise ValueError("training_micro_batch_size must be positive.")
+
+    if self.rollout_micro_batch_size is None:
+      self.rollout_micro_batch_size = self.training_micro_batch_size
+    if self.ref_logps_micro_batch_size is None:
+      self.ref_logps_micro_batch_size = self.training_micro_batch_size
+    if self.old_logps_micro_batch_size is None:
+      self.old_logps_micro_batch_size = self.training_micro_batch_size
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -616,6 +658,88 @@ class RLCluster:
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
       return per_token_logps
+
+  def rollout_by_micro(
+      self, prompts: List[str], micro: int
+  ) -> Tuple[jax.Array, jax.Array, List[str]]:
+    """Performs rollouts in smaller batches (micro-batches) to manage memory."""
+    outs_tokens = []
+    outs_text = []
+    outs_left_padded = []
+
+    # Iterate through the prompts in micro-batches.
+    for slc in _chunk_slices_by_size(len(prompts), micro):
+      sub_prompts = prompts[slc]
+
+      # Generate completions for the current sub-batch.
+      out = self.generate(prompts=sub_prompts)
+
+      # Store the results from the generation.
+      outs_tokens.append(out.tokens)  # Shape: [batch_size, output_seq_len]
+      outs_text.extend(out.text)
+      outs_left_padded.append(
+          out.left_padded_prompt_tokens
+      )  # Shape: [batch_size, input_seq_len]
+
+    # Concatenate the results from all micro-batches.
+    completion_ids = jnp.concatenate(outs_tokens, axis=0)
+    left_padded = jnp.concatenate(outs_left_padded, axis=0)
+
+    return completion_ids, left_padded, outs_text
+
+  def ref_logps_by_micro(
+      self, prompt_ids: jax.Array, completion_ids: jax.Array, micro: int
+  ) -> jax.Array:
+    """Computes reference per-token log probabilities in micro-batches.
+
+    Args:
+      prompt_ids: Token IDs of the prompts.
+      completion_ids: Token IDs of the completions.
+      micro: The maximum size of each micro-batch.
+
+    Returns:
+      A JAX array containing the per-token log probabilities from the reference
+      model, concatenated from all micro-batches.
+    """
+    pad_id = self.rollout.pad_id()
+    eos_id = self.rollout.eos_id()
+    outs = []
+    batch_size = prompt_ids.shape[0]
+    for slc in _chunk_slices_by_size(batch_size, micro):
+      outs.append(
+          self.get_ref_per_token_logps(
+              prompt_tokens=prompt_ids[slc],
+              completion_tokens=completion_ids[slc],
+              pad_id=pad_id,
+              eos_id=eos_id,
+          )
+      )
+    return jnp.concatenate(outs, axis=0)
+
+  def old_logps_by_micro(
+      self, prompt_ids: jax.Array, completion_ids: jax.Array, micro: int
+  ) -> jax.Array:
+    """Computes old policy per-token log probabilities in micro-batches.
+
+    Args:
+      prompt_ids: Token IDs of the prompts.
+      completion_ids: Token IDs of the completions.
+      micro: The maximum size of each micro-batch.
+
+    Returns:
+      A JAX array containing the per-token log probabilities from the old policy
+      model, concatenated from all micro-batches.
+    """
+    outs = []
+    batch_size = prompt_ids.shape[0]
+    for slc in _chunk_slices_by_size(batch_size, micro):
+      outs.append(
+          self.get_old_per_token_logps(
+              prompt_tokens=prompt_ids[slc],
+              completion_tokens=completion_ids[slc],
+          )
+      )
+    return jnp.concatenate(outs, axis=0)
 
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
