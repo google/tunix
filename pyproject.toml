@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
   "datasets",
-  "flax",
+  "flax@git+https://github.com/google/flax", # TODO: change to proper release
   "grain",
   "huggingface_hub",
   "jax",
