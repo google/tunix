@@ -194,7 +194,6 @@ class PeftTrainerTest(parameterized.TestCase):
 
   @mock.patch.object(profiler, 'Profiler')
   def test_basic_training_with_profiler(self, mock_profiler_init):
-    self.train_ds = dummy_datasets(batch_size=4, repeat=4)
     mock_profiler_instance = mock.MagicMock()
     mock_profiler_init.return_value = mock_profiler_instance
     mock_profiler_instance.should_activate.side_effect = (
@@ -218,7 +217,9 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
-    trainer.train(self.train_ds)  # No eval dataset.
+
+    train_ds = dummy_datasets(batch_size=4, repeat=4)
+    trainer.train(train_ds)  # No eval dataset.
 
     mock_profiler_init.assert_called_once_with(
         initial_step=0,
@@ -396,17 +397,52 @@ class PeftTrainerTest(parameterized.TestCase):
         rtol=1e-5,
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='without_grad_accu',
+          grad_accu=1,
+          resume_step=0,
+          expected_save_steps=[1, 2, 3, 4],
+      ),
+      dict(
+          testcase_name='grad_accu',
+          grad_accu=2,
+          resume_step=0,
+          expected_save_steps=[1, 2],
+      ),
+      dict(
+          testcase_name='with_resume',
+          grad_accu=1,
+          resume_step=1,
+          expected_save_steps=[2, 3, 4],
+      ),
+      dict(
+          testcase_name='with_resume_and_grad_accu',
+          grad_accu=2,
+          resume_step=1,
+          expected_save_steps=[2],
+      ),
+  )
   @mock.patch.object(checkpoint_manager, 'CheckpointManager')
-  def test_checkpointing(self, mock_checkpoint_manager_init):
+  def test_checkpointing(
+      self,
+      mock_checkpoint_manager_init,
+      grad_accu,
+      resume_step,
+      expected_save_steps,
+  ):
     mock_checkpoint_manager = mock.MagicMock()
     mock_checkpoint_manager_init.return_value = mock_checkpoint_manager
-    mock_checkpoint_manager.maybe_restore.return_value = 1
+    mock_checkpoint_manager.maybe_restore.return_value = resume_step
     mock_checkpoint_manager.save.return_value = True
-    mock_checkpoint_manager.latest_step.return_value = 1
+    mock_checkpoint_manager.latest_step.return_value = (
+        expected_save_steps[-1] - 1
+    )  # force save at close
     checkpoint_options = ocp.CheckpointManagerOptions()
     config = peft_trainer.TrainingConfig(
         eval_every_n_steps=2,
         max_steps=100,
+        gradient_accumulation_steps=grad_accu,
         checkpoint_root_directory='/tmp/checkpoint',
         checkpointing_options=checkpoint_options,
     )
@@ -415,7 +451,8 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    trainer.train(self.train_ds, self.eval_ds)
+    train_ds = eval_ds = dummy_datasets(batch_size=2, repeat=1)  # 4 batches
+    trainer.train(train_ds, eval_ds)
 
     mock_checkpoint_manager_init.assert_called_once_with(
         root_directory='/tmp/checkpoint', options=checkpoint_options
@@ -425,12 +462,20 @@ class PeftTrainerTest(parameterized.TestCase):
     mock_checkpoint_manager.assert_has_calls(
         [
             mock.call.maybe_restore(mock.ANY, restore_only_lora_params=True),
-            mock.call.save(2, mock.ANY, save_only_lora_params=True),
+            *[
+                mock.call.save(i, mock.ANY, save_only_lora_params=True)
+                for i in expected_save_steps
+            ],
             mock.call.latest_step(),
-            mock.call.save(2, mock.ANY, save_only_lora_params=True, force=True),
+            mock.call.save(
+                expected_save_steps[-1],
+                mock.ANY,
+                save_only_lora_params=True,
+                force=True,
+            ),
             mock.call.close(),
         ],
-        any_order=True,
+        any_order=False,
     )
 
   def test_loss_fn_with_aux(self):

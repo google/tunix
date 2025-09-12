@@ -211,10 +211,10 @@ class PeftTrainer:
     self._pbar = None
     self._flops_measured: bool = False
 
-    self._iter_steps = self.checkpoint_manager.maybe_restore(
+    self._train_steps = self.checkpoint_manager.maybe_restore(
         self.model, restore_only_lora_params=self._lora_enabled
     )
-    self._train_steps = self._iter_steps // self.config.get_with_default(
+    self._iter_steps = self._train_steps * self.config.get_with_default(
         "gradient_accumulation_steps", 1
     )
 
@@ -633,13 +633,6 @@ class PeftTrainer:
           self._post_process_train_step(aux)
           self._iter_steps += 1
 
-          # Actual checkpoint frequency is configured by checkpointing_options.
-          self.checkpoint_manager.save(
-              self._iter_steps,
-              self.model,
-              save_only_lora_params=self._lora_enabled,
-          )
-
           if (
               self._iter_steps
               % self.config.get_with_default("gradient_accumulation_steps", 1)
@@ -647,6 +640,14 @@ class PeftTrainer:
           ):
             self._train_steps += 1
             self._write_train_metrics()
+
+            # Checkpoint frequency is configured by checkpointing_options.
+            self.checkpoint_manager.save(
+                self._train_steps,
+                self.model,
+                save_only_lora_params=self._lora_enabled,
+            )
+
             if (
                 eval_ds
                 and self._train_steps % self.config.eval_every_n_steps == 0
@@ -663,9 +664,9 @@ class PeftTrainer:
 
   def _save_last_checkpoint(self):
     last_saved_step = self.checkpoint_manager.latest_step()
-    if last_saved_step is None or last_saved_step < self._iter_steps:
+    if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
-          self._iter_steps,
+          self._train_steps,
           self.model,
           save_only_lora_params=self._lora_enabled,
           force=True,
