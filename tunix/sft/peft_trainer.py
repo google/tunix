@@ -384,8 +384,29 @@ class PeftTrainer:
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
   def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
+    """Shards the input data across the available devices.
+
+    Args:
+      input_data: The input data to be sharded, expected to be a TrainingInput
+        dataclass.
+
+    Returns:
+      The sharded TrainingInput.
+    """
     mesh = pxla.thread_resources.env.physical_mesh
     if mesh.empty:
+      return input_data
+
+    # Check if the input is already sharded with the target mesh to avoid
+    # re-sharding.
+    is_sharded = jax.tree.map(
+        lambda x: isinstance(x, jax.Array)
+        and hasattr(x, "sharding")
+        and hasattr(x.sharding, "mesh")
+        and x.sharding.mesh == mesh,
+        input_data,
+    )
+    if all(jax.tree.leaves(is_sharded)):
       return input_data
 
     pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
