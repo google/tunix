@@ -700,18 +700,22 @@ class RMSNorm(nnx.Module):
 
 
 class MultimodalProjector(nnx.Module):
+  """Image soft token pooling + projection."""
 
   def __init__(
       self,
       vision_embed_dim: int,
       text_embed_dim: int,
       patches_per_side: int,
+      output_tokens_per_side=16,
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.patches_per_side = patches_per_side
-    self.kernel_size = patches_per_side // 16
+    self.output_tokens_per_side = output_tokens_per_side
+    self.output_tokens_total = output_tokens_per_side * output_tokens_per_side
+    self.kernel_size = patches_per_side // output_tokens_per_side
 
     self.mm_soft_emb_norm = RMSNorm(
         vision_embed_dim,
@@ -727,12 +731,6 @@ class MultimodalProjector(nnx.Module):
             nnx.initializers.zeros_init(), shd_config.ffw_weight_df
         ),
     )
-    # self.mm_input_projection = nnx.Param(
-    #     nnx.initializers.xavier_uniform()(
-    #         rngs.params(), (vision_embed_dim, text_embed_dim)
-    #     ),
-    #     sharding=shd_config.ffw_weight_df,  # ?
-    # )
 
   @jax.named_scope('multimodal_projector')
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
@@ -743,6 +741,7 @@ class MultimodalProjector(nnx.Module):
         window_shape=(self.kernel_size, self.kernel_size),
         strides=(self.kernel_size, self.kernel_size),
     )
+    x = x.reshape(B, self.output_tokens_total, D)
     x = self.mm_soft_emb_norm(x)
     x = self.mm_input_projection(x)
     return x
@@ -825,12 +824,18 @@ class Gemma3(nnx.Module, pytree=False):
     You can run this forward pass two ways: with or without an attention kv
     cache.
 
+    Note: for multimodal (image + text) inputs: last_tokens is expected to be
+    already preprocessed to contain exactly 256 <image_soft_token> (id=262144)
+    per tokenized input, and attention_mask is expected to already have been
+    adjusted for image tokens, i.e. image tokens attend to all tokens in the
+    (same) image bidirectionally in addition to attending to all previous tokens
+
     Args:
       last_tokens: input sequence of tokens.
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
-      pixel_values: (preprocessed) input images for multimodal, None for text-only.
+      pixel_values: (preprocessed) images for multimodal, None for text-only.
       output_hidden_states: whether to output the hidden states.
 
     Returns:
@@ -840,10 +845,28 @@ class Gemma3(nnx.Module, pytree=False):
       new_cache: updated cache if the input cache is not None, None elsewhere.
     """
 
-    # TODO image inputs
-
     new_cache = None if cache is None else {}
-    x = self.embedder.encode(last_tokens)
+
+    if self.config.multimodal:
+      assert pixel_values is not None
+      image_mask = last_tokens == 262144  # 262144: <image_soft_token>
+
+      vision_outputs = self.siglip(pixel_values)  # B, 4096, 1152
+      image_features = self.projector(vision_outputs)  # B, 256, embed_dim
+
+      last_tokens = jnp.where(image_mask, 0, last_tokens)
+      x = self.embedder.encode(last_tokens)
+      image_features = image_features.astype(x.dtype)
+
+      # Write image features to embedded input
+      idx = jnp.cumsum(image_mask, axis=1) - 1
+      idx = jnp.where(image_mask, idx, 0)
+      gathered = jnp.take_along_axis(image_features, idx[..., None], axis=1)
+      x = jnp.where(image_mask[..., None], gathered, x)
+
+    else:
+      x = self.embedder.encode(last_tokens)
+
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
