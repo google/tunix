@@ -59,7 +59,7 @@ def create_model_from_checkpoint(
       lambda: model_lib.Gemma3(model_config, rngs=nnx.Rngs(0))
   )
   params = ocp.StandardCheckpointer().restore(checkpoint_path)
-  params = map_from_upstream_checkpoint(params)
+  params = map_from_upstream_checkpoint(params, multimodal=model_config.multimodal)
   if mesh is not None:
     params = jax.tree.map(
         lambda x, shd: jnp.asarray(x, device=shd, dtype=dtype),
@@ -88,7 +88,9 @@ def create_tokenizer(
   return spm_processor
 
 
-def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
+def map_from_upstream_checkpoint(
+    params, model_type: str = 'gemma3', multimodal: bool = False
+):
   """Map from upstream checkpoint to our implementation."""
   # From:
   #
