@@ -699,6 +699,55 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
+class MultimodalProjector(nnx.Module):
+
+  def __init__(
+      self,
+      vision_embed_dim: int,
+      text_embed_dim: int,
+      patches_per_side: int,
+      *,
+      rngs: nnx.Rngs,
+      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ):
+    self.patches_per_side = patches_per_side
+    self.kernel_size = patches_per_side // 16
+
+    self.mm_soft_emb_norm = RMSNorm(
+        vision_embed_dim,
+        rngs=rngs,
+        sharding=shd_config.rms_norm_weight,
+    )
+    self.mm_input_projection = nnx.Linear(
+        in_features=vision_embed_dim,
+        out_features=text_embed_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), shd_config.ffw_weight_df
+        ),
+    )
+    # self.mm_input_projection = nnx.Param(
+    #     nnx.initializers.xavier_uniform()(
+    #         rngs.params(), (vision_embed_dim, text_embed_dim)
+    #     ),
+    #     sharding=shd_config.ffw_weight_df,  # ?
+    # )
+
+  @jax.named_scope('multimodal_projector')
+  def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
+    B, _, D = x.shape
+    x = x.reshape(B, self.patches_per_side, self.patches_per_side, D)
+    x = nnx.avg_pool(
+        x,
+        window_shape=(self.kernel_size, self.kernel_size),
+        strides=(self.kernel_size, self.kernel_size),
+    )
+    x = self.mm_soft_emb_norm(x)
+    x = self.mm_input_projection(x)
+    return x
+
+
 class Gemma3(nnx.Module, pytree=False):
   """Gemma transformer."""
 
@@ -721,16 +770,12 @@ class Gemma3(nnx.Module, pytree=False):
           ),
           rngs=rngs,
       )
-      self.mm_input_projection = nnx.Param(
-          nnx.initializers.xavier_uniform()(
-              rngs.params(), (1152, config.embed_dim)
-          ),
-          sharding=config.shd_config.emb_vd,  # TODO add another key to shd_config
-      )
-      self.mm_soft_emb_norm = RMSNorm(
+      self.projector = MultimodalProjector(
+          1152,
           config.embed_dim,
+          64,
           rngs=rngs,
-          sharding=config.shd_config.rms_norm_weight,
+          shd_config=config.shd_config,
       )
 
     self.embedder = Embedder(
