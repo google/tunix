@@ -24,6 +24,7 @@ dependencies = [
   "grain",
   "huggingface_hub",
   "jax",
+  "jax[tpu]",
   "jaxtyping",
   "kagglehub",
   "omegaconf",
