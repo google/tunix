@@ -1,9 +1,8 @@
-
 """SigLIP vision encoder (ViT-style) implemented with Flax NNX."""
 
 from __future__ import annotations
 import dataclasses
-from typing import Tuple, Optional
+from typing import Tuple
 
 from flax import nnx
 import jax
@@ -11,7 +10,7 @@ import jax.numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-import dataclasses
+
 
 def shard(x: jnp.ndarray, s: Tuple[str | None, ...]):
   """Apply named sharding if a mesh is present; no-op on CPU."""
@@ -29,28 +28,28 @@ class ShardingConfig:
 
   # weight shardings
   patch_kernel_hwci: Tuple[str | None, ...]  # Conv: [H, W, C, D]
-  attn_qkvo_dd: Tuple[str | None, ...]       # Linear: [D, D]
-  mlp_df: Tuple[str | None, ...]             # Linear: [D, F]
-  mlp_fd: Tuple[str | None, ...]             # Linear: [F, D]
-  ln_weight: Tuple[str | None, ...]          # LayerNorm scale/bias
+  attn_qkvo_dd: Tuple[str | None, ...]  # Linear: [D, D]
+  mlp_df: Tuple[str | None, ...]  # Linear: [D, F]
+  mlp_fd: Tuple[str | None, ...]  # Linear: [F, D]
+  ln_weight: Tuple[str | None, ...]  # LayerNorm scale/bias
 
   # activations
-  act_bnd: Tuple[str | None, ...]            # [B, N, D]
-  act_bnf: Tuple[str | None, ...]            # [B, N, F]
-  act_bnhd: Tuple[str | None, ...]           # [B, N, H, Dh]
+  act_bnd: Tuple[str | None, ...]  # [B, N, D]
+  act_bnf: Tuple[str | None, ...]  # [B, N, F]
+  act_bnhd: Tuple[str | None, ...]  # [B, N, H, Dh]
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
-    fsdp = 'fsdp' if not is_sampling else None
+    fsdp = "fsdp" if not is_sampling else None
     return ShardingConfig(
-        patch_kernel_hwci=(None, None, None, 'tp'),
-        attn_qkvo_dd=('tp', fsdp),
-        mlp_df=('tp', fsdp),
-        mlp_fd=('tp', fsdp),
-        ln_weight=('tp',),
-        act_bnd=('fsdp', None, None if is_sampling else 'tp'),
-        act_bnf=('fsdp', None, 'tp'),
-        act_bnhd=('fsdp', None, 'tp', None),
+        patch_kernel_hwci=(None, None, None, "tp"),
+        attn_qkvo_dd=("tp", fsdp),
+        mlp_df=("tp", fsdp),
+        mlp_fd=("tp", fsdp),
+        ln_weight=("tp",),
+        act_bnd=("fsdp", None, None if is_sampling else "tp"),
+        act_bnf=("fsdp", None, "tp"),
+        act_bnhd=("fsdp", None, "tp", None),
     )
 
 
@@ -80,6 +79,7 @@ class SigLIPConfig:
   def num_patches(self) -> int:
     g = self.image_size // self.patch_size
     return g * g
+
   @classmethod
   def so400m_patch14_384(cls):
     return cls(
@@ -88,13 +88,12 @@ class SigLIPConfig:
         embed_dim=1152,
         depth=27,
         num_heads=16,
-        mlp_ratio=3.0,            # keep whatever; it’ll be ignored
-        mlp_hidden_dim=4304,      # THIS drives the shapes
+        mlp_ratio=3.0,  # keep whatever; it’ll be ignored
+        mlp_hidden_dim=4304,  # THIS drives the shapes
         use_cls_token=False,
         use_abs_pos_emb=True,
         shd_config=ShardingConfig.get_default_sharding(),
     )
-
 
 
 class PatchEmbed(nnx.Module):
@@ -167,28 +166,36 @@ class MultiHeadSelfAttention(nnx.Module):
     self.cfg = cfg
     d = cfg.embed_dim
     self.q = nnx.Linear(
-        in_features=d, out_features=d, use_bias=True,
+        in_features=d,
+        out_features=d,
+        use_bias=True,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.xavier_uniform(), cfg.shd_config.attn_qkvo_dd
         ),
         rngs=rngs,
     )
     self.k = nnx.Linear(
-        in_features=d, out_features=d, use_bias=True,
+        in_features=d,
+        out_features=d,
+        use_bias=True,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.xavier_uniform(), cfg.shd_config.attn_qkvo_dd
         ),
         rngs=rngs,
     )
     self.v = nnx.Linear(
-        in_features=d, out_features=d, use_bias=True,
+        in_features=d,
+        out_features=d,
+        use_bias=True,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.xavier_uniform(), cfg.shd_config.attn_qkvo_dd
         ),
         rngs=rngs,
     )
     self.o = nnx.Linear(
-        in_features=d, out_features=d, use_bias=True,
+        in_features=d,
+        out_features=d,
+        use_bias=True,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.xavier_uniform(), cfg.shd_config.attn_qkvo_dd
         ),
@@ -223,11 +230,13 @@ class EncoderBlock(nnx.Module):
 
   def __init__(self, cfg: SigLIPConfig, *, rngs: nnx.Rngs):
     self.cfg = cfg
-    self.ln1 = nnx.LayerNorm(cfg.embed_dim, use_bias=True,
-                             param_dtype=jnp.float32, rngs=rngs)
+    self.ln1 = nnx.LayerNorm(
+        cfg.embed_dim, use_bias=True, param_dtype=jnp.float32, rngs=rngs
+    )
     self.attn = MultiHeadSelfAttention(cfg, rngs=rngs)
-    self.ln2 = nnx.LayerNorm(cfg.embed_dim, use_bias=True,
-                             param_dtype=jnp.float32, rngs=rngs)
+    self.ln2 = nnx.LayerNorm(
+        cfg.embed_dim, use_bias=True, param_dtype=jnp.float32, rngs=rngs
+    )
     self.mlp = MLP(cfg, rngs=rngs)
 
   @jax.named_scope("encoder_block")
@@ -238,26 +247,40 @@ class EncoderBlock(nnx.Module):
 
 
 class SigLIPEngine(nnx.Module):
+
   def __init__(self, cfg: SigLIPConfig, *, rngs: nnx.Rngs):
     self.cfg = cfg
     self.patch = PatchEmbed(cfg, rngs=rngs)
-    self.blocks = nnx.List([EncoderBlock(cfg, rngs=rngs) for _ in range(cfg.depth)])
-    self.norm = nnx.LayerNorm(cfg.embed_dim, use_bias=True,
-                              param_dtype=jnp.float32, rngs=rngs)
+    self.blocks = nnx.List(
+        [EncoderBlock(cfg, rngs=rngs) for _ in range(cfg.depth)]
+    )
+    self.norm = nnx.LayerNorm(
+        cfg.embed_dim, use_bias=True, param_dtype=jnp.float32, rngs=rngs
+    )
 
     # Create params only if enabled; do NOT pre-assign None.
     if cfg.use_abs_pos_emb:
-      pe_shape = (1, cfg.num_patches + (1 if cfg.use_cls_token else 0), cfg.embed_dim)
-      self.pos_embed = nnx.Param(jax.random.normal(rngs.params(), pe_shape) * 0.02)
+      pe_shape = (
+          1,
+          cfg.num_patches + (1 if cfg.use_cls_token else 0),
+          cfg.embed_dim,
+      )
+      self.pos_embed = nnx.Param(
+          jax.random.normal(rngs.params(), pe_shape) * 0.02
+      )
 
     if cfg.use_cls_token:
-      self.cls_token = nnx.Param(jax.random.normal(rngs.params(), (1, 1, cfg.embed_dim)) * 0.02)
+      self.cls_token = nnx.Param(
+          jax.random.normal(rngs.params(), (1, 1, cfg.embed_dim)) * 0.02
+      )
 
   def get_model_input(self):
     """Dummy input (compatible with sharding) — used by Qwix/rollout."""
     b = 2
     return {
-        "images": jnp.ones((b, self.cfg.image_size, self.cfg.image_size, 3), jnp.float32)
+        "images": jnp.ones(
+            (b, self.cfg.image_size, self.cfg.image_size, 3), jnp.float32
+        )
     }
 
   @jax.named_scope("siglip_encoder")
