@@ -142,6 +142,7 @@ def get_per_token_logps(
     positions: jax.Array,
     attn_mask: jax.Array,
     logits_to_keep: int,
+    images: jax.Array | None = None,
 ) -> jax.Array:
   """Computes the per-token log probabilities."""
   logits, _ = model(
