@@ -17,6 +17,7 @@
 import os
 from absl.testing import absltest
 from etils import epath
+from flax import config as flax_config
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -26,6 +27,10 @@ import qwix
 from tunix.sft import checkpoint_manager
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
+
+
+if hasattr(flax_config, 'flax_always_shard_variable'):
+  flax_config.update('flax_always_shard_variable', False)
 
 
 def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
