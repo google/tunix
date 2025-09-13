@@ -120,10 +120,60 @@ def _map_from_upstream_checkpoint(params):
     module_path, param_name = key_path
     module_path = module_path.split('/')[1:]  # Remove the leading 'transformer'
     if module_path[0] == 'siglip_encoder':
-      continue  # We don't support MM input yet.
-    if module_path[0] == 'embedder':
-      if len(module_path) > 1 and module_path[1].startswith('mm_'):
-        continue  # We don't support MM input yet.
+      if param_name == 'pos_embedding':
+        new_params['siglip.pos_embed'] = value
+        continue
+      elif module_path[1] == 'embedding':
+        new_params[f'siglip.patch.proj.{param_name}'] = value
+        continue
+      elif module_path[2] == 'encoder_norm':
+        new_params[f'siglip.norm.{param_name}'] = value
+        continue
+
+      assert module_path[2].startswith('encoderblock_')
+      siglip_layer_idx = int(module_path[2].removeprefix('encoderblock_'))
+
+      if module_path[3] == 'LayerNorm_0':
+        new_params[f'siglip.blocks.{siglip_layer_idx}.ln1.{param_name}'] = value
+      elif module_path[3] == 'LayerNorm_1':
+        new_params[f'siglip.blocks.{siglip_layer_idx}.ln2.{param_name}'] = value
+      elif module_path[3] == 'MultiHeadDotProductAttention_0':
+        if module_path[4] == 'query':
+          new_params[
+              f'siglip.blocks.{siglip_layer_idx}.attn.q.{param_name}'
+          ] = value
+        elif module_path[4] == 'key':
+          new_params[
+              f'siglip.blocks.{siglip_layer_idx}.attn.k.{param_name}'
+          ] = value
+        elif module_path[4] == 'value':
+          new_params[
+              f'siglip.blocks.{siglip_layer_idx}.attn.v.{param_name}'
+          ] = value
+        else:
+          assert module_path[4] == 'out'
+          new_params[
+              f'siglip.blocks.{siglip_layer_idx}.attn.o.{param_name}'
+          ] = value
+      elif module_path[3:] == ['MlpBlock_0', 'Dense_0']:
+        new_params[f'siglip.blocks.{siglip_layer_idx}.mlp.fc1.{param_name}'] = (
+            value
+        )
+      else:
+        assert module_path[3:] == ['MlpBlock_0', 'Dense_1']
+        new_params[f'siglip.blocks.{siglip_layer_idx}.mlp.fc2.{param_name}'] = (
+            value
+        )
+    if (
+        module_path[0] == 'embedder'
+        and len(module_path) > 1
+        and module_path[1].startswith('mm_')
+    ):
+      if module_path[1] == 'mm_input_projection':
+        new_params[f'mm_input_projection.{param_name}'] = value
+      elif module_path[1] == 'mm_soft_embedding_norm':
+        new_params[f'mm_soft_emb_norm.{param_name}'] = value
+      continue
     if module_path[0] in ('embedder', 'final_norm'):
       new_params[(module_path[0], param_name)] = value
       continue

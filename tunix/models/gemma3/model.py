@@ -87,6 +87,7 @@ class Gemma3Config:
   num_heads: int
   head_dim: int
   num_kv_heads: int
+  multimodal: bool = False
   sliding_window_size: int | None = None
   local_base_frequency: int = 10_000
   global_base_frequency: int = 10_000
@@ -703,6 +704,35 @@ class Gemma3(nnx.Module, pytree=False):
 
   def __init__(self, config: Gemma3Config, *, rngs: nnx.Rngs):
     self.config = config
+
+    if config.multimodal:
+      from tunix.models.siglip.model import SigLIPConfig, SigLIPEngine  # pylint: disable=g-import-not-at-top
+
+      self.siglip = SigLIPEngine(
+          cfg=SigLIPConfig(
+              image_size=896,
+              patch_size=14,
+              embed_dim=1152,
+              depth=27,
+              num_heads=16,
+              mlp_hidden_dim=4304,
+              use_cls_token=False,
+              use_abs_pos_emb=True,
+          ),
+          rngs=rngs,
+      )
+      self.mm_input_projection = nnx.Param(
+          nnx.initializers.xavier_uniform()(
+              rngs.params(), (1152, config.embed_dim)
+          ),
+          sharding=config.shd_config.emb_vd,  # TODO add another key to shd_config
+      )
+      self.mm_soft_emb_norm = RMSNorm(
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config.rms_norm_weight,
+      )
+
     self.embedder = Embedder(
         vocab_size=config.num_embed,
         embed_dim=config.embed_dim,
@@ -742,6 +772,7 @@ class Gemma3(nnx.Module, pytree=False):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
+      pixel_values: jaxtyping.Array | None = None,  # [B, H, W, C]
       output_hidden_states: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Transformer forward pass.
@@ -754,6 +785,7 @@ class Gemma3(nnx.Module, pytree=False):
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
+      pixel_values: (preprocessed) input images for multimodal, None for text-only.
       output_hidden_states: whether to output the hidden states.
 
     Returns:
@@ -762,6 +794,9 @@ class Gemma3(nnx.Module, pytree=False):
       predicted_logits: output logits predicted by the model
       new_cache: updated cache if the input cache is not None, None elsewhere.
     """
+
+    # TODO image inputs
+
     new_cache = None if cache is None else {}
     x = self.embedder.encode(last_tokens)
     for i, layer in enumerate(self.layers):
