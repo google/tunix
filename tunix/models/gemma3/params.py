@@ -25,8 +25,9 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
-from tunix.models.gemma3 import model as model_lib
 import sentencepiece as spm
+
+from tunix.models.gemma3 import model as model_lib
 
 # Pretrained
 GEMMA3_1B_PT = 'gs://gemma-data/checkpoints/gemma3-1b-pt'
@@ -81,7 +82,7 @@ def create_tokenizer(
   return spm_processor
 
 
-def _map_from_upstream_checkpoint(params):
+def _map_from_upstream_checkpoint(params, multimodal: bool = False):
   """Map from upstream checkpoint to our implementation."""
   # From:
   #
@@ -120,59 +121,54 @@ def _map_from_upstream_checkpoint(params):
     module_path, param_name = key_path
     module_path = module_path.split('/')[1:]  # Remove the leading 'transformer'
     if module_path[0] == 'siglip_encoder':
+      if not multimodal:
+        continue
       if param_name == 'pos_embedding':
-        new_params['siglip.pos_embed'] = value
+        new_params[('siglip', 'pos_embed')] = value
         continue
       elif module_path[1] == 'embedding':
-        new_params[f'siglip.patch.proj.{param_name}'] = value
+        new_params[('siglip', 'patch.proj', param_name)] = value
         continue
       elif module_path[2] == 'encoder_norm':
-        new_params[f'siglip.norm.{param_name}'] = value
+        new_params[('siglip', 'norm', param_name)] = value
         continue
 
       assert module_path[2].startswith('encoderblock_')
-      siglip_layer_idx = int(module_path[2].removeprefix('encoderblock_'))
+      siglip_layer = (
+          'siglip',
+          'blocks',
+          int(module_path[2].removeprefix('encoderblock_')),
+      )
 
       if module_path[3] == 'LayerNorm_0':
-        new_params[f'siglip.blocks.{siglip_layer_idx}.ln1.{param_name}'] = value
+        new_params[(*siglip_layer, 'ln1', param_name)] = value
       elif module_path[3] == 'LayerNorm_1':
-        new_params[f'siglip.blocks.{siglip_layer_idx}.ln2.{param_name}'] = value
+        new_params[(*siglip_layer, 'ln2', param_name)] = value
       elif module_path[3] == 'MultiHeadDotProductAttention_0':
         if module_path[4] == 'query':
-          new_params[
-              f'siglip.blocks.{siglip_layer_idx}.attn.q.{param_name}'
-          ] = value
+          new_params[(*siglip_layer, 'attn', 'q', param_name)] = value
         elif module_path[4] == 'key':
-          new_params[
-              f'siglip.blocks.{siglip_layer_idx}.attn.k.{param_name}'
-          ] = value
+          new_params[(*siglip_layer, 'attn', 'k', param_name)] = value
         elif module_path[4] == 'value':
-          new_params[
-              f'siglip.blocks.{siglip_layer_idx}.attn.v.{param_name}'
-          ] = value
+          new_params[(*siglip_layer, 'attn', 'v', param_name)] = value
         else:
           assert module_path[4] == 'out'
-          new_params[
-              f'siglip.blocks.{siglip_layer_idx}.attn.o.{param_name}'
-          ] = value
+          new_params[(*siglip_layer, 'attn', 'o', param_name)] = value
       elif module_path[3:] == ['MlpBlock_0', 'Dense_0']:
-        new_params[f'siglip.blocks.{siglip_layer_idx}.mlp.fc1.{param_name}'] = (
-            value
-        )
+        new_params[(*siglip_layer, 'mlp', 'fc1', param_name)] = value
       else:
         assert module_path[3:] == ['MlpBlock_0', 'Dense_1']
-        new_params[f'siglip.blocks.{siglip_layer_idx}.mlp.fc2.{param_name}'] = (
-            value
-        )
+        new_params[(*siglip_layer, 'mlp', 'fc2', param_name)] = value
     if (
         module_path[0] == 'embedder'
         and len(module_path) > 1
         and module_path[1].startswith('mm_')
     ):
-      if module_path[1] == 'mm_input_projection':
-        new_params[f'mm_input_projection.{param_name}'] = value
-      elif module_path[1] == 'mm_soft_embedding_norm':
-        new_params[f'mm_soft_emb_norm.{param_name}'] = value
+      if multimodal:
+        if module_path[1] == 'mm_input_projection':
+          new_params[('mm_input_projection', param_name)] = value
+        elif module_path[1] == 'mm_soft_embedding_norm':
+          new_params[('mm_soft_emb_norm', param_name)] = value
       continue
     if module_path[0] in ('embedder', 'final_norm'):
       new_params[(module_path[0], param_name)] = value
