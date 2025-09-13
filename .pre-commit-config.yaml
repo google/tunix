@@ -17,3 +17,4 @@ repos:
           # Prevents pylint from failing the pre-commit hook. This is necessary
           # because pylint is very strict.
           - --exit-zero
+        exclude: ^tests/

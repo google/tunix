@@ -211,10 +211,10 @@ class PeftTrainer:
     self._pbar = None
     self._flops_measured: bool = False
 
-    self._iter_steps = self.checkpoint_manager.maybe_restore(
+    self._train_steps = self.checkpoint_manager.maybe_restore(
         self.model, restore_only_lora_params=self._lora_enabled
     )
-    self._train_steps = self._iter_steps // self.config.get_with_default(
+    self._iter_steps = self._train_steps * self.config.get_with_default(
         "gradient_accumulation_steps", 1
     )
 
@@ -384,8 +384,29 @@ class PeftTrainer:
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
   def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
+    """Shards the input data across the available devices.
+
+    Args:
+      input_data: The input data to be sharded, expected to be a TrainingInput
+        dataclass.
+
+    Returns:
+      The sharded TrainingInput.
+    """
     mesh = pxla.thread_resources.env.physical_mesh
     if mesh.empty:
+      return input_data
+
+    # Check if the input is already sharded with the target mesh to avoid
+    # re-sharding.
+    is_sharded = jax.tree.map(
+        lambda x: isinstance(x, jax.Array)
+        and hasattr(x, "sharding")
+        and hasattr(x.sharding, "mesh")
+        and x.sharding.mesh == mesh,
+        input_data,
+    )
+    if all(jax.tree.leaves(is_sharded)):
       return input_data
 
     pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
@@ -633,13 +654,6 @@ class PeftTrainer:
           self._post_process_train_step(aux)
           self._iter_steps += 1
 
-          # Actual checkpoint frequency is configured by checkpointing_options.
-          self.checkpoint_manager.save(
-              self._iter_steps,
-              self.model,
-              save_only_lora_params=self._lora_enabled,
-          )
-
           if (
               self._iter_steps
               % self.config.get_with_default("gradient_accumulation_steps", 1)
@@ -647,6 +661,14 @@ class PeftTrainer:
           ):
             self._train_steps += 1
             self._write_train_metrics()
+
+            # Checkpoint frequency is configured by checkpointing_options.
+            self.checkpoint_manager.save(
+                self._train_steps,
+                self.model,
+                save_only_lora_params=self._lora_enabled,
+            )
+
             if (
                 eval_ds
                 and self._train_steps % self.config.eval_every_n_steps == 0
@@ -663,9 +685,9 @@ class PeftTrainer:
 
   def _save_last_checkpoint(self):
     last_saved_step = self.checkpoint_manager.latest_step()
-    if last_saved_step is None or last_saved_step < self._iter_steps:
+    if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
-          self._iter_steps,
+          self._train_steps,
           self.model,
           save_only_lora_params=self._lora_enabled,
           force=True,
@@ -698,7 +720,7 @@ class PeftTrainer:
   def _run_eval(
       self,
       eval_ds: Iterable[Any],
-      eval_step: Callable[..., Any],
+      eval_step_fn: Callable[..., Any],
   ) -> None:
     """Runs evaluation loop."""
     logging.info("Running evaluation on train step %d.", self._train_steps)
@@ -719,7 +741,7 @@ class PeftTrainer:
         eval_example = self._shard_input(eval_example)
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
-        loss, aux = eval_step(self.model, eval_example)
+        loss, aux = eval_step_fn(self.model, eval_example)
         loss = jax.lax.stop_gradient(loss)
         self._buffered_eval_metrics = self._buffer_metrics(
             self._buffered_eval_metrics,
@@ -729,6 +751,12 @@ class PeftTrainer:
         self._post_process_eval_step(aux)
         eval_loss += loss
         eval_steps += 1
+
+      if eval_steps == 0:
+        logging.warning(
+            "No eval examples found. Skipping eval metrics logging."
+        )
+        return
 
       self._write_metrics(self._buffered_eval_metrics)
       logging.info(

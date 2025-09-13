@@ -57,14 +57,41 @@ confidence=
 # no Warning level messages displayed, use"--disable=all --enable=classes
 # --disable=W"
 disable=apply-builtin,
+        arguments-differ,
+        attribute-defined-outside-init,
         backtick,
         bad-option-value,
         buffer-builtin,
         c-extension-no-member,
+        chained-comparison,
         cmp-builtin,
         cmp-method,
         coerce-builtin,
         coerce-method,
+        consider-iterating-dictionary,
+        consider-merging-isinstance,
+        consider-refactoring-into-while-condition,
+        consider-ternary-expression,
+        consider-using-any-or-all,
+        consider-using-augmented-assign,
+        consider-using-dict-comprehension,
+        consider-using-dict-items,
+        consider-using-dict-literal,
+        consider-using-enumerate,
+        consider-using-f-string,
+        consider-using-from-import,
+        consider-using-generator,
+        consider-using-in,
+        consider-using-join,
+        consider-using-list-comprehension,
+        consider-using-max-with-key,
+        consider-using-min-with-key,
+        consider-using-namedtuple-or-dataclass,
+        consider-using-set-comprehension,
+        consider-using-sys-exit,
+        consider-using-tuple,
+        consider-using-walrus,
+        consider-using-with,
         delslice-method,
         div-method,
         duplicate-code,
@@ -79,6 +106,7 @@ disable=apply-builtin,
         idiv-method,
         implicit-str-concat-in-sequence,
         import-error,
+        import-outside-toplevel,
         import-self,
         import-star-module-level,
         input-builtin,
@@ -110,6 +138,7 @@ disable=apply-builtin,
         range-builtin-not-iterating,
         raw_input-builtin,
         rdiv-method,
+        redefined-argument-from-local,
         reduce-builtin,
         relative-import,
         reload-builtin,
@@ -129,13 +158,19 @@ disable=apply-builtin,
         too-many-public-methods,
         too-many-return-statements,
         too-many-statements,
+        too-many-positional-arguments,
         trailing-newlines,
         unichr-builtin,
         unicode-builtin,
+        unnecessary-comprehension,
+        unnecessary-lambda-assignment,
+        unnecessary-pass,
         unpacking-in-except,
+        use-dict-literal,
         useless-else-on-loop,
         useless-suppression,
         using-cmp-argument,
+        wrong-import-order,
         xrange-builtin,
         zip-builtin-not-iterating,
 
@@ -146,12 +181,6 @@ disable=apply-builtin,
 # (visual studio) and html. You can also give a reporter class, eg
 # mypackage.mymodule.MyReporterClass.
 output-format=text
-
-# Put messages in a separate file for each module / package specified on the
-# command line instead of printing them on stdout. Reports (if any) will be
-# written in a file name "pylint_global.[txt|html]". This option is deprecated
-# and it will be removed in Pylint 2.0.
-files-output=no
 
 # Tells whether to display a full report or only the messages
 reports=no
@@ -265,17 +294,13 @@ max-line-length=80
 # Regexp for a line that is allowed to be longer than the limit.
 ignore-long-lines=(?x)(
   ^\s*(\#\ )?<?https?://\S+>?$|
-  ^\s*(from\s+\S+\s+)?import\s+.+$)
+  ^\s*(from\s+\S+\s+)?import\s+.+$|
+  .*pytype:.*$
+  )
 
 # Allow the body of an if to be on the same line as the test if there is no
 # else.
 single-line-if-stmt=yes
-
-# List of optional constructs for which whitespace checking is disabled. `dict-
-# separator` is used to allow tabulation in dicts, etc.: {1  : 1,\n222: 2}.
-# `trailing-comma` allows a space between comma and closing bracket: (a, ).
-# `empty-line` allows space-only lines.
-no-space-check=
 
 # Maximum number of lines in a module
 max-module-lines=99999
@@ -421,6 +446,5 @@ valid-metaclass-classmethod-first-arg=mcs
 
 # Exceptions that will emit a warning when being caught. Defaults to
 # "Exception"
-overgeneral-exceptions=StandardError,
-                       Exception,
-                       BaseException
+overgeneral-exceptions=builtins.Exception,
+                       builtins.BaseException

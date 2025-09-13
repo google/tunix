@@ -25,6 +25,10 @@ import jax.sharding as shd
 import jaxtyping
 
 
+if hasattr(flax.config, 'flax_always_shard_variable'):
+  flax.config.update('flax_always_shard_variable', False)
+
+
 K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]
