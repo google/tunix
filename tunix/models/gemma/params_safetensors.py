@@ -152,6 +152,7 @@ def _make_preprocess_fn(cfg: model_lib.TransformerConfig):
         if wrote and not slots:
           del pending[layer_id]
     return out
+
   return preprocess
 
 

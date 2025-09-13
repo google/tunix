@@ -958,5 +958,3 @@ class TransformerWithScoreHead(nnx.Module):
     ].value[-1]
     score = self.score(hidden_states)
     return score
-
-
