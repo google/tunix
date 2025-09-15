@@ -57,7 +57,7 @@ class VlmDpoTrainingConfig(peft_trainer.TrainingConfig):
     padding_value: int = 0  # Padding value from tokenizer, default to 0.
 
 
-@nnx.jit(static_argnums=(5,))
+@nnx.jit(static_argnums=(4,))
 def compute_logps_vlm(
     model,
     input_ids,
@@ -115,7 +115,7 @@ def vl_dpo_loss_fn(
         "rewards_margin": margin.mean(),
         "rewards_accuracy": (chosen_rewards > rejected_rewards).mean(),
     }
-    return losses.mean(), aux
+    return float(losses.mean()), aux
 
 
 class VLM_DpoTrainer(peft_trainer.PeftTrainer):
