@@ -84,7 +84,18 @@ def compute_logps_vlm(
     rejected_logps = token_logps[batch_size // 2 :]
     return chosen_logps, rejected_logps
 
-
+def _post_process_train_step(self, aux: Any) -> None:
+    m, s = self._mode, self._train_steps
+    self.metrics_logger.log("chosen_rewards", float(aux["chosen_rewards"]), m, s)
+    self.metrics_logger.log("rejected_rewards", float(aux["rejected_rewards"]), m, s)
+    self.metrics_logger.log("rewards_margin", float(aux["rewards_margin"]), m, s)
+    self.metrics_logger.log("rewards_accuracy", float(aux["rewards_accuracy"]), m, s)
+    # Patch: convert the latest buffered loss to float!
+    if self._buffered_train_metrics is not None:
+        # Convert every loss value in the list to float (in-place)
+        self._buffered_train_metrics.losses = [
+            float(x) for x in self._buffered_train_metrics.losses
+        ]
 def vl_dpo_loss_fn(
     model: nnx.Module,
     train_example: VLMTrainExample,
@@ -115,7 +126,7 @@ def vl_dpo_loss_fn(
         "rewards_margin": margin.mean(),
         "rewards_accuracy": (chosen_rewards > rejected_rewards).mean(),
     }
-    return float(losses.mean()), aux
+    return losses.mean(), aux
 
 
 class VLM_DpoTrainer(peft_trainer.PeftTrainer):
