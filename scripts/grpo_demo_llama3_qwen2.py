@@ -99,6 +99,7 @@ TRAIN_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_train.json"
 TEST_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_test.json"
 HF_MODEL_VERSION = args.model_version
 
+
 TRAIN_FRACTION = 1.0
 
 # Derived Data Path
@@ -301,12 +302,6 @@ provide your reasoning. Place it between {reasoning_start} and \
 {reasoning_end}. Then, provide the final answer (i.e., just one numerical \
 value) between {solution_start} and {solution_end}."""
 
-TEMPLATE = """<start_of_turn>user
-{system_prompt}
-
-{question}<end_of_turn>
-<start_of_turn>model"""
-
 
 def extract_hash_answer(text: str) -> str | None:
   if "####" not in text:
@@ -334,13 +329,8 @@ def get_dataset(path: str) -> grain.MapDataset:
               # passed to model forward pass
               "prompts": model_tokenizer.apply_chat_template(
                   [
-                      {
-                          "role": "user",
-                          "content": TEMPLATE.format(
-                              system_prompt=SYSTEM_PROMPT,
-                              question=x["question"],
-                          ),
-                      },
+                      {"role": "system", "content": SYSTEM_PROMPT},
+                      {"role": "user", "content": x["question"]},
                   ],
                   tokenize=False,
                   add_generation_prompt=True,
@@ -616,16 +606,24 @@ def generate(
 
   if isinstance(question, str):
     input_batch = [
-        TEMPLATE.format(
-            system_prompt=SYSTEM_PROMPT,
-            question=question,
+        model_tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": question},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
         ),
     ]
   else:
     input_batch = [
-        TEMPLATE.format(
-            system_prompt=SYSTEM_PROMPT,
-            question=q,
+        model_tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": q},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
         )
         for q in question
     ]
