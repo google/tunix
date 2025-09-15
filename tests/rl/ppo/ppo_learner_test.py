@@ -245,22 +245,36 @@ class PpoLearnerTest(parameterized.TestCase):
           'use_reward_model': True,
           'reward_fns': None,
           'use_different_rollout_config': True,
+          'epsilon_c': None,
+      },
+      {
+          'testcase_name': 'dual_clip',
+          'use_reward_model': True,
+          'reward_fns': None,
+          'use_different_rollout_config': True,
+          'epsilon_c': 2.0,
       },
       {
           'testcase_name': 'with_reward_fn',
           'use_reward_model': False,
           'reward_fns': [reward_1, reward_2],
           'use_different_rollout_config': False,
+          'epsilon_c': None,
       },
       {
           'testcase_name': 'with_reward_model_diff_rollout_config',
           'use_reward_model': True,
           'reward_fns': None,
           'use_different_rollout_config': True,
+          'epsilon_c': None,
       },
   )
   def test_ppo_learner(
-      self, use_reward_model, reward_fns, use_different_rollout_config
+      self,
+      use_reward_model,
+      reward_fns,
+      use_different_rollout_config,
+      epsilon_c,
   ):
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
@@ -330,7 +344,7 @@ class PpoLearnerTest(parameterized.TestCase):
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
-    ppo_config = ppo_lib.PpoConfig(num_ppo_epochs=1)
+    ppo_config = ppo_lib.PpoConfig(num_ppo_epochs=1, epsilon_c=epsilon_c)
     ppo_learner = ppo_lib.PpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
@@ -381,27 +395,20 @@ class PpoLearnerTest(parameterized.TestCase):
       )
 
     actor_metric_logger = ppo_learner.rl_cluster.actor_trainer.metrics_logger
-    for metric_name in [
-        'loss',  # policy loss
-        'pg_clipfrac',
-    ]:
+    expected_metrics = ['loss', 'pg_clipfrac']  # policy loss
+    if epsilon_c is not None:
+      expected_metrics.append('pg_clipfrac_lower')
+    for metric_name in expected_metrics:
       self.assertLen(
           actor_metric_logger.get_metric_history(metric_name, 'train'),
           ppo_learner._iter_steps,
       )
-      if metric_name in ('loss', 'pg_clipfrac'):
-        self.assertLen(
-            actor_metric_logger.get_metric_history(metric_name, 'eval'),
-            ppo_learner.rl_cluster.actor_trainer.train_steps
-            / cluster_config.training_config.eval_every_n_steps,
-            msg=f'metric_name: {metric_name}',
-        )
-      else:
-        self.assertLen(
-            actor_metric_logger.get_metric_history(metric_name, 'eval'),
-            ppo_learner._eval_steps,
-            msg=f'metric_name: {metric_name}',
-        )
+      self.assertLen(
+          actor_metric_logger.get_metric_history(metric_name, 'eval'),
+          ppo_learner.rl_cluster.actor_trainer.train_steps
+          / cluster_config.training_config.eval_every_n_steps,
+          msg=f'metric_name: {metric_name}',
+      )
 
     critic_metric_logger = ppo_learner.rl_cluster.critic_trainer.metrics_logger
     for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:

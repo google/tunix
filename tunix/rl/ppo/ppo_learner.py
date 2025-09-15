@@ -56,7 +56,14 @@ class PpoConfig:
     gamma: The discount factor for future rewards in GAE.
     gae_lambda: The lambda parameter for Generalized Advantage Estimation (GAE).
     beta: The coefficient for the KL divergence penalty.
-    epsilon: Epsilon value for clipping the policy objective.
+    epsilon: Epsilon value for clipping the ratio for the policy objective.
+    epsilon_low: Lower bound for clipping the ratio for the policy objective.
+      Set to `epsilon` if not provided.
+    epsilon_high: Upper bound for clipping the ratio for the policy objective.
+      Set to `epsilon` if not provided.
+    epsilon_c: Lower bound for clipping for dual-clip PPO. If not provided, we
+      don't do dual-clip PPO.
+      Reference: https://arxiv.org/abs/1912.09729.
     vf_coef: The coefficient for the value function loss.
     clip_range_value: The range for clipping the value function loss.
   """
@@ -69,8 +76,21 @@ class PpoConfig:
   gae_lambda: float = 0.95
   beta: float = 0.04
   epsilon: float = 0.2
+  epsilon_low: float | None = None
+  epsilon_high: float | None = None
+  epsilon_c: float | None = None
   vf_coef: float = 0.1
   clip_range_value: float = 0.2
+
+  def __post_init__(self):
+    self.epsilon_low = self.epsilon_low if self.epsilon_low else self.epsilon
+    self.epsilon_high = self.epsilon_high if self.epsilon_high else self.epsilon
+    self.epsilon = self.epsilon
+
+    if self.epsilon_c is not None and self.epsilon_c <= 1.0:
+      raise ValueError(
+          f"`epsilon_c` must be greater than 1. Received: {self.epsilon_c}."
+      )
 
 
 class PpoLearner:
@@ -137,7 +157,9 @@ class PpoLearner:
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
-            "epsilon": self.ppo_config.epsilon,
+            "epsilon_low": self.ppo_config.epsilon_low,
+            "epsilon_high": self.ppo_config.epsilon_high,
+            "epsilon_c": self.ppo_config.epsilon_c,
             "pad_id": self.rl_cluster.rollout.pad_id(),
             "eos_id": self.rl_cluster.rollout.eos_id(),
         }
@@ -164,8 +186,11 @@ class PpoLearner:
     self.rl_cluster.critic_trainer.is_managed_externally = True
 
     # ===== Configure the metrics logger =====
+    actor_rl_metrics_to_log = {"pg_clipfrac": np.mean}
+    if self.ppo_config.epsilon_c is not None:
+      actor_rl_metrics_to_log["pg_clipfrac_lower"] = np.mean
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
-        {"pg_clipfrac": np.mean}
+        actor_rl_metrics_to_log
     )
     # TODO(tsbao): this need to be fixed, currently it won't display in tqdm
     # since these metrics are logged in rl_cluster and aggregated at global step
@@ -682,7 +707,9 @@ def ppo_value_loss_fn(
 def ppo_policy_loss_fn(
     model: nnx.Module,
     train_example: TrainExample,
-    epsilon: float,
+    epsilon_low: float,
+    epsilon_high: float,
+    epsilon_c: float | None,
     pad_id: int,
     eos_id: int,
 ):
@@ -693,6 +720,7 @@ def ppo_policy_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
+  use_dual_clip_ppo = epsilon_c is not None
 
   # Get log probs.
   per_token_logps = common.compute_per_token_logps(
@@ -705,19 +733,43 @@ def ppo_policy_loss_fn(
   )
 
   advantages = train_example.advantages
+
+  # Compute ratio.
   old_per_token_logps = train_example.old_per_token_logps
-  coef_1 = jnp.exp(per_token_logps - old_per_token_logps)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
-  pg_losses1 = -coef_1 * jnp.expand_dims(advantages, 1)
-  pg_losses2 = -coef_2 * jnp.expand_dims(advantages, 1)
-  policy_loss = jnp.maximum(pg_losses1, pg_losses2)
+  ratio = jnp.exp(per_token_logps - old_per_token_logps)
+  ratio_clipped = jnp.clip(ratio, 1 - epsilon_low, 1 + epsilon_high)
 
-  # "token mean" style of normalisation.
-  policy_loss = ppo_helpers.masked_mean(policy_loss, completion_mask)
+  # Vanilla PPO loss
+  pg_losses_1 = -ratio * advantages
+  pg_losses_2 = -ratio_clipped * advantages
+  clip_pg_losses_1 = jnp.maximum(pg_losses_1, pg_losses_2)
 
+  # Dual-clip PPO to avoid negative-advantage policy updates
+  pg_losses = clip_pg_losses_1
+  if use_dual_clip_ppo:
+    pg_losses_3 = -epsilon_c * advantages
+    clip_pg_losses_2 = jnp.minimum(pg_losses_3, clip_pg_losses_1)
+
+    pg_losses = jnp.where(advantages < 0.0, clip_pg_losses_2, clip_pg_losses_1)
+
+    # For logging.
+    unreduced_pg_clipfrac_lower = (
+        (clip_pg_losses_1 > pg_losses_3) & (advantages < 0.0)
+    ).astype(jnp.float32)
+    pg_clipfrac_lower = ppo_helpers.masked_mean(
+        unreduced_pg_clipfrac_lower, completion_mask
+    )
+
+  # Logging
   aux = {
       "pg_clipfrac": ppo_helpers.masked_mean(
-          (pg_losses2 > pg_losses1).astype(jnp.float32), completion_mask
-      )
+          (pg_losses_2 > pg_losses_1).astype(jnp.float32), completion_mask
+      ),
   }
+  if use_dual_clip_ppo:
+    aux["pg_clipfrac_lower"] = pg_clipfrac_lower  # pylint: disable=undefined-variable
+
+  # "token mean" style of normalisation
+  policy_loss = ppo_helpers.masked_mean(pg_losses, completion_mask)
+
   return policy_loss, aux
