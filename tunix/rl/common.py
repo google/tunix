@@ -144,13 +144,18 @@ def get_per_token_logps(
     logits_to_keep: int,
     images: jax.Array | None = None,
 ) -> jax.Array:
-  """Computes the per-token log probabilities."""
-  logits, _ = model(
-      input_tokens, positions=positions, attention_mask=attn_mask, cache=None
-  )
-  logits = logits[:, -logits_to_keep - 1 : -1, :]
-  input_tokens = input_tokens[:, -logits_to_keep:]
-  return selective_log_softmax(logits, input_tokens)
+    """Computes the per-token log probabilities."""
+    if images is not None:
+        logits, _ = model(
+            input_tokens, positions=positions, attention_mask=attn_mask, cache=None, pixel_values=images
+        )
+    else:
+        logits, _ = model(
+            input_tokens, positions=positions, attention_mask=attn_mask, cache=None
+        )
+    logits = logits[:, -logits_to_keep - 1 : -1, :]
+    input_tokens = input_tokens[:, -logits_to_keep:]
+    return selective_log_softmax(logits, input_tokens)
 
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
