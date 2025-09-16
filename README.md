@@ -18,18 +18,19 @@ Tunix is in early development. We're actively working to expand its
 capabilities, usability and improve its performance. Stay tuned for upcoming
 updates and new features!
 
-## Key Features
+## Key Features & Highlights
 
 Tunix is still under development, here's a glimpse of the current features:
 
 * **Supervised Fine-Tuning:**
     * Full Weights Fine-Tuning
-    * Parameter-Efficient Fine-Tuning (PEFT) with LoRA Layers
+    * Parameter-Efficient Fine-Tuning (PEFT) with LoRA/Q-LoRA Layers
 * **Reinforcement Learning (RL):**
-    * Group Relative Policy Optimization (GRPO)
-    * Direct Preference Optimization (DPO)
     * Proximal Policy Optimization (PPO)
-    * token-level Group Sequence Policy Optimization (GSPO-token)
+    * Group Relative Policy Optimization (GRPO)
+    * Token-level Group Sequence Policy Optimization (GSPO-token)
+* **Preference Fine-Tuning:**
+    * Preference alignments with Direct Preference Optimization (DPO)
 * **Knowledge Distillation:**
     * Logit Strategy: A classic approach where the student learns to match the teacher's output probability distribution.
     * Attention Transfer & Projection Strategies: Methods to align the attention mechanisms between the student and teacher models.
