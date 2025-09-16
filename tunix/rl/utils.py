@@ -173,11 +173,11 @@ def put_params_on_memory_kind(
     memory_kind: str,
 ) -> jaxtyping.PyTree:
   """Puts params on the given memory kind."""
-  assert memory_kind in [
-      "device",
-      "pinned_host",
-      "unpinned_host",
-  ], f"Unsupported memory kind: {memory_kind}"
+  if memory_kind not in ["device", "pinned_host", "unpinned_host"]:
+    raise ValueError(
+        "`memory_kind` must be one of `device`, `pinned_host`, or "
+        f"`unpinned_host`. Received: {memory_kind}."
+    )
   original_shardings = jax.tree.map(lambda x: x.sharding, params)
   logging.info("original_shardings: %s", original_shardings)
   is_on_device = jax.tree_util.tree_reduce(

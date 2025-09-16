@@ -282,10 +282,14 @@ class RLCluster:
   def _init_cluster(self):
     """Initializes the RL cluster."""
     # 1. Initialize rollout.
-    assert self.cluster_config.rollout_engine in [
+    if self.cluster_config.rollout_engine not in [
         "vanilla",
         "vllm",
-    ], f"Unsupported rollout engine: {self.cluster_config.rollout_engine}"
+    ]:
+      raise ValueError(
+          "`cluster_config.rollout_engine` should be one of `'vanilla'` or "
+          f"`'vllm'`. Received: '{self.cluster_config.rollout_engine}'."
+      )
     if isinstance(self.cluster_config.rollout_config, dict):
       max_kv_cache_size = max(
           self.cluster_config.rollout_config[Mode.TRAIN].kv_cache_size,
@@ -295,9 +299,8 @@ class RLCluster:
       max_kv_cache_size = self.cluster_config.rollout_config.kv_cache_size
 
     if self.cluster_config.rollout_engine == "vanilla":
-      assert hasattr(
-          self.rollout_actor, "config"
-      ), "Actor model must have a config attribute."
+      if not hasattr(self.rollout_actor, "config"):
+        raise ValueError("`self.rollout_actor` must have a config attribute.")
       # We must load the model from CPU before initializing the rollout,
       # otherwise the prefill and decode programs might be initialized on CPU.
       self._maybe_load_model_from_cpu(self.rollout_actor, Role.ROLLOUT)
@@ -387,10 +390,8 @@ class RLCluster:
 
   def _put_model_on_memory_kind(self, model: nnx.Module, memory_kind: str):
     """Puts model on the given memory kind."""
-    assert memory_kind in [
-        "pinned_host",
-        "device",
-    ], f"Unsupported memory kind: {memory_kind}"
+    if memory_kind not in ["pinned_host", "device"]:
+      raise ValueError(f"Unsupported memory kind. Received: {memory_kind}")
     original_variables = nnx.variables(model)
     new_variables = rl_utils.put_params_on_memory_kind(
         original_variables, memory_kind

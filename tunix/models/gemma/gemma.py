@@ -734,7 +734,11 @@ def _map_linen_var_names(key: tuple[str, ...]) -> tuple[str | int, ...]:
   for k in key:
     if k.startswith('layer_'):
       prefix, suffix = k.split('layer_')
-      assert not prefix, prefix
+      if prefix:
+        raise ValueError(
+            'Invalid parameter key format. Expected key to start directly '
+            f"with 'layer_', but found a prefix: '{prefix}' in key '{k}'."
+        )
       new_key.append('layers')
       new_key.append(int(suffix))
     elif k == 'gating_einsum':
@@ -958,5 +962,3 @@ class TransformerWithScoreHead(nnx.Module):
     ].value[-1]
     score = self.score(hidden_states)
     return score
-
-

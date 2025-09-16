@@ -74,10 +74,11 @@ class GrpoConfig:
   loss_algo: str = "grpo"  # grpo or gspo-token
 
   def __post_init__(self):
-    assert self.num_generations > 1, (
-        "num_generations must be greater than 1. Received: "
-        f"{self.num_generations}"
-    )
+    if self.num_generations <= 1:
+      raise ValueError(
+          "num_generations must be greater than 1. Received: "
+          f"{self.num_generations}"
+      )
 
 
 class GrpoLearner:
@@ -122,10 +123,11 @@ class GrpoLearner:
         ...    return { ...        "prompt_min_len": (min(len(p) for p in
         prompts), np.min), ...        ... ...    }
     """
-    assert grpo_config.loss_algo in ["grpo", "gspo-token"], (
-        "loss_algo should be either grpo or gspo-token. Received: "
-        f"{grpo_config.loss_algo}"
-    )
+    if grpo_config.loss_algo not in ["grpo", "gspo-token"]:
+      raise ValueError(
+          "loss_algo should be either grpo or gspo-token. Received: "
+          f"{grpo_config.loss_algo}"
+      )
     self.grpo_config = grpo_config
     self.rl_cluster = rl_cluster
     self.reward_fns = (
