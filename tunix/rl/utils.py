@@ -127,9 +127,17 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
 
 
 def jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
+  """Returns the HBM usage for each device when using JAX."""
   hbm_used = []
-  for d in devices:
-    stats = d.memory_stats()
+  for device in devices:
+    if device.platform != "tpu":
+      logging.warning(
+          "Skipping non-TPU device: %s. You might be missing jax[tpu]"
+          " dependency.",
+          device.platform,
+      )
+      continue
+    stats = device.memory_stats()
     used = stats["bytes_in_use"]
     limit = stats["bytes_limit"]
     hbm_used.append((used, limit))
