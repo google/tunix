@@ -90,10 +90,8 @@ def vl_dpo_loss_fn(
     train_example: VLMTrainExample,
     beta: float,
     label_smoothing: float,
-    *,
-    ref_model: nnx.Module,
+    ref_model: nnx.Module,   # <- now a normal arg
 ):
-    # Policy
     pol_ch, pol_rj = compute_logps_vlm(
         model,
         train_example.input_ids,
@@ -102,7 +100,6 @@ def vl_dpo_loss_fn(
         train_example.completion_mask,
         train_example.pixel_values,
     )
-    # Reference (frozen)
     ref_ch, ref_rj = compute_logps_vlm(
         ref_model,
         train_example.input_ids,
@@ -111,7 +108,6 @@ def vl_dpo_loss_fn(
         train_example.completion_mask,
         train_example.pixel_values,
     )
-
     chosen_rewards   = pol_ch - ref_ch
     rejected_rewards = pol_rj - ref_rj
     margin = chosen_rewards - rejected_rewards
@@ -147,13 +143,12 @@ class VLM_DpoTrainer(peft_trainer.PeftTrainer):
         self.dpo_config = training_config
 
         # Single loss function that runs both policy & ref in one jitted graph
-        self.loss_fn = functools.partial(
-            vl_dpo_loss_fn, ref_model=self.ref_model
-        )
+        self.loss_fn = vl_dpo_loss_fn
         self.gen_model_input_fn = lambda x: {
             "train_example": x,
             "beta": self.dpo_config.beta,
             "label_smoothing": self.dpo_config.label_smoothing,
+            "ref_model": self.ref_model,   
         }
         self._has_aux = True
 
