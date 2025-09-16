@@ -33,6 +33,10 @@ LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
+if hasattr(flax.config, 'flax_always_shard_variable'):
+  flax.config.update('flax_always_shard_variable', False)
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for Llama3 model."""
