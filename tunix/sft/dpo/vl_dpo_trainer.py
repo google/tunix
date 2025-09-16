@@ -46,6 +46,9 @@ class VLMTrainExample:
     attention_mask: jax.Array      # [2B, P+A, P+A]
     completion_mask: jax.Array     # [2B, A]
     pixel_values: jax.Array        # [2B, H, W, C]
+    # NEW:
+    ref_chosen_logps: jax.Array    # [B]
+    ref_rejected_logps: jax.Array  # [B]
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -64,8 +67,7 @@ def compute_logps_vlm(
     completion_mask,
     pixel_values,
 ):
-    """Compute summed completion log-probs for chosen/rejected halves."""
-    # Derive the number of completion logits to keep from the mask shape
+    # derive dynamically
     logits_to_keep = completion_mask.shape[-1]
 
     token_logps = common.get_per_token_logps(
@@ -76,13 +78,10 @@ def compute_logps_vlm(
         logits_to_keep=logits_to_keep,
         pixel_values=pixel_values,
     )
-    # Sum only over completion region
     token_logps = (token_logps * completion_mask).sum(axis=-1)
 
     b = token_logps.shape[0]
-    chosen_logps = token_logps[: b // 2]
-    rejected_logps = token_logps[b // 2 :]
-    return chosen_logps, rejected_logps
+    return token_logps[: b // 2], token_logps[b // 2 :]
 
 
 def vl_dpo_loss_fn(
@@ -90,8 +89,8 @@ def vl_dpo_loss_fn(
     train_example: VLMTrainExample,
     beta: float,
     label_smoothing: float,
-    ref_model: nnx.Module,   # <- now a normal arg
 ):
+    # policy logps
     pol_ch, pol_rj = compute_logps_vlm(
         model,
         train_example.input_ids,
@@ -100,14 +99,11 @@ def vl_dpo_loss_fn(
         train_example.completion_mask,
         train_example.pixel_values,
     )
-    ref_ch, ref_rj = compute_logps_vlm(
-        ref_model,
-        train_example.input_ids,
-        train_example.positions,
-        train_example.attention_mask,
-        train_example.completion_mask,
-        train_example.pixel_values,
-    )
+
+    # reference logps were precomputed in _prepare_inputs and are just arrays
+    ref_ch = train_example.ref_chosen_logps
+    ref_rj = train_example.ref_rejected_logps
+
     chosen_rewards   = pol_ch - ref_ch
     rejected_rewards = pol_rj - ref_rj
     margin = chosen_rewards - rejected_rewards
@@ -148,17 +144,14 @@ class VLM_DpoTrainer(peft_trainer.PeftTrainer):
             "train_example": x,
             "beta": self.dpo_config.beta,
             "label_smoothing": self.dpo_config.label_smoothing,
-            "ref_model": self.ref_model,   
         }
         self._has_aux = True
 
     @override
     def _prepare_inputs(self, ti: VLMTrainingInput) -> Any:
-        # Duplicate prompts (chosen/rejected share the same prompt)
         prompt_ids  = jnp.concatenate([ti.prompt_ids,  ti.prompt_ids ])
         prompt_mask = jnp.concatenate([ti.prompt_mask, ti.prompt_mask])
 
-        # Right-pad completions to a single fixed max_len
         max_len = max(ti.chosen_ids.shape[1], ti.rejected_ids.shape[1])
         pad_val = self.dpo_config.padding_value
         completion_ids = jnp.concatenate([
@@ -170,18 +163,21 @@ class VLM_DpoTrainer(peft_trainer.PeftTrainer):
             common.pad_to_length(ti.rejected_mask, max_len, 0, axis=-1),
         ])
 
-        # Concatenate prompt + completion
         input_ids = jnp.concatenate([prompt_ids, completion_ids], axis=1)
-
-        # Causal mask built from (prompt_mask + completion_mask)
         full_mask = jnp.concatenate([prompt_mask, completion_mask], axis=1)
         attention_mask = common.make_causal_attn_mask(full_mask)
-
-        # Absolute positions for RoPE
         positions = common.build_positions_from_mask(full_mask)
-
-        # Duplicate images for chosen/rejected halves
         pixel_values = jnp.concatenate([ti.pixel_values, ti.pixel_values], axis=0)
+
+        # Compute REFERENCE log-probs *outside* the loss/grad path
+        ref_chosen_logps, ref_rejected_logps = compute_logps_vlm(
+            self.ref_model,
+            input_ids,
+            positions,
+            attention_mask,
+            completion_mask,
+            pixel_values,
+        )
 
         return VLMTrainExample(
             input_ids=input_ids,
@@ -189,6 +185,8 @@ class VLM_DpoTrainer(peft_trainer.PeftTrainer):
             attention_mask=attention_mask,
             completion_mask=completion_mask,
             pixel_values=pixel_values,
+            ref_chosen_logps=ref_chosen_logps,
+            ref_rejected_logps=ref_rejected_logps,
         )
 
     @override
