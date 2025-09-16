@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 from typing import Any
+import functools
 
 import flax
 from flax import nnx
@@ -43,10 +44,7 @@ class VLMTrainExample:
     input_ids: jax.Array           # [2B, P+A]
     positions: jax.Array           # [2B, P+A]
     attention_mask: jax.Array      # [2B, P+A, P+A]
-    ref_chosen_logps: jax.Array    # [B]
-    ref_rejected_logps: jax.Array  # [B]
     completion_mask: jax.Array     # [2B, A]
-    logits_to_keep: int = flax.struct.field(pytree_node=False)
     pixel_values: jax.Array        # [2B, H, W, C]
 
 
@@ -57,18 +55,19 @@ class VlmDpoTrainingConfig(peft_trainer.TrainingConfig):
     padding_value: int = 0  # Padding value from tokenizer, default to 0.
 
 
-@nnx.jit(static_argnums=(4,))
+@nnx.jit
 def compute_logps_vlm(
     model,
     input_ids,
     positions,
     attention_mask,
-    logits_to_keep,
     completion_mask,
     pixel_values,
 ):
-    """Computes the log probabilities for chosen and rejected tokens for VLMs."""
-    # NOTE: Pass pixel_values to your model's forward! Adjust as needed for your VLM.
+    """Compute summed completion log-probs for chosen/rejected halves."""
+    # Derive the number of completion logits to keep from the mask shape
+    logits_to_keep = completion_mask.shape[-1]
+
     token_logps = common.get_per_token_logps(
         model,
         input_tokens=input_ids,
@@ -77,37 +76,50 @@ def compute_logps_vlm(
         logits_to_keep=logits_to_keep,
         pixel_values=pixel_values,
     )
+    # Sum only over completion region
     token_logps = (token_logps * completion_mask).sum(axis=-1)
 
-    batch_size = token_logps.shape[0]
-    chosen_logps = token_logps[: batch_size // 2]
-    rejected_logps = token_logps[batch_size // 2 :]
+    b = token_logps.shape[0]
+    chosen_logps = token_logps[: b // 2]
+    rejected_logps = token_logps[b // 2 :]
     return chosen_logps, rejected_logps
+
 
 def vl_dpo_loss_fn(
     model: nnx.Module,
     train_example: VLMTrainExample,
     beta: float,
     label_smoothing: float,
+    *,
+    ref_model: nnx.Module,
 ):
-    chosen_logps, rejected_logps = compute_logps_vlm(
+    # Policy
+    pol_ch, pol_rj = compute_logps_vlm(
         model,
         train_example.input_ids,
         train_example.positions,
         train_example.attention_mask,
-        train_example.logits_to_keep,
         train_example.completion_mask,
         train_example.pixel_values,
     )
-    chosen_rewards = chosen_logps - train_example.ref_chosen_logps
-    rejected_rewards = rejected_logps - train_example.ref_rejected_logps
+    # Reference (frozen)
+    ref_ch, ref_rj = compute_logps_vlm(
+        ref_model,
+        train_example.input_ids,
+        train_example.positions,
+        train_example.attention_mask,
+        train_example.completion_mask,
+        train_example.pixel_values,
+    )
+
+    chosen_rewards   = pol_ch - ref_ch
+    rejected_rewards = pol_rj - ref_rj
     margin = chosen_rewards - rejected_rewards
 
     losses = (
         -jax.nn.log_sigmoid(beta * margin) * (1 - label_smoothing)
         - jax.nn.log_sigmoid(-beta * margin) * label_smoothing
     )
-
     aux = {
         "chosen_rewards": chosen_rewards.mean(),
         "rejected_rewards": rejected_rewards.mean(),
@@ -115,6 +127,8 @@ def vl_dpo_loss_fn(
         "rewards_accuracy": (chosen_rewards > rejected_rewards).mean(),
     }
     return losses.mean(), aux
+
+
 
 
 class VLM_DpoTrainer(peft_trainer.PeftTrainer):
@@ -131,7 +145,11 @@ class VLM_DpoTrainer(peft_trainer.PeftTrainer):
         self.ref_model = ref_model
         super().__init__(model, optimizer, training_config)
         self.dpo_config = training_config
-        self.loss_fn = vl_dpo_loss_fn
+
+        # Single loss function that runs both policy & ref in one jitted graph
+        self.loss_fn = functools.partial(
+            vl_dpo_loss_fn, ref_model=self.ref_model
+        )
         self.gen_model_input_fn = lambda x: {
             "train_example": x,
             "beta": self.dpo_config.beta,
@@ -140,81 +158,56 @@ class VLM_DpoTrainer(peft_trainer.PeftTrainer):
         self._has_aux = True
 
     @override
-    def _prepare_inputs(self, training_input: VLMTrainingInput) -> Any:
-        # Concat chosen and rejected ids so we can compute together.
-        prompt_ids = jnp.concatenate(
-            [training_input.prompt_ids, training_input.prompt_ids]
-        )
-        prompt_mask = jnp.concatenate(
-            [training_input.prompt_mask, training_input.prompt_mask]
-        )
-        max_len = max(
-            training_input.chosen_ids.shape[1],
-            training_input.rejected_ids.shape[1],
-        )
-        pad_value = self.dpo_config.padding_value
+    def _prepare_inputs(self, ti: VLMTrainingInput) -> Any:
+        # Duplicate prompts (chosen/rejected share the same prompt)
+        prompt_ids  = jnp.concatenate([ti.prompt_ids,  ti.prompt_ids ])
+        prompt_mask = jnp.concatenate([ti.prompt_mask, ti.prompt_mask])
+
+        # Right-pad completions to a single fixed max_len
+        max_len = max(ti.chosen_ids.shape[1], ti.rejected_ids.shape[1])
+        pad_val = self.dpo_config.padding_value
         completion_ids = jnp.concatenate([
-            common.pad_to_length(
-                training_input.chosen_ids, max_len, pad_value, axis=-1
-            ),
-            common.pad_to_length(
-                training_input.rejected_ids, max_len, pad_value, axis=-1
-            ),
+            common.pad_to_length(ti.chosen_ids,   max_len, pad_val, axis=-1),
+            common.pad_to_length(ti.rejected_ids, max_len, pad_val, axis=-1),
         ])
         completion_mask = jnp.concatenate([
-            common.pad_to_length(training_input.chosen_mask, max_len, 0, axis=-1),
-            common.pad_to_length(training_input.rejected_mask, max_len, 0, axis=-1),
+            common.pad_to_length(ti.chosen_mask,   max_len, 0, axis=-1),
+            common.pad_to_length(ti.rejected_mask, max_len, 0, axis=-1),
         ])
 
+        # Concatenate prompt + completion
         input_ids = jnp.concatenate([prompt_ids, completion_ids], axis=1)
-        attention_mask = common.make_causal_attn_mask(
-            jnp.concatenate([prompt_mask, completion_mask], axis=1)
-        )
-        logits_to_keep = completion_ids.shape[1]
-        positions = common.build_positions_from_mask(
-            jnp.concatenate([prompt_mask, completion_mask], axis=1)
-        )
 
-        # Duplicate pixel_values for chosen/rejected
-        pixel_values = jnp.concatenate([training_input.pixel_values, training_input.pixel_values], axis=0)
+        # Causal mask built from (prompt_mask + completion_mask)
+        full_mask = jnp.concatenate([prompt_mask, completion_mask], axis=1)
+        attention_mask = common.make_causal_attn_mask(full_mask)
 
-        ref_chosen_logps, ref_rejected_logps = compute_logps_vlm(
-            self.ref_model,
-            input_ids,
-            positions,
-            attention_mask,
-            logits_to_keep,
-            completion_mask,
-            pixel_values,
-        )
+        # Absolute positions for RoPE
+        positions = common.build_positions_from_mask(full_mask)
+
+        # Duplicate images for chosen/rejected halves
+        pixel_values = jnp.concatenate([ti.pixel_values, ti.pixel_values], axis=0)
+
         return VLMTrainExample(
             input_ids=input_ids,
             positions=positions,
             attention_mask=attention_mask,
-            ref_chosen_logps=ref_chosen_logps,
-            ref_rejected_logps=ref_rejected_logps,
             completion_mask=completion_mask,
-            logits_to_keep=logits_to_keep,
             pixel_values=pixel_values,
         )
 
     @override
     def _post_process_train_step(self, aux: Any) -> None:
         m, s = self._mode, self._train_steps
-        self.metrics_logger.log("chosen_rewards", float(aux["chosen_rewards"]), m, s)
+        self.metrics_logger.log("chosen_rewards",   float(aux["chosen_rewards"]),   m, s)
         self.metrics_logger.log("rejected_rewards", float(aux["rejected_rewards"]), m, s)
-        self.metrics_logger.log("rewards_margin", float(aux["rewards_margin"]), m, s)
+        self.metrics_logger.log("rewards_margin",   float(aux["rewards_margin"]),   m, s)
         self.metrics_logger.log("rewards_accuracy", float(aux["rewards_accuracy"]), m, s)
-        # --- PATCH START ---
         if self._buffered_train_metrics is not None:
-            self._buffered_train_metrics.losses = [
-                float(x) for x in self._buffered_train_metrics.losses
-            ]
-
-    # Optionally override _post_process_eval_step for metrics logging
+            self._buffered_train_metrics.losses = [float(x) for x in self._buffered_train_metrics.losses]
 
 
-# Utility for processing records into VLMTrainingInput (like process_dpo_record for vision data)
+# (Optional) helper if you transform single records
 def process_vlm_dpo_record(
     record: dict[str, Any],
     tokenizer: Any,
@@ -222,19 +215,13 @@ def process_vlm_dpo_record(
     image_key: str = "pixel_values",
 ) -> VLMTrainingInput:
     # only prompt is left padded, others are right padded.
-    prompt_ids, prompt_mask = _generate_ids_and_masks(
-        [record["prompt"]], tokenizer, max_seq_length
-    )
-    chosen_ids, chosen_mask = _generate_ids_and_masks(
-        [record["chosen"]], tokenizer, max_seq_length, left_pad=False
-    )
-    rejected_ids, rejected_mask = _generate_ids_and_masks(
-        [record["rejected"]], tokenizer, max_seq_length, left_pad=False
-    )
+    prompt_ids,  prompt_mask  = _generate_ids_and_masks([record["prompt"]],  tokenizer, max_seq_length)
+    chosen_ids,  chosen_mask  = _generate_ids_and_masks([record["chosen"]],  tokenizer, max_seq_length, left_pad=False)
+    rejected_ids,rejected_mask= _generate_ids_and_masks([record["rejected"]],tokenizer, max_seq_length, left_pad=False)
 
     pixel_values = record[image_key]
     if pixel_values.ndim == 3:
-        pixel_values = pixel_values[None, ...]  # add batch dim if needed
+        pixel_values = pixel_values[None, ...]  # [1,H,W,C]
 
     return VLMTrainingInput(
         prompt_ids=prompt_ids,
