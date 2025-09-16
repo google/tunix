@@ -13,18 +13,22 @@
 # limitations under the License.
 
 """Simple utils used by RL algorithms."""
+
+import collections
+import functools
 import gc
 import operator
 from typing import Any, List, Optional, Tuple
-
 from absl import logging
 from flax import nnx
 from flax.nnx import filterlib
 from flax.nnx import statelib
+import humanize
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import numpy as np
-from tunix.oss import utils
+from tunix.google import utils
 
 
 Mesh = jax.sharding.Mesh
@@ -105,7 +109,7 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
     device.
   """
   live_arrays = jax.live_arrays()
-  hbm_used = dict(int)
+  hbm_used = collections.defaultdict(int)
   # TODO(lancewang): Find a way to get the accurate hbm limit on Pathways.
   hbm_limit = None
   for array in live_arrays:
@@ -138,7 +142,7 @@ def show_hbm_usage(title=""):
   Args:
     title: The title to print before the HBM usage.
   """
-  fmt_size = utils.humanize_binary_size
+  fmt_size = functools.partial(humanize.naturalsize, binary=True)
   devices = jax.devices()
   # Force a GC sweep to catch recently deallocated arrays
   gc.collect()
@@ -162,6 +166,21 @@ def show_hbm_usage(title=""):
           used / limit,
           devices[i],
       )
+
+
+def chunk_slices_by_size(stop: int, step: int):
+  """Yields slices `slice(...)` for samples before `stop`, chunked by `step`.
+
+  The last chunk is allowed to be smaller than `step`.
+
+  Args:
+    stop: The total number of samples.
+    step: The maximum size of each chunk.
+  """
+  i = 0
+  while i < stop:
+    yield slice(i, min(i + step, stop))
+    i += step
 
 
 def put_params_on_memory_kind(
@@ -202,3 +221,29 @@ def put_params_on_memory_kind(
   shardings = jax.tree.map(lambda x: x.sharding, params_on_memory_kind)
   logging.info("params_on_memory_kind shardings: %s", shardings)
   return params_on_memory_kind
+
+
+def create_critic_model(
+    actor_model: nnx.Module, seed: int = 0, lm_head_to_replace: str = "lm_head"
+) -> nnx.Module:
+  """Creates a critic model from an actor model."""
+  g, state = nnx.split(actor_model)
+  # TODO(tsbao): if actor model is a LoRA model, then we can potentially share
+  # backbone of base weights with critic model. Do it later as an optimization.
+  copied_state = jax.tree.map(jnp.copy, state)
+  critic_model = nnx.merge(g, copied_state)
+  lm_head = getattr(critic_model, lm_head_to_replace)
+  hidden_dim = (
+      lm_head.shape[0] if hasattr(lm_head, "shape") else lm_head.in_features
+  )
+  setattr(
+      critic_model,
+      lm_head_to_replace,
+      nnx.Linear(
+          in_features=hidden_dim,
+          out_features=1,
+          use_bias=False,
+          rngs=nnx.Rngs(seed),
+      ),
+  )
+  return critic_model
