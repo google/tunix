@@ -173,7 +173,8 @@ class Einsum(nnx.Module):
     self.einsum_str = einsum_str
     self.shape = shape
     self.w = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+        nnx.initializers.normal()(rngs.params(), shape, dtype=jnp.bfloat16),
+        sharding=sharding,
     )
 
   @jax.named_scope('einsum')
@@ -193,7 +194,9 @@ class Embedder(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.input_embedding = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
+        nnx.initializers.normal()(
+            rngs.params(), (vocab_size, embed_dim), dtype=jnp.bfloat16
+        ),
         sharding=shd_config.emb_vd,
     )
     self.shd_config = shd_config
@@ -245,7 +248,7 @@ class RMSNorm(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim),
+        nnx.initializers.ones_init()(rngs.params(), dim, dtype=jnp.bfloat16),
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
@@ -415,11 +418,13 @@ class MoELayer(nnx.Module):
         out_features=config.num_experts,
         use_bias=False,
         rngs=rngs,
+        param_dtype=jnp.bfloat16,
     )
     self.gate_proj = nnx.Param(
         nnx.initializers.normal()(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
+            dtype=jnp.bfloat16,
         ),
         sharding=shd_config.exp_weight_cdf,
     )
@@ -427,6 +432,7 @@ class MoELayer(nnx.Module):
         nnx.initializers.normal()(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
+            dtype=jnp.bfloat16,
         ),
         sharding=shd_config.exp_weight_cdf,
     )
@@ -434,6 +440,7 @@ class MoELayer(nnx.Module):
         nnx.initializers.normal()(
             rngs.params(),
             (config.num_experts, config.hidden_dim, config.embed_dim),
+            dtype=jnp.bfloat16,
         ),
         sharding=shd_config.exp_weight_cfd,
     )
@@ -496,6 +503,7 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, shd_config.ffw_weight_df
         ),
+        param_dtype=jnp.bfloat16,
     )
     self.up_proj = nnx.Linear(
         in_features=config.embed_dim,
@@ -505,6 +513,7 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, shd_config.ffw_weight_df
         ),
+        param_dtype=jnp.bfloat16,
     )
     self.down_proj = nnx.Linear(
         in_features=config.hidden_dim,
@@ -514,6 +523,7 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, shd_config.ffw_weight_fd
         ),
+        param_dtype=jnp.bfloat16,
     )
 
   @jax.named_scope('feed_forward')
