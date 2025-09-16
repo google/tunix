@@ -49,8 +49,6 @@ Tunix is still under development, here's a glimpse of the current features:
 * **Scalability:**
     * Distributed training for large models
     * Efficient inference support for RL workflow
-* **Accelerator:**
-    * Efficient execution on GPU.
 * **User Guides:**
     * Comprehensive onboarding materials and example notebooks
 
