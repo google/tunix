@@ -87,7 +87,7 @@ class TrainingInput:
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class MetricsBuffer:
+class _MetricsBuffer:
   """Metrics collected for a specific step.
 
   Attributes:
@@ -151,7 +151,10 @@ def _calculate_global_batch_size(train_example: Any) -> int:
 
 
 class PeftTrainer:
-  """PEFT trainer for LoRA. Only LoRA parameters are updated.
+  """PEFT trainer for SFT.
+
+  If LoRA layer is present in the model, then only LoRA params will be trained.
+  Otherwise, all params will be trained.
 
   Attributes:
     model: The model to train.
@@ -225,9 +228,9 @@ class PeftTrainer:
         max_step=self.config.max_steps,
         profiler_options=self.config.profiler_options,
     )
-    self._buffered_train_metrics: MetricsBuffer | None = None
-    self._prev_buffered_train_metrics: MetricsBuffer | None = None
-    self._buffered_eval_metrics: MetricsBuffer | None = None
+    self._buffered_train_metrics: _MetricsBuffer | None = None
+    self._prev_buffered_train_metrics: _MetricsBuffer | None = None
+    self._buffered_eval_metrics: _MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
 
@@ -245,19 +248,12 @@ class PeftTrainer:
       )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
+    """Customizable training hooks to the trainer."""
     self.training_hooks = training_hooks
 
   def with_data_hooks(self, data_hooks: hooks.DataHooks):
+    """Customizable data hooks to the trainer."""
     self.data_hooks = data_hooks
-
-  def clear_jit_cache(self):
-    """Clears the JIT cache of the train and eval step functions.
-
-    This function should be called when the trainer is being reused after
-    overiding the training related states, for example, the loss function.
-    """
-    self._jitted_train_step_fn = None
-    self._jitted_eval_step_fn = None
 
   def with_loss_fn(
       self,
@@ -266,7 +262,7 @@ class PeftTrainer:
       ],
       has_aux: bool = False,
   ):
-    self.clear_jit_cache()
+    self._clear_jit_cache()
     self.loss_fn = loss_fn
     self.eval_loss_fn = loss_fn
     self._has_aux = has_aux
@@ -275,7 +271,7 @@ class PeftTrainer:
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], _ModelInputT]
   ):
-    """Generates model input from training input.
+    """Customizable function to generate model input from training input.
 
     NB: output of this function will be passed to the loss function, so the args
     should match what loss function expects.
@@ -287,9 +283,18 @@ class PeftTrainer:
     Returns:
       PeftTrainer.
     """
-    self.clear_jit_cache()
+    self._clear_jit_cache()
     self.gen_model_input_fn = gen_model_input_fn
     return self
+
+  def _clear_jit_cache(self):
+    """Clears the JIT cache of the train and eval step functions.
+
+    This function should be called when the trainer is being reused after
+    overiding the training related states, for example, the loss function.
+    """
+    self._jitted_train_step_fn = None
+    self._jitted_eval_step_fn = None
 
   def _train_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
@@ -330,14 +335,6 @@ class PeftTrainer:
     else:
       return out, None
 
-  def create_train_step_fn(self) -> Callable[..., ArrayLike]:
-    """Creates the train step function."""
-    return self._train_step
-
-  def create_eval_step_fn(self) -> Callable[..., ArrayLike]:
-    """Creates the eval step function."""
-    return self._eval_step
-
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
     """Optimizer states should be sharded before calling the jit function.
 
@@ -356,7 +353,7 @@ class PeftTrainer:
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-  def jit_train_and_eval_step(self, skip_jit: bool = False):
+  def _jit_train_and_eval_step(self, skip_jit: bool = False):
     """Creates and returns the train and eval step functions.
 
     This function will return the cached ones if available.
@@ -367,19 +364,19 @@ class PeftTrainer:
     Returns:
       A tuple of train and eval step functions.
     """
-    train_step = self.create_train_step_fn()
-    eval_step = self.create_eval_step_fn()
+    train_step_fn = self._train_step
+    eval_step_fn = self._eval_step
     if skip_jit:
-      return train_step, eval_step
+      return train_step_fn, eval_step_fn
     else:
       if self._jitted_train_step_fn is None:
         mesh = pxla.thread_resources.env.physical_mesh
         self._shard_optimizer(mesh)
         self._jitted_train_step_fn = nnx.jit(
-            train_step, donate_argnames=("optimizer",)
+            train_step_fn, donate_argnames=("optimizer",)
         )
         self._jitted_eval_step_fn = nnx.jit(
-            eval_step, donate_argnames=("model",)
+            eval_step_fn, donate_argnames=("model",)
         )
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
@@ -477,14 +474,14 @@ class PeftTrainer:
 
   def _buffer_metrics(
       self,
-      metrics_buffer: MetricsBuffer | None,
+      metrics_buffer: _MetricsBuffer | None,
       loss: ArrayLike,
       step: int,
       step_time_delta: float = 0.0,
-  ) -> MetricsBuffer:
+  ) -> _MetricsBuffer:
     """Buffers metrics for the current step."""
     if metrics_buffer is None:
-      metrics_buffer = MetricsBuffer(
+      metrics_buffer = _MetricsBuffer(
           step=step, losses=[loss], step_time_deltas=[step_time_delta]
       )
     else:
@@ -513,7 +510,7 @@ class PeftTrainer:
     self._prev_buffered_train_metrics = self._buffered_train_metrics
     self._buffered_train_metrics = None
 
-  def _write_metrics(self, metrics_buffer: MetricsBuffer):
+  def _write_metrics(self, metrics_buffer: _MetricsBuffer):
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
@@ -565,7 +562,7 @@ class PeftTrainer:
     mesh = pxla.thread_resources.env.physical_mesh
     logging.info("Training with mesh: %s", mesh)
 
-    train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
+    train_step, eval_step = self._jit_train_and_eval_step(skip_jit)
     if eval_ds:
       self._run_eval(eval_ds, eval_step)
 

@@ -439,7 +439,7 @@ class PpoLearner:
       prompts: List[str],
       completions: List[str],
       **kargs,
-  ):
+  ) -> jax.Array:
     """Computes the rewards for completions using the provided reward functions.
 
     Args:
