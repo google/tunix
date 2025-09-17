@@ -60,4 +60,11 @@ pyink-annotation-pragmas = [
   "mypy:",
   "pyright:",
   "pyre-",
+  "@title",
+  "@param",
+  "@markdown",
+  "@tidy",
+  "@test",
 ]
+pyink-ipynb-indentation = 2
+pyink-ipynb-unicode-escape = true
