@@ -307,7 +307,7 @@ class GrpoLearner:
       completions: List[str],
       mode: rl_cluster_lib.Mode,
       **kargs,
-  ) -> jax.Array:
+  ):
     """Computes the rewards for completions using the provided reward functions.
 
     Args:
@@ -526,6 +526,8 @@ class GrpoLearner:
     NOTE:
     1. The outer loop (I) is ignored for now because we never update the
     reference model for now.
+    2. Currently sample and train hold the same referece to the model. So we
+    also omit the step to update the sampler model.
 
     Args:
       train_ds: An iterable of training input data, where each element is a

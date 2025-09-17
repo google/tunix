@@ -19,7 +19,6 @@
 from tunix.distillation.distillation_trainer import DistillationTrainer, TrainingConfig as DistillationTrainingConfig
 from tunix.generate.sampler import CacheConfig, Sampler
 from tunix.rl.grpo.grpo_learner import GrpoConfig, GrpoLearner, RewardFn
-from tunix.rl.ppo.ppo_learner import PpoConfig, PpoLearner
 from tunix.rl.rl_cluster import ClusterConfig, RLCluster, RLTrainingConfig, Role
 from tunix.rl.rollout.base_rollout import RolloutConfig
 from tunix.sft.dpo.dpo_trainer import DpoTrainer, DpoTrainingConfig

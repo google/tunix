@@ -535,43 +535,27 @@ class RLCluster:
       else:
         cur_metrics.metrics[metric_name][0].append(value)
 
-  def update_actor(self, train_ds, eval_ds, skip_jit=False) -> None:
-    """Updates the actor model.
-
-    Args:
-      train_ds: The training dataset.
-      eval_ds: The evaluation dataset.
-      skip_jit: Whether to skip JIT (mainly for debugging purpose).
-    """
+  def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[Role.ACTOR]:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
-  def update_critic(self, train_ds, eval_ds, skip_jit=False) -> None:
-    """Updates the critic model.
-
-    Args:
-     train_ds: The training dataset.
-     eval_ds: The evaluation dataset.
-     skip_jit: Whether to skip JIT (mainly for debugging purpose).
-    """
+  def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[Role.CRITIC]:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
       self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
-  def generate(
-      self, prompts: list[str], mode: Mode = Mode.TRAIN
-  ) -> base_rollout.RolloutOutput:
-    """Generates texts from the given prompts.
+  def generate(self, prompts: list[str], mode: Mode = Mode.TRAIN):
+    """Generates text from the given prompts.
 
     Args:
       prompts: A list of prompts to generate text from.
       mode: The mode of rollout, either TRAIN or EVAL.
 
     Returns:
-      RolloutOutput containing the generated texts, tokens, and other metadata.
+      A list of generated text.
     """
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
@@ -599,17 +583,7 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    """Gets the per-token logps of the reference model.
-
-    Args:
-      prompt_tokens: The prompt tokens.
-      completion_tokens: The completion tokens.
-      pad_id: The pad id.
-      eos_id: The eos id.
-
-    Returns:
-      The per-token logps of the reference model.
-    """
+    """Gets the per-token logps of the reference model."""
     # TODO(linchai): Need to transfer the prompt and completion tokens to the
     # reference model's mesh if rollout and reference are on different meshes.
     with self.cluster_config.role_to_mesh[Role.REFERENCE]:
@@ -629,15 +603,7 @@ class RLCluster:
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
   ) -> jax.Array:
-    """Gets the per-token logps of the current rollout model.
-
-    Args:
-      prompt_tokens: The prompt tokens.
-      completion_tokens: The completion tokens.
-
-    Returns:
-      The per-token logps of the rollout model.
-    """
+    """Gets the per-token logps of the current policy model."""
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
@@ -653,7 +619,7 @@ class RLCluster:
       return per_token_logps
 
   def sync_weights(self):
-    """Syncs the weights of between the rollout model and policy model."""
+    """Syncs the weights of between the sampler model and trainer model."""
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
       cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
@@ -679,17 +645,6 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    """Computes the values from the critic model.
-
-    Args:
-      prompt_tokens: The prompt tokens.
-      completion_tokens: The completion tokens.
-      pad_id: The pad id.
-      eos_id: The eos id.
-
-    Returns:
-      The values from the critic model.
-    """
     with self.cluster_config.role_to_mesh[Role.CRITIC]:
       return self.inference_worker.get_values(
           prompt_tokens, completion_tokens, pad_id, eos_id
@@ -702,17 +657,6 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    """Computes the rewards from the reward model.
-
-    Args:
-      prompt_tokens: The prompt tokens.
-      completion_tokens: The completion tokens.
-      pad_id: The pad id.
-      eos_id: The eos id.
-
-    Returns:
-      The rewards from the reward model.
-    """
     with self.cluster_config.role_to_mesh[Role.REWARD]:
       return self.inference_worker.get_rewards(
           prompt_tokens,

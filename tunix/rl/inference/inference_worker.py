@@ -72,7 +72,6 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    """Gets the values from the critic model."""
     critic_model = self._models.get("critic")
     if critic_model is None:
       raise ValueError("Critic model is not available.")
