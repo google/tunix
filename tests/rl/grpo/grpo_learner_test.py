@@ -257,16 +257,14 @@ class GrpoLearnerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     self.assertEqual(grpo_learner._iter_steps, 10)  # max_steps
-    # max_steps / eval_every_n_steps * (#_rows_in_eval_ds / eval_batch_size)
-    # = 10 / 2 * (4 / 1) = 20
-    self.assertEqual(grpo_learner._eval_steps, 20)
+    self.assertEqual(grpo_learner._eval_steps, 4)  # num eval batches
     self.assertEqual(
         grpo_learner.rl_cluster.actor_trainer.iter_steps,
         grpo_learner._iter_steps,
     )
     expected_prepare_data_call_at_step = {
         'train': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-        'eval': [0, 4, 8, 12, 16],
+        'eval': [0, 0, 0, 0, 0],  # eval step is being reset to 0 at each time
     }
     self.assertEqual(
         prepare_data_call_at_step,
@@ -781,9 +779,8 @@ class GrpoLearnerTest(parameterized.TestCase):
 
   def test_trajectory_ids(self):
     def my_reward_fn(trajectories, prompts, **kwargs):
-      if 'trajectory_ids' in kwargs:
-        for t_id, prompt in zip(kwargs['trajectory_ids'], prompts):
-          trajectories[t_id] = prompt
+      for t_id, prompt in zip(kwargs['trajectory_ids'], prompts):
+        trajectories[kwargs['mode']][t_id] = prompt
       return 1.0
 
     vocab = tc.MockVocab()
@@ -828,7 +825,7 @@ class GrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=1,
     )
-    first_trajectories = {}
+    first_trajectories = {'train': {}, 'eval': {}}
     grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=create_rl_cluster(1),
         reward_fns=lambda **kwargs: my_reward_fn(
@@ -843,7 +840,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     grpo_learner.train(train_ds, eval_ds)
 
     # Execute with different batch size and gradient accumulation steps.
-    second_trajectories = {}
+    second_trajectories = {'train': {}, 'eval': {}}
     grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=create_rl_cluster(4),
         reward_fns=lambda **kwargs: my_reward_fn(
@@ -860,8 +857,9 @@ class GrpoLearnerTest(parameterized.TestCase):
     # Check that the trajectories are the same.
     self.assertEqual(first_trajectories, second_trajectories)
     self.assertLen(
-        first_trajectories, 80
+        first_trajectories['train'], 80
     )  # max_steps * batch_size * num_generations
+    self.assertLen(first_trajectories['eval'], 8)  # eval_rows * num_generations
 
 
 if __name__ == '__main__':

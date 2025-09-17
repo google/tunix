@@ -306,24 +306,27 @@ class GrpoLearner:
       prompts: List[str],
       completions: List[str],
       mode: rl_cluster_lib.Mode,
-      **kargs,
-  ):
+      **kwargs,
+  ) -> jax.Array:
     """Computes the rewards for completions using the provided reward functions.
 
     Args:
       prompts: A list of input prompts.
       completions: A list of generated text completions.
       mode: The mode to use for logging metrics.
-      **kargs: Additional keyword arguments passed to the reward functions.
+      **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
       A JAX array (shape `[num_prompts, num_reward_fns]`) of scalar rewards for
       each prompt-completion pair. The rewards are computed using the provided
       reward functions.
     """
+    if "mode" in kwargs:
+      raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
+    kwargs["mode"] = str(mode)
     rewards = jnp.zeros((len(prompts), len(self.reward_fns)))
     for i, reward_fn in enumerate(self.reward_fns):
-      r = reward_fn(prompts=prompts, completions=completions, **kargs)
+      r = reward_fn(prompts=prompts, completions=completions, **kwargs)
       r = jnp.array(r)
       rewards = rewards.at[:, i].set(r)
       self.rl_cluster.buffer_metrics(
@@ -372,7 +375,9 @@ class GrpoLearner:
 
     return rewards
 
-  def _compute_trajectory_ids(self, example: _TrainingInputT) -> List[str]:
+  def _compute_trajectory_ids(
+      self, example: _TrainingInputT, steps: int
+  ) -> List[str]:
     """Computes the trajectory ID for each prompt in the batch.
 
     Trajectory id is a string of format {row_offset}_{group_offset} where
@@ -381,12 +386,13 @@ class GrpoLearner:
 
     Args:
       example: The training input data.
+      steps: The number of steps taken so far.
 
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
     batch_size = len(example["prompts"]) // self.grpo_config.num_generations
-    row_offset = self._iter_steps * batch_size
+    row_offset = steps * batch_size
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),
         self.grpo_config.num_generations,
@@ -453,16 +459,21 @@ class GrpoLearner:
         ):  # fast forward the iterator if loading from a previous checkpoint.
           next(iterator)
           self._iter_steps += 1
+
         example = next(iterator)
         example = jax.tree.map(
             lambda x: np.repeat(x, sample_repeat, axis=0),
             example,
         )  # [B] -> [B * G]
 
-        if mode == rl_cluster_lib.Mode.TRAIN:
-          trajectory_ids = self._compute_trajectory_ids(example)
-          assert "trajectory_ids" not in example
-          example["trajectory_ids"] = trajectory_ids
+        trajectory_ids = self._compute_trajectory_ids(
+            example,
+            self._iter_steps
+            if mode == rl_cluster_lib.Mode.TRAIN
+            else self._eval_steps,
+        )
+        assert "trajectory_ids" not in example
+        example["trajectory_ids"] = trajectory_ids
 
         with jax.profiler.StepTraceAnnotation(
             "sampler",
@@ -586,6 +597,7 @@ class GrpoLearner:
                 % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
                 == 0
             ):
+              self._eval_steps = 0
               self._prepare_data(
                   iterator=iter(eval_ds),
                   proceed_num_steps=-1,
