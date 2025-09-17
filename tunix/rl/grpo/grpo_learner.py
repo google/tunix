@@ -116,12 +116,12 @@ class GrpoLearner:
       grpo_config: An instance of `GrpoConfig` containing all GRPO specific
         parameters.
       metric_fns: A sequence of callables that compute metrics for the
-        completions. Each callable should accept `prompts`, `completions`,
-        `rewards`, `advantages` and optional keyword arguments, and return a
-        dictionary of metric names to tuples of (metric_value, aggregation_fn):
-        >>> def metric_fn(prompts, completions, rewards, advantages, **kargs):
-        ...    return { ...        "prompt_min_len": (min(len(p) for p in
-        prompts), np.min), ...        ... ...    }
+        completions. Each callable should accept ``prompts``, ``completions``,
+        ``rewards``, ``advantages`` and optional keyword arguments, and return a
+        dictionary of metric names to tuples of ``(metric_value, aggregation_fn)``:
+
+           >>> def metric_fn(prompts, completions, rewards, advantages, **kargs):
+           ...    return { ...  "prompt_min_len": (min(len(p) for p in prompts), np.min), ... }
     """
     if grpo_config.loss_algo not in ["grpo", "gspo-token"]:
       raise ValueError(
