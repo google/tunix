@@ -20,6 +20,7 @@ import copy
 import dataclasses
 import enum
 import gc
+import itertools
 import operator
 import os
 from typing import Any, Callable, Dict, Tuple
@@ -93,15 +94,13 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
       will be trained in the same optimizer as the actor model.
     actor_critic_share_backbone: Whether to share the backbone of the actor and
       critic models.
-    training_micro_batch_size: The microbatch size used for training.
+    training_micro_batch_size: The microbatch size used for training. This must
+      be the same as the input batch size.
     rollout_micro_batch_size: The microbatch size used for model rollouts. If
       None, it defaults to `training_micro_batch_size`.
-    ref_logps_micro_batch_size: The microbatch size used for computing reference
-      model log probabilities. If None, it defaults to
-      `training_micro_batch_size`.
-    old_logps_micro_batch_size: The microbatch size used for computing old
-      policy log probabilities. If None, it defaults to
-      `training_micro_batch_size`.
+    compute_logps_micro_batch_size: The microbatch size used for computing log
+      probabilities (e.g., for reference and old policy models). If None, it
+      defaults to `training_micro_batch_size`.
   """
 
   actor_optimizer: optax.GradientTransformation
@@ -109,8 +108,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   actor_critic_share_backbone: bool = False  # TODO(tsbao): support this.
   training_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
-  ref_logps_micro_batch_size: int | None = None
-  old_logps_micro_batch_size: int | None = None
+  compute_logps_micro_batch_size: int | None = None
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
@@ -125,15 +123,10 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     ):
       raise ValueError("rollout_micro_batch_size must be positive.")
     if (
-        self.ref_logps_micro_batch_size is not None
-        and self.ref_logps_micro_batch_size <= 0
+        self.compute_logps_micro_batch_size is not None
+        and self.compute_logps_micro_batch_size <= 0
     ):
-      raise ValueError("ref_logps_micro_batch_size must be positive.")
-    if (
-        self.old_logps_micro_batch_size is not None
-        and self.old_logps_micro_batch_size <= 0
-    ):
-      raise ValueError("old_logps_micro_batch_size must be positive.")
+      raise ValueError("compute_logps_micro_batch_size must be positive.")
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -617,34 +610,26 @@ class RLCluster:
       else:
         rollout_config = self.cluster_config.rollout_config
 
-      outputs: list[base_rollout.RolloutOutput] = []
-      for slc in rl_utils.chunk_slices_by_size(
-          stop=len(prompts), step=micro_batch_size
-      ):
-        sub_prompts = prompts[slc]
-        output = self.rollout.generate(
-            sub_prompts,
-            rollout_config,
-        )
-        outputs.append(output)
-
-      model = self.rollout.model()
+      outputs = [
+          self.rollout.generate(prompts[s], rollout_config)
+          for s in rl_utils.chunk_slices_by_size(
+              stop=len(prompts), step=micro_batch_size
+          )
+      ]
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
 
-    texts = []
-    for out in outputs:
-      texts.extend(out.text)
+    texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
     logprobs = None
-    if outputs and outputs[0].logprobs is not None:
-      logprobs = []
-      for out in outputs:
-        logprobs.extend(out.logprobs)
+    if outputs[0].logprobs is not None:
+      logprobs = list(
+          itertools.chain.from_iterable(out.logprobs for out in outputs)
+      )
 
     logits = None
-    if outputs and isinstance(outputs[0].logits, (jnp.ndarray, jnp.ndarray)):
+    if isinstance(outputs[0].logits, jnp.ndarray):
       logits = jnp.concatenate([out.logits for out in outputs], axis=0)
 
     return base_rollout.RolloutOutput(
@@ -680,12 +665,15 @@ class RLCluster:
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
       outs = []
-      for slc in rl_utils.chunk_slices_by_size(
+      for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
       ):
         outs.append(
             self.inference_worker.get_ref_per_token_logps(
-                prompt_tokens[slc], completion_tokens[slc], pad_id, eos_id
+                prompt_tokens[batch_slice],
+                completion_tokens[batch_slice],
+                pad_id,
+                eos_id,
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -712,12 +700,12 @@ class RLCluster:
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
       outs = []
-      for slc in rl_utils.chunk_slices_by_size(
+      for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
       ):
         outs.append(
             self.rollout.get_per_token_logps(
-                prompt_tokens[slc], completion_tokens[slc]
+                prompt_tokens[batch_slice], completion_tokens[batch_slice]
             )
         )
       per_token_logps = jnp.concatenate(outs, axis=0)
