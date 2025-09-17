@@ -51,7 +51,7 @@ def _dummy_dataset(
     rejected_mask: np.ndarray,
 ):
   return grain.MapDataset.source(source).map(
-      lambda x: dpo_lib.TrainingInput(
+      lambda x: dpo_lib.TokenizedTrainingInput(
           prompt_ids=prompt_ids,
           prompt_mask=prompt_mask,
           chosen_ids=chosen_ids,
@@ -73,15 +73,6 @@ class DpoTrainerTest(parameterized.TestCase):
           chosen_mask=np.ones((2, 5)),
           rejected_ids=np.arange(20, 30).reshape(2, 5),
           rejected_mask=np.ones((2, 5)),
-      ),
-      dict(
-          testcase_name="chosen_reject_unequal_length",
-          prompt_ids=np.arange(0, 10).reshape(2, 5),
-          prompt_mask=np.ones((2, 5)),
-          chosen_ids=np.arange(10, 20).reshape(2, 5),
-          chosen_mask=np.ones((2, 5)),
-          rejected_ids=np.arange(20, 26).reshape(2, 3),
-          rejected_mask=np.ones((2, 3)),
       ),
   )
   def test_dpo_trainer(
@@ -168,13 +159,13 @@ class DpoTrainerTest(parameterized.TestCase):
         ),
     )
 
-    training_input = dpo_lib.TrainingInput(
+    training_input = dpo_lib.TokenizedTrainingInput(
         prompt_ids=np.array([[1, 2, 3, 4, 5], [0, 0, 1, 2, 3]]),
         prompt_mask=np.array([[1, 1, 1, 1, 1], [0, 0, 1, 1, 1]]),
         chosen_ids=np.array([[10, 11, 12, 0], [13, 14, 15, 16]]),
         chosen_mask=np.array([[1, 1, 1, 0], [1, 1, 1, 1]]),
-        rejected_ids=np.array([[20, 21, 22], [23, 0, 0]]),
-        rejected_mask=np.array([[1, 1, 1], [1, 0, 0]]),
+        rejected_ids=np.array([[20, 21, 22, 0], [23, 0, 0, 0]]),
+        rejected_mask=np.array([[1, 1, 1, 0], [1, 0, 0, 0]]),
     )
     out = dpo_trainer._prepare_inputs(training_input)
     expected_input_ids = np.array([

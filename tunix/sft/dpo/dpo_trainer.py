@@ -32,11 +32,22 @@ from typing_extensions import override
 
 @flax.struct.dataclass(frozen=True)
 class TrainingInput:
-  prompt_ids: jax.Array | np.ndarray  # Prompt ids should be left padded.
+  """Training input for DPO."""
+  prompts: list[str]
+  chosen_responses: list[str]
+  rejected_responses: list[str]
+
+
+@flax.struct.dataclass(frozen=True)
+class TokenizedTrainingInput:
+  # Prompt IDs should be left padded.
+  prompt_ids: jax.Array | np.ndarray
   prompt_mask: jax.Array | np.ndarray
-  chosen_ids: jax.Array | np.ndarray  # Chosen ids should be right padded.
+  # Chosen IDs should be right padded.
+  chosen_ids: jax.Array | np.ndarray
   chosen_mask: jax.Array | np.ndarray
-  rejected_ids: jax.Array | np.ndarray  # Rejected ids should be right padded.
+  # Rejected IDs should be right padded.
+  rejected_ids: jax.Array | np.ndarray
   rejected_mask: jax.Array | np.ndarray
 
 
@@ -51,79 +62,14 @@ class TrainExample:
   logits_to_keep: int = flax.struct.field(pytree_node=False)
 
 
-def _generate_ids_and_masks(
-    input_strings: list[str],
-    tokenizer: Any,
-    max_length: int,
-    left_pad: bool = True,
-) -> tuple[jax.Array, jax.Array]:
-  """Generates ids and masks for a list of strings."""
-  tokens = [tokenizer.tokenize(x) for x in input_strings]
-  all_input_ids = jnp.array([
-      common.pad_to_length(
-          x[:max_length],
-          target_length=max_length,
-          pad_value=tokenizer.pad_id(),
-          left=left_pad,
-          axis=-1,
-      )
-      for x in tokens
-  ])
-  # generate masks
-  all_input_mask = (all_input_ids != tokenizer.pad_id()).astype("int32")
-  return all_input_ids[0], all_input_mask[0]
-
-
-def process_dpo_record(
-    record: dict[str, Any], tokenizer: Any, max_seq_length: int
-) -> TrainingInput:
-  """Processes and tokenizes a single record for DPO training.
-
-  This function takes a dictionary containing a prompt, a chosen response,
-  and a rejected response. It tokenizes each text field into ids and creates
-  the corresponding attention masks.
-
-  Args:
-      record: A dictionary containing the training data. Expected to have
-        'prompt', 'chosen', and 'rejected' keys, each with a string value.
-      tokenizer: The tokenizer to use for converting text into token IDs.
-      max_seq_length: The maximum length for the tokenized sequences. Any
-        sequence longer than this will be truncated.
-
-  Returns:
-      A `TrainingInput` object
-  """
-
-  # only prompt is left padded, others are right padded.
-  prompt_ids, prompt_mask = _generate_ids_and_masks(
-      [record["prompt"]], tokenizer, max_seq_length
-  )
-  chosen_ids, chosen_mask = _generate_ids_and_masks(
-      [record["chosen"]], tokenizer, max_seq_length, left_pad=False
-  )
-  rejected_ids, rejected_mask = _generate_ids_and_masks(
-      [record["rejected"]], tokenizer, max_seq_length, left_pad=False
-  )
-
-  # Ensure the shapes are correct
-  assert prompt_ids.shape == chosen_ids.shape == rejected_ids.shape
-  assert prompt_mask.shape == chosen_mask.shape == rejected_mask.shape
-
-  return TrainingInput(
-      prompt_ids=prompt_ids,
-      prompt_mask=prompt_mask,
-      chosen_ids=chosen_ids,
-      chosen_mask=chosen_mask,
-      rejected_ids=rejected_ids,
-      rejected_mask=rejected_mask,
-  )
-
-
 @dataclasses.dataclass(slots=True, kw_only=True)
 class DpoTrainingConfig(peft_trainer.TrainingConfig):
   beta: float = 0.1  # 𝛽 for KL penalty https://arxiv.org/pdf/2305.18290
   label_smoothing: float = 0.0
-  padding_value: int = 0  # Padding value from tokenizer, default to 0.
+
+  # Should be specified only if your input has strings instead of tokenized IDs.
+  max_prompt_length: int | None = None
+  max_response_length: int | None = None
 
 
 @nnx.jit(static_argnums=(4,))
@@ -160,11 +106,15 @@ class DpoTrainer(peft_trainer.PeftTrainer):
       ref_model: nnx.Module,
       optimizer: optax.GradientTransformation,
       training_config: DpoTrainingConfig,
+      tokenizer: Any | None = None,
   ):
     self.model = model
     self.ref_model = ref_model
-    super(DpoTrainer, self).__init__(model, optimizer, training_config)
     self.dpo_config = training_config
+    super().__init__(model, optimizer, training_config)
+
+    self.tokenizer = tokenizer
+
     self.loss_fn = dpo_loss_fn
     self.gen_model_input_fn = lambda x: {
         "train_example": x,
@@ -174,41 +124,60 @@ class DpoTrainer(peft_trainer.PeftTrainer):
     self._has_aux = True
 
   @override
-  def _prepare_inputs(self, training_input: TrainingInput) -> Any:
-    # Concat chosen and rejected ids so we can compute together.
+  def _prepare_inputs(
+      self, training_input: TrainingInput | TokenizedTrainingInput
+  ) -> Any:
+    # If the inputs are list of strings, let's tokenise them and pad them.
+    if isinstance(training_input, TrainingInput):
+      if self.tokenizer is not None:
+        raise ValueError(
+            "Tokenizer must be provided if training input is not tokenized."
+        )
+
+      max_prompt_length = self.dpo_config.max_prompt_length
+      max_response_length = self.dpo_config.max_response_length
+      if (
+          self.dpo_config.max_prompt_length is None
+          or self.dpo_config.max_response_length is None
+      ):
+        raise ValueError(
+            "max_prompt_length and max_response_length must be provided if "
+            "training input is not tokenized. Received: "
+            f"max_prompt_length={max_prompt_length}, "
+            f"max_response_length={max_response_length}."
+        )
+
+      training_input = process_dpo_record(
+          prompts=training_input.prompts,
+          chosen_responses=training_input.chosen_responses,
+          rejected_responses=training_input.rejected_responses,
+          tokenizer=self.tokenizer,
+          max_prompt_length=self.dpo_config.max_prompt_length,
+          max_response_length=self.dpo_config.max_response_length,
+      )
+
+    # Concatenate chosen and rejected IDs so we can do a forward pass together.
     prompt_ids = jnp.concatenate(
-        [training_input.prompt_ids, training_input.prompt_ids]
+        [training_input.prompt_ids, training_input.prompt_ids], axis=0
     )
     prompt_mask = jnp.concatenate(
-        [training_input.prompt_mask, training_input.prompt_mask]
+        [training_input.prompt_mask, training_input.prompt_mask], axis=0
     )
-    max_len = max(
-        training_input.chosen_ids.shape[1],
-        training_input.rejected_ids.shape[1],
+    completion_ids = jnp.concatenate(
+        [training_input.chosen_ids, training_input.rejected_ids], axis=0
     )
-    pad_value = self.dpo_config.padding_value
-    completion_ids = jnp.concatenate([
-        common.pad_to_length(
-            training_input.chosen_ids, max_len, pad_value, axis=-1
-        ),
-        common.pad_to_length(
-            training_input.rejected_ids, max_len, pad_value, axis=-1
-        ),
-    ])
-    completion_mask = jnp.concatenate([
-        common.pad_to_length(training_input.chosen_mask, max_len, 0, axis=-1),
-        common.pad_to_length(training_input.rejected_mask, max_len, 0, axis=-1),
-    ])
-
+    completion_mask = jnp.concatenate(
+        [training_input.chosen_mask, training_input.rejected_mask], axis=0
+    )
     input_ids = jnp.concat([prompt_ids, completion_ids], axis=1)
-    attention_mask = common.make_causal_attn_mask(
-        jnp.concat([prompt_mask, completion_mask], axis=1)
-    )
-    logits_to_keep = completion_ids.shape[1]
-    positions = common.build_positions_from_mask(
-        jnp.concat([prompt_mask, completion_mask], axis=1)
-    )
 
+    # Compute positions, attention mask, etc., to be fed to the model.
+    mask = jnp.concat([prompt_mask, completion_mask], axis=1)
+    attention_mask = common.make_causal_attn_mask(mask)
+    logits_to_keep = completion_ids.shape[1]
+    positions = common.build_positions_from_mask(mask)
+
+    # Compute the log probabilities for the chosen and rejected tokens.
     ref_chosen_logps, ref_rejected_logps = compute_logps(
         self.ref_model,
         input_ids,
@@ -272,3 +241,86 @@ def dpo_loss_fn(
   }
 
   return losses.mean(), aux
+
+
+def _generate_ids_and_masks(
+    input_strings: list[str],
+    tokenizer: Any,
+    max_length: int,
+    left_pad: bool = True,
+) -> tuple[jax.Array, jax.Array]:
+  """Generates ids and masks for a list of strings."""
+  tokens = [tokenizer.tokenize(x) for x in input_strings]
+  all_input_ids = jnp.array([
+      common.pad_to_length(
+          x[:max_length],
+          target_length=max_length,
+          pad_value=tokenizer.pad_id(),
+          left=left_pad,
+          axis=-1,
+      )
+      for x in tokens
+  ])
+  # generate masks
+  all_input_mask = (all_input_ids != tokenizer.pad_id()).astype("int32")
+  return all_input_ids, all_input_mask
+
+
+def process_dpo_record(
+    prompts: list[str] | str,
+    chosen_responses: list[str] | str,
+    rejected_responses: list[str] | str,
+    tokenizer: Any,
+    max_prompt_length: int,
+    max_response_length: int,
+) -> TokenizedTrainingInput:
+  """Processes and tokenizes a single record for DPO training.
+
+  This function takes a dictionary containing a prompt, a chosen response,
+  and a rejected response. It tokenizes each text field into ids and creates
+  the corresponding attention masks.
+
+  Args:
+      prompts: A list of prompts or a single prompt.
+      chosen_responses: A list of chosen responses or a single chosen response.
+      rejected_responses: A list of rejected responses or a single rejected
+        response.
+      tokenizer: The tokenizer to use for converting text into token IDs.
+      max_prompt_length: The maximum length for the tokenized prompts. Any
+        sequence longer than this will be truncated.
+      max_response_length: The maximum length for the tokenized responses. Any
+        sequence longer than this will be truncated.
+
+  Returns:
+      A `TrainingInput` object
+  """
+
+  if isinstance(prompts, str):
+    prompts = [prompts]
+  if isinstance(chosen_responses, str):
+    chosen_responses = [chosen_responses]
+  if isinstance(rejected_responses, str):
+    rejected_responses = [rejected_responses]
+
+  # Only prompt is left padded, others are right padded.
+  prompt_ids, prompt_mask = _generate_ids_and_masks(
+      prompts,
+      tokenizer,
+      max_prompt_length,
+      left_pad=True,
+  )
+  chosen_ids, chosen_mask = _generate_ids_and_masks(
+      chosen_responses, tokenizer, max_response_length, left_pad=False
+  )
+  rejected_ids, rejected_mask = _generate_ids_and_masks(
+      rejected_responses, tokenizer, max_response_length, left_pad=False
+  )
+
+  return TokenizedTrainingInput(
+      prompt_ids=prompt_ids,
+      prompt_mask=prompt_mask,
+      chosen_ids=chosen_ids,
+      chosen_mask=chosen_mask,
+      rejected_ids=rejected_ids,
+      rejected_mask=rejected_mask,
+  )
