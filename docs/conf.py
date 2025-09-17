@@ -87,6 +87,8 @@ suppress_warnings = ["misc.highlighting_failure"]
 
 # -- Options for the API reference
 
+default_role = "py:obj"
+
 napoleon_include_init_with_doc = False
 
 autodoc_default_options = {
