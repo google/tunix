@@ -3,7 +3,10 @@ repos:
     rev: '24.10.1'
     hooks:
       - id: pyink
-        types: [python]
+        types_or: [python, jupyter]
+        files: '\.(py|ipynb)$'
+        additional_dependencies:
+          - "pyink[jupyter]"
 
   - repo: https://github.com/pylint-dev/pylint
     rev: v3.3.8
@@ -18,3 +21,11 @@ repos:
           # because pylint is very strict.
           - --exit-zero
         exclude: ^tests/
+
+  - repo: https://github.com/nbQA-dev/nbQA
+    rev: 1.9.1
+    hooks:
+      - id: nbqa-pylint
+        additional_dependencies: [pylint==3.3.8]
+        args: [--rcfile=.pylintrc-notebooks, --fail-under=10.0]
+        files: '\.ipynb$'
