@@ -20,6 +20,7 @@ import copy
 import dataclasses
 import enum
 import gc
+import itertools
 import operator
 import os
 from typing import Any, Callable, Dict, Tuple
@@ -28,6 +29,7 @@ from flax import nnx
 from flax.nnx import filterlib
 from flax.nnx import statelib
 import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
@@ -45,6 +47,7 @@ from tunix.sft import utils as sft_utils
 
 
 ModelOrPath = nnx.Module | str
+
 
 MetricsT = Dict[
     str, Tuple[ArrayLike | str, Callable[[jax.Array], jax.Array] | None]
@@ -91,11 +94,39 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
       will be trained in the same optimizer as the actor model.
     actor_critic_share_backbone: Whether to share the backbone of the actor and
       critic models.
+    training_micro_batch_size: The microbatch size used for training. This must
+      be the same as the input batch size.
+    rollout_micro_batch_size: The microbatch size used for model rollouts. If
+      None, it defaults to `training_micro_batch_size`.
+    compute_logps_micro_batch_size: The microbatch size used for computing log
+      probabilities (e.g., for reference and old policy models). If None, it
+      defaults to `training_micro_batch_size`.
   """
 
   actor_optimizer: optax.GradientTransformation
   critic_optimizer: optax.GradientTransformation | None = None
   actor_critic_share_backbone: bool = False  # TODO(tsbao): support this.
+  training_micro_batch_size: int | None = None
+  rollout_micro_batch_size: int | None = None
+  compute_logps_micro_batch_size: int | None = None
+
+  def __post_init__(self):
+    """Validates the configuration after initialization."""
+    if (
+        self.training_micro_batch_size is not None
+        and self.training_micro_batch_size <= 0
+    ):
+      raise ValueError("training_micro_batch_size must be positive.")
+    if (
+        self.rollout_micro_batch_size is not None
+        and self.rollout_micro_batch_size <= 0
+    ):
+      raise ValueError("rollout_micro_batch_size must be positive.")
+    if (
+        self.compute_logps_micro_batch_size is not None
+        and self.compute_logps_micro_batch_size <= 0
+    ):
+      raise ValueError("compute_logps_micro_batch_size must be positive.")
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -547,34 +578,69 @@ class RLCluster:
       self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
-  def generate(self, prompts: list[str], mode: Mode = Mode.TRAIN):
+  def generate(
+      self,
+      prompts: list[str],
+      mode: Mode = Mode.TRAIN,
+      micro_batch_size: int | None = None,
+  ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
     Args:
       prompts: A list of prompts to generate text from.
       mode: The mode of rollout, either TRAIN or EVAL.
+      micro_batch_size: The micro-batch size for generation. If None, no
+        micro-batching is performed.
 
     Returns:
-      A list of generated text.
+      A `RolloutOutput` object containing the generated text and other info.
     """
+    if len(prompts) == 0:  # pylint: disable=g-explicit-length-test
+      raise ValueError("Cannot generate from an empty list of prompts.")
+    micro_batch_size = micro_batch_size or len(prompts)
+
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+
       if isinstance(self.cluster_config.rollout_config, dict):
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
-      output = self.rollout.generate(
-          prompts,
-          rollout_config,
-      )
-      model = self.rollout.model()
+
+      outputs = [
+          self.rollout.generate(prompts[s], rollout_config)
+          for s in rl_utils.chunk_slices_by_size(
+              stop=len(prompts), step=micro_batch_size
+          )
+      ]
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
-      return output
+
+    texts = list(itertools.chain.from_iterable(out.text for out in outputs))
+
+    logprobs = None
+    if outputs[0].logprobs is not None:
+      logprobs = list(
+          itertools.chain.from_iterable(out.logprobs for out in outputs)
+      )
+
+    logits = None
+    if isinstance(outputs[0].logits, jnp.ndarray):
+      logits = jnp.concatenate([out.logits for out in outputs], axis=0)
+
+    return base_rollout.RolloutOutput(
+        text=texts,
+        logits=logits,
+        tokens=jnp.concatenate([out.tokens for out in outputs], axis=0),
+        left_padded_prompt_tokens=jnp.concatenate(
+            [out.left_padded_prompt_tokens for out in outputs], axis=0
+        ),
+        logprobs=logprobs,
+    )
 
   def get_ref_per_token_logps(
       self,
@@ -582,17 +648,35 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      micro_batch_size: int | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
+    batch_size = prompt_tokens.shape[0]
+    if batch_size == 0:
+      raise ValueError(
+          "Cannot get reference log probabilities from an empty batch."
+      )
+    micro_batch_size = micro_batch_size or batch_size
+
     # TODO(linchai): Need to transfer the prompt and completion tokens to the
     # reference model's mesh if rollout and reference are on different meshes.
     with self.cluster_config.role_to_mesh[Role.REFERENCE]:
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
-      ref_per_token_logps = self.inference_worker.get_ref_per_token_logps(
-          prompt_tokens, completion_tokens, pad_id, eos_id
-      )
+      outs = []
+      for batch_slice in rl_utils.chunk_slices_by_size(
+          stop=batch_size, step=micro_batch_size
+      ):
+        outs.append(
+            self.inference_worker.get_ref_per_token_logps(
+                prompt_tokens[batch_slice],
+                completion_tokens[batch_slice],
+                pad_id,
+                eos_id,
+            )
+        )
+      ref_per_token_logps = jnp.concatenate(outs, axis=0)
       self._maybe_offload_model_to_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -602,16 +686,29 @@ class RLCluster:
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
+      micro_batch_size: int | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the current policy model."""
+    batch_size = prompt_tokens.shape[0]
+    if batch_size == 0:
+      return jnp.array([], dtype=jnp.float32)
+    micro_batch_size = micro_batch_size or batch_size
+
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
-      per_token_logps = self.rollout.get_per_token_logps(
-          prompt_tokens, completion_tokens
-      )
+      outs = []
+      for batch_slice in rl_utils.chunk_slices_by_size(
+          stop=batch_size, step=micro_batch_size
+      ):
+        outs.append(
+            self.rollout.get_per_token_logps(
+                prompt_tokens[batch_slice], completion_tokens[batch_slice]
+            )
+        )
+      per_token_logps = jnp.concatenate(outs, axis=0)
       model = self.rollout.model()
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
