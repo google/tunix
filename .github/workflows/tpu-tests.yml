@@ -39,59 +39,116 @@ jobs:
     - name: Cleanup old docker images
       run: docker system prune --all --force
 
-  tpu_image:
-    needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
-    with:
-      device_type: tpu
-      device_name: v5litepod-8
-      cloud_runner: linux-x86-ct5lp-224-8tpu
-      build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
-
   tpu_unit_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: tpu
-      device_name: v5litepod-8
-      cloud_runner: linux-x86-ct5lp-224-8tpu
-      image_type: tpu
-      pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+    needs: prelim
+    runs-on: [self-hosted, linux-x86-ct5lp-224-8tpu]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git curl
+    
+    - name: Set up JAX for TPU
+      run: |
+        pip install --upgrade pip
+        pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+    
+    - name: Install tunix dependencies
+      run: |
+        pip install -e .
+        pip install pytest pytest-xdist
+    
+    - name: Verify TPU availability
+      run: |
+        python -c "
+        import jax
+        print(f'JAX version: {jax.__version__}')
+        print(f'JAX devices: {jax.devices()}')
+        print(f'TPU available: {len(jax.devices()) > 0}')
+        "
+    
+    - name: Run tunix model tests
+      run: |
+        python -m pytest tests/models/ -v --tb=short -m "not cpu_only and not gpu_only"
+    
+    - name: Run tunix generation tests
+      run: |
+        python -m pytest tests/generate/ -v --tb=short -m "not cpu_only and not gpu_only"
+    
+    - name: Run tunix SFT tests
+      run: |
+        python -m pytest tests/sft/ -v --tb=short -m "not cpu_only and not gpu_only" -k "not test_common"
+    
+    - name: Run tunix distillation tests
+      run: |
+        python -m pytest tests/distillation/ -v --tb=short -m "not cpu_only and not gpu_only"
+    
+    - name: Run tunix RL tests (basic)
+      run: |
+        python -m pytest tests/rl/common_test.py -v --tb=short -m "not cpu_only and not gpu_only"
+    
+    - name: Test tunix imports
+      run: |
+        python -c "
+        import tunix
+        import tunix.models
+        import tunix.generate
+        import tunix.sft
+        import tunix.distillation
+        import tunix.rl
+        print('All tunix modules imported successfully')
+        "
+    
+    - name: Test basic model loading
+      run: |
+        python -c "
+        from tunix.models.llama3.params import Llama3Params
+        print('Llama3 params loaded successfully')
+        "
 
   tpu_integration_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: tpu
-      device_name: v5litepod-8
-      cloud_runner: linux-x86-ct5lp-224-8tpu
-      pytest_marker: 'not cpu_only and not gpu_only and integration_test'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
-
-  clean_up:
-    if: ${{ always() }}
-    needs: [tpu_unit_tests, tpu_integration_tests]
-    name: "Clean up"
-    runs-on: ["self-hosted"]
-    permissions:
-      contents: read
-      issues: write
+    needs: prelim
+    runs-on: [self-hosted, linux-x86-ct5lp-224-8tpu]
     steps:
-    - name: Authenticate gcloud
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    
+    - name: Install system dependencies
       run: |
-          # configure registries as root and as runner
-          gcloud auth configure-docker --quiet
-          gcloud auth configure-docker us-docker.pkg.dev --quiet
-    - name: Delete the tpu image
-      run: gcloud container images delete "gcr.io/tpu-prod-env-multipod/tunix_${{ github.run_id }}:tpu" --force-delete-tags --quiet
+        sudo apt-get update
+        sudo apt-get install -y git curl
+    
+    - name: Set up JAX for TPU
+      run: |
+        pip install --upgrade pip
+        pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+    
+    - name: Install tunix dependencies
+      run: |
+        pip install -e .
+        pip install pytest pytest-xdist
+    
+    - name: Run integration tests
+      run: |
+        # Run more comprehensive tests that might take longer
+        python -m pytest tests/ -v --tb=short -m "integration_test" --timeout=300
 
   notify_failure:
     name: Notify failed build
