@@ -9,7 +9,7 @@ on:
 
 jobs:
   tpu-tests:
-    runs-on: [self-hosted, linux-x86-ct5lp-224-8tpu]
+    runs-on: ["self-hosted", "linux-x86-ct5lp-224-8tpu"]
     
     steps:
     - name: Checkout code
