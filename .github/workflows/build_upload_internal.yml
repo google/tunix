@@ -35,7 +35,7 @@ on:
 
 jobs:
   build_upload:
-    runs-on: [self-hosted, ${{ inputs.cloud_runner }}]
+    runs-on: [self-hosted, linux-x86-ct5lp-224-8tpu]
     steps:
     - name: Checkout code
       uses: actions/checkout@v4

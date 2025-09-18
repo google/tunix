@@ -27,12 +27,7 @@ on:
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
-  group: >
-    ${{
-      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
-      github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
-      github.run_id
-    }}
+  group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || github.event_name == 'schedule' && format('{0}-schedule', github.workflow) || github.run_id }}
   cancel-in-progress: true
 
 jobs:
