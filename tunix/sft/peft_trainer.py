@@ -157,9 +157,9 @@ class PeftTrainer:
     model: The model to train.
     config: The training config.
     optimizer: The optimizer to use. To monitor the learning rate at each step,
-      use ``optax.inject_hyperparams`` to inject learning rate as a
+      use `optax.schedules.inject_hyperparams` to inject learning rate as a
       hyperparameter. For example: ``optimizer =
-      optax.inject_hyperparams(optax.sgd)(learning_rate=learning_rate_schedule)``
+      optax.schedules.inject_hyperparams(optax.sgd)(learning_rate=learning_rate_schedule)``
     loss_fn: The loss function to use.
     eval_loss_fn: The loss function to use for evaluation.
     gen_model_input_fn: The function to generate model input from training
