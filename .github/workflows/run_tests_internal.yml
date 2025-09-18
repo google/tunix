@@ -1,0 +1,115 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Run Tests Internal
+
+on:
+  workflow_call:
+    inputs:
+      device_type:
+        required: true
+        type: string
+      device_name:
+        required: true
+        type: string
+      cloud_runner:
+        required: true
+        type: string
+      image_type:
+        required: false
+        type: string
+        default: ""
+      pytest_marker:
+        required: true
+        type: string
+      xla_python_client_mem_fraction:
+        required: false
+        type: string
+        default: "0.75"
+      tf_force_gpu_allow_growth:
+        required: false
+        type: string
+        default: "false"
+      container_resource_option:
+        required: false
+        type: string
+        default: ""
+      is_scheduled_run:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  run_tests:
+    runs-on: [self-hosted, ${{ inputs.cloud_runner }}]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Authenticate gcloud
+      run: |
+        gcloud auth configure-docker --quiet
+        gcloud auth configure-docker us-docker.pkg.dev --quiet
+    
+    - name: Pull Docker image
+      run: |
+        docker pull "gcr.io/tpu-prod-env-multipod/tunix_${{ github.run_id }}:${{ inputs.device_type }}"
+    
+    - name: Run tests in Docker container
+      run: |
+        docker run \
+          --rm \
+          ${{ inputs.container_resource_option }} \
+          -e XLA_PYTHON_CLIENT_MEM_FRACTION="${{ inputs.xla_python_client_mem_fraction }}" \
+          -e TF_FORCE_GPU_ALLOW_GROWTH="${{ inputs.tf_force_gpu_allow_growth }}" \
+          -e PYTEST_MARKER="${{ inputs.pytest_marker }}" \
+          -e IS_SCHEDULED_RUN="${{ inputs.is_scheduled_run }}" \
+          -v "$(pwd):/workspace" \
+          -w /workspace \
+          "gcr.io/tpu-prod-env-multipod/tunix_${{ github.run_id }}:${{ inputs.device_type }}" \
+          bash -c "
+            # Install tunix in development mode
+            pip install -e .
+            pip install pytest pytest-xdist
+            
+            # Verify TPU availability
+            python -c \"
+            import jax
+            print(f'JAX version: {jax.__version__}')
+            print(f'JAX devices: {jax.devices()}')
+            print(f'TPU available: {len(jax.devices()) > 0}')
+            \"
+            
+            # Run tests based on marker
+            if [ \"\$IS_SCHEDULED_RUN\" = \"true\" ]; then
+              echo 'Running scheduled test suite...'
+              python -m pytest tests/ -v --tb=short -m \"\$PYTEST_MARKER\" --timeout=600
+            else
+              echo 'Running PR test suite...'
+              python -m pytest tests/ -v --tb=short -m \"\$PYTEST_MARKER\" --timeout=300
+            fi
+            
+            # Test tunix imports
+            python -c \"
+            import tunix
+            import tunix.models
+            import tunix.generate
+            import tunix.sft
+            import tunix.distillation
+            import tunix.rl
+            print('All tunix modules imported successfully')
+            \"
+          "
