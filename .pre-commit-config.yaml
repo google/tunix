@@ -30,3 +30,16 @@ repos:
         additional_dependencies: [pylint==3.3.8]
         args: [--rcfile=.pylintrc-notebooks, --fail-under=10.0]
         files: '\.ipynb$'
+
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 0.7.16
+    hooks:
+      - id: mdformat
+        args: ["--wrap", "80"]
+        additional_dependencies:
+          - mdformat-gfm==0.3.5
+          - "markdown-it-py[linkify]"
+          # (optional) other plugins:
+          # - mdformat-frontmatter
+          # - mdformat-tables
+        files: '\.md$'
