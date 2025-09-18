@@ -118,3 +118,7 @@ class TokenizerAdapter:
     ):
       return True
     return False
+
+  @property
+  def tokenizer(self) -> Any:
+    return self._tokenizer

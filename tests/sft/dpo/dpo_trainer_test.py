@@ -62,6 +62,32 @@ def _dummy_dataset(
   )
 
 
+def _dummy_string_dataset(
+    source: MySource,
+    prompts: np.ndarray,
+    chosen_responses: np.ndarray,
+    rejected_responses: np.ndarray,
+    return_dict=False,
+):
+  ds = grain.MapDataset.source(source)
+  if return_dict:
+    return ds.map(
+        lambda x: {
+            "prompts": prompts,
+            "chosen_responses": chosen_responses,
+            "rejected_responses": rejected_responses,
+        }
+    )
+  else:
+    return ds.map(
+        lambda x: dpo_lib.DataInput(
+            prompts=prompts,
+            chosen_responses=chosen_responses,
+            rejected_responses=rejected_responses,
+        )
+    )
+
+
 class DpoTrainerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
@@ -73,15 +99,6 @@ class DpoTrainerTest(parameterized.TestCase):
           chosen_mask=np.ones((2, 5)),
           rejected_ids=np.arange(20, 30).reshape(2, 5),
           rejected_mask=np.ones((2, 5)),
-      ),
-      dict(
-          testcase_name="chosen_reject_unequal_length",
-          prompt_ids=np.arange(0, 10).reshape(2, 5),
-          prompt_mask=np.ones((2, 5)),
-          chosen_ids=np.arange(10, 20).reshape(2, 5),
-          chosen_mask=np.ones((2, 5)),
-          rejected_ids=np.arange(20, 26).reshape(2, 3),
-          rejected_mask=np.ones((2, 3)),
       ),
   )
   def test_dpo_trainer(
@@ -121,10 +138,71 @@ class DpoTrainerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     for metric_name in [
-        "chosen_rewards",
-        "rejected_rewards",
-        "rewards_margin",
-        "rewards_accuracy",
+        "rewards/chosen",
+        "rewards/rejected",
+        "rewards/margin",
+        "rewards/accuracy",
+        "log_probs/chosen",
+        "log_probs/rejected",
+    ]:
+      self.assertLen(
+          dpo_trainer.metrics_logger.get_metric_history(metric_name, "train"),
+          dpo_trainer._train_steps,
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="dataclass_inputs",
+          train_ds=_dummy_string_dataset(
+              MySource(np.arange(10)),
+              prompts=["Tunix", "Parallax"],
+              chosen_responses=["PT", "distributed training"],
+              rejected_responses=["optimizer library", "quantization"],
+          ),
+      ),
+      dict(
+          testcase_name="dict_inputs",
+          train_ds=_dummy_string_dataset(
+              MySource(np.arange(10)),
+              prompts=["Tunix", "Parallax"],
+              chosen_responses=["PT", "distributed training"],
+              rejected_responses=["optimizer library", "quantization"],
+              return_dict=True,
+          ),
+      ),
+  )
+  def test_dpo_trainer_with_string_inputs(self, train_ds):
+    tokenizer = tc.MockVocab()
+    model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+    )
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    ref_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+    )
+    dpo_config = dpo_lib.DpoTrainingConfig(
+        eval_every_n_steps=10,
+        max_steps=10,
+        max_prompt_length=3,
+        max_response_length=3,
+    )
+    dpo_trainer = dpo_lib.DpoTrainer(
+        model=model,
+        ref_model=ref_model,
+        optimizer=optax.sgd(1e-3),
+        training_config=dpo_config,
+        tokenizer=tokenizer,
+    )
+    dpo_trainer.train(train_ds, None)
+
+    variables = nnx.state(model, nnx.Param)
+    jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
+
+    for metric_name in [
+        "rewards/chosen",
+        "rewards/rejected",
+        "rewards/margin",
+        "rewards/accuracy",
     ]:
       self.assertLen(
           dpo_trainer.metrics_logger.get_metric_history(metric_name, "train"),
@@ -155,6 +233,59 @@ class DpoTrainerTest(parameterized.TestCase):
       loss, _ = dpo_lib.dpo_loss_fn(model, train_example, 0.1, 0.3)
       np.testing.assert_allclose(loss, 0.925447, atol=1e-5)
 
+  def test_dpo_prepare_inputs_for_strings(self):
+    tokenizer = tc.MockVocab()
+
+    model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+    )
+    ref_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+    )
+    dpo_trainer = dpo_lib.DpoTrainer(
+        model=model,
+        ref_model=ref_model,
+        optimizer=optax.sgd(1e-3),
+        training_config=dpo_lib.DpoTrainingConfig(
+            eval_every_n_steps=10,
+            max_steps=10,
+            max_prompt_length=3,
+            max_response_length=3,
+        ),
+        tokenizer=tokenizer,
+    )
+
+    # These are random strings, they hold no meaning.
+    training_input = dpo_lib.DataInput(
+        prompts=["Tunix", "Parallax"],
+        chosen_responses=["PT", "distributed training"],
+        rejected_responses=["optimizer library", "quantization"],
+    )
+    out = dpo_trainer._prepare_inputs(training_input)
+
+    expected_input_ids = np.array([
+        [0, 1, 14, 1, 16, 0],
+        [0, 1, 15, 1, 18, 19],
+        [0, 1, 14, 1, 20, 17],
+        [0, 1, 15, 1, 21, 0],
+    ])
+    np.testing.assert_array_equal(out.input_ids, expected_input_ids)
+    self.assertEqual(np.sum(out.attention_mask[0]), 14)
+    self.assertEqual(np.sum(out.attention_mask[1]), 15)
+    self.assertEqual(np.sum(out.attention_mask[2]), 15)
+    self.assertEqual(np.sum(out.attention_mask[3]), 14)
+    np.testing.assert_allclose(
+        out.ref_chosen_logps, np.array([-11.21106, -5.985622]), atol=1e-5
+    )
+    np.testing.assert_allclose(
+        out.ref_rejected_logps, np.array([-13.020714, -5.95595]), atol=1e-5
+    )
+    expected_completion_mask = np.array(
+        [[1, 1, 0], [1, 1, 1], [1, 1, 1], [1, 1, 0]]
+    )
+    np.testing.assert_array_equal(out.completion_mask, expected_completion_mask)
+    self.assertEqual(out.logits_to_keep, 3)
+
   def test_dpo_prepare_inputs(self):
     model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     ref_model = tc.ToyTransformer(rngs=nnx.Rngs(0))
@@ -173,8 +304,8 @@ class DpoTrainerTest(parameterized.TestCase):
         prompt_mask=np.array([[1, 1, 1, 1, 1], [0, 0, 1, 1, 1]]),
         chosen_ids=np.array([[10, 11, 12, 0], [13, 14, 15, 16]]),
         chosen_mask=np.array([[1, 1, 1, 0], [1, 1, 1, 1]]),
-        rejected_ids=np.array([[20, 21, 22], [23, 0, 0]]),
-        rejected_mask=np.array([[1, 1, 1], [1, 0, 0]]),
+        rejected_ids=np.array([[20, 21, 22, 0], [23, 0, 0, 0]]),
+        rejected_mask=np.array([[1, 1, 1, 0], [1, 0, 0, 0]]),
     )
     out = dpo_trainer._prepare_inputs(training_input)
     expected_input_ids = np.array([

@@ -127,9 +127,17 @@ def pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
 
 
 def jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
+  """Returns the HBM usage for each device when using JAX."""
   hbm_used = []
-  for d in devices:
-    stats = d.memory_stats()
+  for device in devices:
+    if device.platform != "tpu":
+      logging.warning(
+          "Skipping non-TPU device: %s. You might be missing jax[tpu]"
+          " dependency.",
+          device.platform,
+      )
+      continue
+    stats = device.memory_stats()
     used = stats["bytes_in_use"]
     limit = stats["bytes_limit"]
     hbm_used.append((used, limit))
@@ -173,11 +181,11 @@ def put_params_on_memory_kind(
     memory_kind: str,
 ) -> jaxtyping.PyTree:
   """Puts params on the given memory kind."""
-  assert memory_kind in [
-      "device",
-      "pinned_host",
-      "unpinned_host",
-  ], f"Unsupported memory kind: {memory_kind}"
+  if memory_kind not in ["device", "pinned_host", "unpinned_host"]:
+    raise ValueError(
+        "`memory_kind` must be one of `device`, `pinned_host`, or "
+        f"`unpinned_host`. Received: {memory_kind}."
+    )
   original_shardings = jax.tree.map(lambda x: x.sharding, params)
   logging.info("original_shardings: %s", original_shardings)
   is_on_device = jax.tree_util.tree_reduce(

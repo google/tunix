@@ -22,6 +22,8 @@ from etils import epath
 from grain import python as grain
 import numpy as np
 import tensorflow_datasets as tfds
+import transformers
+from tunix.generate import tokenizer_adapter
 from tunix.sft.peft_trainer import TrainingInput  # pylint: disable=g-importing-member
 
 import sentencepiece as spm
@@ -35,6 +37,56 @@ INPUT_TEMPLATE_IT = {
     "prefix": "<start_of_turn>user\nTranslate this into French:\n",
     "suffix": "\n<end_of_turn>\n<start_of_turn>model\n",
 }
+
+
+# TODO(sizhi): Combine HFTokenizer and GemmaTokenizer into one class.
+class HFTokenizer(tokenizer_adapter.TokenizerAdapter):
+  """Tokenizing and encoding/decoding text using the HuggingFace tokenizer."""
+
+  def __init__(
+      self,
+      tokenizer_path: str,
+      add_bos: bool,
+      add_eos: bool,
+      hf_access_token: str,
+  ):
+
+    hf_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        pretrained_model_name_or_path=tokenizer_path,
+        add_bos_token=add_bos,
+        add_eos_token=add_eos,
+        token=hf_access_token,
+    )
+    super().__init__(hf_tokenizer)
+
+  def tokenize(
+      self,
+      example: str,
+      prefix: str = "",
+      suffix: str = "",
+      add_eos: bool = True,
+  ) -> np.ndarray:
+    """The tokenization function.
+
+    Args:
+      example: Input string to tokenize.
+      prefix:  Prefix to add to the input string.
+      suffix:  Suffix to add to the input string.
+      add_eos: If True, add an "end of sentence" token at the end of the output
+        sequence.
+
+    Returns:
+      Tokens corresponding to the input string.
+    """
+    int_list = []
+    if self.bos_id():
+      int_list.append(self.bos_id())
+    int_list.extend(
+        self.encode(prefix + example + suffix, add_special_tokens=False)
+    )
+    if add_eos:
+      int_list.append(self.eos_id())
+    return np.array(int_list, dtype=np.int32)
 
 
 class GemmaTokenizer(spm.SentencePieceProcessor):

@@ -64,30 +64,30 @@ def compute_gae_advantages(
   """
   batch_size = values.shape[0]
 
-  next_values = jnp.concatenate(
-      ((values * completion_mask)[..., 1:], jnp.zeros((batch_size, 1))), axis=1
-  )
+  def gae_step(state_t_plus_1, xs):
+    # Unpack state and inputs.
+    gae_t_plus_1, next_values = state_t_plus_1
+    rewards_t, values_t, mask_t = xs
 
-  # Compute Temporal Difference (TD).
-  deltas = rewards + gamma * next_values - values
+    # Compute Temporal Difference (TD).
+    delta = rewards_t + gamma * next_values - values_t
+    # Compute GAE for this time step.
+    gae_t = delta + gamma * gae_lambda * gae_t_plus_1
 
-  def gae_step(gae_t_plus_1, xs):
-    delta_t, mask_t = xs
-    # `A_t = delta_t + (gamma * lambda) * A_{t+1}`.
-    # Only update gae_t if mask_t is 1, otherwise, carry it over from the
-    # previous step.
-    gae_t = (delta_t + gamma * gae_lambda * gae_t_plus_1) * mask_t + (
-        1 - mask_t
-    ) * gae_t_plus_1
+    # Skip values on non-completion tokens.
+    next_values = values_t * mask_t + (1 - mask_t) * next_values
+    gae_t = gae_t * mask_t + (1 - mask_t) * gae_t_plus_1
 
-    # New state to carry over is `gae_t`. Output for this step is also `gae_t`.
-    return gae_t, gae_t
+    # New state to carry over comprises `gae_t` and `next_values`. Output for
+    # this step is `gae_t`.
+    return (gae_t, next_values), gae_t
 
   _, advantages_transposed = jax.lax.scan(
       gae_step,
-      init=jnp.zeros((batch_size,)),
+      init=(jnp.zeros((batch_size,)), jnp.zeros((batch_size,))),
       xs=(
-          jnp.transpose(jnp.array(deltas)),
+          jnp.transpose(jnp.array(rewards)),
+          jnp.transpose(jnp.array(values)),
           jnp.transpose(jnp.array(completion_mask)),
       ),
       reverse=True,

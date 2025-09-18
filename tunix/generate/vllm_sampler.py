@@ -225,9 +225,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       pad_output: bool = False,
   ) -> base_sampler.SamplerOutput:
     # max_tokens: maximum number of tokens to generate
-    assert (
-        max_generation_steps <= self.args["max_model_len"]
-    ), f"{max_generation_steps} > {self.args['max_model_len']}"
+    if max_generation_steps > self.args["max_model_len"]:
+      raise ValueError(
+          "`max_generation_steps` must be less than or equal to "
+          "`max_model_len`. Received:  `max_generation_steps`="
+          f"{max_generation_steps} and `max_model_len`="
+          f"{self.args['max_model_len']}."
+      )
     if beam_size is not None:
       self.sampling_params = self.llm.sampling_params.BeamSearchParams(
           beam_width=beam_size,
@@ -254,7 +258,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     prompt_ids = [self.tokenize(x) for x in input_strings]
     outputs = self.llm.generate(
         prompts=[TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
-        prompt_token_ids=prompt_ids,
         sampling_params=self.sampling_params,
         use_tqdm=True,
     )

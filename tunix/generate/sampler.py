@@ -283,9 +283,11 @@ class Sampler(base_sampler.BaseSampler):
       self._transformer_state = state
     else:
       # LoRA state replacement.
-      assert (
-          len(param_types) == 1 and nnx.LoRAParam in param_types
-      ), f'Only LoRAParam is supported. Invalid: {param_types}'
+      if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+        raise ValueError(
+            'Only LoRAParam is supported. Received invalid `param_types`: '
+            f'{param_types}'
+        )
       original_lora_params = statelib.filter_state(
           self._transformer_state, nnx.LoRAParam
       )

@@ -300,14 +300,21 @@ def make_completion_mask(completion_ids, eos_tok: int = 0):
 
 
 def make_causal_attn_mask(input_mask: jax.Array) -> jax.Array:
-  """Create causal attention mask.
+  """Makes a causal attention mask.
+
+  I.e., as in middle diagram of Figure 3 in https://arxiv.org/pdf/1910.10683.
 
   Args:
-    input_mask: Mask for the input
+    input_mask: Input mask for the input. True for non-padded tokens only, else
+      False.
 
   Returns:
-    Attention mask.
+    Attention mask of shape [B, L, L] (where B=batch dim and L=sequence dim).
   """
+  if len(input_mask.shape) != 2:
+    raise ValueError(
+        f'Input mask must be 2D (shape [B, L]), but got {input_mask.shape}.'
+    )
   seq_len = input_mask.shape[-1]
   attn_mask = input_mask[..., None, :]
   causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))

@@ -32,6 +32,10 @@ LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
+if hasattr(flax.config, 'flax_always_shard_variable'):
+  flax.config.update('flax_always_shard_variable', False)
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
@@ -734,7 +738,11 @@ def _map_linen_var_names(key: tuple[str, ...]) -> tuple[str | int, ...]:
   for k in key:
     if k.startswith('layer_'):
       prefix, suffix = k.split('layer_')
-      assert not prefix, prefix
+      if prefix:
+        raise ValueError(
+            'Invalid parameter key format. Expected key to start directly '
+            f"with 'layer_', but found a prefix: '{prefix}' in key '{k}'."
+        )
       new_key.append('layers')
       new_key.append(int(suffix))
     elif k == 'gating_einsum':
@@ -958,44 +966,3 @@ class TransformerWithScoreHead(nnx.Module):
     ].value[-1]
     score = self.score(hidden_states)
     return score
-
-
-def make_causal_attn_mask(
-    input_mask: jax.Array,  # Shape [B, L]
-) -> jax.Array:
-  """Makes a causal attention mask.
-
-  I.e., as in middle diagram of Figure 3 in https://arxiv.org/pdf/1910.10683.
-
-  Args:
-    input_mask: Input mask for the input. True for non-padded tokens only, else
-      False.
-
-  Returns:
-    Attention mask of shape [B, L, L] (where B=batch dim and L=sequence dim).
-  """
-  if len(input_mask.shape) != 2:
-    raise ValueError(
-        f'Input mask must be 2D (shape [B, L]), but got {input_mask.shape}.'
-    )
-  seq_len = input_mask.shape[-1]
-  causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool))
-  attn_mask = input_mask[..., None, :]
-  attn_mask *= causal_mask[None, ...]
-  return attn_mask
-
-
-def build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
-  """Computes the `positions` from the `input_mask`.
-
-  Args:
-    input_mask: The tokens `input_mask`, True for non-padded tokens only.
-
-  Returns:
-    The indices to use for RoPE and absolute position encodings for the given
-    input mask.
-  """
-  positions = jnp.cumsum(input_mask, axis=-1)
-  # Subtract one for all positions from the first valid one as they are
-  # 0-indexed
-  return positions - (positions >= 1)
