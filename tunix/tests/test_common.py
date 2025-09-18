@@ -178,6 +178,14 @@ class MockVocab(spm.SentencePieceProcessor):
         'name': 11,
         'is': 12,
         'Morgane': 13,
+        'Tunix': 14,
+        'Parallax': 15,
+        'PT': 16,
+        'library': 17,
+        'distributed': 18,
+        'training': 19,
+        'optimizer': 20,
+        'quantization': 21,
     }
     self._vocab_size = len(self._mapping_text_to_id)
 
