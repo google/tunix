@@ -4,8 +4,6 @@ Reinforcement learning (RL)
 .. currentmodule:: tunix
 
 .. autosummary::
-    :nosignatures:
-    :toctree:
 
     GrpoConfig
     GrpoLearner
@@ -16,4 +14,35 @@ Reinforcement learning (RL)
     RLTrainingConfig
     Role
     RolloutConfig
+
+
+.. autoclass:: GrpoConfig
+
+-------
+
+.. autoclass:: GrpoLearner
+
+-------
+
+.. autoclass:: RewardFn
+
+-------
+
+.. autoclass:: ClusterConfig
+
+-------
+
+.. autoclass:: RLCluster
+
+-------
+
+.. autoclass:: RLTrainingConfig
+
+-------
+
+.. autoclass:: Role
+
+-------
+
+.. autoclass:: RolloutConfig
 

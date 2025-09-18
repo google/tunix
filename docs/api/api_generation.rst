@@ -4,9 +4,14 @@ Generation
 .. currentmodule:: tunix
 
 .. autosummary::
-    :nosignatures:
-    :toctree:
 
     Sampler
     CacheConfig
+
+
+.. autoclass:: Sampler
+
+----
+
+.. autoclass:: CacheConfig
 

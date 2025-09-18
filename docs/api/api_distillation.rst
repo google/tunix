@@ -4,9 +4,13 @@ Distillation
 .. currentmodule:: tunix
 
 .. autosummary::
-    :nosignatures:
-    :toctree:
 
     DistillationTrainer
     DistillationTrainingConfig
 
+
+.. autoclass:: DistillationTrainer
+
+----
+
+.. autoclass:: DistillationTrainingConfig

@@ -4,8 +4,6 @@ Supervised fine-tuning (SFT)
 .. currentmodule:: tunix
 
 .. autosummary::
-    :nosignatures:
-    :toctree:
 
     PeftTrainer
     TrainingConfig
@@ -13,4 +11,27 @@ Supervised fine-tuning (SFT)
     DpoTrainingConfig
     MetricsLogger
     MetricsLoggerOptions
+
+
+.. autoclass:: PeftTrainer
+
+-------
+
+.. autoclass:: TrainingConfig
+
+-------
+
+.. autoclass:: DpoTrainer
+
+-------
+
+.. autoclass:: DpoTrainingConfig
+
+-------
+
+.. autoclass:: MetricsLogger
+
+-------
+
+.. autoclass:: MetricsLoggerOptions
 
