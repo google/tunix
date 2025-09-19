@@ -5,7 +5,7 @@ authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 readme = "README.md"
 license = "Apache-2.0"
 classifiers = [
@@ -25,7 +25,7 @@ dependencies = [
   "jaxtyping",
   "kagglehub",
   "omegaconf",
-  "qwix@git+https://github.com/google/qwix", # TODO: change to proper release
+  "qwix",
   "sentencepiece",
   "tensorboardX",
   "tensorflow_datasets",
