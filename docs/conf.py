@@ -3,8 +3,6 @@
 For the full list of built-in configuration values, see the documentation:
 https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
-import warnings
-
 
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
@@ -17,9 +15,9 @@ author = "Tunix Developers"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    'myst_nb',
-    'sphinx_gallery.gen_gallery',
-    'sphinxcontrib.collections',
+    "myst_nb",
+    "sphinx_gallery.gen_gallery",
+    "sphinxcontrib.collections",
     # api docs
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -94,14 +92,14 @@ default_role = "py:obj"
 napoleon_include_init_with_doc = False
 
 autodoc_default_options = {
-   'members': True,
-   'imported-members': True,
-   'undoc-members': True,
+    "members": True,
+    "imported-members": True,
+    "undoc-members": True,
 }
 
 
 intersphinx_mapping = {
     "optax": ("https://optax.readthedocs.io/en/latest/", None),
     "flax": ("https://flax.readthedocs.io/en/stable/", None),
-    "jax": ("https://docs.jax.dev/en/latest/", None)
+    "jax": ("https://docs.jax.dev/en/latest/", None),
 }

@@ -24,4 +24,3 @@ gallery.rst
    api/api_distillation
    api/api_generation
 ```
-
