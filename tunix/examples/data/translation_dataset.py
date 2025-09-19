@@ -93,7 +93,7 @@ class GemmaTokenizer(spm.SentencePieceProcessor):
   """Tokenizing and encoding/decoding text using the Sentencepiece tokenizer."""
 
   _GEMMA2_TOKENIZER_PATH: epath.PathLike = (
-      'gs://gemma-data/tokenizers/tokenizer_gemma2.model'
+      "gs://gemma-data/tokenizers/tokenizer_gemma2.model"
   )
 
   def __init__(self, model_path: str = _GEMMA2_TOKENIZER_PATH):

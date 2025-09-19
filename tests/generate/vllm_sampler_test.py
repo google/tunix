@@ -136,9 +136,7 @@ class VllmSamplerTest(absltest.TestCase):
       args["additional_config"]["lora_config"] = {
           "rank": 64,
           "alpha": 64.0,
-          "module_path": (
-              ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
-          ),
+          "module_path": ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
           # "dropout": 0.0,
           # "bias": "none",
       }
