@@ -129,10 +129,11 @@ class DpoTrainer(peft_trainer.PeftTrainer):
   human or AI preferences. It is a more efficient, performant alternative
   to RLHF.
 
-  DPO bypasses the reward modeling step entirely, i.e., we do not need
-  to train a separate reward model. It uses a dataset of preferences (pairs of
-  "chosen" and "rejected responses) to directly optimize the policy model by
-  using a classification-style loss.
+  DPO is simpler because it eliminates the need for text generation in the
+  training loop. Moreover, DPO bypasses the reward modeling step entirely, i.e.,
+  we do not need to train a separate reward model. It uses a dataset of
+  preferences (pairs of "chosen" and "rejected responses) to directly optimize
+  the policy model by using a classification-style loss.
 
   References:
   - https://arxiv.org/abs/2305.18290
