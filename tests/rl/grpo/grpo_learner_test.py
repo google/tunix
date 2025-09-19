@@ -92,7 +92,7 @@ class GrpoLearnerTest(parameterized.TestCase):
 
       def __init__(self, grpo_config):
         self._iter_steps = 0
-        self._eval_steps = 0
+        self._eval_iter_steps = 0
         self.rollout_worker_mesh = pxla.thread_resources.env.physical_mesh
         self._last_iter_step = 0
         self.grpo_config = grpo_config
@@ -268,7 +268,7 @@ class GrpoLearnerTest(parameterized.TestCase):
         if str(kwargs['mode']) == 'train':
           fn_call_at_step['train'].append(learner._iter_steps)
         else:
-          fn_call_at_step['eval'].append(learner._eval_steps)
+          fn_call_at_step['eval'].append(learner._eval_iter_steps)
         return fn(*args, **kwargs)
 
       return wrapper
@@ -286,7 +286,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     self.assertEqual(grpo_learner._iter_steps, 10)  # max_steps
-    self.assertEqual(grpo_learner._eval_steps, 4)  # num eval batches
+    self.assertEqual(grpo_learner._eval_iter_steps, 4)  # num eval batches
     self.assertEqual(
         grpo_learner.rl_cluster.actor_trainer.iter_steps,
         grpo_learner._iter_steps,

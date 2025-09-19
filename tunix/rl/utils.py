@@ -218,25 +218,25 @@ def get_batch_slice(tree: Any, batch_slice: slice) -> Any:
   )
 
 
-def merge_micro_batches(buf: List[dict[str, Any]]) -> dict[str, Any]:
+def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
   """Merges micro-batch dictionaries into a single batch.
 
-  Concatenates values from a list of micro-batch dicts. List values are summed,
-  while array-like values are concatenated along axis 0.
+  Concatenates values from a list of micro-batch dicts. Values are concatenated
+  along the batch dimension.
 
   Args:
-    buf: List of micro-batch dictionaries.
+    batches: List of micro-batch dictionaries.
 
   Returns:
     A dictionary with merged batch data.
   """
-  if not buf:
+  if not batches:
     return {}
 
   merged = {}
 
-  for key in buf[0].keys():
-    all_values = [item[key] for item in buf]
+  for key in batches[0].keys():
+    all_values = [item[key] for item in batches]
 
     if isinstance(all_values[0], list):
       merged[key] = list(chain.from_iterable(all_values))
