@@ -132,13 +132,13 @@ def jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
   """Returns the HBM usage for each device when using JAX."""
   hbm_used = []
   for device in devices:
-    if device.platform != "tpu":
+    if device.platform == "cpu":
       logging.warning(
           "Skipping non-TPU device: %s. You might be missing jax[tpu]"
           " dependency.",
           device.platform,
       )
-      continue
+      return []
     stats = device.memory_stats()
     used = stats["bytes_in_use"]
     limit = stats["bytes_limit"]
