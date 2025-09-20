@@ -58,6 +58,9 @@ class TrainingConfig:
   checkpoint_root_directory: str | None = None
   # Checkpoint configurations. If None, the default options will be used.
   checkpointing_options: ocp.CheckpointManagerOptions | None = None
+  # The storage format for the checkpoints.
+  checkpoint_storage_use_ocdbt: bool = True
+  checkpoint_storage_use_zarr3: bool = True
 
   # Configs for the metrics logger.
   metrics_logging_options: metrics_logger.MetricsLoggerOptions | None = None
@@ -195,6 +198,8 @@ class PeftTrainer:
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
         options=self.config.checkpointing_options,
+        checkpoint_storage_use_ocdbt=self.config.checkpoint_storage_use_ocdbt,
+        checkpoint_storage_use_zarr3=self.config.checkpoint_storage_use_zarr3,
     )
     self.metrics_logger = metrics_logger.MetricsLogger(
         self.config.metrics_logging_options
