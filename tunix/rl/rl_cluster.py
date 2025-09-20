@@ -88,7 +88,7 @@ class Role(enum.Enum):
 class RLTrainingConfig(peft_trainer.TrainingConfig):
   """RLTraining config.
 
-  Attributes:
+  Parameters:
     actor_optimizer: Optimizer for the actor model.
     critic_optimizer: Optimizer for the critic model. If None, the critic model
       will be trained in the same optimizer as the actor model.
@@ -133,7 +133,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
 class ClusterConfig:
   """Cluster config.
 
-  Attributes:
+  Parameters:
     role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
       disaggregated setup.
     rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm".
@@ -348,6 +348,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
+
       if self.cluster_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
 

@@ -24,6 +24,8 @@ _DEFAULT_STEP = 0
 
 @dataclasses.dataclass
 class MetricsLoggerOptions:
+  """Metrics Logger options."""
+
   log_dir: str
   flush_every_n_steps: int = 100
 
