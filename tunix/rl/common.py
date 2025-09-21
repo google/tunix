@@ -197,7 +197,7 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask
 
 
-@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"))
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_per_token_logps(
     model: nnx.Module,
     prompt_tokens: jax.Array,
@@ -217,7 +217,6 @@ def compute_per_token_logps(
       positions=positions,
       attn_mask=attn_mask,
       logits_to_keep=completion_tokens.shape[1],
-      return_logits=return_logits,
   )
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
