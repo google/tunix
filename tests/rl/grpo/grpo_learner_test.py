@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import itertools
+import types
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -90,15 +92,37 @@ class GrpoLearnerTest(parameterized.TestCase):
 
       def __init__(self, grpo_config):
         self._iter_steps = 0
-        self._eval_steps = 0
+        self._eval_iter_steps = 0
         self.rollout_worker_mesh = pxla.thread_resources.env.physical_mesh
         self._last_iter_step = 0
         self.grpo_config = grpo_config
+        self.rl_cluster = types.SimpleNamespace(
+            cluster_config=types.SimpleNamespace(
+                training_config=types.SimpleNamespace(
+                    rollout_micro_batch_size=1,
+                    compute_logps_micro_batch_size=1,
+                )
+            )
+        )
 
       @override
       def _generate_and_compute_advantage(self, example, mode='train'):
-        del example['trajectory_ids']
-        return example
+        if 'trajectory_ids' in example:
+          del example['trajectory_ids']
+
+        prompts = example['prompts']
+        num_samples = len(prompts)
+
+        # Return a SimpleNamespace to mimic TrainExample attributes
+        return types.SimpleNamespace(
+            prompt_ids=np.array(prompts),
+            prompt_mask=np.ones((num_samples, 1), dtype=np.int32),
+            completion_ids=np.zeros((num_samples, 1), dtype=np.int32),
+            completion_mask=np.zeros((num_samples, 1), dtype=np.int32),
+            ref_per_token_logps=None,
+            advantages=np.zeros(num_samples, dtype=np.float32),
+            old_per_token_logps=None,
+        )
 
     empty_trainer = _EmptyTrainer(
         grpo_lib.GrpoConfig(num_generations=2, num_iterations=1)
@@ -108,7 +132,8 @@ class GrpoLearnerTest(parameterized.TestCase):
       iterator = iter(dataset)
       while True:
         try:
-          data_queue = queue_lib.SimpleDataQueue(maxsize=2)
+          queue_size = batch_repeat * grad_acc_steps + 1
+          data_queue = queue_lib.SimpleDataQueue(maxsize=queue_size)
           empty_trainer._prepare_data(
               iterator=iterator,
               proceed_num_steps=grad_acc_steps,
@@ -117,13 +142,17 @@ class GrpoLearnerTest(parameterized.TestCase):
               data_queue=data_queue,
               async_loading=False,
           )
-          yield data_queue.get(block=True)
+          while True:
+            item = data_queue.get(block=True)
+            if item is None:
+              break
+            yield item
         except StopIteration:
           break
 
     dataset = _dummy_dataset([i for i in range(4)], 2)
     res = [
-        d.get('prompts').tolist()
+        d.prompt_ids.tolist()
         for d in itertools.chain.from_iterable(_prepare(dataset, 5, 3, 1))
     ]
     expected = [
@@ -140,7 +169,7 @@ class GrpoLearnerTest(parameterized.TestCase):
 
     dataset = _dummy_dataset([i for i in range(16)], 2)
     res = [
-        d.get('prompts').tolist()
+        d.prompt_ids.tolist()
         for d in itertools.chain.from_iterable(_prepare(dataset, 2, 2, 3))
     ]
     expected = [
@@ -239,7 +268,7 @@ class GrpoLearnerTest(parameterized.TestCase):
         if str(kwargs['mode']) == 'train':
           fn_call_at_step['train'].append(learner._iter_steps)
         else:
-          fn_call_at_step['eval'].append(learner._eval_steps)
+          fn_call_at_step['eval'].append(learner._eval_iter_steps)
         return fn(*args, **kwargs)
 
       return wrapper
@@ -257,7 +286,7 @@ class GrpoLearnerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     self.assertEqual(grpo_learner._iter_steps, 10)  # max_steps
-    self.assertEqual(grpo_learner._eval_steps, 4)  # num eval batches
+    self.assertEqual(grpo_learner._eval_iter_steps, 4)  # num eval batches
     self.assertEqual(
         grpo_learner.rl_cluster.actor_trainer.iter_steps,
         grpo_learner._iter_steps,

@@ -1,21 +1,18 @@
 [project]
-name = "tunix"
-version = "0.0.0"
+name = "google-tunix"
+version = "0.0.1"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 readme = "README.md"
 license = "Apache-2.0"
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -28,7 +25,7 @@ dependencies = [
   "jaxtyping",
   "kagglehub",
   "omegaconf",
-  "qwix@git+https://github.com/google/qwix", # TODO: change to proper release
+  "qwix",
   "sentencepiece",
   "tensorboardX",
   "tensorflow_datasets",
