@@ -348,6 +348,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
+
       if self.cluster_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
 
@@ -763,7 +764,6 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     with self.cluster_config.role_to_mesh[Role.REWARD]:
       return self.inference_worker.get_rewards(
@@ -771,5 +771,4 @@ class RLCluster:
           completion_tokens,
           pad_id,
           eos_id,
-          completion_mask=completion_mask,
       )
