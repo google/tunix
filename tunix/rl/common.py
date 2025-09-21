@@ -152,7 +152,7 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
-@nnx.jit(static_argnums=(4, 5))
+@nnx.jit(static_argnums=(4,))
 def get_per_token_logps(
     model: nnx.Module,
     input_tokens: jax.Array,
