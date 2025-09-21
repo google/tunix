@@ -675,7 +675,7 @@ class RLCluster:
                 completion_tokens[batch_slice],
                 pad_id,
                 eos_id,
-                completion_mask[batch_slice],
+                completion_mask=completion_mask[batch_slice],
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -708,7 +708,9 @@ class RLCluster:
       ):
         outs.append(
             self.rollout.get_per_token_logps(
-                prompt_tokens[batch_slice], completion_tokens[batch_slice], completion_mask[batch_slice]
+                prompt_tokens[batch_slice],
+                completion_tokens[batch_slice],
+                completion_mask=completion_mask[batch_slice],
             )
         )
       per_token_logps = jnp.concatenate(outs, axis=0)
@@ -748,7 +750,11 @@ class RLCluster:
   ) -> jax.Array:
     with self.cluster_config.role_to_mesh[Role.CRITIC]:
       return self.inference_worker.get_values(
-          prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
+          prompt_tokens,
+          completion_tokens,
+          pad_id,
+          eos_id,
+          completion_mask=completion_mask,
       )
 
   def get_rewards(
@@ -757,6 +763,7 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     with self.cluster_config.role_to_mesh[Role.REWARD]:
       return self.inference_worker.get_rewards(
@@ -764,4 +771,5 @@ class RLCluster:
           completion_tokens,
           pad_id,
           eos_id,
+          completion_mask=completion_mask,
       )

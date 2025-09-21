@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -23,26 +24,62 @@ from tunix.tests import test_common as tc
 jax.config.update("jax_threefry_partitionable", False)
 
 
-class CommonTest(absltest.TestCase):
+class CommonTest(parameterized.TestCase):
 
-  def test_compute_kl_divergence(self):
+  @parameterized.named_parameters(
+      (
+          "kl",
+          "kl",
+          np.array([
+              [
+                  [0.38486493, 0.7469206, 0.3495195, 0.5621129][
+                      -0.4474684, -0.13095665, 0.46064317, -0.19887352
+                  ]
+              ],
+              [
+                  [0.43108296, 0.53564644, -0.25296474, 0.44137287][
+                      -0.06834459, -0.12115264, -0.61533415, 0.15468943
+                  ]
+              ],
+          ]),
+      ),
+      (
+          "mse_kl",
+          "mse_kl",
+          np.array([
+              [
+                  [0.07406051, 0.27894518, 0.06108194, 0.15798548],
+                  [0.10011399, 0.00857482, 0.10609607, 0.01977534],
+              ],
+              [
+                  [0.09291626, 0.14345856, 0.03199558, 0.09740501],
+                  [0.00233549, 0.00733898, 0.18931806, 0.01196441],
+              ],
+          ]),
+      ),
+      (
+          "low_var_kl",
+          "low_var_kl",
+          jnp.array([
+              [
+                  [0.0654075, 0.220744, 0.0545462, 0.1321163],
+                  [0.1168784, 0.0089617, 0.0915209, 0.0211542],
+              ],
+              [
+                  [0.080888, 0.1209372, 0.0348731, 0.0845257],
+                  [0.0023897, 0.0076445, 0.2349406, 0.0113707],
+              ],
+          ]),
+      ),
+  )
+  def test_compute_kl_divergence(self, method, expected_value):
     rng = jax.random.PRNGKey(0)
     k1, k2 = jax.random.split(rng)
     per_token_logps = jax.random.uniform(k1, shape=(2, 2, 4))
     ref_per_token_logps = jax.random.uniform(k2, shape=(2, 2, 4))
     kl_divergence = common.compute_kl_divergence(
-        per_token_logps, ref_per_token_logps
+        per_token_logps, ref_per_token_logps, method=method
     )
-    expected_value = jnp.array([
-        [
-            [0.0654075, 0.220744, 0.0545462, 0.1321163],
-            [0.1168784, 0.0089617, 0.0915209, 0.0211542],
-        ],
-        [
-            [0.080888, 0.1209372, 0.0348731, 0.0845257],
-            [0.0023897, 0.0076445, 0.2349406, 0.0113707],
-        ],
-    ])
     np.testing.assert_allclose(
         kl_divergence, expected_value, atol=1e-7, rtol=1e-5
     )
@@ -68,7 +105,7 @@ class CommonTest(absltest.TestCase):
     input_tokens = jax.random.randint(rng, shape=(2, 4), minval=0, maxval=8)
     positions = jnp.ones((2, 4))
     attn_mask = common.make_causal_attn_mask(positions)
-    per_token_logps = common.get_per_token_logps(
+    per_token_logps, _ = common.get_per_token_logps(
         model, input_tokens, positions, attn_mask, logits_to_keep=2
     )
     np.testing.assert_allclose(
@@ -82,7 +119,7 @@ class CommonTest(absltest.TestCase):
     completion_tokens = jnp.array(
         [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
     )
-    per_token_logps = common.compute_per_token_logps(
+    per_token_logps, _ = common.compute_per_token_logps(
         model,
         prompt_tokens,
         completion_tokens,
