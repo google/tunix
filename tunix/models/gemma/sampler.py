@@ -15,7 +15,8 @@ import jax
 import jax.numpy as jnp
 from tunix.models.gemma import gemma as gemma_lib
 
-import sentencepiece as spm
+# Keep the import below for google internal lint.
+import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
 
 
 def _sample_top_p(

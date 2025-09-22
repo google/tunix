@@ -15,6 +15,7 @@
 """Profiler class for Tunix trainers."""
 
 import dataclasses
+
 from absl import logging
 import jax
 

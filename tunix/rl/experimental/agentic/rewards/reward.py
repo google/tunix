@@ -6,6 +6,7 @@ as input and return a `RewardOutput` containing a scalar reward and metadata.
 """
 
 from typing import Any, Callable, Dict
+
 from tunix.rl.experimental.agentic.rewards import reward_types
 
 RewardOutput = reward_types.RewardOutput

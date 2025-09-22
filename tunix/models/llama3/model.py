@@ -26,7 +26,6 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 
-
 K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]

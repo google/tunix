@@ -26,7 +26,9 @@ import transformers
 from tunix.generate import tokenizer_adapter
 from tunix.sft.peft_trainer import TrainingInput  # pylint: disable=g-importing-member
 
-import sentencepiece as spm
+# Keep the import below for google internal lint.
+import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
+
 
 INPUT_TEMPLATE = {
     "prefix": "Translate this into French:\n",
@@ -93,7 +95,7 @@ class GemmaTokenizer(spm.SentencePieceProcessor):
   """Tokenizing and encoding/decoding text using the Sentencepiece tokenizer."""
 
   _GEMMA2_TOKENIZER_PATH: epath.PathLike = (
-      'gs://gemma-data/tokenizers/tokenizer_gemma2.model'
+      "gs://gemma-data/tokenizers/tokenizer_gemma2.model"
   )
 
   def __init__(self, model_path: str = _GEMMA2_TOKENIZER_PATH):

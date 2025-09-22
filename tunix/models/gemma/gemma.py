@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import dataclasses
 import enum
 from typing import Any, Callable, Tuple
+
 import flax
 from flax import nnx
 import jax
@@ -26,7 +27,6 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 from tunix.models.gemma import params as params_lib
-
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]

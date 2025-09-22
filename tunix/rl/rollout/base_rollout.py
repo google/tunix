@@ -17,6 +17,7 @@
 import abc
 import dataclasses
 from typing import Any, Optional, Tuple
+
 import jax
 import jaxtyping
 
