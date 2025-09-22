@@ -390,7 +390,7 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
   logits_to_keep = completion_ids.shape[1]
   positions = common.build_positions_from_mask(prompt_completion_mask)
 
-  per_token_logps = common.get_per_token_logps(
+  per_token_logps, _ = common.get_per_token_logps(
       model,
       input_tokens=input_ids,
       positions=positions,
