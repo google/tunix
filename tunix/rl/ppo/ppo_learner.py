@@ -60,12 +60,13 @@ class PpoConfig:
     epsilon_c: Lower bound for clipping for dual-clip PPO. If not provided, we
       don't do dual-clip PPO.
       Reference: https://arxiv.org/abs/1912.09729.
+    entropy_coef: Entropy coefficient for the policy loss. Set to `None` or
+      `0.0` to disable entropy regularization.
     vf_coef: The coefficient for the value function loss.
     clip_range_value: The range for clipping the value function loss.
   """
 
   num_ppo_epochs: int = 1
-  mini_batch_size: int | None = None
 
   # PPO loss and advantage computation configs.
   gamma: float = 1.0
@@ -75,6 +76,7 @@ class PpoConfig:
   epsilon_low: float | None = None
   epsilon_high: float | None = None
   epsilon_c: float | None = None
+  entropy_coef: float | None = None
   vf_coef: float = 0.1
   clip_range_value: float = 0.2
 
@@ -166,6 +168,7 @@ class PpoLearner(rl_learner.RLLearner):
             "epsilon_low": self.ppo_config.epsilon_low,
             "epsilon_high": self.ppo_config.epsilon_high,
             "epsilon_c": self.ppo_config.epsilon_c,
+            "entropy_coef": self.ppo_config.entropy_coef,
             "pad_id": self.rl_cluster.rollout.pad_id(),
             "eos_id": self.rl_cluster.rollout.eos_id(),
         }
@@ -188,6 +191,11 @@ class PpoLearner(rl_learner.RLLearner):
     actor_rl_metrics_to_log = {"pg_clipfrac": np.mean}
     if self.ppo_config.epsilon_c is not None:
       actor_rl_metrics_to_log["pg_clipfrac_lower"] = np.mean
+    if (
+        self.ppo_config.entropy_coef is not None
+        and self.ppo_config.entropy_coef > 0.0
+    ):
+      actor_rl_metrics_to_log["loss/entropy"] = np.mean
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
         actor_rl_metrics_to_log
     )
@@ -484,6 +492,7 @@ def ppo_policy_loss_fn(
     epsilon_low: float,
     epsilon_high: float,
     epsilon_c: float | None,
+    entropy_coef: float | None,
     pad_id: int,
     eos_id: int,
 ):
@@ -497,7 +506,7 @@ def ppo_policy_loss_fn(
   use_dual_clip_ppo = epsilon_c is not None
 
   # Get log probs.
-  per_token_logps, _ = common.compute_per_token_logps(
+  per_token_logps, logits = common.compute_per_token_logps(
       model,
       prompt_tokens=prompt_ids,
       completion_tokens=completion_ids,
@@ -545,5 +554,15 @@ def ppo_policy_loss_fn(
 
   # "token mean" style of normalisation
   policy_loss = ppo_helpers.masked_mean(pg_losses, completion_mask)
+
+  # Compute entropy loss.
+  if entropy_coef is not None and entropy_coef > 0.0:
+    token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
+    # "token mean" style of normalisation.
+    entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
+    policy_loss -= entropy_coef * entropy_loss
+
+    # Logging
+    aux["loss/entropy"] = entropy_loss
 
   return policy_loss, aux

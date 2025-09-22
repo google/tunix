@@ -246,6 +246,7 @@ class PpoLearnerTest(parameterized.TestCase):
           'reward_fns': None,
           'use_different_rollout_config': True,
           'epsilon_c': None,
+          'entropy_coef': None,
       },
       {
           'testcase_name': 'dual_clip',
@@ -253,6 +254,15 @@ class PpoLearnerTest(parameterized.TestCase):
           'reward_fns': None,
           'use_different_rollout_config': True,
           'epsilon_c': 2.0,
+          'entropy_coef': None,
+      },
+      {
+          'testcase_name': 'dual_clip_with_entropy',
+          'use_reward_model': True,
+          'reward_fns': None,
+          'use_different_rollout_config': True,
+          'epsilon_c': 2.0,
+          'entropy_coef': 0.1,
       },
       {
           'testcase_name': 'with_reward_fn',
@@ -260,6 +270,7 @@ class PpoLearnerTest(parameterized.TestCase):
           'reward_fns': [reward_1, reward_2],
           'use_different_rollout_config': False,
           'epsilon_c': None,
+          'entropy_coef': None,
       },
       {
           'testcase_name': 'with_reward_model_diff_rollout_config',
@@ -267,6 +278,7 @@ class PpoLearnerTest(parameterized.TestCase):
           'reward_fns': None,
           'use_different_rollout_config': True,
           'epsilon_c': None,
+          'entropy_coef': None,
       },
   )
   def test_ppo_learner(
@@ -275,6 +287,7 @@ class PpoLearnerTest(parameterized.TestCase):
       reward_fns,
       use_different_rollout_config,
       epsilon_c,
+      entropy_coef,
   ):
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
@@ -344,7 +357,9 @@ class PpoLearnerTest(parameterized.TestCase):
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
-    ppo_config = ppo_lib.PpoConfig(num_ppo_epochs=1, epsilon_c=epsilon_c)
+    ppo_config = ppo_lib.PpoConfig(
+        num_ppo_epochs=1, epsilon_c=epsilon_c, entropy_coef=entropy_coef
+    )
     ppo_learner = ppo_lib.PpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,

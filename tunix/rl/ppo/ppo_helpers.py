@@ -143,3 +143,18 @@ def masked_var(
   mask_sum = cast_mask.sum()
   bessel_corr = mask_sum / (mask_sum - 1)
   return variance * bessel_corr
+
+
+def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
+  """Computes the entropy of a distribution given its logits.
+
+  Args:
+    logits: Logits as returned by the model. Of shape `[batch_size, seq_len,
+      emb_dim]`.
+
+  Returns:
+    A JAX array of shape `[batch_size, seq_len]`, containing the entropy values.
+  """
+  log_probs = jax.nn.log_softmax(logits, axis=-1)
+  probs = jnp.exp(log_probs)
+  return -jnp.sum(probs * log_probs, axis=-1)
