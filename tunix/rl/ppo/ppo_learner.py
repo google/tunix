@@ -497,7 +497,7 @@ def ppo_policy_loss_fn(
   use_dual_clip_ppo = epsilon_c is not None
 
   # Get log probs.
-  per_token_logps = common.compute_per_token_logps(
+  per_token_logps, _ = common.compute_per_token_logps(
       model,
       prompt_tokens=prompt_ids,
       completion_tokens=completion_ids,
