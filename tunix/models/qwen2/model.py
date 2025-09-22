@@ -104,6 +104,22 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
+  # DeepSeek-R1-Distill-Qwen-1.5B
+  @classmethod
+  def deepseek_r1_distill_qwen_1_5b(cls):
+    return cls(
+        num_layers=28,
+        vocab_size=151936,
+        embed_dim=1536,
+        hidden_dim=8960,
+        num_heads=12,
+        head_dim=128,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10000,
+        use_tied_embedding=False,
+    )
+
   # qwen2.5-coder-3B and qwen2.5-3B share the same config.
   @classmethod
   def qwen2_5_3b(cls):

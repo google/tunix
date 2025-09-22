@@ -16,26 +16,21 @@
 
 from __future__ import annotations
 
-from concurrent import futures
 import dataclasses
-from typing import Callable, Dict, Iterable, Iterator, List, Sequence
+from typing import Iterable, List, Sequence
 
 import flax
 import jax
 import jax.numpy as jnp
-from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl import utils as rl_utils
+from tunix.rl import rl_learner
 from tunix.rl.grpo import grpo_helpers
-from tunix.rl.queue import data_queue as queue_lib
-from tunix.sft import utils as sft_utils
 
-_TrainingInputT = Dict[str, List[str] | ArrayLike]
-
-# prompts, completions, **kargs -> rewards
-RewardFn = Callable[..., List[float]]
+TrainingInputT = rl_learner.TrainingInputT
+RewardFn = rl_learner.RewardFn
+MetricFn = rl_learner.MetricFn
 
 
 @flax.struct.dataclass(frozen=True)
@@ -79,9 +74,14 @@ class GrpoConfig:
           "num_generations must be greater than 1. Received: "
           f"{self.num_generations}"
       )
+    if self.loss_algo not in ["grpo", "gspo-token"]:
+      raise ValueError(
+          "loss_algo should be either grpo or gspo-token. Received: "
+          f"{self.loss_algo}"
+      )
 
 
-class GrpoLearner:
+class GrpoLearner(rl_learner.RLLearner):
   """GRPO (Group Relative Policy Optimization) learner.
 
   GRPO is a reinforcement learning algorithm designed to enhance the reasoning
@@ -101,9 +101,7 @@ class GrpoLearner:
       rl_cluster: rl_cluster_lib.RLCluster,
       reward_fns: RewardFn | List[RewardFn],
       grpo_config: GrpoConfig,
-      metric_fns: (
-          Sequence[Callable[..., rl_cluster_lib.MetricsT]] | None
-      ) = None,
+      metric_fns: Sequence[MetricFn] | None = None,
   ):
     """Initializes the `GrpoTrainer`.
 
@@ -123,17 +121,12 @@ class GrpoLearner:
         ...    return { ...        "prompt_min_len": (min(len(p) for p in
         prompts), np.min), ...        ... ...    }
     """
-    if grpo_config.loss_algo not in ["grpo", "gspo-token"]:
-      raise ValueError(
-          "loss_algo should be either grpo or gspo-token. Received: "
-          f"{grpo_config.loss_algo}"
-      )
     self.grpo_config = grpo_config
-    self.rl_cluster = rl_cluster
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
+    super().__init__(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fns,
+        metric_fns=metric_fns,
     )
-    self.metric_fns = metric_fns or []
 
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
@@ -161,46 +154,10 @@ class GrpoLearner:
         "rewards/overall",
         lambda: "kl" if self.grpo_config.beta != 0.0 else None,
     ])
-    self.rl_cluster.actor_trainer.is_managed_externally = True
-
-    # adjust global steps based on the number of iterations.
-    self.rl_cluster.global_steps = (
-        self.rl_cluster.actor_trainer.train_steps
-        // self.grpo_config.num_iterations
-    )
-
-    self.grad_acc_steps = (
-        self.rl_cluster.cluster_config.training_config.get_with_default(
-            "gradient_accumulation_steps", 1
-        )
-    )
-
-    self._iter_steps = 0
-    self._eval_steps = 0
-
-    # Sync weights if the actor model and rollout model are not sharing weights.
-    self.should_sync_weights = not (
-        rl_utils.is_sharing_weights(
-            self.rl_cluster.actor_trainer.model,
-            self.rl_cluster.rollout.model(),
-        )
-    )
-
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
-    self.can_enable_async_rollout = (
-        self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
-        != self.rl_cluster.cluster_config.role_to_mesh[
-            rl_cluster_lib.Role.ROLLOUT
-        ]
-    )
-    self.executor = futures.ThreadPoolExecutor(max_workers=1)
-    self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
   def _generate_and_compute_advantage(
       self,
-      training_input: _TrainingInputT,
+      training_input: TrainingInputT,
       mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
   ) -> TrainExample:
     """Generates text completions and computes the advantages for GRPO training.
@@ -215,16 +172,23 @@ class GrpoLearner:
       prompt IDs, completion IDs, masks, advantages, and per-token log
       probabilities from the reference and policy models.
     """
+    training_config = self.rl_cluster.cluster_config.training_config
+    training_input["prompts"] = list(training_input["prompts"])
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
-
-    # Generate, and pad output.
-    completion_output = self.rl_cluster.generate(
+    rollout_output = self.rl_cluster.generate(
         prompts=training_input["prompts"],
+        mode=mode,
+        micro_batch_size=(
+            training_config.rollout_micro_batch_size
+            * self.grpo_config.num_generations
+        ),
     )
-    completion_ids = completion_output.tokens
-    prompt_ids = completion_output.left_padded_prompt_tokens
+    completion_ids = rollout_output.tokens
+    prompt_ids = rollout_output.left_padded_prompt_tokens
+    completion_text = rollout_output.text
 
+    # Assemble masks
     prompt_mask = (prompt_ids != pad_value).astype("int32")
     completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype(
         "int32"
@@ -232,6 +196,7 @@ class GrpoLearner:
     completion_mask = common.make_completion_mask(
         completion_ids, eos_tok=eos_value
     )
+    # Apply the padding mask to the completion mask.
     completion_mask = completion_mask * completion_padding_mask
 
     if self.grpo_config.beta != 0.0:
@@ -240,20 +205,29 @@ class GrpoLearner:
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
+          micro_batch_size=(
+              training_config.compute_logps_micro_batch_size
+              * self.grpo_config.num_generations
+          ),
       )
     else:
       ref_per_token_logps = None
-
     if self.grpo_config.num_iterations > 1:
       old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-          prompt_tokens=prompt_ids, completion_tokens=completion_ids
+          prompt_tokens=prompt_ids,
+          completion_tokens=completion_ids,
+          micro_batch_size=(
+              training_config.compute_logps_micro_batch_size
+              * self.grpo_config.num_generations
+          ),
       )
     else:
       old_per_token_logps = None
 
+    # Compute rewards and advantages
     rewards = self._compute_rewards(
         prompts=training_input["prompts"],
-        completions=completion_output.text,
+        completions=completion_text,
         mode=mode,
         **{k: v for k, v in training_input.items() if k != "prompts"},
     )
@@ -284,7 +258,7 @@ class GrpoLearner:
     for m_fn in self.metric_fns:
       user_defined_metric = m_fn(
           prompts=training_input["prompts"],
-          completions=completion_output.text,
+          completions=completion_text,
           advances=advantages,
           rewards=rewards,
           **{k: v for k, v in training_input.items() if k != "prompts"},
@@ -301,82 +275,8 @@ class GrpoLearner:
         old_per_token_logps=old_per_token_logps,
     )
 
-  def _compute_rewards(
-      self,
-      prompts: List[str],
-      completions: List[str],
-      mode: rl_cluster_lib.Mode,
-      **kwargs,
-  ) -> jax.Array:
-    """Computes the rewards for completions using the provided reward functions.
-
-    Args:
-      prompts: A list of input prompts.
-      completions: A list of generated text completions.
-      mode: The mode to use for logging metrics.
-      **kwargs: Additional keyword arguments passed to the reward functions.
-
-    Returns:
-      A JAX array (shape `[num_prompts, num_reward_fns]`) of scalar rewards for
-      each prompt-completion pair. The rewards are computed using the provided
-      reward functions.
-    """
-    if "mode" in kwargs:
-      raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
-    kwargs["mode"] = str(mode)
-    rewards = jnp.zeros((len(prompts), len(self.reward_fns)))
-    for i, reward_fn in enumerate(self.reward_fns):
-      r = reward_fn(prompts=prompts, completions=completions, **kwargs)
-      r = jnp.array(r)
-      rewards = rewards.at[:, i].set(r)
-      self.rl_cluster.buffer_metrics(
-          {
-              f"rewards/{reward_fn.__name__}": (
-                  np.mean(r),
-                  np.mean,
-              ),
-          },
-          mode=mode,
-      )
-
-    rewards = jnp.nansum(rewards, axis=1)
-    self.rl_cluster.buffer_metrics(
-        {
-            "rewards/overall": (
-                np.mean(rewards),
-                np.mean,
-            ),
-        },
-        mode=mode,
-    )
-    self.rl_cluster.buffer_metrics(
-        {
-            "rewards/min": (
-                np.min(rewards),
-                np.min,
-            ),
-        },
-        mode=mode,
-    )
-    for p, c in zip(prompts, completions):
-      self.rl_cluster.buffer_metrics(
-          {
-              "prompts": (
-                  p,
-                  None,
-              ),
-              "completions": (
-                  c,
-                  None,
-              ),
-          },
-          mode=mode,
-      )
-
-    return rewards
-
   def _compute_trajectory_ids(
-      self, example: _TrainingInputT, steps: int
+      self, example: TrainingInputT, steps: int
   ) -> List[str]:
     """Computes the trajectory ID for each prompt in the batch.
 
@@ -406,110 +306,16 @@ class GrpoLearner:
         f"{r_off}_{g_off}" for r_off, g_off in zip(row_offsets, group_offsets)
     ]
 
-  def _prepare_data(
+  def _num_iterations(self) -> int:
+    return self.grpo_config.num_iterations
+
+  def _num_generations(self) -> int:
+    return self.grpo_config.num_generations
+
+  def train(  # pylint: disable=useless-parent-delegation
       self,
-      iterator: Iterator[_TrainingInputT],
-      proceed_num_steps: int,
-      sample_repeat: int,
-      batch_repeat: int,
-      data_queue: queue_lib.AbstractDataQueue[
-          list[TrainExample] | common.RepeatIterable | None
-      ],
-      async_loading: bool = False,
-      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
-  ) -> None:
-    """Prepares the data for training.
-
-    Includes rollout generation and advantage computation.
-
-    Args:
-      iterator: The input iterator of the dataset.
-      proceed_num_steps: The number of steps to proceed for the iterator if set
-        to a positive number. If it's set to a non positive number, the function
-        will exhaust the iterator. If the input iterator is exhausted before the
-        number of steps is reached, the function will return the empty result.
-      sample_repeat: The number of times to repeat the sample within a batch.
-      batch_repeat: The number of times to repeat the batch in the final
-        dataset.
-      data_queue: The data queue to use for putting the examples into.
-      async_loading: Whether to load the batch asynchronously, if not async
-        loading, then all the examples needed will be processed and then loaded
-        into the data queue.
-      mode: The mode to use for logging metrics.
-
-    Returns:
-      None. Examples are put into the data queue.
-    """
-
-    example_list = []
-
-    def _put_list_of_examples_to_data_queue():
-      if not async_loading:
-        data_queue.put(common.RepeatIterable(example_list, batch_repeat))
-      elif batch_repeat > 1:
-        # Since we have already loaded the batch in data_queue once, we only
-        # need to repeat batch_repeat - 1 times.
-        data_queue.put(common.RepeatIterable(example_list, batch_repeat - 1))
-
-    try:
-      while True:
-        while (
-            mode == rl_cluster_lib.Mode.TRAIN
-            and self._iter_steps < self._last_iter_step
-        ):  # fast forward the iterator if loading from a previous checkpoint.
-          next(iterator)
-          self._iter_steps += 1
-
-        example = next(iterator)
-        example = jax.tree.map(
-            lambda x: np.repeat(x, sample_repeat, axis=0),
-            example,
-        )  # [B] -> [B * G]
-
-        trajectory_ids = self._compute_trajectory_ids(
-            example,
-            self._iter_steps
-            if mode == rl_cluster_lib.Mode.TRAIN
-            else self._eval_steps,
-        )
-        assert "trajectory_ids" not in example
-        example["trajectory_ids"] = trajectory_ids
-
-        with jax.profiler.StepTraceAnnotation(
-            "sampler",
-            step_num=self._iter_steps
-            if mode == rl_cluster_lib.Mode.TRAIN
-            else self._eval_steps,
-        ):
-          training_input = self._generate_and_compute_advantage(example, mode)
-        if async_loading:
-          data_queue.put([training_input])
-
-        if mode == rl_cluster_lib.Mode.TRAIN:
-          self._iter_steps += 1
-        else:
-          self._eval_steps += 1
-
-        example_list.append(training_input)
-        if proceed_num_steps > 0 and len(example_list) == proceed_num_steps:
-          _put_list_of_examples_to_data_queue()
-          return
-    except StopIteration as e:
-      if proceed_num_steps > 0:
-        raise e
-      else:
-        _put_list_of_examples_to_data_queue()
-        return
-    except Exception as e:
-      raise e
-    finally:
-      # Signal no more iterable to be loaded.
-      data_queue.put(None)
-
-  def train(
-      self,
-      train_ds: Iterable[_TrainingInputT],
-      eval_ds: Iterable[_TrainingInputT] | None = None,
+      train_ds: Iterable[TrainingInputT],
+      eval_ds: Iterable[TrainingInputT] | None = None,
       skip_jit: bool = False,
   ) -> None:
     """GRPO training loop.
@@ -547,96 +353,7 @@ class GrpoLearner:
         dictionary containing the key 'prompts'.
       skip_jit: Whether to skip JIT compilation of the training loop.
     """
-    train_iterator = iter(train_ds)
-    while True:  # loop over M
-      try:
-        # reserve 1 for None and the other for repeated interable
-        # if batch_repeat > 1
-        train_data_queue = queue_lib.SimpleDataQueue(
-            maxsize=self.grad_acc_steps + 2
-        )
-        # reserve 1 for None
-        eval_data_queue = queue_lib.SimpleDataQueue(maxsize=2)
-        initial_steps = self._iter_steps
-        future = self.executor.submit(
-            self._prepare_data,
-            iterator=train_iterator,
-            proceed_num_steps=self.grad_acc_steps,
-            sample_repeat=self.grpo_config.num_generations,
-            batch_repeat=self.grpo_config.num_iterations,
-            data_queue=train_data_queue,
-            async_loading=self.can_enable_async_rollout,
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
-        curr_eval_ds = None
-        with jax.profiler.StepTraceAnnotation(
-            "trainer", step_num=initial_steps
-        ):
-          while True:
-            with sft_utils.time_measure(suppress_logging=True) as timer:
-              curr_train_ds = train_data_queue.get(block=True)
-
-            if curr_train_ds is None:
-              break
-
-            if self.can_enable_async_rollout:
-              self.rl_cluster.buffer_metrics(
-                  {
-                      "actor_dequeue_time": (
-                          timer(),
-                          np.mean,
-                      ),
-                  },
-                  mode=rl_cluster_lib.Mode.TRAIN,
-              )
-
-            if (
-                eval_ds
-                and not curr_eval_ds
-                and self.rl_cluster.actor_trainer.train_steps
-                % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
-                == 0
-            ):
-              self._eval_steps = 0
-              self._prepare_data(
-                  iterator=iter(eval_ds),
-                  proceed_num_steps=-1,
-                  sample_repeat=self.grpo_config.num_generations,
-                  batch_repeat=1,
-                  data_queue=eval_data_queue,
-                  async_loading=False,
-                  mode=rl_cluster_lib.Mode.EVAL,
-              )
-              curr_eval_ds = eval_data_queue.get(block=True)
-            self.rl_cluster.update_actor(
-                curr_train_ds,
-                curr_eval_ds,
-                skip_jit,
-            )  # loop over μ
-        # call to throw stop iteration as a singal to break the loop
-        future.result()
-        # sync the iter steps with internel trainer, this is based on the
-        # assumption that the trainer internally doesn't reset the iter steps.
-        # there is current a unit test to ensure this assumption.
-        self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
-
-        if self.should_sync_weights:
-          with jax.profiler.StepTraceAnnotation(
-              "sync_sampler_weights", step_num=initial_steps
-          ):
-            self.rl_cluster.sync_weights()
-        else:
-          self.rl_cluster.global_steps += (
-              1  # manually increment the global steps.
-          )
-        if (
-            self.rl_cluster.actor_trainer.train_steps
-            >= self.rl_cluster.cluster_config.training_config.max_steps
-        ):
-          break
-      except StopIteration:
-        break
-    self.rl_cluster.close()
+    super().train(train_ds, eval_ds, skip_jit)
 
 
 def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):

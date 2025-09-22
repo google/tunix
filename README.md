@@ -48,13 +48,17 @@ Tunix is still under development, here's a glimpse of the current features:
 
 ## Upcoming
 
+- **Agentic RL Training:**
+  - Async Rollout
+  - Multi-turn & multi-step support
+  - Tool usage
 - **Advanced Algorithms:**
   - Addtional state-of-the-art RL and distillation algorithms
 - **Scalability:**
-  - Distributed training for large models
-  - Efficient inference support for RL workflow
+  - Multi-host distributed training
+  - Optimized rollout with vLLM
 - **User Guides:**
-  - Comprehensive onboarding materials and example notebooks
+  - More advanced RL recipe
 
 ## Installation
 
