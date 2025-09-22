@@ -16,11 +16,13 @@
 
 from concurrent import futures
 import functools
-import math
+# Keep this import for google internal usage.
+import math  # pylint: disable=unused-import
 import os
 import threading
 import time
 from typing import Any, Callable
+
 from absl import logging
 import jax
 import jaxtyping
