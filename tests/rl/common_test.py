@@ -58,7 +58,7 @@ class CommonTest(parameterized.TestCase):
       (
           "low_var_kl",
           "low_var_kl",
-          jnp.array([
+          np.array([
               [
                   [0.0654075, 0.220744, 0.0545462, 0.1321163],
                   [0.1168784, 0.0089617, 0.0915209, 0.0211542],
