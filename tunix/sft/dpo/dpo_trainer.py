@@ -107,7 +107,7 @@ def compute_logps(
     completion_mask,
 ):
   """Computes the log probabilities for chosen and rejected tokens."""
-  token_logps, _ = common.get_per_token_logps(
+  token_logps, logits = common.get_per_token_logps(
       model,
       input_tokens=input_ids,
       positions=positions,
