@@ -676,7 +676,9 @@ class RLCluster:
                 completion_tokens[batch_slice],
                 pad_id,
                 eos_id,
-                completion_mask=completion_mask[batch_slice],
+                completion_mask=None
+                if completion_mask is None
+                else completion_mask[batch_slice],
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -711,7 +713,9 @@ class RLCluster:
             self.rollout.get_per_token_logps(
                 prompt_tokens[batch_slice],
                 completion_tokens[batch_slice],
-                completion_mask=completion_mask[batch_slice],
+                completion_mask=None
+                if completion_mask is None
+                else completion_mask[batch_slice],
             )
         )
       per_token_logps = jnp.concatenate(outs, axis=0)

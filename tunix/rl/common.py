@@ -159,7 +159,7 @@ def get_per_token_logps(
     positions: jax.Array,
     attn_mask: jax.Array,
     logits_to_keep: int,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
   logits, _ = model(
       input_tokens, positions=positions, attention_mask=attn_mask, cache=None
