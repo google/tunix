@@ -35,7 +35,6 @@ from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
 
-
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 

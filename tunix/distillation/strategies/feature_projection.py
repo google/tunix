@@ -15,6 +15,7 @@
 """Implements Feature Projection Distillation Strategy."""
 
 from typing import Callable
+
 from flax import nnx
 import jax
 import jax.numpy as jnp

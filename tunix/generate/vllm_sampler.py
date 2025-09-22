@@ -31,7 +31,6 @@ from vllm import LLM
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 
-
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 

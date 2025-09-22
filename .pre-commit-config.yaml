@@ -43,3 +43,11 @@ repos:
           # - mdformat-frontmatter
           # - mdformat-tables
         files: '\.md$'
+
+  - repo: https://github.com/PyCQA/isort
+    rev: 6.0.1
+    hooks:
+    - id: isort
+      name: isort
+      types: [python]
+      exclude: ^tests/

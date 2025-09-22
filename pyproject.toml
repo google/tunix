@@ -78,3 +78,7 @@ pyink-annotation-pragmas = [
 ]
 pyink-ipynb-indentation = 2
 pyink-ipynb-unicode-escape = true
+
+[tool.isort]
+profile = "google"       # or "black", etc.
+known_third_party = ["tunix"]
