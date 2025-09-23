@@ -88,7 +88,7 @@ def _dummy_string_dataset(
     )
 
 
-class DPOTrainerTest(parameterized.TestCase):
+class DpoTrainerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
@@ -113,11 +113,11 @@ class DPOTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = tc.ToyTransformer(rngs=nnx.Rngs(0))
-    dpo_config = dpo_lib.DPOTrainingConfig(
+    dpo_config = dpo_lib.DpoTrainingConfig(
         eval_every_n_steps=10,
         max_steps=10,
     )
-    dpo_trainer = dpo_lib.DPOTrainer(
+    dpo_trainer = dpo_lib.DpoTrainer(
         model=model,
         ref_model=ref_model,
         optimizer=optax.sgd(1e-3),
@@ -180,13 +180,13 @@ class DPOTrainerTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
     )
-    dpo_config = dpo_lib.DPOTrainingConfig(
+    dpo_config = dpo_lib.DpoTrainingConfig(
         eval_every_n_steps=10,
         max_steps=10,
         max_prompt_length=3,
         max_response_length=3,
     )
-    dpo_trainer = dpo_lib.DPOTrainer(
+    dpo_trainer = dpo_lib.DpoTrainer(
         model=model,
         ref_model=ref_model,
         optimizer=optax.sgd(1e-3),
@@ -245,11 +245,11 @@ class DPOTrainerTest(parameterized.TestCase):
     ref_model = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
     )
-    dpo_trainer = dpo_lib.DPOTrainer(
+    dpo_trainer = dpo_lib.DpoTrainer(
         model=model,
         ref_model=ref_model,
         optimizer=optax.sgd(1e-3),
-        training_config=dpo_lib.DPOTrainingConfig(
+        training_config=dpo_lib.DpoTrainingConfig(
             eval_every_n_steps=10,
             max_steps=10,
             max_prompt_length=3,
@@ -292,11 +292,11 @@ class DPOTrainerTest(parameterized.TestCase):
   def test_dpo_prepare_inputs(self):
     model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     ref_model = tc.ToyTransformer(rngs=nnx.Rngs(0))
-    dpo_trainer = dpo_lib.DPOTrainer(
+    dpo_trainer = dpo_lib.DpoTrainer(
         model=model,
         ref_model=ref_model,
         optimizer=optax.sgd(1e-3),
-        training_config=dpo_lib.DPOTrainingConfig(
+        training_config=dpo_lib.DpoTrainingConfig(
             eval_every_n_steps=10,
             max_steps=10,
         ),
