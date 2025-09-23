@@ -62,7 +62,6 @@ class PpoConfig:
       Reference: https://arxiv.org/abs/1912.09729.
     entropy_coef: Entropy coefficient for the policy loss. Set to `None` or
       `0.0` to disable entropy regularization.
-    vf_coef: The coefficient for the value function loss.
     clip_range_value: The range for clipping the value function loss.
   """
 
@@ -77,7 +76,6 @@ class PpoConfig:
   epsilon_high: float | None = None
   epsilon_c: float | None = None
   entropy_coef: float | None = None
-  vf_coef: float = 0.1
   clip_range_value: float = 0.2
 
   def __post_init__(self):
@@ -180,7 +178,6 @@ class PpoLearner(rl_learner.RLLearner):
         lambda x: {
             "train_example": x,
             "clip_range_value": self.ppo_config.clip_range_value,
-            "vf_coef": self.ppo_config.vf_coef,
             "pad_id": self.rl_cluster.rollout.pad_id(),
             "eos_id": self.rl_cluster.rollout.eos_id(),
         }
@@ -439,7 +436,6 @@ class PpoLearner(rl_learner.RLLearner):
 def ppo_value_loss_fn(
     model: nnx.Module,
     train_example: TrainExample,
-    vf_coef: float,
     clip_range_value: float | None,
     pad_id: int,
     eos_id: int,
@@ -483,7 +479,7 @@ def ppo_value_loss_fn(
           (vf_losses2 > vf_losses1).astype(jnp.float32), completion_mask
       ),
   }
-  return vf_coef * vf_loss, aux
+  return vf_loss, aux
 
 
 def ppo_policy_loss_fn(
