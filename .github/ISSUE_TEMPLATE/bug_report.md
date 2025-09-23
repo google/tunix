@@ -1,11 +1,9 @@
----
-name: Bug report
-about: Create a report to help us fix/improve something
-title: 'A brief description of the bug'
-labels: 'bug'
-assignees: ''
+______________________________________________________________________
 
----
+name: Bug report about: Create a report to help us fix/improve something title:
+'A brief description of the bug' labels: 'bug' assignees: ''
+
+______________________________________________________________________
 
 **Expected Behavior**
 
@@ -14,8 +12,8 @@ assignees: ''
 **Steps to Reproduce the Problem**
 
 1.
-2.
-3.
+1.
+1.
 
 <!---
 If possible, provide a link to a [Colab Notebook](https://research.google.com/colaboratory/),
@@ -24,8 +22,8 @@ which reproduces the bug.
 
 **Environment**
 
-- **OS:** [e.g., Ubuntu, etc.]
-- **Project Version:** [e.g., 0.0.1]
+- **OS:** \[e.g., Ubuntu, etc.\]
+- **Project Version:** \[e.g., 0.0.1\]
 
 **Checklist**
 

@@ -21,8 +21,8 @@ For minor changes, such as documentation updates or simple bug fixes, you can
 open a pull request directly.
 
 All bug fixes must include a link to a
-[Colab](https://colab.research.google.com/) notebook that clearly reproduces
-the error.
+[Colab](https://colab.research.google.com/) notebook that clearly reproduces the
+error.
 
 ### 2. Make code changes
 
@@ -100,7 +100,13 @@ git commit -m "<message>" --no-verify
 
 ## Documentation
 
-The Tunix documentation website is built using [Sphinx](https://www.sphinx-doc.org) and [MyST](https://myst-parser.readthedocs.io/en/latest/). Documents can be written in [MyST Markdown syntax](https://myst-parser.readthedocs.io/en/latest/syntax/typography.html#syntax-core) or [reStructuredText](https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html).
+The Tunix documentation website is built using
+[Sphinx](https://www.sphinx-doc.org) and
+[MyST](https://myst-parser.readthedocs.io/en/latest/). Documents can be written
+in
+[MyST Markdown syntax](https://myst-parser.readthedocs.io/en/latest/syntax/typography.html#syntax-core)
+or
+[reStructuredText](https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html).
 
 ### Building the documentation locally (optional)
 
@@ -136,9 +142,9 @@ documentation.
 ### Adding new documentation files
 
 If you are adding a new document, make sure it is included in the `toctree`
-directive corresponding to the section where the new document should live.
-For example, if adding a new page, make sure it is listed in the `toctree`
-directive in `docs/index.md`.
+directive corresponding to the section where the new document should live. For
+example, if adding a new page, make sure it is listed in the `toctree` directive
+in `docs/index.md`.
 
 <!-- ### Documentation deployment
 
