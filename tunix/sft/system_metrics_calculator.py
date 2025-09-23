@@ -43,7 +43,7 @@ def measure_tflops_per_step(
       return None
     # Convert FLOPs to TFLOPs
     return float(flops) / 1e12
-  except (AttributeError, TypeError, ValueError) as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     logging.error("Could not measure TFLOPs due to an error: %s", e)
     return None
 
