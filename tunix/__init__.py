@@ -14,25 +14,34 @@
 
 """Tunix API."""
 
-# pylint: disable=g-multiple-import, g-importing-member
+# pylint: disable=g-multiple-import, g-importing-member, reimported
 
 from tunix.distillation.distillation_trainer import DistillationTrainer
 from tunix.distillation.distillation_trainer import TrainingConfig as DistillationTrainingConfig
 from tunix.generate.sampler import CacheConfig
 from tunix.generate.sampler import Sampler
-from tunix.rl.grpo.grpo_learner import GrpoConfig
-from tunix.rl.grpo.grpo_learner import GrpoLearner
+from tunix.rl.grpo.grpo_learner import GRPOConfig
+from tunix.rl.grpo.grpo_learner import GRPOConfig as GrpoConfig
+from tunix.rl.grpo.grpo_learner import GRPOLearner
+from tunix.rl.grpo.grpo_learner import GRPOLearner as GrpoLearner
 from tunix.rl.grpo.grpo_learner import RewardFn
+from tunix.rl.ppo.ppo_learner import PPOConfig
+from tunix.rl.ppo.ppo_learner import PPOConfig as PpoConfig
+from tunix.rl.ppo.ppo_learner import PPOLearner
+from tunix.rl.ppo.ppo_learner import PPOLearner as PpoLearner
 from tunix.rl.rl_cluster import ClusterConfig
 from tunix.rl.rl_cluster import RLCluster
 from tunix.rl.rl_cluster import RLTrainingConfig
 from tunix.rl.rl_cluster import Role
 from tunix.rl.rollout.base_rollout import RolloutConfig
-from tunix.sft.dpo.dpo_trainer import DpoTrainer
-from tunix.sft.dpo.dpo_trainer import DpoTrainingConfig
+from tunix.sft.dpo.dpo_trainer import DPOTrainer
+from tunix.sft.dpo.dpo_trainer import DPOTrainer as DpoTrainer
+from tunix.sft.dpo.dpo_trainer import DPOTrainingConfig
+from tunix.sft.dpo.dpo_trainer import DPOTrainingConfig as DpoTrainingConfig
 from tunix.sft.metrics_logger import MetricsLogger
 from tunix.sft.metrics_logger import MetricsLoggerOptions
 from tunix.sft.peft_trainer import PeftTrainer
 from tunix.sft.peft_trainer import TrainingConfig
+
 
 # pylint: enable=g-multiple-import, g-importing-member

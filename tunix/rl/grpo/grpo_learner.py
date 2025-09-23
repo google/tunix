@@ -39,7 +39,7 @@ class TrainExample(common.TrainExample):
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class GrpoConfig:
+class GRPOConfig:
   """Configuration for GRPO algorithm.
 
   Attributes:
@@ -81,7 +81,7 @@ class GrpoConfig:
       )
 
 
-class GrpoLearner(rl_learner.RLLearner):
+class GRPOLearner(rl_learner.RLLearner):
   """GRPO (Group Relative Policy Optimization) learner.
 
   GRPO is a reinforcement learning algorithm designed to enhance the reasoning
@@ -100,7 +100,7 @@ class GrpoLearner(rl_learner.RLLearner):
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
       reward_fns: RewardFn | List[RewardFn],
-      grpo_config: GrpoConfig,
+      grpo_config: GRPOConfig,
       metric_fns: Sequence[MetricFn] | None = None,
   ):
     """Initializes the `GrpoTrainer`.
@@ -111,7 +111,7 @@ class GrpoLearner(rl_learner.RLLearner):
         reward for given prompts and completions. Each function should accept
         `prompts`, `completions` and optional keyword arguments, and return a
         list of float rewards.
-      grpo_config: An instance of `GrpoConfig` containing all GRPO specific
+      grpo_config: An instance of `GRPOConfig` containing all GRPO specific
         parameters.
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept `prompts`, `completions`,
