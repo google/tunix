@@ -375,8 +375,16 @@ class PeftTrainer:
       if self._jitted_train_step_fn is None:
         mesh = pxla.thread_resources.env.physical_mesh
         self._shard_optimizer(mesh)
+        # In general, donating model is always recommended for memory
+        # efficiency. But experiments show that with lora enabled model donation
+        # increases jax program HBM usage.
+        if self._lora_enabled:
+          train_donated_argnames = ("model", "optimizer")
+        else:
+          train_donated_argnames = ("optimizer",)
         self._jitted_train_step_fn = nnx.jit(
-            train_step, donate_argnames=("optimizer",)
+            train_step,
+            donate_argnames=train_donated_argnames,
         )
         self._jitted_eval_step_fn = nnx.jit(
             eval_step, donate_argnames=("model",)

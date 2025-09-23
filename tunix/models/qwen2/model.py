@@ -554,6 +554,23 @@ class Qwen2(nnx.Module):
           sharding=shd_config.emb_dv,
       )
 
+  def get_model_input(self):
+    """Returns a dummy model input."""
+    dummy_batch_size = 2
+    dummy_seq_len = 128
+    return {
+        'input_tokens': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
+
   def __call__(
       self,
       input_tokens: jaxtyping.Array,  # [B, L]
