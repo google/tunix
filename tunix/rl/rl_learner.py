@@ -159,11 +159,10 @@ class RLLearner(abc.ABC):
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
-    rewards = jnp.zeros((len(prompts), len(self.reward_fns)))
+    rewards = np.zeros((len(prompts), len(self.reward_fns)))
     for i, reward_fn in enumerate(self.reward_fns):
       r = reward_fn(prompts=prompts, completions=completions, **kwargs)
-      r = jnp.array(r)
-      rewards = rewards.at[:, i].set(r)
+      rewards[:, i] = np.array(r)
       self.rl_cluster.buffer_metrics(
           {
               f"rewards/{reward_fn.__name__}": (
@@ -174,7 +173,7 @@ class RLLearner(abc.ABC):
           mode=mode,
       )
 
-    rewards = jnp.nansum(rewards, axis=1)
+    rewards = np.nansum(rewards, axis=1)
     self.rl_cluster.buffer_metrics(
         {
             "rewards/overall": (
@@ -208,7 +207,7 @@ class RLLearner(abc.ABC):
           mode=mode,
       )
 
-    return rewards
+    return jnp.array(rewards)
 
   def _initialize_micro_batch_sizes(self, input_batch_size: int):
     """Initializes micro batch sizes in training_config if not set."""
