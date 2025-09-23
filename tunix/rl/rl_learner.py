@@ -20,7 +20,7 @@ import abc
 from concurrent import futures
 import itertools
 import math
-from typing import Callable, Dict, Iterable, Iterator, List, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -209,27 +209,63 @@ class RLLearner(abc.ABC):
 
     return jnp.array(rewards)
 
-  def _initialize_micro_batch_sizes(self, input_batch_size: int):
-    """Initializes micro batch sizes in training_config if not set."""
+  def _initialize_batch_sizes(self, full_batch_size: int) -> tuple[int, int]:
+    """Initializes mini, micro batch sizes and grad accumulation steps."""
     training_config = self.rl_cluster.cluster_config.training_config
-    if (
-        training_config.training_micro_batch_size
-        and training_config.training_micro_batch_size != input_batch_size
-    ):
+    mini_batch_size = training_config.mini_batch_size
+    gradient_accumulation_steps = training_config.gradient_accumulation_steps
+    training_micro_batch_size = training_config.training_micro_batch_size
+
+    # Initialize mini batch size
+    if mini_batch_size is None:
+      mini_batch_size = full_batch_size
+      training_config.mini_batch_size = mini_batch_size
+    elif full_batch_size < mini_batch_size:
       raise ValueError(
-          "Training micro batch size must be equal to input batch size. "
-          f"Got {training_config.training_micro_batch_size} and "
-          f"{input_batch_size}."
+          f"full_batch_size ({full_batch_size}) must be greater than or equal"
+          f" to mini_batch_size ({mini_batch_size})."
       )
-    training_config.training_micro_batch_size = input_batch_size
+    elif full_batch_size % mini_batch_size != 0:
+      raise ValueError(
+          f"input_batch_size ({full_batch_size}) must be a multiple of"
+          f" mini_batch_size ({mini_batch_size})."
+      )
+
+    if training_micro_batch_size and gradient_accumulation_steps:
+      if training_micro_batch_size != (
+          mini_batch_size // gradient_accumulation_steps
+      ):
+        raise ValueError(
+            "training_micro_batch_size must be equal to mini_batch_size //"
+            " gradient_accumulation_steps"
+        )
+    elif training_micro_batch_size is not None:
+      if mini_batch_size % training_micro_batch_size != 0:
+        raise ValueError(
+            "mini_batch_size must be a multiple of training_micro_batch_size"
+        )
+      gradient_accumulation_steps = mini_batch_size // training_micro_batch_size
+    elif gradient_accumulation_steps is not None:
+      if mini_batch_size % gradient_accumulation_steps != 0:
+        raise ValueError(
+            "mini_batch_size must be a multiple of gradient_accumulation_steps"
+        )
+      training_micro_batch_size = mini_batch_size // gradient_accumulation_steps
+    else:
+      training_micro_batch_size = mini_batch_size
+      gradient_accumulation_steps = 1
+    # using assert to avoid dtype error. This is not a runtime error check.
+    assert training_micro_batch_size is not None
+    training_config.training_micro_batch_size = training_micro_batch_size
+    training_config.gradient_accumulation_steps = gradient_accumulation_steps
+
     for attr in (
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
     ):
       if getattr(training_config, attr) is None:
-        setattr(training_config, attr, input_batch_size)
+        setattr(training_config, attr, training_micro_batch_size)
 
-    training_micro_batch_size = training_config.training_micro_batch_size
     for attr in (
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
@@ -245,6 +281,10 @@ class RLLearner(abc.ABC):
             f"{attr} ({micro_batch_size}) must be a multiple of "
             f"training_micro_batch_size ({training_micro_batch_size})."
         )
+    return (
+        training_config.mini_batch_size,
+        training_config.training_micro_batch_size,
+    )
 
   def _process_accumulated_batches(
       self,
@@ -369,8 +409,16 @@ class RLLearner(abc.ABC):
       if repeats <= 0 or not examples:
         return
       for _ in range(repeats):
-        for example in examples:
-          data_queue.put([example])
+        if self._data_shuffle_seed is not None:
+          shuffle_seed, self._data_shuffle_seed = jax.random.split(
+              self._data_shuffle_seed
+          )
+          shuffled_indices = jax.random.permutation(shuffle_seed, len(examples))
+          for i in shuffled_indices:
+            data_queue.put([examples[i]])
+        else:
+          for example in examples:
+            data_queue.put([example])
 
     def _enqueue_or_buffer_examples(produced: list[common.TrainExample]):
       """Enqueues produced examples or adds them to a temporary buffer."""
@@ -498,6 +546,49 @@ class RLLearner(abc.ABC):
       # Signal no more iterable to be loaded.
       data_queue.put(None)
 
+  def _create_micro_batch_iterator(
+      self,
+      full_batch_iterator: Iterator[TrainingInputT],
+      micro_batch_size: int,
+  ) -> Iterator[TrainingInputT]:
+    """Re-batches large inputs into an iterator of micro-batches.
+
+    Args:
+      full_batch_iterator: Iterator yielding large `TrainingInputT` batches.
+      micro_batch_size: The desired size of the micro-batches.
+
+    Yields:
+      `TrainingInputT` dicts, each with `micro_batch_size` samples.
+    """
+
+    buffer = {}
+
+    def get_buffer_len(buf: dict[str, list[Any]]) -> int:
+      if not buf:
+        return 0
+      return len(next(iter(buf.values())))
+
+    for large_batch in full_batch_iterator:
+      for key, values in large_batch.items():
+        if key not in buffer:
+          buffer[key] = []
+
+        if isinstance(values, (np.ndarray, jax.Array)):
+          buffer[key].extend(list(values.flatten()))
+        elif isinstance(values, (list, tuple)):
+          buffer[key].extend(values)
+        else:
+          buffer[key].append(values)
+
+    while get_buffer_len(buffer) >= micro_batch_size:
+      micro_batch = {}
+      for key in buffer:
+        micro_batch_list_slice = buffer[key][:micro_batch_size]
+        micro_batch[key] = np.array(micro_batch_list_slice)
+        buffer[key] = buffer[key][micro_batch_size:]
+
+      yield micro_batch
+
   def train(
       self,
       train_ds: Iterable[TrainingInputT],
@@ -505,91 +596,105 @@ class RLLearner(abc.ABC):
       skip_jit: bool = False,
   ) -> None:
     """Main entry point for the training loop."""
-    train_iterator = iter(train_ds)
-    first_item = next(train_iterator)
-    input_batch_size = len(first_item["prompts"])
-    train_iterator = itertools.chain([first_item], train_iterator)
-    self._initialize_micro_batch_sizes(input_batch_size)
+    full_batch_iterator = iter(train_ds)
+    first_item = next(full_batch_iterator)
+    full_batch_size = len(first_item["prompts"])
+    full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
+    # Initialize batch sizes and gradient accumulation steps.
+    (
+        training_mini_batch_sizes,
+        training_micro_batch_sizes,
+    ) = self._initialize_batch_sizes(full_batch_size)
+    # if the micro batch size is the same as the full batch size, we can use the
+    # full batch iterator directly.
+    if training_micro_batch_sizes == full_batch_size:
+      train_iterator = full_batch_iterator
+    else:
+      train_iterator = self._create_micro_batch_iterator(
+          full_batch_iterator, training_micro_batch_sizes
+      )
 
     while True:  # loop over M
       try:
-        # reserve 1 for None and the other for repeated interable
-        # if batch_repeat > 1
-        train_data_queue = queue_lib.SimpleDataQueue(
-            maxsize=self.grad_acc_steps * self._num_iterations() + 1
-        )
-        # Use an unbounded queue for evaluation data.
-        eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
         initial_steps = self._iter_steps
-        future = self.executor.submit(
-            self._prepare_data,
-            iterator=train_iterator,
-            proceed_num_steps=self.grad_acc_steps,
-            sample_repeat=self._num_generations(),
-            batch_repeat=self._num_iterations(),
-            data_queue=train_data_queue,
-            async_loading=self.can_enable_async_rollout,
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
+        for _ in range(full_batch_size // training_mini_batch_sizes):
+          # reserve 1 for None and the other for repeated interable
+          # if batch_repeat > 1
+          train_data_queue = queue_lib.SimpleDataQueue(
+              maxsize=self.grad_acc_steps * self._num_iterations() + 1
+          )
+          # Use an unbounded queue for evaluation data.
+          eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+          initial_steps = self._iter_steps
+          future = self.executor.submit(
+              self._prepare_data,
+              iterator=train_iterator,
+              proceed_num_steps=self.grad_acc_steps,
+              sample_repeat=self._num_generations(),
+              batch_repeat=self._num_iterations(),
+              data_queue=train_data_queue,
+              async_loading=self.can_enable_async_rollout,
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
 
-        curr_eval_ds = None
-        with jax.profiler.StepTraceAnnotation(
-            "trainer", step_num=initial_steps
-        ):
-          while True:
-            with sft_utils.time_measure(suppress_logging=True) as timer:
-              curr_train_ds = train_data_queue.get(block=True)
+          curr_eval_ds = None
+          with jax.profiler.StepTraceAnnotation(
+              "trainer", step_num=initial_steps
+          ):
+            while True:
+              with sft_utils.time_measure(suppress_logging=True) as timer:
+                curr_train_ds = train_data_queue.get(block=True)
 
-            if curr_train_ds is None:
-              break
+              if curr_train_ds is None:
+                break
 
-            if self.can_enable_async_rollout:
-              self.rl_cluster.buffer_metrics(
-                  {
-                      "actor_dequeue_time": (
-                          timer(),
-                          np.mean,
-                      ),
-                  },
-                  mode=rl_cluster_lib.Mode.TRAIN,
-              )
+              if self.can_enable_async_rollout:
+                self.rl_cluster.buffer_metrics(
+                    {
+                        "actor_dequeue_time": (
+                            timer(),
+                            np.mean,
+                        ),
+                    },
+                    mode=rl_cluster_lib.Mode.TRAIN,
+                )
 
-            if (
-                eval_ds
-                and not curr_eval_ds
-                and self.rl_cluster.actor_trainer.train_steps
-                % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
-                == 0
-            ):
-              self._eval_iter_steps = 0
-              self._prepare_data(
-                  iterator=iter(eval_ds),
-                  proceed_num_steps=-1,
-                  sample_repeat=self._num_generations(),
-                  batch_repeat=1,
-                  data_queue=eval_data_queue,
-                  async_loading=False,
-                  mode=rl_cluster_lib.Mode.EVAL,
-              )
-              curr_eval_ds = eval_data_queue.get(block=True)
-            self.rl_cluster.update_actor(
-                curr_train_ds,
-                curr_eval_ds,
-                skip_jit,
-            )  # loop over μ
-            if hasattr(self.rl_cluster, "critic_trainer"):
-              self.rl_cluster.update_critic(
+              if (
+                  eval_ds
+                  and not curr_eval_ds
+                  and self.rl_cluster.actor_trainer.train_steps
+                  % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
+                  == 0
+              ):
+                self._eval_iter_steps = 0
+                self._prepare_data(
+                    iterator=iter(eval_ds),
+                    proceed_num_steps=-1,
+                    sample_repeat=self._num_generations(),
+                    batch_repeat=1,
+                    data_queue=eval_data_queue,
+                    async_loading=False,
+                    mode=rl_cluster_lib.Mode.EVAL,
+                )
+                curr_eval_ds = eval_data_queue.get(block=True)
+              self.rl_cluster.update_actor(
                   curr_train_ds,
                   curr_eval_ds,
                   skip_jit,
               )  # loop over μ
+              if hasattr(self.rl_cluster, "critic_trainer"):
+                self.rl_cluster.update_critic(
+                    curr_train_ds,
+                    curr_eval_ds,
+                    skip_jit,
+                )  # loop over μ
 
-        # call to throw stop iteration as a singal to break the loop
-        future.result()
-        # sync the iter steps with internel trainer, this is based on the
-        # assumption that the trainer internally doesn't reset the iter steps.
-        # there is current a unit test to ensure this assumption.
-        self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
+          # call to throw stop iteration as a singal to break the loop
+          future.result()
+          # sync the iter steps with internel trainer, this is based on the
+          # assumption that the trainer internally doesn't reset the iter steps.
+          # there is current a unit test to ensure this assumption.
+          self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
 
         if self.should_sync_weights:
           with jax.profiler.StepTraceAnnotation(

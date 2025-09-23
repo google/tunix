@@ -105,6 +105,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
 
   actor_optimizer: optax.GradientTransformation
   critic_optimizer: optax.GradientTransformation | None = None
+  mini_batch_size: int | None = None
   training_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None

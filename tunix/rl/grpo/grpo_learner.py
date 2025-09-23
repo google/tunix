@@ -102,6 +102,7 @@ class GrpoLearner(rl_learner.RLLearner):
       reward_fns: RewardFn | List[RewardFn],
       grpo_config: GrpoConfig,
       metric_fns: Sequence[MetricFn] | None = None,
+      data_shuffle_seed: int | None = None,
   ):
     """Initializes the `GrpoTrainer`.
 
@@ -120,12 +121,14 @@ class GrpoLearner(rl_learner.RLLearner):
         >>> def metric_fn(prompts, completions, rewards, advantages, **kargs):
         ...    return { ...        "prompt_min_len": (min(len(p) for p in
         prompts), np.min), ...        ... ...    }
+      data_shuffle_seed: Optional seed for shuffling the training data.
     """
     self.grpo_config = grpo_config
     super().__init__(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         metric_fns=metric_fns,
+        data_shuffle_seed=data_shuffle_seed,
     )
 
     # Workaround for passing in importance_sampling_algo as jax transforms
