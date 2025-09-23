@@ -804,7 +804,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     rollout_vllm_tpu_backend_type="jax",
 )
 
-grpo_config = grpo_learner.GrpoConfig(
+grpo_config = grpo_learner.GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
     beta=BETA,
@@ -820,7 +820,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 # GRPO Trainer
-grpo_trainer = grpo_learner.GrpoLearner(
+grpo_trainer = grpo_learner.GRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=[
         match_format_exactly,

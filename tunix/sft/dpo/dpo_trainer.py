@@ -37,7 +37,7 @@ class DataInput:
   """Training data input for DPO.
 
   This can be used when inputs are raw strings. Tokenization, padding and
-  preprocessing is taken care of by `DpoTrainer`.
+  preprocessing is taken care of by `DPOTrainer`.
 
   Attributes:
     prompts: A list of prompts.
@@ -88,7 +88,7 @@ class TrainExample:
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class DpoTrainingConfig(peft_trainer.TrainingConfig):
+class DPOTrainingConfig(peft_trainer.TrainingConfig):
   beta: float = 0.1  # 𝛽 for KL penalty https://arxiv.org/pdf/2305.18290
   label_smoothing: float = 0.0
 
@@ -122,7 +122,7 @@ def compute_logps(
   return chosen_logps, rejected_logps
 
 
-class DpoTrainer(peft_trainer.PeftTrainer):
+class DPOTrainer(peft_trainer.PeftTrainer):
   """Direct Preference Optimization (DPO) trainer.
 
   DPO is a preference tuning method for aligning large language models with
@@ -144,7 +144,7 @@ class DpoTrainer(peft_trainer.PeftTrainer):
       model: nnx.Module,
       ref_model: nnx.Module,
       optimizer: optax.GradientTransformation,
-      training_config: DpoTrainingConfig,
+      training_config: DPOTrainingConfig,
       tokenizer: Any | None = None,
   ):
     """Initializes the DPO trainer.
@@ -155,7 +155,7 @@ class DpoTrainer(peft_trainer.PeftTrainer):
         training. It is used to prevent the policy model from drifting too far
         from its original capabilities.
       optimizer: The optimizer used for training the policy model.
-      training_config: A `DpoTrainingConfig` object containing DPO-specific
+      training_config: A `DPOTrainingConfig` object containing DPO-specific
         hyperparameters like `beta` and `label_smoothing`.
       tokenizer: An optional tokenizer. If provided, the trainer can accept
         string inputs and tokenize them internally.
