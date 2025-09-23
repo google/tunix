@@ -156,19 +156,15 @@ def _init_cache(
     The KV cache for one attention block.
   """
 
-  def _init_layer_cache() -> LayerCache:
-    return {
-        'k': jnp.zeros(
-            (batch_size, cache_size, num_kv_heads, head_dim), dtype=dtype
-        ),
-        'v': jnp.zeros(
-            (batch_size, cache_size, num_kv_heads, head_dim), dtype=dtype
-        ),
-        'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
-    }
-
-  cache = {f'layer_{i}': _init_layer_cache() for i in range(n_layers)}
-  return cache
+  shape = (batch_size, cache_size, num_kv_heads, head_dim)
+  k = jnp.zeros(shape, dtype=dtype)
+  v = jnp.zeros(shape, dtype=dtype)
+  end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
+  # Jax array is immutable, so updates to each layer creates new arrays.
+  return {
+      f'layer_{i}': {'k': k, 'v': v, 'end_index': end_index}
+      for i in range(n_layers)
+  }
 
 
 class Sampler(base_sampler.BaseSampler):

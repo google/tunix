@@ -902,17 +902,16 @@ class Transformer(nnx.Module, pytree=False):
       self, batch_size: int, cache_size: int, dtype: jnp.dtype
   ) -> Cache:
     """Initializes the cache for the model."""
-    cache = {}
     config = self.config
     shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
-    for i in range(config.num_layers):
-      layer_cache = {
-          'k': jnp.zeros(shape, dtype=dtype),
-          'v': jnp.zeros(shape, dtype=dtype),
-          'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
-      }
-      cache[f'layer_{i}'] = layer_cache
-    return cache
+    k = jnp.zeros(shape, dtype=dtype)
+    v = jnp.zeros(shape, dtype=dtype)
+    end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
+    # Jax array is immutable, so updates to each layer creates new arrays.
+    return {
+        f'layer_{i}': {'k': k, 'v': v, 'end_index': end_index}
+        for i in range(config.num_layers)
+    }
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.
