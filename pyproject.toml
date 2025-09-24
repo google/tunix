@@ -1,18 +1,20 @@
 [project]
 name = "google-tunix"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 readme = "README.md"
 license = "Apache-2.0"
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [

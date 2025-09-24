@@ -383,24 +383,12 @@ class RLCluster:
     self._inference_worker = inference_worker.InferenceWorker(inference_models)
 
     # 3. Initialize trainer.
-    self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
-    actor_config = copy.deepcopy(self.cluster_config.training_config)
-    if actor_config.checkpoint_root_directory is not None:
-      actor_config.checkpoint_root_directory = os.path.join(
-          actor_config.checkpoint_root_directory, "actor"
-      )
-    self._actor_trainer = rl_trainer.Trainer(
-        model=self.train_actor,
-        optimizer=self.cluster_config.training_config.actor_optimizer,
-        training_config=self.cluster_config.training_config,
-    )
-    del self.train_actor
-    self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
     if (
         self.critic
         and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
     ):
       critic_config = copy.deepcopy(self.cluster_config.training_config)
+      critic_config.metric_prefix = "critic/"
       if critic_config.checkpoint_root_directory is not None:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
@@ -412,6 +400,21 @@ class RLCluster:
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
+
+    self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
+    actor_config = copy.deepcopy(self.cluster_config.training_config)
+    actor_config.metric_prefix = "actor/"
+    if actor_config.checkpoint_root_directory is not None:
+      actor_config.checkpoint_root_directory = os.path.join(
+          actor_config.checkpoint_root_directory, "actor"
+      )
+    self._actor_trainer = rl_trainer.Trainer(
+        model=self.train_actor,
+        optimizer=self.cluster_config.training_config.actor_optimizer,
+        training_config=self.cluster_config.training_config,
+    )
+    del self.train_actor
+    self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
