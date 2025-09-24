@@ -25,6 +25,7 @@ from absl import logging
 from flax import nnx
 from flax.nnx import filterlib
 from flax.nnx import statelib
+from grain._src.core import tree_lib
 import humanize
 import jax
 import jax.numpy as jnp
@@ -240,7 +241,7 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
     if isinstance(all_values[0], list):
       merged[key] = list(chain.from_iterable(all_values))
     else:
-      merged[key] = np.concatenate([np.asarray(v) for v in all_values], axis=0)
+      merged[key] = tree_lib.map_structure(lambda *xs: np.concatenate(xs), *all_values)
 
   return merged
 
