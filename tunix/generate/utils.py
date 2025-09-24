@@ -488,11 +488,19 @@ def transfer_state_with_mappings(
         else:
           raise ValueError(
               f'Rank mismatch for {tgt_key}: {val.shape} vs '
-              f'{tgt_param.value.shape}'
+              f' {tgt_param.value.shape}'
           )
       pad_width = []
-      for src_dim, tgt_dim in zip(val.shape, tgt_param.value.shape):
+      for i, (src_dim, tgt_dim) in enumerate(
+          zip(val.shape, tgt_param.value.shape)
+      ):
         if src_dim < tgt_dim:
+          # Optional: enforce vLLM padding constraint only on padded dims
+          if tgt_dim != 128:
+            raise ValueError(
+                'vLLM only supports padding to 128, but got {tgt_dim} in dim'
+                f' {i} for {flat_src_key}'
+            )
           pad_width.append((0, tgt_dim - src_dim))
         elif src_dim > tgt_dim:
           raise ValueError(
