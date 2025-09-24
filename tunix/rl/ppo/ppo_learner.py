@@ -63,6 +63,8 @@ class PpoConfig:
     entropy_coef: Entropy coefficient for the policy loss. Set to `None` or
       `0.0` to disable entropy regularization.
     clip_range_value: The range for clipping the value function loss.
+    kl_method: The method for computing KL divergence. Must be one of
+      `["low_var_kl", "kl", "mse_kl"]`.
   """
 
   num_ppo_epochs: int = 1
@@ -77,6 +79,7 @@ class PpoConfig:
   epsilon_c: float | None = None
   entropy_coef: float | None = None
   clip_range_value: float = 0.2
+  kl_method: str = "low_var_kl"
 
   def __post_init__(self):
     self.epsilon_low = self.epsilon_low if self.epsilon_low else self.epsilon
@@ -86,6 +89,12 @@ class PpoConfig:
     if self.epsilon_c is not None and self.epsilon_c <= 1.0:
       raise ValueError(
           f"`epsilon_c` must be greater than 1. Received: {self.epsilon_c}."
+      )
+
+    if self.kl_method not in ["kl", "mse_kl", "low_var_kl"]:
+      raise ValueError(
+          f"Invalid KL method: {self.kl_method}. Must be one of"
+          " ['low_var_kl', 'kl', 'mse_kl']."
       )
 
 
@@ -185,6 +194,8 @@ class PpoLearner(rl_learner.RLLearner):
     self.rl_cluster.critic_trainer.is_managed_externally = True
 
     # ===== Configure the metrics logger =====
+    # We just log the metrics returned in `aux`. All other metrics are logged
+    # by `RLCluster` itself.
     actor_rl_metrics_to_log = {"pg_clipfrac": np.mean}
     if self.ppo_config.epsilon_c is not None:
       actor_rl_metrics_to_log["pg_clipfrac_lower"] = np.mean
@@ -196,14 +207,6 @@ class PpoLearner(rl_learner.RLLearner):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
         actor_rl_metrics_to_log
     )
-    # TODO(tsbao): this need to be fixed, currently it won't display in tqdm
-    # since these metrics are logged in rl_cluster and aggregated at global step
-    # level.
-    self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
-        "score/mean",
-        "reward/mean",
-        lambda: "reward_kl_penalty" if self.ppo_config.beta != 0.0 else None,
-    ])
 
     self.rl_cluster.critic_trainer.with_rl_metrics_to_log({
         "vpred_mean": np.mean,
@@ -316,7 +319,9 @@ class PpoLearner(rl_learner.RLLearner):
       # TODO(abheesht): Add a toggle - KL can either be added directly to
       # rewards or computed in the loss function.
       kl = common.compute_kl_divergence(
-          old_per_token_logps, ref_per_token_logps
+          old_per_token_logps,
+          ref_per_token_logps,
+          method=self.ppo_config.kl_method,
       )
       kl = kl * completion_mask
       rewards = rewards - self.ppo_config.beta * kl
@@ -382,6 +387,45 @@ class PpoLearner(rl_learner.RLLearner):
                 np.min(agg_completion_mask),
                 np.min,
             ),
+        },
+        mode=mode,
+    )
+
+    # Log advantages.
+    valid_advantages = np.ma.masked_array(
+        advantages, mask=np.logical_not(completion_mask)
+    )
+    self.rl_cluster.buffer_metrics(
+        {
+            "advantages/mean": (valid_advantages.mean(), np.mean),
+            "advantages/max": (valid_advantages.max(), np.max),
+            "advantages/min": (valid_advantages.min(), np.min),
+        },
+        mode=mode,
+    )
+
+    # Log returns.
+    valid_returns = np.ma.masked_array(
+        returns, mask=np.logical_not(completion_mask)
+    )
+    self.rl_cluster.buffer_metrics(
+        {
+            "returns/mean": (valid_returns.mean(), np.mean),
+            "returns/max": (valid_returns.max(), np.max),
+            "returns/min": (valid_returns.min(), np.min),
+        },
+        mode=mode,
+    )
+
+    # Log values.
+    valid_values = np.ma.masked_array(
+        values, mask=np.logical_not(completion_mask)
+    )
+    self.rl_cluster.buffer_metrics(
+        {
+            "old_values/mean": (valid_values.mean(), np.mean),
+            "old_values/max": (valid_values.max(), np.max),
+            "old_values/min": (valid_values.min(), np.min),
         },
         mode=mode,
     )

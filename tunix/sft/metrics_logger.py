@@ -137,16 +137,20 @@ class MetricsLogger:
   """Simple Metrics logger."""
 
   def __init__(
-      self, metrics_logger_options: MetricsLoggerOptions | None = None
+      self,
+      metrics_logger_options: MetricsLoggerOptions | None = None,
+      metric_prefix: str = "",
   ):
     self._metrics = {
         Mode.TRAIN: collections.defaultdict(list),
         Mode.EVAL: collections.defaultdict(list),
     }
+
+    self._summary_writers = None
     if metrics_logger_options:
       self._summary_writers = register_jax_monitoring(metrics_logger_options)
-    else:
-      self._summary_writers = None
+
+    self.metric_prefix = metric_prefix
 
   def log(
       self,
@@ -158,7 +162,7 @@ class MetricsLogger:
     """Logs the scalar metric value for the given metric name and mode."""
     self._metrics[mode][metric_name].append(scalar_value)
     jax.monitoring.record_scalar(
-        f"{mode}/{metric_name}", scalar_value, step=step
+        f"{self.metric_prefix}{mode}/{metric_name}", scalar_value, step=step
     )
 
   def metric_exists(self, metric_name: str, mode: Mode | str) -> bool:
