@@ -17,13 +17,16 @@
 from collections.abc import Iterable
 import dataclasses
 
+from flax import config as flax_config
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-
 import sentencepiece as spm
+
+if hasattr(flax_config, 'flax_always_shard_variable'):
+  flax_config.update('flax_always_shard_variable', False)
 
 
 def assert_equal(path, x, y):
@@ -173,6 +176,14 @@ class MockVocab(spm.SentencePieceProcessor):
         'name': 11,
         'is': 12,
         'Morgane': 13,
+        'Tunix': 14,
+        'Parallax': 15,
+        'PT': 16,
+        'library': 17,
+        'distributed': 18,
+        'training': 19,
+        'optimizer': 20,
+        'quantization': 21,
     }
     self._vocab_size = len(self._mapping_text_to_id)
 

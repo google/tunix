@@ -15,6 +15,7 @@
 """Utilities for mutating feature shapes via pooling for distillation."""
 
 import enum
+
 from flax import nnx
 import jax.numpy as jnp
 

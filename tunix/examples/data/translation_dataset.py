@@ -26,7 +26,9 @@ import transformers
 from tunix.generate import tokenizer_adapter
 from tunix.sft.peft_trainer import TrainingInput  # pylint: disable=g-importing-member
 
-import sentencepiece as spm
+# Keep the import below for google internal lint.
+import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
+
 
 INPUT_TEMPLATE = {
     "prefix": "Translate this into French:\n",

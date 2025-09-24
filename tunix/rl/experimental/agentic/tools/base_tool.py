@@ -12,7 +12,6 @@ import dataclasses
 import json
 from typing import Any, Optional
 
-
 abstractmethod = abc.abstractmethod
 dataclass = dataclasses.dataclass
 ABC = abc.ABC

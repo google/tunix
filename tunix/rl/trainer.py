@@ -15,6 +15,7 @@
 """RL Trainer."""
 
 from typing import Any, Callable
+
 from flax import nnx
 from jax.typing import ArrayLike
 import optax

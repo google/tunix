@@ -17,6 +17,7 @@
 import enum
 import inspect
 from typing import Any
+
 import sentencepiece as spm
 
 
@@ -118,3 +119,7 @@ class TokenizerAdapter:
     ):
       return True
     return False
+
+  @property
+  def tokenizer(self) -> Any:
+    return self._tokenizer

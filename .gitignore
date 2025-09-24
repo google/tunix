@@ -17,3 +17,8 @@
 /include/
 /lib/
 /share/
+
+# Documentation
+/docs/_build/
+/docs/_collections/
+/docs/sg_execution_times.rst

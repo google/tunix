@@ -16,6 +16,7 @@
 
 import dataclasses
 from typing import Tuple
+
 import flax
 from flax import nnx
 import jax
@@ -23,7 +24,6 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-
 
 K_MASK = -2.3819763e38
 
@@ -88,6 +88,7 @@ class ModelConfig:
   use_tied_embedding: bool = False
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
 
+  # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
   def qwen2_5_0_5b(cls):  # qwen2.5-0.5B
     return cls(
@@ -103,8 +104,41 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
+  # DeepSeek-R1-Distill-Qwen-1.5B
   @classmethod
-  def qwen2_5_7b(cls):  # qwen2.5-7B
+  def deepseek_r1_distill_qwen_1_5b(cls):
+    return cls(
+        num_layers=28,
+        vocab_size=151936,
+        embed_dim=1536,
+        hidden_dim=8960,
+        num_heads=12,
+        head_dim=128,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10000,
+        use_tied_embedding=False,
+    )
+
+  # qwen2.5-coder-3B and qwen2.5-3B share the same config.
+  @classmethod
+  def qwen2_5_3b(cls):
+    return cls(
+        num_layers=36,
+        vocab_size=151936,
+        embed_dim=2048,
+        hidden_dim=11008,
+        num_heads=16,
+        head_dim=128,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        use_tied_embedding=True,
+    )
+
+  # qwen2.5-7B and qwen2.5-coder-7B share the same config.
+  @classmethod
+  def qwen2_5_7b(cls):
     return cls(
         num_layers=28,
         vocab_size=152064,

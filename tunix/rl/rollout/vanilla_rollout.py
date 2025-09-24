@@ -74,6 +74,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
     return common.compute_per_token_logps(
@@ -82,7 +83,8 @@ class VanillaRollout(base_rollout.BaseRollout):
         completion_tokens=completion_tokens,
         pad_id=self.pad_id(),
         eos_id=self.eos_id(),
-    )
+        completion_mask=completion_mask,
+    )[0]
 
   def update_params(
       self,

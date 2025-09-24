@@ -26,11 +26,14 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 
-
 K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+if hasattr(flax.config, 'flax_always_shard_variable'):
+  flax.config.update('flax_always_shard_variable', False)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

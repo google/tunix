@@ -16,6 +16,7 @@
 """Utility functions for sampler."""
 
 import functools
+import gc
 import logging
 import re
 from typing import Any, Dict, Iterator, List, Optional
@@ -103,7 +104,7 @@ def pad_to_length(
 
   Returns:
       A new JAX array that is padded to the target length along the specified
-      axis. Return original array if it is already longer than the target
+      axis. Returns original array if it is already longer than the target
       length.
   """
   length = x.shape[axis]
@@ -162,14 +163,14 @@ def find_last_non_pad_idx(ids, pad_id):
 
 @functools.partial(
     jax.jit,
-    static_argnames=[
+    static_argnames=(
         'return_logits',
         'echo',
         'pad_value',
         'eos_value',
         'max_prompt_length',
         'max_total_length',
-    ],
+    ),
 )
 def padded_fill_tokens_and_logits(
     token_buffers: jax.Array,
@@ -362,12 +363,13 @@ def build_flat_dict(
         # Check if this is a scanned parameter (has 'layer' in sharding spec)
         if sharding and 'layer' in sharding:
           if actual_src not in new_flat_dict:
-            new_flat_dict[actual_src] = ([], sharding)
+            new_flat_dict[actual_src] = ([], [], sharding)
           layer_number = int(matched.groups()[0])
           new_flat_dict[actual_src][0].append((layer_number, v))
+          new_flat_dict[actual_src][1].append((layer_number, path))
         else:
           # Regular (non-scanned) parameter
-          new_flat_dict[actual_src] = v, sharding
+          new_flat_dict[actual_src] = v, path, sharding
 
         mapped = True
         break
@@ -376,10 +378,13 @@ def build_flat_dict(
       logging.warning('!!! No mapping for flat state: %s', path)
 
   # Sort layers
-  for key, (layers, sharding) in new_flat_dict.items():
+  for key, (layers, paths, sharding) in new_flat_dict.items():
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
-      new_flat_dict[key] = ([layer for _, layer in layers], sharding)
+      paths.sort(key=lambda x: x[0])
+      values = [v for _, v in layers]
+      paths = [p for _, p in paths]
+      new_flat_dict[key] = (values, paths, sharding)
 
   return new_flat_dict
 
@@ -410,141 +415,129 @@ def transfer_state_with_mappings(
   Returns:
     The target state with the transferred values.
   """
+  tgt_flat_list = dst_state.flat_state()
+  sharding_dict = None
+  if reshard_fn:
+    sharding_dict = dict(
+        [(key, tgt_params.value.sharding) for key, tgt_params in tgt_flat_list]
+    )
 
-  src_flat = src_state.flat_state()
-  tgt_flat = dst_state.flat_state()
   # Maps source keys to target tensor(s) and sharding spec
-  new_src_dict = build_flat_dict(tgt_flat, key_mappings)
+  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
-  def _process_and_assign_value(value, tgt_param, flat_key, src_keys):
-    # Optional transpose
+  # Flatten the source state, unrolling any scanned layers.
+  unscanned_src_to_tgt_flat = {}
+  for src_keys, src_val in src_state.flat_state():
+    src_key = '.'.join(str(k) for k in src_keys)
+    if src_key not in src_to_tgt_map:
+      if 'rng' in src_key:
+        logging.debug('Skipping RNG parameter: %s', src_key)
+      else:
+        logging.error('!!! No mapping for source key: %s', src_key)
+      continue
+
+    tgt_param, tgt_path, sharding_spec = src_to_tgt_map[src_key]
+
+    def _get_layer_axis_from_sharding_spec(sharding_spec):
+      if isinstance(sharding_spec, (list, tuple)):
+        for i, spec in enumerate(sharding_spec):
+          if spec == 'layer':
+            return i
+      return None
+
+    layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
+    if layer_axis is not None:
+      num_layers = src_val.value.shape[layer_axis]
+      for i in range(num_layers):
+        idx = [slice(None)] * src_val.value.ndim
+        idx[layer_axis] = i
+        layer_val = src_val.value[tuple(idx)]
+        # Construct the flattened key, e.g. layers.0.attention.wq
+        layer_key = tgt_path[i]
+        unscanned_src_to_tgt_flat[(src_key, layer_key)] = (
+            layer_val,
+            tgt_param[i],
+        )
+    else:
+      unscanned_src_to_tgt_flat[(src_key, tgt_path)] = (
+          src_val.value,
+          tgt_param,
+      )
+  for (flat_src_key, tgt_key), (
+      val,
+      tgt_param,
+  ) in unscanned_src_to_tgt_flat.items():
+    last_key = flat_src_key.split('.')[-1]
     if (
         transpose_keys
-        and (src_keys[-1] in transpose_keys)
-        and 'lora' not in src_keys[-1]
+        and (last_key in transpose_keys)
+        and 'lora' not in last_key
     ):
-      value = jnp.transpose(value, transpose_keys[src_keys[-1]])
-
+      val = jnp.transpose(val, transpose_keys[last_key])
     # Optional hook fn
-    if key_mapping_hook_fns and flat_key in key_mapping_hook_fns:
-      value = key_mapping_hook_fns[flat_key](value)
-
-    # Shape check and general padding support
-    if tgt_param.value.shape != value.shape:
-      if len(value.shape) != len(tgt_param.value.shape):
-        if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(flat_key):
-          # Special case for qkv bias, which needs to be reshaped.
+    if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
+      val = key_mapping_hook_fns[flat_src_key](val)
+    if tgt_param.value.shape != val.shape:
+      if len(val.shape) != len(tgt_param.value.shape):
+        if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(flat_src_key):
           new_shape = (
               tgt_param.value.shape[0],
-              value.shape[0] // tgt_param.value.shape[0],
+              val.shape[0] // tgt_param.value.shape[0],
           )
-          value = jnp.reshape(value, new_shape)
+          val = jnp.reshape(val, new_shape)
         else:
           raise ValueError(
-              f'Rank mismatch for {flat_key}: {value.shape} vs'
+              f'Rank mismatch for {tgt_key}: {val.shape} vs '
               f' {tgt_param.value.shape}'
           )
-
       pad_width = []
       for i, (src_dim, tgt_dim) in enumerate(
-          zip(value.shape, tgt_param.value.shape)
+          zip(val.shape, tgt_param.value.shape)
       ):
         if src_dim < tgt_dim:
           # Optional: enforce vLLM padding constraint only on padded dims
-          assert tgt_dim == 128, (
-              f'vLLM only supports padding to 128, but got {tgt_dim} in dim'
-              f' {i} for {flat_key}'
-          )
+          if tgt_dim != 128:
+            raise ValueError(
+                'vLLM only supports padding to 128, but got {tgt_dim} in dim'
+                f' {i} for {flat_src_key}'
+            )
           pad_width.append((0, tgt_dim - src_dim))
-        elif src_dim == tgt_dim:
-          pad_width.append((0, 0))
-        else:
+        elif src_dim > tgt_dim:
           raise ValueError(
-              f'Cannot shrink shape for {flat_key}: {value.shape} ->'
+              f'Cannot shrink shape for {flat_src_key}: {val.shape} ->'
               f' {tgt_param.value.shape}'
           )
+        else:
+          pad_width.append((0, 0))
+      val = jnp.pad(val, pad_width)
 
-      logging.info(
-          'Padding %s from shape %s to %s',
-          flat_key,
-          value.shape,
-          tgt_param.value.shape,
-      )
-      value = jnp.pad(value, pad_width)
-
-    # Type cast if needed
-    if tgt_param.value.dtype != value.dtype:
+    # Type cast
+    if tgt_param.value.dtype != val.dtype:
       logging.warning(
           'Type mismatch on %s: %s -> %s',
-          flat_key,
-          value.dtype,
+          flat_src_key,
+          val.dtype,
           tgt_param.value.dtype,
       )
-      value = value.astype(tgt_param.value.dtype)
+      val = val.astype(tgt_param.value.dtype)
+    tgt_param.value = val
 
-    # Apply resharding if provided
-    new_value = (
-        reshard_fn(value, tgt_param.value.sharding) if reshard_fn else value
+  del unscanned_src_to_tgt_flat
+  gc.collect()
+
+  # Batch reshard and assign
+  if reshard_fn:
+    tgt_flat_dict = dict(
+        [(key, tgt_params.value) for key, tgt_params in tgt_flat_list]
     )
-    tgt_param.value = new_value
+    resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
+    for tgt_key, tgt_param in tgt_flat_list:
+      assert (
+          tgt_key in resharded_values_flat_dict
+      ), f'Key {tgt_key} not in resharded values'
+      tgt_param.value = resharded_values_flat_dict[tgt_key]
 
-  def _extract_layer_from_scanned_tensor(tensor, layer_idx, layer_axis):
-    """Extract a specific layer from a scanned tensor."""
-    idx = [slice(None)] * tensor.ndim
-    idx[layer_axis] = layer_idx
-    return tensor[tuple(idx)]
-
-  def _get_layer_axis_from_sharding_spec(sharding_spec):
-    """Determine which axis contains the layer dimension from sharding specification."""
-    if isinstance(sharding_spec, (list, tuple)):
-      for i, spec in enumerate(sharding_spec):
-        if spec == 'layer':
-          return i
-    return None
-
-  def _should_skip_parameter(param_key):
-    """Check if a parameter should be skipped."""
-    skip_patterns = [
-        'rng',
-    ]
-    return any(pattern in param_key for pattern in skip_patterns)
-
-  def process_entry(src_keys, src_val):
-    flat_key = '.'.join(str(k) for k in src_keys)
-
-    if flat_key not in new_src_dict:
-      # Skip RNG states that don't need mapping
-      if _should_skip_parameter(flat_key):
-        logging.debug('Skipping parameter: %s', flat_key)
-      else:
-        logging.error('!!! No mapping for source key: %s', flat_key)
-        return
-      return
-
-    tgt_param, sharding_spec = new_src_dict[flat_key]
-    value = src_val.value
-
-    layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
-
-    if layer_axis is not None:
-      # This is a scanned parameter
-      num_layers = len(tgt_param)
-      for layer_idx in range(0, num_layers):
-        layer_tensor = _extract_layer_from_scanned_tensor(
-            value, layer_idx, layer_axis
-        )
-        _process_and_assign_value(
-            layer_tensor, tgt_param[layer_idx], flat_key, src_keys
-        )
-    else:
-      # This is a normal parameter
-      _process_and_assign_value(value, tgt_param, flat_key, src_keys)
-
-  # Loop through each parameter
-  for src_keys, src_val in src_flat:
-    process_entry(src_keys, src_val)
-
-  return dst_state.from_flat_path(tgt_flat)
+  return dst_state.from_flat_path(tgt_flat_list)
 
 
 def verify_state_closeness(golden_state, state, atol=1e-2):

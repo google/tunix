@@ -14,7 +14,9 @@
 
 """Common utilities for loading model weights from safetensors files."""
 
+import contextlib
 import re
+
 from etils import epath
 from flax import nnx
 import jax
@@ -79,7 +81,11 @@ def load_and_create_model(
     raise ValueError(f"No safetensors found in {file_dir}")
 
   # Create model structure
-  model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))
+  context_manager = mesh if mesh is not None else contextlib.nullcontext()
+
+  with context_manager:
+    model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))
+
   graph_def, abs_state = nnx.split(model)
   state_dict = abs_state.to_pure_dict()
 

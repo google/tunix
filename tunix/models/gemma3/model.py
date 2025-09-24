@@ -18,6 +18,7 @@ import dataclasses
 import enum
 import itertools
 from typing import Tuple
+
 import flax
 from flax import nnx
 import jax
@@ -25,6 +26,9 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+
+if hasattr(flax.config, 'flax_always_shard_variable'):
+  flax.config.update('flax_always_shard_variable', False)
 
 
 LayerCache = dict[str, jaxtyping.Array]
