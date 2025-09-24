@@ -77,7 +77,7 @@ def _dummy_dataset(source=MySource(), batch_size: int = 1):
   )
 
 
-class GRPOLearnerTest(parameterized.TestCase):
+class GrpoLearnerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -87,7 +87,7 @@ class GRPOLearnerTest(parameterized.TestCase):
 
   def test_iterator(self):
 
-    class _EmptyTrainer(grpo_lib.GRPOLearner):
+    class _EmptyTrainer(grpo_lib.GrpoLearner):
       """A trainer that does nothing but used to test the iterator preparation."""
 
       def __init__(self, grpo_config):
@@ -126,7 +126,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         )
 
     empty_trainer = _EmptyTrainer(
-        grpo_lib.GRPOConfig(num_generations=2, num_iterations=1)
+        grpo_lib.GrpoConfig(num_generations=2, num_iterations=1)
     )
 
     def _prepare(dataset, sample_repeat, batch_repeat, grad_acc_steps):
@@ -248,12 +248,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     rl_cluster.with_external_metrics_logger(print)
 
-    grpo_config = grpo_lib.GRPOConfig(
+    grpo_config = grpo_lib.GrpoConfig(
         num_generations=2,
         num_iterations=1,
         loss_algo=loss_algo,
     )
-    grpo_learner = grpo_lib.GRPOLearner(
+    grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         grpo_config=grpo_config,
@@ -518,13 +518,13 @@ class GRPOLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = grpo_lib.GRPOConfig(
+    grpo_config = grpo_lib.GrpoConfig(
         num_generations=2,
         num_iterations=num_iterations,
         beta=beta,
     )
 
-    grpo_learner = grpo_lib.GRPOLearner(
+    grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_1,
         grpo_config=grpo_config,
@@ -626,12 +626,12 @@ class GRPOLearnerTest(parameterized.TestCase):
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
-    grpo_config = grpo_lib.GRPOConfig(
+    grpo_config = grpo_lib.GrpoConfig(
         num_generations=2,
         num_iterations=1,
     )
 
-    grpo_learner = grpo_lib.GRPOLearner(
+    grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_1,
         grpo_config=grpo_config,
@@ -657,8 +657,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_equal, original_base_params, base_params)
 
   def test_exception_from_data_preparation(self):
-
-    class _TrainerWithException(grpo_lib.GRPOLearner):
+    class _TrainerWithException(grpo_lib.GrpoLearner):
 
       @override
       def _generate_and_compute_advantage(self, example, mode='train'):
@@ -697,7 +696,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = grpo_lib.GRPOConfig(
+    grpo_config = grpo_lib.GrpoConfig(
         num_generations=2,
         num_iterations=1,
     )
@@ -746,12 +745,12 @@ class GRPOLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = grpo_lib.GRPOConfig(
+    grpo_config = grpo_lib.GrpoConfig(
         num_generations=2,
         num_iterations=1,
     )
 
-    grpo_learner = grpo_lib.GRPOLearner(
+    grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_1,
         grpo_config=grpo_config,
@@ -799,7 +798,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config2,
     )
 
-    grpo_learner2 = grpo_lib.GRPOLearner(
+    grpo_learner2 = grpo_lib.GrpoLearner(
         rl_cluster=rl_cluster2,
         reward_fns=reward_1,
         grpo_config=grpo_config,
@@ -812,7 +811,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         tokenizer=vocab,
         cluster_config=cluster_config2,
     )
-    grpo_learner2 = grpo_lib.GRPOLearner(
+    grpo_learner2 = grpo_lib.GrpoLearner(
         rl_cluster=rl_cluster2,
         reward_fns=reward_1,
         grpo_config=grpo_config,
@@ -871,12 +870,12 @@ class GRPOLearnerTest(parameterized.TestCase):
       )
       return rl_cluster.with_external_metrics_logger(print)
 
-    grpo_config = grpo_lib.GRPOConfig(
+    grpo_config = grpo_lib.GrpoConfig(
         num_generations=2,
         num_iterations=1,
     )
     first_trajectories = {'train': {}, 'eval': {}}
-    grpo_learner = grpo_lib.GRPOLearner(
+    grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=create_rl_cluster(1),
         reward_fns=lambda **kwargs: my_reward_fn(
             trajectories=first_trajectories, **kwargs
@@ -891,7 +890,7 @@ class GRPOLearnerTest(parameterized.TestCase):
 
     # Execute with different batch size and gradient accumulation steps.
     second_trajectories = {'train': {}, 'eval': {}}
-    grpo_learner = grpo_lib.GRPOLearner(
+    grpo_learner = grpo_lib.GrpoLearner(
         rl_cluster=create_rl_cluster(4),
         reward_fns=lambda **kwargs: my_reward_fn(
             trajectories=second_trajectories, **kwargs

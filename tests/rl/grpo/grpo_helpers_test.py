@@ -21,7 +21,7 @@ from tunix.rl.grpo import grpo_helpers
 jax.config.update("jax_threefry_partitionable", False)
 
 
-class GRPOHelpersTest(absltest.TestCase):
+class GrpoHelpersTest(absltest.TestCase):
 
   def test_compute_advantages(self):
     rng = jax.random.PRNGKey(0)

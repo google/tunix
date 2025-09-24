@@ -39,7 +39,7 @@ class TrainExample(common.TrainExample):
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class GRPOConfig:
+class GrpoConfig:
   """Configuration for GRPO algorithm.
 
   Attributes:
@@ -81,7 +81,7 @@ class GRPOConfig:
       )
 
 
-class GRPOLearner(rl_learner.RLLearner):
+class GrpoLearner(rl_learner.RLLearner):
   """GRPO (Group Relative Policy Optimization) learner.
 
   GRPO is a reinforcement learning algorithm designed to enhance the reasoning
@@ -100,11 +100,11 @@ class GRPOLearner(rl_learner.RLLearner):
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
       reward_fns: RewardFn | List[RewardFn],
-      grpo_config: GRPOConfig,
+      grpo_config: GrpoConfig,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
   ):
-    """Initializes the `GRPOTrainer`.
+    """Initializes the `GrpoTrainer`.
 
     Args:
       rl_cluster: RL cluster containing actor, reference and reward models.
@@ -112,7 +112,7 @@ class GRPOLearner(rl_learner.RLLearner):
         reward for given prompts and completions. Each function should accept
         `prompts`, `completions` and optional keyword arguments, and return a
         list of float rewards.
-      grpo_config: An instance of `GRPOConfig` containing all GRPO specific
+      grpo_config: An instance of `GrpoConfig` containing all GRPO specific
         parameters.
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept `prompts`, `completions`,
@@ -451,6 +451,3 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
     loss = (per_token_loss * completion_mask).sum() / loss_denominator
 
   return loss, aux
-
-GrpoConfig = GRPOConfig
-GrpoLearner = GRPOLearner

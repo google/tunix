@@ -41,7 +41,7 @@ class TrainExample(common.TrainExample):
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class PPOConfig:
+class PpoConfig:
   """Configuration for PPO learner.
 
   Attributes:
@@ -89,7 +89,7 @@ class PPOConfig:
       )
 
 
-class PPOLearner(rl_learner.RLLearner):
+class PpoLearner(rl_learner.RLLearner):
   """PPO (Proximal Policy Optimization) learner.
 
   PPO is a reinforcement learning algorithm that fine-tunes models using an
@@ -107,16 +107,16 @@ class PPOLearner(rl_learner.RLLearner):
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
-      ppo_config: PPOConfig,
+      ppo_config: PpoConfig,
       reward_fns: RewardFn | List[RewardFn] | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
   ):
-    """Initializes the `PPOLearner`.
+    """Initializes the `PpoLearner`.
 
     Args:
       rl_cluster: RL cluster containing actor, reference and reward models.
-      ppo_config: An instance of `PPOConfig` containing all training-specific
+      ppo_config: An instance of `PpoConfig` containing all training-specific
         configuration options.
       reward_fns: A single callable or a list of callables that compute a scalar
         reward for given prompts and completions. Each function should accept
@@ -562,6 +562,3 @@ def ppo_policy_loss_fn(
     aux["loss/entropy"] = entropy_loss
 
   return policy_loss, aux
-
-PpoConfig = PPOConfig
-PpoLearner = PPOLearner

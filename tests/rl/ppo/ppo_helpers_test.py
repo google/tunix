@@ -79,7 +79,7 @@ def _ref_compute_gae_advantages(
   return advantages, returns
 
 
-class PPOHelpersTest(parameterized.TestCase):
+class PpoHelpersTest(parameterized.TestCase):
 
   def test_compute_gae_advantages(self):
     bsz, seq_len = 3, 10
