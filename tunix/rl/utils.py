@@ -27,6 +27,7 @@ from flax.nnx import filterlib
 from flax.nnx import statelib
 import humanize
 import jax
+from jax import tree_util
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
@@ -240,7 +241,9 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
     if isinstance(all_values[0], list):
       merged[key] = list(chain.from_iterable(all_values))
     else:
-      merged[key] = np.concatenate([np.asarray(v) for v in all_values], axis=0)
+      merged[key] = tree_util.tree_map(
+          lambda *xs: np.concatenate(xs), *all_values
+      )
 
   return merged
 
