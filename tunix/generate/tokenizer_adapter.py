@@ -108,7 +108,7 @@ class TokenizerAdapter:
         raise ValueError('SentencePiece tokenizer has a undefined pad_id.')
       return ret_id
     elif self._tokenizer_type == TokenizerType.HF:
-      # e.g. llama3 HF tokenizers do not have pad_id
+      # e.g., LLaMA-style HF tokenizers may not have pad_id
       if self._tokenizer.pad_token_id is None:
         self._tokenizer.pad_token = self._tokenizer.eos_token
       return self._tokenizer.pad_token_id
