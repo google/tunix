@@ -30,6 +30,7 @@ from tunix.rl.ppo.ppo_learner import PpoConfig
 from tunix.rl.ppo.ppo_learner import PPOLearner
 from tunix.rl.ppo.ppo_learner import PpoLearner
 from tunix.rl.rl_cluster import ClusterConfig
+from tunix.rl.rl_cluster import MetricsBuffer
 from tunix.rl.rl_cluster import RLCluster
 from tunix.rl.rl_cluster import RLTrainingConfig
 from tunix.rl.rl_cluster import Role
