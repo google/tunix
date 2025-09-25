@@ -15,11 +15,22 @@
 
 set -x # Enable xtrace
 
-python3 -m tunix.sft.peft_main \
+python3 -m tunix.cli.peft_main \
   base_config.yaml \
-  model_name="gemma-2b" \
-  model_id="google/gemma/flax/2b" \
-  model_source="kaggle" \
+  model_config.model_name="gemma-2b" \
+  model_config.model_id="google/gemma/flax/2b" \
+  model_config.model_source="kaggle" \
+  model_config.model_download_path="/tmp/models" \
+  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/" \
+  model_config.mesh.shape="(2,2)" \
+  model_config.mesh.axis_names="('fsdp','tp')" \
+  model_config.lora_config.rank=16 \
+  model_config.lora_config.alpha=2.0 \
+  model_config.lora_config.weight_qtype="nf4" \
+  model_config.lora_config.tile_size=256 \
+  model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj" \
+  tokenizer_config.tokenizer_path="/tmp/models/models/google/gemma/flax/2b/2/tokenizer.model" \
+  tokenizer_config.tokenizer_type="sentencepiece" \
   dataset_name="mtnt/en-fr" \
   optimizer_config.opt_type="adamw" \
   optimizer_config.learning_rate=1e-5 \
@@ -27,10 +38,5 @@ python3 -m tunix.sft.peft_main \
   training_config.max_steps=100 \
   training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full" \
   training_config.metrics_logging_options.flush_every_n_steps=20 \
-  mesh.shape="(2,2)" \
-  mesh.axis_names="('fsdp','tp')"
-  # Uncomment this to run LoRA.
-  # lora_config.rank=16 \
-  # lora_config.alpha=2.0 \
-  # lora_config.weight_qtype="nf4" \
-  # lora_config.tile_size=256
+
+
