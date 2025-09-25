@@ -226,7 +226,7 @@ class PeftTrainer:
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
     self._prof = profiler.Profiler(
-        initial_step=self._iter_steps,
+        initial_step=self._train_steps,
         max_step=self.config.max_steps,
         profiler_options=self.config.profiler_options,
     )
