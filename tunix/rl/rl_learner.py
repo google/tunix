@@ -155,6 +155,11 @@ class RLLearner(abc.ABC):
       A JAX array (shape `[num_prompts, num_reward_fns]`) of scalar rewards for
       each prompt-completion pair. The rewards are computed using the provided
       reward functions.
+
+    Raises:
+        RuntimeError: If 'r' reward is None, indicating a failure to obtain the
+        result, or if the length of 'r' reward does not match the length of
+        'prompts'.
     """
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
@@ -162,6 +167,17 @@ class RLLearner(abc.ABC):
     rewards = np.zeros((len(prompts), len(self.reward_fns)))
     for i, reward_fn in enumerate(self.reward_fns):
       r = reward_fn(prompts=prompts, completions=completions, **kwargs)
+      if r is None:
+        raise RuntimeError(
+            f"Failed to obtain result from {reward_fn.__name__}. Result is"
+            " None."
+        )
+      if isinstance(r, list) and len(r) != len(prompts):
+        raise RuntimeError(
+            f"Length mismatch after {reward_fn.__name__}: "
+            f"len(r)={len(r)}, len(prompts)={len(prompts)}. "
+            f"Content of r: {r}"
+        )
       rewards[:, i] = np.array(r)
       self.rl_cluster.buffer_metrics(
           {
