@@ -709,6 +709,16 @@ class PeftTrainer:
     """Returns the number of iterator steps taken."""
     return self._iter_steps
 
+  @property
+  def flops_measured(self) -> bool:
+    """Returns whether the TFLOPs has been measured."""
+    return self._flops_measured
+
+  @flops_measured.setter
+  def flops_measured(self, value: bool):
+    """Sets the TFLOPs measurement status."""
+    self._flops_measured = value
+
   def close(self):
     """Closes the trainer and its associated resources.
 
