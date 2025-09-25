@@ -69,7 +69,7 @@ def _dummy_dataset(source=MySource(), batch_size: int = 1):
   )
 
 
-class PpoLearnerTest(parameterized.TestCase):
+class PPOLearnerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -79,7 +79,7 @@ class PpoLearnerTest(parameterized.TestCase):
 
   # def test_iterator(self):
 
-  #   class _EmptyTrainer(ppo_lib.PpoLearner):
+  #   class _EmptyTrainer(ppo_lib.PPOLearner):
   #     """A trainer used to test the iterator preparation."""
 
   #     def __init__(self):
@@ -357,10 +357,10 @@ class PpoLearnerTest(parameterized.TestCase):
         tokenizer=vocab,
         cluster_config=cluster_config,
     )
-    ppo_config = ppo_lib.PpoConfig(
+    ppo_config = ppo_lib.PPOConfig(
         num_ppo_epochs=1, epsilon_c=epsilon_c, entropy_coef=entropy_coef
     )
-    ppo_learner = ppo_lib.PpoLearner(
+    ppo_learner = ppo_lib.PPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         ppo_config=ppo_config,
@@ -608,8 +608,8 @@ class PpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    ppo_config = ppo_lib.PpoConfig(num_ppo_epochs=num_ppo_epochs, beta=beta)
-    ppo_learner = ppo_lib.PpoLearner(
+    ppo_config = ppo_lib.PPOConfig(num_ppo_epochs=num_ppo_epochs, beta=beta)
+    ppo_learner = ppo_lib.PPOLearner(
         rl_cluster=rl_cluster,
         ppo_config=ppo_config,
     )
