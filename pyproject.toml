@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
   "datasets",
-  "flax@git+https://github.com/google/flax", # TODO: change to proper release
+  "flax>=0.11.2",
   "gcsfs",
   "grain",
   "huggingface_hub",
@@ -47,6 +47,10 @@ docs = [
     "sphinx-gallery>=0.19.0",
     "sphinx-collections>=0.0.1",
     "sphinx_contributors",
+]
+dev = [
+    "flax@git+https://github.com/google/flax",
+    "qwix@git+https://github.com/google/qwix",
 ]
 
 [project.urls]
