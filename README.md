@@ -111,3 +111,9 @@ cutting-edge research and easy reproducibility.
 Thank you for your interest in Tunix. We're working hard to bring you a powerful
 and efficient library for LLM post-training. Please follow our progress and
 check back for updates!
+
+## Acknowledgements
+
+Thank you to all our wonderful contributors!
+
+[![Contributors](https://contrib.rocks/image?repo=google/tunix)](https://github.com/google/tunix/graphs/contributors)
