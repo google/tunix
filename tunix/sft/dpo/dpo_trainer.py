@@ -89,6 +89,8 @@ class TrainExample:
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class DPOTrainingConfig(peft_trainer.TrainingConfig):
+  """DPO Training Config."""
+
   beta: float = 0.1  # 𝛽 for KL penalty https://arxiv.org/pdf/2305.18290
   label_smoothing: float = 0.0
 
