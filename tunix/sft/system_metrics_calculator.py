@@ -15,6 +15,7 @@
 """System metrics calculator for Tunix."""
 
 from typing import Any, Callable
+
 from absl import logging
 from flax import nnx
 
@@ -42,7 +43,7 @@ def measure_tflops_per_step(
       return None
     # Convert FLOPs to TFLOPs
     return float(flops) / 1e12
-  except (TypeError, ValueError) as e:
+  except Exception as e:  # pylint: disable=broad-exception-caught
     logging.error("Could not measure TFLOPs due to an error: %s", e)
     return None
 

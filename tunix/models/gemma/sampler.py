@@ -15,7 +15,8 @@ import jax
 import jax.numpy as jnp
 from tunix.models.gemma import gemma as gemma_lib
 
-import sentencepiece as spm
+# Keep the import below for google internal lint.
+import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
 
 
 def _sample_top_p(
@@ -226,9 +227,11 @@ class Sampler:
       self._transformer_state = state
     else:
       # LoRA state replacement.
-      assert (
-          len(param_types) == 1 and nnx.LoRAParam in param_types
-      ), f'Only LoRAParam is supported. Invalid: {param_types}'
+      if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+        raise ValueError(
+            'Only LoRAParam is supported. Received invalid `param_types`: '
+            f'{param_types}'
+        )
       original_lora_params = statelib.filter_state(
           self._transformer_state, nnx.LoRAParam
       )

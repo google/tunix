@@ -14,6 +14,7 @@
 """Inflight computation throttler."""
 
 import queue
+
 import jax
 
 

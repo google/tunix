@@ -1,0 +1,17 @@
+# pylintrc-notebooks
+# Derived from Google's pylintrc, adjusted for Jupyter notebooks.
+
+[MESSAGES CONTROL]
+
+disable = missing-module-docstring,
+          missing-function-docstring,
+          wrong-import-position,
+          ungrouped-imports,
+          redefined-outer-name,
+          wrong-import-order,
+          import-error,
+
+[FORMAT]
+
+indent-string='  '
+

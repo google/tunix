@@ -17,6 +17,7 @@
 import enum
 import inspect
 from typing import Any
+
 import sentencepiece as spm
 
 

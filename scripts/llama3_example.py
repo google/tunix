@@ -26,7 +26,6 @@ from tunix.generate import sampler
 from tunix.models.llama3 import model
 from tunix.models.llama3 import params
 
-
 MODEL_VERSION = "meta-llama/Llama-3.1-8B-Instruct"
 
 # Consider switch to tempfile after figuring out how it works

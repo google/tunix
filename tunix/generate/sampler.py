@@ -35,7 +35,6 @@ from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
 
-
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
@@ -157,19 +156,15 @@ def _init_cache(
     The KV cache for one attention block.
   """
 
-  def _init_layer_cache() -> LayerCache:
-    return {
-        'k': jnp.zeros(
-            (batch_size, cache_size, num_kv_heads, head_dim), dtype=dtype
-        ),
-        'v': jnp.zeros(
-            (batch_size, cache_size, num_kv_heads, head_dim), dtype=dtype
-        ),
-        'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
-    }
-
-  cache = {f'layer_{i}': _init_layer_cache() for i in range(n_layers)}
-  return cache
+  shape = (batch_size, cache_size, num_kv_heads, head_dim)
+  k = jnp.zeros(shape, dtype=dtype)
+  v = jnp.zeros(shape, dtype=dtype)
+  end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
+  # Jax array is immutable, so updates to each layer creates new arrays.
+  return {
+      f'layer_{i}': {'k': k, 'v': v, 'end_index': end_index}
+      for i in range(n_layers)
+  }
 
 
 class Sampler(base_sampler.BaseSampler):
@@ -283,9 +278,11 @@ class Sampler(base_sampler.BaseSampler):
       self._transformer_state = state
     else:
       # LoRA state replacement.
-      assert (
-          len(param_types) == 1 and nnx.LoRAParam in param_types
-      ), f'Only LoRAParam is supported. Invalid: {param_types}'
+      if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+        raise ValueError(
+            'Only LoRAParam is supported. Received invalid `param_types`: '
+            f'{param_types}'
+        )
       original_lora_params = statelib.filter_state(
           self._transformer_state, nnx.LoRAParam
       )

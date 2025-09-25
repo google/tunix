@@ -31,7 +31,6 @@ from vllm import LLM
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 
-
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
@@ -225,9 +224,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       pad_output: bool = False,
   ) -> base_sampler.SamplerOutput:
     # max_tokens: maximum number of tokens to generate
-    assert (
-        max_generation_steps <= self.args["max_model_len"]
-    ), f"{max_generation_steps} > {self.args['max_model_len']}"
+    if max_generation_steps > self.args["max_model_len"]:
+      raise ValueError(
+          "`max_generation_steps` must be less than or equal to "
+          "`max_model_len`. Received:  `max_generation_steps`="
+          f"{max_generation_steps} and `max_model_len`="
+          f"{self.args['max_model_len']}."
+      )
     if beam_size is not None:
       self.sampling_params = self.llm.sampling_params.BeamSearchParams(
           beam_width=beam_size,

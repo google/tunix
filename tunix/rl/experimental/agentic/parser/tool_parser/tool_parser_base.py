@@ -7,7 +7,6 @@ from typing import Any, List, Literal
 
 from tunix.rl.experimental.agentic.tools import base_tool
 
-
 BaseTool = base_tool.BaseTool
 abstractmethod = abc.abstractmethod
 dataclass = dataclasses.dataclass

@@ -25,9 +25,10 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
-import sentencepiece as spm
-
 from tunix.models.gemma3 import model as model_lib
+
+# Keep the import below for google internal lint.
+import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
 
 # Pretrained
 GEMMA3_1B_PT = 'gs://gemma-data/checkpoints/gemma3-1b-pt'

@@ -70,6 +70,10 @@ class TrainingConfig:
   # Controls how many train_steps can be scheduled ahead of time.
   max_inflight_computations: int = 2
 
+  # Prefix for metric names for logging. Not sticking it in
+  # `metrics_logging_options` because the latter is optional.
+  metric_prefix: str = ""
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -197,7 +201,8 @@ class PeftTrainer:
         options=self.config.checkpointing_options,
     )
     self.metrics_logger = metrics_logger.MetricsLogger(
-        self.config.metrics_logging_options
+        self.config.metrics_logging_options,
+        metric_prefix=self.config.metric_prefix,
     )
     self.is_managed_externally = False
 
@@ -483,6 +488,7 @@ class PeftTrainer:
       step_time_delta: float = 0.0,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
+    loss = np.array(loss)
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
           step=step, losses=[loss], step_time_deltas=[step_time_delta]

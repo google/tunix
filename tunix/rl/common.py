@@ -100,23 +100,40 @@ class TrainExample:
 
 
 def compute_kl_divergence(
-    per_token_logps: jax.Array, ref_per_token_logps: jax.Array
+    per_token_logps: jax.Array,
+    ref_per_token_logps: jax.Array,
+    method: str = "low_var_kl",
 ) -> jax.Array:
   """Compute per token KL divergence between trained and reference policy.
+
+  Based on `method`, we compute one of three kinds of KL divergence:
+  - "kl": Unbiased, high-variance estimator. Simple Forward KL:
+    `logp - ref_logp`.
+  - "mse_kl": Biased, low-variance estimator. Squared log-difference:
+    `0.5 * (logp - ref_logp)^2`.
+  - "low_var_kl": Unbiased, low-variance estimator. J. Schulman low-variance
+    approx: `(r - 1) - log r`, where `r = q/p = exp(ref_logp - logp)`.
 
   Args:
     per_token_logps: Per token log probabilities from the trained policy.
     ref_per_token_logps: Per token log probabilities from the reference policy.
+    method: KL penalty method. Defaults to "low_var_kl".
 
   Returns:
     KL divergence.
   """
-  per_token_kl = (
-      jnp.exp(ref_per_token_logps - per_token_logps)
-      - (ref_per_token_logps - per_token_logps)
-      - 1
-  )
-  return per_token_kl
+  if method == "kl":
+    return per_token_logps - ref_per_token_logps
+  elif method == "mse_kl":
+    return 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
+  elif method == "low_var_kl":
+    kl = ref_per_token_logps - per_token_logps
+    return jnp.exp(kl) - (kl) - 1
+  else:
+    raise ValueError(
+        "`method` must be one of 'kl', 'mse_kl', 'low_var_kl'. Received:"
+        f" {method}"
+    )
 
 
 def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
@@ -142,37 +159,35 @@ def get_per_token_logps(
     positions: jax.Array,
     attn_mask: jax.Array,
     logits_to_keep: int,
-    images: jax.Array | None = None,
-    pixel_values: jax.Array | None = None, # <-- add this line for compatibility
-) -> jax.Array:
-    """Computes the per-token log probabilities."""
-    if pixel_values is not None:
-        logits, _ = model(
-            input_tokens, positions=positions, attention_mask=attn_mask, cache=None, pixel_values=pixel_values
-        )
-    else:
-        logits, _ = model(
-            input_tokens, positions=positions, attention_mask=attn_mask, cache=None
-        )
-    logits = logits[:, -logits_to_keep - 1 : -1, :]
-    input_tokens = input_tokens[:, -logits_to_keep:]
-    return selective_log_softmax(logits, input_tokens)
+) -> tuple[jax.Array, jax.Array]:
+  """Computes the per-token log probabilities."""
+  logits, _ = model(
+      input_tokens, positions=positions, attention_mask=attn_mask, cache=None
+  )
+  logits = logits[:, -logits_to_keep - 1 : -1, :]
+  input_tokens = input_tokens[:, -logits_to_keep:]
+  per_token_logps = selective_log_softmax(logits, input_tokens)
+  return per_token_logps, logits
 
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@nnx.jit(static_argnames=('pad_id', 'eos_id'))
+@nnx.jit(static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
+    completion_mask: jax.Array | None = None,
 ):
   """Processes prompt and completion ids."""
 
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
   prompt_mask = prompt_tokens != pad_id
-  completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+
+  if completion_mask is None:
+    completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+
   prompt_completion_mask = jnp.concatenate(
       [prompt_mask, completion_mask], axis=-1
   )
@@ -182,20 +197,21 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask
 
 
-@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_per_token_logps(
     model: nnx.Module,
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
+    completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
-) -> jax.Array:
+) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
   prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id
+      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
-  per_token_logps = get_per_token_logps(
+  per_token_logps, logits = get_per_token_logps(
       model,
       input_tokens=prompt_completion_ids,
       positions=positions,
@@ -204,21 +220,23 @@ def compute_per_token_logps(
   )
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
-  return per_token_logps
+    logits = jax.lax.stop_gradient(logits)
+  return per_token_logps, logits
 
 
-@nnx.jit(static_argnames=('pad_id', 'eos_id', 'stop_gradient'))
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
 def compute_score(
     model,
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
+    completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
 ):
   """Computes reward using the provided model."""
   prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id
+      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
 
   out = model(
@@ -277,7 +295,7 @@ def make_causal_attn_mask(input_mask: jax.Array) -> jax.Array:
   """
   if len(input_mask.shape) != 2:
     raise ValueError(
-        f'Input mask must be 2D (shape [B, L]), but got {input_mask.shape}.'
+        f"Input mask must be 2D (shape [B, L]), but got {input_mask.shape}."
     )
   seq_len = input_mask.shape[-1]
   attn_mask = input_mask[..., None, :]

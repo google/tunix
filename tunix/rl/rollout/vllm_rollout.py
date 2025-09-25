@@ -15,6 +15,7 @@
 """vLLM rollout worker with Tunix sampler."""
 
 from typing import Any, Dict, Optional, Tuple
+
 from flax import nnx
 import jax
 import jaxtyping

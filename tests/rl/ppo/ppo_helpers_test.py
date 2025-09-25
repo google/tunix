@@ -79,15 +79,17 @@ def _ref_compute_gae_advantages(
   return advantages, returns
 
 
-class PpoHelpersTest(parameterized.TestCase):
+class PPOHelpersTest(parameterized.TestCase):
 
   def test_compute_gae_advantages(self):
-    bsz, seq_len = 2, 10
+    bsz, seq_len = 3, 10
     rewards = jax.random.uniform(jax.random.PRNGKey(0), (bsz, seq_len))
     values = jax.random.uniform(jax.random.PRNGKey(1), (bsz, seq_len))
-    response_mask = jnp.array(
-        [[1, 1, 1, 1, 1, 0, 0, 0, 0, 0], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]]
-    )
+    response_mask = jnp.array([
+        [1, 1, 1, 1, 1, 0, 0, 0, 0, 0],  # masking at the end
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],  # no masking
+        [1, 1, 0, 0, 1, 1, 0, 1, 0, 0],  # arbitrary mask
+    ])
 
     advantages, returns = ppo_helpers.compute_gae_advantages(
         np.array(rewards),
