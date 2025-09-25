@@ -60,6 +60,7 @@ def load_and_create_model(
     mesh=None,
     preprocess_fn=None,
     dtype: jnp.dtype | None = None,
+    rngs: nnx.Rngs = nnx.Rngs(params=0),
 ):
   """Generic function to load model from safetensors files.
 
@@ -84,7 +85,7 @@ def load_and_create_model(
   context_manager = mesh if mesh is not None else contextlib.nullcontext()
 
   with context_manager:
-    model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))
+    model = nnx.eval_shape(lambda: model_class(config, rngs=rngs))
 
   graph_def, abs_state = nnx.split(model)
   state_dict = abs_state.to_pure_dict()

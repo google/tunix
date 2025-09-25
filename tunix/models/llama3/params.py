@@ -14,11 +14,11 @@
 
 """Utils for loading and converting Llama3 PT weights."""
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
 from tunix.models import safetensors_loader
 from tunix.models.llama3 import model as model_lib
-
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
@@ -82,6 +82,7 @@ def create_model_from_safe_tensors(
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
+    rngs: nnx.Rngs | None = None,
 ) -> model_lib.Llama3:
   """Load tensors from the safetensors file and create a Llama3 model."""
   return safetensors_loader.load_and_create_model(
@@ -92,4 +93,5 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=None,
       dtype=dtype,
+      rngs=rngs,
   )

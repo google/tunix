@@ -14,6 +14,7 @@
 
 """Utils for loading and converting Qwen2 PT weights."""
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
 from tunix.models import safetensors_loader
@@ -86,6 +87,7 @@ def create_model_from_safe_tensors(
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
+    rngs: nnx.Rngs | None = None,
 ) -> model_lib.Qwen2:
   """Load tensors from the safetensors file and create a Qwen2 model."""
   return safetensors_loader.load_and_create_model(
@@ -96,4 +98,5 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=None,
       dtype=dtype,
+      rngs=rngs,
   )

@@ -5,6 +5,7 @@
 
 import re
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
 from tunix.models import safetensors_loader
@@ -196,6 +197,7 @@ def create_model_from_safe_tensors(
     config: model_lib.Gemma3Config,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
+    rngs: nnx.Rngs | None = None,
 ):
   return safetensors_loader.load_and_create_model(
       file_dir=file_dir,
@@ -205,4 +207,5 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
+      rngs=rngs,
   )

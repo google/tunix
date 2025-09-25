@@ -65,7 +65,9 @@ except Exception as e:
 
 class Llama3ParamsTest(absltest.TestCase):
 
-  def _test_model_loading(self, model_name, model_path, config_fn, mesh_config):
+  def _test_model_loading(
+      self, model_name, model_path, config_fn, mesh_config, rngs=rngs
+  ):
     """Common test logic for loading different Llama3 models.
 
     Args:
@@ -74,6 +76,7 @@ class Llama3ParamsTest(absltest.TestCase):
       config_fn: Function to create model config (e.g.,
         model.ModelConfig.llama3_2_1b)
       mesh_config: Mesh configuration tuple (e.g., [(1, 4), ("fsdp", "tp")])
+      rngs: RNGs to use for model initialization
     """
     if model_path is None:
       self.skipTest(
@@ -83,12 +86,13 @@ class Llama3ParamsTest(absltest.TestCase):
 
     config = config_fn()
     mesh = jax.make_mesh(*mesh_config)
-
     with mesh:
       # Test that model loading completes without exceptions
       # pylint: disable=broad-exception-caught
       try:
-        llama3 = params.create_model_from_safe_tensors(model_path, config, mesh)
+        llama3 = params.create_model_from_safe_tensors(
+            model_path, config, mesh, rngs=rngs
+        )
       except Exception as e:
         self.fail(
             f"create_model_from_safe_tensors failed for {model_name} model: {e}"
@@ -117,6 +121,7 @@ class Llama3ParamsTest(absltest.TestCase):
         model_path=local_model_path_1b,
         config_fn=model.ModelConfig.llama3_2_1b,
         mesh_config=[(1, len(jax.devices())), ("fsdp", "tp")],
+        rngs=nnx.Rngs(nnx.PRNGKey(0)),
     )
 
 
