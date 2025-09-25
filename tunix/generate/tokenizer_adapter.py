@@ -18,16 +18,16 @@ import enum
 import inspect
 from typing import Any
 
-from etils import epath
 import numpy as np
-import transformers
-
 import sentencepiece as spm
+import transformers
+from etils import epath
 
 
 class TokenizerType(enum.Enum):
   SP: str = 'sp'  # sentencepiece tokenizer
   HF: str = 'hf'  # huggingface tokenizer
+  HFP: str = 'hfp'  # huggingface processor
   NONE: str = 'none'  # Represents no tokenizer
 
 
@@ -43,6 +43,8 @@ class TokenizerAdapter:
       self._tokenizer_type = TokenizerType.SP
     elif self._is_hf_tokenizer():
       self._tokenizer_type = TokenizerType.HF
+    elif self._is_hf_processor():
+      self._tokenizer_type = TokenizerType.HFP
     elif not missing_methods:
       self._tokenizer_type = TokenizerType.NONE
     else:
@@ -55,11 +57,16 @@ class TokenizerAdapter:
           f'{missing_methods}.'
       )
 
-  def encode(self, text: str, **kwargs) -> list[int]:
+  def encode(self, text: str, **kwargs) -> list[int] | tuple[list[int], Any]:
     if self._tokenizer_type == TokenizerType.SP:
       return self._tokenizer.EncodeAsIds(text, **kwargs)
     elif self._tokenizer_type == TokenizerType.HF:
       return self._tokenizer.encode(text, **kwargs)
+    elif self._tokenizer_type == TokenizerType.HFP:
+      inputs = self._tokenizer(text=text, **kwargs)
+      if 'images' in kwargs:
+        return inputs['input_ids'], inputs['pixel_values']
+      return inputs['input_ids']
     else:
       return self._tokenizer.encode(text, **kwargs)
 
@@ -68,6 +75,8 @@ class TokenizerAdapter:
       return self._tokenizer.DecodeIds(ids, **kwargs)
     elif self._tokenizer_type == TokenizerType.HF:
       return self._tokenizer.decode(ids, **kwargs)
+    elif self._tokenizer_type == TokenizerType.HFP:
+      return self._tokenizer.tokenizer.decode(ids, **kwargs)
     else:
       return self._tokenizer.decode(ids, **kwargs)
 
@@ -76,6 +85,8 @@ class TokenizerAdapter:
       return self._tokenizer.bos_id()
     elif self._tokenizer_type == TokenizerType.HF:
       return self._tokenizer.bos_token_id
+    elif self._tokenizer_type == TokenizerType.HFP:
+      return self._tokenizer.tokenizer.bos_token_id
     else:
       return self._tokenizer.bos_id()
 
@@ -84,6 +95,8 @@ class TokenizerAdapter:
       return self._tokenizer.eos_id()
     elif self._tokenizer_type == TokenizerType.HF:
       return self._tokenizer.eos_token_id
+    elif self._tokenizer_type == TokenizerType.HFP:
+      return self._tokenizer.tokenizer.eos_token_id
     else:
       return self._tokenizer.eos_id()
 
@@ -95,10 +108,12 @@ class TokenizerAdapter:
         raise ValueError('SentencePiece tokenizer has a undefined pad_id.')
       return ret_id
     elif self._tokenizer_type == TokenizerType.HF:
-      # e.g. llama3 HF tokenizers do not have pad_id
+      # e.g., LLaMA-style HF tokenizers may not have pad_id
       if self._tokenizer.pad_token_id is None:
         self._tokenizer.pad_token = self._tokenizer.eos_token
       return self._tokenizer.pad_token_id
+    elif self._tokenizer_type == TokenizerType.HFP:
+      return self._tokenizer.tokenizer.pad_token_id
     else:
       return self._tokenizer.pad_id()
 
@@ -118,12 +133,19 @@ class TokenizerAdapter:
         baseclass.__module__ + '.' + baseclass.__name__
         for baseclass in baseclasses
     ]
-    if (
+    return (
         'transformers.tokenization_utils_base.PreTrainedTokenizerBase'
         in baseclass_names
-    ):
-      return True
-    return False
+    )
+
+  def _is_hf_processor(self) -> bool:
+    """Checks if the tokenizer is a huggingface Processor."""
+    baseclasses = inspect.getmro(type(self._tokenizer))
+    baseclass_names = [
+        baseclass.__module__ + '.' + baseclass.__name__
+        for baseclass in baseclasses
+    ]
+    return 'transformers.processing_utils.ProcessorMixin' in baseclass_names
 
   @property
   def tokenizer(self) -> Any:
