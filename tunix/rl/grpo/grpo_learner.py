@@ -159,7 +159,6 @@ class GRPOLearner(rl_learner.RLLearner):
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
-        "rewards/overall",
         lambda: "kl" if self.grpo_config.beta != 0.0 else None,
     ])
 
