@@ -25,12 +25,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from PIL import Image
 # TODO(abheesht): We should move TokenizerAdapter outside `generate`.
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common
 from tunix.sft import peft_trainer
 from typing_extensions import override
-from PIL import Image
 
 ImageType = np.ndarray | jax.Array | Image.Image
 
@@ -62,7 +62,8 @@ class TrainingInput:
   Attributes:
     prompt_ids: Prompt IDs. Should be left-padded.
     prompt_mask: Prompt mask. Should be left-padded.
-    pixel_values: Optional pixels for multimodal inputs. Assumed same size across batch if provided.
+    pixel_values: Optional pixels for multimodal inputs. Assumed same size
+      across batch if provided.
     chosen_ids: Chosen response IDs. Should be right-padded.
     chosen_mask: Chosen response mask. Should be right-padded.
     rejected_ids: Rejected response IDs. Should be right-padded.
@@ -72,13 +73,14 @@ class TrainingInput:
   # Prompt IDs should be left padded.
   prompt_ids: jax.Array | np.ndarray
   prompt_mask: jax.Array | np.ndarray
-  pixel_values: jax.Array | np.ndarray | None
   # Chosen IDs should be right padded.
   chosen_ids: jax.Array | np.ndarray
   chosen_mask: jax.Array | np.ndarray
   # Rejected IDs should be right padded.
   rejected_ids: jax.Array | np.ndarray
   rejected_mask: jax.Array | np.ndarray
+
+  pixel_values: jax.Array | np.ndarray | None = None
 
 
 @flax.struct.dataclass(frozen=True)
@@ -353,14 +355,19 @@ def _generate_ids_and_masks(
   return all_input_ids, all_input_mask, all_pixel_values
 
 
-def _tokenize(inp: str | dict[str, str | ImageType], tokenizer: Any) -> tuple[jax.Array, jax.Array | None]:
+def _tokenize(
+    inp: str | dict[str, str | ImageType], tokenizer: Any
+) -> tuple[jax.Array, jax.Array | None]:
   """Tokenizes the input string."""
   if isinstance(inp, str):
     input_ids = tokenizer.encode(inp)
     pixel_values = None
-  else:
-    assert "text" in inp.keys() and "image" in inp.keys()
+  elif "text" in inp.keys() and "image" in inp.keys():
     input_ids, pixel_values = tokenizer.encode(inp["text"], images=inp["image"])
+  else:
+    raise ValueError(
+        "expected either str input or dict with 'text' and 'image' keys."
+    )
   bos_tok = [tokenizer.bos_id()] if tokenizer.bos_id() else []
   input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
   return input_ids, pixel_values
@@ -371,33 +378,42 @@ def _preprocess_dict(
 ) -> DataInput | TrainingInput:
   """Wraps input dict with either DataInput or TrainingInput."""
 
-  training_input_fields = [
-      field.name for field in dataclasses.fields(DataInput)
-  ]
+  data_input_fields = [field.name for field in dataclasses.fields(DataInput)]
   tokenized_input_fields = [
       field.name for field in dataclasses.fields(TrainingInput)
   ]
 
   # If the dict contains tokenized fields, we should wrap it with
   # TrainingInput.
-  if all(field in training_input for field in tokenized_input_fields):
-    return TrainingInput(
-        **{field: training_input[field] for field in tokenized_input_fields}
-    )
-  elif all(field in training_input for field in training_input_fields):
+  if all(
+      field in training_input
+      for field in tokenized_input_fields
+      if field != "pixel_values"
+  ):
+    return TrainingInput(**{
+        field: training_input.get(field, None)
+        for field in tokenized_input_fields
+    })
+  elif all(field in training_input for field in data_input_fields):
     return DataInput(
-        **{field: training_input[field] for field in training_input_fields}
+        **{field: training_input[field] for field in data_input_fields}
     )
   else:
     raise ValueError(
         "Training input must contain either tokenized fields "
         f"({tokenized_input_fields}) or raw string fields "
-        f"({training_input_fields}). Received: {training_input.keys()}."
+        f"({data_input_fields}). Received: {training_input.keys()}."
     )
 
 
 def process_dpo_record(
-    record: dict[str, str | list[str]],
+    record: dict[
+        str,
+        str
+        | list[str]
+        | dict[str, str | ImageType]
+        | list[dict[str, str | ImageType]],
+    ],
     tokenizer: Any,
     max_prompt_length: int,
     max_response_length: int,
@@ -456,13 +472,13 @@ def process_dpo_record(
 
   if unbatched:
     prompt_ids = jnp.squeeze(prompt_ids, axis=0)
-    if pixel_values is not None:
-      pixel_values = jnp.squeeze(pixel_values, axis=0)
     chosen_ids = jnp.squeeze(chosen_ids, axis=0)
     rejected_ids = jnp.squeeze(rejected_ids, axis=0)
     prompt_mask = jnp.squeeze(prompt_mask, axis=0)
     chosen_mask = jnp.squeeze(chosen_mask, axis=0)
     rejected_mask = jnp.squeeze(rejected_mask, axis=0)
+    if pixel_values is not None:
+      pixel_values = jnp.squeeze(pixel_values, axis=0)
 
   return TrainingInput(
       prompt_ids=prompt_ids,
@@ -473,6 +489,7 @@ def process_dpo_record(
       rejected_mask=rejected_mask,
       pixel_values=pixel_values,
   )
+
 
 DpoTrainingConfig = DPOTrainingConfig
 DpoTrainer = DPOTrainer
