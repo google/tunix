@@ -536,10 +536,10 @@ class Qwen2(nnx.Module):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.layers = nnx.List([
+    self.layers = [
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
         for _ in range(config.num_layers)
-    ])
+    ]
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
