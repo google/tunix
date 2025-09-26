@@ -81,10 +81,9 @@
       <div class="sphx-glr-thumbnail-title">DPO Demo</div>
     </div>
 
-
 .. raw:: html
 
-    <div class="sphx-glr-thumbcontainer" tooltip="DPO Demo Gemma3">
+    <div class="sphx-glr-thumbcontainer" tooltip="Direct Preference Optimization (DPO) Training with Gemma3-1B">
 
 .. only:: html
 
@@ -95,7 +94,7 @@
 
 .. raw:: html
 
-      <div class="sphx-glr-thumbnail-title">DPO Demo Gemma3</div>
+      <div class="sphx-glr-thumbnail-title">Direct Preference Optimization (DPO) Training with Gemma3-1B</div>
     </div>
 
 .. raw:: html
