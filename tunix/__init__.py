@@ -14,6 +14,15 @@
 
 """Tunix API."""
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version
+
+try:
+  __version__ = version("google-tunix")  # match the name in pyproject.toml
+except PackageNotFoundError:
+  __version__ = "0.0.0.dev0"  # fallback for editable installs
+
+
 # pylint: disable=g-multiple-import, g-importing-member
 
 from tunix.distillation.distillation_trainer import DistillationTrainer
