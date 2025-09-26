@@ -67,7 +67,7 @@
 
 .. raw:: html
 
-    <div class="sphx-glr-thumbcontainer" tooltip="DPO Demo">
+    <div class="sphx-glr-thumbcontainer" tooltip="DPO Demo with user-assistant conversations">
 
 .. only:: html
 
@@ -78,12 +78,12 @@
 
 .. raw:: html
 
-      <div class="sphx-glr-thumbnail-title">DPO Demo</div>
+      <div class="sphx-glr-thumbnail-title">DPO Demo with user-assistant conversations</div>
     </div>
 
 .. raw:: html
 
-    <div class="sphx-glr-thumbcontainer" tooltip="Direct Preference Optimization (DPO) Training with Gemma3-1B">
+    <div class="sphx-glr-thumbcontainer" tooltip="DPO Demo with math (gsm8k)">
 
 .. only:: html
 
@@ -94,7 +94,7 @@
 
 .. raw:: html
 
-      <div class="sphx-glr-thumbnail-title">Direct Preference Optimization (DPO) Training with Gemma3-1B</div>
+      <div class="sphx-glr-thumbnail-title">DPO Demo with math (gsm8k)</div>
     </div>
 
 .. raw:: html
