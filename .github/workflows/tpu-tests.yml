@@ -39,35 +39,35 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    
+
     - name: Install tunix dependencies
       run: |
         pip install -e .
         pip install pytest pytest-xdist
-    
+
     - name: Verify TPU availability
       run: |
         python -c "
         import jax
         print(f'JAX version: {jax.__version__}')
         print(f'JAX devices: {jax.devices()}')
-        
+
         # Check if we have TPU devices specifically
         devices = jax.devices()
         has_tpu = len(devices) > 0 and all(device.platform == 'tpu' for device in devices)
         print(f'TPU available: {has_tpu}')
-        
+
         if not has_tpu:
             print('ERROR: No TPU devices found! Expected TPU devices but got:', [device.platform for device in devices])
             exit(1)
         else:
             print(f'SUCCESS: Found {len(devices)} TPU device(s)')
         "
-    
+
     - name: Run tunix model tests
       run: |
         python -m pytest tests/models/ -v --tb=short -m "not cpu_only and not gpu_only"
-    
+
     - name: Run tunix generation tests (PASSED only)
       run: |
         python -m pytest tests/generate/utils_test.py -v --tb=short
@@ -76,10 +76,14 @@ jobs:
       run: |
         # Config tests that passed
         python -m pytest tests/sft/config_test.py -v --tb=short
-          
+
+        # Sft utils tests that passed
+        python -m pytest tests/sft/utils_test.py::UtilsTest::test_build_positions_from_mask -v --tb=short
+        python -m pytest tests/sft/utils_test.py::UtilsTest::test_make_causal_attn_mask -v --tb=short
+
         # Checkpoint manager test that passed
         python -m pytest tests/sft/checkpoint_manager_test.py::CheckpointManagerTest::test_empty_root_directory -v --tb=short
-        
+
         # PEFT trainer tests that passed
         python -m pytest tests/sft/peft_trainer_test.py::PeftTrainerTest::test_basic_training_with_hooks -v --tb=short
         python -m pytest tests/sft/peft_trainer_test.py::PeftTrainerTest::test_basic_training_with_profiler -v --tb=short
@@ -92,26 +96,26 @@ jobs:
         python -m pytest tests/sft/peft_trainer_test.py::PeftTrainerTest::test_loss_fn_with_aux -v --tb=short
         python -m pytest tests/sft/peft_trainer_test.py::PeftTrainerTest::test_reusing_trainer -v --tb=short
         python -m pytest tests/sft/peft_trainer_test.py::PeftTrainerTest::test_shard_input_on_already_sharded_input_is_noop -v --tb=short
-        
+
         # System metrics tests that passed
         python -m pytest tests/sft/system_metrics_calculator_test.py -v --tb=short
-    
+
     - name: Run tunix distillation tests (PASSED only)
       run: |
         # Distillation trainer tests that passed
         python -m pytest tests/distillation/distillation_trainer_test.py::DistillationTrainerTest::test_basic_training -v --tb=short
         python -m pytest tests/distillation/distillation_trainer_test.py::DistillationTrainerTest::test_complex_strategy_training -v --tb=short
         python -m pytest tests/distillation/distillation_trainer_test.py::DistillationTrainerTest::test_with_loss_fn_raises_exception -v --tb=short
-        
+
         # Feature extraction pooling tests that passed (all 12 tests)
         python -m pytest tests/distillation/feature_extraction/pooling_test.py -v --tb=short
-        
+
         # Feature extraction projection tests that passed (all 6 tests)
         python -m pytest tests/distillation/feature_extraction/projection_test.py -v --tb=short
-        
+
         # Feature extraction sowed module tests that passed (all 5 tests)
         python -m pytest tests/distillation/feature_extraction/sowed_module_test.py -v --tb=short
-        
+
         # Attention strategy tests that passed
         python -m pytest tests/distillation/strategies/attention_test.py::AttentionTransferStrategyTest::test_get_eval_loss -v --tb=short
         python -m pytest tests/distillation/strategies/attention_test.py::AttentionTransferStrategyTest::test_init_invalid_alpha_neg -v --tb=short
@@ -119,7 +123,7 @@ jobs:
         python -m pytest tests/distillation/strategies/attention_test.py::AttentionTransferStrategyTest::test_init_valid_alpha_half -v --tb=short
         python -m pytest tests/distillation/strategies/attention_test.py::AttentionTransferStrategyTest::test_init_valid_alpha_one -v --tb=short
         python -m pytest tests/distillation/strategies/attention_test.py::AttentionTransferStrategyTest::test_init_valid_alpha_zero -v --tb=short
-        
+
         # Feature pooling strategy tests that passed
         python -m pytest tests/distillation/strategies/feature_pooling_test.py::FeaturePoolingStrategyTest::test_compute_loss_default_cosine_distance_alpha_one -v --tb=short
         python -m pytest tests/distillation/strategies/feature_pooling_test.py::FeaturePoolingStrategyTest::test_get_eval_loss -v --tb=short
@@ -128,14 +132,14 @@ jobs:
         python -m pytest tests/distillation/strategies/feature_pooling_test.py::FeaturePoolingStrategyTest::test_init_valid_alpha_half -v --tb=short
         python -m pytest tests/distillation/strategies/feature_pooling_test.py::FeaturePoolingStrategyTest::test_init_valid_alpha_one -v --tb=short
         python -m pytest tests/distillation/strategies/feature_pooling_test.py::FeaturePoolingStrategyTest::test_init_valid_alpha_zero -v --tb=short
-        
+
         # Feature projection strategy tests that passed
         python -m pytest tests/distillation/strategies/feature_projection_test.py::FeatureProjectionStrategyTest::test_init_invalid_alpha_neg -v --tb=short
         python -m pytest tests/distillation/strategies/feature_projection_test.py::FeatureProjectionStrategyTest::test_init_invalid_alpha_over -v --tb=short
         python -m pytest tests/distillation/strategies/feature_projection_test.py::FeatureProjectionStrategyTest::test_init_valid_alpha_half -v --tb=short
         python -m pytest tests/distillation/strategies/feature_projection_test.py::FeatureProjectionStrategyTest::test_init_valid_alpha_one -v --tb=short
         python -m pytest tests/distillation/strategies/feature_projection_test.py::FeatureProjectionStrategyTest::test_init_valid_alpha_zero -v --tb=short
-        
+
         # Logit strategy tests that passed
         python -m pytest tests/distillation/strategies/logit_test.py::LogitStrategyTest::test_get_eval_loss -v --tb=short
         python -m pytest tests/distillation/strategies/logit_test.py::LogitStrategyTest::test_get_train_loss -v --tb=short
@@ -146,18 +150,16 @@ jobs:
         python -m pytest tests/distillation/strategies/logit_test.py::LogitStrategyTest::test_init_valid_alpha_one -v --tb=short
         python -m pytest tests/distillation/strategies/logit_test.py::LogitStrategyTest::test_init_valid_alpha_zero -v --tb=short
         python -m pytest tests/distillation/strategies/logit_test.py::LogitStrategyTest::test_init_valid_valid -v --tb=short
-    
+
     - name: Run tunix RL tests (PASSED only)
       run: |
         # RL common tests that passed
-        python -m pytest tests/rl/common_test.py::CommonTest::test_build_positions_from_mask -v --tb=short
         python -m pytest tests/rl/common_test.py::CommonTest::test_compute_kl_divergence_kl -v --tb=short
         python -m pytest tests/rl/common_test.py::CommonTest::test_compute_kl_divergence_mse_kl -v --tb=short
-        python -m pytest tests/rl/common_test.py::CommonTest::test_make_causal_attn_mask -v --tb=short
         python -m pytest tests/rl/common_test.py::CommonTest::test_make_completion_mask -v --tb=short
         python -m pytest tests/rl/common_test.py::CommonTest::test_pad_to_length -v --tb=short
 
-    
+
     - name: Test basic model loading
       run: |
         python -m pytest tests/models/llama3/params_test.py -v --tb=short
