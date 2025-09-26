@@ -73,6 +73,8 @@ class RLLearner(abc.ABC):
     )
     self.metric_fns = metric_fns or []
     self.rl_cluster.actor_trainer.is_managed_externally = True
+    if hasattr(self.rl_cluster, "critic_trainer"):
+      self.rl_cluster.critic_trainer.is_managed_externally = True
 
     self._data_shuffle_seed = (
         jax.random.PRNGKey(data_shuffle_seed)
@@ -83,12 +85,6 @@ class RLLearner(abc.ABC):
     # adjust global steps based on the number of iterations.
     self.rl_cluster.global_steps = (
         self.rl_cluster.actor_trainer.train_steps // self._num_iterations()
-    )
-
-    self.grad_acc_steps = (
-        self.rl_cluster.cluster_config.training_config.get_with_default(
-            "gradient_accumulation_steps", 1
-        )
     )
 
     self._iter_steps = 0
@@ -113,6 +109,19 @@ class RLLearner(abc.ABC):
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
+
+    self._mini_batch_size = (
+        self.rl_cluster.cluster_config.training_config.mini_batch_size
+    )
+    self._training_micro_batch_size = (
+        self.rl_cluster.cluster_config.training_config.training_micro_batch_size
+    )
+    self._rollout_micro_batch_size = (
+        self.rl_cluster.cluster_config.training_config.rollout_micro_batch_size
+    )
+    self._compute_logps_micro_batch_size = (
+        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+    )
 
   @abc.abstractmethod
   def _generate_and_compute_advantage(
@@ -225,83 +234,6 @@ class RLLearner(abc.ABC):
 
     return jnp.array(rewards)
 
-  def _initialize_batch_sizes(self, full_batch_size: int) -> tuple[int, int]:
-    """Initializes mini, micro batch sizes and grad accumulation steps."""
-    training_config = self.rl_cluster.cluster_config.training_config
-    mini_batch_size = training_config.mini_batch_size
-    gradient_accumulation_steps = training_config.gradient_accumulation_steps
-    training_micro_batch_size = training_config.training_micro_batch_size
-
-    # Initialize mini batch size
-    if mini_batch_size is None:
-      mini_batch_size = full_batch_size
-      training_config.mini_batch_size = mini_batch_size
-    elif full_batch_size < mini_batch_size:
-      raise ValueError(
-          f"full_batch_size ({full_batch_size}) must be greater than or equal"
-          f" to mini_batch_size ({mini_batch_size})."
-      )
-    elif full_batch_size % mini_batch_size != 0:
-      raise ValueError(
-          f"input_batch_size ({full_batch_size}) must be a multiple of"
-          f" mini_batch_size ({mini_batch_size})."
-      )
-
-    if training_micro_batch_size and gradient_accumulation_steps:
-      if training_micro_batch_size != (
-          mini_batch_size // gradient_accumulation_steps
-      ):
-        raise ValueError(
-            "training_micro_batch_size must be equal to mini_batch_size //"
-            " gradient_accumulation_steps"
-        )
-    elif training_micro_batch_size is not None:
-      if mini_batch_size % training_micro_batch_size != 0:
-        raise ValueError(
-            "mini_batch_size must be a multiple of training_micro_batch_size"
-        )
-      gradient_accumulation_steps = mini_batch_size // training_micro_batch_size
-    elif gradient_accumulation_steps is not None:
-      if mini_batch_size % gradient_accumulation_steps != 0:
-        raise ValueError(
-            "mini_batch_size must be a multiple of gradient_accumulation_steps"
-        )
-      training_micro_batch_size = mini_batch_size // gradient_accumulation_steps
-    else:
-      training_micro_batch_size = mini_batch_size
-      gradient_accumulation_steps = 1
-    # using assert to avoid dtype error. This is not a runtime error check.
-    assert training_micro_batch_size is not None
-    training_config.training_micro_batch_size = training_micro_batch_size
-    training_config.gradient_accumulation_steps = gradient_accumulation_steps
-
-    for attr in (
-        "rollout_micro_batch_size",
-        "compute_logps_micro_batch_size",
-    ):
-      if getattr(training_config, attr) is None:
-        setattr(training_config, attr, training_micro_batch_size)
-
-    for attr in (
-        "rollout_micro_batch_size",
-        "compute_logps_micro_batch_size",
-    ):
-      micro_batch_size = getattr(training_config, attr)
-      if micro_batch_size < training_micro_batch_size:
-        raise ValueError(
-            f"{attr} ({micro_batch_size}) must be greater than or equal to "
-            f"training_micro_batch_size ({training_micro_batch_size})."
-        )
-      if micro_batch_size % training_micro_batch_size != 0:
-        raise ValueError(
-            f"{attr} ({micro_batch_size}) must be a multiple of "
-            f"training_micro_batch_size ({training_micro_batch_size})."
-        )
-    return (
-        training_config.mini_batch_size,
-        training_config.training_micro_batch_size,
-    )
-
   def _process_accumulated_batches(
       self,
       micro_batches: list[TrainingInputT],
@@ -400,11 +332,9 @@ class RLLearner(abc.ABC):
       mode: The metrics logger mode, either `metrics_logger.Mode.TRAIN` or
         `metrics_logger.Mode.EVAL`.
     """
-    training_config = self.rl_cluster.cluster_config.training_config
-
     service_target_batch_size = math.lcm(
-        training_config.rollout_micro_batch_size,
-        training_config.compute_logps_micro_batch_size,
+        self._rollout_micro_batch_size,
+        self._compute_logps_micro_batch_size,
     )
 
     # A buffer to accumulate micro-batches before processing them together.
@@ -612,32 +542,42 @@ class RLLearner(abc.ABC):
       skip_jit: bool = False,
   ) -> None:
     """Main entry point for the training loop."""
+    grad_acc_steps = (
+        self.rl_cluster.cluster_config.training_config.gradient_accumulation_steps
+    )
+    if grad_acc_steps is None:
+      raise ValueError("Gradient accumulation steps must be set.")
+
     full_batch_iterator = iter(train_ds)
     first_item = next(full_batch_iterator)
     full_batch_size = len(first_item["prompts"])
     full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
-    # Initialize batch sizes and gradient accumulation steps.
-    (
-        training_mini_batch_sizes,
-        training_micro_batch_sizes,
-    ) = self._initialize_batch_sizes(full_batch_size)
+    # Initialize batch sizes.
+    if self._mini_batch_size is None:
+      self._mini_batch_size = full_batch_size
+      self._training_micro_batch_size = full_batch_size
+    if self._rollout_micro_batch_size is None:
+      self._rollout_micro_batch_size = self._training_micro_batch_size
+    if self._compute_logps_micro_batch_size is None:
+      self._compute_logps_micro_batch_size = self._training_micro_batch_size
+
     # if the micro batch size is the same as the full batch size, we can use the
     # full batch iterator directly.
-    if training_micro_batch_sizes == full_batch_size:
+    if self._training_micro_batch_size == full_batch_size:
       train_iterator = full_batch_iterator
     else:
       train_iterator = self._create_micro_batch_iterator(
-          full_batch_iterator, training_micro_batch_sizes
+          full_batch_iterator, self._training_micro_batch_size
       )
 
     while True:  # loop over M
       try:
         initial_steps = self._iter_steps
-        for _ in range(full_batch_size // training_mini_batch_sizes):
+        for _ in range(full_batch_size // self._mini_batch_size):
           # reserve 1 for None and the other for repeated interable
           # if batch_repeat > 1
           train_data_queue = queue_lib.SimpleDataQueue(
-              maxsize=self.grad_acc_steps * self._num_iterations() + 1
+              maxsize=grad_acc_steps * self._num_iterations() + 1
           )
           # Use an unbounded queue for evaluation data.
           eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
@@ -645,7 +585,7 @@ class RLLearner(abc.ABC):
           future = self.executor.submit(
               self._prepare_data,
               iterator=train_iterator,
-              proceed_num_steps=self.grad_acc_steps,
+              proceed_num_steps=grad_acc_steps,
               sample_repeat=self._num_generations(),
               batch_repeat=self._num_iterations(),
               data_queue=train_data_queue,

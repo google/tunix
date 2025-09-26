@@ -191,7 +191,6 @@ class PPOLearner(rl_learner.RLLearner):
             "eos_id": self.rl_cluster.rollout.eos_id(),
         }
     )
-    self.rl_cluster.critic_trainer.is_managed_externally = True
 
     # ===== Configure the metrics logger =====
     # We just log the metrics returned in `aux`. All other metrics are logged

@@ -17,7 +17,7 @@
 from typing import Any, Callable
 
 from flax import nnx
-from jax.typing import ArrayLike
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
 from tunix.sft import peft_trainer
 from typing_extensions import override

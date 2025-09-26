@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import chex
 from flax import nnx
 import jax
@@ -26,7 +27,7 @@ from tunix.tests import test_common as tc
 Mesh = jax.sharding.Mesh
 
 
-class RlClusterTest(absltest.TestCase):
+class RlClusterTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -55,7 +56,7 @@ class RlClusterTest(absltest.TestCase):
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
             max_steps=10,
-            gradient_accumulation_steps=1,
+            gradient_accumulation_steps=None,
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_tokens_to_generate=10,
@@ -93,6 +94,68 @@ class RlClusterTest(absltest.TestCase):
         nnx.state(rl_cluster.inference_worker._models['reference'])
     )
     self.assertEqual(ref_model_mesh, actor_mesh)
+
+  @parameterized.named_parameters(
+      ('1', None, None, None, None, [None, None, None, None, 1]),
+      ('2', 8, None, None, None, [8, 8, 8, 8, 1]),
+      ('3', 8, 2, None, None, [8, 2, 2, 2, 4]),
+      ('4', 8, 4, 2, None, [8, 4, 2, 4, 2]),
+      ('5', 8, 4, None, 2, [8, 4, 4, 2, 2]),
+      ('6', 16, 8, 4, 2, [16, 8, 4, 2, 2]),
+  )
+  def test_batch_sizes(
+      self,
+      mini_batch_size,
+      training_micro_batch_size,
+      rollout_micro_batch_size,
+      compute_logps_micro_batch_size,
+      expected_values,
+  ):
+    cfg = rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        critic_optimizer=None,
+        mini_batch_size=mini_batch_size,
+        training_micro_batch_size=training_micro_batch_size,
+        rollout_micro_batch_size=rollout_micro_batch_size,
+        compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+        eval_every_n_steps=1,
+    )
+
+    self.assertEqual(
+        expected_values,
+        [
+            cfg.mini_batch_size,
+            cfg.training_micro_batch_size,
+            cfg.rollout_micro_batch_size,
+            cfg.compute_logps_micro_batch_size,
+            cfg.gradient_accumulation_steps,
+        ],
+    )
+
+  @parameterized.named_parameters(
+      ('1', 2, 4, None, None),
+      ('2', 8, 3, None, None),
+      ('3', 8, 4, 3, None),
+      ('4', 8, 4, None, 3),
+      ('5', None, 2, None, None),
+  )
+  def test_batch_sizes_errors(
+      self,
+      mini_batch_size,
+      training_micro_batch_size,
+      rollout_micro_batch_size,
+      compute_logps_micro_batch_size,
+  ):
+    with self.assertRaises(ValueError):
+      rl_cluster_lib.RLTrainingConfig(
+          actor_optimizer=optax.sgd(1e-3),
+          critic_optimizer=None,
+          mini_batch_size=mini_batch_size,
+          training_micro_batch_size=training_micro_batch_size,
+          rollout_micro_batch_size=rollout_micro_batch_size,
+          compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+          eval_every_n_steps=1,
+      )
 
 
 if __name__ == '__main__':

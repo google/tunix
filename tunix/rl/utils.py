@@ -135,6 +135,20 @@ def get_batch_slice(tree: Any, batch_slice: slice) -> Any:
   )
 
 
+def check_batch_divisibility(
+    small_batch_size,
+    big_batch_size,
+    small_batch_size_name,
+    big_batch_size_name,
+):
+  """Checks if big_batch_size is a multiple of small_batch_size."""
+  if big_batch_size % small_batch_size != 0:
+    raise ValueError(
+        f"{big_batch_size_name} ({big_batch_size}) must be a multiple "
+        f"of {small_batch_size_name} ({small_batch_size})."
+    )
+
+
 def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
   """Merges micro-batch dictionaries into a single batch.
 

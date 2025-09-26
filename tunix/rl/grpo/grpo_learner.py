@@ -127,7 +127,8 @@ class GRPOLearner(rl_learner.RLLearner):
            ...       # ...
            ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
            ...       # ... }
-    """
+      data_shuffle_seed: The seed used to shuffle the training data.
+    """  # fmt: skip
     self.grpo_config = grpo_config
     super().__init__(
         rl_cluster=rl_cluster,
@@ -179,7 +180,6 @@ class GRPOLearner(rl_learner.RLLearner):
       prompt IDs, completion IDs, masks, advantages, and per-token log
       probabilities from the reference and policy models.
     """
-    training_config = self.rl_cluster.cluster_config.training_config
     training_input["prompts"] = list(training_input["prompts"])
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
@@ -187,8 +187,7 @@ class GRPOLearner(rl_learner.RLLearner):
         prompts=training_input["prompts"],
         mode=mode,
         micro_batch_size=(
-            training_config.rollout_micro_batch_size
-            * self.grpo_config.num_generations
+            self._rollout_micro_batch_size * self.grpo_config.num_generations
         ),
     )
     completion_ids = rollout_output.tokens
@@ -213,7 +212,7 @@ class GRPOLearner(rl_learner.RLLearner):
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=(
-              training_config.compute_logps_micro_batch_size
+              self._compute_logps_micro_batch_size
               * self.grpo_config.num_generations
           ),
       )
@@ -224,7 +223,7 @@ class GRPOLearner(rl_learner.RLLearner):
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           micro_batch_size=(
-              training_config.compute_logps_micro_batch_size
+              self._compute_logps_micro_batch_size
               * self.grpo_config.num_generations
           ),
       )

@@ -345,7 +345,7 @@ class PPOLearnerTest(parameterized.TestCase):
             critic_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=2,
             max_steps=10,
-            gradient_accumulation_steps=1,
+            gradient_accumulation_steps=None,
         ),
         rollout_config=rollout_config,
     )
