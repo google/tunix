@@ -74,6 +74,9 @@ class TrainingConfig:
   # `metrics_logging_options` because the latter is optional.
   metric_prefix: str = ""
 
+  # Progress bar description.
+  pbar_description: str | None = "Training"
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -580,6 +583,7 @@ class PeftTrainer:
           metrics_logger=self.metrics_logger,
           initial_steps=self._train_steps,
           max_steps=self.config.max_steps,
+          description=self.config.pbar_description,
       )
 
     if self.training_hooks:
