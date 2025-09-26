@@ -47,10 +47,10 @@ from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen2 import params as qwen2_params
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl import utils
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
+from tunix.sft import utils
 
 logging.set_verbosity(logging.INFO)
 

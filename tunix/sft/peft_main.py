@@ -38,7 +38,7 @@ from tunix.models.gemma3 import params as gemma3_params_lib
 from tunix.models.llama3 import model as llama3_lib
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen3 import model as qwen3_lib
-from tunix.rl import common
+from tunix.sft import utils
 from tunix.sft import config
 from tunix.sft import peft_trainer
 
@@ -378,8 +378,8 @@ def run_peft_trainer(hyperparms: config.HyperParameters):
   def gen_model_input_fn(x: peft_trainer.TrainingInput):
     pad_mask = x.input_tokens != 0
 
-    positions = common.build_positions_from_mask(pad_mask)
-    attention_mask = common.make_causal_attn_mask(pad_mask)
+    positions = utils.build_positions_from_mask(pad_mask)
+    attention_mask = utils.make_causal_attn_mask(pad_mask)
     return {
         'input_tokens': x.input_tokens,
         'input_mask': x.input_mask,
