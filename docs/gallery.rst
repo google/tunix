@@ -81,6 +81,23 @@
       <div class="sphx-glr-thumbnail-title">DPO Demo</div>
     </div>
 
+
+.. raw:: html
+
+    <div class="sphx-glr-thumbcontainer" tooltip="DPO Demo Gemma3">
+
+.. only:: html
+
+  .. image:: _static/img/sphx_glr_local_module_thumb.png
+    :alt: DPO Demo
+
+  :doc:`_collections/examples/dpo_demo_gemma3`
+
+.. raw:: html
+
+      <div class="sphx-glr-thumbnail-title">DPO Demo Gemma3</div>
+    </div>
+
 .. raw:: html
 
     </div>
