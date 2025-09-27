@@ -47,5 +47,6 @@ jobs:
           import tunix.distillation
           import tunix.rl
 
-          print('All tunix modules imported successfully')
+          assert tunix.__version__ != '0.0.0.dev0', 'Tunix version not set correctly'
+          print('All tunix modules imported successfully and version is', tunix.__version__)
           "
