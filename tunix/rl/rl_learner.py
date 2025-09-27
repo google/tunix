@@ -443,6 +443,14 @@ class RLLearner(abc.ABC):
         assert "trajectory_ids" not in example
         example["trajectory_ids"] = trajectory_ids
 
+        for t_id in trajectory_ids:
+          self.rl_cluster.buffer_metrics(
+              {
+                  "trajectory_ids": (t_id, None),
+              },
+              mode=mode,
+          )
+
         with jax.profiler.StepTraceAnnotation(
             "sampler",
             step_num=self._iter_steps
