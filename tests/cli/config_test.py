@@ -18,7 +18,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import optax
-from tunix.sft import config
+from tunix.cli import config
 from tunix.sft import peft_trainer
 from tunix.tests import test_common as tc
 
@@ -67,9 +67,14 @@ class ConfigTest(parameterized.TestCase):
     return result_list
 
   def run_test_peft_trainer(self, hp):
-    rngs = nnx.Rngs(hp.config["rng_seed"])
+    rngs = nnx.Rngs(hp.config["model_config"]["rng_seed"])
     model = tc.ToyTransformer(rngs=rngs)
-    peft_trainer.PeftTrainer(model, hp.optimizer, hp.training_config)
+    optimizer = hp.create_optimizer("optimizer_config")
+    training_config = peft_trainer.TrainingConfig(
+        **hp.obtain_training_config_dict("training_config")
+    )
+
+    peft_trainer.PeftTrainer(model, optimizer, training_config)
 
   def test_config_from_yaml(self):
     non_existent_argv = ["", "nonexistent_config.yaml"]
@@ -122,6 +127,8 @@ class ConfigTest(parameterized.TestCase):
       ),
   )
   def test_valid_configs(self, overrides):
+    prefix = "model_config."
+    overrides = [f"{prefix}{item}" for item in overrides]
     argv = ["", "base_config.yaml"] + overrides
     try:
       config.initialize(argv)
@@ -146,6 +153,8 @@ class ConfigTest(parameterized.TestCase):
       ),
   )
   def test_invalid_configs(self, overrides, expected_error):
+    prefix = "model_config."
+    overrides = [f"{prefix}{item}" for item in overrides]
     argv = ["", "base_config.yaml"] + overrides
     with self.assertRaises(expected_error):
       config.initialize(argv)
@@ -164,9 +173,12 @@ class ConfigTest(parameterized.TestCase):
   )
   def test_create_optimizer_valid(self, overrides, expected_type):
     """Tests valid optimizer configurations."""
+    prefix = "model_config."
+    overrides = [f"{prefix}{item}" for item in overrides]
     hp = self.initialize_config(overrides)
-    self.assertIsNotNone(hp.optimizer)
-    self.assertIsInstance(hp.optimizer, expected_type)
+    optimizer = hp.create_optimizer("optimizer_config")
+    self.assertIsNotNone(optimizer)
+    self.assertIsInstance(optimizer, expected_type)
 
   @parameterized.named_parameters(
       dict(
@@ -194,27 +206,41 @@ class ConfigTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="valid_1d",
-          raw_keys={"mesh": {"shape": "(4,)", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(4,)", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           expected=((4,), ("data",)),
       ),
       dict(
           testcase_name="valid_2d",
           raw_keys={
-              "mesh": {"shape": "(2, 4)", "axis_names": "('data', 'model')"}
+              "model_config": {
+                  "mesh": {"shape": "(2, 4)", "axis_names": "('data', 'model')"}
+              }
           },
           mock_num_devices=8,
           expected=((2, 4), ("data", "model")),
       ),
       dict(
           testcase_name="devices_equal_prod",
-          raw_keys={"mesh": {"shape": "(8,)", "axis_names": "('a',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(8,)", "axis_names": "('a',)"}
+              }
+          },
           mock_num_devices=8,
           expected=((8,), ("a",)),
       ),
       dict(
           testcase_name="devices_more_than_prod",
-          raw_keys={"mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}
+              }
+          },
           mock_num_devices=5,
           expected=((2, 2), ("x", "y")),
       ),
@@ -225,48 +251,75 @@ class ConfigTest(parameterized.TestCase):
   ):
     mock_device_count_fn.return_value = mock_num_devices
     hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
-    self.assertEqual(hp.mesh, expected)
+    mesh = hp.create_mesh("model_config")
+    self.assertEqual(mesh, expected)
 
   @parameterized.named_parameters(
       dict(
           testcase_name="shape_invalid_literal",
-          raw_keys={"mesh": {"shape": "(1,a)", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1,a)", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           error_regex="Invalid 'shape' key in 'mesh' configuration",
       ),
       dict(
           testcase_name="shape_not_tuple",
-          raw_keys={"mesh": {"shape": "1", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "1", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           error_regex="Invalid 'shape' key in 'mesh' configuration",
       ),
       dict(
           testcase_name="shape_not_int",
-          raw_keys={"mesh": {"shape": "(1, '2')", "axis_names": "('a', 'b')"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1, '2')", "axis_names": "('a', 'b')"}
+              }
+          },
           mock_num_devices=4,
           error_regex="All elements in mesh.shape must be integers",
       ),
       dict(
           testcase_name="axis_names_not_tuple",
-          raw_keys={"mesh": {"shape": "(1,)", "axis_names": "'data'"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1,)", "axis_names": "'data'"}
+              }
+          },
           mock_num_devices=4,
           error_regex="Invalid 'axis_names' key in 'mesh' configuration",
       ),
       dict(
           testcase_name="axis_names_not_str",
-          raw_keys={"mesh": {"shape": "(1,)", "axis_names": "(1,)"}},
+          raw_keys={
+              "model_config": {"mesh": {"shape": "(1,)", "axis_names": "(1,)"}}
+          },
           mock_num_devices=4,
           error_regex="All elements in mesh.axis_names must be strings",
       ),
       dict(
           testcase_name="length_mismatch",
-          raw_keys={"mesh": {"shape": "(1, 2)", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1, 2)", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           error_regex="must have the same length",
       ),
       dict(
           testcase_name="too_many_devices_required",
-          raw_keys={"mesh": {"shape": "(2, 3)", "axis_names": "('a', 'b')"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(2, 3)", "axis_names": "('a', 'b')"}
+              }
+          },
           mock_num_devices=5,
           error_regex="requires 6 devices, but found 5",
       ),
