@@ -128,12 +128,12 @@ class ToolEnvironment(BaseEnv):
     # Handle episode termination: compute final reward
     if done:
       llm_answer = self._extract_llm_answer(action)
-      r_out = self.reward_fn(task=self.task, action=llm_answer)
+      r_out = self.reward_fn(task=self.task, model_answer_str=llm_answer)
       return (
           {},
-          r_out.reward,
+          r_out,
           True,
-          {"response": action, "metadata": r_out.metadata},
+          {"response": action, "metadata": {}},
       )
 
     # Handle continuing episode: execute tools and return intermediate results

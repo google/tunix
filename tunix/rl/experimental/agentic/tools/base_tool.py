@@ -103,7 +103,7 @@ class BaseTool(ABC):
 
   @property
   @abstractmethod
-  def json(self) -> dict[str, Any]:
+  def get_json_schema(self) -> dict[str, Any]:
     """Generate OpenAI-compatible function metadata for tool registration.
 
     Provides the schema definition needed for LLM function calling systems

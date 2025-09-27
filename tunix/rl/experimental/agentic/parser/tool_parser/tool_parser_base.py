@@ -13,12 +13,6 @@ dataclass = dataclasses.dataclass
 ABC = abc.ABC
 
 
-@dataclass
-class ToolCall:
-  name: str
-  arguments: dict[str, Any]
-
-
 class ToolParser(ABC):
   """Abstract base class for all tool parsers.
 
@@ -28,7 +22,7 @@ class ToolParser(ABC):
   """
 
   @abstractmethod
-  def parse(self, model_response: str) -> list[ToolCall]:
+  def parse(self, model_response: str) -> list[base_tool.ToolCall]:
     """Parse model output and return a list of tool calls.
 
     Args:
@@ -42,9 +36,7 @@ class ToolParser(ABC):
   @abstractmethod
   def get_tool_prompt(
       self,
-      tools: List[BaseTool],
-      *,
-      schema_style: Literal["openai", "mcp", "gemini"] = "openai",
+      tools_schema: str,
   ) -> str:
     """Generate tool-usage instruction prompt from a list of tools.
 
@@ -75,7 +67,7 @@ class ToolParser(ABC):
     Returns:
         A JSON string representation of the tool schemas.
     """
-    if schema_style == "mcp":
+    if schema_style == "openai":
       schemas = [t.to_mcp_json() for t in tools]
     elif schema_style == "gemini":
       # Gemini also uses JSON schema, same as OpenAI
