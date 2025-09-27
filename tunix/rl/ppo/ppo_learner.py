@@ -230,7 +230,7 @@ class PPOLearner(rl_learner.RLLearner):
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
 
-    # TODO(abheesht): verl allows specifying different micro batch sizes for
+    # TODO(abheesht): Other RL libraries may allow specifying different micro batch sizes for
     # computing log probs, values, rewards, etc. We can do that here.
 
     # ===== Generation ======
@@ -268,8 +268,7 @@ class PPOLearner(rl_learner.RLLearner):
     # Get log probs from the policy before model weights are updated. We use
     # the policy model here. Shape = `[B, T]`.
     # TODO(abheesht): Do we do this only when `self.num_ppo_epochs > 1`? Don't
-    # see this condition here:
-    # https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/ray_trainer.py#L1224-L1233.
+    # see this condition in other RL libraries.
     old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
         prompt_tokens=prompt_ids,
         completion_tokens=completion_ids,
@@ -306,8 +305,8 @@ class PPOLearner(rl_learner.RLLearner):
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
 
-    # Reward computation is in accordance with TRL and verl's
-    # `BatchRewardManager` (token-level rewards).
+    # Reward computation is in accordance with other RL libraries
+    # batch reward manager (token-level rewards).
     # 1. Set all rewards (i.e., for every token) to 0s.
     # 2. A positive reward is given only at the final timestep, so we add that
     # to the tensor of zeros.
@@ -605,6 +604,7 @@ def ppo_policy_loss_fn(
     aux["loss/entropy"] = entropy_loss
 
   return policy_loss, aux
+
 
 PpoConfig = PPOConfig
 PpoLearner = PPOLearner
