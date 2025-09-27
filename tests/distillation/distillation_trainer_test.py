@@ -182,8 +182,10 @@ class DistillationTrainerTest(absltest.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
   def test_distributed_training(self):
+    total_devices = jax.device_count()
     mesh = shd.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
+        devices=np.array(jax.devices()).reshape(2, total_devices // 2),
+        axis_names=('fsdp', 'tp'),
     )
     student_rngs = nnx.Rngs(0)
     teacher_rngs = nnx.Rngs(1)

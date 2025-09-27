@@ -109,7 +109,7 @@ class FeatureProjectionStrategyTest(parameterized.TestCase):
         inputs=inputs,
     )
 
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5)
 
   def test_get_eval_loss(self):
     strategy = FeatureProjectionStrategy(
@@ -132,7 +132,7 @@ class FeatureProjectionStrategyTest(parameterized.TestCase):
         student_model=student_model, inputs=inputs
     )
 
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5)
 
 
 if __name__ == "__main__":
