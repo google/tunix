@@ -381,8 +381,7 @@ class PeftTrainer:
       return train_step, eval_step
     else:
       if self._jitted_train_step_fn is None:
-        mesh = pxla.thread_resources.env.physical_mesh
-        self._shard_optimizer(mesh)
+        self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
         self._jitted_train_step_fn = nnx.jit(
             train_step, donate_argnames=("optimizer",)
         )
@@ -571,10 +570,14 @@ class PeftTrainer:
       skip_jit: bool = False,
   ) -> None:
     """Training loop."""
-    mesh = pxla.thread_resources.env.physical_mesh
-    logging.info("Training with mesh: %s", mesh)
-
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
+    if not skip_jit:
+      logging.info(
+          "Training with mesh: %s. Compiled train_step cache size: %s",
+          pxla.thread_resources.env.physical_mesh,
+          train_step.jitted_fn._cache_size(),  # pytype: disable=attribute-error,protected-access
+      )
+
     if eval_ds:
       self._run_eval(eval_ds, eval_step)
 
