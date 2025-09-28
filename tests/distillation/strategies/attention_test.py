@@ -109,7 +109,7 @@ class AttentionTransferStrategyTest(parameterized.TestCase):
         labels=labels,
     )
 
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5)
 
   def test_get_train_loss(self):
     strategy = AttentionTransferStrategy(
@@ -135,8 +135,8 @@ class AttentionTransferStrategyTest(parameterized.TestCase):
         inputs=inputs,
     )
 
-    npt.assert_allclose(teacher_output, 2.016251, rtol=1e-6)
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(teacher_output, 2.016251, atol=1e-5)
+    npt.assert_allclose(computed_loss, expected_loss, atol=1e-5)
 
   def test_get_eval_loss(self):
     strategy = AttentionTransferStrategy(

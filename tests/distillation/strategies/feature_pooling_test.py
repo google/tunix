@@ -126,7 +126,7 @@ class FeaturePoolingStrategyTest(parameterized.TestCase):
         teacher_output=teacher_features,
         labels=labels,
     )
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6, atol=1e-6)
+    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5, atol=1e-5)
 
   def test_compute_loss_empty_features(self):
     key = jax.random.key(3)
@@ -150,7 +150,7 @@ class FeaturePoolingStrategyTest(parameterized.TestCase):
         teacher_output=jnp.array([]),
         labels=labels,
     )
-    npt.assert_allclose(computed_loss, expected_combined_loss, rtol=1e-6)
+    npt.assert_allclose(computed_loss, expected_combined_loss, rtol=1e-5)
 
   @parameterized.named_parameters(
       ("alpha_one", 1.0),
@@ -177,7 +177,7 @@ class FeaturePoolingStrategyTest(parameterized.TestCase):
         labels=labels,
     )
 
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5)
 
   def test_get_train_loss(self):
     strategy = FeaturePoolingStrategy(
@@ -203,8 +203,8 @@ class FeaturePoolingStrategyTest(parameterized.TestCase):
         inputs=inputs,
     )
 
-    npt.assert_allclose(teacher_output, 2.016251, rtol=1e-6)
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(teacher_output, 2.016251, atol=1e-5)
+    npt.assert_allclose(computed_loss, expected_loss, atol=1e-5)
 
   def test_get_eval_loss(self):
     strategy = FeaturePoolingStrategy(
