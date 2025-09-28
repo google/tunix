@@ -103,7 +103,8 @@ class GRPOLearnerTest(parameterized.TestCase):
                     rollout_micro_batch_size=1,
                     compute_logps_micro_batch_size=1,
                 )
-            )
+            ),
+            buffer_metrics=lambda x, mode: None,
         )
 
         self._rollout_micro_batch_size = 1
