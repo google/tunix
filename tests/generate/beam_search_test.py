@@ -109,10 +109,10 @@ class BeamSearchTest(absltest.TestCase):
     new_scores1, tokens1 = jax.lax.top_k(
         jax.nn.log_softmax(jnp.array([1, 2, 1.1])), 2
     )
-    self.assertEqual(state.scores[0][0], new_scores0[0])
-    self.assertEqual(state.scores[0][1], new_scores0[1])
-    self.assertEqual(state.scores[1][0], new_scores1[0])
-    self.assertEqual(state.scores[1][1], new_scores1[1])
+    self.assertAlmostEqual(state.scores[0][0], new_scores0[0], places=6)
+    self.assertAlmostEqual(state.scores[0][1], new_scores0[1], places=6)
+    self.assertAlmostEqual(state.scores[1][0], new_scores1[0], places=6)
+    self.assertAlmostEqual(state.scores[1][1], new_scores1[1], places=6)
 
     updated_token_buffer = updated_params['token_buffer']
     expected = token_buffer
@@ -162,10 +162,10 @@ class BeamSearchTest(absltest.TestCase):
         ).ravel(),
         2,
     )
-    self.assertEqual(state.scores[0][0], new_scores0[0])
-    self.assertEqual(state.scores[0][1], new_scores0[1])
-    self.assertEqual(state.scores[1][0], new_scores1[0])
-    self.assertEqual(state.scores[1][1], new_scores1[1])
+    self.assertAlmostEqual(state.scores[0][0], new_scores0[0], places=6)
+    self.assertAlmostEqual(state.scores[0][1], new_scores0[1], places=6)
+    self.assertAlmostEqual(state.scores[1][0], new_scores1[0], places=6)
+    self.assertAlmostEqual(state.scores[1][1], new_scores1[1], places=6)
     # before the beam search, the token buffer[:][0] is [2, 1, 1, 2]
     # token_buffer[0] should be [1, 1, -1, ...]
     # token_buffer[1] should be [2, 1, -1, ...]

@@ -70,7 +70,11 @@ jobs:
 
     - name: Run tunix generation tests (PASSED only)
       run: |
-        python -m pytest tests/generate/utils_test.py -v --tb=short
+        # vllm_sampler_test depends on vllm TPU which is not OSS yet
+        # tokenizer_adapter_test requires access to gated repo
+        python -m pytest tests/generate/ -v --tb=short \
+          --ignore=tests/generate/vllm_sampler_test.py \
+          --ignore=tests/generate/tokenizer_adapter_test.py
 
     - name: Run tunix SFT tests (PASSED only)
       run: |
@@ -102,7 +106,7 @@ jobs:
 
     - name: Run tunix distillation tests
       run: |
-        python -m pytest tests/distillation/distillation_trainer_test.py -v --tb=short
+        python -m pytest tests/distillation/ -v --tb=short
 
     - name: Run tunix RL tests (PASSED only)
       run: |
