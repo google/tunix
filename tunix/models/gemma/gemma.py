@@ -938,13 +938,16 @@ class Transformer(nnx.Module, pytree=False):
 class TransformerWithScoreHead(nnx.Module):
   """Gemma transformer with a score head."""
 
-  def __init__(self, transformer: Transformer, rngs: nnx.Rngs):
+  def __init__(self, transformer: Transformer, rngs: nnx.Rngs, shd_cfg=None):
     """Initializes the transformer with a score head.
 
     Args:
       transformer: The transformer backbone.
       rngs: The random number generator.
+      shd_cfg: Sharding mesh for the score dense layer.
     """
+
+    self.shd_cfg = shd_cfg or transformer.config.shd_config.score_weight_d1
 
     self.transformer = transformer
     self.score = nnx.Linear(
@@ -953,7 +956,7 @@ class TransformerWithScoreHead(nnx.Module):
         use_bias=False,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.normal(),
-            transformer.config.shd_config.score_weight_d1,
+            self.shd_cfg,
         ),
         rngs=rngs,
     )
