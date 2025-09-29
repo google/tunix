@@ -1,18 +1,18 @@
 """VLM-aware sampler for PaLI-Gemma (SigLIP vision + Gemma text)."""
 
 from __future__ import annotations
+
 from typing import List, Optional
 
 from flax import nnx
 from flax.nnx import statelib
 import jax
-import jax.numpy as jnp
 from jax import random
-
-from tunix.generate.base_sampler import BaseSampler, SamplerOutput
+import jax.numpy as jnp
 from tunix.generate import tokenizer_adapter as tok_adapt
-from tunix.models.paligemma import model as pali_model
-from tunix.models.siglip import preprocess as siglip_pp
+from tunix.generate.base_sampler import BaseSampler
+from tunix.generate.base_sampler import SamplerOutput
+from tunix.generate.utils import preprocess_image
 
 
 class VLMSampler(BaseSampler):
@@ -26,7 +26,7 @@ class VLMSampler(BaseSampler):
   def __init__(
       self,
       *,
-      transformer: pali_model.PaLIGemma,
+      transformer: nnx.Module,
       tokenizer: tok_adapt.TokenizerAdapter,
       image_size: int,
   ):
@@ -64,7 +64,8 @@ class VLMSampler(BaseSampler):
     token_lists = [self._tokenizer.encode(s) for s in input_strings]
     if max_prompt_length is not None:
       token_lists = [
-          tl[-max_prompt_length:] if len(tl) > max_prompt_length
+          tl[-max_prompt_length:]
+          if len(tl) > max_prompt_length
           else [self.pad_id()] * (max_prompt_length - len(tl)) + tl
           for tl in token_lists
       ]
@@ -94,10 +95,12 @@ class VLMSampler(BaseSampler):
       lc_sorted = jnp.take_along_axis(lc, sort_idx, axis=-1)
       probs = jax.nn.softmax(lc_sorted, axis=-1)
       cdf = jnp.cumsum(probs, axis=-1)
-      keep = (cdf <= top_p)
+      keep = cdf <= top_p
       keep = keep.at[:, 0].set(True)  # ensure at least one
       mask_sorted = jnp.logical_not(keep)
-      mask = jnp.take_along_axis(mask_sorted, jnp.argsort(sort_idx, axis=-1), axis=-1)
+      mask = jnp.take_along_axis(
+          mask_sorted, jnp.argsort(sort_idx, axis=-1), axis=-1
+      )
       lc = jnp.where(mask, -1e9, lc)
 
     probs = jax.nn.softmax(lc, axis=-1)
@@ -106,8 +109,10 @@ class VLMSampler(BaseSampler):
   def _make_pos_and_mask(self, tokens: jnp.ndarray):
     """tokens: [B, L] int32 -> (positions [B,L] int32, mask [B,L] int32)."""
     pad_id = self.pad_id()
-    mask = (tokens != pad_id).astype(jnp.int32)                  # 1 for real tokens
-    positions = (jnp.cumsum(mask, axis=1) - 1) * mask            # 0.. for non-pads, 0 for pads
+    mask = (tokens != pad_id).astype(jnp.int32)  # 1 for real tokens
+    positions = (
+        jnp.cumsum(mask, axis=1) - 1
+    ) * mask  # 0.. for non-pads, 0 for pads
     return positions.astype(jnp.int32), mask
 
   def __call__(
@@ -133,13 +138,17 @@ class VLMSampler(BaseSampler):
       input_strings: list of prompts (strings).
       images: float32/uint8 [B,H,W,3] raw images, preprocessed here.
     """
-    assert beam_size in (None, 1), "Beam search not implemented in VLMSampler v1"
-    assert multi_sampling == 1, "multi_sampling not implemented in VLMSampler v1"
+    assert beam_size in (
+        None,
+        1,
+    ), "Beam search not implemented in VLMSampler v1"
+    assert (
+        multi_sampling == 1
+    ), "multi_sampling not implemented in VLMSampler v1"
 
-    # Preprocess images to SigLIP size (+ normalize)
     if images.dtype != jnp.uint8:
       images = images.astype(jnp.uint8)
-    imgs = siglip_pp.preprocess(images, self._image_size)        # [B,S,S,3] float32
+    imgs = preprocess_image(images, self._image_size)  # [B,S,S,3] float32
     imgs = imgs.astype(jnp.float32)
 
     # Tokenize batch
@@ -157,20 +166,22 @@ class VLMSampler(BaseSampler):
       # Call transformer with its exact signature:
       # (last_tokens, positions, cache, attention_mask, *, pixel_values=None, output_hidden_states=False)
       logits, _ = self._transformer(
-          last_tokens=seq,                 # [B, L]
-          positions=positions,             # [B, L]
+          last_tokens=seq,  # [B, L]
+          positions=positions,  # [B, L]
           cache=None,
-          attention_mask=attn_mask,        # [B, L]
-          pixel_values=imgs,               # [B, S, S, 3]
+          attention_mask=attn_mask,  # [B, L]
+          pixel_values=imgs,  # [B, S, S, 3]
           output_hidden_states=False,
       )  # -> [B, L, V]
 
-      next_logits = logits[:, -1, :]      # [B, V]
+      next_logits = logits[:, -1, :]  # [B, V]
       if return_logits:
         collected_logits.append(next_logits)
 
       rng, sub = random.split(rng)
-      next_ids = self._sample_logits(next_logits, temperature, top_k, top_p, sub)  # [B]
+      next_ids = self._sample_logits(
+          next_logits, temperature, top_k, top_p, sub
+      )  # [B]
       out_tokens.append(next_ids)
 
       # Append to sequence
@@ -181,8 +192,16 @@ class VLMSampler(BaseSampler):
         break
 
     # Build outputs
-    gen_tokens = jnp.stack(out_tokens, axis=1) if out_tokens else jnp.zeros((B, 0), dtype=jnp.int32)
-    tokens_full = jnp.concatenate([prompt_tokens, gen_tokens], axis=1) if echo else gen_tokens
+    gen_tokens = (
+        jnp.stack(out_tokens, axis=1)
+        if out_tokens
+        else jnp.zeros((B, 0), dtype=jnp.int32)
+    )
+    tokens_full = (
+        jnp.concatenate([prompt_tokens, gen_tokens], axis=1)
+        if echo
+        else gen_tokens
+    )
 
     # Decode
     texts = []
@@ -193,7 +212,8 @@ class VLMSampler(BaseSampler):
       texts.append(self._tokenizer.decode(toks))
 
     logits_out = (
-        jnp.stack(collected_logits, axis=1) if (return_logits and collected_logits)
+        jnp.stack(collected_logits, axis=1)
+        if (return_logits and collected_logits)
         else None
     )
 
