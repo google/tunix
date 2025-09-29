@@ -6,9 +6,17 @@ from unittest import mock
 from absl.testing import absltest
 import numpy as np
 from tunix.sft import metrics_logger
+import tempfile
 
 
 class MetricLoggerTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    try:
+      self.log_dir = self.create_tempdir().full_path
+    except Exception:
+      self.log_dir = tempfile.TemporaryDirectory().name
 
   @mock.patch("tunix.sft.metrics_logger.datetime")
   @mock.patch("tunix.sft.metrics_logger.wandb")
@@ -18,15 +26,14 @@ class MetricLoggerTest(absltest.TestCase):
         fixed_timestamp_str
     )
     metrics_logger.wandb = mock_wandb
-    log_dir = self.create_tempdir().full_path
     logger = metrics_logger.MetricsLogger(
         metrics_logger.MetricsLoggerOptions(
-            log_dir=log_dir, flush_every_n_steps=1
+            log_dir=self.log_dir, flush_every_n_steps=1
         )
     )
-    self.assertLen(os.listdir(log_dir), 1)
+    self.assertLen(os.listdir(self.log_dir), 1)
     file_size_before = os.path.getsize(
-        os.path.join(log_dir, os.listdir(log_dir)[0])
+        os.path.join(self.log_dir, os.listdir(self.log_dir)[0])
     )
 
     logger.log("loss", np.array(1.0), metrics_logger.Mode.TRAIN, 1)
@@ -44,9 +51,9 @@ class MetricLoggerTest(absltest.TestCase):
     eval_loss_history = logger.get_metric_history("loss", "eval")
     np.testing.assert_array_equal(eval_loss_history, np.array([7.0, 10.0]))
 
-    self.assertLen(os.listdir(log_dir), 1)
+    self.assertLen(os.listdir(self.log_dir), 1)
     file_size_after = os.path.getsize(
-        os.path.join(log_dir, os.listdir(log_dir)[0])
+        os.path.join(self.log_dir, os.listdir(self.log_dir)[0])
     )
 
     self.assertGreater(file_size_after, file_size_before)

@@ -35,6 +35,7 @@ from tunix.tests import test_common as tc
 
 TEST_LEARNING_RATE = 1e-3
 
+# CPU environment setup to simulate multi device env.
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 
@@ -81,8 +82,18 @@ class PeftTrainerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
+    # CPU env setup to simulate multi device env. Won't affect TPU env. But
+    # need to be careful not to use self.num_cpus in TPU env.
     self.num_cpus = 4
     chex.set_n_cpu_devices(self.num_cpus)
+
+    self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
+    total_devices = jax.device_count()
+    self.mesh = shd.Mesh(
+        devices=np.array(jax.devices()).reshape(2, total_devices // 2),
+        axis_names=('fsdp', 'tp'),
+    )
+
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
 
   def test_compile_once(self):
@@ -93,17 +104,14 @@ class PeftTrainerTest(parameterized.TestCase):
         global_counter += 1
         return super()._train_step(model, optimizer, inputs)
 
-    mesh = shd.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
-    )
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     rngs = nnx.Rngs(0)
-    model = tc.get_lora_model(tc.ToyTransformer(rngs=rngs), mesh=mesh)
+    model = tc.get_lora_model(tc.ToyTransformer(rngs=rngs), mesh=self.mesh)
     trainer = CountCompiledTimesTrainer(model, optax.sgd(1e-3), config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     global global_counter
     global_counter = 0  # make mypy happy
-    with mesh:
+    with self.mesh:
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
 
@@ -269,18 +277,15 @@ class PeftTrainerTest(parameterized.TestCase):
     )
 
   def test_dist_training(self):
-    mesh = shd.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
-    )
     rngs = nnx.Rngs(0)
-    model, _ = create_sharded_model(tc.ToyTransformer, rngs, mesh)
+    model, _ = create_sharded_model(tc.ToyTransformer, rngs, self.mesh)
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    with mesh:
+    with self.mesh:
       trainer.train(self.train_ds, self.eval_ds)
     variables = nnx.state(model, nnx.Param)
 
