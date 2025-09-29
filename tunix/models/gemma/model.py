@@ -258,7 +258,6 @@ class Attention(nnx.Module):
       )
 
   @jax.named_scope('attention')
-  @nnx.remat
   def __call__(
       self,
       x: jaxtyping.Array,
@@ -431,7 +430,6 @@ class FeedForward(nnx.Module):
     )
 
   @jax.named_scope('feed_forward')
-  @nnx.remat
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)

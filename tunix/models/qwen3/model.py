@@ -311,7 +311,6 @@ class Attention(nnx.Module):
     self.scale = self.head_dim**-0.5
 
   @jax.named_scope('attention')
-  @nnx.remat
   def __call__(
       self,
       x: jaxtyping.Array,
@@ -518,7 +517,6 @@ class MLP(nnx.Module):
     )
 
   @jax.named_scope('feed_forward')
-  @nnx.remat
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
     activations = shard(activations, self.shd_config.act_btf)
