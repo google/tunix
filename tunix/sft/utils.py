@@ -152,7 +152,7 @@ def show_hbm_usage(title=""):
       logging.info("Using %s on %s", fmt_size(used), devices[i])
   else:
     logging.info(
-        "%s - Pathways not available. Using defaultHBM stats collector", title
+        "%s - Pathways not available. Using default HBM stats collector", title
     )
     hbm_stats = _jax_hbm_usage_gb(devices)
 
