@@ -99,9 +99,9 @@ class RlClusterTest(parameterized.TestCase):
       ('1', None, None, None, None, [None, None, None, None, 1]),
       ('2', 8, None, None, None, [8, 8, 8, 8, 1]),
       ('3', 8, 2, None, None, [8, 2, 2, 2, 4]),
-      ('4', 8, 4, 2, None, [8, 4, 2, 4, 2]),
-      ('5', 8, 4, None, 2, [8, 4, 4, 2, 2]),
-      ('6', 16, 8, 4, 2, [16, 8, 4, 2, 2]),
+      ('4', 8, 4, 8, None, [8, 4, 8, 4, 2]),
+      ('5', 8, 4, None, 8, [8, 4, 4, 8, 2]),
+      ('6', 16, 8, 8, 16, [16, 8, 8, 16, 2]),
   )
   def test_batch_sizes(
       self,
@@ -138,6 +138,7 @@ class RlClusterTest(parameterized.TestCase):
       ('3', 8, 4, 3, None),
       ('4', 8, 4, None, 3),
       ('5', None, 2, None, None),
+      ('6', None, None, 2, None),
   )
   def test_batch_sizes_errors(
       self,

@@ -145,18 +145,29 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
             ret_grad_acc=True,
         )
     )
-    self.rollout_micro_batch_size = _compute_batch_sizes(
-        self.rollout_micro_batch_size,
-        self.training_micro_batch_size,
+
+    for batch_name in [
         "rollout_micro_batch_size",
-        "training_micro_batch_size",
-    )
-    self.compute_logps_micro_batch_size = _compute_batch_sizes(
-        self.compute_logps_micro_batch_size,
-        self.training_micro_batch_size,
         "compute_logps_micro_batch_size",
-        "training_micro_batch_size",
-    )
+    ]:
+      batch_size = getattr(self, batch_name)
+
+      if self.training_micro_batch_size is None and batch_size is not None:
+        raise ValueError(
+            f"For {batch_name}, training_micro_batch_size must be set when"
+            f" {batch_name} is set."
+        )
+      if batch_size is None:
+        batch_size = self.training_micro_batch_size
+        setattr(self, batch_name, batch_size)
+
+      if batch_size is not None:
+        rl_utils.check_batch_divisibility(
+            self.training_micro_batch_size,
+            batch_size,
+            "training_micro_batch_size",
+            batch_name,
+        )
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)

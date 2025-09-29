@@ -569,6 +569,13 @@ class RLLearner(abc.ABC):
     if self._compute_logps_micro_batch_size is None:
       self._compute_logps_micro_batch_size = self._training_micro_batch_size
 
+    rl_utils.check_batch_divisibility(
+        self._mini_batch_size,
+        full_batch_size,
+        "mini_batch_size",
+        "full_batch_size",
+    )
+
     # if the micro batch size is the same as the full batch size, we can use the
     # full batch iterator directly.
     if self._training_micro_batch_size == full_batch_size:

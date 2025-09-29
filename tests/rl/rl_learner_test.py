@@ -35,9 +35,9 @@ class RLLearnerTest(parameterized.TestCase):
       ('1', None, None, None, None, [32, 32, 32, 32]),
       ('2', 8, None, None, None, [8, 8, 8, 8]),
       ('3', 8, 2, None, None, [8, 2, 2, 2]),
-      ('4', 8, 4, 2, None, [8, 4, 2, 4]),
-      ('5', 8, 4, None, 2, [8, 4, 4, 2]),
-      ('6', 16, 8, 4, 2, [16, 8, 4, 2]),
+      ('4', 8, 4, 8, None, [8, 4, 8, 4]),
+      ('5', 8, 4, None, 4, [8, 4, 4, 4]),
+      ('6', 16, 8, 16, 8, [16, 8, 16, 8]),
   )
   def test_micro_batching(
       self,
