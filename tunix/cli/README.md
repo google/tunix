@@ -1,4 +1,4 @@
-#Tunix CLI 
+# Tunix CLI 
 This directory, `tunix/cli`, contains the core command-line interface scripts for running post-training tasks with the Tunix framework.
 
 Overview
