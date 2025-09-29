@@ -99,3 +99,8 @@ jobs:
         # RL common tests that passed
         # b/448133814: test_grpo_with_lora_model fails
         python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model"
+
+    - name: Run tunix tests not covered by the above categories
+      run: |
+        # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
+        python -m pytest tests/ -v --tb=short --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/
