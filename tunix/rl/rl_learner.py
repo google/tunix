@@ -122,6 +122,7 @@ class RLLearner(abc.ABC):
     self._compute_logps_micro_batch_size = (
         self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
     )
+    sft_utils.show_hbm_usage(title="RLLearner init")
 
   @abc.abstractmethod
   def _generate_and_compute_advantage(
