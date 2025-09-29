@@ -22,6 +22,9 @@ import numpy as np
 from tunix.rl import common
 from tunix.rl import utils
 from tunix.tests import test_common as tc
+import os
+
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 
 class UtilsTest(absltest.TestCase):
@@ -30,11 +33,13 @@ class UtilsTest(absltest.TestCase):
     super().setUp()
     self.num_cpus = 4
     chex.set_n_cpu_devices(self.num_cpus)
-    assert len(jax.devices()) == self.num_cpus
+    self.device_count = jax.device_count()
 
   def test_get_pytree_mesh_info(self):
     mesh1 = sharding.Mesh(
-        np.array(jax.devices()[: self.num_cpus // 2]).reshape(1, 2),
+        np.array(jax.devices()[: self.device_count // 2]).reshape(
+            1, self.device_count // 2
+        ),
         ('fsdp', 'tp'),
     )
     model1 = tc.get_lora_model(
@@ -46,7 +51,9 @@ class UtilsTest(absltest.TestCase):
     self.assertEqual(utils.get_pytree_mesh_info(nnx.state(model1)), mesh1)
 
     mesh2 = sharding.Mesh(
-        np.array(jax.devices()[self.num_cpus // 2 :]).reshape(1, 2),
+        np.array(jax.devices()[self.device_count // 2 :]).reshape(
+            1, self.device_count // 2
+        ),
         ('fsdp', 'tp'),
     )
     model2 = tc.get_lora_model(

@@ -29,7 +29,10 @@ from tunix.rl.ppo import ppo_learner as ppo_lib
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 # from typing_extensions import override
+import os
 
+
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=2'
 
 _DUMMY_DATA = [
     'input string',
@@ -71,11 +74,12 @@ def _dummy_dataset(source=MySource(), batch_size: int = 1):
 
 class PPOLearnerTest(parameterized.TestCase):
 
-  def setUp(self):
-    super().setUp()
-    self.num_cpus = 2
-    chex.set_n_cpu_devices(self.num_cpus)
-    assert len(jax.devices()) == self.num_cpus
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    num_cpus = int(os.environ.get('DEVICE_COUNTS', 2))
+    chex.set_n_cpu_devices(num_cpus)
+    print(f'Setting up test with {num_cpus} devices')
 
   # def test_iterator(self):
 
