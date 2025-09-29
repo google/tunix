@@ -14,7 +14,7 @@
 
 import itertools
 import types
-
+import os
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -22,9 +22,9 @@ from flax import nnx
 from flax.nnx import filterlib
 from grain import python as grain
 import jax
+import jax.numpy as jnp
 from jax import sharding
 from jax.interpreters import pxla
-import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -34,7 +34,9 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 from typing_extensions import override
+import tempfile
 
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=2'
 
 Mesh = sharding.Mesh
 
@@ -79,11 +81,14 @@ def _dummy_dataset(source=MySource(), batch_size: int = 1):
 
 class GRPOLearnerTest(parameterized.TestCase):
 
-  def setUp(self):
-    super().setUp()
-    self.num_cpus = 2
-    chex.set_n_cpu_devices(self.num_cpus)
-    assert len(jax.devices()) == self.num_cpus
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    num_cpus = int(os.environ.get('DEVICE_COUNTS', 2))
+    chex.set_n_cpu_devices(num_cpus)
+    print(f'Setting up test with {num_cpus} devices')
+
+    cls.device_count = jax.device_count()
 
   def test_iterator(self):
 
@@ -310,10 +315,15 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
 
     rl_metric_logger = grpo_learner.rl_cluster._rl_metrics_logger
+
+    rewards_metrics = (
+        ('rewards/' + f.__name__ for f in reward_fns)
+        if isinstance(reward_fns, list)
+        else ('rewards/' + reward_fns.__name__,)
+    )
     for metric_name in [
         'rewards/overall',
-        'rewards/reward_1',
-        'rewards/reward_2',
+        *rewards_metrics,
         'completions/mean_length',
         'completions/max_length',
         'completions/min_length',
@@ -583,12 +593,17 @@ class GRPOLearnerTest(parameterized.TestCase):
 
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.
+    split_index = self.device_count // 2
     mesh1 = Mesh(
-        np.array(jax.devices()[: self.num_cpus // 2]).reshape(1, 1),
+        np.array(
+            sorted(jax.devices(), key=lambda d: d.id)[:split_index]
+        ).reshape(split_index, 1),
         ('fsdp', 'tp'),
     )
     mesh2 = Mesh(
-        np.array(jax.devices()[self.num_cpus // 2 :]).reshape(1, 1),
+        np.array(
+            sorted(jax.devices(), key=lambda d: d.id)[split_index:]
+        ).reshape(1, split_index),
         ('fsdp', 'tp'),
     )
     vocab = tc.MockVocab()
@@ -766,7 +781,10 @@ class GRPOLearnerTest(parameterized.TestCase):
     grpo_learner.train(train_ds_full, None)
     self.assertEqual(grpo_learner.rl_cluster.global_steps, 2)
 
-    temp_path = self.create_tempdir().full_path
+    try:
+      temp_path = self.create_tempdir().full_path
+    except Exception:
+      temp_path = tempfile.TemporaryDirectory().name
 
     model2 = tc.ToyTransformer(
         rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()

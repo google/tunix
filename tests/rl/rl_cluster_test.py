@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -24,24 +25,31 @@ from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
+
 Mesh = jax.sharding.Mesh
 
 
 class RlClusterTest(parameterized.TestCase):
 
-  def setUp(self):
-    super().setUp()
-    self.num_cpus = 4
-    chex.set_n_cpu_devices(self.num_cpus)
-    assert len(jax.devices()) == self.num_cpus
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+
+    cls.num_cpus = int(os.environ.get('DEVICE_COUNTS', 4))
+    chex.set_n_cpu_devices(cls.num_cpus)
+    print(f'Setting up test with {cls.num_cpus} CPU devices before JAX init')
+    cls.device_count = jax.device_count()
 
   def test_model_loading_with_resharding(self):
+    split_index = self.device_count // 2
+
     actor_mesh = Mesh(
-        np.array(jax.devices()[: self.num_cpus // 2]).reshape(2, 1),
+        np.array(jax.devices()[:split_index]).reshape(split_index, 1),
         ('fsdp', 'tp'),
     )
     rollout_mesh = Mesh(
-        np.array(jax.devices()[self.num_cpus // 2 :]).reshape(1, 2),
+        np.array(jax.devices()[split_index:]).reshape(1, split_index),
         ('fsdp', 'tp'),
     )
     cluster_config = rl_cluster_lib.ClusterConfig(

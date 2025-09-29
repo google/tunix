@@ -94,10 +94,8 @@ jobs:
       run: |
         python -m pytest tests/distillation/ -v --tb=short
 
-    - name: Run tunix RL tests (PASSED only)
+    - name: Run tunix RL tests
       run: |
         # RL common tests that passed
-        python -m pytest tests/rl/common_test.py::CommonTest::test_compute_kl_divergence_kl -v --tb=short
-        python -m pytest tests/rl/common_test.py::CommonTest::test_compute_kl_divergence_mse_kl -v --tb=short
-        python -m pytest tests/rl/common_test.py::CommonTest::test_make_completion_mask -v --tb=short
-        python -m pytest tests/rl/common_test.py::CommonTest::test_pad_to_length -v --tb=short
+        # b/448133814: test_grpo_with_lora_model fails
+        python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model"
