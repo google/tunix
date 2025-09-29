@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 from safetensors import safe_open
 from tunix.models import safetensors_loader
-from tunix.models.gemma import gemma as model_lib
+from tunix.models.gemma import model as model_lib
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.TransformerConfig):
