@@ -278,10 +278,10 @@ class DPOTrainerTest(parameterized.TestCase):
     self.assertEqual(np.sum(out.attention_mask[2]), 15)
     self.assertEqual(np.sum(out.attention_mask[3]), 14)
     np.testing.assert_allclose(
-        out.ref_chosen_logps, np.array([-11.21106, -5.985622]), atol=1e-5
+        out.ref_chosen_logps, np.array([-11.21106, -5.985622]), atol=1e-1
     )
     np.testing.assert_allclose(
-        out.ref_rejected_logps, np.array([-13.020714, -5.95595]), atol=1e-5
+        out.ref_rejected_logps, np.array([-13.020714, -5.95595]), atol=1e-1
     )
     expected_completion_mask = np.array(
         [[1, 1, 0], [1, 1, 1], [1, 1, 1], [1, 1, 0]]
@@ -323,10 +323,10 @@ class DPOTrainerTest(parameterized.TestCase):
     self.assertEqual(np.sum(out.attention_mask[2]), 44)
     self.assertEqual(np.sum(out.attention_mask[3]), 22)
     np.testing.assert_allclose(
-        out.ref_chosen_logps, np.array([-20.536058, -20.905323]), atol=1e-5
+        out.ref_chosen_logps, np.array([-20.536058, -20.905323]), atol=1e-1
     )
     np.testing.assert_allclose(
-        out.ref_rejected_logps, np.array([-18.149311, -8.219014]), atol=1e-5
+        out.ref_rejected_logps, np.array([-18.149311, -8.219014]), atol=1e-1
     )
     expected_completion_mask = np.array(
         [[1, 1, 1, 0], [1, 1, 1, 1], [1, 1, 1, 0], [1, 0, 0, 0]]

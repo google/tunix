@@ -79,7 +79,7 @@ jobs:
     - name: Run tunix SFT tests (PASSED only)
       run: |
         # Config tests that passed
-        python -m pytest tests/sft/config_test.py -v --tb=short
+        python -m pytest tests/sft/ -v --tb=short
 
         # Sft utils tests that passed
         python -m pytest tests/sft/utils_test.py::UtilsTest::test_build_positions_from_mask -v --tb=short
