@@ -35,14 +35,14 @@ class TokenizerAdapter:
     self._tokenizer = tokenizer
 
     missing_methods = self._missing_methods()
-    if not missing_methods:
-      self._tokenizer_type = TokenizerType.NONE
-    elif isinstance(self._tokenizer, spm.SentencePieceProcessor):
+    if isinstance(self._tokenizer, spm.SentencePieceProcessor):
       self._tokenizer_type = TokenizerType.SP
     elif self._is_hf_tokenizer():
       self._tokenizer_type = TokenizerType.HF
     elif self._is_hf_processor():
       self._tokenizer_type = TokenizerType.HFP
+    elif not missing_methods:
+      self._tokenizer_type = TokenizerType.NONE
     else:
       raise ValueError(
           'Your tokenizer should either be a `spm.SentencePieceProcessor` '
