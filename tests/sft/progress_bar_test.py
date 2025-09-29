@@ -4,14 +4,20 @@ from absl.testing import absltest
 import numpy as np
 from tunix.sft import metrics_logger
 from tunix.sft import progress_bar
+import tempfile
 
 
 class ProgressBarTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
+    try:
+      self.log_dir = self.create_tempdir().full_path
+    except Exception:
+      self.log_dir = tempfile.TemporaryDirectory().name
+
     metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-        log_dir=self.create_tempdir().full_path
+        log_dir=self.log_dir
     )
     self.metrics_logger = metrics_logger.MetricsLogger(metrics_logging_options)
 

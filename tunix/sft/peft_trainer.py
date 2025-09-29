@@ -441,13 +441,13 @@ class PeftTrainer:
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
     try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"]
+      return self.optimizer.opt_state.hyperparams["learning_rate"].value
     except AttributeError:
       for chainpart in self.optimizer.opt_state:
         if isinstance(chainpart, optax.EmptyState):
           break
         if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"]
+          return chainpart.hyperparams["learning_rate"].value
       return None
 
   def _log_metrics(
@@ -463,7 +463,9 @@ class PeftTrainer:
     self.metrics_logger.log("perplexity", perplexity, self._mode, step)
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
-      self.metrics_logger.log("learning_rate", learning_rate, self._mode, step)
+      self.metrics_logger.log(
+          "learning_rate", jax.device_get(learning_rate), self._mode, step
+      )
     if step_time_delta is not None:
       self.metrics_logger.log(
           "step_time_sec", step_time_delta, self._mode, step
