@@ -15,13 +15,18 @@
 
 set -x # Enable xtrace
 
-python3 -m tunix.sft.peft_main \
+python3 -m tunix.cli.peft_main \
   base_config.yaml \
-  model_name="qwen2.5-0.5b" \
-  model_id="Qwen/Qwen2.5-0.5B" \
-  model_source="huggingface" \
-  tokenizer_path="Qwen/Qwen2.5-0.5B"\
-  hf_cp_base_model_directory="/tmp/models" \
+  model_config.model_name="qwen2.5-0.5b" \
+  model_config.model_id="Qwen/Qwen2.5-0.5B" \
+  model_config.model_source="huggingface" \
+  model_config.lora_config={} \
+  model_config.mesh.shape="(2,2)" \
+  model_config.mesh.axis_names="('fsdp','tp')" \
+  model_config.rng_seed=0 \
+  model_config.model_download_path="/tmp/models" \
+  tokenizer_config.tokenizer_path="Qwen/Qwen2.5-0.5B"\
+  tokenizer_config.tokenizer_type="huggingface" \
   dataset_name="mtnt/en-fr" \
   optimizer_config.opt_type="adamw" \
   optimizer_config.learning_rate=1e-5 \
@@ -29,8 +34,5 @@ python3 -m tunix.sft.peft_main \
   training_config.eval_every_n_steps=20 \
   training_config.max_steps=100 \
   training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full" \
-  training_config.metrics_logging_options.flush_every_n_steps=20 \
-  lora_config={} \
-  mesh.shape="(2,2)" \
-  mesh.axis_names="('fsdp','tp')" \
-  rng_seed=0
+  training_config.metrics_logging_options.flush_every_n_steps=20 
+

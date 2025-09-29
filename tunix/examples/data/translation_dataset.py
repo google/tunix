@@ -18,16 +18,11 @@ from collections.abc import Iterable
 from typing import Any
 
 import datasets
-from etils import epath
 from grain import python as grain
 import numpy as np
 import tensorflow_datasets as tfds
-import transformers
-from tunix.generate import tokenizer_adapter
+from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.sft.peft_trainer import TrainingInput  # pylint: disable=g-importing-member
-
-# Keep the import below for google internal lint.
-import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
 
 
 INPUT_TEMPLATE = {
@@ -41,101 +36,12 @@ INPUT_TEMPLATE_IT = {
 }
 
 
-# TODO(sizhi): Combine HFTokenizer and GemmaTokenizer into one class.
-class HFTokenizer(tokenizer_adapter.TokenizerAdapter):
-  """Tokenizing and encoding/decoding text using the HuggingFace tokenizer."""
-
-  def __init__(
-      self,
-      tokenizer_path: str,
-      add_bos: bool,
-      add_eos: bool,
-      hf_access_token: str,
-  ):
-
-    hf_tokenizer = transformers.AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=tokenizer_path,
-        add_bos_token=add_bos,
-        add_eos_token=add_eos,
-        token=hf_access_token,
-    )
-    super().__init__(hf_tokenizer)
-
-  def tokenize(
-      self,
-      example: str,
-      prefix: str = "",
-      suffix: str = "",
-      add_eos: bool = True,
-  ) -> np.ndarray:
-    """The tokenization function.
-
-    Args:
-      example: Input string to tokenize.
-      prefix:  Prefix to add to the input string.
-      suffix:  Suffix to add to the input string.
-      add_eos: If True, add an "end of sentence" token at the end of the output
-        sequence.
-
-    Returns:
-      Tokens corresponding to the input string.
-    """
-    int_list = []
-    if self.bos_id():
-      int_list.append(self.bos_id())
-    int_list.extend(
-        self.encode(prefix + example + suffix, add_special_tokens=False)
-    )
-    if add_eos:
-      int_list.append(self.eos_id())
-    return np.array(int_list, dtype=np.int32)
-
-
-class GemmaTokenizer(spm.SentencePieceProcessor):
-  """Tokenizing and encoding/decoding text using the Sentencepiece tokenizer."""
-
-  _GEMMA2_TOKENIZER_PATH: epath.PathLike = (
-      "gs://gemma-data/tokenizers/tokenizer_gemma2.model"
-  )
-
-  def __init__(self, model_path: str = _GEMMA2_TOKENIZER_PATH):
-    model_proto = epath.Path(model_path).read_bytes()
-    super().__init__()
-    self.LoadFromSerializedProto(model_proto)
-
-  def tokenize(
-      self,
-      example: str,
-      prefix: str = "",
-      suffix: str = "",
-      add_eos: bool = True,
-  ) -> np.ndarray:
-    """The tokenization function.
-
-    Args:
-      example: Input string to tokenize.
-      prefix:  Prefix to add to the input string.
-      suffix:  Suffix to add to the input string.
-      add_eos: If True, add an "end of sentence" token at the end of the output
-        sequence.
-
-    Returns:
-      Tokens corresponding to the input string.
-    """
-    int_list = [self.bos_id()]
-    int_list.extend(self.EncodeAsIds(prefix + example + suffix))
-    if add_eos:
-      int_list.append(self.eos_id())
-
-    return np.array(int_list, dtype=np.int32)
-
-
 def create_datasets(
     dataset_name: str,
     global_batch_size: int,
     max_target_length: int,
     num_train_epochs: int | None,
-    tokenizer: GemmaTokenizer,
+    tokenizer: tokenizer_lib.Tokenizer,
     instruct_tuned: bool = False,
     input_template: dict[str, str] | None = None,
 ) -> tuple[Iterable[TrainingInput], Iterable[TrainingInput]]:
@@ -190,7 +96,7 @@ def _build_data_loader(
     batch_size: int,
     num_epochs: int | None,
     max_seq_len: int,
-    tokenizer: GemmaTokenizer,
+    tokenizer: tokenizer_lib.Tokenizer,
     input_template: dict[str, str],
 ) -> grain.DataLoader:
   """Builds a data loader for the given data source."""
@@ -213,7 +119,9 @@ def _build_data_loader(
 class _Tokenize(grain.MapTransform):
   """Tokenize the input."""
 
-  def __init__(self, tokenizer: GemmaTokenizer, input_template: dict[str, str]):
+  def __init__(
+      self, tokenizer: tokenizer_lib.Tokenizer, input_template: dict[str, str]
+  ):
     self._tokenizer = tokenizer
     self._input_template = input_template
 

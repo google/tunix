@@ -18,6 +18,10 @@ import enum
 import inspect
 from typing import Any
 
+from etils import epath
+import numpy as np
+import transformers
+
 import sentencepiece as spm
 
 
@@ -124,3 +128,74 @@ class TokenizerAdapter:
   @property
   def tokenizer(self) -> Any:
     return self._tokenizer
+
+
+class Tokenizer(TokenizerAdapter):
+  """Tokenizing and encoding/decoding text using TokenizerAdapter."""
+
+  def __init__(
+      self,
+      tokenizer_type: str = 'sentencepiece',
+      tokenizer_path: str = 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+      add_bos: bool | None = True,
+      add_eos: bool | None = True,
+      hf_access_token: str | None = None,
+  ):
+
+    self.tokenizer_type = tokenizer_type
+    if tokenizer_type == 'huggingface':
+      tokenizer = transformers.AutoTokenizer.from_pretrained(
+          pretrained_model_name_or_path=tokenizer_path,
+          add_bos_token=add_bos,
+          add_eos_token=add_eos,
+          token=hf_access_token,
+      )
+    elif tokenizer_type == 'sentencepiece':
+      model_proto = epath.Path(tokenizer_path).read_bytes()
+      tokenizer = spm.SentencePieceProcessor()
+      tokenizer.LoadFromSerializedProto(model_proto)
+      options = []
+      if add_bos:
+        options.append('bos')
+      if add_eos:
+        options.append('eos')
+
+      extra_options_str = ':'.join(options)
+      if extra_options_str:
+        tokenizer.SetEncodeExtraOptions(extra_options_str)
+    else:
+      raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
+    super().__init__(tokenizer)
+
+  def tokenize(
+      self,
+      example: str,
+      prefix: str = '',
+      suffix: str = '',
+      add_eos: bool = True,
+  ) -> np.ndarray:
+    """The tokenization function.
+
+    Args:
+      example: Input string to tokenize.
+      prefix:  Prefix to add to the input string.
+      suffix:  Suffix to add to the input string.
+      add_eos: If True, add an "end of sentence" token at the end of the output
+        sequence.
+
+    Returns:
+      Tokens corresponding to the input string.
+    """
+    int_list = []
+    if self.bos_id():
+      int_list.append(self.bos_id())
+    if self.tokenizer_type == 'huggingface':
+      int_list.extend(
+          self.encode(prefix + example + suffix, add_special_tokens=False)
+      )
+    else:
+      # sentencepiece
+      int_list.extend(self.tokenizer.EncodeAsIds(prefix + example + suffix))
+    if add_eos:
+      int_list.append(self.eos_id())
+    return np.array(int_list, dtype=np.int32)

@@ -17,11 +17,11 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+import jax
 import optax
-from tunix.sft import config
+from tunix.cli import config
 from tunix.sft import peft_trainer
 from tunix.tests import test_common as tc
-
 
 class ConfigTest(parameterized.TestCase):
   TEST_ARGV = [
@@ -34,42 +34,53 @@ class ConfigTest(parameterized.TestCase):
     argv = self.TEST_ARGV + configs
     return config.initialize(argv)
 
-  def convert_nested_dict_to_list(
-      self,
-      data_dict: Dict[str, Dict[str, Any]],
-  ) -> List[str]:
-    """Converts a nested dictionary to a list of strings.
+  def convert_nested_dict_to_list(self, data_dict: Dict[str, Any]) -> List[str]:
+    """Converts a potentially deeply nested dictionary to a list of strings.
 
-    The function processes a dictionary where each value is expected to be
-    another dictionary. The format for each inner item is
-    "{outer_key}.{inner_key}={inner_value}".
+    Each string in the list represents a path from the root to a non-dictionary
+    value, formatted as "key1.key2.keyN=value".
 
     Args:
-      data_dict: The input nested dictionary (e.g., {"mesh": {"shape": "..."}}).
+      data_dict: The input nested dictionary.
 
     Returns:
-      A list of formatted strings.
-
-    Raises:
-      TypeError: If any value in the outer dictionary is not a dictionary.
+      A list of formatted strings representing the paths and values.
     """
     result_list = []
-    for outer_key, inner_dict in data_dict.items():
-      if isinstance(inner_dict, dict):
-        for inner_key, inner_value in inner_dict.items():
-          # Using f-string for concise string formatting
-          result_list.append(f"{outer_key}.{inner_key}={inner_value}")
-      else:
-        raise TypeError(
-            f"Expected a dictionary for key '{outer_key}', but got"
-            f" {type(inner_dict).__name__}"
-        )
+    self._flatten_dict_recursive(data_dict, [], result_list)
     return result_list
 
+  def _flatten_dict_recursive(
+      self,
+      current_dict: Dict[str, Any],
+      current_path: List[str],
+      result_list: List[str],
+  ) -> None:
+    """Helper function to recursively traverse the dictionary.
+
+    Args:
+      current_dict: The dictionary node currently being processed.
+      current_path: A list of keys representing the path from the root to the
+        current_dict.
+      result_list: The list to accumulate the formatted strings.
+    """
+    for key, value in current_dict.items():
+      new_path = current_path + [str(key)]  # Ensure key is string
+      if isinstance(value, dict):
+        self._flatten_dict_recursive(value, new_path, result_list)
+      else:
+        path_str = ".".join(new_path)
+        result_list.append(f"{path_str}={value}")
+
   def run_test_peft_trainer(self, hp):
-    rngs = nnx.Rngs(hp.config["rng_seed"])
+    rngs = nnx.Rngs(hp.config["model_config"]["rng_seed"])
     model = tc.ToyTransformer(rngs=rngs)
-    peft_trainer.PeftTrainer(model, hp.optimizer, hp.training_config)
+    optimizer = hp.create_optimizer("optimizer_config")
+    training_config = peft_trainer.TrainingConfig(
+        **hp.obtain_training_config_dict("training_config")
+    )
+
+    peft_trainer.PeftTrainer(model, optimizer, training_config)
 
   def test_config_from_yaml(self):
     non_existent_argv = ["", "nonexistent_config.yaml"]
@@ -83,6 +94,7 @@ class ConfigTest(parameterized.TestCase):
         "base_config.yaml",
         "training_config.max_steps=150",
         "training_config.data_sharding_axis=['fsdp','dp']",
+        "training_config.eval_every_n_steps=10",
     ]
     hp = config.initialize(argv)
     self.assertEqual(hp.config["training_config"]["max_steps"], 150)
@@ -98,6 +110,7 @@ class ConfigTest(parameterized.TestCase):
         "training_config.profiler_options.log_dir=/tmp/profiler_log_dir",
         "training_config.profiler_options.skip_first_n_steps=1",
         "training_config.profiler_options.profiler_steps=5",
+        "training_config.eval_every_n_steps=10",
     ]
     self.run_test_peft_trainer(config.initialize(argv))
 
@@ -105,6 +118,7 @@ class ConfigTest(parameterized.TestCase):
       dict(
           testcase_name="kaggle_with_ckpt",
           overrides=[
+              "model_name=gemma-2b",
               "model_source=kaggle",
               "intermediate_ckpt_dir=/path/to/ckpt",
           ],
@@ -118,10 +132,12 @@ class ConfigTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="gcs_ckpt_source",
-          overrides=["model_source=gcs"],
+          overrides=["model_name=gemma3-1b", "model_source=gcs"],
       ),
   )
   def test_valid_configs(self, overrides):
+    prefix = "model_config."
+    overrides = [f"{prefix}{item}" for item in overrides]
     argv = ["", "base_config.yaml"] + overrides
     try:
       config.initialize(argv)
@@ -165,8 +181,9 @@ class ConfigTest(parameterized.TestCase):
   def test_create_optimizer_valid(self, overrides, expected_type):
     """Tests valid optimizer configurations."""
     hp = self.initialize_config(overrides)
-    self.assertIsNotNone(hp.optimizer)
-    self.assertIsInstance(hp.optimizer, expected_type)
+    optimizer = hp.create_optimizer("optimizer_config")
+    self.assertIsNotNone(optimizer)
+    self.assertIsInstance(optimizer, expected_type)
 
   @parameterized.named_parameters(
       dict(
@@ -176,7 +193,7 @@ class ConfigTest(parameterized.TestCase):
               "optimizer_config.learning_rate=0.01",
           ],
           expected_error=ValueError,
-          error_regex="Optimizer unknown not found in dict_keys",
+          error_regex="Optimizer type 'unknown' not supported",
       ),
   )
   def test_create_optimizer_invalid(
@@ -184,9 +201,8 @@ class ConfigTest(parameterized.TestCase):
   ):
     """Tests invalid optimizer configurations."""
     with self.assertRaisesRegex(expected_error, error_regex):
-      self.initialize_config(overrides)
-      # raw_keys = omegaconf.OmegaConf.from_cli(overrides)
-      # hp._create_optimizer(raw_keys)
+      hp = self.initialize_config(overrides)
+      hp.create_optimizer("optimizer_config")
 
   # --- Tests for create_mesh ---
   # NOTE: These tests might depend on the available JAX devices.
@@ -194,27 +210,41 @@ class ConfigTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="valid_1d",
-          raw_keys={"mesh": {"shape": "(4,)", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(4,)", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           expected=((4,), ("data",)),
       ),
       dict(
           testcase_name="valid_2d",
           raw_keys={
-              "mesh": {"shape": "(2, 4)", "axis_names": "('data', 'model')"}
+              "model_config": {
+                  "mesh": {"shape": "(2, 4)", "axis_names": "('data', 'model')"}
+              }
           },
           mock_num_devices=8,
           expected=((2, 4), ("data", "model")),
       ),
       dict(
           testcase_name="devices_equal_prod",
-          raw_keys={"mesh": {"shape": "(8,)", "axis_names": "('a',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(8,)", "axis_names": "('a',)"}
+              }
+          },
           mock_num_devices=8,
           expected=((8,), ("a",)),
       ),
       dict(
           testcase_name="devices_more_than_prod",
-          raw_keys={"mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}
+              }
+          },
           mock_num_devices=5,
           expected=((2, 2), ("x", "y")),
       ),
@@ -225,48 +255,75 @@ class ConfigTest(parameterized.TestCase):
   ):
     mock_device_count_fn.return_value = mock_num_devices
     hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
-    self.assertEqual(hp.mesh, expected)
+    mesh = hp.create_mesh("model_config")
+    self.assertEqual(mesh, jax.make_mesh(expected[0], expected[1]))
 
   @parameterized.named_parameters(
       dict(
           testcase_name="shape_invalid_literal",
-          raw_keys={"mesh": {"shape": "(1,a)", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1,a)", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           error_regex="Invalid 'shape' key in 'mesh' configuration",
       ),
       dict(
           testcase_name="shape_not_tuple",
-          raw_keys={"mesh": {"shape": "1", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "1", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           error_regex="Invalid 'shape' key in 'mesh' configuration",
       ),
       dict(
           testcase_name="shape_not_int",
-          raw_keys={"mesh": {"shape": "(1, '2')", "axis_names": "('a', 'b')"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1, '2')", "axis_names": "('a', 'b')"}
+              }
+          },
           mock_num_devices=4,
           error_regex="All elements in mesh.shape must be integers",
       ),
       dict(
           testcase_name="axis_names_not_tuple",
-          raw_keys={"mesh": {"shape": "(1,)", "axis_names": "'data'"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1,)", "axis_names": "'data'"}
+              }
+          },
           mock_num_devices=4,
           error_regex="Invalid 'axis_names' key in 'mesh' configuration",
       ),
       dict(
           testcase_name="axis_names_not_str",
-          raw_keys={"mesh": {"shape": "(1,)", "axis_names": "(1,)"}},
+          raw_keys={
+              "model_config": {"mesh": {"shape": "(1,)", "axis_names": "(1,)"}}
+          },
           mock_num_devices=4,
           error_regex="All elements in mesh.axis_names must be strings",
       ),
       dict(
           testcase_name="length_mismatch",
-          raw_keys={"mesh": {"shape": "(1, 2)", "axis_names": "('data',)"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(1, 2)", "axis_names": "('data',)"}
+              }
+          },
           mock_num_devices=4,
           error_regex="must have the same length",
       ),
       dict(
           testcase_name="too_many_devices_required",
-          raw_keys={"mesh": {"shape": "(2, 3)", "axis_names": "('a', 'b')"}},
+          raw_keys={
+              "model_config": {
+                  "mesh": {"shape": "(2, 3)", "axis_names": "('a', 'b')"}
+              }
+          },
           mock_num_devices=5,
           error_regex="requires 6 devices, but found 5",
       ),
@@ -281,7 +338,9 @@ class ConfigTest(parameterized.TestCase):
   ):
     mock_device_count_fn.return_value = mock_num_devices
     with self.assertRaisesRegex(ValueError, error_regex):
-      self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
+      nested_dict = self.convert_nested_dict_to_list(raw_keys)
+      hp = self.initialize_config(nested_dict)
+      hp.create_mesh("model_config")
 
 
 if __name__ == "__main__":
