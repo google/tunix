@@ -15,11 +15,11 @@
 
 import re
 from typing import Callable, List
-from asbl import logging
+from absl import logging
 
 
 # Define the expected signature with type hints
-ExpectedSignature = Callable[[List[str], List[str], ...], List[float]]
+ExpectedSignature = Callable[..., List[float]]
 
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"

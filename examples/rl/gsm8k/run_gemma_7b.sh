@@ -64,7 +64,7 @@ python3 -m tunix.cli.grpo_main \
   num_train_epochs=$num_train_epochs \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
-  rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine" \
+  rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
   rl_training_config.actor_optimizer_config.init_value=0.0 \
   rl_training_config.actor_optimizer_config.end_value=0.0 \
   rl_training_config.actor_optimizer_config.warmup_ratio=0.1 \

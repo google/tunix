@@ -48,20 +48,6 @@ def string_to_bool(s: str) -> bool:
     return False
   raise ValueError(f"Can't convert {s} to bool")
 
-
-# Map optimizer names to their optax functions
-_OPTIMIZER_MAP: dict[
-    str, collections.abc.Callable[..., optax.GradientTransformation]
-] = {
-    "adagrad": optax.adagrad,
-    "adam": optax.adam,
-    "adamw": optax.adamw,
-    "rmsprop": optax.rmsprop,
-    "sgd": optax.sgd,
-    # Add other optax optimizers here as needed
-}
-
-
 _yaml_types_to_parser = {
     str: str,
     int: int,
@@ -131,10 +117,10 @@ class HyperParameters:
           "model_download_path"
       )
     if not os.path.isdir(model_download_path):
-      print(f"Error: '{model_download_path}' is not a valid directory.")
+      logging.error(f"Error: '{model_download_path}' is not a valid directory.")
       return
 
-    print(f"Clearing contents of '{model_download_path}'...")
+    logging.info(f"Clearing contents of '{model_download_path}'...")
     for item in os.listdir(model_download_path):
       item_path = os.path.join(model_download_path, item)
       try:
@@ -146,15 +132,15 @@ class HyperParameters:
           except OSError:
             pass  # Continue and let os.remove() raise the error if it fails
           os.remove(item_path)
-          print(f"  Removed file/link: {item_path}")
+          logging.info(f"  Removed file/link: {item_path}")
         elif os.path.isdir(item_path):
           # shutil.rmtree can also handle permission issues internally
           # by providing an onerror handler if needed.
           shutil.rmtree(item_path)
-          print(f"  Removed directory: {item_path}")
+          logging.info(f"  Removed directory: {item_path}")
       except (OSError, shutil.Error) as e:
-        print(f"  Failed to delete {item_path}. Reason: {e}")
-    print(f"Finished clearing '{model_download_path}'.")
+        logging.info(f"  Failed to delete {item_path}. Reason: {e}")
+    logging.info(f"Finished clearing '{model_download_path}'.")
 
   def _validate_model_source(self, raw_keys: collections.OrderedDict[str, Any]):
     """Validate the checkpoint source and intermediate checkpoint."""
@@ -260,22 +246,47 @@ class HyperParameters:
         )
     return kwargs
 
+  def _get_schedule_fn(self, schedule_type: str, config_path_info: str):
+    """Dynamically imports a schedule function from optax.schedules.
+
+    Args:
+      schedule_type: The type of schedule (e.g., "constant_schedule",
+        "warmup_cosine_decay_schedule").
+      config_path_info: The path to the config file, used for error reporting.
+
+    Returns:
+      The corresponding function from optax.schedules.
+
+    Raises:
+      AttributeError: If the schedule type does not correspond to a valid
+                      function in optax.schedules.
+    """
+    try:
+      schedule_fn = getattr(optax.schedules, schedule_type)
+      return schedule_fn
+    except AttributeError as exc:
+      raise AttributeError(
+          f"Config {config_path_info}: '{schedule_type}' is not a valid"
+          " function in optax.schedules."
+      ) from exc
+
   def _create_learning_rate(
       self, optimizer_config: Dict[str, Any], config_path_info: str
   ) -> Any:
     """Creates a learning rate schedule based on the optimizer config."""
     schedule_type = optimizer_config.get("schedule_type")
-    if schedule_type == "warmup_cosine":
-      schedule_func = optax.schedules.warmup_cosine_decay_schedule
+    if schedule_type:
+      schedule_func = self._get_schedule_fn(schedule_type, config_path_info)
       schedule_kwargs = self._extract_kwargs(
           schedule_func, optimizer_config, config_path_info
       )
-      return schedule_func(**schedule_kwargs)
-    elif schedule_type:
-      raise ValueError(
-          f"Unsupported schedule_type '{schedule_type}' in config at"
-          f" {config_path_info}."
+      logging.info(
+          "Creating learning rate with schedule_type: %s, and following"
+          " kwargs: %s",
+          schedule_type,
+          schedule_kwargs,
       )
+      return schedule_func(**schedule_kwargs)
 
     # Default: No schedule, learning_rate should be a scalar
     learning_rate = optimizer_config.get("learning_rate")
@@ -286,6 +297,7 @@ class HyperParameters:
           "learning_rate must be a scalar when no schedule_type is specified, "
           f"got {type(learning_rate)} in config at {config_path_info}."
       )
+    logging.info("Creating learning rate with learning_rate: %d", learning_rate)
     return learning_rate
 
   def create_optimizer(
@@ -324,13 +336,14 @@ class HyperParameters:
     if not opt_type:
       raise ValueError("Optimizer name is required")
 
-    if opt_type not in _OPTIMIZER_MAP:
+    try:
+      opt_func = getattr(optax, opt_type.lower())
+    except ValueError as e:
       raise ValueError(
-          f"Optimizer type '{opt_type}' not supported. Available options:"
-          f" {list(_OPTIMIZER_MAP.keys())}"
-      )
-
-    opt_func = _OPTIMIZER_MAP[opt_type]
+          f"Optimizer type '{opt_type}' not supported from {config_path_info}."
+          " Available options, see"
+          " https://optax.readthedocs.io/en/latest/api/optimizers.html#optimizers"
+      ) from e
 
     # Handle learning rate, potentially creating a schedule
     learning_rate_val = self._create_learning_rate(
@@ -667,6 +680,9 @@ class HyperParameters:
 
   def obtain_reward_fn(self) -> List[Callable[..., Any]]:
     reward_fns = []
+    logging.info(
+        "self.config['reward_functions'] %s", self.config["reward_functions"]
+    )
     for path_str in self.config["reward_functions"]:
       function = self._get_function_from_path(path_str)
       if function:
