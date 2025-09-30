@@ -23,7 +23,6 @@ dependencies = [
   "grain",
   "huggingface_hub",
   "jax",
-  "jax[tpu]",
   "jaxtyping",
   "kagglehub",
   "omegaconf",
@@ -50,9 +49,15 @@ docs = [
 ]
 prod = [
     "flax>=0.12.0",
+    "jax[tpu]",
 ]
 dev = [
     "flax>=0.11.2",
+    "jax[tpu]",
+]
+gpu = [
+  "flax>=0.11.2",
+  "jax[cuda12]",
 ]
 
 [project.urls]
