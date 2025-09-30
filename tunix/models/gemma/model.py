@@ -555,7 +555,7 @@ class RMSNorm(nnx.Module):
 
 
 @dataclasses.dataclass(frozen=True)
-class TransformerConfig:
+class ModelConfig:
   """Configuration for the gemma transformer."""
 
   num_layers: int
@@ -781,13 +781,13 @@ class Transformer(nnx.Module, pytree=False):
   ) -> 'Transformer':
 
     if version in ['2b', '2b-it', '1.1-2b-it']:
-      config = TransformerConfig.gemma_2b()
+      config = ModelConfig.gemma_2b()
     elif version in ['7b', '7b-it', '1.1-7b-it']:
-      config = TransformerConfig.gemma_7b()
+      config = ModelConfig.gemma_7b()
     elif version in ['2-2b', '2-2b-it']:
-      config = TransformerConfig.gemma2_2b()
+      config = ModelConfig.gemma2_2b()
     elif version in ['2-9b', '2-9b-it']:
-      config = TransformerConfig.gemma2_9b()
+      config = ModelConfig.gemma2_9b()
     else:
       raise ValueError(f'Unsupported version: {version}')
 
@@ -800,7 +800,7 @@ class Transformer(nnx.Module, pytree=False):
 
   def __init__(
       self,
-      config: TransformerConfig,
+      config: ModelConfig,
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),

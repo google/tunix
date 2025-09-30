@@ -11,7 +11,7 @@ from tunix.models import safetensors_loader
 from tunix.models.gemma3 import model as model_lib
 
 
-def _get_key_and_transform_mapping(cfg: model_lib.Gemma3Config):
+def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   """Mapping of torch_keys to (nnx_keys, (permute_rule, reshape_rule))."""
   return {
       r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
@@ -98,7 +98,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.Gemma3Config):
   }
 
 
-def _make_preprocess_fn(cfg: model_lib.Gemma3Config):
+def _make_preprocess_fn(cfg: model_lib.ModelConfig):
   """Creates a tensor preprocessing function for Gemma3 safetensors, fusing q, k, and v projections."""
   q_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.q$")
   k_pat = re.compile(r"tmp\.layers\.([0-9]+)\.attn\.k$")
@@ -193,7 +193,7 @@ def _make_preprocess_fn(cfg: model_lib.Gemma3Config):
 
 def create_model_from_safe_tensors(
     file_dir: str,
-    config: model_lib.Gemma3Config,
+    config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
 ):

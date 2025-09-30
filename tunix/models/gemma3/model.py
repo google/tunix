@@ -81,7 +81,7 @@ class QueryPreAttentionNormalisation(enum.Enum):
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class Gemma3Config:
+class ModelConfig:
   """Transformer config."""
 
   num_layers: int
@@ -105,7 +105,7 @@ class Gemma3Config:
   def gemma3_1b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  ) -> 'Gemma3Config':
+  ) -> 'ModelConfig':
     return cls(
         num_layers=26,
         num_embed=262144,
@@ -124,7 +124,7 @@ class Gemma3Config:
   def gemma3_4b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  ) -> 'Gemma3Config':
+  ) -> 'ModelConfig':
     """Gemma3-4B text-only config."""
     return cls(
         num_layers=34,
@@ -145,7 +145,7 @@ class Gemma3Config:
   def gemma3_12b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  ) -> 'Gemma3Config':
+  ) -> 'ModelConfig':
     """Gemma3-12B text-only config."""
     return cls(
         num_layers=48,
@@ -167,7 +167,7 @@ class Gemma3Config:
   def gemma3_27b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  ) -> 'Gemma3Config':
+  ) -> 'ModelConfig':
     """Gemma3-27B text-only config."""
     return cls(
         num_layers=62,
@@ -705,7 +705,7 @@ class RMSNorm(nnx.Module):
 class Gemma3(nnx.Module, pytree=False):
   """Gemma transformer."""
 
-  def __init__(self, config: Gemma3Config, *, rngs: nnx.Rngs):
+  def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
     self.embedder = Embedder(
         vocab_size=config.num_embed,

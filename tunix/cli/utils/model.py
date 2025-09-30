@@ -37,9 +37,9 @@ from tunix.models.qwen3 import model as qwen3_lib
 
 # Map prefixes to the target object containing the methods.
 CONFIG_MAP = {
-    'gemma': gemma_lib.TransformerConfig,
-    'gemma2': gemma_lib.TransformerConfig,
-    'gemma3': gemma3_lib.Gemma3Config,
+    'gemma': gemma_lib.ModelConfig,
+    'gemma2': gemma_lib.ModelConfig,
+    'gemma3': gemma3_lib.ModelConfig,
     'llama3.1': llama3_lib.ModelConfig,
     'llama3.2': llama3_lib.ModelConfig,
     'qwen2.5': qwen2_lib.ModelConfig,

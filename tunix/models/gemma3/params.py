@@ -47,7 +47,7 @@ GEMMA3_TOKENIZER = 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
 
 def create_model_from_checkpoint(
     checkpoint_path: str,
-    model_config: model_lib.Gemma3Config,
+    model_config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
 ) -> model_lib.Gemma3:
   """Load a Gemma3 model from a checkpoint."""
