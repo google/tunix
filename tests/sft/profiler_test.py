@@ -19,13 +19,17 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.sft import profiler
+import tempfile
 
 
 class ProfilerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.log_dir = self.create_tempdir().full_path
+    try:
+      self.log_dir = self.create_tempdir().full_path
+    except Exception:
+      self.log_dir = tempfile.TemporaryDirectory().name
 
   @mock.patch('jax.process_index', return_value=0)
   @mock.patch('jax.profiler.start_trace')

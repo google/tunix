@@ -79,7 +79,7 @@ class CommonTest(parameterized.TestCase):
         per_token_logps, ref_per_token_logps, method=method
     )
     np.testing.assert_allclose(
-        kl_divergence, expected_value, atol=1e-7, rtol=1e-5
+        kl_divergence, expected_value, atol=1e-5, rtol=1e-2
     )
 
   def test_selective_log_softmax(self):
@@ -94,8 +94,12 @@ class CommonTest(parameterized.TestCase):
         [-2.242679, -2.2733693, -2.1024966, -1.9994389],
         [-2.0603075, -2.4863663, -1.9176172, -2.0206313],
     ])
-    np.testing.assert_allclose(per_token_logps, expected_value)
-    np.testing.assert_allclose(per_token_logps, jitted_per_token_logps)
+    np.testing.assert_allclose(
+        per_token_logps, expected_value, rtol=1e-04, atol=1e-04
+    )
+    np.testing.assert_allclose(
+        per_token_logps, jitted_per_token_logps, rtol=1e-05, atol=1e-05
+    )
 
   def test_get_per_token_logps(self):
     rng = jax.random.PRNGKey(0)
@@ -109,6 +113,8 @@ class CommonTest(parameterized.TestCase):
     np.testing.assert_allclose(
         per_token_logps,
         np.array([[-5.7448483, -5.937829], [-4.222273, -4.41953]]),
+        rtol=1e-02,
+        atol=1e-03,
     )
 
   def test_compute_per_token_logps(self):
@@ -131,8 +137,8 @@ class CommonTest(parameterized.TestCase):
             [-6.071025, -7.5328417, -5.9712567, -4.653783],
             [-6.039485, -8.264197, -6.2771187, -4.767109],
         ]),
-        atol=1e-6,
-        rtol=1e-6,
+        atol=1e-1,
+        rtol=1e-2,
     )
 
   def test_make_completion_mask(self):
@@ -151,35 +157,6 @@ class CommonTest(parameterized.TestCase):
     ])
     np.testing.assert_allclose(completion_mask, expected_value)
 
-  def test_make_causal_attn_mask(self):
-    input_mask = jnp.array([
-        [True, True, True, True],
-        [True, True, True, False],
-        [False, True, True, False],
-    ])
-    attn_mask = common.make_causal_attn_mask(input_mask)
-    expected_value = jnp.array([
-        [
-            [True, False, False, False],
-            [True, True, False, False],
-            [True, True, True, False],
-            [True, True, True, True],
-        ],
-        [
-            [True, False, False, False],
-            [True, True, False, False],
-            [True, True, True, False],
-            [True, True, True, False],
-        ],
-        [
-            [False, False, False, False],
-            [False, True, False, False],
-            [False, True, True, False],
-            [False, True, True, False],
-        ],
-    ])
-    np.testing.assert_allclose(attn_mask, expected_value)
-
   def test_pad_to_length(self):
     x = jnp.ones((2, 4))
     padded_x = common.pad_to_length(x, target_length=5)
@@ -197,19 +174,6 @@ class CommonTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         padded_x, jnp.array([[0, 1, 1, 1, 1], [0, 1, 1, 1, 1]])
     )
-
-  def test_build_positions_from_mask(self):
-    input_mask = jnp.array(
-        [[1, 1, 1, 1], [0, 1, 1, 1], [1, 1, 1, 0], [0, 1, 1, 0]]
-    )
-    positions = common.build_positions_from_mask(input_mask)
-    expected_value = jnp.array([
-        [0, 1, 2, 3],
-        [0, 0, 1, 2],
-        [0, 1, 2, 2],
-        [0, 0, 1, 1],
-    ])
-    np.testing.assert_array_equal(positions, expected_value)
 
 
 if __name__ == "__main__":

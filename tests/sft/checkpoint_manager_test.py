@@ -25,6 +25,7 @@ import jax.sharding as shd
 import numpy as np
 import qwix
 from tunix.sft import checkpoint_manager
+import tempfile
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
@@ -86,6 +87,18 @@ def create_sharded_model(model_ctor, rngs, mesh):
 
 class CheckpointManagerTest(absltest.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    try:
+      self.temp_path = self.create_tempdir().full_path
+    except Exception:
+      self.temp_path = tempfile.TemporaryDirectory().name
+    self.device_count = jax.device_count()
+    self.mesh = jax.sharding.Mesh(
+        devices=np.array(jax.devices()).reshape(2, self.device_count // 2),
+        axis_names=('fsdp', 'tp'),
+    )
+
   def test_empty_root_directory(self):
     peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=None
@@ -95,9 +108,8 @@ class CheckpointManagerTest(absltest.TestCase):
     self.assertEqual(peft_checkpoint_manager.maybe_restore(None), 0)
 
   def test_checkpoint_manager_options_none_sets_default(self):
-    temp_path = self.create_tempdir().full_path
     peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
-        temp_path, options=None
+        self.temp_path, options=None
     )
     self.assertIsNotNone(peft_checkpoint_manager._checkpoint_manager)
     self.assertEqual(
@@ -106,29 +118,25 @@ class CheckpointManagerTest(absltest.TestCase):
     )
 
   def test_save(self):
-    temp_path = self.create_tempdir().full_path
-    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(temp_path)
-    mesh = jax.sharding.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
+    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path
     )
-    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), mesh)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
 
     # Save the model state.
     self.assertTrue(peft_checkpoint_manager.save(1, model))
     self.assertEqual(peft_checkpoint_manager.latest_step(), 1)
 
     peft_checkpoint_manager.close()
-    model_param_path = epath.Path(temp_path) / '1' / 'model_params'
+    model_param_path = epath.Path(self.temp_path) / '1' / 'model_params'
     # Verify the model params are saved.
     self.assertTrue(model_param_path.exists())
 
   def test_restore(self):
-    temp_path = self.create_tempdir().full_path
-    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(temp_path)
-    mesh = jax.sharding.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
+    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path
     )
-    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), mesh)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
     expected_state = nnx.state(model)
 
     # Save the model params.
@@ -148,13 +156,11 @@ class CheckpointManagerTest(absltest.TestCase):
     )
 
   def test_restore_different_sharding(self):
-    temp_path = self.create_tempdir().full_path
-    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(temp_path)
-    mesh = jax.sharding.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
+    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path
     )
     unsharded_model = TestModel(nnx.Rngs(0))
-    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), mesh)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
 
     # Save the model params.
     self.assertTrue(peft_checkpoint_manager.save(1, unsharded_model))
@@ -187,12 +193,10 @@ class CheckpointManagerTest(absltest.TestCase):
     )
 
   def test_restore_with_lora(self):
-    temp_path = self.create_tempdir().full_path
-    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(temp_path)
-    mesh = jax.sharding.Mesh(
-        devices=np.array(jax.devices()).reshape(2, 2), axis_names=('fsdp', 'tp')
+    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path
     )
-    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), mesh)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
     lora_provider = qwix.LoraProvider(
         module_path='.*w1',
         rank=4,

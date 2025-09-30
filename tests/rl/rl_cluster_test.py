@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from absl.testing import absltest
+from absl.testing import parameterized
 import chex
 from flax import nnx
 import jax
@@ -23,24 +25,31 @@ from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 
+os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
+
 Mesh = jax.sharding.Mesh
 
 
-class RlClusterTest(absltest.TestCase):
+class RlClusterTest(parameterized.TestCase):
 
-  def setUp(self):
-    super().setUp()
-    self.num_cpus = 4
-    chex.set_n_cpu_devices(self.num_cpus)
-    assert len(jax.devices()) == self.num_cpus
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+
+    cls.num_cpus = int(os.environ.get('DEVICE_COUNTS', 4))
+    chex.set_n_cpu_devices(cls.num_cpus)
+    print(f'Setting up test with {cls.num_cpus} CPU devices before JAX init')
+    cls.device_count = jax.device_count()
 
   def test_model_loading_with_resharding(self):
+    split_index = self.device_count // 2
+
     actor_mesh = Mesh(
-        np.array(jax.devices()[: self.num_cpus // 2]).reshape(2, 1),
+        np.array(jax.devices()[:split_index]).reshape(split_index, 1),
         ('fsdp', 'tp'),
     )
     rollout_mesh = Mesh(
-        np.array(jax.devices()[self.num_cpus // 2 :]).reshape(1, 2),
+        np.array(jax.devices()[split_index:]).reshape(1, split_index),
         ('fsdp', 'tp'),
     )
     cluster_config = rl_cluster_lib.ClusterConfig(
@@ -55,7 +64,7 @@ class RlClusterTest(absltest.TestCase):
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=1,
             max_steps=10,
-            gradient_accumulation_steps=1,
+            gradient_accumulation_steps=None,
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_tokens_to_generate=10,
@@ -93,6 +102,69 @@ class RlClusterTest(absltest.TestCase):
         nnx.state(rl_cluster.inference_worker._models['reference'])
     )
     self.assertEqual(ref_model_mesh, actor_mesh)
+
+  @parameterized.named_parameters(
+      ('1', None, None, None, None, [None, None, None, None, 1]),
+      ('2', 8, None, None, None, [8, 8, 8, 8, 1]),
+      ('3', 8, 2, None, None, [8, 2, 2, 2, 4]),
+      ('4', 8, 4, 8, None, [8, 4, 8, 4, 2]),
+      ('5', 8, 4, None, 8, [8, 4, 4, 8, 2]),
+      ('6', 16, 8, 8, 16, [16, 8, 8, 16, 2]),
+  )
+  def test_batch_sizes(
+      self,
+      mini_batch_size,
+      training_micro_batch_size,
+      rollout_micro_batch_size,
+      compute_logps_micro_batch_size,
+      expected_values,
+  ):
+    cfg = rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        critic_optimizer=None,
+        mini_batch_size=mini_batch_size,
+        training_micro_batch_size=training_micro_batch_size,
+        rollout_micro_batch_size=rollout_micro_batch_size,
+        compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+        eval_every_n_steps=1,
+    )
+
+    self.assertEqual(
+        expected_values,
+        [
+            cfg.mini_batch_size,
+            cfg.training_micro_batch_size,
+            cfg.rollout_micro_batch_size,
+            cfg.compute_logps_micro_batch_size,
+            cfg.gradient_accumulation_steps,
+        ],
+    )
+
+  @parameterized.named_parameters(
+      ('1', 2, 4, None, None),
+      ('2', 8, 3, None, None),
+      ('3', 8, 4, 3, None),
+      ('4', 8, 4, None, 3),
+      ('5', None, 2, None, None),
+      ('6', None, None, 2, None),
+  )
+  def test_batch_sizes_errors(
+      self,
+      mini_batch_size,
+      training_micro_batch_size,
+      rollout_micro_batch_size,
+      compute_logps_micro_batch_size,
+  ):
+    with self.assertRaises(ValueError):
+      rl_cluster_lib.RLTrainingConfig(
+          actor_optimizer=optax.sgd(1e-3),
+          critic_optimizer=None,
+          mini_batch_size=mini_batch_size,
+          training_micro_batch_size=training_micro_batch_size,
+          rollout_micro_batch_size=rollout_micro_batch_size,
+          compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+          eval_every_n_steps=1,
+      )
 
 
 if __name__ == '__main__':

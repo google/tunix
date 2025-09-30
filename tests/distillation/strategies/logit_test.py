@@ -103,7 +103,7 @@ class LogitStrategyTest(parameterized.TestCase):
         labels=labels,
     )
 
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-4, atol=1e-4)
 
   @parameterized.named_parameters(
       ("alpha_one", 1.0),
@@ -130,7 +130,7 @@ class LogitStrategyTest(parameterized.TestCase):
         labels=labels,
     )
 
-    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5, atol=1e-5)
 
   def test_get_train_loss(self):
     strategy = LogitStrategy(

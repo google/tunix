@@ -27,7 +27,7 @@ import jax
 from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
-from jax.typing import ArrayLike
+from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -73,6 +73,9 @@ class TrainingConfig:
   # Prefix for metric names for logging. Not sticking it in
   # `metrics_logging_options` because the latter is optional.
   metric_prefix: str = ""
+
+  # Progress bar description.
+  pbar_description: str | None = "Training"
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -161,9 +164,9 @@ class PeftTrainer:
     model: The model to train.
     config: The training config.
     optimizer: The optimizer to use. To monitor the learning rate at each step,
-      use `optax.inject_hyperparams` to inject learning rate as a
-      hyperparameter. For example: optimizer =
-      optax.inject_hyperparams(optax.sgd)(learning_rate=learning_rate_schedule)
+      use `optax.schedules.inject_hyperparams` to inject learning rate as a
+      hyperparameter. For example: ``optimizer =
+      optax.schedules.inject_hyperparams(optax.sgd)(learning_rate=learning_rate_schedule)``
     loss_fn: The loss function to use.
     eval_loss_fn: The loss function to use for evaluation.
     gen_model_input_fn: The function to generate model input from training
@@ -378,8 +381,7 @@ class PeftTrainer:
       return train_step, eval_step
     else:
       if self._jitted_train_step_fn is None:
-        mesh = pxla.thread_resources.env.physical_mesh
-        self._shard_optimizer(mesh)
+        self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
         self._jitted_train_step_fn = nnx.jit(
             train_step, donate_argnames=("optimizer",)
         )
@@ -439,13 +441,13 @@ class PeftTrainer:
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
     try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"]
+      return self.optimizer.opt_state.hyperparams["learning_rate"].value
     except AttributeError:
       for chainpart in self.optimizer.opt_state:
         if isinstance(chainpart, optax.EmptyState):
           break
         if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"]
+          return chainpart.hyperparams["learning_rate"].value
       return None
 
   def _log_metrics(
@@ -461,7 +463,9 @@ class PeftTrainer:
     self.metrics_logger.log("perplexity", perplexity, self._mode, step)
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
-      self.metrics_logger.log("learning_rate", learning_rate, self._mode, step)
+      self.metrics_logger.log(
+          "learning_rate", jax.device_get(learning_rate), self._mode, step
+      )
     if step_time_delta is not None:
       self.metrics_logger.log(
           "step_time_sec", step_time_delta, self._mode, step
@@ -568,10 +572,14 @@ class PeftTrainer:
       skip_jit: bool = False,
   ) -> None:
     """Training loop."""
-    mesh = pxla.thread_resources.env.physical_mesh
-    logging.info("Training with mesh: %s", mesh)
-
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
+    if not skip_jit:
+      logging.info(
+          "Training with mesh: %s. Compiled train_step cache size: %s",
+          pxla.thread_resources.env.physical_mesh,
+          train_step.jitted_fn._cache_size(),  # pytype: disable=attribute-error,protected-access
+      )
+
     if eval_ds:
       self._run_eval(eval_ds, eval_step)
 
@@ -580,6 +588,7 @@ class PeftTrainer:
           metrics_logger=self.metrics_logger,
           initial_steps=self._train_steps,
           max_steps=self.config.max_steps,
+          description=self.config.pbar_description,
       )
 
     if self.training_hooks:

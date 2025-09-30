@@ -15,7 +15,7 @@
 
 set -x # Enable xtrace
 
-python3 -m tunix.sft.peft_main \
+python3 -m tunix.cli.peft_main \
   base_config.yaml \
   model_name="gemma3-4b" \
   model_id="gs://gemma-data/checkpoints/gemma3-4b-pt" \

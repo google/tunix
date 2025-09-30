@@ -20,6 +20,10 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 import jax.tree_util as jtu
+from tunix.sft import utils
+
+make_causal_attn_mask = utils.make_causal_attn_mask
+build_positions_from_mask = utils.build_positions_from_mask
 
 
 class RepeatIterable(Iterable[Any]):
@@ -281,30 +285,6 @@ def make_completion_mask(completion_ids, eos_tok: int = 0):
   return completion_mask
 
 
-def make_causal_attn_mask(input_mask: jax.Array) -> jax.Array:
-  """Makes a causal attention mask.
-
-  I.e., as in middle diagram of Figure 3 in https://arxiv.org/pdf/1910.10683.
-
-  Args:
-    input_mask: Input mask for the input. True for non-padded tokens only, else
-      False.
-
-  Returns:
-    Attention mask of shape [B, L, L] (where B=batch dim and L=sequence dim).
-  """
-  if len(input_mask.shape) != 2:
-    raise ValueError(
-        f"Input mask must be 2D (shape [B, L]), but got {input_mask.shape}."
-    )
-  seq_len = input_mask.shape[-1]
-  attn_mask = input_mask[..., None, :]
-  causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
-  # Prefixes can be attended by all tokens
-  attn_mask *= causal_mask[None, ...]
-  return attn_mask
-
-
 def pad_to_length(
     x: jax.Array,
     target_length: int,
@@ -338,19 +318,3 @@ def pad_to_length(
     return jnp.concatenate([padding, x], axis=axis)
   else:
     return jnp.concatenate([x, padding], axis=axis)
-
-
-def build_positions_from_mask(input_mask: jax.Array) -> jax.Array:
-  """Computes `positions` from the `input_mask`.
-
-  Args:
-    input_mask: The tokens `input_mask`, True for non-padded tokens only.
-
-  Returns:
-    The indices to use for RoPE and absolute position encodings for the given
-    input mask.
-  """
-  positions = jnp.cumsum(input_mask, axis=-1)
-  # Subtract one for all positions from the first valid one as they are
-  # 0-indexed
-  return positions - (positions >= 1)

@@ -45,5 +45,13 @@ class TokenizerAdapterTest(absltest.TestCase):
     self.assertEqual(decoded, 'test')
 
 
+class TokenizerTest(absltest.TestCase):
+
+  def test_default_tokenizer(self):
+    tokenizer = adapter.Tokenizer()
+    self.assertEqual(tokenizer.tokenizer_type, 'sentencepiece')
+    self.assertIsNotNone(tokenizer._tokenizer_type, adapter.TokenizerType.SP)
+
+
 if __name__ == '__main__':
   absltest.main()
