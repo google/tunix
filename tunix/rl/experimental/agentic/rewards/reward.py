@@ -151,3 +151,44 @@ def is_two_reward(action: str) -> RewardOutput:
   except ValueError:
     score = 0.0
   return RewardOutput(score, {"is_two": score})
+
+
+def dummy_reward(
+    task: Dict[str, Any], model_answer_str: str
+) -> float:
+  return 0.0
+
+
+def calculate_reward_for_math(
+    task: Dict[str, Any], model_answer_str: str
+) -> float:
+  """Calculates the reward for a math expression based on answer correctness.
+
+  WARNING: Uses eval(), which is NOT SAFE for untrusted input. This is only for
+  feature testing.
+
+  Args:
+      task: The task context containing the 'question' field.
+      model_answer_str: The model's answer as a string.
+
+  Returns:
+      float: 1.0 if the model's answer matches the evaluated expression within a
+      tolerance, 0.0 otherwise.
+  """
+  question_str = task.get("question", "")
+  expression = question_str.replace("=?", "").replace("=", "").strip()
+  answer = (
+      model_answer_str.replace("The answer is ", "").replace(".", "").strip()
+  )
+  answer = float(answer)
+
+  try:
+    correct_value = eval(expression)
+    tolerance = 1e-6
+    if abs(correct_value - answer) < tolerance:
+      return 1.0
+    else:
+      return 0.0
+
+  except Exception:
+    return 0.0
