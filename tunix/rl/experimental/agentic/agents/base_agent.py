@@ -92,7 +92,7 @@ class LLMBaseAgent(ABC):
         info (dict): Additional environment metadata (debug info, metrics, etc.)
         **kwargs: Additional parameters for extensibility
     """
-    ...
+    raise NotImplementedError("update_from_env is not implemented.")
 
   async def update_from_env_async(self, *args, **kwargs) -> None:
     """Asynchronous version of update_from_env.
@@ -138,7 +138,7 @@ class LLMBaseAgent(ABC):
             The action content should match the expected format for the target
             environment
     """
-    ...
+    raise NotImplementedError("update_from_model is not implemented.")
 
   async def update_from_model_async(self, *args, **kwargs) -> Action:
     """Asynchronous version of update_from_model.
