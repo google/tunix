@@ -706,9 +706,13 @@ class RLCluster:
       )
     micro_batch_size = micro_batch_size or batch_size
 
-    # TODO(linchai): Need to transfer the prompt and completion tokens to the
-    # reference model's mesh if rollout and reference are on different meshes.
-    with self.cluster_config.role_to_mesh[Role.REFERENCE]:
+    reference_mesh = self.cluster_config.role_to_mesh[Role.REFERENCE]
+
+    dest_prompt_tokens = rl_utils.maybe_move(prompt_tokens, reference_mesh)
+    dest_completion_tokens = rl_utils.maybe_move(
+        completion_tokens, reference_mesh
+    )
+    with reference_mesh:
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -718,8 +722,8 @@ class RLCluster:
       ):
         outs.append(
             self.inference_worker.get_ref_per_token_logps(
-                prompt_tokens[batch_slice],
-                completion_tokens[batch_slice],
+                dest_prompt_tokens[batch_slice],
+                dest_completion_tokens[batch_slice],
                 pad_id,
                 eos_id,
                 completion_mask=None

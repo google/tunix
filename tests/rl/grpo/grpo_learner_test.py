@@ -623,7 +623,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     cluster_config = rl_cluster_lib.ClusterConfig(
         role_to_mesh={
             rl_cluster_lib.Role.ACTOR: mesh1,
-            rl_cluster_lib.Role.REFERENCE: mesh2,
+            rl_cluster_lib.Role.REFERENCE: mesh1,
             rl_cluster_lib.Role.ROLLOUT: mesh2,
         },
         rollout_engine='vanilla',
