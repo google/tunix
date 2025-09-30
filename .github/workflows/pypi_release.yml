@@ -92,4 +92,4 @@ jobs:
 
       - name: Publish package to PyPI
         # This is the official action for PyPI Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@v1
+        uses: pypa/gh-action-pypi-publish@release/v1
