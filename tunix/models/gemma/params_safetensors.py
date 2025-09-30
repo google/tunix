@@ -160,8 +160,9 @@ def _peek_vocab_size_from_safetensors(file_dir: str) -> int:
     if fn.endswith(".safetensors"):
       path = os.path.join(file_dir, fn)
       with safe_open(path, framework="jax") as f:
-        shape = f.get_tensor("model.embed_tokens.weight").shape
-        return shape[0]
+        if "model.embed_tokens.weight" in f.keys():
+          shape = f.get_tensor("model.embed_tokens.weight").shape
+          return shape[0]
   raise FileNotFoundError("No .safetensors found to peek vocab size")
 
 
