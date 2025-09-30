@@ -61,7 +61,7 @@ class ToolManager:
     return list(self._tool_dict.keys())
 
   @property
-  def json(self) -> List[dict[str, Any]]:
+  def get_json_schema(self) -> List[dict[str, Any]]:
     """Get OpenAI-compatible JSON schemas for all registered tools.
 
     Generates function metadata suitable for injection into LLM prompts
@@ -71,10 +71,10 @@ class ToolManager:
     Returns:
         List[dict]: OpenAI function calling format schemas for all tools
     """
-    return [tool.json for tool in self._tool_dict.values()]
+    return [tool.get_json_schema for tool in self._tool_dict.values()]
 
   @property
-  def mcp_json(self) -> List[dict[str, Any]]:
+  def get_mcp_schema(self) -> List[dict[str, Any]]:
     """Get MCP (Model Context Protocol) compatible tool metadata.
 
     Provides tool definitions in the standardized MCP format used by

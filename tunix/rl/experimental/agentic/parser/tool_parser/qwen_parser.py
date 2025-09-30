@@ -5,7 +5,7 @@ which involves XML-like tags around a JSON object.
 """
 
 import json
-from typing import Any, List
+from typing import Any
 
 from tunix.rl.experimental.agentic.parser.tool_parser import tool_parser_base
 from tunix.rl.experimental.agentic.tools import base_tool
@@ -36,13 +36,12 @@ class QwenToolParser(ToolParser):
         model_response (str): Text containing tool calls
 
     Returns:
-        ToolInputs: Parsed tool calls
+        list[ToolCall]: Parsed tool calls
     """
     tool_calls_dicts = self.parse_qwen_tool_calls(model_response)
-    tool_calls = [
-        ToolCall(name=tc["name"], arguments=tc["arguments"])
-        for tc in tool_calls_dicts
-    ]
+    # The keys in tool_calls_dicts ('name', 'arguments') match the arguments of
+    # the ToolCall constructor, so we can use dictionary unpacking.
+    tool_calls = [ToolCall(**tool_call) for tool_call in tool_calls_dicts]
     return tool_calls
 
   def parse_qwen_tool_calls(self, text: str) -> list[dict[str, Any]]:
@@ -92,11 +91,8 @@ class QwenToolParser(ToolParser):
 
   def get_tool_prompt(
       self,
-      tools: List[BaseTool],
-      *,
-      schema_style: str = "openai",
+      tools_schema: str,
   ) -> str:
-    tools_schema = self._tools_schema_dump(tools, schema_style=schema_style)
     return f"""
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
