@@ -159,7 +159,6 @@ class HyperParameters:
   def _validate_model_source(self, raw_keys: collections.OrderedDict[str, Any]):
     """Validate the checkpoint source and intermediate checkpoint."""
     model_config = raw_keys["model_config"]
-    logging.info("current model_config %s", model_config)
     model_source = model_config.get("model_source")
     intermediate_ckpt = model_config.get("intermediate_ckpt_dir")
 
@@ -271,7 +270,6 @@ class HyperParameters:
       schedule_kwargs = self._extract_kwargs(
           schedule_func, optimizer_config, config_path_info
       )
-      logging.info("schedule_kwargs: %s", schedule_kwargs)
       return schedule_func(**schedule_kwargs)
     elif schedule_type:
       raise ValueError(
@@ -518,7 +516,6 @@ class HyperParameters:
 
     # Check for conflicts and unknown keys.
     for k in raw_data_from_cmd_line:
-      logging.info("k %s", k)
       if not k:
         continue
       if k not in raw_data_from_yaml:
