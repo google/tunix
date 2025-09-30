@@ -17,7 +17,7 @@ jobs:
     name: Build package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -28,7 +28,7 @@ jobs:
         run: |
           python -m build
       - name: Store package artifacts
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275d9f445f53 # v4.4.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.4.0
         with:
           name: python-package
           path: dist/*
@@ -38,7 +38,7 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@v4 # v4.2.2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
