@@ -24,7 +24,7 @@ class CalculatorTool(BaseTool):
   """
 
   @property
-  def json(self) -> dict[str, Any]:
+  def get_json_schema(self) -> dict[str, Any]:
     """Generate OpenAI-compatible function schema for the calculator tool.
 
     Defines the tool's interface with strongly typed parameters and
