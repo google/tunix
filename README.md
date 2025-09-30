@@ -67,23 +67,16 @@ You can install Tunix in several ways:
 1. From PyPI (recommended):
 
 ```sh
-pip install tunix
+pip install "tunix[prod]"
 ```
 
-2. With development extras If you want to contribute or run tests and examples
-   locally:
-
-```
-pip install "tunix[dev]"
-```
-
-3. Directly from GitHub (latest main branch)
+2. Directly from GitHub (latest main branch)
 
 ```sh
 pip install git+https://github.com/google/tunix
 ```
 
-4. From source (editable install) If you plan to modify the codebase and run it
+3. From source (editable install) If you plan to modify the codebase and run it
    in development mode:
 
 ```sh
