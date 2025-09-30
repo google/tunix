@@ -26,7 +26,7 @@ import kagglehub
 from orbax import checkpoint as ocp
 import qwix
 from tunix.generate import tokenizer_adapter as tokenizer_lib
-from tunix.models.gemma import gemma as gemma_lib
+from tunix.models.gemma import model as gemma_lib
 from tunix.models.gemma import params as gemma_params_lib
 from tunix.models.gemma3 import model as gemma3_lib
 from tunix.models.gemma3 import params as gemma3_params_lib
@@ -407,8 +407,8 @@ def create_model(
   # gemma is ready.
   elif model_name.startswith('gemma') and model_source == 'kaggle':
 
-    # Download model from Kaggle requires NNX conversion and can takes long time.
-    # It is recommended to save the NNX converted model for later runs.
+    # Download model from Kaggle requires NNX conversion and can takes long
+    # time. It is recommended to save the NNX converted model for later runs.
     ckpt_path = _kaggle_pipeline(model_config)
     intermediate_ckpt_dir = model_config['intermediate_ckpt_dir']
     skip_nnx_conversion: bool = os.path.exists(intermediate_ckpt_dir)
