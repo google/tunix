@@ -22,7 +22,7 @@ dependencies = [
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax[tpu]<=0.7.1",
+  "jax[tpu]==0.7.1",
   "jaxtyping",
   "kagglehub",
   "omegaconf",
