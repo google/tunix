@@ -22,7 +22,7 @@ dependencies = [
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax[tpu]==0.7.1", # Newer libtpu version has some perf regression on cloud TPU, pin to 0.7.1 for now. b/448646341
+  "jax[tpu]>=0.6.0,<=0.7.1", # Newer libtpu version has some perf regression on cloud TPU, pin to <=0.7.1 for now. b/448646341
   "jaxtyping",
   "kagglehub",
   "omegaconf",
@@ -48,7 +48,7 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-    "flax>=0.12.0",
+    "flax>=0.11.2",
 ]
 dev = [
     "flax>=0.11.2",
