@@ -22,7 +22,7 @@ dependencies = [
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax[tpu]==0.7.1",
+  "jax[tpu]==0.7.1", # Newer libtpu version has some perf regression on cloud TPU, pin to 0.7.1 for now. b/448646341
   "jaxtyping",
   "kagglehub",
   "omegaconf",
