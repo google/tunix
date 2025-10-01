@@ -550,7 +550,7 @@ class RLCluster:
       if isinstance(value[0], str):
         continue  # jax.monitoring does not support string values.
       if op is None:
-        self._rl_metrics_logger.log(
+        self._rl_metrics_logger.log(  # pytype: disable=wrong-arg-types
             metric_name, value, metrics_buffer.mode, metrics_buffer.global_steps
         )
       else:
