@@ -36,6 +36,16 @@ if hasattr(flax.config, 'flax_always_shard_variable'):
   flax.config.update('flax_always_shard_variable', False)
 
 
+class AttentionType(enum.Enum):
+  GLOBAL = 1
+  LOCAL_SLIDING = 2
+
+
+class RematConfig(enum.Enum):
+  NONE = enum.auto()  # No remat, all activations will be stored in HBM.
+  BLOCK = enum.auto()  # Remat the entire attn block.
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
@@ -70,6 +80,107 @@ class ShardingConfig:
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
         score_weight_d1=(fsdp, None),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelConfig:
+  """Configuration for the gemma transformer."""
+
+  num_layers: int
+  num_embed: int
+  embed_dim: int
+  hidden_dim: int
+  num_heads: int
+  head_dim: int
+  num_kv_heads: int
+  final_logit_softcap: float | None
+  use_post_attn_norm: bool
+  use_post_ffw_norm: bool
+  attention_types: Iterable[AttentionType]
+  attn_logits_soft_cap: float | None = None
+  sliding_window_size: int | None = None
+  shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
+  remat_config: RematConfig = RematConfig.NONE
+
+  @classmethod
+  def gemma_2b(cls):
+    num_layers = 18
+    return cls(
+        num_layers=num_layers,
+        num_embed=256128,
+        embed_dim=2048,
+        hidden_dim=16384,
+        num_heads=8,
+        head_dim=256,
+        num_kv_heads=1,
+        final_logit_softcap=None,
+        attention_types=(AttentionType.GLOBAL,) * num_layers,
+        use_post_attn_norm=False,
+        use_post_ffw_norm=False,
+    )
+
+  @classmethod
+  def gemma_7b(cls):
+    num_layers = 28
+    return cls(
+        num_layers=num_layers,
+        num_embed=256128,
+        embed_dim=3072,
+        hidden_dim=24576,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=16,
+        final_logit_softcap=None,
+        attention_types=(AttentionType.GLOBAL,) * num_layers,
+        use_post_attn_norm=False,
+        use_post_ffw_norm=False,
+    )
+
+  @classmethod
+  def gemma2_2b(cls):
+    num_layers = 26
+    return cls(
+        num_layers=num_layers,
+        num_embed=256128,
+        embed_dim=2304,
+        hidden_dim=9216,
+        num_heads=8,
+        head_dim=256,
+        num_kv_heads=4,
+        final_logit_softcap=30.0,
+        attention_types=(
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.GLOBAL,
+        )
+        * int(num_layers / 2),
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        attn_logits_soft_cap=50.0,
+        sliding_window_size=4096,
+    )
+
+  @classmethod
+  def gemma2_9b(cls):
+    num_layers = 42
+    return cls(
+        num_layers=num_layers,
+        num_embed=256128,
+        embed_dim=3584,
+        hidden_dim=28672,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        final_logit_softcap=30.0,
+        attention_types=(
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.GLOBAL,
+        )
+        * int(num_layers / 2),
+        use_post_attn_norm=True,
+        use_post_ffw_norm=True,
+        attn_logits_soft_cap=50.0,
+        sliding_window_size=4096,
     )
 
 
@@ -169,11 +280,6 @@ def apply_rope(
 K_MASK = -2.3819763e38  # Set to a large negative number.
 
 
-class AttentionType(enum.Enum):
-  GLOBAL = 1
-  LOCAL_SLIDING = 2
-
-
 def _create_sliding_mask(
     segment_pos: jnp.ndarray,  # [B, seq_len]
     cache_len: int,
@@ -218,6 +324,7 @@ class Attention(nnx.Module):
       sliding_window_size: int | None = None,
       attn_logits_soft_cap: float | None = None,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      remat_config: RematConfig = RematConfig.BLOCK,
   ):
     if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
       raise ValueError(
@@ -228,6 +335,7 @@ class Attention(nnx.Module):
     self.attn_type = attn_type
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.shd_config = shd_config
+    self.remat_config = remat_config
     self.attn_vec_einsum = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(num_heads, head_dim, features),
@@ -257,8 +365,7 @@ class Attention(nnx.Module):
           else shd_config.kv_weight_cndh,
       )
 
-  @jax.named_scope('attention')
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -358,6 +465,19 @@ class Attention(nnx.Module):
       new_cache = None
 
     return new_cache, attn_output
+
+  @jax.named_scope('attention')
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
 
   @property
   def head_dim(self):
@@ -460,6 +580,7 @@ class Block(nnx.Module):
       attn_logits_soft_cap: float | None,
       sliding_window_size: int | None = None,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      remat_config: RematConfig = RematConfig.BLOCK,
   ):
     self.pre_attention_norm = RMSNorm(
         embed_dim, rngs=rngs, shd_config=shd_config
@@ -474,6 +595,7 @@ class Block(nnx.Module):
         sliding_window_size=sliding_window_size,
         rngs=rngs,
         shd_config=shd_config,
+        remat_config=remat_config,
     )
     if use_post_attn_norm:
       self.post_attn_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
@@ -552,106 +674,6 @@ class RMSNorm(nnx.Module):
     scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
     normed_inputs = normed_inputs * (1 + scale)
     return normed_inputs
-
-
-@dataclasses.dataclass(frozen=True)
-class ModelConfig:
-  """Configuration for the gemma transformer."""
-
-  num_layers: int
-  num_embed: int
-  embed_dim: int
-  hidden_dim: int
-  num_heads: int
-  head_dim: int
-  num_kv_heads: int
-  final_logit_softcap: float | None
-  use_post_attn_norm: bool
-  use_post_ffw_norm: bool
-  attention_types: Iterable[AttentionType]
-  attn_logits_soft_cap: float | None = None
-  sliding_window_size: int | None = None
-  shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
-
-  @classmethod
-  def gemma_2b(cls):
-    num_layers = 18
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=2048,
-        hidden_dim=16384,
-        num_heads=8,
-        head_dim=256,
-        num_kv_heads=1,
-        final_logit_softcap=None,
-        attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=False,
-        use_post_ffw_norm=False,
-    )
-
-  @classmethod
-  def gemma_7b(cls):
-    num_layers = 28
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=3072,
-        hidden_dim=24576,
-        num_heads=16,
-        head_dim=256,
-        num_kv_heads=16,
-        final_logit_softcap=None,
-        attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=False,
-        use_post_ffw_norm=False,
-    )
-
-  @classmethod
-  def gemma2_2b(cls):
-    num_layers = 26
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=2304,
-        hidden_dim=9216,
-        num_heads=8,
-        head_dim=256,
-        num_kv_heads=4,
-        final_logit_softcap=30.0,
-        attention_types=(
-            AttentionType.LOCAL_SLIDING,
-            AttentionType.GLOBAL,
-        )
-        * int(num_layers / 2),
-        use_post_attn_norm=True,
-        use_post_ffw_norm=True,
-        attn_logits_soft_cap=50.0,
-        sliding_window_size=4096,
-    )
-
-  @classmethod
-  def gemma2_9b(cls):
-    num_layers = 42
-    return cls(
-        num_layers=num_layers,
-        num_embed=256128,
-        embed_dim=3584,
-        hidden_dim=28672,
-        num_heads=16,
-        head_dim=256,
-        num_kv_heads=8,
-        final_logit_softcap=30.0,
-        attention_types=(
-            AttentionType.LOCAL_SLIDING,
-            AttentionType.GLOBAL,
-        )
-        * int(num_layers / 2),
-        use_post_attn_norm=True,
-        use_post_ffw_norm=True,
-        attn_logits_soft_cap=50.0,
-        sliding_window_size=4096,
-    )
 
 
 def _flatten_path(path: tuple[str | int, ...]) -> str:
@@ -803,14 +825,13 @@ class Transformer(nnx.Module, pytree=False):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.config = config
     self.embedder = Embedder(
         vocab_size=config.num_embed,
         embed_dim=config.embed_dim,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
     )
     self.layers = [
         Block(
@@ -825,14 +846,15 @@ class Transformer(nnx.Module, pytree=False):
             attn_logits_soft_cap=config.attn_logits_soft_cap,
             attn_type=attn_type,
             rngs=rngs,
-            shd_config=shd_config,
+            shd_config=config.shd_config,
+            remat_config=config.remat_config,
         )
         for _, attn_type in zip(
             range(config.num_layers), config.attention_types
         )
     ]
     self.final_norm = RMSNorm(
-        config.embed_dim, rngs=rngs, shd_config=shd_config
+        config.embed_dim, rngs=rngs, shd_config=config.shd_config
     )
     self.final_logits_softcap = config.final_logit_softcap
 

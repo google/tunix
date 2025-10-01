@@ -35,6 +35,11 @@ LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
+class RematConfig(enum.Enum):
+  NONE = enum.auto()  # No remat, all activations will be stored in HBM.
+  BLOCK = enum.auto()  # Remat the entire attn block.
+
+
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
@@ -100,6 +105,7 @@ class ModelConfig:
       QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM
   )
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
+  remat_config: RematConfig = RematConfig.NONE
 
   @classmethod
   def gemma3_1b(
@@ -348,6 +354,7 @@ class Attention(nnx.Module):
       rope_scale_factor: float,
       query_pre_attn_norm: QueryPreAttentionNormalisation,
       shd_config: ShardingConfig,
+      remat_config: RematConfig,
   ):
     if attn_type == AttentionType.LOCAL_SLIDING and sliding_window_size is None:
       raise ValueError(
@@ -360,6 +367,7 @@ class Attention(nnx.Module):
     self.rope_scale_factor = rope_scale_factor
     self.query_pre_attn_norm = query_pre_attn_norm
     self.shd_config = shd_config
+    self.remat_config = remat_config
     self.attn_vec_einsum = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(num_heads, head_dim, features),
@@ -392,8 +400,7 @@ class Attention(nnx.Module):
     self._query_norm = RMSNorm(head_dim, rngs=rngs)
     self._key_norm = RMSNorm(head_dim, rngs=rngs)
 
-  @jax.named_scope('attention')
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -496,6 +503,19 @@ class Attention(nnx.Module):
       new_cache = None
 
     return new_cache, attn_output
+
+  @jax.named_scope('attention')
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
 
   @property
   def head_dim(self):
@@ -615,6 +635,7 @@ class Block(nnx.Module):
       rope_scale_factor: float,
       query_pre_attn_norm: QueryPreAttentionNormalisation,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      remat_config: RematConfig = RematConfig.NONE,
   ):
     self.pre_attention_norm = RMSNorm(
         embed_dim, rngs=rngs, sharding=shd_config.rms_norm_weight
@@ -631,6 +652,7 @@ class Block(nnx.Module):
         query_pre_attn_norm=query_pre_attn_norm,
         rngs=rngs,
         shd_config=shd_config,
+        remat_config=remat_config,
     )
     self.post_attention_norm = RMSNorm(
         embed_dim, rngs=rngs, sharding=shd_config.rms_norm_weight
@@ -731,6 +753,7 @@ class Gemma3(nnx.Module, pytree=False):
             query_pre_attn_norm=config.query_pre_attn_norm,
             rngs=rngs,
             shd_config=config.shd_config,
+            remat_config=config.remat_config,
         )
         for _, attn_type in zip(
             range(config.num_layers), itertools.cycle(GEMMA3_ATTENTION_PATTERN)

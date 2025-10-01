@@ -15,6 +15,7 @@
 """Qwen2 model."""
 
 import dataclasses
+import enum
 from typing import Tuple
 
 import flax
@@ -29,6 +30,11 @@ K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+class RematConfig(enum.Enum):
+  NONE = enum.auto()  #  No remat, all activations will be stored in HBM.
+  BLOCK = enum.auto()  # Remat the entire attn block.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -87,6 +93,7 @@ class ModelConfig:
   norm_eps: float
   use_tied_embedding: bool = False
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
+  remat_config: RematConfig = RematConfig.NONE
 
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
@@ -273,32 +280,32 @@ class Attention(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
-    self.shd_config = shd_config
+    self.config = config
+    self.shd_config = config.shd_config
     self.q_proj = Einsum(
         einsum_str='BTD,DNH->BTNH',
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
-        sharding=shd_config.q_weight_ndh,
+        sharding=self.shd_config.q_weight_ndh,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_ndh,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_ndh,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
-        sharding=shd_config.o_weight_nhd,
+        sharding=self.shd_config.o_weight_nhd,
     )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
@@ -306,23 +313,22 @@ class Attention(nnx.Module):
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_heads * config.head_dim
         ),
-        sharding=shd_config.qkv_bias,
+        sharding=self.shd_config.qkv_bias,
     )
     self.k_bias = nnx.Param(
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_kv_heads * config.head_dim
         ),
-        sharding=shd_config.qkv_bias,
+        sharding=self.shd_config.qkv_bias,
     )
     self.v_bias = nnx.Param(
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_kv_heads * config.head_dim
         ),
-        sharding=shd_config.qkv_bias,
+        sharding=self.shd_config.qkv_bias,
     )
 
-  @jax.named_scope('attention')
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -403,6 +409,19 @@ class Attention(nnx.Module):
 
     return new_cache, outputs
 
+  @jax.named_scope('attention')
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array | None,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.config.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
+
   @property
   def head_dim(self):
     return self.o_proj.shape[1]
@@ -424,9 +443,8 @@ class MLP(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
-    self.shd_config = shd_config
+    self.shd_config = config.shd_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=config.embed_dim,
@@ -434,7 +452,7 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_df
+            kernel_init_fn, self.shd_config.ffw_weight_df
         ),
     )
     self.up_proj = nnx.Linear(
@@ -443,7 +461,7 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_df
+            kernel_init_fn, self.shd_config.ffw_weight_df
         ),
     )
     self.down_proj = nnx.Linear(
@@ -452,7 +470,7 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_fd
+            kernel_init_fn, self.shd_config.ffw_weight_fd
         ),
     )
 
@@ -472,29 +490,26 @@ class DecoderLayer(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.input_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
     )
     self.attn = Attention(
         config=config,
         rngs=rngs,
-        shd_config=shd_config,
     )
     self.post_attention_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=config.shd_config,
     )
     self.mlp = MLP(
         config=config,
         rngs=rngs,
-        shd_config=shd_config,
     )
 
   def __call__(
@@ -537,8 +552,7 @@ class Qwen2(nnx.Module):
         shd_config=shd_config,
     )
     self.layers = nnx.List([
-        DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
-        for _ in range(config.num_layers)
+        DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(
         config.embed_dim,

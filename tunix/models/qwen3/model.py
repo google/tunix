@@ -15,6 +15,7 @@
 """Qwen3 model."""
 
 import dataclasses
+import enum
 from typing import Tuple
 
 import flax
@@ -33,6 +34,11 @@ K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+class RematConfig(enum.Enum):
+  NONE = enum.auto()  # No remat, all activations will be stored in HBM.
+  BLOCK = enum.auto()  # Remat the entire attn block.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -90,6 +96,7 @@ class ModelConfig:
   num_experts: int | None = None
   num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
+  remat_config: RematConfig = RematConfig.NONE
 
   @classmethod
   def qwen3_0_6b(cls):  # qwen3-0.6B
@@ -268,50 +275,49 @@ class Attention(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
-    self.shd_config = shd_config
+    self.config = config
+    self.shd_config = config.shd_config
     self.q_proj = Einsum(
         einsum_str='BTD,DNH->BTNH',
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
-        sharding=shd_config.q_weight_ndh,
+        sharding=self.shd_config.q_weight_ndh,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_ndh,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_ndh,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
-        sharding=shd_config.o_weight_nhd,
+        sharding=self.shd_config.o_weight_nhd,
     )
     self.q_norm = RMSNorm(
         config.head_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=self.shd_config,
     )
     self.k_norm = RMSNorm(
         config.head_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=self.shd_config,
     )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
 
-  @jax.named_scope('attention')
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -384,6 +390,19 @@ class Attention(nnx.Module):
 
     return new_cache, outputs
 
+  @jax.named_scope('attention')
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array | None,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.config.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
+
   @property
   def head_dim(self):
     return self.o_proj.shape[1]
@@ -405,9 +424,8 @@ class MoELayer(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
-    self.shd_config = shd_config
+    self.shd_config = config.shd_config
     self.experts_per_tok = config.num_experts_per_tok
     self.num_experts = config.num_experts
     self.router = nnx.Linear(
@@ -421,21 +439,21 @@ class MoELayer(nnx.Module):
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
-        sharding=shd_config.exp_weight_cdf,
+        sharding=self.shd_config.exp_weight_cdf,
     )
     self.up_proj = nnx.Param(
         nnx.initializers.normal()(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
-        sharding=shd_config.exp_weight_cdf,
+        sharding=self.shd_config.exp_weight_cdf,
     )
     self.down_proj = nnx.Param(
         nnx.initializers.normal()(
             rngs.params(),
             (config.num_experts, config.hidden_dim, config.embed_dim),
         ),
-        sharding=shd_config.exp_weight_cfd,
+        sharding=self.shd_config.exp_weight_cfd,
     )
 
   def __call__(self, x):
@@ -484,9 +502,8 @@ class MLP(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
-    self.shd_config = shd_config
+    self.shd_config = config.shd_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=config.embed_dim,
@@ -494,7 +511,7 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_df
+            kernel_init_fn, self.shd_config.ffw_weight_df
         ),
     )
     self.up_proj = nnx.Linear(
@@ -503,7 +520,7 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_df
+            kernel_init_fn, self.shd_config.ffw_weight_df
         ),
     )
     self.down_proj = nnx.Linear(
@@ -512,7 +529,7 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_fd
+            kernel_init_fn, self.shd_config.ffw_weight_fd
         ),
     )
 
@@ -543,7 +560,6 @@ class DecoderLayer(nnx.Module):
     self.attn = Attention(
         config=config,
         rngs=rngs,
-        shd_config=shd_config,
     )
     self.post_attention_layernorm = RMSNorm(
         config.embed_dim,
@@ -555,13 +571,11 @@ class DecoderLayer(nnx.Module):
       self.mlp = MLP(
           config=config,
           rngs=rngs,
-          shd_config=shd_config,
       )
     else:
       self.mlp = MoELayer(
           config=config,
           rngs=rngs,
-          shd_config=shd_config,
       )
 
   def __call__(
