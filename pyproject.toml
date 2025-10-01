@@ -1,6 +1,6 @@
 [project]
 name = "google-tunix"
-version = "0.1.0"
+version = "0.1.1"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
@@ -22,8 +22,7 @@ dependencies = [
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax",
-  "jax[tpu]",
+  "jax[tpu]<=0.7.1",
   "jaxtyping",
   "kagglehub",
   "omegaconf",
