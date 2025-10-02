@@ -98,7 +98,7 @@ jobs:
       run: |
         # RL common tests that passed
         # b/448133814: test_grpo_with_lora_model fails
-        python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model"
+        python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/experimental/agentic
 
     - name: Run tunix tests not covered by the above categories
       run: |

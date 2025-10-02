@@ -26,6 +26,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -37,6 +38,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install google_tunix-*-py3-none-any.whl
+          python -m pip install pytest
       - name: Verify Tunix imports from installed package
         run: |
           python3 -c "
@@ -50,3 +52,6 @@ jobs:
           assert tunix.__version__ != '0.0.0.dev0', 'Tunix version not set correctly'
           print('All tunix modules imported successfully and version is', tunix.__version__)
           "
+      - name: Run agentic RL tests
+        run: |
+          python -m pytest tests/rl/experimental/agentic/ -v --tb=short
