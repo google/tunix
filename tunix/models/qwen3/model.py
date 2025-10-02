@@ -25,6 +25,8 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.utils import container
+
 
 if hasattr(flax.config, 'flax_always_shard_variable'):
   flax.config.update('flax_always_shard_variable', False)
@@ -617,7 +619,7 @@ class Qwen3(nnx.Module, pytree=False):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.layers = nnx.List([
+    self.layers = container.ModuleList([
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
         for _ in range(config.num_layers)
     ])

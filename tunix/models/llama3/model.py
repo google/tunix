@@ -26,6 +26,8 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.utils import container
+
 
 K_MASK = -2.3819763e38
 
@@ -502,7 +504,7 @@ class Llama3(nnx.Module):
         rngs=rngs,
         shd_config=config.shd_config,
     )
-    self.layers = nnx.List([
+    self.layers = container.ModuleList([
         DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(
