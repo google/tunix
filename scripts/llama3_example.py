@@ -13,8 +13,7 @@
 # limitations under the License.
 
 """Example of using tunix to load and run Llama3 models."""
-import sys
-sys.path.insert(0, "/home/grads/tianjiao/tunix")
+
 import os
 import tempfile
 
