@@ -1,5 +1,11 @@
 # Tunix: A JAX-native LLM Post-Training Library
 
+<div align="left">
+
+<a href="https://tunix.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/documentation-blue"></a>
+
+</div>
+
 **Tunix(Tune-in-JAX)** is a JAX based library designed to streamline the
 post-training of Large Language Models. It provides efficient and scalable
 supports for:
