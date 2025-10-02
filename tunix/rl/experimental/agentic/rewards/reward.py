@@ -68,20 +68,6 @@ def get_reward_fn(name: str):
   return _REGISTRY[name]
 
 
-@register("zero")
-def zero_reward() -> RewardOutput:
-  """Baseline reward function that always returns zero.
-
-  Used as a control baseline in experiments or placeholder during development.
-
-  Args: None
-
-  Returns:
-      RewardOutput: Zero reward with empty metadata
-  """
-  return RewardOutput(0.0, {})
-
-
 @register("exact_match")
 def exact_match(task: Dict[str, Any], action: str) -> RewardOutput:
   """Binary reward based on exact string matching with ground truth.
@@ -132,7 +118,7 @@ def combine_rewards(
 
 # -------- Example Reward Function --------
 @register("is_two")
-def is_two_reward(action: str) -> RewardOutput:
+def is_two_reward(task: Dict[str, Any], action: str) -> RewardOutput:
   """Specialized reward function that checks if action represents the number 2.
 
   Attempts to parse the action as numeric value and returns 1.0 if it equals
@@ -151,3 +137,44 @@ def is_two_reward(action: str) -> RewardOutput:
   except ValueError:
     score = 0.0
   return RewardOutput(score, {"is_two": score})
+
+
+@register("dummy")
+def dummy_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+  """A dummy reward function that always returns zero."""
+  return RewardOutput(0.0, {})
+
+
+@register("calculate")
+def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+  """Calculates the reward for a math expression based on answer correctness.
+
+  WARNING: Uses eval(), which is NOT SAFE for untrusted input. This is only for
+  feature testing.
+
+  Args:
+    task: The task context containing the 'question' field.
+    action: The model's answer as a string.
+
+  Returns:
+    RewardOutput: 1.0 if the model's answer matches the evaluated expression
+      within a tolerance, 0.0 otherwise.
+  """
+  question_str = task.get("question", "")
+  expression = question_str.replace("=?", "").replace("=", "").strip()
+
+  try:
+    answer_str = (
+        action.replace("The answer is ", "").strip().rstrip(".")
+    )
+    answer = float(answer_str)
+    correct_value = eval(expression)
+    tolerance = 1e-6
+    if abs(correct_value - answer) < tolerance:
+      score = 1.0
+    else:
+      score = 0.0
+
+  except Exception:
+    score = 0.0
+  return RewardOutput(score, {"calculate_correct": score})
