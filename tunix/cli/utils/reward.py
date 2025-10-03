@@ -68,29 +68,36 @@ def check_answer(prompts, completions, answer, **kwargs):
 
   scores = []
   for guess, true_answer in zip(extracted_responses, answer):
-    score = 0
     if guess is None:
-      scores.append(0)
-      continue
+      score = 0
     # Correct answer gets 3 points!
-    if guess == true_answer:
-      score += 3.0
-    # Match if spaces are seen
+    elif guess == true_answer:
+      score = 3.0
+      # Match if spaces are seen
     elif guess.strip() == true_answer.strip():
-      score += 1.5
+      score = 1.5
     else:
       # Reward it if the answer is close via ratios!
       # Ie if the answer is within some range, reward it!
       try:
-        ratio = float(guess) / float(true_answer)
-        if ratio >= 0.9 and ratio <= 1.1:
-          score += 0.5
-        elif ratio >= 0.8 and ratio <= 1.2:
-          score += 0.25
+        true_answer_num = float(true_answer)
+        guess_num = float(guess)
+        # If the numbers are exactly the same, then it's a perfect match!
+        if true_answer_num == guess_num:
+          score = 3.0
         else:
-          score -= 1.0  # Penalize wrong answers
-      except (ValueError, ZeroDivisionError):
-        score -= 0.5  # Penalize
+          try:
+            ratio = guess_num / true_answer_num
+            if ratio >= 0.9 and ratio <= 1.1:
+              score = 0.5
+            elif ratio >= 0.8 and ratio <= 1.2:
+              score = 0.25
+            else:
+              score = -1.0  # Penalize wrong answers
+          except ZeroDivisionError:
+            score = -0.5  # Penalize
+      except ValueError:
+        score = -0.5  # Penalize
     scores.append(score)
   return scores
 
