@@ -671,6 +671,12 @@ class Sampler(base_sampler.BaseSampler):
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
     """
+
+    if isinstance(input_strings, str):
+      raise ValueError(
+          'input_strings must be a sequence of strings, not a single string.'
+      )
+
     forbidden_token_ids = None
     if forbidden_tokens is not None:
       forbidden_token_ids = []
