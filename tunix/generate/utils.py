@@ -19,7 +19,7 @@ import functools
 import gc
 import logging
 import re
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from flax import nnx
 import jax
@@ -385,6 +385,210 @@ def build_flat_dict(
   return new_flat_dict
 
 
+class ShapeMismatchError(ValueError):
+  """Raised when source and target shapes are incompatible."""
+
+  pass
+
+
+class MappingError(ValueError):
+  """Raised when key mappings are invalid or missing."""
+
+  pass
+
+
+def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
+  """Returns index of the 'layer' axis in sharding_spec, or None if not found."""
+  if isinstance(sharding_spec, (list, tuple)):
+    for i, spec in enumerate(sharding_spec):
+      if spec == 'layer':
+        return i
+  return None
+
+
+def _unroll_scanned_layers(
+    src_state: Any,
+    src_to_tgt_map: Dict,
+) -> Dict[Tuple[str, str], Tuple[Any, Any]]:
+  """Unroll scanned layers from source state and map to target keys.
+
+  Args:
+      src_state: Source state to unroll.
+      src_to_tgt_map: Mapping from flat source keys to (target_param,
+        target_path, sharding_spec).
+
+  Returns:
+      Dictionary mapping (src_key, tgt_key) to (value, target_param).
+  """
+
+  unscanned_flat = {}
+
+  for src_keys, src_val in src_state.flat_state():
+    src_key = '.'.join(str(k) for k in src_keys)
+
+    # Skip RNG parameters silently
+    if 'rng' in src_key:
+      logging.debug('Skipping RNG parameter: %s', src_key)
+      continue
+
+    # Validate mapping exists
+    if src_key not in src_to_tgt_map:
+      logging.error('No mapping for source key: %s', src_key)
+      continue
+
+    tgt_param, tgt_path, sharding_spec = src_to_tgt_map[src_key]
+
+    # Check if this is a scanned layer that needs unrolling
+    layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
+
+    if layer_axis is not None:
+      # Unroll the scanned layer dimension
+      num_layers = src_val.value.shape[layer_axis]
+      for i in range(num_layers):
+        idx = [slice(None)] * src_val.value.ndim
+        idx[layer_axis] = i
+        layer_val = src_val.value[tuple(idx)]
+        layer_key = tgt_path[i]
+        unscanned_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
+    else:
+      # No unrolling needed
+      unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
+
+  return unscanned_flat
+
+
+def _apply_transpose(
+    val: jnp.ndarray,
+    src_key: str,
+    transpose_keys: Optional[Dict[str, Tuple[int, ...]]],
+) -> jnp.ndarray:
+  """Apply transpose operation if configured for this key."""
+  if not transpose_keys:
+    return val
+
+  last_key = src_key.split('.')[-1]
+  if last_key in transpose_keys and 'lora' not in last_key:
+    logging.debug('Applying transpose on %s', src_key)
+    return jnp.transpose(val, transpose_keys[last_key])
+
+  return val
+
+
+def _reshape_attention_bias(
+    val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
+) -> jnp.ndarray:
+  """Reshape attention bias tensors with special handling.
+
+  Args:
+      val: Value to reshape.
+      tgt_shape: Target shape.
+      src_key: Source key for error messages.
+
+  Returns:
+      Reshaped value.
+
+  Raises:
+      ShapeMismatchError: If reshaping is not possible.
+  """
+  if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
+    new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
+    logging.debug(
+        'Reshaping attention bias on %s: %s -> %s',
+        src_key,
+        val.shape,
+        new_shape,
+    )
+    return jnp.reshape(val, new_shape)
+
+  raise ShapeMismatchError(
+      f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
+  )
+
+
+def _align_shape(
+    val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
+) -> jnp.ndarray:
+  """Align source value shape to target shape through padding or repeating.
+
+  Args:
+      val: Source value.
+      tgt_shape: Target shape.
+      src_key: Source key for error messages.
+
+  Returns:
+      Shape-aligned value.
+
+  Raises:
+      ShapeMismatchError: If shapes cannot be aligned.
+  """
+  if val.shape == tgt_shape:
+    return val
+
+  # Handle rank mismatch
+  if len(val.shape) != len(tgt_shape):
+    return _reshape_attention_bias(val, tgt_shape, src_key)
+
+  original_shape = val.shape
+  # Check if this is an attention weight that can be padded/repeated
+  attention_patterns = [r'.*(q|k|v|o)_proj.*', r'.*(key|query|value|output).*']
+  if not any(re.match(pattern, src_key) for pattern in attention_patterns):
+    raise ShapeMismatchError(
+        f'Shape mismatch for non-attention weight {src_key}: '
+        f'{val.shape} vs {tgt_shape}. Padding/repetition only supported '
+        'for attention weights.'
+    )
+  # Align each dimension
+  pad_width = []
+  repeat_ops = []
+  for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, tgt_shape)):
+    if src_dim < tgt_dim:
+      if i == len(val.shape) - 1:
+        # Head dimension: pad with zeros
+        pad_width.append((0, tgt_dim - src_dim))
+      else:
+        # Num heads dimension: repeat weights
+        repeat_factor = tgt_dim // src_dim
+        if tgt_dim % src_dim != 0:
+          raise ShapeMismatchError(
+              f'Target dimension {tgt_dim} is not divisible by source '
+              f'dimension {src_dim} for {src_key}'
+          )
+        repeat_ops.append((i, repeat_factor))
+        pad_width.append((0, 0))
+    elif src_dim > tgt_dim:
+      raise ShapeMismatchError(
+          f'Cannot shrink dimension {i} for {src_key}: {src_dim} -> {tgt_dim}'
+      )
+    else:
+      pad_width.append((0, 0))
+
+  logging.info(
+      'Resolved shape mismatch on %s: %s -> %s',
+      src_key,
+      original_shape,
+      tgt_shape,
+  )
+
+  for axis, repeat_factor in repeat_ops:
+    val = jnp.repeat(val, repeat_factor, axis=axis)
+  return jnp.pad(val, pad_width)
+
+
+def _apply_dtype_cast(
+    val: jnp.ndarray, tgt_dtype: jnp.dtype, src_key: str
+) -> jnp.ndarray:
+
+  if val.dtype != tgt_dtype:
+    logging.warning(
+        'Type mismatch on %s: %s -> %s',
+        src_key,
+        val.dtype,
+        tgt_dtype,
+    )
+    return val.astype(tgt_dtype)
+  return val
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
@@ -411,118 +615,54 @@ def transfer_state_with_mappings(
   Returns:
     The target state with the transferred values.
   """
+  # Get flat target state
   tgt_flat_list = dst_state.flat_state()
+  # Build sharding dictionary if resharding is needed
   sharding_dict = None
   if reshard_fn:
-    sharding_dict = dict(
-        [(key, tgt_params.value.sharding) for key, tgt_params in tgt_flat_list]
-    )
+    sharding_dict = {
+        key: tgt_params.value.sharding for key, tgt_params in tgt_flat_list
+    }
 
-  # Maps source keys to target tensor(s) and sharding spec
+  # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
-  # Flatten the source state, unrolling any scanned layers.
-  unscanned_src_to_tgt_flat = {}
-  for src_keys, src_val in src_state.flat_state():
-    src_key = '.'.join(str(k) for k in src_keys)
-    if src_key not in src_to_tgt_map:
-      if 'rng' in src_key:
-        logging.debug('Skipping RNG parameter: %s', src_key)
-      else:
-        logging.error('!!! No mapping for source key: %s', src_key)
-      continue
+  # Unroll scanned layers and flatten source state
+  unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
 
-    tgt_param, tgt_path, sharding_spec = src_to_tgt_map[src_key]
-
-    def _get_layer_axis_from_sharding_spec(sharding_spec):
-      if isinstance(sharding_spec, (list, tuple)):
-        for i, spec in enumerate(sharding_spec):
-          if spec == 'layer':
-            return i
-      return None
-
-    layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
-    if layer_axis is not None:
-      num_layers = src_val.value.shape[layer_axis]
-      for i in range(num_layers):
-        idx = [slice(None)] * src_val.value.ndim
-        idx[layer_axis] = i
-        layer_val = src_val.value[tuple(idx)]
-        # Construct the flattened key, e.g. layers.0.attention.wq
-        layer_key = tgt_path[i]
-        unscanned_src_to_tgt_flat[(src_key, layer_key)] = (
-            layer_val,
-            tgt_param[i],
-        )
-    else:
-      unscanned_src_to_tgt_flat[(src_key, tgt_path)] = (
-          src_val.value,
-          tgt_param,
-      )
+  # Transfer values with transformations
   for (flat_src_key, tgt_key), (
       val,
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
-    last_key = flat_src_key.split('.')[-1]
-    if (
-        transpose_keys
-        and (last_key in transpose_keys)
-        and 'lora' not in last_key
-    ):
-      val = jnp.transpose(val, transpose_keys[last_key])
-    # Optional hook fn
+    # Apply transpose if configured
+    val = _apply_transpose(val, flat_src_key, transpose_keys)
+
+    # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
       val = key_mapping_hook_fns[flat_src_key](val)
-    if tgt_param.value.shape != val.shape:
-      if len(val.shape) != len(tgt_param.value.shape):
-        if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(flat_src_key):
-          new_shape = (
-              tgt_param.value.shape[0],
-              val.shape[0] // tgt_param.value.shape[0],
-          )
-          val = jnp.reshape(val, new_shape)
-        else:
-          raise ValueError(
-              f'Rank mismatch for {tgt_key}: {val.shape} vs '
-              f'{tgt_param.value.shape}'
-          )
-      pad_width = []
-      for src_dim, tgt_dim in zip(val.shape, tgt_param.value.shape):
-        if src_dim < tgt_dim:
-          pad_width.append((0, tgt_dim - src_dim))
-        elif src_dim > tgt_dim:
-          raise ValueError(
-              f'Cannot shrink shape for {flat_src_key}: {val.shape} ->'
-              f' {tgt_param.value.shape}'
-          )
-        else:
-          pad_width.append((0, 0))
-      val = jnp.pad(val, pad_width)
 
-    # Type cast
-    if tgt_param.value.dtype != val.dtype:
-      logging.warning(
-          'Type mismatch on %s: %s -> %s',
-          flat_src_key,
-          val.dtype,
-          tgt_param.value.dtype,
-      )
-      val = val.astype(tgt_param.value.dtype)
+    # Align shapes (padding/repeating as needed)
+    val = _align_shape(val, tgt_param.value.shape, flat_src_key)
+
+    # Cast to target dtype
+    val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
+
+    # Assign transformed value
     tgt_param.value = val
 
+  # Clean up memory
   del unscanned_src_to_tgt_flat
   gc.collect()
 
-  # Batch reshard and assign
+  # Batch reshard and assign if resharding is configured
   if reshard_fn:
-    tgt_flat_dict = dict(
-        [(key, tgt_params.value) for key, tgt_params in tgt_flat_list]
-    )
+    tgt_flat_dict = {key: tgt_params.value for key, tgt_params in tgt_flat_list}
     resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
+
     for tgt_key, tgt_param in tgt_flat_list:
-      assert (
-          tgt_key in resharded_values_flat_dict
-      ), f'Key {tgt_key} not in resharded values'
+      if tgt_key not in resharded_values_flat_dict:
+        raise MappingError(f'Key {tgt_key} not found in resharded values')
       tgt_param.value = resharded_values_flat_dict[tgt_key]
 
   return dst_state.from_flat_path(tgt_flat_list)
