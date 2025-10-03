@@ -144,6 +144,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       args["additional_config"][
           "lora_config"
       ] = config.mapping_config.lora_config
+    device_indexes = config.mesh.device_ids.flatten().tolist()
+    args["additional_config"]["sharding"] = {
+        "sharding_strategy": {"device_indexes": device_indexes}
+    }
     return args
 
   @property
