@@ -48,6 +48,8 @@ jobs:
   tunix_tpu_tests:
     needs: build_tunix_package
     uses: ./.github/workflows/tpu-tests.yml
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
