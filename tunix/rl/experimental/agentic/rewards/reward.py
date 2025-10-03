@@ -161,7 +161,7 @@ def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
       within a tolerance, 0.0 otherwise.
   """
   question_str = task.get("question", "")
-  expression = question_str.replace("=?", "").replace("=", "").strip()
+  expression = question_str.replace("= ?", "").replace("=", "").strip()
 
   try:
     answer_str = (
