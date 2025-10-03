@@ -138,13 +138,9 @@ def find_first_eos_idx(ids, eos_id):
   """Finds the index of the first EOS token."""
   assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
   mask = ids == eos_id
-
-  return lax.cond(
-      jnp.any(mask),
-      lambda operands: jnp.argmax(operands[0]),
-      lambda operands: operands[1].shape[0],
-      (mask, ids),
-  )
+  first_idx = jnp.argmax(mask)
+  is_eos_present = mask[first_idx]
+  return jnp.where(is_eos_present, first_idx, ids.shape[0])
 
 
 def find_last_non_pad_idx(ids, pad_id):
