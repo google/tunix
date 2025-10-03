@@ -19,6 +19,10 @@ name: TPU Tests
 
 on:
   workflow_call:
+    secrets:
+      HF_TOKEN:
+        required: true
+        description: 'HuggingFace token for model downloads'
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
@@ -44,7 +48,7 @@ jobs:
     - name: Install tunix dependencies
       run: |
         pip install -e .
-        pip install pytest pytest-xdist
+        pip install pytest pytest-xdist jinja2
 
     - name: Verify TPU availability
       run: |
@@ -100,6 +104,40 @@ jobs:
         # b/448133814: test_grpo_with_lora_model fails
         python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/experimental/agentic
 
+    - name: GRPO Integration Test
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        
+        # Download GSM8K dataset
+        mkdir -p /tmp/grpo_test/rl/grpo/data
+        python3 -c "
+        from datasets import load_dataset
+        import json
+        
+        # Download and save GSM8K train split
+        dataset = load_dataset('openai/gsm8k', 'main', split='train')
+        train_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
+        with open('/tmp/grpo_test/rl/grpo/data/gsm8k_train.json', 'w') as f:
+            json.dump(train_data, f)
+        
+        # Download and save GSM8K test split
+        dataset = load_dataset('openai/gsm8k', 'main', split='test')
+        test_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
+        with open('/tmp/grpo_test/rl/grpo/data/gsm8k_test.json', 'w') as f:
+            json.dump(test_data, f)
+        
+        print('GSM8K dataset downloaded successfully')
+        "
+        
+        # Run GRPO demo script with minimal configuration
+        python3 scripts/grpo_demo_llama3_qwen2.py \
+          --root-dir=/tmp/grpo_test \
+          --model-version=Qwen/Qwen2.5-0.5B-Instruct \
+          --num-batches=8 \
+          --num-test-batches=4 \
+          --rollout-engine=vanilla
+
     - name: Run tunix tests not covered by the above categories
       run: |
         # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
@@ -110,3 +148,4 @@ jobs:
         else
           exit "${code:-0}"
         fi
+
