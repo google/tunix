@@ -6,17 +6,19 @@ import logging
 from typing import Any
 import uuid
 
+from tunix.rl.experimental.agentic.agents import agent_types
 from tunix.rl.experimental.agentic.agents import base_agent
 from tunix.rl.experimental.agentic.parser.tool_parser import tool_parser_base
 from tunix.rl.experimental.agentic.parser.tool_parser import tool_parser_registry
 from tunix.rl.experimental.agentic.tools import base_tool
 from tunix.rl.experimental.agentic.tools import tool_manager
 
+
 ToolManager = tool_manager.ToolManager
 BaseTool = base_tool.BaseTool
 ToolParser = tool_parser_base.ToolParser
-Trajectory = base_agent.Trajectory
-Step = base_agent.Step
+Trajectory = agent_types.Trajectory
+Step = agent_types.Step
 LLMBaseAgent = base_agent.LLMBaseAgent
 Action = base_agent.Action
 get_tool_parser = tool_parser_registry.get_tool_parser
@@ -45,7 +47,7 @@ class ToolAgent(LLMBaseAgent):
   def __init__(
       self,
       system_prompt: str,
-      model_parser_name: str = "qwen",
+      tool_parser_name: str = "qwen",
       tool_map: dict[str, type[BaseTool]] | None = None,
   ):
     """Initialize the ToolAgent with system prompt, parser, and tool configuration.
@@ -54,7 +56,7 @@ class ToolAgent(LLMBaseAgent):
         system_prompt (str): Base system prompt that defines the agent's
           behavior and instructions. Will be combined with auto-generated tool
           documentation.
-        model_parser_name (str): Name of the tool parser to use for extracting
+        tool_parser_name (str): Name of the tool parser to use for extracting
           tool calls from LLM responses. Must be registered in the tool parser
           registry.
         tool_map (dict[str, type[BaseTool]] | None): Mapping of tool names to
@@ -67,12 +69,12 @@ class ToolAgent(LLMBaseAgent):
     self.tool_manager = ToolManager(tool_map=tool_map or {})
 
     # Parser component for converting LLM responses to structured tool calls
-    parser_cls: type[ToolParser] = get_tool_parser(model_parser_name)
+    parser_cls: type[ToolParser] = get_tool_parser(tool_parser_name)
     self.tool_parser = parser_cls()
 
     # Generate tool documentation by injecting JSON Schema into parser template
-    tools_json = json.dumps(self.tool_manager.json, indent=2)
-    self.tools_prompt = self.tool_parser.get_tool_prompt(tools_json)
+    tools_schema = json.dumps(self.tool_manager.get_json_schema, indent=2)
+    self.tools_prompt = self.tool_parser.get_tool_prompt(tools_schema)
 
     # Internal state management
     self._trajectory = Trajectory()
@@ -151,7 +153,7 @@ class ToolAgent(LLMBaseAgent):
         # Handle structured tool execution results
         for call_id, output in observation["tool_outputs"].items():
           self._messages.append({
-              "role": "user",
+              "role": "tool",
               "tool_call_id": call_id,
               "content": "Tool returned result: " + output,
           })
