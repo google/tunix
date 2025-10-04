@@ -35,6 +35,10 @@ from tunix.cli.utils import model
         model_name="gemma3-1b",
     ),
     dict(
+        testcase_name="gemma3-270m",
+        model_name="gemma3-270m",
+    ),
+    dict(
         testcase_name="llama3.2-1b",
         model_name="llama3.2-1b",
     ),

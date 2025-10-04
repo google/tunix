@@ -109,6 +109,26 @@ class ModelConfig:
   param_dtype: jnp.dtype = jnp.bfloat16
 
   @classmethod
+  def gemma3_270m(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-270M text-only config."""
+    return cls(
+        num_layers=18,
+        num_embed=262144,
+        embed_dim=640,
+        hidden_dim=2048,
+        num_heads=4,
+        head_dim=256,
+        num_kv_heads=1,
+        sliding_window_size=512,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+        shd_config=sharding_config,
+    )
+
+  @classmethod
   def gemma3_1b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
