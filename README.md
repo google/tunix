@@ -59,7 +59,7 @@ Tunix is still under development, here's a glimpse of the current features:
   - Multi-turn & multi-step support
   - Tool usage
 - **Advanced Algorithms:**
-  - Addtional state-of-the-art RL and distillation algorithms
+  - Additional state-of-the-art RL and distillation algorithms
 - **Scalability:**
   - Multi-host distributed training
   - Optimized rollout with vLLM
@@ -106,7 +106,7 @@ To setup Jupyter notebook on single host GCP TPU VM, please refer to the
 We plan to provide clear, concise documentation and more examples in the near
 future.
 
-## Contributing and Feedbacks
+## Contributing and Feedback
 
 We welcome contributions! As Tunix is in early development, the contribution
 process is still being formalized. A rough draft of the contribution process is
