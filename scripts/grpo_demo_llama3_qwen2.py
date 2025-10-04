@@ -256,12 +256,22 @@ def delete_directory(path: str):
 delete_directory(CKPT_DIR)
 
 for name, obj in list(globals().items()):
-  if isinstance(obj, jnp.ndarray):
-    del globals()[name]
-gc.collect()
-
-
-# Download data
+  modes = {
+      'train': train,
+      'eval': eval,
+      'finetune': finetune,
+  }
+  if FLAGS.mode in modes:
+    modes[FLAGS.mode]()
+  else:
+    raise ValueError(
+        f'Invalid mode: {FLAGS.mode}. Must be one of [train, eval, finetune]'
+    )
+    modes[FLAGS.mode]()
+  else:
+    raise ValueError(
+        f'Invalid mode: {FLAGS.mode}. Must be one of [train, eval, finetune]'
+    )
 def download_hf_checkpoint(repo_id, local_dir):
   all_files = huggingface_hub.list_repo_files(repo_id)
   filtered_files = [f for f in all_files if not f.startswith("original/")]
