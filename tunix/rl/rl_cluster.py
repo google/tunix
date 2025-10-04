@@ -35,6 +35,7 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
@@ -624,6 +625,39 @@ class RLCluster:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
       self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
+
+  def generate_with_chat_template(
+      self,
+      messages: list[dict[str, str]],
+      mode: Any = "train",
+  ) -> str:
+    """Generates text from messages with a chat template.
+
+    Args:
+      messages: A list of message dictionaries, each containing 'role' and
+        'content'.
+      mode: The mode of rollout, either TRAIN or EVAL.
+
+    Returns:
+      The generated text.
+    """
+    if self.tokenizer is None:
+      raise ValueError("Tokenizer must be initialized to use chat templates.")
+
+    formatted_prompt = self.tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=False,
+    )
+
+    rollout_output = self.generate(
+        prompts=[formatted_prompt],
+        mode=Mode(mode),
+        micro_batch_size=self.cluster_config.training_config.rollout_micro_batch_size,
+    )
+
+    return rollout_output.text[0]
 
   def generate(
       self,
