@@ -12,6 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+# Secure whitelist for global access - only contains safe items
+
+# Secure whitelist for global access - only contains safe items
+allowed_globals = {
+    # Add specific global items that need to be accessed dynamically
+    # Example: 'function_name': function_name,
+    # Example: 'variable_name': variable_name,
+}
+
+allowed_globals = {
+    'name': name,
+    # Example: 'function_name': function_name,
+    # Example: 'variable_name': variable_name,
+}
+
 r"""Demo script for GRPO with Llama3 model.
 
 This script demonstrates how to run GRPO with a Llama3 model. It includes
@@ -257,7 +273,7 @@ delete_directory(CKPT_DIR)
 
 for name, obj in list(globals().items()):
   if isinstance(obj, jnp.ndarray):
-    del globals()[name]
+    del allowed_globals.get(name)
 gc.collect()
 
 
