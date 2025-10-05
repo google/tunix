@@ -1,5 +1,11 @@
 # Tunix: A JAX-native LLM Post-Training Library
 
+<div align="left">
+
+<a href="https://tunix.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/documentation-blue"></a>
+
+</div>
+
 **Tunix(Tune-in-JAX)** is a JAX based library designed to streamline the
 post-training of Large Language Models. It provides efficient and scalable
 supports for:
@@ -67,23 +73,16 @@ You can install Tunix in several ways:
 1. From PyPI (recommended):
 
 ```sh
-pip install tunix
+pip install "tunix[prod]"
 ```
 
-2. With development extras If you want to contribute or run tests and examples
-   locally:
-
-```
-pip install "tunix[dev]"
-```
-
-3. Directly from GitHub (latest main branch)
+2. Directly from GitHub (latest main branch)
 
 ```sh
 pip install git+https://github.com/google/tunix
 ```
 
-4. From source (editable install) If you plan to modify the codebase and run it
+3. From source (editable install) If you plan to modify the codebase and run it
    in development mode:
 
 ```sh

@@ -6,7 +6,7 @@ and complete episode trajectories.
 """
 
 import dataclasses
-from typing import Any
+from typing import Any, Optional
 
 field = dataclasses.field
 dataclass = dataclasses.dataclass
@@ -51,7 +51,7 @@ class Step:
 
   chat_completions: list[dict[str, str]] = field(default_factory=list)
   thought: str = ""
-  action: Action = None
+  action: Optional[Action] = None
   observation: Any = None
   model_response: str = ""
   info: dict[str, Any] = field(default_factory=dict)

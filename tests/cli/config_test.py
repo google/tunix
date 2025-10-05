@@ -192,8 +192,8 @@ class ConfigTest(parameterized.TestCase):
               "optimizer_config.opt_type=unknown",
               "optimizer_config.learning_rate=0.01",
           ],
-          expected_error=ValueError,
-          error_regex="Optimizer type 'unknown' not supported",
+          expected_error=AttributeError,
+          error_regex="module 'optax' has no attribute 'unknown'",
       ),
   )
   def test_create_optimizer_invalid(
@@ -204,9 +204,46 @@ class ConfigTest(parameterized.TestCase):
       hp = self.initialize_config(overrides)
       hp.create_optimizer("optimizer_config")
 
+  #  --- Tests for learning_rate_schedule ---
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="constant_lr",
+          overrides=[
+              "optimizer_config.schedule_type=constant_schedule",
+              "optimizer_config.value=1e-5",
+          ],
+      ),
+      dict(
+          testcase_name="exponential_decay",
+          overrides=[
+              "optimizer_config.schedule_type=exponential_decay",
+              "optimizer_config.init_value=0.01",
+              "optimizer_config.transition_steps=10",
+              "optimizer_config.decay_rate=0.95",
+          ],
+      ),
+      dict(
+          testcase_name="warmup_cosine_decay",
+          overrides=[
+              "optimizer_config.schedule_type=warmup_cosine_decay_schedule",
+              "optimizer_config.init_value=0.0",
+              "optimizer_config.peak_value=0.001",
+              "optimizer_config.warmup_steps=100",
+              "optimizer_config.decay_steps=1000",
+              "optimizer_config.end_value=0.0001",
+              "optimizer_config.alpha=0.5",
+          ],
+      ),
+  )
+  def test_learning_rate_schedule_valid(self, overrides):
+    hp = self.initialize_config(overrides)
+    lr_schedule = hp._create_learning_rate(
+        hp.config["optimizer_config"], "test_config_path"
+    )
+    self.assertIsNotNone(lr_schedule)
+    self.assertTrue(callable(lr_schedule), "lr_schedule should be callable")
+
   # --- Tests for create_mesh ---
-  # NOTE: These tests might depend on the available JAX devices.
-  # Mocking jax.device_count() and jax.devices() is best for hermetic tests.
   @parameterized.named_parameters(
       dict(
           testcase_name="valid_1d",
@@ -341,6 +378,40 @@ class ConfigTest(parameterized.TestCase):
       nested_dict = self.convert_nested_dict_to_list(raw_keys)
       hp = self.initialize_config(nested_dict)
       hp.create_mesh("model_config")
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="single_reward_fn",
+          overrides=[
+              "reward_functions=['tunix.cli.utils.reward.check_answer']",
+          ],
+          expected_reward_fn_len=1,
+          expected_reward_fn_names=["check_answer"],
+      ),
+      dict(
+          testcase_name="multiple_reward_fns",
+          overrides=[
+              "reward_functions=['tunix.cli.utils.reward.check_answer',"
+              "'tunix.cli.utils.reward.check_numbers']"
+          ],
+          expected_reward_fn_len=2,
+          expected_reward_fn_names=[
+              "check_answer",
+              "check_numbers",
+          ],
+      ),
+  )
+  def test_get_reward_fns(
+      self,
+      overrides,
+      expected_reward_fn_len,
+      expected_reward_fn_names
+  ):
+    hp = self.initialize_config(overrides)
+    reward_fns = hp.obtain_reward_fn()
+    self.assertLen(reward_fns, expected_reward_fn_len)
+    for i in range(expected_reward_fn_len):
+      self.assertEqual(reward_fns[i].__name__, expected_reward_fn_names[i])
 
 
 if __name__ == "__main__":

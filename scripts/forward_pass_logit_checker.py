@@ -31,7 +31,7 @@ from tunix.models.gemma3 import params as gemma3_params_lib
 
 def load_gemma3_model(mesh):
   config = (
-      gemma3_model_lib.Gemma3Config.gemma3_27b()
+      gemma3_model_lib.ModelConfig.gemma3_27b()
   )  # pick corresponding config based on model version
   return config, gemma3_params_lib.create_model_from_checkpoint(
       gemma3_params_lib.GEMMA3_27B_IT, config, mesh

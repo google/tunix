@@ -22,6 +22,7 @@ import itertools
 import math
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 
+from absl import logging
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
@@ -122,6 +123,7 @@ class RLLearner(abc.ABC):
     self._compute_logps_micro_batch_size = (
         self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
     )
+    sft_utils.show_hbm_usage(title="RLLearner init")
 
   @abc.abstractmethod
   def _generate_and_compute_advantage(
@@ -414,6 +416,7 @@ class RLLearner(abc.ABC):
         ):  # fast forward the iterator if loading from a previous checkpoint.
           next(iterator)
           self._iter_steps += 1
+          logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
         # Fetch one training micro-batch
         example = next(iterator)

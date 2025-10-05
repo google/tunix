@@ -79,8 +79,8 @@ tokenizer_config:
 
 
 ################################## DATASET ##################################
-# translation_dataset  "Helsinki-NLP/opus-100" or "mtnt/en-fr" for SFT
-# gsm8k for grpo 
+# Translation_dataset  "Helsinki-NLP/opus-100" or "mtnt/en-fr" for SFT
+# Math_dataset "gsm8k" for grpo 
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 num_batches: 3738
@@ -95,12 +95,11 @@ optimizer_config: &base_optimizer_config
   learning_rate: 1e-5
   opt_type: "adamw"
 
-  # == Cosine decay with warmup scheduler ==
-  # Linearly increase learning rate from 0. to 5e-6 in the first 10% training
-  # steps, and then gradually decrease the learning rate to 0 using cosine
-  # scheduler.
+  # == Optax Optimizer Scheduler ==
+  # Belows are function parameters for optax optimizer scheduler. Make sure you specified the corresponding parameters for your schedule_type. 
 
-  schedule_type: "warmup_cosine"
+  schedule_type: "warmup_cosine_decay_schedule"
+  value: 1e-5
   peak_value: 3e-5
   init_value: 0.0
   end_value: 0.0

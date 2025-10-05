@@ -13,7 +13,7 @@ from flax.nnx import graph
 from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
-from tunix.models.gemma import gemma as gemma_lib
+from tunix.models.gemma import model as gemma_lib
 
 # Keep the import below for google internal lint.
 import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long

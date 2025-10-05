@@ -54,7 +54,7 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
       completion_mask: jax.Array | None = None,
-  ):
+  ) -> jax.Array:
     ref_model = self._models.get("reference")
     if ref_model is None:
       raise ValueError("Reference model is not available.")

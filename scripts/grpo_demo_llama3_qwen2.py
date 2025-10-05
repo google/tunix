@@ -83,6 +83,28 @@ parser.add_argument(
     required=False,
     help="The model version to use.",
 )
+parser.add_argument(
+      "--num-batches",
+      type=int,
+      default=1869,
+      required=False,
+      help="Number of batches for training.",
+  )
+parser.add_argument(
+    "--num-test-batches",
+    type=int,
+    default=50,
+    required=False,
+    help="Number of test batches for evaluation.",
+)
+parser.add_argument(
+    "--rollout-engine",
+    type=str,
+    default="vanilla",
+    choices=["vanilla", "vllm"],
+    required=False,
+    help="Rollout engine to use (vanilla or vllm).",
+)
 
 # Parse arguments
 args = parser.parse_args()
@@ -164,11 +186,11 @@ EPSILON = 0.2
 # 4 is the max we can do on v5e-8 with llama3 1B model.
 BATCH_SIZE = 4
 # To speed up for quick workflow validation, we can change NUM_BATCHES to e.g. 2
-NUM_BATCHES = 1869
+NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 # To speed up for quick workflow validation, we can change it to e.g. 1
-NUM_TEST_BATCHES = 50
+NUM_TEST_BATCHES = args.num_test_batches
 
 EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
@@ -778,7 +800,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rl_cluster_lib.Role.REFERENCE: mesh,
         rl_cluster_lib.Role.ROLLOUT: mesh,
     },
-    rollout_engine="vllm",
+    rollout_engine=args.rollout_engine,
     offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
@@ -874,7 +896,7 @@ with mesh:
 
 show_hbm_usage("After training the reference lora model")
 
-trained_ckpt_path = os.path.join(CKPT_DIR, str(MAX_STEPS), "model_params")
+trained_ckpt_path = os.path.join(CKPT_DIR, "actor", str(MAX_STEPS), "model_params")
 
 filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
 abs_params = jax.tree.map(
