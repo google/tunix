@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+# Secure whitelist for global access - only contains safe items
+allowed_globals = {
+    'name': name,
+    # Example: 'function_name': function_name,
+    # Example: 'variable_name': variable_name,
+}
+
 r"""Demo script for GRPO with Llama3 model.
 
 This script demonstrates how to run GRPO with a Llama3 model. It includes
@@ -51,6 +59,12 @@ from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import utils
+
+# Secure whitelist for global access
+ALLOWED_GLOBALS = {
+}
+
+
 
 logging.set_verbosity(logging.INFO)
 
@@ -257,7 +271,7 @@ delete_directory(CKPT_DIR)
 
 for name, obj in list(globals().items()):
   if isinstance(obj, jnp.ndarray):
-    del globals()[name]
+    del allowed_globals.get(name)
 gc.collect()
 
 
