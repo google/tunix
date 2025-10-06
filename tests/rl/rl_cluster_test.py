@@ -18,6 +18,7 @@ from absl.testing import parameterized
 import chex
 from flax import nnx
 import jax
+from jax import numpy as jnp
 import numpy as np
 import optax
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -70,6 +71,7 @@ class RlClusterTest(parameterized.TestCase):
             max_tokens_to_generate=10,
             max_prompt_length=256,
             kv_cache_size=1024,
+            data_type=jnp.bfloat16,
         ),
     )
 
@@ -96,7 +98,16 @@ class RlClusterTest(parameterized.TestCase):
     rollout_actor_mesh = utils.get_pytree_mesh_info(
         nnx.state(rl_cluster.rollout.model())
     )
+    rollout_actor_data_type = jax.tree.leaves(
+        nnx.state(rl_cluster.rollout.model())
+    )[0].dtype
     self.assertEqual(rollout_actor_mesh, rollout_mesh)
+    self.assertEqual(rollout_actor_data_type, jnp.bfloat16)
+
+    actor_data_type = jax.tree.leaves(
+        nnx.state(rl_cluster.actor_trainer.model)
+    )[0].dtype
+    self.assertEqual(actor_data_type, jnp.float32)
 
     ref_model_mesh = utils.get_pytree_mesh_info(
         nnx.state(rl_cluster.inference_worker._models['reference'])

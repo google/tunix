@@ -231,7 +231,16 @@ class RLCluster:
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
     else:
-      self.rollout_actor = self._load_model(actor, self.r2m[Role.ROLLOUT])
+      rollout_data_type = (
+          self.cluster_config.rollout_config[Mode.TRAIN].data_type
+          if isinstance(self.cluster_config.rollout_config, dict)
+          else self.cluster_config.rollout_config.data_type
+      )
+      self.rollout_actor = self._load_model(
+          actor,
+          self.r2m[Role.ROLLOUT],
+          rollout_data_type,
+      )
 
     if reference:
       self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
@@ -302,7 +311,12 @@ class RLCluster:
 
     self._propagate_backbone_sharing_map()
 
-  def _load_model(self, model_or_path: ModelOrPath, mesh: Mesh) -> nnx.Module:
+  def _load_model(
+      self,
+      model_or_path: ModelOrPath,
+      mesh: Mesh,
+      data_type: jnp.dtype | None = None,
+  ) -> nnx.Module:
     """Loads model with given mesh to the given memory_kind.
 
     If input is already an NNX model, check if the model is sharded on the
@@ -340,9 +354,15 @@ class RLCluster:
             ),
             nnx.get_partition_spec(state),
         )
+        if data_type and data_type != jax.tree.leaves(state)[0].dtype:
+          tmp_state = jax.tree.map(lambda x: x.astype(data_type), state)
+        else:
+          tmp_state = state
         model_or_path = nnx.merge(
-            graph, reshard.reshard_pytree(state, dst_shardings)
+            graph, reshard.reshard_pytree(tmp_state, dst_shardings)
         )
+        del tmp_state
+        gc.collect()
       if is_on_device and self.cluster_config.offload_to_cpu:
         graph, state = nnx.split(model_or_path)
         new_params = rl_utils.put_params_on_memory_kind(state, "pinned_host")

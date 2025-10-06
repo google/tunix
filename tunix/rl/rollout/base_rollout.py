@@ -19,6 +19,7 @@ import dataclasses
 from typing import Any, Optional, Tuple
 
 import jax
+from jax import numpy as jnp
 import jaxtyping
 
 
@@ -87,6 +88,9 @@ class RolloutConfig:
 
   # Only used for vanilla rollout engine.
   kv_cache_size: int = 1024  # Only used for vanilla rollout engine.
+
+  # data type of the rollout model.
+  data_type: jnp.dtype | None = None
 
 
 class BaseRollout(abc.ABC):
