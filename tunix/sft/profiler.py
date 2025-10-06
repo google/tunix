@@ -28,6 +28,8 @@ class ProfilerOptions:
   skip_first_n_steps: int
   # Number of steps to profile.
   profiler_steps: int
+  # Whether to set the profile options.
+  set_profile_options: bool = True
   # https://github.com/jax-ml/jax/blob/0b1b909dd66a113ee0d7e54e55d0efef480e2a8a/docs/profiling.md?plain=1#L285
   host_tracer_level: int = 2  # set to 2 to capture HBM profiles.
   # https://github.com/jax-ml/jax/blob/0b1b909dd66a113ee0d7e54e55d0efef480e2a8a/docs/profiling.md?plain=1#L300
@@ -69,14 +71,19 @@ class Profiler:
     if self._do_not_profile or step != self._first_profile_step:
       return
     logging.info("Starting JAX profiler at step %d.", step)
-    profile_options = jax.profiler.ProfileOptions()
-    profile_options.host_tracer_level = self._profiler_options.host_tracer_level
-    profile_options.python_tracer_level = (
-        self._profiler_options.python_tracer_level
-    )
-    jax.profiler.start_trace(
-        log_dir=self._output_path, profiler_options=profile_options
-    )
+    if self._profiler_options.set_profile_options:
+      profile_options = jax.profiler.ProfileOptions()
+      profile_options.host_tracer_level = (
+          self._profiler_options.host_tracer_level
+      )
+      profile_options.python_tracer_level = (
+          self._profiler_options.python_tracer_level
+      )
+      jax.profiler.start_trace(
+          log_dir=self._output_path, profiler_options=profile_options
+      )
+    else:
+      jax.profiler.start_trace(log_dir=self._output_path)
 
   def maybe_deactivate(self, step: int):
     """End the profiler."""
