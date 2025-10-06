@@ -73,7 +73,7 @@ You can install Tunix in several ways:
 1. From PyPI (recommended):
 
 ```sh
-pip install "tunix[prod]"
+pip install "google-tunix[prod]"
 ```
 
 2. Directly from GitHub (latest main branch)
