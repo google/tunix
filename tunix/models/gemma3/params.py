@@ -30,7 +30,10 @@ from tunix.models.gemma3 import model as model_lib
 # Keep the import below for google internal lint.
 import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> uiuc-vlm
 # Pretrained
 GEMMA3_1B_PT = 'gs://gemma-data/checkpoints/gemma3-1b-pt'
 GEMMA3_4B_PT = 'gs://gemma-data/checkpoints/gemma3-4b-pt'
@@ -55,7 +58,13 @@ def create_model_from_checkpoint(
       lambda: model_lib.Gemma3(model_config, rngs=nnx.Rngs(0))
   )
   params = ocp.StandardCheckpointer().restore(checkpoint_path)
+<<<<<<< HEAD
   params = _map_from_upstream_checkpoint(params)
+=======
+  params = _map_from_upstream_checkpoint(
+      params, multimodal=model_config.multimodal
+  )
+>>>>>>> uiuc-vlm
   if mesh is not None:
     params = jax.tree.map(
         lambda x, shd: jnp.asarray(x, device=shd),
@@ -84,7 +93,11 @@ def create_tokenizer(
   return spm_processor
 
 
+<<<<<<< HEAD
 def _map_from_upstream_checkpoint(params):
+=======
+def _map_from_upstream_checkpoint(params, multimodal: bool = False):
+>>>>>>> uiuc-vlm
   """Map from upstream checkpoint to our implementation."""
   # From:
   #
@@ -123,6 +136,7 @@ def _map_from_upstream_checkpoint(params):
     module_path, param_name = key_path
     module_path = module_path.split('/')[1:]  # Remove the leading 'transformer'
     if module_path[0] == 'siglip_encoder':
+<<<<<<< HEAD
       continue  # We don't support MM input yet.
     if module_path[0] == 'embedder':
       if len(module_path) > 1 and module_path[1].startswith('mm_'):
@@ -130,6 +144,72 @@ def _map_from_upstream_checkpoint(params):
     if module_path[0] in ('embedder', 'final_norm'):
       new_params[(module_path[0], param_name)] = value
       continue
+=======
+      if not multimodal:
+        continue
+      if param_name == 'pos_embedding':
+        new_params[('siglip', 'pos_embed')] = value
+        continue
+      elif module_path[1] == 'embedding':
+        new_params[('siglip', 'patch', 'proj', param_name)] = value
+        continue
+      elif module_path[2] == 'encoder_norm':
+        new_params[('siglip', 'norm', param_name)] = value
+        continue
+
+      assert module_path[2].startswith('encoderblock_')
+      siglip_layer = (
+          'siglip',
+          'blocks',
+          int(module_path[2].removeprefix('encoderblock_')),
+      )
+
+      if module_path[3] == 'LayerNorm_0':
+        new_params[(*siglip_layer, 'ln1', param_name)] = value
+      elif module_path[3] == 'LayerNorm_1':
+        new_params[(*siglip_layer, 'ln2', param_name)] = value
+      elif module_path[3] == 'MultiHeadDotProductAttention_0':
+        if module_path[4] == 'out':
+          if value.ndim == 3:
+            value = value.reshape(-1, value.shape[-1])
+          else:
+            value = value.reshape(-1)
+          new_params[(*siglip_layer, 'attn', 'o', param_name)] = value
+        else:
+          if value.ndim == 3:
+            value = value.reshape(value.shape[0], -1)
+          else:
+            value = value.reshape(-1)
+          if module_path[4] == 'query':
+            new_params[(*siglip_layer, 'attn', 'q', param_name)] = value
+          elif module_path[4] == 'key':
+            new_params[(*siglip_layer, 'attn', 'k', param_name)] = value
+          else:
+            assert module_path[4] == 'value'
+            new_params[(*siglip_layer, 'attn', 'v', param_name)] = value
+      elif module_path[3:] == ['MlpBlock_0', 'Dense_0']:
+        new_params[(*siglip_layer, 'mlp', 'fc1', param_name)] = value
+      else:
+        assert module_path[3:] == ['MlpBlock_0', 'Dense_1']
+        new_params[(*siglip_layer, 'mlp', 'fc2', param_name)] = value
+      continue
+
+    if (
+        module_path[0] == 'embedder'
+        and len(module_path) > 1
+        and module_path[1].startswith('mm_')
+    ):
+      if multimodal:
+        if module_path[1] == 'mm_soft_embedding_norm':
+          new_params[('projector', 'mm_soft_emb_norm', param_name)] = value
+        elif module_path[1] == 'mm_input_projection':
+          new_params[('projector', 'mm_input_projection', 'kernel')] = value
+      continue
+    if module_path[0] in ('embedder', 'final_norm'):
+      new_params[(module_path[0], param_name)] = value
+      continue
+
+>>>>>>> uiuc-vlm
     # module_path should now look like ('layer_0', 'attn', '_key_norm')
     layer_idx = ('layers', int(module_path[0].removeprefix('layer_')))
     if module_path[1:] == ['mlp', 'gating_einsum']:
