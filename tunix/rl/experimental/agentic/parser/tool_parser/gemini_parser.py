@@ -6,7 +6,7 @@ from tunix.rl.experimental.agentic.parser.tool_parser import tool_parser_base
 from tunix.rl.experimental.agentic.tools import base_tool
 
 BaseTool = base_tool.BaseTool
-ToolCall = tool_parser_base.ToolCall
+ToolCall = base_tool.ToolCall
 ToolParser = tool_parser_base.ToolParser
 
 
