@@ -14,10 +14,13 @@
 
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
+import asyncio
 import dataclasses
 import math
 import os
+import threading
 from typing import Any, Dict, List, Optional, Tuple
+from types import SimpleNamespace
 
 from absl import logging
 import jax
@@ -28,6 +31,10 @@ from tunix.generate import utils
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
 from vllm import LLM
+from vllm.entrypoints.openai.api_server import run_server
+from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 
@@ -56,6 +63,13 @@ class VllmConfig:
   init_with_random_weights: bool
   tpu_backend_type: str
   mapping_config: MappingConfig
+  async_mode: bool = False
+
+  # Async configs
+  port: int = 8000
+  served_model_name: str | None = None
+  api_key: str | None = None
+  extra_args: list[str] | None = None
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -89,8 +103,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.config = config
     self.args = self._vllm_config(config)
-    self.llm = LLM(**self.args)
+    self.llm_thread = None
+    if config.async_mode:
+      self.llm = None
+      self.llm_thread = self.start_vllm_serve_inproc()
+    else:
+      self.llm = LLM(**self.args)
 
     self.mappings = config.mapping_config.to_hf_mappings
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
@@ -301,3 +321,65 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs[0],
     )
+
+  def _build_server_kwargs(self) -> Dict[str, Any]:
+    server_kwargs = {
+        "model": self.config.model_version,
+        "tensor_parallel_size": self._find_tp_size(self.config.mesh),
+        "max_model_len": self.config.max_model_len,
+        "gpu_memory_utilization": self.config.hbm_utilization,
+    }
+    if self.args.get("additional_config"):
+      server_kwargs["additional_config"] = self.args["additional_config"]
+    if self.config.port is not None:
+      server_kwargs["port"] = self.config.port
+    if self.config.served_model_name:
+      server_kwargs["served_model_name"] = self.config.served_model_name
+    if self.config.api_key:
+      server_kwargs["api_key"] = self.config.api_key
+    if self.config.extra_args:
+      logging.warning(
+          "Ignoring unsupported extra_args in async_mode: %s",
+          self.config.extra_args,
+      )
+    # Build the same argparse.Namespace the CLI would produce
+    parser = make_arg_parser()
+    # The CLI expects a positional model tag (like `vllm serve <model_tag>`)
+    ns = parser.parse_args(argv)
+    # The CLI wrapper moves model_tag -> args.model; we simulate that here:
+    ns = SimpleNamespace(**vars(ns), model_tag=self.config.model_version, model=self.config.model_version)
+    validate_parsed_serve_args(ns)
+
+    return ns
+
+  def start_vllm_serve_inproc(self):
+    serve_ns = self._build_server_kwargs()
+
+    def _run():
+      asyncio.run(run_server(serve_ns))  # Same as `vllm serve` CLI
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
+
+  def stop(self):
+    if self.llm_thread and self.llm_thread.is_alive():
+      self.llm_thread.join(timeout=5)
+
+
+from openai import OpenAI
+
+
+class VLLMOpenAIClient:
+
+  def __init__(
+      self, base_url: str, api_key: str = "EMPTY", model_name: str = ""
+  ):
+    self.client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1")
+    self.model = model_name
+
+  def chat(self, messages, **kwargs) -> str:
+    resp = self.client.chat.completions.create(
+        model=self.model, messages=messages, **kwargs
+    )
+    return resp.choices[0].message.content
