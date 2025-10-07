@@ -6,6 +6,7 @@ import datetime
 import enum
 import functools
 import logging
+from typing import Dict
 
 import jax
 import numpy as np
@@ -20,6 +21,9 @@ except ImportError:
   logging.info("Could not import `wandb`. Logging to W&B not possible.")
 
 _DEFAULT_STEP = 0
+
+# Global step tracker to ensure monotonic steps across different metrics.
+_last_steps: Dict[str, int] = collections.defaultdict(int)
 
 
 @dataclasses.dataclass
@@ -38,10 +42,23 @@ class Mode(str, enum.Enum):
     return self.value
 
 
-def _get_step(kwargs: dict[str, str | int]) -> int:
-  """Returns the step from the kwargs, or 0 if not provided."""
+def _get_step(kwargs: dict[str, str | int], metric_prefix: str = "") -> int:
+  """Returns the step from the kwargs, or increments from last step.
+
+  Args:
+    kwargs: Keyword arguments containing 'step'.
+    metric_prefix: Prefix for the metric to track steps separately.
+
+  Returns:
+    The step number, ensuring monotonicity within each prefix.
+  """
   step = kwargs.get("step")
-  return _DEFAULT_STEP if step is None else int(step)
+  if step is None:
+    # Use global counter for this prefix to ensure monotonic steps.
+    prefix_key = metric_prefix or "default"
+    _last_steps[prefix_key] += 1
+    return _last_steps[prefix_key]
+  return int(step)
 
 
 def _preprocess_event_name(event_name: str) -> str:
@@ -80,6 +97,7 @@ def log_to_tensorboard(
 def log_to_wandb(
     event: str,
     scalar_value: float | np.ndarray,
+    metric_prefix: str = "",
     **kwargs: str | int,
 ):
   """Creates a W&B event listener for jax.monitoring.
@@ -87,14 +105,12 @@ def log_to_wandb(
   Args:
     event: The name of the event.
     scalar_value: The value of the event.
+    metric_prefix: Prefix for the metric for step tracking.
     **kwargs: Additional keyword arguments, including 'step'.
-
-  Raises:
-    ValueError: If 'step' is not provided in `kwargs`.
   """
-  current_step = _get_step(kwargs)
+  current_step = _get_step(kwargs, metric_prefix)
 
-  if wandb is not None:
+  if wandb is not None and wandb.run is not None:
     event = _preprocess_event_name(event)
     wandb.log({event: scalar_value}, step=current_step)
 
@@ -122,11 +138,16 @@ def register_jax_monitoring(metrics_logger_options: MetricsLoggerOptions):
   )
   # Register Weights & Biases backend.
   if wandb is not None:
-    wandb_run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    wandb.init(project="tunix", name=wandb_run_name, anonymous="allow")
-    if wandb.run:
-      logging.info("W&B run URL: %s", wandb.run.url)
-    jax.monitoring.register_scalar_listener(log_to_wandb)
+    # Only initialize wandb if there's no active run.
+    if wandb.run is None:
+      wandb_run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+      wandb.init(project="tunix", name=wandb_run_name, anonymous="allow")
+      if wandb.run:
+        logging.info("W&B run URL: %s", wandb.run.url)
+    # Create a partial function with metric_prefix for step tracking.
+    jax.monitoring.register_scalar_listener(
+        functools.partial(log_to_wandb, metric_prefix="jax/")
+    )
   return [tensorboard_summary_writer]
 
 
@@ -153,6 +174,9 @@ class MetricsLogger:
       self._summary_writers = register_jax_monitoring(metrics_logger_options)
 
     self.metric_prefix = metric_prefix
+    # Reset global step counter for this prefix to ensure clean start.
+    self._step_prefix_key = metric_prefix or "default"
+    _last_steps[self._step_prefix_key] = 0
 
   def log(
       self,
@@ -199,5 +223,6 @@ class MetricsLogger:
       # TODO(b/413717077): Solution for destructing lister in jax.monitoring.
       for summary_writer in self._summary_writers:
         summary_writer.close()
-    if wandb is not None:
+    # Only finish wandb if there's an active run.
+    if wandb is not None and wandb.run is not None:
       wandb.finish()
