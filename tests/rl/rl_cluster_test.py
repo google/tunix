@@ -116,68 +116,27 @@ class RlClusterTest(parameterized.TestCase):
     )
     self.assertEqual(ref_model_mesh, actor_mesh)
 
-  @parameterized.named_parameters(
-      ('1', None, None, None, None, [None, None, None, None, 1]),
-      ('2', 8, None, None, None, [8, 8, 8, 8, 1]),
-      ('3', 8, 2, None, None, [8, 2, 2, 2, 4]),
-      ('4', 8, 4, 8, None, [8, 4, 8, 4, 2]),
-      ('5', 8, 4, None, 8, [8, 4, 4, 8, 2]),
-      ('6', 16, 8, 8, 16, [16, 8, 8, 16, 2]),
-  )
-  def test_batch_sizes(
-      self,
-      mini_batch_size,
-      training_micro_batch_size,
-      rollout_micro_batch_size,
-      compute_logps_micro_batch_size,
-      expected_values,
-  ):
+  def test_batch_size_config(self):
     cfg = rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
         critic_optimizer=None,
-        mini_batch_size=mini_batch_size,
-        training_micro_batch_size=training_micro_batch_size,
-        rollout_micro_batch_size=rollout_micro_batch_size,
-        compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+        mini_batch_size=8,
+        train_micro_batch_size=4,
         eval_every_n_steps=1,
     )
+    self.assertEqual(cfg.gradient_accumulation_steps, 2)
 
-    self.assertEqual(
-        expected_values,
-        [
-            cfg.mini_batch_size,
-            cfg.training_micro_batch_size,
-            cfg.rollout_micro_batch_size,
-            cfg.compute_logps_micro_batch_size,
-            cfg.gradient_accumulation_steps,
-        ],
-    )
-
-  @parameterized.named_parameters(
-      ('1', 2, 4, None, None),
-      ('2', 8, 3, None, None),
-      ('3', 8, 4, 3, None),
-      ('4', 8, 4, None, 3),
-      ('5', None, 2, None, None),
-      ('6', None, None, 2, None),
-  )
-  def test_batch_sizes_errors(
-      self,
-      mini_batch_size,
-      training_micro_batch_size,
-      rollout_micro_batch_size,
-      compute_logps_micro_batch_size,
-  ):
-    with self.assertRaises(ValueError):
-      rl_cluster_lib.RLTrainingConfig(
-          actor_optimizer=optax.sgd(1e-3),
-          critic_optimizer=None,
-          mini_batch_size=mini_batch_size,
-          training_micro_batch_size=training_micro_batch_size,
-          rollout_micro_batch_size=rollout_micro_batch_size,
-          compute_logps_micro_batch_size=compute_logps_micro_batch_size,
-          eval_every_n_steps=1,
-      )
+    for mini_batch_size, train_micro_batch_size in zip(
+        [8, -8, None], [3, 4, 4]
+    ):
+      with self.assertRaises(ValueError):
+        rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            critic_optimizer=None,
+            mini_batch_size=mini_batch_size,
+            train_micro_batch_size=train_micro_batch_size,
+            eval_every_n_steps=1,
+        )
 
   def test_generate_with_chat_template(self):  # pylint: disable=g-doc-args
     mesh = Mesh(
