@@ -101,9 +101,8 @@ class BaseTool(ABC):
     self.name = name
     self.description = description
 
-  @property
   @abstractmethod
-  def json(self) -> dict[str, Any]:
+  def get_json_schema(self) -> dict[str, Any]:
     """Generate OpenAI-compatible function metadata for tool registration.
 
     Provides the schema definition needed for LLM function calling systems
@@ -186,24 +185,6 @@ class BaseTool(ABC):
     Returns:
         ToolOutput: Standardized result containing output, error, or metadata
     """
-    return self.apply(**kwargs)
-
-  def __call__(self, *args, use_async=False, **kwargs):
-    """Convenience method for tool invocation with execution mode selection.
-
-    Provides a unified interface for calling tools either synchronously
-    or asynchronously based on the use_async flag. Useful for generic
-    tool execution systems that need runtime execution mode selection.
-
-    Args:
-        *args: Positional arguments passed to the execution method
-        use_async (bool): Whether to use asynchronous execution
-        **kwargs: Keyword arguments passed to the execution method
-
-    Returns:
-        ToolOutput or Coroutine: Direct result if synchronous,
-            coroutine object if asynchronous
-    """
-    if use_async:
-      return self.apply_async(*args, **kwargs)
-    return self.apply(*args, **kwargs)
+    raise NotImplementedError(
+        "Tool must implement either `apply()` or `apply_async()`"
+    )
