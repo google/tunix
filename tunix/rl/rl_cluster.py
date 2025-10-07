@@ -35,6 +35,7 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
@@ -647,14 +648,19 @@ class RLCluster:
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | list[list[dict[str, str]]],
+      apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
     Args:
-      prompts: A list of prompts to generate text from.
+      prompts: A list of prompts to generate text from. If
+        `apply_chat_template` is True, this should be a list of conversations
+        (each a list of dictionaries with 'role' and 'content'). Otherwise, it
+        should be a list of strings.
+      apply_chat_template: Whether to apply chat template to the prompts.
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
@@ -662,9 +668,26 @@ class RLCluster:
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
     """
-    if len(prompts) == 0:  # pylint: disable=g-explicit-length-test
+    if apply_chat_template:
+      if self.tokenizer is None:
+        raise ValueError(
+            "Tokenizer must be initialized to use chat templates."
+        )
+      string_prompts = [
+          self.tokenizer.apply_chat_template(
+              m,  # pytype: disable=wrong-arg-types
+              add_generation_prompt=True,
+              tokenize=False,
+              enable_thinking=False,
+          )
+          for m in prompts
+      ]
+    else:
+      string_prompts = prompts  # pytype: disable=annotation-type-mismatch
+
+    if len(string_prompts) == 0:
       raise ValueError("Cannot generate from an empty list of prompts.")
-    micro_batch_size = micro_batch_size or len(prompts)
+    micro_batch_size = micro_batch_size or len(string_prompts)
 
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
       model = self.rollout.model()
@@ -678,9 +701,9 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config
 
       outputs = [
-          self.rollout.generate(prompts[s], rollout_config)
+          self.rollout.generate(string_prompts[s], rollout_config)
           for s in rl_utils.chunk_slices_by_size(
-              stop=len(prompts), step=micro_batch_size
+              stop=len(string_prompts), step=micro_batch_size
           )
       ]
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)

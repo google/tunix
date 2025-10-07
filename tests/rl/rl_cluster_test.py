@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -21,6 +22,7 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import optax
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
@@ -177,6 +179,75 @@ class RlClusterTest(parameterized.TestCase):
           eval_every_n_steps=1,
       )
 
+  def test_generate_with_chat_template(self):  # pylint: disable=g-doc-args
+    mesh = Mesh(
+        np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp')
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            critic_optimizer=None,
+            eval_every_n_steps=1,
+            max_steps=10,
+            mini_batch_size=1,
+            rollout_micro_batch_size=1,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+
+    mock_tokenizer = mock.MagicMock(spec=PreTrainedTokenizerBase)
+    mock_tokenizer.apply_chat_template.return_value = 'formatted prompt'
+    mock_tokenizer.bos_id = 0
+    mock_tokenizer.eos_id = 1
+    mock_tokenizer.pad_id = 0
+
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        tokenizer=mock_tokenizer,
+        cluster_config=cluster_config,
+    )
+
+    expected_text = 'generated text'
+    rl_cluster.rollout.generate = mock.MagicMock(
+        return_value=base_rollout.RolloutOutput(
+            text=[expected_text],
+            logits=np.zeros((1, 1, 1)),
+            tokens=np.zeros((1, 1)),
+            left_padded_prompt_tokens=np.zeros((1, 1)),
+            logprobs=None,
+        )
+    )
+
+    messages = [[{'role': 'user', 'content': 'Hello'}]]
+    result = rl_cluster.generate(
+        prompts=messages,
+        apply_chat_template=True,
+        mode=rl_cluster_lib.Mode.EVAL,
+    )
+
+    self.assertEqual(result.text[0], expected_text)
+    mock_tokenizer.apply_chat_template.assert_called_once_with(
+        messages[0],
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=False,
+    )
+    rl_cluster.rollout.generate.assert_called_once()
+    called_prompts = rl_cluster.rollout.generate.call_args[0][0]
+    self.assertEqual(called_prompts, ['formatted prompt'])
 
 if __name__ == '__main__':
   absltest.main()
