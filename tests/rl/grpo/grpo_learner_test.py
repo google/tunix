@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import itertools
-import types
 import os
+import tempfile
+import types
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -22,9 +24,9 @@ from flax import nnx
 from flax.nnx import filterlib
 from grain import python as grain
 import jax
-import jax.numpy as jnp
 from jax import sharding
 from jax.interpreters import pxla
+import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -34,7 +36,6 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 from typing_extensions import override
-import tempfile
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=2'
 
@@ -151,6 +152,7 @@ class GRPOLearnerTest(parameterized.TestCase):
               batch_repeat=batch_repeat,
               data_queue=data_queue,
               async_loading=False,
+              service_target_batch_size=1,
           )
           while True:
             item = data_queue.get(block=True)
@@ -880,7 +882,7 @@ class GRPOLearnerTest(parameterized.TestCase):
               # We can't set grad_acc_steps directly, so we do it through
               # mini_batch_size and training_micro_batch_size.
               mini_batch_size=mini_batch_size,
-              training_micro_batch_size=mini_batch_size // grad_accu_steps,
+              train_micro_batch_size=mini_batch_size // grad_accu_steps,
           ),
           rollout_config=base_rollout.RolloutConfig(
               max_tokens_to_generate=10,
@@ -935,6 +937,166 @@ class GRPOLearnerTest(parameterized.TestCase):
         first_trajectories['train'], 80
     )  # max_steps * batch_size * num_generations
     self.assertLen(first_trajectories['eval'], 8)  # eval_rows * num_generations
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_update',
+          batch_size=8,
+          mini_batch_size=8,
+          train_micro_batch_size=4,
+          rollout_micro_batch_size=4,
+          compute_logps_micro_batch_size=4,
+      ),
+      dict(
+          testcase_name='multi_update',
+          batch_size=8,
+          mini_batch_size=4,
+          train_micro_batch_size=2,
+          rollout_micro_batch_size=2,
+          compute_logps_micro_batch_size=2,
+      ),
+      dict(
+          testcase_name='single_update_with_bigger_rollout_and_compute_logps',
+          batch_size=8,
+          mini_batch_size=8,
+          train_micro_batch_size=4,
+          rollout_micro_batch_size=8,
+          compute_logps_micro_batch_size=8,
+      ),
+      dict(
+          testcase_name='only_rollout_and_compute_logps',
+          batch_size=8,
+          mini_batch_size=None,
+          train_micro_batch_size=None,
+          rollout_micro_batch_size=4,
+          compute_logps_micro_batch_size=4,
+      ),
+      dict(
+          testcase_name='individible_batch_size',
+          batch_size=20,
+          mini_batch_size=20,
+          train_micro_batch_size=10,
+          rollout_micro_batch_size=4,
+          compute_logps_micro_batch_size=4,
+      ),
+  )
+  def test_micro_batch_training(
+      self,
+      batch_size,
+      mini_batch_size,
+      train_micro_batch_size,
+      rollout_micro_batch_size,
+      compute_logps_micro_batch_size,
+  ):
+    def my_reward_fn(trajectories, prompts, **kwargs):
+      for t_id, prompt in zip(kwargs['trajectory_ids'], prompts):
+        trajectories[kwargs['mode']][t_id] = prompt
+      return jnp.arange(len(prompts))
+
+    def create_learner(
+        mini_batch_size,
+        train_micro_batch_size,
+        rollout_micro_batch_size,
+        compute_logps_micro_batch_size,
+        trajectories,
+    ):
+      vocab = tc.MockVocab()
+      model = tc.ToyTransformer(
+          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+      )
+      ref_model = tc.ToyTransformer(
+          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+      )
+
+      mesh = pxla.thread_resources.env.physical_mesh
+      cluster_config = rl_cluster_lib.ClusterConfig(
+          role_to_mesh={
+              rl_cluster_lib.Role.ACTOR: mesh,
+              rl_cluster_lib.Role.REFERENCE: mesh,
+              rl_cluster_lib.Role.ROLLOUT: mesh,
+          },
+          rollout_engine='vanilla',
+          offload_to_cpu=False,
+          training_config=rl_cluster_lib.RLTrainingConfig(
+              actor_optimizer=optax.sgd(1e-3),
+              eval_every_n_steps=2,
+              max_steps=20,
+              mini_batch_size=mini_batch_size,
+              train_micro_batch_size=train_micro_batch_size,
+              rollout_micro_batch_size=rollout_micro_batch_size,
+              compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+          ),
+          rollout_config=base_rollout.RolloutConfig(
+              max_tokens_to_generate=10,
+              max_prompt_length=32,
+              kv_cache_size=256,
+              temperature=0.5,
+          ),
+      )
+      rl_cluster = rl_cluster_lib.RLCluster(
+          actor=model,
+          reference=ref_model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+      grpo_config = grpo_lib.GRPOConfig(
+          num_generations=2,
+          num_iterations=1,
+      )
+      grpo_learner = grpo_lib.GRPOLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=lambda **kwargs: my_reward_fn(
+              trajectories=trajectories, **kwargs
+          ),
+          grpo_config=grpo_config,
+      )
+      return grpo_learner, model
+
+    #  40 rows with repeat=10.
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=batch_size)
+    eval_ds = _dummy_dataset(batch_size=1)
+
+    # Baseline with no micro batching.
+    base_trajectories = {'train': {}, 'eval': {}}
+    grpo_learner, model = create_learner(
+        mini_batch_size=None,
+        train_micro_batch_size=None,
+        rollout_micro_batch_size=None,
+        compute_logps_micro_batch_size=None,
+        trajectories=base_trajectories,
+    )
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+
+    grpo_learner.train(train_ds, eval_ds)
+    self.assertEqual(
+        40 // batch_size, grpo_learner.rl_cluster.actor_trainer.train_steps
+    )
+
+    base_variables = nnx.state(model, nnx.Param)
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_variables, base_variables
+    )
+
+    # Train with micro batching.
+    micro_batch_trajectories = {'train': {}, 'eval': {}}
+    grpo_learner, model = create_learner(
+        mini_batch_size=mini_batch_size,
+        train_micro_batch_size=train_micro_batch_size,
+        rollout_micro_batch_size=rollout_micro_batch_size,
+        compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+        trajectories=micro_batch_trajectories,
+    )
+    grpo_learner.train(train_ds, eval_ds)
+    micro_batch_variables = nnx.state(model, nnx.Param)
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_variables, micro_batch_variables
+    )
+    self.assertEqual(base_trajectories, micro_batch_trajectories)
+    self.assertEqual(
+        40 // (mini_batch_size or batch_size),
+        grpo_learner.rl_cluster.actor_trainer.train_steps,
+    )
 
 
 if __name__ == '__main__':

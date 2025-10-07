@@ -111,17 +111,12 @@ class RLLearner(abc.ABC):
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
-    self._mini_batch_size = (
-        self.rl_cluster.cluster_config.training_config.mini_batch_size
-    )
-    self._training_micro_batch_size = (
-        self.rl_cluster.cluster_config.training_config.training_micro_batch_size
-    )
+    self._training_config = self.rl_cluster.cluster_config.training_config
     self._rollout_micro_batch_size = (
-        self.rl_cluster.cluster_config.training_config.rollout_micro_batch_size
+        self._training_config.rollout_micro_batch_size
     )
     self._compute_logps_micro_batch_size = (
-        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+        self._training_config.compute_logps_micro_batch_size
     )
     sft_utils.show_hbm_usage(title="RLLearner init")
 
@@ -272,6 +267,7 @@ class RLLearner(abc.ABC):
     produced: list[common.TrainExample] = []
     offset = 0
 
+    # TODO(tsbao): remove sample_repeat and set proper micro_batch_sizes outside
     for n in micro_batch_sizes:
       # Calculate slice indices
       start_idx = offset * sample_repeat
@@ -289,6 +285,7 @@ class RLLearner(abc.ABC):
       proceed_num_steps: int,
       sample_repeat: int,
       batch_repeat: int,
+      service_target_batch_size: int,
       data_queue: queue_lib.AbstractDataQueue[list[common.TrainExample] | None],
       async_loading: bool = False,
       mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
@@ -328,17 +325,15 @@ class RLLearner(abc.ABC):
         `grpo_config.num_generations`.
       batch_repeat: The number of times the produced `TrainExample` batch should
         `grpo_config.num_iterations`.
+      service_target_batch_size: largest common multiple of rollout and
+        compute_logps micro-batch sizes. This is used to accumulate
+        micro-batches between the rollout and inference computation.
       data_queue: The queue to which lists of `TrainExample` are added.
       async_loading: If True, enqueue each produced micro-batch immediately in
         async mode. Otherwise, accumulate and enqueue at the boundary.
       mode: The metrics logger mode, either `metrics_logger.Mode.TRAIN` or
         `metrics_logger.Mode.EVAL`.
     """
-    service_target_batch_size = math.lcm(
-        self._rollout_micro_batch_size,
-        self._compute_logps_micro_batch_size,
-    )
-
     # A buffer to accumulate micro-batches before processing them together.
     micro_batches: list[TrainingInputT] = []
     # Number of samples for each micro-batch
@@ -553,45 +548,58 @@ class RLLearner(abc.ABC):
       skip_jit: bool = False,
   ) -> None:
     """Main entry point for the training loop."""
-    grad_acc_steps = (
-        self.rl_cluster.cluster_config.training_config.gradient_accumulation_steps
-    )
-    if grad_acc_steps is None:
-      raise ValueError("Gradient accumulation steps must be set.")
-
     full_batch_iterator = iter(train_ds)
     first_item = next(full_batch_iterator)
     full_batch_size = len(first_item["prompts"])
     full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
     # Initialize batch sizes.
-    if self._mini_batch_size is None:
-      self._mini_batch_size = full_batch_size
-      self._training_micro_batch_size = full_batch_size
-    if self._rollout_micro_batch_size is None:
-      self._rollout_micro_batch_size = self._training_micro_batch_size
-    if self._compute_logps_micro_batch_size is None:
-      self._compute_logps_micro_batch_size = self._training_micro_batch_size
+    mini_batch_size = self._training_config.mini_batch_size or full_batch_size
+    train_micro_batch_size = (
+        self._training_config.train_micro_batch_size or mini_batch_size
+    )
+    self._rollout_micro_batch_size = (
+        self._rollout_micro_batch_size or train_micro_batch_size
+    )
+    self._compute_logps_micro_batch_size = (
+        self._compute_logps_micro_batch_size or train_micro_batch_size
+    )
+    for v, n in [
+        (self._rollout_micro_batch_size, f"{self._rollout_micro_batch_size=}"),
+        (
+            self._compute_logps_micro_batch_size,
+            f"{self._compute_logps_micro_batch_size=}",
+        ),
+        (mini_batch_size, f"{mini_batch_size=}"),
+    ]:
+      rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
+    grad_acc_steps = self._training_config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
 
-    rl_utils.check_batch_divisibility(
-        self._mini_batch_size,
-        full_batch_size,
-        "mini_batch_size",
-        "full_batch_size",
+    logging.info(  # pylint: disable=logging-fstring-interpolation
+        f"Training with {full_batch_size=}, {mini_batch_size=},"
+        f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
+        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+    )
+
+    service_target_batch_size = math.lcm(
+        self._rollout_micro_batch_size,
+        self._compute_logps_micro_batch_size,
     )
 
     # if the micro batch size is the same as the full batch size, we can use the
     # full batch iterator directly.
-    if self._training_micro_batch_size == full_batch_size:
+    if train_micro_batch_size == full_batch_size:
       train_iterator = full_batch_iterator
     else:
       train_iterator = self._create_micro_batch_iterator(
-          full_batch_iterator, self._training_micro_batch_size
+          full_batch_iterator, train_micro_batch_size
       )
 
     while True:  # loop over M
       try:
         initial_steps = self._iter_steps
-        for _ in range(full_batch_size // self._mini_batch_size):
+        for _ in range(full_batch_size // mini_batch_size):
           # reserve 1 for None and the other for repeated interable
           # if batch_repeat > 1
           train_data_queue = queue_lib.SimpleDataQueue(
@@ -606,6 +614,7 @@ class RLLearner(abc.ABC):
               proceed_num_steps=grad_acc_steps,
               sample_repeat=self._num_generations(),
               batch_repeat=self._num_iterations(),
+              service_target_batch_size=service_target_batch_size,
               data_queue=train_data_queue,
               async_loading=self.can_enable_async_rollout,
               mode=rl_cluster_lib.Mode.TRAIN,
@@ -646,6 +655,7 @@ class RLLearner(abc.ABC):
                     proceed_num_steps=-1,
                     sample_repeat=self._num_generations(),
                     batch_repeat=1,
+                    service_target_batch_size=service_target_batch_size,
                     data_queue=eval_data_queue,
                     async_loading=False,
                     mode=rl_cluster_lib.Mode.EVAL,

@@ -93,82 +93,56 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     actor_optimizer: Optimizer for the actor model.
     critic_optimizer: Optimizer for the critic model. If None, the critic model
       will be trained in the same optimizer as the actor model.
-    actor_critic_share_backbone: Whether to share the backbone of the actor and
-      critic models.
-    training_micro_batch_size: The microbatch size used for training.
-    rollout_micro_batch_size: The microbatch size used for model rollouts. If
-      None, it defaults to `training_micro_batch_size`.
-    compute_logps_micro_batch_size: The microbatch size used for computing log
-      probabilities (e.g., for reference and old policy models). If None, it
-      defaults to `training_micro_batch_size`.
+    mini_batch_size: The mini-batch size used for policy weight updates. One
+      mini-batch corresponds to one optimizer update. `mini_batch_size` must be
+      divisible by the batch size used for data loading.
+    train_micro_batch_size: The micro-batch size used for gradient
+      accumulation at training time. `train_micro_batch_size` must be
+      divisible by `mini_batch_size`.
+    rollout_micro_batch_size: The micro-batch size used for model rollouts.
+    compute_logps_micro_batch_size: The micro-batch size used for computing log
+      probabilities (e.g. for reference and old policy models).
   """
 
   actor_optimizer: optax.GradientTransformation
   critic_optimizer: optax.GradientTransformation | None = None
   mini_batch_size: int | None = None
-  training_micro_batch_size: int | None = None
+  train_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
-
-    # Verify all batch sizes are positive.
-    def _check_positive(value: int | None, name: str):
-      """Checks if the value is positive."""
-      if value is not None and value <= 0:
-        raise ValueError(f"{name} must be positive.")
-
-    _check_positive(self.mini_batch_size, "mini_batch_size")
-    _check_positive(self.training_micro_batch_size, "training_micro_batch_size")
-    _check_positive(self.rollout_micro_batch_size, "rollout_micro_batch_size")
-    _check_positive(
-        self.compute_logps_micro_batch_size, "compute_logps_micro_batch_size"
-    )
-
-    if self.gradient_accumulation_steps == 1:
-      self.gradient_accumulation_steps = None
-
-    # Verify `gradient_accumulation_steps` is None.
-    if self.gradient_accumulation_steps is not None:
-      raise ValueError(
-          "For RL training, gradient_accumulation_steps should be None. It is "
-          "automatically inferred: "
-          "`mini_batch_size // training_micro_batch_size`."
-      )
-
-    self.training_micro_batch_size, self.gradient_accumulation_steps = (
-        _compute_batch_sizes(
-            self.training_micro_batch_size,
-            self.mini_batch_size,
-            "training_micro_batch_size",
-            "mini_batch_size",
-            ret_grad_acc=True,
-        )
-    )
-
-    for batch_name in [
+    for name in [
+        "mini_batch_size",
+        "train_micro_batch_size",
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
     ]:
-      batch_size = getattr(self, batch_name)
+      rl_utils.check_positive(getattr(self, name), name)
 
-      if self.training_micro_batch_size is None and batch_size is not None:
+    if self.gradient_accumulation_steps is not None:
+      raise ValueError(
+          "For RL training, gradient_accumulation_steps should be None. It is "
+          "automatically derived from: "
+          "`mini_batch_size // train_micro_batch_size`."
+      )
+
+    if self.train_micro_batch_size is not None:
+      if self.mini_batch_size is None:
         raise ValueError(
-            f"For {batch_name}, training_micro_batch_size must be set when"
-            f" {batch_name} is set."
+            "For RL training, `batch_size` and `mini_batch_size` must be set"
+            " when `train_micro_batch_size` is set."
         )
-      if batch_size is None:
-        batch_size = self.training_micro_batch_size
-        setattr(self, batch_name, batch_size)
-
-      if batch_size is not None:
-        rl_utils.check_batch_divisibility(
-            self.training_micro_batch_size,
-            batch_size,
-            "training_micro_batch_size",
-            batch_name,
-        )
+      rl_utils.check_divisibility(
+          self.train_micro_batch_size,
+          self.mini_batch_size,
+          f"{self.train_micro_batch_size=}",
+          f"{self.mini_batch_size=}",
+      )
+      self.gradient_accumulation_steps = (
+          self.mini_batch_size // self.train_micro_batch_size
+      )
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -790,7 +764,7 @@ class RLCluster:
     """Gets the per-token logps of the current policy model."""
     batch_size = prompt_tokens.shape[0]
     if batch_size == 0:
-      return jnp.array([], dtype=jnp.float32)
+      raise ValueError("Cannot get old log probabilities from an empty batch.")
     micro_batch_size = micro_batch_size or batch_size
 
     with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
@@ -869,58 +843,3 @@ class RLCluster:
           pad_id,
           eos_id,
       )
-
-
-def _compute_batch_sizes(
-    small_batch_size,
-    big_batch_size,
-    small_batch_size_name,
-    big_batch_size_name,
-    ret_grad_acc=False,
-):
-  """Computes and validates batch sizes.
-
-  There are four cases:
-  - big_batch_size: None, small_batch_size: None; allowed, grad_steps = 1.
-  - big_batch_size: None, small_batch_size: set; not allowed, since we cannot
-    if say, mini_batch_size is None, we want it to be equal to dataloader batch
-    size, which is available to us only during training. So, we cannot determine
-    `grad_accumulation_steps` here.
-  - big_batch_size: set, small_batch_size: None; allowed, grad_steps = 1.
-  -  Both set, in which case we check divisibility.
-
-  Args:
-    small_batch_size: The small batch size.
-    big_batch_size: The big batch size.
-    small_batch_size_name: The name of the small batch size.
-    big_batch_size_name: The name of the big batch size.
-    ret_grad_acc: Whether to return the gradient accumulation steps.
-
-  Returns:
-    The correct `small_batch_size` and `gradient_accumulation_steps`, if
-    `ret_grad_acc` is True.
-  """
-  if big_batch_size is None and small_batch_size is not None:
-    # Case 2
-    raise ValueError(
-        f"`{big_batch_size_name}` ({big_batch_size}) must be set if "
-        f"{small_batch_size_name}` ({small_batch_size}) is set."
-    )
-
-  # Case 1, 3
-  if small_batch_size is None:
-    small_batch_size = big_batch_size
-    if ret_grad_acc:
-      return small_batch_size, 1
-    return small_batch_size
-
-  # Case 4
-  rl_utils.check_batch_divisibility(
-      small_batch_size,
-      big_batch_size,
-      small_batch_size_name,
-      big_batch_size_name,
-  )
-  if ret_grad_acc:
-    return small_batch_size, big_batch_size // small_batch_size
-  return small_batch_size
