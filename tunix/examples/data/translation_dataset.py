@@ -61,6 +61,8 @@ def create_datasets(
     A tuple of train and eval data iterators.
   """
   if dataset_name == "mtnt/en-fr":
+    import tensorflow_datasets.text.mtnt
+
     train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
   elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
     train_ds, eval_ds = datasets.load_dataset(
