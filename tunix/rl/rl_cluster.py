@@ -187,6 +187,7 @@ class ClusterConfig:
   rollout_vllm_hbm_utilization: float = 0.2
   rollout_vllm_init_with_random_weights: bool = True
   rollout_vllm_tpu_backend_type: str | None = None
+  rollout_vllm_server_mode: bool = False
   rollout_vllm_swap_space_size_gb: float = 4.0  # in GiB
 
 
@@ -412,6 +413,7 @@ class RLCluster:
           tpu_backend_type=self.cluster_config.rollout_vllm_tpu_backend_type,
           swap_space=self.cluster_config.rollout_vllm_swap_space_size_gb,
           lora_config=self.cluster_config.rollout_vllm_lora_config,
+          server_mode=self.cluster_config.rollout_vllm_server_mode,
           rollout_engine=backend,
           mapping_config=self.cluster_config.rollout_mapping_config,
       )

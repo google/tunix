@@ -41,6 +41,7 @@ class VllmRollout(base_rollout.BaseRollout):
       lora_config: Optional[Dict[str, str]] = None,
       mapping_config: Optional[mappings.MappingConfig] = None,
       rollout_engine: str = "vllm_jax",
+      server_mode: bool = False
   ):
     self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
@@ -58,6 +59,7 @@ class VllmRollout(base_rollout.BaseRollout):
             mapping_config=mapping_config,
             lora_config=lora_config,
             swap_space=swap_space,
+            server_mode=server_mode,
         ),
     )
     state = nnx.state(model)

@@ -14,7 +14,9 @@
 
 import os
 import re
+import socket
 import tempfile
+import time
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -76,6 +78,31 @@ class VllmSamplerTest(absltest.TestCase):
       print(f"Loaded LoRA model: {model_version} with LoRA enabled")
     # nnx.display(llama3)
     return llama3, model_config
+
+  def _pick_free_port(self) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+      sock.bind(("127.0.0.1", 0))
+      return sock.getsockname()[1]
+
+  def _await_chat_completion(
+      self, client, prompt: str, *, retries: int = 10, sleep_s: float = 15.0
+  ) -> str:
+    last_error = None
+    for _ in range(retries):
+      try:
+        response = client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=128,
+        )
+        if response:
+          return response
+      except Exception as exc:  # pylint: disable=broad-except
+        last_error = exc
+        time.sleep(sleep_s)
+    raise RuntimeError(
+        f"Failed to fetch completion for prompt '{prompt}': {last_error}"
+    )
 
   def test_vllm_sampler(self):
     tunix_model, model_config = self.load_llama3_model(
@@ -202,5 +229,78 @@ class VllmSamplerTest(absltest.TestCase):
       )
 
 
+  def test_vllm_sampler_async_mode_with_real_checkpoint(self):
+    tunix_model, _ = self.load_llama3_model(
+        self.repo_id, enable_lora=self.enable_lora
+    )
+
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path
+    )
+    prompts = [
+        "Hello, my name is Tom.",
+        "The capital of France is",
+        "why is sky blue?",
+    ]
+
+    port = self._pick_free_port()
+    served_name = "llama3-async"
+    api_key = "async-test-key"
+
+    vllm_config = vllm_sampler.VllmConfig(
+        model_version=self.model_path,
+        max_model_len=512,
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=False,
+        tpu_backend_type=None,
+        mapping_config=vllm_sampler.MappingConfig(
+            to_hf_mappings=tunix_model.to_hf_mappings(),
+            to_hf_transpose_keys=tunix_model.to_hf_transpose_keys(),
+            lora_to_hf_mappings=tunix_model.lora_to_hf_mappings(),
+            lora_config=None,
+            to_hf_hook_fns=None,
+        ),
+        async_mode=True,
+        port=port,
+        served_model_name=served_name,
+        api_key=api_key,
+    )
+
+    vl_sampler = vllm_sampler.VllmSampler(
+        tokenizer=model_tokenizer,
+        config=vllm_config,
+    )
+    # Server boots asynchronously and loads weights from the supplied model path,
+    # so we intentionally skip `load_checkpoint` here.
+    self.addCleanup(vl_sampler.stop)
+
+    validation_cases = [
+        (prompts[0], ["Tom", "help"]),
+        (prompts[1], ["Paris"]),
+        (prompts[2], ["Rayleigh", "scattering"]),
+    ]
+
+    client = vllm_sampler.VLLMOpenAIClient(
+        base_url=f"http://127.0.0.1:{port}",
+        api_key=api_key,
+        model_name=served_name,
+    )
+
+    for prompt, expectations in validation_cases:
+      response = self._await_chat_completion(client, prompt)
+      normalized = response.strip().lower()
+      for keyword in expectations:
+        self.assertIn(
+            keyword.lower(),
+            normalized,
+            msg=(
+                f"Response '{response}' for prompt '{prompt}' does not contain"
+                f" expected keyword '{keyword}'."
+            ),
+        )
+
+
 if __name__ == "__main__":
   absltest.main()
+

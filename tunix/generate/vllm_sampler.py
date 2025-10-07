@@ -14,9 +14,16 @@
 
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
+import asyncio
 import dataclasses
+import json
 import math
 import os
+import signal
+import socket
+import threading
+import time
+from argparse import Namespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from absl import logging
@@ -29,8 +36,14 @@ from tunix.generate.mappings import MappingConfig
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
 from vllm import LLM
+from vllm.entrypoints.openai.api_server import run_server
+from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
+
+from vllm.utils import FlexibleArgumentParser
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -56,6 +69,55 @@ class VllmConfig:
   # transferring data between CPU and TPU/GPU memory.
   swap_space: float = 4.0  # in GiB
   lora_config: Optional[Dict[str, Any]] = None
+  server_mode: bool = False
+
+  # Async configs
+  port: int = 8000
+  served_model_name: str | None = None
+  api_key: str | None = None
+  extra_args: list[str] | None = None
+
+
+def _run_vllm_server_in_thread(serve_args: Namespace, owner: "VllmSampler"):
+  """Run vLLM server, skipping signal registration in non-main thread."""
+  main_thread = threading.main_thread()
+
+  original_signal_fn = signal.signal
+
+  def safe_signal(sig, handler):
+    if threading.current_thread() is main_thread:
+      return original_signal_fn(sig, handler)
+    logging.debug(
+        "Skipping signal handler registration for %s in non-main thread", sig
+    )
+    return None
+
+  loop = asyncio.new_event_loop()
+  asyncio.set_event_loop(loop)
+  original_add_signal_handler = loop.add_signal_handler
+
+  def safe_add_signal_handler(sig, callback, *args):
+    try:
+      return original_add_signal_handler(sig, callback, *args)
+    except (NotImplementedError, RuntimeError, ValueError):
+      logging.debug(
+          "Skipping loop.add_signal_handler for %s in non-main thread", sig
+      )
+      return None
+
+  loop.add_signal_handler = safe_add_signal_handler
+  signal.signal = safe_signal
+  owner._server_loop = loop  # pylint: disable=protected-access
+  try:
+    loop.run_until_complete(run_server(serve_args))
+  except RuntimeError as exc:
+    if "Event loop stopped before Future completed" not in str(exc):
+      raise
+  finally:
+    loop.add_signal_handler = original_add_signal_handler
+    signal.signal = original_signal_fn
+    loop.close()
+    owner._server_loop = None  # pylint: disable=protected-access
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -89,8 +151,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.config = config
     self.args = self._vllm_config(config)
-    self.llm = LLM(**self.args)
+    self.llm_thread = None
+    self._server_loop: asyncio.AbstractEventLoop | None = None
+    if config.server_mode:
+      self.llm = None
+      self.llm_thread = self.start_vllm_serve_inproc()
+    else:
+      self.llm = LLM(**self.args)
 
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
@@ -301,3 +370,114 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs[0],
     )
+
+  def _build_server_kwargs(self) -> Namespace:
+    tp_size = self._find_tp_size(self.config.mesh)
+
+    cli_args = [self.config.model_version]
+    cli_args.extend(["--tensor-parallel-size", str(tp_size)])
+    cli_args.extend(["--max-model-len", str(self.config.max_model_len)])
+    cli_args.extend([
+        "--gpu-memory-utilization",
+        str(self.config.hbm_utilization),
+    ])
+    cli_args.append("--disable-frontend-multiprocessing")
+
+    additional_config = self.args.get("additional_config")
+    if additional_config:
+      cli_args.extend(["--additional-config", json.dumps(additional_config)])
+
+    if self.config.port is not None:
+      cli_args.extend(["--port", str(self.config.port)])
+
+    if self.config.served_model_name:
+      served_name = self.config.served_model_name
+      if isinstance(served_name, (list, tuple)):
+        for name in served_name:
+          cli_args.extend(["--served-model-name", name])
+      else:
+        cli_args.extend(["--served-model-name", served_name])
+
+    if self.config.api_key:
+      cli_args.extend(["--api-key", self.config.api_key])
+
+    if self.config.extra_args:
+      logging.warning(
+          "Ignoring unsupported extra_args in server_mode: %s",
+          self.config.extra_args,
+      )
+
+    parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
+    parser = make_arg_parser(parser)
+    ns = parser.parse_args(cli_args)
+    ns.model_tag = self.config.model_version
+    ns.model = self.config.model_version
+    validate_parsed_serve_args(ns)
+
+    return ns
+
+  def start_vllm_serve_inproc(self):
+    serve_ns = self._build_server_kwargs()
+    thread = threading.Thread(
+        target=_run_vllm_server_in_thread, args=(serve_ns, self), daemon=False
+    )
+    self.llm_thread = thread
+    thread.start()
+    try:
+      port = self.config.port if self.config.port is not None else 8000
+      self._wait_for_server_ready("127.0.0.1", port)
+    except TimeoutError as exc:
+      logging.warning(
+          "Timed out waiting for vLLM server on %s:%s; continuing anyway: %s",
+          "127.0.0.1",
+          port,
+          exc,
+      )
+    except Exception as exc:
+      self.stop()
+      raise RuntimeError('Failed to start vLLM async server') from exc
+    return thread
+
+  def stop(self):
+    if not self.llm_thread:
+      return
+
+    if self._server_loop is not None:
+      self._server_loop.call_soon_threadsafe(self._server_loop.stop)
+
+    if self.llm_thread.is_alive():
+      self.llm_thread.join(timeout=5)
+
+    self.llm_thread = None
+
+  def _wait_for_server_ready(self, host: str, port: int, timeout: float = 360.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+      if self.llm_thread and not self.llm_thread.is_alive():
+        raise RuntimeError('vLLM server thread exited before becoming ready')
+      try:
+        with socket.create_connection((host, port), timeout=2.0):
+          return
+      except OSError:
+        time.sleep(1.0)
+    raise TimeoutError(
+        f'vLLM server did not become ready on {host}:{port} within {timeout}s'
+    )
+
+
+from openai import OpenAI
+
+
+class VLLMOpenAIClient:
+
+  def __init__(
+      self, base_url: str, api_key: str = "EMPTY", model_name: str = ""
+  ):
+    self.client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/v1")
+    self.model = model_name
+
+  def chat(self, messages, **kwargs) -> str:
+    resp = self.client.chat.completions.create(
+        model=self.model, messages=messages, **kwargs
+    )
+    return resp.choices[0].message.content
