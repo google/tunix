@@ -33,6 +33,7 @@ dependencies = [
   "tqdm",
   "transformers",
   "python-dotenv",
+  "jinja2",
 ]
 
 [project.optional-dependencies]
