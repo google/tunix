@@ -56,6 +56,13 @@ class VllmConfig:
   init_with_random_weights: bool
   tpu_backend_type: str
   mapping_config: MappingConfig
+  # The size of the CPU swap space to use for the KV cache, in GiB.
+  # This allows vLLM to offload KV cache blocks from TPU/GPU memory (HBM) to
+  # CPU memory (RAM) when HBM is full.
+  # A larger swap space allows for larger batch sizes and longer sequences
+  # than what can fit in HBM alone, potentially increasing throughput.
+  # However, frequent swapping can increase latency due to the overhead of
+  # transferring data between CPU and TPU/GPU memory.
   swap_space: float = 4.0  # in GiB
 
 
@@ -141,7 +148,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["max_model_len"] = config.max_model_len
     args["tensor_parallel_size"] = self._find_tp_size(config.mesh)
     args["gpu_memory_utilization"] = config.hbm_utilization
-    print(f"swap_space={config.swap_space}")
     args["swap_space"] = config.swap_space
     if config.mapping_config.lora_config is not None:
       args["additional_config"][
