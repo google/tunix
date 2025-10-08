@@ -806,7 +806,6 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
-        gradient_accumulation_steps=1,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
