@@ -16,6 +16,8 @@
 
 from collections.abc import Iterable
 import dataclasses
+import random
+import string
 
 from flax import config as flax_config
 from flax import nnx
@@ -24,6 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 import sentencepiece as spm
+from jax.sharding import Mesh, PartitionSpec as P
 
 if hasattr(flax_config, 'flax_always_shard_variable'):
   flax_config.update('flax_always_shard_variable', False)
@@ -49,24 +52,60 @@ class Decoder(nnx.Module):
   """Toy decoder for testing."""
 
   def __init__(self, rngs: nnx.Rngs):
+    qkv_kernel_sharding = P(None, 'tp')
+    # qkv_bias_sharding = P('tp',)
+
+    # Sharding for Out projection kernel: (qkv_features, out_features)
+    # Shard the input features dimension, matching the sharded qkv_features.
+    out_kernel_sharding = P('tp', None)
+    # Out bias is shape (out_features,), so it's not sharded along the 'model' axis.
+    # out_bias_sharding = P(None,) # Replicated
+
     self.attn = nnx.MultiHeadAttention(
-        num_heads=4,
-        in_features=16,
-        qkv_features=16,
+        num_heads=32,
+        in_features=2048,
+        qkv_features=2048,
         use_bias=False,
         decode=False,
         rngs=rngs,
+        kernel_init=nnx.with_metadata(
+            nnx.initializers.xavier_uniform(),
+            sharding=qkv_kernel_sharding
+        ),
+        # bias_init=nnx.with_metadata(
+        #     nnx.initializers.zeros_init(),
+        #     sharding=qkv_bias_sharding
+        # ),
+        out_kernel_init=nnx.with_metadata(
+            nnx.initializers.xavier_uniform(),
+            sharding=out_kernel_sharding
+        ),
+        # out_bias_init=nnx.with_metadata(
+        #     nnx.initializers.zeros_init(),
+        #     sharding=out_bias_sharding
+        # ),
+        # param_axes={
+        #     # These keys depend on the module internals; common patterns:
+        #     'q_proj.kernel': ('embed', 'heads_kv'),  # heads_kv ≈ heads*head_dim
+        #     'k_proj.kernel': ('embed', 'heads_kv'),
+        #     'v_proj.kernel': ('embed', 'heads_kv'),
+        #     'o_proj.kernel': ('heads_kv', 'embed'),
+        # },
     )
+    # self.attn.q_proj.param_axes = {'kernel': ('embed','heads_kv')}
+    # self.attn.k_proj.param_axes = {'kernel': ('embed','heads_kv')}
+    # self.attn.v_proj.param_axes = {'kernel': ('embed','heads_kv')}
+    # self.attn.o_proj.param_axes = {'kernel': ('heads_kv','embed')}
     kernel_init_fn = nnx.initializers.lecun_normal()
     self.w1 = nnx.Linear(
-        in_features=16,
-        out_features=32,
+        in_features=2048,
+        out_features=2048,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('fsdp', 'tp')),
     )
     self.w2 = nnx.Linear(
-        in_features=32,
-        out_features=16,
+        in_features=2048,
+        out_features=2048,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('tp', 'fsdp')),
     )
@@ -93,19 +132,19 @@ class ToyTransformer(nnx.Module, pytree=False):
   def __init__(
       self,
       rngs: nnx.Rngs,
-      vocab_size: int = 256,
-      num_layers: int = 4,
+      vocab_size: int = 128256,
+      num_layers: int = 8,
   ):
     self.config = ModelConfig(
-        num_layers=num_layers, num_kv_heads=4, head_dim=16
+        num_layers=num_layers, num_kv_heads=8, head_dim=64
     )
-    self.emb = nnx.Embed(vocab_size, 16, rngs=rngs)
+    self.emb = nnx.Embed(vocab_size, 2048, rngs=rngs)
     self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
     self.lm_head = nnx.Linear(
-        in_features=16, out_features=vocab_size, rngs=rngs
+        in_features=2048, out_features=vocab_size, rngs=rngs
     )
 
-    self.head_dim = 16
+    self.head_dim = 64
 
   def __call__(
       self, x, positions, cache, attention_mask, output_hidden_states=False
@@ -185,7 +224,17 @@ class MockVocab(spm.SentencePieceProcessor):
         'optimizer': 20,
         'quantization': 21,
     }
+    self._mapping_text_to_id |= self.random_dict()
+
     self._vocab_size = len(self._mapping_text_to_id)
+
+
+  def random_word(self, length=8):
+      # generate a random lowercase word
+      return ''.join(random.choices(string.ascii_lowercase, k=length))
+
+  def random_dict(self, start=22, end=128256):
+      return {self.random_word(): i for i in range(start, end)}
 
   def pad_id(self) -> int:
     return 0
