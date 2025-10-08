@@ -185,35 +185,38 @@ class RLLearner(abc.ABC):
             f"Content of r: {r}"
         )
       rewards[:, i] = np.array(r)
+      for reward in r:
+        self.rl_cluster.buffer_metrics(
+            {
+                f"rewards/{reward_fn.__name__}": (
+                    reward,
+                    np.mean,
+                ),
+            },
+            mode=mode,
+        )
+
+    rewards = np.nansum(rewards, axis=1)
+    for trajectory_idx in range(len(prompts)):
+      trajectory_rewards = rewards[trajectory_idx]
       self.rl_cluster.buffer_metrics(
           {
-              f"rewards/{reward_fn.__name__}": (
-                  np.mean(r),
+              "rewards/sum": (
+                  np.sum(trajectory_rewards),
                   np.mean,
               ),
           },
           mode=mode,
       )
-
-    rewards = np.nansum(rewards, axis=1)
-    self.rl_cluster.buffer_metrics(
-        {
-            "rewards/overall": (
-                np.mean(rewards),
-                np.mean,
-            ),
-        },
-        mode=mode,
-    )
-    self.rl_cluster.buffer_metrics(
-        {
-            "rewards/min": (
-                np.min(rewards),
-                np.min,
-            ),
-        },
-        mode=mode,
-    )
+      self.rl_cluster.buffer_metrics(
+          {
+              "rewards/min": (
+                  np.min(trajectory_rewards),
+                  np.min,
+              ),
+          },
+          mode=mode,
+      )
     for p, c in zip(prompts, completions):
       self.rl_cluster.buffer_metrics(
           {
