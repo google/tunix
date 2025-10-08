@@ -206,7 +206,7 @@ class GRPOLearner(rl_learner.RLLearner):
     completion_mask = completion_mask * completion_padding_mask
 
     if self.grpo_config.beta != 0.0:
-      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+      ref_per_token_logps = jax.lax.stop_gradient(self.rl_cluster.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           pad_id=pad_value,
@@ -215,18 +215,18 @@ class GRPOLearner(rl_learner.RLLearner):
               self._compute_logps_micro_batch_size
               * self.grpo_config.num_generations
           ),
-      )
+      ))
     else:
       ref_per_token_logps = None
     if self.grpo_config.num_iterations > 1:
-      old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+      old_per_token_logps = jax.lax.stop_gradient(self.rl_cluster.get_old_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           micro_batch_size=(
               self._compute_logps_micro_batch_size
               * self.grpo_config.num_generations
           ),
-      )
+      ))
     else:
       old_per_token_logps = None
 
