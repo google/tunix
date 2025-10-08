@@ -56,6 +56,7 @@ class VllmConfig:
   init_with_random_weights: bool
   tpu_backend_type: str
   mapping_config: MappingConfig
+  swap_space: float = 4.0  # in GiB
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -140,6 +141,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["max_model_len"] = config.max_model_len
     args["tensor_parallel_size"] = self._find_tp_size(config.mesh)
     args["gpu_memory_utilization"] = config.hbm_utilization
+    print(f"swap_space={config.swap_space}")
+    args["swap_space"] = config.swap_space
     if config.mapping_config.lora_config is not None:
       args["additional_config"][
           "lora_config"
