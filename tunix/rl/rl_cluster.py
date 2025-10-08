@@ -165,6 +165,8 @@ class ClusterConfig:
       random weights instead of loading from the given path.
     rollout_vllm_tpu_backend_type: The TPU Jax backend type for vllm rollout
       engine, E.g. "jax", "torchax" or "pytorch_xla".
+    rollout_vllm_swap_space_size_gb: The swap space size (in GiB) for vllm
+      rollout engine.
   """
 
   role_to_mesh: dict[Role, Mesh]
@@ -181,6 +183,7 @@ class ClusterConfig:
   rollout_vllm_hbm_utilization: float = 0.2
   rollout_vllm_init_with_random_weights: bool = True
   rollout_vllm_tpu_backend_type: str | None = None
+  rollout_vllm_swap_space_size_gb: float = 4.0  # in GiB
 
 
 class RLCluster:
@@ -192,6 +195,7 @@ class RLCluster:
       actor: ModelOrPath,
       critic: ModelOrPath | None = None,
       reference: ModelOrPath | None = None,
+      rollout: ModelOrPath | None = None,
       reward: ModelOrPath | None = None,
       tokenizer: Any | None,
       cluster_config: ClusterConfig,
@@ -212,7 +216,7 @@ class RLCluster:
           else self.cluster_config.rollout_config.data_type
       )
       self.rollout_actor = self._load_model(
-          actor,
+          rollout,
           self.r2m[Role.ROLLOUT],
           rollout_data_type,
       )
@@ -398,6 +402,7 @@ class RLCluster:
           hbm_utilization=self.cluster_config.rollout_vllm_hbm_utilization,
           init_with_random_weights=self.cluster_config.rollout_vllm_init_with_random_weights,
           tpu_backend_type=self.cluster_config.rollout_vllm_tpu_backend_type,
+          swap_space=self.cluster_config.rollout_vllm_swap_space_size_gb,
           lora_config=self.cluster_config.rollout_vllm_lora_config,
       )
     else:

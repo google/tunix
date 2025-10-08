@@ -36,6 +36,7 @@ class VllmRollout(base_rollout.BaseRollout):
       hbm_utilization: float,
       init_with_random_weights: bool,
       tpu_backend_type: str,
+      swap_space: float = 4.0,  # in GiB
       lora_config: Optional[Dict[str, str]] = None,
   ):
     self.mesh = mesh
@@ -55,6 +56,7 @@ class VllmRollout(base_rollout.BaseRollout):
                 lora_to_hf_mappings=model.lora_to_hf_mappings(),
                 lora_config=lora_config,
             ),
+            swap_space=swap_space,
         ),
     )
     state = nnx.state(model)
