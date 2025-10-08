@@ -45,7 +45,8 @@ jobs:
     needs: build_tunix_package
     uses: ./.github/workflows/run_tests_against_package.yml
 
-  tunix_tpu_tests:
+
+  tunix_tpu_unit_tests:
     needs: build_tunix_package
     uses: ./.github/workflows/tpu-tests.yml
     secrets:
@@ -53,7 +54,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [tunix_cpu_unit_tests, tunix_tpu_tests]
+    needs: [build_tunix_package,tunix_cpu_unit_tests, tunix_tpu_unit_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
