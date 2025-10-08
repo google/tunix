@@ -5,8 +5,9 @@ These types provide standardized containers for actions, interaction steps,
 and complete episode trajectories.
 """
 
+from collections.abc import Hashable
 import dataclasses
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 field = dataclasses.field
 dataclass = dataclasses.dataclass
@@ -79,16 +80,41 @@ class Trajectory:
   steps: list[Step] = field(default_factory=list)
   reward: float = 0.0
 
-  def to_dict(self) -> dict[str, Any]:
-    """Convert trajectory to dictionary format for serialization.
 
-    Useful for logging, storage, or transmission over APIs. All Step objects
+@dataclass
+class TrajectoryItem:
+  """Represents an item within a Trajectory, potentially for pairing or grouping.
+
+  Attributes:
+      pair_index (int): Index for pairing.
+      group_id (collections.abc.Hashable): Identifier for grouping trajectories.
+      episode_id (int): Unique identifier for the episode.
+      start_step (int): The starting step index within the full trajectory.
+      traj (Trajectory): The Trajectory object itself.
+      metadata (Dict[str, Any]): Additional metadata.
+  """
+
+  pair_index: int
+  group_id: Hashable
+  episode_id: int
+  start_step: int
+  traj: Trajectory
+  metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def to_dict(self) -> dict[str, Any]:
+  """Convert trajectory to dictionary format for serialization.
+
+  Useful for logging, storage, or transmission over APIs. All Step objects
     are recursively converted to dictionaries using dataclass serialization.
 
-    Returns:
-        dict: Serializable dictionary representation of the trajectory
-    """
-    return {
-        "steps": [asdict(step) for step in self.steps],
-        "reward": float(self.reward),
-    }
+  Args:
+      self: The Trajectory object to convert.
+
+  Returns:
+      dict: Serializable dictionary representation of the trajectory
+  """
+  return {
+      "steps": [asdict(step) for step in self.steps],
+      "reward": float(self.reward),
+  }
