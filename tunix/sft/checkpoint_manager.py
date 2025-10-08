@@ -19,42 +19,42 @@ from absl import logging
 from flax import nnx
 import jax
 import orbax.checkpoint as ocp
-from pathwaysutils.persistence import helper
+# from pathwaysutils.persistence import helper
 from concurrent import futures
 import datetime
 
-original_write_one_array = helper.write_one_array
-def my_write_one_array(
-    location: str,
-    name: str,
-    value: jax.Array,
-    timeout: datetime.timedelta,
-):
-  try:
-    # Call the original write_one_array function. This will have the same
-    # behavior as the original write_one_array function if there is no error.
-    write_future = original_write_one_array(location, name, value, timeout)
-  except TypeError as e:
-    # If there is an error, print the error, some information, and continue.
-    print("Found an array that failed to write")
-    print(f"TypeError: {e}")
+# original_write_one_array = helper.write_one_array
+# def my_write_one_array(
+#     location: str,
+#     name: str,
+#     value: jax.Array,
+#     timeout: datetime.timedelta,
+# ):
+#   try:
+#     # Call the original write_one_array function. This will have the same
+#     # behavior as the original write_one_array function if there is no error.
+#     write_future = original_write_one_array(location, name, value, timeout)
+#   except TypeError as e:
+#     # If there is an error, print the error, some information, and continue.
+#     print("Found an array that failed to write")
+#     print(f"TypeError: {e}")
 
-    print(f"{value=}")
-    print(f"{type(value)=}")
-    print(f"{location=}")
-    print(f"{name=}")
-    print(f"{timeout=}")
-    print("Skipping this failed array and continuing")
+#     print(f"{value=}")
+#     print(f"{type(value)=}")
+#     print(f"{location=}")
+#     print(f"{name=}")
+#     print(f"{timeout=}")
+#     print("Skipping this failed array and continuing")
 
-    # Return a dummy future that is already done with no result
-    write_future = futures.Future()
-    write_future.set_result(None)
+#     # Return a dummy future that is already done with no result
+#     write_future = futures.Future()
+#     write_future.set_result(None)
 
-  return write_future
+#   return write_future
 
-# Override the write_one_array with the my_write_one_array function.
-# This will be used by Orbax to write the arrays.
-helper.write_one_array = my_write_one_array
+# # Override the write_one_array with the my_write_one_array function.
+# # This will be used by Orbax to write the arrays.
+# helper.write_one_array = my_write_one_array
 
 
 _DEFAULT_CHECKPOINTING_OPTIONS = ocp.CheckpointManagerOptions(
@@ -143,11 +143,11 @@ class CheckpointManager:
             lambda _: ocp.SaveArgs(), params_dict_with_jax_array
         ),
     )
-    # return self._checkpoint_manager.save(
-    #     step,
-    #     args=ocp.args.Composite(model_params=checkpoint_args),
-    #     force=force,
-    # )
+    return self._checkpoint_manager.save(
+        step,
+        args=ocp.args.Composite(model_params=checkpoint_args),
+        force=force,
+    )
 
   def maybe_restore(
       self,
