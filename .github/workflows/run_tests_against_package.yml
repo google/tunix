@@ -22,7 +22,7 @@ on:
 
 permissions:
   contents: read
-jobs:
+jobs: 
   run:
     runs-on: ubuntu-latest
     steps:

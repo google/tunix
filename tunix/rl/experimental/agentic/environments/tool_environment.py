@@ -20,7 +20,7 @@ BaseEnv = base_environment.BaseEnv
 BaseTool = base_tool.BaseTool
 ToolManager = tool_manager.ToolManager
 ToolCall = base_tool.ToolCall
-zero_reward = reward.zero_reward
+dummy_reward = reward.dummy_reward
 
 
 class ToolEnvironment(BaseEnv):
@@ -53,7 +53,7 @@ class ToolEnvironment(BaseEnv):
         tool_map (Dict[str, type[BaseTool]]): Mapping of tool names to their
           implementation classes for tool discovery and execution.
         reward_fn: Reward function that takes (task, action) and returns
-          RewardOutput. If None, defaults to zero_reward with a warning.
+          RewardOutput. If None, defaults to dummy_reward with a warning.
         max_steps (int): Maximum number of interaction steps before forced
           termination. Prevents infinite loops and controls episode length.
     """
@@ -64,8 +64,8 @@ class ToolEnvironment(BaseEnv):
 
     # Reward computation function with fallback to zero reward
     if reward_fn is None:
-      logging.warning("No reward_fn provided, defaulting to zero_reward().")
-      reward_fn = zero_reward
+      logging.warning("No reward_fn provided, defaulting to dummy_reward().")
+      reward_fn = dummy_reward
     self.reward_fn = reward_fn
 
     # Episode configuration and state tracking

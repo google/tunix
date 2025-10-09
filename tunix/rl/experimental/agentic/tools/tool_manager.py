@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent import futures
+import inspect
 from typing import Any, Dict, List, Type
 import uuid
 
@@ -46,10 +47,16 @@ class ToolManager:
         desc_fallback (str): Default description used when a tool class lacks a
           docstring. Helps maintain consistent documentation.
     """
-    self._tool_dict: Dict[str, BaseTool] = {
-        name: cls(name=name, description=getattr(cls, "__doc__", desc_fallback))
-        for name, cls in tool_map.items()
-    }
+    self._tool_dict: Dict[str, BaseTool] = {}
+    for name, cls in tool_map.items():
+      if inspect.isabstract(cls):
+        raise TypeError(
+            f"Cannot instantiate abstract tool class '{name}': {cls.__name__}. "
+            "Please provide concrete implementations of BaseTool."
+        )
+      self._tool_dict[name] = cls(  # pytype: disable=not-instantiable
+          name=name, description=(cls.__doc__ or desc_fallback)
+      )
 
   @property
   def names(self) -> List[str]:
@@ -60,8 +67,7 @@ class ToolManager:
     """
     return list(self._tool_dict.keys())
 
-  @property
-  def json(self) -> List[dict[str, Any]]:
+  def get_json_schema(self) -> List[dict[str, Any]]:
     """Get OpenAI-compatible JSON schemas for all registered tools.
 
     Generates function metadata suitable for injection into LLM prompts
@@ -71,10 +77,9 @@ class ToolManager:
     Returns:
         List[dict]: OpenAI function calling format schemas for all tools
     """
-    return [tool.json for tool in self._tool_dict.values()]
+    return [tool.get_json_schema() for tool in self._tool_dict.values()]
 
-  @property
-  def mcp_json(self) -> List[dict[str, Any]]:
+  def get_mcp_schema(self) -> List[dict[str, Any]]:
     """Get MCP (Model Context Protocol) compatible tool metadata.
 
     Provides tool definitions in the standardized MCP format used by
@@ -98,7 +103,7 @@ class ToolManager:
     """
     self._tool_dict[tool.name] = tool
 
-  def run(self, tool_name: str, **kwargs) -> ToolOutput:
+  def run(self, tool_name: str, **kwargs: Any) -> ToolOutput:
     """Execute a single tool by name with the provided arguments.
 
     Looks up the tool in the registry, executes it with the given parameters,
@@ -120,7 +125,33 @@ class ToolManager:
       )
     # pylint: disable=broad-exception-caught
     try:
-      return tool(**kwargs)
+      return tool.apply(**kwargs)
+    except Exception as e:
+      return ToolOutput(name=tool_name, error=f"{type(e).__name__}: {e}")
+
+  async def run_async(self, tool_name: str, **kwargs: Any) -> ToolOutput:
+    """Asynchronously execute a single tool by name with the provided arguments.
+
+    Looks up the tool in the registry, executes it with the given parameters,
+    and handles any exceptions that occur during execution. Returns a
+    standardized ToolOutput regardless of success or failure.
+
+    Args:
+        tool_name (str): Name of the registered tool to execute
+        **kwargs: Tool-specific parameters to pass to the tool's apply method
+
+    Returns:
+        ToolOutput: Standardized result containing output, error information,
+            or metadata from the tool execution
+    """
+    tool = self._tool_dict.get(tool_name)
+    if tool is None:
+      return ToolOutput(
+          name=tool_name, error=f"Tool '{tool_name}' not registered."
+      )
+    # pylint: disable=broad-exception-caught
+    try:
+      return await tool.apply_async(**kwargs)
     except Exception as e:
       return ToolOutput(name=tool_name, error=f"{type(e).__name__}: {e}")
 

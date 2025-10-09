@@ -73,7 +73,7 @@ You can install Tunix in several ways:
 1. From PyPI (recommended):
 
 ```sh
-pip install "tunix[prod]"
+pip install "google-tunix[prod]"
 ```
 
 2. Directly from GitHub (latest main branch)
@@ -134,6 +134,19 @@ cutting-edge research and easy reproducibility.
 Thank you for your interest in Tunix. We're working hard to bring you a powerful
 and efficient library for LLM post-training. Please follow our progress and
 check back for updates!
+
+## Citing Tunix
+
+```bibtex
+@misc{tunix2025,
+  title={Tunix},
+  author={Bao, Tianshu and Wang, Lance and Sharma, Abheesht and Shin, Jiwon and
+  Yan, Ann and Tan, Sizhi and Gao, Haoyu and Ha, Jen and Chai, Lin and
+  Liu, Dangyi and Iyer, Rakesh and Sahu, Mridul and others},
+  year={2025},
+  howpublished={\url{https://github.com/google/tunix}},
+}
+```
 
 ## Acknowledgements
 
