@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from collections import Counter
 from typing import Any, Dict, List
+import unittest
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -22,6 +23,7 @@ import optax
 from tunix.cli import config
 from tunix.sft import peft_trainer
 from tunix.tests import test_common as tc
+
 
 class ConfigTest(parameterized.TestCase):
   TEST_ARGV = [
@@ -381,37 +383,39 @@ class ConfigTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name="single_reward_fn",
+          testcase_name="reward_fn_from_module",
           overrides=[
-              "reward_functions=['tunix.cli.utils.reward.check_answer']",
+              "reward_functions=['tunix/cli/reward_fn/gsm8k.py']",
+              "verl_compatible=False",
           ],
-          expected_reward_fn_len=1,
-          expected_reward_fn_names=["check_answer"],
-      ),
-      dict(
-          testcase_name="multiple_reward_fns",
-          overrides=[
-              "reward_functions=['tunix.cli.utils.reward.check_answer',"
-              "'tunix.cli.utils.reward.check_numbers']"
-          ],
-          expected_reward_fn_len=2,
+          expected_reward_fn_len=4,
           expected_reward_fn_names=[
+              "match_format_exactly",
+              "match_format_approximately",
               "check_answer",
               "check_numbers",
           ],
       ),
+      dict(
+          testcase_name="reward_fn_from_module_verl_compatible",
+          overrides=[
+              "reward_functions=['tunix/cli/reward_fn/gsm8k_verl.py']",
+              "verl_compatible=True",
+          ],
+          expected_reward_fn_len=1,
+          expected_reward_fn_names=[
+              "reward_fn",
+          ],
+      ),
   )
   def test_get_reward_fns(
-      self,
-      overrides,
-      expected_reward_fn_len,
-      expected_reward_fn_names
+      self, overrides, expected_reward_fn_len, expected_reward_fn_names
   ):
     hp = self.initialize_config(overrides)
     reward_fns = hp.obtain_reward_fn()
     self.assertLen(reward_fns, expected_reward_fn_len)
-    for i in range(expected_reward_fn_len):
-      self.assertEqual(reward_fns[i].__name__, expected_reward_fn_names[i])
+    actual_names = [fn.__name__ for fn in reward_fns]
+    self.assertEqual(Counter(actual_names), Counter(expected_reward_fn_names))
 
 
 if __name__ == "__main__":

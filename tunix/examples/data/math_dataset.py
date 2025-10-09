@@ -14,8 +14,10 @@
 
 import os
 import grain
+from grain.multiprocessing import MultiprocessingOptions
 import tensorflow_datasets as tfds
 import tensorflow_datasets.text.gsm8k
+from transformers import AutoTokenizer
 
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"
@@ -71,6 +73,21 @@ def get_dataset(data_dir, split="train") -> grain.MapDataset:
           }
       )
   )
+  return dataset
+
+
+def get_dataset_from_parquet(parquet_path, tokenizer):
+  dataset = grain.experimental.ParquetIterDataset(parquet_path)
+
+  def process_element(x):
+    return {
+        "prompts": tokenizer.apply_chat_template(
+            x["prompt"], tokenize=False, add_generation_prompt=True
+        ),
+        **{k: v for k, v in x.items() if k != "prompt"},
+    }
+
+  dataset = dataset.map(process_element)
   return dataset
 
 

@@ -18,13 +18,14 @@ set -x # Enable xtrace
 batch_size=${batch_size:-8}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}
-
+warmup_ratio=${warmup_ratio:-0.1}
 train_fraction=${train_fraction:-1.0} 
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
 echo "  Num Batches: $num_batches"
 echo "  Num Epochs: $num_train_epochs"
+echo "  Warmup Ratio: $warmup_ratio" 
 echo "  Train Fraction: $train_fraction"
 
 max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
@@ -32,7 +33,7 @@ max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epoc
 max_steps=$(printf "%.0f" "$max_steps_float")
 
 
-warmup_steps=$(awk "BEGIN {printf \"%.0f\", 0.1 * $max_steps}")
+warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
 
 echo "Max steps: $max_steps"
 echo "Rounded warmup steps: $warmup_steps"
@@ -66,7 +67,7 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
   rl_training_config.actor_optimizer_config.init_value=0.0 \
   rl_training_config.actor_optimizer_config.end_value=0.0 \
-  rl_training_config.actor_optimizer_config.warmup_ratio=0.1 \
+  rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio \
   rl_training_config.actor_optimizer_config.warmup_steps=$warmup_steps \
   rl_training_config.actor_optimizer_config.decay_steps=$max_steps \
   rl_training_config.actor_optimizer_config.b1=0.9 \
@@ -91,4 +92,4 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.num_iterations=1 \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
-  reward_functions="['tunix.cli.utils.reward.match_format_exactly', 'tunix.cli.utils.reward.match_format_approximately', 'tunix.cli.utils.reward.check_answer', 'tunix.cli.utils.reward.check_numbers']"
+  reward_functions="['tunix/cli/reward_fn/gsm8k.py']"
