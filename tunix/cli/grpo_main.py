@@ -16,7 +16,7 @@
 from absl import app
 from tunix.cli import config
 from tunix.cli.utils import model as model_lib
-from tunix.examples.data.math_dataset import math_dataset as data_lib
+from tunix.examples.data import math_dataset as data_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.grpo.grpo_learner import GrpoConfig
@@ -110,11 +110,17 @@ class GrpoPipeline(config.HyperParameters):
         grpo_config=GrpoConfig(**self.config["grpo_config"]),
     )
 
-    dataset = data_lib.create_dataset(
-        self.config["dataset_name"],
-        self.config["batch_size"],
-        self.config["num_batches"],
-    )
+    if self.config["data_source"] == "local":
+      dataset = data_lib.get_dataset_from_parquet(
+          self.config["data_directory"],
+          grpo_trainer.rl_cluster.tokenizer.tokenizer,
+      ).batch(self.config["batch_size"])
+    else:
+      dataset = data_lib.create_dataset(
+          self.config["dataset_name"],
+          self.config["batch_size"],
+          self.config["num_batches"],
+      )
 
     mesh = self.create_mesh("actor_model_config")
     with mesh:

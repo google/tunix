@@ -81,6 +81,8 @@ tokenizer_config:
 ################################## DATASET ##################################
 # Translation_dataset  "Helsinki-NLP/opus-100" or "mtnt/en-fr" for SFT
 # Math_dataset "gsm8k" for grpo 
+data_source: ""
+data_directory: ""
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 num_batches: 3738
@@ -183,8 +185,6 @@ offload_to_cpu: false
 
  ############################# Reward Fns #############################
 
-reward_functions:
- - 'tunix.cli.utils.reward.match_format_exactly'
- - 'tunix.cli.utils.reward.match_format_approximately'
- - 'tunix.cli.utils.reward.check_answer'
- - 'tunix.cli.utils.reward.check_numbers'
+verl_compatible: false 
+reward_functions: 
+ - tunix/cli/reward_fn/gsm8k.py
