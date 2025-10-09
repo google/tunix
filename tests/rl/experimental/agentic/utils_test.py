@@ -121,7 +121,7 @@ class MessagesToTokensTest(unittest.TestCase):
     self.mock_parser.parse.side_effect = parse_side_effect
 
   def test_empty_messages(self):
-    tokens, masks = utils.convert_messages_to_tokens_and_masks(
+    tokens, masks = utils.tokenize_and_generate_masks(
         messages=[],
         tokenizer=self.mock_tokenizer,
         parser=self.mock_parser,
@@ -134,7 +134,7 @@ class MessagesToTokensTest(unittest.TestCase):
     expected_text = 'role:user content:hi'
     expected_tokens = [ord(c) for c in expected_text]
 
-    tokens, masks = utils.convert_messages_to_tokens_and_masks(
+    tokens, masks = utils.tokenize_and_generate_masks(
         messages=messages,
         tokenizer=self.mock_tokenizer,
         parser=self.mock_parser,
@@ -151,7 +151,7 @@ class MessagesToTokensTest(unittest.TestCase):
     expected_text = 'role:assistant content:hello'
     expected_tokens = [ord(c) for c in expected_text]
 
-    tokens, masks = utils.convert_messages_to_tokens_and_masks(
+    tokens, masks = utils.tokenize_and_generate_masks(
         messages=messages,
         tokenizer=self.mock_tokenizer,
         parser=self.mock_parser,
@@ -176,7 +176,7 @@ class MessagesToTokensTest(unittest.TestCase):
     tokens2 = [ord(c) for c in text2]
     masks2 = [1] * len(tokens2)
 
-    tokens, masks = utils.convert_messages_to_tokens_and_masks(
+    tokens, masks = utils.tokenize_and_generate_masks(
         messages=messages,
         tokenizer=self.mock_tokenizer,
         parser=self.mock_parser,
@@ -191,7 +191,7 @@ class MessagesToTokensTest(unittest.TestCase):
         {'role': 'user', 'content': 'hi'},
         {'role': 'assistant', 'content': 'hello'},
     ]
-    utils.convert_messages_to_tokens_and_masks(
+    utils.tokenize_and_generate_masks(
         messages=messages,
         tokenizer=self.mock_tokenizer,
         parser=self.mock_parser,
@@ -221,7 +221,7 @@ class MessagesToTokensTest(unittest.TestCase):
         {'role': 'user', 'content': 'hi'},
         {'role': 'assistant', 'content': 'hello'},
     ]
-    utils.convert_messages_to_tokens_and_masks(
+    utils.tokenize_and_generate_masks(
         messages=messages,
         tokenizer=self.mock_tokenizer,
         parser=self.mock_parser,
@@ -263,7 +263,7 @@ class MessagesToTokensTest(unittest.TestCase):
     expected_text = 'content:hi'  # The token should be stripped
     expected_tokens = [ord(c) for c in expected_text]
 
-    tokens, masks = utils.convert_messages_to_tokens_and_masks(
+    tokens, masks = utils.tokenize_and_generate_masks(
         messages=messages,
         tokenizer=self.mock_tokenizer,
         parser=self.mock_parser,
