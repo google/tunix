@@ -16,7 +16,7 @@
 from absl import app
 from tunix.cli import config
 from tunix.cli.utils import model as model_lib
-from tunix.examples.data.math_dataset import math_dataset as data_lib
+from tunix.examples.data import math_dataset as data_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.grpo.grpo_learner import GrpoConfig
