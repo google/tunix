@@ -240,6 +240,28 @@ class CheckpointManagerTest(absltest.TestCase):
         nnx.state(model, nnx.filterlib.Not(nnx.LoRAParam)),
     )
 
+  def test_restore_with_backward_compatibility(self):
+    # The checkpoints in test_data is saved with StandardSave. The test is to
+    # verify the checkpoint manager with PyTreeRestore can still restore the
+    # checkpoints saved with StandardSave.
+    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
+        os.path.join(os.path.dirname(__file__), 'test_data/checkpoints')
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    expected_state = nnx.state(model)
+    # Change the model state.
+    changed_state = jax.tree.map(lambda x: x + 1, nnx.state(model))
+    nnx.update(model, changed_state)
+
+    # Restore the model params.
+    self.assertEqual(peft_checkpoint_manager.maybe_restore(model), 1)
+    # Check the model params are restored correctly.
+    jax.tree.map_with_path(
+        assert_close,
+        expected_state,
+        nnx.state(model),
+    )
+
 
 if __name__ == '__main__':
   absltest.main()
