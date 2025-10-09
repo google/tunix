@@ -34,6 +34,55 @@ from tunix.models.llama3 import model as llama3_lib
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen3 import model as qwen3_lib
 
+# Security: Whitelist for safe module imports
+ALLOWED_MODULE_PREFIXES = [
+    'tunix.',
+    'transformers.',
+    'torch.',
+    'tensorflow.',
+    'sklearn.',
+    'numpy.',
+    'pandas.',
+]
+
+
+def validate_module_name(module_name: str) -> str:
+    """
+    Validate that the module name is safe to import.
+    
+    Args:
+        module_name: The module name to validate
+        
+    Returns:
+        The validated module name
+        
+    Raises:
+        ValueError: If the module name is not in the whitelist
+    """
+    import re
+    
+    # Remove any whitespace
+    module_name = module_name.strip()
+    
+    # Check for path traversal attempts
+    if '..' in module_name or '/' in module_name or '\\' in module_name:
+        raise ValueError(f"Invalid module name: {module_name}")
+    
+    # Validate against allowed prefixes
+    if not any(module_name.startswith(prefix) for prefix in ALLOWED_MODULE_PREFIXES):
+        raise ValueError(
+            f"Module '{module_name}' is not in the allowed list. "
+            f"Allowed prefixes: {', '.join(ALLOWED_MODULE_PREFIXES)}"
+        )
+    
+    # Ensure module name contains only valid characters
+    if not re.match(r'^[a-zA-Z0-9_.]+$', module_name):
+        raise ValueError(f"Module name contains invalid characters: {module_name}")
+    
+    return module_name
+
+
+
 
 # Map prefixes to the target object containing the methods.
 CONFIG_MAP = {
@@ -62,6 +111,7 @@ def get_model_module(model_name: str) -> Any:
   module_path = f'{_BASE_MODULE_PATH}.{model_type}.params'
   try:
     print(f'Attempting to import: {module_path}')
+    module_path = validate_module_name(module_path)
     model_module = importlib.import_module(module_path)
     return model_module
   except ImportError as exc:  # Capture the original exeception as 'exc'
@@ -477,5 +527,31 @@ def create_model(
 
   if model_config['model_display']:
     nnx.display(model)
+
+
+
+# Security: Whitelist for safe module imports
+_ALLOWED_MODULE_PREFIXES = (
+    'tunix.',
+    'transformers.',
+    'torch.',
+    'tensorflow.',
+    'sklearn.',
+    'numpy.',
+    'pandas.',
+)
+
+
+def _validate_module_name(module_name: str):
+    """Validates that the module name is safe to import."""
+    # Basic validation for module name format
+    if not re.fullmatch(r'[a-zA-Z0-9_.]+', module_name):
+        raise ValueError(f'Module name contains invalid characters: {module_name}')
+    
+    # Check against the whitelist of allowed prefixes
+    if not any(module_name.startswith(prefix) for prefix in _ALLOWED_MODULE_PREFIXES):
+        raise ValueError(
+            f"Module '{module_name}' is not in the allowed list of modules to import."
+        )
 
   return model, tokenizer_path
