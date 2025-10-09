@@ -22,7 +22,6 @@ dependencies = [
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax[tpu]>=0.6.0,<=0.7.1", # Newer libtpu version has some perf regression on cloud TPU, pin to <=0.7.1 for now. b/448646341
   "jaxtyping",
   "kagglehub",
   "omegaconf",
@@ -49,10 +48,14 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
+    "jax[tpu]>=0.6.0,<=0.7.1", # Newer libtpu version has some perf regression on cloud TPU, pin to <=0.7.1 for now. b/448646341
     "flax>=0.11.2",
 ]
 dev = [
+    "jax[tpu]>=0.7.2",  # vLLM TPU backend only works with latest Jax
     "flax>=0.11.2",
+    "numba",
+    "vllm",
 ]
 
 [project.urls]

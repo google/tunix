@@ -138,7 +138,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["additional_config"] = {}
     args["model"] = config.model_version
     args["max_model_len"] = config.max_model_len
-    args["tensor_parallel_size"] = self._find_tp_size(config.mesh)
     args["gpu_memory_utilization"] = config.hbm_utilization
     if config.mapping_config.lora_config is not None:
       args["additional_config"][
@@ -146,7 +145,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       ] = config.mapping_config.lora_config
     device_indexes = config.mesh.device_ids.flatten().tolist()
     args["additional_config"]["sharding"] = {
-        "sharding_strategy": {"device_indexes": device_indexes}
+        "sharding_strategy": {"device_indexes": device_indexes, "tensor_parallelism": self._find_tp_size(config.mesh)}
     }
     return args
 

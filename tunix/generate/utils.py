@@ -543,7 +543,8 @@ def _align_shape(
   repeat_ops = []
   for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, tgt_shape)):
     if src_dim < tgt_dim:
-      if i == len(val.shape) - 1:
+      # For QKV, H is dim(-1); For O, H is dim(-2), same for Tunix and vLLM
+      if i == len(val.shape) - 1 or ('o_proj' in src_key and  i == len(val.shape) - 2):
         # Head dimension: pad with zeros
         pad_width.append((0, tgt_dim - src_dim))
       else:
