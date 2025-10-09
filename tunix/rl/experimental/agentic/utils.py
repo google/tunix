@@ -92,7 +92,7 @@ def convert_single_message(
   return tokens, masks
 
 
-def convert_messages_to_tokens_and_masks(
+def tokenize_and_generate_masks(
     messages: list[dict[str, str]],
     tokenizer: Any,
     parser: chat_template_parser.BaseChatTemplateParser,
