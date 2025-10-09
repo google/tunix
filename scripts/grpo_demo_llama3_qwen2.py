@@ -184,7 +184,7 @@ EPSILON = 0.2
 # ====== Training ======
 # 2 is the max we can do on v5e-8 with llama3 8B model.
 # 4 is the max we can do on v5e-8 with llama3 1B model.
-BATCH_SIZE = 4
+TRAIN_MICRO_BATCH_SIZE = 4
 # To speed up for quick workflow validation, we can change NUM_BATCHES to e.g. 2
 NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
@@ -366,7 +366,7 @@ def get_dataset(path: str) -> grain.MapDataset:
   return loaded_dataset
 
 
-dataset = get_dataset(TRAIN_DATA_PATH).batch(BATCH_SIZE)[:NUM_BATCHES]
+dataset = get_dataset(TRAIN_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_BATCHES]
 
 if TRAIN_FRACTION == 1.0:
   train_dataset = dataset.repeat(NUM_EPOCHS)
@@ -377,7 +377,7 @@ else:
 
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
-test_dataset = get_dataset(TEST_DATA_PATH).batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
+test_dataset = get_dataset(TEST_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_TEST_BATCHES]
 
 print(
     f"train_dataset size: {len(train_dataset)}, val_dataset size:"
@@ -806,7 +806,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
-        gradient_accumulation_steps=1,
+        mini_batch_size=TRAIN_MICRO_BATCH_SIZE,
+        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
