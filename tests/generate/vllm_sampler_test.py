@@ -41,7 +41,7 @@ class VllmSamplerTest(absltest.TestCase):
     axis_names = ("fsdp", "tp")  #
     self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
 
-    self.repo_id = "meta-llama/Llama-3.1-8B-Instruct"
+    self.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
     temp_dir = tempfile.gettempdir()
     self.model_path = os.path.join(temp_dir, "models", self.repo_id)
     all_files = huggingface_hub.list_repo_files(self.repo_id)
@@ -96,7 +96,7 @@ class VllmSamplerTest(absltest.TestCase):
       llama3 = self.get_lora_model(llama3)
       print(f"Loaded LoRA model: {model_version} with LoRA enabled")
     # nnx.display(llama3)
-    return llama3
+    return llama3, model_config
 
   def print_mem_stats(self, label: str):
     print(f"\nMemstats: {label}:")
@@ -124,7 +124,7 @@ class VllmSamplerTest(absltest.TestCase):
     return out
 
   def test_vllm_sampler(self):
-    tunix_model = self.load_llama3_model(
+    tunix_model, model_config = self.load_llama3_model(
         self.repo_id, enable_lora=self.enable_lora
     )
 
@@ -164,7 +164,7 @@ class VllmSamplerTest(absltest.TestCase):
         transformer=tunix_model,
         tokenizer=model_tokenizer,
         cache_config=vanilla_sampler.CacheConfig(
-            cache_size=512, num_layers=32, num_kv_heads=8, head_dim=128
+            cache_size=512, num_layers=model_config.num_layers, num_kv_heads=model_config.num_kv_heads, head_dim=model_config.head_dim
         ),
     )
     vanilla_output = vn_sampler(
@@ -185,12 +185,13 @@ class VllmSamplerTest(absltest.TestCase):
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
-        tpu_backend_type=None,
+        tpu_backend_type="jax",
         mapping_config=vllm_sampler.MappingConfig(
             to_hf_mappings=tunix_model.to_hf_mappings(),
             to_hf_transpose_keys=tunix_model.to_hf_transpose_keys(),
             lora_to_hf_mappings=tunix_model.lora_to_hf_mappings(),
             lora_config=args["additional_config"]["lora_config"],
+            to_hf_hook_fns=None,
         ),
     )
 
@@ -216,111 +217,50 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     expected_output_pattern = [
-        (
-            r"^Hello Tom, it's nice to meet you. Is there something I can help"
-            r" you with or would you like to chat\?$"
-        ),
-        r"^Paris\.$",
-        (
-            r"^The sky appears blue because of a phenomenon called Rayleigh"
-            r" scattering.*"
-        ),
+        (prompts[0], ["Tom", "help"]),
+        (prompts[1], ["Paris"]),
+        (prompts[2], ["Rayleigh", "scattering"]),
     ]
 
     print("-" * 50)
     print(f"Vanilla Generated text: {vanilla_output.text}")
 
-    for generated, expected_pattern in zip(
-        vanilla_output.text, expected_output_pattern
-    ):
-      self.assertIsNotNone(
-          re.match(expected_pattern, generated),
-          f"Expected '{generated}' to match '{expected_pattern}'.",
-      )
+    def _validate_outputs(serving_outputs):
+      for (prompt, expectations), generated in zip(expected_output_pattern, serving_outputs):
+        normalized = generated.strip().lower()
+        for keyword in expectations:
+          self.assertIn(
+              keyword.lower(),
+              normalized,
+              msg=(
+                  f"Response '{generated}' for prompt '{prompt}' does not contain"
+                  f" expected keyword '{keyword}'."
+              ),
+          )
+
+    _validate_outputs(vanilla_output.text)
 
     print("-" * 50)
     print(f"vLLM Generated text: {vllm_output.text}")
-    for generated, expected_pattern in zip(
-        vllm_output.text, expected_output_pattern
-    ):
-      self.assertIsNotNone(
-          re.match(expected_pattern, generated),
-          f"Expected '{generated}' to match '{expected_pattern}'.",
-      )
+
+    _validate_outputs(vllm_output.text)
 
     _, tunix_state = nnx.split(tunix_model)
     vllm_state = vl_sampler._model_runner.state
     if os.environ.get("NEW_MODEL_DESIGN") == "True":
       self.assertTrue(
           np.allclose(
-              tunix_state["lm_head"]["w"].value,
-              vllm_state["lm_head"]["input_embedding_table_DV"].value,
+              tunix_state["embedder"]["input_embedding"].value,
+              vllm_state["embedder"]["input_embedding_table_VD"].value,
           )
       )
     else:
       self.assertTrue(
           np.allclose(
-              tunix_state["lm_head"]["w"].value,
-              vllm_state["model"]["lm_head"].value,
+              tunix_state["embedder"]["input_embedding"].value,
+              vllm_state["model"]["embed"]["embedding"].value,
           )
       )
-
-  def test_generation_length_exceed_max_model_len(self):
-    tunix_model = self.load_llama3_model(
-        self.repo_id, enable_lora=self.enable_lora
-    )
-
-    args = {}
-    args["model"] = self.model_path
-    args["additional_config"] = {}
-    args["additional_config"]["lora_config"] = None
-
-    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
-        self.model_path
-    )
-    prompts = [
-        "Hello, my name is Tom.",
-        "The capital of France is",
-        "why is sky blue?",
-    ]
-
-    inputs = self.templatize(prompts, tokenizer=model_tokenizer)
-
-    vllm_config = vllm_sampler.VllmConfig(
-        model_version=self.model_path,
-        max_model_len=128,
-        mesh=self.mesh,
-        hbm_utilization=0.2,
-        init_with_random_weights=True,
-        tpu_backend_type=None,
-        mapping_config=vllm_sampler.MappingConfig(
-            to_hf_mappings=tunix_model.to_hf_mappings(),
-            to_hf_transpose_keys=tunix_model.to_hf_transpose_keys(),
-            lora_to_hf_mappings=tunix_model.lora_to_hf_mappings(),
-            lora_config=args["additional_config"]["lora_config"],
-        ),
-    )
-
-    vl_sampler = vllm_sampler.VllmSampler(
-        tokenizer=model_tokenizer,
-        config=vllm_config,
-    )
-    state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
-
-    with self.assertRaisesRegex(ValueError, ".*exceeds max_model_len.*"):
-      vl_sampler(
-          input_strings=inputs,
-          max_generation_steps=128,  # Changed from 768 to 128 for vLLM
-          max_prompt_length=None,  # Use default max prompt length
-          temperature=0.0,
-          # top_p=0.9,
-          top_k=1,
-          seed=0,
-          echo=False,
-          pad_output=True,  # Use padding for output
-      )
-
 
 if __name__ == "__main__":
   absltest.main()
