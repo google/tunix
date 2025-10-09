@@ -134,10 +134,12 @@ def find_first_non_pad_idx(ids, pad_id):
   )
 
 
-def find_first_eos_idx(ids, eos_id):
+def find_first_eos_idx(ids, eos_id: int | jax.Array):
   """Finds the index of the first EOS token."""
   assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
-  mask = ids == eos_id
+  if isinstance(eos_id, int):
+    eos_id = jnp.array([eos_id])
+  mask = jnp.isin(ids, eos_id)
   first_idx = jnp.argmax(mask)
   is_eos_present = mask[first_idx]
   return jnp.where(is_eos_present, first_idx, ids.shape[0])
@@ -163,7 +165,6 @@ def find_last_non_pad_idx(ids, pad_id):
         'return_logits',
         'echo',
         'pad_value',
-        'eos_value',
         'max_prompt_length',
         'max_total_length',
     ),
@@ -174,7 +175,7 @@ def padded_fill_tokens_and_logits(
     return_logits: bool,
     echo: bool,
     pad_value: int,
-    eos_value: int,
+    eos_value: int | jax.Array,
     max_prompt_length: int,
     max_total_length: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
@@ -220,7 +221,7 @@ def single_padded_fill_tokens_and_logits(
     return_logits: bool,
     echo: bool,
     pad_value: int,
-    eos_value: int,
+    eos_value: int | jax.Array,
     max_prompt_length: int,
     max_total_length: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
