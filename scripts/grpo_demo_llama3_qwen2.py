@@ -76,173 +76,6 @@ parser.add_argument(
 )
 parser.add_argument(
     "--model-version",
-    type=str,
-    # default="meta-llama/Llama-3.1-8B-Instruct"
-    # default="meta-llama/Llama-3.2-3B-Instruct",
-    default="meta-llama/Llama-3.2-1B-Instruct",
-    required=False,
-    help="The model version to use.",
-)
-parser.add_argument(
-      "--num-batches",
-      type=int,
-      default=1869,
-      required=False,
-      help="Number of batches for training.",
-  )
-parser.add_argument(
-    "--num-test-batches",
-    type=int,
-    default=50,
-    required=False,
-    help="Number of test batches for evaluation.",
-)
-parser.add_argument(
-    "--rollout-engine",
-    type=str,
-    default="vanilla",
-    choices=["vanilla", "vllm"],
-    required=False,
-    help="Rollout engine to use (vanilla or vllm).",
-)
-
-# Parse arguments
-args = parser.parse_args()
-
-# ====== Data ======
-# The data is not available in gcs bucket yet, please manually copy the
-# following data to your local TRAIN_DATA_PATH (to avoid leakr error using *):
-# /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_train.json
-# /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_test.json
-
-GCS_BUCKET_PREFIX = "gcs://tunix/"
-TRAIN_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_train.json"
-TEST_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_test.json"
-HF_MODEL_VERSION = args.model_version
-
-
-TRAIN_FRACTION = 1.0
-
-# Derived Data Path
-GCS_TRAIN_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, TRAIN_DATA_PATH_SUBDIR)
-GCS_TEST_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, TEST_DATA_PATH_SUBDIR)
-
-TRAIN_DATA_PATH = os.path.join(args.root_dir, TRAIN_DATA_PATH_SUBDIR)
-TEST_DATA_PATH = os.path.join(args.root_dir, TEST_DATA_PATH_SUBDIR)
-
-VLLM_MODEL_SUBDIR = "rl/grpo/models/"
-VLLM_MODEL_VERSION = os.path.join(
-    args.root_dir, VLLM_MODEL_SUBDIR, HF_MODEL_VERSION
-)
-
-# ====== Base Model ======
-NNX_CKPT_DIR = os.path.join(args.root_dir, "rl/grpo/models/", HF_MODEL_VERSION)
-
-# ====== Reproducibility ======
-SEED = 42
-
-# ====== LoRA ======
-ENABLE_LORA = False
-RANK = 64
-ALPHA = 64.0
-
-# ====== Sharding ======
-if "Qwen2.5-0.5B-Instruct" in args.model_version:
-  TOTAL_TPU_TO_USE = 2
-elif "Qwen2.5-7B-Instruct" in args.model_version:
-  TOTAL_TPU_TO_USE = 4
-else:
-  TOTAL_TPU_TO_USE = jax.device_count()
-
-MESH = [(1, TOTAL_TPU_TO_USE), ("fsdp", "tp")]  # YY
-
-# ====== GRPO ======
-# === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 256
-TOTAL_GENERATION_STEPS = 1024  # YY 768
-# Important to keep a high-ish temperature for varied, diverse responses during
-# training.
-TEMPERATURE = 0.9
-TOP_P = 1.0  # implies we don't do nucleus sampling
-TOP_K = 50
-# The number of times the policy generates multiple responses for a given prompt
-# within a single training step. This corresponds to `G` in Algorithm 1 in the
-# paper. The "group" in GRPO comes from here.
-NUM_GENERATIONS = 4
-
-# === other GRPO configs ===
-# The number of iterations per batch (𝜇 in GRPO algo 1).
-NUM_ITERATIONS = 1
-# The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
-# Important to keep a high enough value for this, otherwise, the KL divergence
-# can increase unchecked.
-BETA = 0.08
-# Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
-# stable updates.
-EPSILON = 0.2
-
-# ====== Training ======
-# 2 is the max we can do on v5e-8 with llama3 8B model.
-# 4 is the max we can do on v5e-8 with llama3 1B model.
-BATCH_SIZE = 4
-# To speed up for quick workflow validation, we can change NUM_BATCHES to e.g. 2
-NUM_BATCHES = args.num_batches
-# Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
-# increased to a max. of 330 (if batch size is 4).
-# To speed up for quick workflow validation, we can change it to e.g. 1
-NUM_TEST_BATCHES = args.num_test_batches
-
-EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 1  # can potentially train for more epochs
-
-# Number of training steps.
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
-
-# === AdamW, warmup, cosine scheduler ===
-LEARNING_RATE = 3e-6
-B1 = 0.9  # Adam beta1
-B2 = 0.99  # Adam beta2
-WEIGHT_DECAY = 0.1
-# == Cosine decay with warmup scheduler ==
-# Linearly increase learning rate from 0. to 5e-6 in the first 10% training
-# steps, and then gradually decrease the learning rate to 0 using cosine
-# scheduler.
-WARMUP_STEPS = 0.1 * MAX_STEPS
-# == Grad clipping ==
-# Grad clipping to prevent large gradients. Found this
-# important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.1
-
-# ====== Checkpoint saving ======
-CKPT_DIR = os.path.join(
-    args.root_dir, "rl/grpo/demo/experiments/llama3/training_runs/2"
-)
-
-SAVE_INTERVAL_STEPS = (
-    500  # To speed up for quick workflow validation, we can change it to e.g. 2
-)
-MAX_TO_KEEP = 1
-DO_MEM_PROFILING = False
-DO_MODEL_DISPLAY = False
-
-# ====== Inference ======
-GENERATION_CONFIGS = {
-    # greedy search
-    "greedy": {"temperature": 1e-2, "top_k": 1, "top_p": 1.0},
-    # some randomness
-    "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
-    # liberal
-    "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
-}
-
-# ====== Profiler ======
-PROFILER_PATH = os.path.join(
-    args.root_dir, "rl/grpo/demo/experiments/llama3/profiler"
-)
-
-
-def delete_directory(path: str):
-  if os.path.exists(path):
     if os.path.isdir(path):
       shutil.rmtree(path)
       print(f"Deleted directory: {path}")
@@ -257,14 +90,16 @@ delete_directory(CKPT_DIR)
 
 for name, obj in list(globals().items()):
   if isinstance(obj, jnp.ndarray):
-    del globals()[name]
-gc.collect()
-
-
-# Download data
-def download_hf_checkpoint(repo_id, local_dir):
-  all_files = huggingface_hub.list_repo_files(repo_id)
-  filtered_files = [f for f in all_files if not f.startswith("original/")]
+                  run_experiment(
+                      model_name=model_name,
+                      dataset_name=dataset_name,
+                      num_shots=num_shots,
+                      seed=seed,
+                      temperature=temperature,
+                      top_k=top_k,
+                      top_p=top_p,
+                      max_new_tokens=max_new_tokens,
+                  )
 
   for filename in filtered_files:
     huggingface_hub.hf_hub_download(
