@@ -34,7 +34,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:jax0.7.1_rev1
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
