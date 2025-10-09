@@ -23,7 +23,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-
 import sentencepiece as spm
 
 if hasattr(flax_config, 'flax_always_shard_variable'):
