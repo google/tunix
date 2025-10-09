@@ -13,6 +13,7 @@ class BeamSearchTest(absltest.TestCase):
     self.beam_size = 2
     self.vocab_size = 3
     self.seq_length = 10
+    self.pad_token_id = jnp.array([-1])
 
   def _check_content_equal_per_beam(
       self, beam_content: jnp.ndarray, original_content: jnp.ndarray
@@ -72,7 +73,6 @@ class BeamSearchTest(absltest.TestCase):
 
   def test_beam_search_step_without_stop(self) -> None:
     # b0: [[0.2, 0.35, 0.45]]
-    pad_token_id = -1
     decoding_step = -1
     original_cache = {
         'fake': {
@@ -86,7 +86,7 @@ class BeamSearchTest(absltest.TestCase):
     done = jnp.zeros((self.batch_size * self.beam_size), dtype=jnp.bool)
     token_buffer = jnp.full(
         (self.batch_size * self.beam_size, self.seq_length),
-        pad_token_id,
+        self.pad_token_id,
         dtype=jnp.int32,
     )
 
@@ -100,7 +100,7 @@ class BeamSearchTest(absltest.TestCase):
         cache=original_cache,
         logits_buffer=None,
         state=init_state,
-        pad_token_id=pad_token_id,
+        pad_token_id=self.pad_token_id,
         decoding_step=decoding_step,
     )
     new_scores0, tokens0 = jax.lax.top_k(
@@ -143,7 +143,7 @@ class BeamSearchTest(absltest.TestCase):
         cache=updated_params['cache'],
         logits_buffer=None,
         state=state,
-        pad_token_id=pad_token_id,
+        pad_token_id=self.pad_token_id,
         decoding_step=decoding_step,
     )
     new_scores0, _ = jax.lax.top_k(
@@ -187,7 +187,7 @@ class BeamSearchTest(absltest.TestCase):
             updated_params['token_buffer'][:, 2:],
             jnp.full(
                 (self.batch_size * self.beam_size, self.seq_length - 2),
-                pad_token_id,
+                self.pad_token_id,
             ),
         )
     )
@@ -218,7 +218,6 @@ class BeamSearchTest(absltest.TestCase):
 
   def test_beam_search_step_with_stop_picked(self) -> None:
     self.batch_size = 1
-    pad_token_id = -1
     initial_scores = jnp.zeros(
         (self.batch_size, self.beam_size), dtype=jnp.float32
     )
@@ -227,7 +226,7 @@ class BeamSearchTest(absltest.TestCase):
     done = jnp.array([True, False])  # mark the first beam as done.
     token_buffer = jnp.full(
         (self.batch_size * self.beam_size, self.seq_length),
-        pad_token_id,
+        self.pad_token_id,
         dtype=jnp.int32,
     )
     token_buffer = token_buffer.at[0, 0].set(0)
@@ -250,7 +249,7 @@ class BeamSearchTest(absltest.TestCase):
           cache=cache,
           logits_buffer=None,
           state=state,
-          pad_token_id=pad_token_id,
+          pad_token_id=self.pad_token_id,
           decoding_step=decoding_step,
       )
       done = updated_params['done']
@@ -262,18 +261,17 @@ class BeamSearchTest(absltest.TestCase):
     self.assertTrue(
         jnp.allclose(
             token_buffer[0, 1:],
-            jnp.array([pad_token_id] * (self.seq_length - 1)),
+            jnp.array([self.pad_token_id] * (self.seq_length - 1)),
         )
     )
     self.assertFalse(done[1])
     for i in range(0, decoding_step + 1):
-      self.assertNotEqual(token_buffer[1, i], pad_token_id)
+      self.assertNotEqual(token_buffer[1, i], self.pad_token_id)
     for i in range(decoding_step + 1, self.seq_length):
-      self.assertEqual(token_buffer[1, i], pad_token_id)
+      self.assertEqual(token_buffer[1, i], self.pad_token_id)
 
   def test_beam_search_step_with_stop_not_picked(self) -> None:
     self.batch_size = 1
-    pad_token_id = -1
     initial_scores = jnp.zeros(
         (self.batch_size, self.beam_size), dtype=jnp.float32
     )
@@ -282,7 +280,7 @@ class BeamSearchTest(absltest.TestCase):
     done = jnp.array([True, False])  # mark the first beam as done.
     token_buffer = jnp.full(
         (self.batch_size * self.beam_size, self.seq_length),
-        pad_token_id,
+        self.pad_token_id,
         dtype=jnp.int32,
     )
     token_buffer = token_buffer.at[0, 0].set(0)
@@ -304,7 +302,7 @@ class BeamSearchTest(absltest.TestCase):
         cache=cache,
         logits_buffer=None,
         state=state,
-        pad_token_id=pad_token_id,
+        pad_token_id=self.pad_token_id,
         decoding_step=decoding_step,
     )
     done = updated_params['done']

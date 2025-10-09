@@ -370,6 +370,35 @@ class SamplerTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, '.*must have the same structure.*'):
       sampler.transformer_state = nnx.variables(new_transformer, nnx.LoRAParam)
 
+  def test_eos_tokens(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    result = sampler(
+        ['input string training', 'hello world'],
+        max_generation_steps=10,
+        return_logits=True,
+        max_prompt_length=4,
+        eos_tokens=[7, 21],
+        temperature=0.9,
+        top_p=1.0,
+        seed=42,
+    )
+    np.testing.assert_equal(
+        result.tokens, [np.array([8, 14, 5]), np.array([14])]
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

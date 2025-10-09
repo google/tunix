@@ -92,6 +92,10 @@ class RolloutConfig:
   # data type of the rollout model.
   data_type: jnp.dtype | None = None
 
+  # EOS tokens to stop the generation. If not defined, eos_id from tokenizer
+  # will be used.
+  eos_tokens: list[int] | None = None
+
 
 class BaseRollout(abc.ABC):
   """Base RolloutWorker."""
