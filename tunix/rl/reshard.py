@@ -107,10 +107,25 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
     for i, axis_name in enumerate(sharding.spec):
       if axis_name is None:
         sharding_dims[(i, None)] = 1
-      else:
+      elif isinstance(axis_name, str):
         sharding_dims[(i, mesh.axis_names.index(axis_name))] = mesh.shape[
             axis_name
         ]
+      elif isinstance(axis_name, (tuple, list)):
+        for _, axis in enumerate(axis_name):
+          if axis is None:
+            sharding_dims[(i, None)] = 1
+          # Only handles two-level logical axis rules for now.
+          elif isinstance(axis, str):
+            sharding_dims[(i, mesh.axis_names.index(axis))] = (
+                mesh.shape[axis]
+            )
+          else:
+            raise ValueError(f'Unsupported axis name: {axis_name}')
+      else:
+        raise ValueError(
+            f'Unsupported axis name: {axis_name} with type {type(axis_name)}'
+        )
 
     largest_shards = max(sharding_dims.values()) if len(sharding_dims) else 1
     if len(sharding_dims) < len(mesh.shape):
