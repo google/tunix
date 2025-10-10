@@ -96,7 +96,7 @@ jobs:
     
     - name: Run tunix SFT integration tests
       run: |
-        chmod +x ./tests/sft/sft_tpu_smoke_test.sh
+        ./tests/sft/sft_tpu_smoke_test.sh
 
     - name: Run tunix distillation tests
       run: |
