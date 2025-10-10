@@ -235,7 +235,6 @@ class RLLearner(abc.ABC):
       self,
       micro_batches: list[TrainingInputT],
       micro_batch_sizes: list[int],
-      sample_repeat: int,
       mode: rl_cluster_lib.Mode,
   ) -> list[common.TrainExample]:
     """Merges, repeats, and computes advantages for a buffer of examples.
@@ -248,7 +247,6 @@ class RLLearner(abc.ABC):
       micro_batches: A list of training micro-batches.
       micro_batch_sizes: A list of the number of samples for each training
         micro-batch.
-      sample_repeat: The number of times each sample is repeated.
       mode: The mode to use for logging metrics.
 
     Returns:
@@ -267,13 +265,9 @@ class RLLearner(abc.ABC):
     produced: list[common.TrainExample] = []
     offset = 0
 
-    # TODO(tsbao): remove sample_repeat and set proper micro_batch_sizes outside
     for n in micro_batch_sizes:
-      # Calculate slice indices
-      start_idx = offset * sample_repeat
-      end_idx = (offset + n) * sample_repeat
-      token_slice = slice(start_idx, end_idx)
-      training_example = rl_utils.get_batch_slice(combined_batch, token_slice)
+      cur_slice = slice(offset, offset + n)  # Calculate slice indices
+      training_example = rl_utils.get_batch_slice(combined_batch, cur_slice)
       produced.append(training_example)
       offset += n
 
@@ -335,6 +329,7 @@ class RLLearner(abc.ABC):
         `metrics_logger.Mode.EVAL`.
     """
     # A buffer to accumulate micro-batches before processing them together.
+    # Num of examples per micro-batch is train_micro_batch_size * sample_repeat.
     micro_batches: list[TrainingInputT] = []
     # Number of samples for each micro-batch
     micro_batch_sizes: list[int] = []
@@ -377,7 +372,6 @@ class RLLearner(abc.ABC):
       tail_examples = self._process_accumulated_batches(
           micro_batches=micro_batches,
           micro_batch_sizes=micro_batch_sizes,
-          sample_repeat=sample_repeat,
           mode=mode,
       )
       micro_batches.clear()
@@ -421,7 +415,7 @@ class RLLearner(abc.ABC):
         # their sizes and the total number of samples. This allows us to form a
         # larger batch for processing once `accumulated_samples_num` reaches the
         # `service_target_batch_size` threshold.
-        micro_batch_sizes.append(cur_batch_size)
+        micro_batch_sizes.append(cur_batch_size * sample_repeat)
         accumulated_samples_num += cur_batch_size
         consumed_steps += 1
 
@@ -461,7 +455,6 @@ class RLLearner(abc.ABC):
             produced_training_examples = self._process_accumulated_batches(
                 micro_batches=micro_batches,
                 micro_batch_sizes=micro_batch_sizes,
-                sample_repeat=sample_repeat,
                 mode=mode,
             )
             micro_batches.clear()
