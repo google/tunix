@@ -1,6 +1,6 @@
 [project]
 name = "google-tunix"
-version = "0.1.1"
+version = "0.1.2"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
