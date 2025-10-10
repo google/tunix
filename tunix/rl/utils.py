@@ -32,6 +32,25 @@ Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
 
 
+def check_positive(value: int | None, name: str):
+  """Checks if the value is positive."""
+  if value is not None and value <= 0:
+    raise ValueError(f"{name} must be positive.")
+
+
+def check_divisibility(
+    small_size,
+    big_size,
+    small_size_name,
+    big_size_name,
+):
+  """Checks if big_size is a multiple of small_size."""
+  if big_size % small_size != 0:
+    raise ValueError(
+        f"{big_size_name} must be a multiple of {small_size_name}."
+    )
+
+
 def to_flat_dict(
     tree: jaxtyping.PyTree | statelib.State,
 ) -> tuple[dict[tuple[str, ...], jaxtyping.Array], jaxtyping.PyTreeDef]:
@@ -133,25 +152,6 @@ def get_batch_slice(tree: Any, batch_slice: slice) -> Any:
   return jax.tree_util.tree_map(
       apply_slice, tree, is_leaf=lambda node: node is None
   )
-
-
-def check_positive(value: int | None, name: str):
-  """Checks if the value is positive."""
-  if value is not None and value <= 0:
-    raise ValueError(f"{name} must be positive.")
-
-
-def check_divisibility(
-    small_size,
-    big_size,
-    small_size_name,
-    big_size_name,
-):
-  """Checks if big_size is a multiple of small_size."""
-  if big_size % small_size != 0:
-    raise ValueError(
-        f"{big_size_name} must be a multiple of {small_size_name}."
-    )
 
 
 def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:

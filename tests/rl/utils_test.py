@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from absl.testing import absltest
 import chex
 from flax import nnx
@@ -22,7 +23,6 @@ import numpy as np
 from tunix.rl import common
 from tunix.rl import utils
 from tunix.tests import test_common as tc
-import os
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
@@ -87,6 +87,51 @@ class UtilsTest(absltest.TestCase):
     self.assertFalse(utils.is_sharing_weights(m1, m2))
     self.assertFalse(utils.is_sharing_weights(m2, m3))
     self.assertTrue(utils.is_sharing_weights(m1, m3))
+
+  def test_chunk_slices_by_size(self):
+    x = [0, 1, 2, 3, 4]
+    y = [x[s] for s in utils.chunk_slices_by_size(stop=len(x), step=2)]
+    self.assertEqual(y, [[0, 1], [2, 3], [4]])
+
+  def test_get_batch_slice(self):
+    x = {
+        'a': np.array([[1], [2], [3], [4], [5], [6]]),
+        'b': {'c': np.array([[7], [8], [9], [10], [11], [12]])},
+    }
+    y = [
+        utils.get_batch_slice(x, s)
+        for s in utils.chunk_slices_by_size(stop=6, step=2)
+    ]
+    expected = [
+        {'a': np.array([[1], [2]]), 'b': {'c': np.array([[7], [8]])}},
+        {'a': np.array([[3], [4]]), 'b': {'c': np.array([[9], [10]])}},
+        {'a': np.array([[5], [6]]), 'b': {'c': np.array([[11], [12]])}},
+    ]
+    jax.tree_util.tree_map(np.testing.assert_array_equal, expected, y)
+
+  def test_merge_micro_batches(self):
+    batches = [
+        {
+            'a': [1, 2],
+            'b': {'c': np.array([3, 4]), 'd': np.array([5])},
+            'e': np.array([6, 7]),
+        },
+        {
+            'a': [10, 11],
+            'b': {'c': np.array([12, 13]), 'd': np.array([14, 15])},
+            'e': np.array([16]),
+        },
+    ]
+    merged = utils.merge_micro_batches(batches)
+    self.assertEqual(merged['a'], [1, 2, 10, 11])
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal,
+        merged['b'],
+        {'c': np.array([3, 4, 12, 13]), 'd': np.array([5, 14, 15])},
+    )
+    jax.tree_util.tree_map(
+        np.testing.assert_array_equal, merged['e'], np.array([6, 7, 16])
+    )
 
   def test_create_critic_model(self):
     actor_model = tc.ToyTransformer(
