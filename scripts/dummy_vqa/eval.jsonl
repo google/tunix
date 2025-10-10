@@ -1,0 +1,4 @@
+{"image": "./dummy_vqa/images/img9.png", "question": "How many red squares are in the image?", "answer": "1"}
+{"image": "./dummy_vqa/images/img10.png", "question": "How many blue circles are in the image?", "answer": "2"}
+{"image": "./dummy_vqa/images/img11.png", "question": "How many green triangles are there?", "answer": "1"}
+{"image": "./dummy_vqa/images/img12.png", "question": "Count the red squares.", "answer": "2"}
