@@ -174,7 +174,7 @@ class VLMSampler(BaseSampler):
           output_hidden_states=False,
       )  # -> [B, L, V]
 
-      next_logits = logits[:, -1, :]  # [B, V]
+      next_logits = logits[:, -1, :]      # [B, V]
       if return_logits:
         collected_logits.append(next_logits)
 
