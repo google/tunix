@@ -102,14 +102,18 @@ def tokenize_and_generate_masks(
   """Converts multiple messages to tokens and masks.
 
   Args:
-      messages: The messages to convert
-      tokenizer: The tokenizer to use
-      parser: The chat template parser
-      contains_first_msg: Whether the first message is special
-      contains_generation_msg: Whether the last message needs generation prompt
+    messages: The messages to convert.
+    tokenizer: The tokenizer to use.
+    parser: The chat template parser.
+    contains_first_msg: Whether the first message in `messages` is the absolute
+      first message of the conversation. This is used by the parser to add
+      special beginning-of-sequence tokens.
+    contains_generation_msg: Whether to add a generation prompt after the last
+      message in `messages`. This signals the model to start generating a
+      response (e.g., by adding an assistant role token).
 
   Returns:
-      tuple containing (all_tokens, all_masks)
+    A tuple containing (all_tokens, all_masks).
   """
   all_tokens = []
   all_masks = []
