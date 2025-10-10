@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import os
 import re
+import socket
 import tempfile
+import threading
+import time
+from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import huggingface_hub
@@ -26,6 +31,8 @@ from tunix.generate import sampler as vanilla_sampler
 from tunix.generate import vllm_sampler
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import SamplingParams
 
 
 # vLLM Jax backend suggest to use old model desing for now.
@@ -123,6 +130,11 @@ class VllmSamplerTest(absltest.TestCase):
       )
     return out
 
+  def _pick_free_port(self) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+      sock.bind(("127.0.0.1", 0))
+      return sock.getsockname()[1]
+
   def test_vllm_sampler(self):
     tunix_model, model_config = self.load_llama3_model(
         self.repo_id, enable_lora=self.enable_lora
@@ -193,6 +205,7 @@ class VllmSamplerTest(absltest.TestCase):
             lora_config=args["additional_config"]["lora_config"],
             to_hf_hook_fns=None,
         ),
+        async_mode=True,
     )
 
     vl_sampler = vllm_sampler.VllmSampler(
@@ -261,6 +274,104 @@ class VllmSamplerTest(absltest.TestCase):
               vllm_state["model"]["embed"]["embedding"].value,
           )
       )
+    if vllm_config.async_mode:
+      vl_sampler.stop()
+
+  def test_async_mode_e2e_real_model_out_of_order(self):
+    tunix_model, _ = self.load_llama3_model(
+        self.repo_id, enable_lora=self.enable_lora
+    )
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_path)
+
+    prompts = [
+        "Please summarize the following text concisely:\n"
+        + " ".join(["alpha"] * length)
+        for length in [320, 80, 400, 40, 360, 20, 300, 120, 340, 60]
+    ]
+
+    mapping_config = vllm_sampler.MappingConfig(
+        to_hf_mappings=tunix_model.to_hf_mappings(),
+        to_hf_transpose_keys=tunix_model.to_hf_transpose_keys(),
+        lora_to_hf_mappings=tunix_model.lora_to_hf_mappings(),
+        lora_config=None,
+        to_hf_hook_fns=None,
+    )
+    vllm_config = vllm_sampler.VllmConfig(
+        model_version=self.model_path,
+        max_model_len=512,
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type=None,
+        mapping_config=mapping_config,
+        async_mode=True,
+        port=self._pick_free_port(),
+        served_model_name=None,
+        api_key=None,
+        extra_args=None,
+    )
+
+    vl_sampler = vllm_sampler.VllmSampler(
+        tokenizer=tokenizer,
+        config=vllm_config,
+    )
+    self.addCleanup(vl_sampler.stop)
+
+    state = nnx.state(tunix_model)
+    vl_sampler.load_checkpoint(state)
+
+    driver = vl_sampler._driver
+    self.assertIsNotNone(driver)
+
+    base_params = SamplingParams()
+    base_params.detokenize = True
+    base_params.max_tokens = 64
+    base_params.n = 1
+    base_params.temperature = 0.0
+    base_params.top_k = 1
+    base_params.stop_token_ids = [tokenizer.eos_token_id]
+    base_params.skip_special_tokens = True
+
+    submitted_order = [str(i) for i in range(len(prompts))]
+    futures = []
+    for idx, prompt in enumerate(prompts):
+      token_ids = vl_sampler.tokenize(prompt)
+      prompt_obj = TokensPrompt(prompt_token_ids=token_ids)
+      params = base_params.clone()
+      future = driver.submit_request(
+          request_id=str(idx),
+          prompt=prompt_obj,
+          params=params,
+      )
+      futures.append(future)
+
+    completion_order = []
+    results_by_request: dict[str, object] = {}
+    for future in concurrent.futures.as_completed(futures, timeout=600):
+      output = future.result()
+      completion_order.append(output.request_id)
+      results_by_request[output.request_id] = output
+
+    self.assertCountEqual(completion_order, submitted_order)
+    self.assertNotEqual(
+        completion_order,
+        submitted_order,
+        msg="Completions arrived strictly in submission order; "
+        "continuous batching did not reorder responses.",
+    )
+
+    for request_id in submitted_order:
+      output = results_by_request[request_id]
+      print(f"\nYY {output=}")
+      self.assertTrue(output.finished)
+      self.assertGreater(len(output.outputs), 0)
+      generated_text = output.outputs[0].text
+      self.assertIsInstance(generated_text, str)
+      self.assertNotEqual(generated_text.strip(), "")
+
+    if vllm_config.async_mode:
+      vl_sampler.stop()
 
 if __name__ == "__main__":
   absltest.main()
