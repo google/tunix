@@ -55,3 +55,7 @@ jobs:
       - name: Run agentic RL tests
         run: |
           python -m pytest tests/rl/experimental/agentic/ -v --tb=short
+
+      - name: Run Cli utils tests
+        run: |
+          python -m pytest tests/cli/utils/ -v --tb=short

@@ -80,7 +80,8 @@ jobs:
         KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
         # Config tests that passed
-        python -m pytest tests/cli/ -v --tb=short
+        python -m pytest tests/cli/ -v --tb=short \
+          --ignore=tests/cli/utils/model_test.py
 
     - name: Run tunix generation tests (PASSED only)
       run: |
