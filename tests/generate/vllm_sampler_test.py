@@ -17,7 +17,6 @@ import re
 import tempfile
 from absl.testing import absltest
 from flax import nnx
-import huggingface_hub
 import jax
 import numpy as np
 import qwix
@@ -26,7 +25,8 @@ from tunix.generate import sampler as vanilla_sampler
 from tunix.generate import vllm_sampler
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
-
+from tunix.tests import test_common as tc
+from tunix.sft import utils as base_utils
 
 # vLLM Jax backend suggest to use old model desing for now.
 # os.environ["NEW_MODEL_DESIGN"]="True"
@@ -35,50 +35,24 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 class VllmSamplerTest(absltest.TestCase):
 
-  def setUp(self) -> None:
-    super().setUp()
+  @classmethod
+  def setUpClass(cls) -> None:
+    super().setUpClass()
     mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
-    axis_names = ("fsdp", "tp")  #
-    self.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+    axis_names = ("fsdp", "tp")
+    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
 
-    self.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
+    cls.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
     temp_dir = tempfile.gettempdir()
-    self.model_path = os.path.join(temp_dir, "models", self.repo_id)
-    all_files = huggingface_hub.list_repo_files(self.repo_id)
-    filtered_files = [f for f in all_files if not f.startswith("original/")]
+    cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
 
-    for filename in filtered_files:
-      huggingface_hub.hf_hub_download(
-          repo_id=self.repo_id, filename=filename, local_dir=self.model_path
-      )
-    print(f"Downloaded {filtered_files} to: {self.model_path}")
+    tc.download_from_huggingface(repo_id=cls.repo_id, model_path=cls.model_path)
 
     # TODO(b/432096319): Enable after LoRA support in vLLM
-    self.enable_lora = False
-
-  def get_lora_model(self, base_model):
-    lora_provider = qwix.LoraProvider(
-        module_path=(
-            ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
-        ),
-        rank=64,
-        alpha=64.0,
-    )
-
-    model_input = base_model.get_model_input()
-    lora_model = qwix.apply_lora_to_model(
-        base_model, lora_provider, **model_input
-    )
-
-    state = nnx.state(lora_model)
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    nnx.update(lora_model, sharded_state)
-
-    return lora_model
+    cls.enable_lora = False
 
   def load_llama3_model(
-      self, model_version: str = "llama3-1b", enable_lora: bool = False
+      self, model_version: str, enable_lora: bool = False
   ):
     model_config = {
         "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
@@ -93,35 +67,10 @@ class VllmSamplerTest(absltest.TestCase):
         self.model_path, model_config, self.mesh
     )
     if enable_lora:
-      llama3 = self.get_lora_model(llama3)
+      llama3 = tc.get_lora_model(llama3, model_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj", rank=64, alpha=64.0, mesh=self.mesh)
       print(f"Loaded LoRA model: {model_version} with LoRA enabled")
     # nnx.display(llama3)
     return llama3, model_config
-
-  def print_mem_stats(self, label: str):
-    print(f"\nMemstats: {label}:")
-    try:
-      for d in jax.local_devices():
-        stats = d.memory_stats()
-        used = round(stats["bytes_in_use"] / 2**30, 2)
-        limit = round(stats["bytes_limit"] / 2**30, 2)
-        print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
-    except (RuntimeError, KeyError, TypeError) as ex:
-      print(f"\tMemstats unavailable, error: {ex}")
-
-  def templatize(self, prompts, tokenizer=None):
-    out = []
-    for p in prompts:
-      out.append(
-          tokenizer.apply_chat_template(
-              [
-                  {"role": "user", "content": p},
-              ],
-              tokenize=False,
-              add_generation_prompt=True,
-          )
-      )
-    return out
 
   def test_vllm_sampler(self):
     tunix_model, model_config = self.load_llama3_model(
@@ -143,9 +92,8 @@ class VllmSamplerTest(absltest.TestCase):
           # "bias": "none",
       }
 
-    self.print_mem_stats("After loading tunix model")
+    base_utils.show_hbm_usage("After loading tunix model")
 
-    # Sampler setup
     model_tokenizer = transformers.AutoTokenizer.from_pretrained(
         self.model_path
     )
@@ -158,7 +106,7 @@ class VllmSamplerTest(absltest.TestCase):
         "why is sky blue?",
     ]
 
-    inputs = self.templatize(prompts, tokenizer=model_tokenizer)
+    inputs = tc.batch_templatize(prompts, model_tokenizer)
 
     vn_sampler = vanilla_sampler.Sampler(
         transformer=tunix_model,
@@ -202,7 +150,7 @@ class VllmSamplerTest(absltest.TestCase):
     state = nnx.state(tunix_model)
     vl_sampler.load_checkpoint(state)
 
-    self.print_mem_stats("After loading vLLM sampler")
+    base_utils.show_hbm_usage("After loading vLLM sampler")
 
     vllm_output = vl_sampler(
         input_strings=inputs,
@@ -225,28 +173,17 @@ class VllmSamplerTest(absltest.TestCase):
     print("-" * 50)
     print(f"Vanilla Generated text: {vanilla_output.text}")
 
-    def _validate_outputs(serving_outputs):
-      for (prompt, expectations), generated in zip(expected_output_pattern, serving_outputs):
-        normalized = generated.strip().lower()
-        for keyword in expectations:
-          self.assertIn(
-              keyword.lower(),
-              normalized,
-              msg=(
-                  f"Response '{generated}' for prompt '{prompt}' does not contain"
-                  f" expected keyword '{keyword}'."
-              ),
-          )
 
-    _validate_outputs(vanilla_output.text)
+    tc.validate_llm_outputs(expected_output_pattern,vanilla_output.text)
 
     print("-" * 50)
     print(f"vLLM Generated text: {vllm_output.text}")
 
-    _validate_outputs(vllm_output.text)
+    tc.validate_llm_outputs(expected_output_pattern, vllm_output.text)
 
     _, tunix_state = nnx.split(tunix_model)
     vllm_state = vl_sampler._model_runner.state
+
     if os.environ.get("NEW_MODEL_DESIGN") == "True":
       self.assertTrue(
           np.allclose(
