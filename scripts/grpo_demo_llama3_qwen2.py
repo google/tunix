@@ -34,7 +34,6 @@ import shutil
 from absl import logging
 from flax import nnx
 import grain
-import huggingface_hub
 import jax
 from jax import numpy as jnp
 import optax
@@ -51,6 +50,7 @@ from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import utils
+from tunix.tests import test_common as tc
 
 logging.set_verbosity(logging.INFO)
 
@@ -240,40 +240,12 @@ PROFILER_PATH = os.path.join(
     args.root_dir, "rl/grpo/demo/experiments/llama3/profiler"
 )
 
-
-def delete_directory(path: str):
-  if os.path.exists(path):
-    if os.path.isdir(path):
-      shutil.rmtree(path)
-      print(f"Deleted directory: {path}")
-    else:
-      print(f"Path exists but is not a directory: {path}")
-  else:
-    print(f"Directory does not exist: {path}")
-
-
 # Delete local checkpoint directory
-delete_directory(CKPT_DIR)
+tc.delete_directory(CKPT_DIR)
+tc.clear_jax_arrays()
 
-for name, obj in list(globals().items()):
-  if isinstance(obj, jnp.ndarray):
-    del globals()[name]
-gc.collect()
-
-
-# Download data
-def download_hf_checkpoint(repo_id, local_dir):
-  all_files = huggingface_hub.list_repo_files(repo_id)
-  filtered_files = [f for f in all_files if not f.startswith("original/")]
-
-  for filename in filtered_files:
-    huggingface_hub.hf_hub_download(
-        repo_id=repo_id, filename=filename, local_dir=local_dir
-    )
-  print(f"Downloaded {filtered_files} to: {local_dir}")
-
-
-download_hf_checkpoint(HF_MODEL_VERSION, VLLM_MODEL_VERSION)
+# Download checkpoints
+tc.download_from_huggingface(repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION)
 
 
 def download_from_gcs(zip_gcs_path, target_path):
@@ -306,7 +278,6 @@ def load_json_from_local(path):
   # with gfile.Open(path, "rb") as f:
   with open(path, "rb") as f:
     return json.loads(f.read())
-
 
 show_hbm_usage()
 
