@@ -53,29 +53,28 @@ class GRPOConfig:
       the reference model. A value of 0.0 means no KL penalty is applied.
     epsilon: Epsilon value for clipping lower bound (𝜀 in GRPO loss in paper).
       Similar to PPO, it ensures stable updates.
-    epsilon_high: Epsilon value for clipping upper bound. If None, defaults to
+    epsilon_high: Defaults to epsilon. Epsilon value for clipping upper bound. If None, defaults to
       epsilon for symmetric clipping. Set higher than epsilon for asymmetric
       clipping.
       # Clip Higher introduced in DAPO (https://arxiv.org/pdf/2503.14476),
       # also used in Magistral and VAPO (https://arxiv.org/abs/2504.05118)
-    loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
+    loss_algo: Defaults to "grpo". use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the
       paper. For GSPO, we use gspo-token loss which is more flexible.
-    dr_grpo: If True, use DR-GRPO variant which:
+    dr_grpo: Defaults to False. If True, use DR-GRPO variant which:
       - Only subtracts mean rewards (no std dev normalization)
       - Normalizes loss by max_tokens instead of actual token counts
       See: DR-GRPO https://arxiv.org/pdf/2503.20783
-    max_tokens: Maximum generation tokens for DR-GRPO normalization. If None
+    max_tokens: Only used if dr_grpo is True. Maximum generation tokens for DR-GRPO normalization. If None
       and dr_grpo is True, will attempt to infer from rollout config.
-    magistral_adv_norm: If True, normalize advantages by mini-batch std dev
+    magistral_adv_norm: Defaults to False. If True, normalize advantages by mini-batch std dev
       instead of group std dev after subtracting group mean.
       See: Magistral https://arxiv.org/pdf/2506.10910
-    eliminate_non_diverse_groups: If True, discard groups where all rewards
+    eliminate_non_diverse_groups: Defaults to False. If True, discard groups where all rewards
       are identical (0 or 1), as they provide no learning signal. Do this by
       setting loss for this group to 0.
       # Introduced in Magistral paper (https://arxiv.org/pdf/2506.10910)
-    debug: If True, print detailed debug information during training.
-
+    debug: Defaults to False. If True, print detailed debug information during training.
   Contributions:
     - GSPO: sequence-level importance sampling.
     - DR-GRPO: removes length normalization and std dev term for unbiased length and difficulty, eliminating difficulty/length bias.
