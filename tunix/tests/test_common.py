@@ -14,6 +14,7 @@
 
 """Common test utilities."""
 
+from typing import List, Tuple, Any
 from collections.abc import Iterable
 import dataclasses
 
@@ -25,6 +26,10 @@ import numpy as np
 import qwix
 
 import sentencepiece as spm
+import huggingface_hub
+import os
+import shutil
+import gc
 
 if hasattr(flax_config, 'flax_always_shard_variable'):
   flax_config.update('flax_always_shard_variable', False)
@@ -127,23 +132,29 @@ class ToyTransformer(nnx.Module, pytree=False):
     return self.emb.num_embeddings
 
 
-def get_lora_model(
-    model: nnx.Module,
-    module_path: str = '.*w1|.*w2',
-    mesh: jax.sharding.Mesh | None = None,
-) -> nnx.Module:
-  """Apply LoRA to ToyTransformer."""
-  lora_provider = qwix.LoraProvider(
-      module_path=module_path,
-      rank=4,
-      alpha=2.0,
-  )
-  dummy_model_input = {
+def get_dummy_inputs_for_lora_toy_transformer_tests():
+  return {
       'x': jnp.ones((1, 1), dtype=jnp.int32),
       'positions': jnp.ones((1, 1), dtype=jnp.int32),
       'cache': None,
       'attention_mask': jnp.ones((1, 1, 1), dtype=jnp.bool),
   }
+
+
+def get_lora_model(
+    model: nnx.Module,
+    module_path: str = '.*w1|.*w2',
+    mesh: jax.sharding.Mesh | None = None,
+    rank: int = 4,
+    alpha: float = 2.0,
+) -> nnx.Module:
+  """Apply LoRA to ToyTransformer."""
+  lora_provider = qwix.LoraProvider(
+      module_path=module_path,
+      rank=rank,
+      alpha=alpha,
+  )
+  dummy_model_input = get_dummy_inputs_for_lora_toy_transformer_tests()
   lora_model = qwix.apply_lora_to_model(
       model, lora_provider, **dummy_model_input
   )
@@ -235,3 +246,68 @@ class MockTransformerWithScoreHead(nnx.Module):
     ].value[-1]
     score = self.score(hidden_states)
     return score
+
+
+def download_from_huggingface(repo_id: str, model_path: str):
+  """Download checkpoint files from huggingface."""
+  print('Make sure you logged in to the huggingface cli.')
+  all_files = huggingface_hub.list_repo_files(repo_id)
+  filtered_files = [f for f in all_files if not f.startswith('original/')]
+
+  for filename in filtered_files:
+    huggingface_hub.hf_hub_download(
+        repo_id=repo_id, filename=filename, local_dir=model_path
+    )
+  print(f'Downloaded {filtered_files} to: {model_path}')
+
+
+def batch_templatize(prompts: List[str], tokenizer: Any):
+  """Use tokenizer to batch templatize the prompts."""
+  assert hasattr(tokenizer, 'apply_chat_template')
+  out = []
+  for p in prompts:
+    out.append(
+        tokenizer.apply_chat_template(
+            [
+                {'role': 'user', 'content': p},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    )
+  return out
+
+
+def validate_llm_outputs(
+    expected_output_pattern: List[Tuple[str, List[str]]],
+    serving_outputs: List[str],
+):
+  for (prompt, expectations), generated in zip(
+      expected_output_pattern, serving_outputs
+  ):
+    normalized = generated.strip().lower()
+    for keyword in expectations:
+      assert keyword.lower() in normalized, (
+          f"Response '{generated}' for prompt '{prompt}' does not contain "
+          f"expected keyword '{keyword}'."
+      )
+
+
+def delete_directory(path: str):
+  """Safely delete directory from filesystem."""
+  if os.path.exists(path):
+    if os.path.isdir(path):
+      shutil.rmtree(path)
+      print(f'Deleted directory: {path}')
+    else:
+      print(f'Path exists but is not a directory: {path}')
+  else:
+    print(f'Directory does not exist: {path}')
+
+
+def clear_jax_arrays():
+  """Clear all the Jax arrays from hbm."""
+  for name, obj in list(globals().items()):
+    if isinstance(obj, jnp.ndarray):
+      del globals()[name]
+  gc.collect()
