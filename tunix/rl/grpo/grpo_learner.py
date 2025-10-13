@@ -195,10 +195,8 @@ class GRPOLearner(rl_learner.RLLearner):
     completion_text = rollout_output.text
 
     # Assemble masks
-    prompt_mask = (prompt_ids != pad_value).astype("int32")
-    completion_padding_mask = jnp.not_equal(completion_ids, pad_value).astype(
-        "int32"
-    )
+    prompt_mask = prompt_ids != pad_value
+    completion_padding_mask = jnp.not_equal(completion_ids, pad_value)
     completion_mask = common.make_completion_mask(
         completion_ids, eos_tok=eos_value
     )
