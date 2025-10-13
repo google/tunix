@@ -35,7 +35,7 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from tunix.generate import mappings
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
@@ -180,6 +180,7 @@ class ClusterConfig:
   rollout_config: (
       dict[Mode, base_rollout.RolloutConfig] | base_rollout.RolloutConfig
   )
+  rollout_mapping_config: mappings.MappingConfig | None = None
 
   rollout_vllm_model_version: str = ""
   rollout_vllm_lora_config: dict[str, Any] | None = None
@@ -394,6 +395,11 @@ class RLCluster:
       if self.cluster_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
 
+      backend = (
+          self.cluster_config.rollout_engine
+          + "_"
+          + self.cluster_config.rollout_vllm_tpu_backend_type
+      )
       # TODO(linchai): maybe support offloading for vllm rollout.
       self._rollout = vllm_rollout.VllmRollout(
           self.rollout_actor,
@@ -406,6 +412,8 @@ class RLCluster:
           tpu_backend_type=self.cluster_config.rollout_vllm_tpu_backend_type,
           swap_space=self.cluster_config.rollout_vllm_swap_space_size_gb,
           lora_config=self.cluster_config.rollout_vllm_lora_config,
+          rollout_engine=backend,
+          mapping_config=self.cluster_config.rollout_mapping_config,
       )
     else:
       raise NotImplementedError(
@@ -651,9 +659,7 @@ class RLCluster:
     """
     if apply_chat_template:
       if self.tokenizer is None:
-        raise ValueError(
-            "Tokenizer must be initialized to use chat templates."
-        )
+        raise ValueError("Tokenizer must be initialized to use chat templates.")
       string_prompts = [
           self.tokenizer.apply_chat_template(
               m,  # pytype: disable=wrong-arg-types
