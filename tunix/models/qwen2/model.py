@@ -222,28 +222,58 @@ class Embedder(nnx.Module):
     return jnp.dot(x, self.input_embedding.value.T)
 
 
-def apply_rope(
-    inputs: jaxtyping.Array,  # [B, L]
-    positions: jaxtyping.Array,  # [B, L]
-    head_dim: int,
-    rope_theta: int = 1_000_000,
-) -> jaxtyping.Array:
-  """Applies RoPE."""
-  fraction = 2 * jnp.arange(0, head_dim // 2, dtype=jnp.float32) / head_dim
+def _generate_pos_embeddings(
+    positions: jax.Array,
+    features: int,
+    rope_theta: int = 10_000,
+) -> tuple[jax.Array, jax.Array]:
+  """Generate Sin/Cos for Rotary Embeddings.
+
+  Generates sinusoids at (features//2) different timescales, where the
+  timescales form a geometric series from min_timescale to max_timescale
+  (max_timescale is not included, but would be the next element in the series).
+
+  Sinusoids are evaluated at integer positions i in [0, length).
+
+  The outputs are computed as:
+
+
+  sin[b, t, j] = sin(rope_pos[b, t] / timescale[j])
+  cos[b, t, j] = cos(rope_pos[b, t] / timescale[j])
+
+  Args:
+      postions: [batch, time]
+      features: head_dim.
+      rope_theta: the rope_theta parameter.
+
+  Returns:
+      sin: a float32 array with shape [length, features // 2]
+      cos: a float32 array with shape [length, features // 2]
+  """
+  # Forked from: flaxformer/components/embedding.py;l=592
+  fraction = jnp.arange(0, features, 2, dtype=jnp.float32) / features
   timescale = rope_theta**fraction
-
-  sinusoid_inp = (
-      positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
+  rotational_frequency = 1.0 / timescale
+  # Must use high precision einsum here, since rounding off to a bfloat16 is
+  # catastrophic. bfloat16 rounds 257 to 256, but sin(257) is very different
+  # from sin(256).
+  sinusoid_inp = jnp.einsum(
+      'BT,k->BTk',
+      positions,
+      rotational_frequency,
+      precision=jax.lax.Precision.HIGHEST,
   )
-  sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
-  sin = jnp.sin(sinusoid_inp)
-  cos = jnp.cos(sinusoid_inp)
+  return jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)
 
-  first_half, second_half = jnp.split(inputs, 2, axis=-1)
-  first_part = first_half * cos - second_half * sin
-  second_part = second_half * cos + first_half * sin
-  out = jnp.concatenate([first_part, second_part], axis=-1)
-  return out.astype(inputs.dtype)
+
+def apply_rotary_embedding(
+    x: jax.Array, sin: jax.Array, cos: jax.Array
+) -> jax.Array:
+  assert x.ndim == 4 and sin.ndim == 3 and cos.ndim == 3
+  x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+  # [B, T, head_dim] -> [B, h, T, head_dim]
+  sin, cos = sin[:, :, None, :], cos[:, :, None, :]
+  return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
 
 
 class RMSNorm(nnx.Module):
@@ -270,7 +300,7 @@ class RMSNorm(nnx.Module):
         jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True)
         + self.norm_eps
     )
-    return jnp.astype(self.w * x / rms, dtype)
+    return self.w * jnp.astype(x / rms, dtype)
 
 
 class Attention(nnx.Module):
@@ -332,9 +362,10 @@ class Attention(nnx.Module):
   def block(
       self,
       x: jaxtyping.Array,
-      segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array | None,
+      sin: jaxtyping.Array,
+      cos: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
 
@@ -354,15 +385,15 @@ class Attention(nnx.Module):
     key_proj = shard(key_proj, self.shd_config.act_btnh)
     value_proj = shard(value_proj, self.shd_config.act_btnh)
 
-    query_proj = apply_rope(
+    query_proj = apply_rotary_embedding(
         query_proj,
-        segment_pos,
-        head_dim=self.head_dim,
+        sin,
+        cos,
     )
-    key_proj = apply_rope(
+    key_proj = apply_rotary_embedding(
         key_proj,
-        segment_pos,
-        head_dim=self.head_dim,
+        sin,
+        cos,
     )
 
     if cache is not None:
@@ -414,14 +445,15 @@ class Attention(nnx.Module):
   def __call__(
       self,
       x: jaxtyping.Array,
-      segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array | None,
+      sin: jaxtyping.Array,
+      cos: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+      return nnx.remat(self.block)(x, cache, attn_mask, sin, cos)
     else:
-      return self.block(x, segment_pos, cache, attn_mask)
+      return self.block(x, cache, attn_mask, sin, cos)
 
   @property
   def head_dim(self):
@@ -516,16 +548,18 @@ class DecoderLayer(nnx.Module):
   def __call__(
       self,
       x: jaxtyping.Array,
-      segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
+      sin,
+      cos,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     inputs_normalized = self.input_layernorm(x)
     cache, attn_output = self.attn(
         inputs_normalized,
-        segment_pos,
         cache,
         attn_mask,
+        sin,
+        cos,
     )
     attn_output += x
     residual = attn_output
@@ -594,15 +628,20 @@ class Qwen2(nnx.Module):
     """
     new_cache = None if cache is None else {}
     x = self.embedder.encode(input_tokens)
+    sin, cos = _generate_pos_embeddings(
+        positions, self.config.head_dim, self.config.rope_theta
+    )
+    sin, cos = sin.astype(x.dtype), cos.astype(x.dtype)
 
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
       layer_cache, x = layer(
           x,
-          positions,
           layer_cache,
           attention_mask,
+          sin,
+          cos,
       )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
