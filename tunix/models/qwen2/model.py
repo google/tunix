@@ -128,6 +128,21 @@ class ModelConfig:
         use_tied_embedding=False,
     )
 
+  @classmethod
+  def qwen2_5_1_5b(cls):  # qwen2.5-1.5B
+    return cls(
+        num_layers=28,
+        vocab_size=151936,
+        embed_dim=1536,
+        hidden_dim=8960,
+        num_heads=12,
+        head_dim=128,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        use_tied_embedding=True,
+    )
+
   # qwen2.5-coder-3B and qwen2.5-3B share the same config.
   @classmethod
   def qwen2_5_3b(cls):
@@ -225,7 +240,7 @@ class Embedder(nnx.Module):
 def _generate_pos_embeddings(
     positions: jax.Array,
     features: int,
-    rope_theta: int = 10_000,
+    rope_theta: int,
 ) -> tuple[jax.Array, jax.Array]:
   """Generate Sin/Cos for Rotary Embeddings.
 
