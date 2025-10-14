@@ -155,7 +155,8 @@ class DPOTrainer(peft_trainer.PeftTrainer):
       model: The policy model to be trained.
       ref_model: The reference/anchor model which is kept fixed/frozen during
         training. It is used to prevent the policy model from drifting too far
-        from its original capabilities.
+        from its original capabilities. If `ref_model` is None, we don't use it
+        in the loss term.
       optimizer: The optimizer used for training the policy model.
       training_config: A `DPOTrainingConfig` object containing DPO-specific
         hyperparameters like `beta` and `label_smoothing`.
@@ -180,6 +181,9 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         "label_smoothing": self.dpo_config.label_smoothing,
     }
     self._has_aux = True
+
+    # If reference model is not provided, we don't use it in the loss term.
+    self._ref_model_exists = ref_model is not None
 
   @override
   def _prepare_inputs(
@@ -242,14 +246,17 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     positions = common.build_positions_from_mask(mask)
 
     # Compute the log probabilities for the chosen and rejected tokens.
-    ref_chosen_logps, ref_rejected_logps = compute_logps(
-        self.ref_model,
-        input_ids,
-        positions,
-        attention_mask,
-        logits_to_keep,
-        completion_mask,
-    )
+    ref_chosen_logps = None
+    ref_rejected_logps = None
+    if self._ref_model_exists:
+      ref_chosen_logps, ref_rejected_logps = compute_logps(
+          self.ref_model,
+          input_ids,
+          positions,
+          attention_mask,
+          logits_to_keep,
+          completion_mask,
+      )
     return TrainExample(
         input_ids=input_ids,
         positions=positions,
@@ -301,19 +308,27 @@ def dpo_loss_fn(
       train_example.completion_mask,
   )
 
-  chosen_rewards = chosen_logps - train_example.ref_chosen_logps
-  rejected_rewards = rejected_logps - train_example.ref_rejected_logps
-  margin = chosen_rewards - rejected_rewards
-
-  losses = (
-      -jax.nn.log_sigmoid(beta * margin) * (1 - label_smoothing)
-      - jax.nn.log_sigmoid(-beta * margin) * label_smoothing
+  # Compute DPO loss.
+  chosen_log_ratio = chosen_logps
+  if train_example.ref_chosen_logps is not None:
+    chosen_log_ratio = chosen_log_ratio - train_example.ref_chosen_logps
+  rejected_log_ratio = rejected_logps
+  if train_example.ref_rejected_logps is not None:
+    rejected_log_ratio = rejected_log_ratio - train_example.ref_rejected_logps
+  delta = chosen_log_ratio - rejected_log_ratio
+  losses = -(
+      jax.nn.log_sigmoid(beta * delta) * (1 - label_smoothing)
+      + jax.nn.log_sigmoid(-beta * delta) * label_smoothing
   )
+
+  # Compute rewards.
+  chosen_rewards = beta * chosen_log_ratio
+  rejected_rewards = beta * rejected_log_ratio
 
   aux = {
       "rewards/chosen": chosen_rewards.mean(),
       "rewards/rejected": rejected_rewards.mean(),
-      "rewards/margin": margin.mean(),
+      "rewards/margin": (chosen_rewards - rejected_rewards).mean(),
       "rewards/accuracy": (chosen_rewards > rejected_rewards).mean(),
       "log_probs/chosen": chosen_logps.mean(),
       "log_probs/rejected": rejected_logps.mean(),
