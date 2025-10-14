@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, Tuple
 from flax import nnx
 import jax
 import jaxtyping
+from tunix.generate import mappings
 from tunix.generate import vllm_sampler
 from tunix.rl.rollout import base_rollout
 
@@ -38,8 +39,13 @@ class VllmRollout(base_rollout.BaseRollout):
       tpu_backend_type: str,
       swap_space: float = 4.0,  # in GiB
       lora_config: Optional[Dict[str, str]] = None,
+      mapping_config: Optional[mappings.MappingConfig] = None,
+      rollout_engine: str = "vllm_jax",
   ):
     self.mesh = mesh
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=mapping_config, model=model, backend=rollout_engine
+    )
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
@@ -49,13 +55,8 @@ class VllmRollout(base_rollout.BaseRollout):
             hbm_utilization=hbm_utilization,
             init_with_random_weights=init_with_random_weights,
             tpu_backend_type=tpu_backend_type,
-            mapping_config=vllm_sampler.MappingConfig(
-                to_hf_mappings=model.to_hf_mappings(),
-                to_hf_transpose_keys=model.to_hf_transpose_keys(),
-                to_hf_hook_fns=model.to_hf_hook_fns(),
-                lora_to_hf_mappings=model.lora_to_hf_mappings(),
-                lora_config=lora_config,
-            ),
+            mapping_config=mapping_config,
+            lora_config=lora_config,
             swap_space=swap_space,
         ),
     )

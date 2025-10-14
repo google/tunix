@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import jaxtyping
 from tunix.generate import base_sampler
 from tunix.generate import utils
+from tunix.generate.mappings import MappingConfig
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
 from vllm import LLM
@@ -36,19 +37,9 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
 @dataclasses.dataclass
-class MappingConfig:
-  # Mappings for parameter names
-  to_hf_mappings: Optional[Dict[str, str]]
-  lora_to_hf_mappings: Optional[Dict[str, str]]
-  # Mapping for weight transformations (e.g. rescaling)
-  to_hf_hook_fns: Optional[Dict[str, callable]]
-  # Parameters that need to be transposed
-  to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]]
-  lora_config: Optional[Dict[str, Any]]
-
-
-@dataclasses.dataclass
 class VllmConfig:
+  """Vllm rollout configuations."""
+
   model_version: str
   max_model_len: int
   mesh: jax.sharding.Mesh
@@ -64,6 +55,7 @@ class VllmConfig:
   # However, frequent swapping can increase latency due to the overhead of
   # transferring data between CPU and TPU/GPU memory.
   swap_space: float = 4.0  # in GiB
+  lora_config: Optional[Dict[str, Any]] = None
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -100,17 +92,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self.args = self._vllm_config(config)
     self.llm = LLM(**self.args)
 
-    self.mappings = config.mapping_config.to_hf_mappings
+    self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
 
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
-    if (
-        config.mapping_config.lora_config is not None
-        and config.mapping_config.lora_to_hf_mappings is not None
-    ):
-      self.mappings |= config.mapping_config.lora_to_hf_mappings
+    if config.lora_config and config.mapping_config.lora_to_hf_mappings:
+      self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -123,7 +112,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
-        key_mappings=self.mappings,
+        key_mappings=self.to_hf_key_mappings,
         key_mapping_hook_fns=self.to_hf_hook_fns,
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
@@ -142,19 +131,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     return math.prod(mesh.shape.values())
 
   def _vllm_config(self, config: VllmConfig):
+    """Setup vllm config from Tunix Vllm config."""
     args = {}
     args["additional_config"] = {}
     args["model"] = config.model_version
     args["max_model_len"] = config.max_model_len
     args["gpu_memory_utilization"] = config.hbm_utilization
     args["swap_space"] = config.swap_space
-    if config.mapping_config.lora_config is not None:
-      args["additional_config"][
-          "lora_config"
-      ] = config.mapping_config.lora_config
+    if config.lora_config is not None:
+      args["additional_config"]["lora_config"] = config.lora_config
     device_indexes = config.mesh.device_ids.flatten().tolist()
     args["additional_config"]["sharding"] = {
-        "sharding_strategy": {"device_indexes": device_indexes, "tensor_parallelism": self._find_tp_size(config.mesh)}
+        "sharding_strategy": {
+            "device_indexes": device_indexes,
+            "tensor_parallelism": self._find_tp_size(config.mesh),
+        }
     }
     return args
 
@@ -192,6 +183,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def detokenize(
       self, input_strings: List[str], request_outputs: List[RequestOutput]
   ) -> Tuple[List[str], List[float], List[int]]:
+    """Detokenize the vllm outputs."""
     generations = len(request_outputs[0].outputs)
     decoded_outputs = [[] for _ in range(generations)]
     out_logprobs = [[] for _ in range(generations)]
