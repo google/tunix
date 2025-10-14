@@ -5,6 +5,7 @@ from unittest import mock
 from absl.testing import absltest
 from tunix.rl.experimental.agentic.agents import base_agent
 from tunix.rl.experimental.agentic.environments import base_environment
+from tunix.rl.experimental.agentic.rewards import reward_types
 from tunix.rl.experimental.agentic.trajectory import trajectory_collect_engine
 
 
@@ -19,7 +20,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         base_environment.BaseEnv, instance=True
     )
     self.mock_model_call = mock.Mock()
-    self.mock_final_reward_fn = mock.Mock(return_value=0.5)
+    self.mock_final_reward_fn = mock.Mock(
+        return_value=reward_types.RewardOutput(reward=0.5)
+    )
     self.mock_tokenizer = mock.Mock()
     self.mock_chat_parser = mock.Mock()
 

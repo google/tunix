@@ -15,6 +15,8 @@ import jax.numpy as jnp
 from tunix.rl.experimental.agentic import utils
 from tunix.rl.experimental.agentic.agents import base_agent
 from tunix.rl.experimental.agentic.environments import base_environment
+from tunix.rl.experimental.agentic.rewards import reward_types
+
 
 BaseEnv = base_environment.BaseEnv
 Trajectory = base_agent.Trajectory
@@ -41,7 +43,8 @@ class TrajectoryCollectEngine:
       env=None,
       *,
       model_call: Callable[[list[Dict[str, str]]], str],
-      final_reward_fn: Optional[Callable[[Dict[str, Any], str], float]] = None,
+      final_reward_fn: Optional[Callable[[Dict[str, Any], str],
+                                         reward_types.RewardOutput]] = None,
       max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,
@@ -70,7 +73,9 @@ class TrajectoryCollectEngine:
     self.agent = agent
     self.env = env
     self.model_call = model_call
-    self.final_reward_fn = final_reward_fn or (lambda *_: 0.0)
+    self.final_reward_fn = final_reward_fn or (
+        lambda *_: reward_types.RewardOutput(reward=0.0)
+    )
     self.max_steps = max_steps
     self.gamma = gamma
     self.timeout = timeout
@@ -168,7 +173,8 @@ class TrajectoryCollectEngine:
       pairs: List[Tuple[LLMBaseAgent, BaseEnv]],
       *,
       model_call: Callable[[list[Dict[str, str]]], str],
-      final_reward_fn: Optional[Callable[[Dict[str, Any], str], float]] = None,
+      final_reward_fn: Optional[Callable[[Dict[str, Any], str],
+                                         reward_types.RewardOutput]] = None,
       max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,
@@ -251,7 +257,7 @@ class TrajectoryCollectEngine:
           False otherwise.
     """
     resp = await asyncio.get_event_loop().run_in_executor(
-        None, self.model_call, self.agent.chat_completions
+        None, self.model_call, [self.agent.chat_completions]
     )
     action = self.agent.update_from_model(resp).action
 
@@ -317,7 +323,7 @@ class TrajectoryCollectEngine:
     final_reward = await asyncio.get_event_loop().run_in_executor(
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
-    last_step.reward += final_reward
+    last_step.reward += final_reward.reward
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.

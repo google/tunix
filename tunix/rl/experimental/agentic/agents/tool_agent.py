@@ -72,9 +72,10 @@ class ToolAgent(LLMBaseAgent):
     parser_cls: type[ToolParser] = get_tool_parser(tool_parser_name)
     self.tool_parser = parser_cls()
 
-    # Generate tool documentation by injecting JSON Schema into parser template
-    tools_schema = json.dumps(self.tool_manager.get_json_schema, indent=2)
-    self.tools_prompt = self.tool_parser.get_tool_prompt(tools_schema)
+    # Generate tool prompt by injecting JSON Schema into parser template
+    self.tools_prompt = self.tool_parser.get_tool_prompt(
+        self.tool_manager.get_tools()
+    )
 
     # Internal state management
     self._trajectory = Trajectory()
@@ -166,10 +167,6 @@ class ToolAgent(LLMBaseAgent):
       else:
         # Handle unexpected dict observation formats
         logger.warning("Unknown dict observation format: %s", observation)
-        self._messages.append({
-            "role": "user",
-            "content": f"Environment response: {json.dumps(observation)}",
-        })
     elif isinstance(observation, str):
       # Handle plain text observations
       self._messages.append({"role": "user", "content": observation})

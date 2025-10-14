@@ -67,6 +67,14 @@ class ToolManager:
     """
     return list(self._tool_dict.keys())
 
+  def get_tools(self) -> List[BaseTool]:
+    """Get a list of all registered tool instances.
+
+    Returns:
+        List[BaseTool]: A list of all tool instances.
+    """
+    return list(self._tool_dict.values())
+
   def get_json_schema(self) -> List[dict[str, Any]]:
     """Get OpenAI-compatible JSON schemas for all registered tools.
 

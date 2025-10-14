@@ -307,6 +307,7 @@ class RLCluster:
     Args:
       model_or_path: either a nnx.Module or a path to a model.
       mesh: the mesh to load the model on.
+      data_type: optional data type to cast the model parameters to.
 
     Returns:
       The model loaded on the given mesh.
@@ -662,12 +663,12 @@ class RLCluster:
         raise ValueError("Tokenizer must be initialized to use chat templates.")
       string_prompts = [
           self.tokenizer.apply_chat_template(
-              m,  # pytype: disable=wrong-arg-types
+              prompt,  # pytype: disable=wrong-arg-types
               add_generation_prompt=True,
               tokenize=False,
               enable_thinking=False,
           )
-          for m in prompts
+          for prompt in prompts
       ]
     else:
       string_prompts = prompts  # pytype: disable=annotation-type-mismatch
@@ -686,7 +687,6 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
-
       outputs = [
           self.rollout.generate(string_prompts[s], rollout_config)
           for s in rl_utils.chunk_slices_by_size(
