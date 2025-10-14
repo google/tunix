@@ -269,7 +269,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:
-    m, s = self._mode, self._train_steps
+    m, s = self._mode, self.global_steps
     self.metrics_logger.log("rewards/chosen", aux["rewards/chosen"], m, s)
     self.metrics_logger.log("rewards/rejected", aux["rewards/rejected"], m, s)
     self.metrics_logger.log("rewards/margin", aux["rewards/margin"], m, s)
@@ -281,7 +281,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_eval_step(self, aux: Any) -> None:
-    m, s = self._mode, self._train_steps
+    m, s = self._mode, self.global_steps
     self.metrics_logger.log("rewards/chosen", aux["rewards/chosen"], m, s)
     self.metrics_logger.log("rewards/rejected", aux["rewards/rejected"], m, s)
     self.metrics_logger.log("rewards/margin", aux["rewards/margin"], m, s)
