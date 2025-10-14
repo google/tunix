@@ -181,6 +181,10 @@ class MetricsLogger:
           f"Metric {metric_name} not found for mode {mode}. Available metrics"
           f" for mode {mode}: {self._metrics[mode].keys()}"
       )
+
+    if metric_name == "learning_rate":
+      return self._metrics[mode][metric_name][-1]
+
     if metric_name == "perplexity":
       return _calculate_geometric_mean(
           np.stack(self._metrics[mode][metric_name])

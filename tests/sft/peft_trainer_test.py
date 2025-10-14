@@ -581,6 +581,34 @@ class PeftTrainerTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       peft_trainer.PeftTrainer(model, optimizer, config)
 
+  def test_learning_rate_logging(self):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(rngs=rngs)
+    optimizer = optax.inject_hyperparams(optax.adamw)(
+        learning_rate=optax.schedules.linear_schedule(
+            init_value=TEST_LEARNING_RATE,
+            end_value=0.0,
+            transition_begin=1,
+            transition_steps=8,
+        ),
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(max_norm=1.0),
+        optimizer,
+    )
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    train_ds = dummy_datasets(batch_size=1)
+
+    trainer.train(train_ds)
+
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        0.00025,
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

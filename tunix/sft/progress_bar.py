@@ -38,7 +38,7 @@ class ProgressBar:
     self.max_steps = max_steps
     self.metrics_logger = metrics_logger
     self.description = description
-    self.disable_warning_for_metrics = {"learning_rate"}
+    self.disable_warning_for_metrics = {}
 
   def _update_metric(self, metric_name: str, mode: ml.Mode, ndigits: int = 3):
     """Update metric corresponding to `metric_name`."""
