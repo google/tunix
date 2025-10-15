@@ -45,6 +45,7 @@ from tunix.rl.rl_cluster import RLCluster
 from tunix.rl.rl_cluster import RLTrainingConfig
 from tunix.rl.rl_cluster import Role
 from tunix.rl.rollout.base_rollout import RolloutConfig
+from tunix.sft.checkpoint_manager import CheckpointManager
 from tunix.sft.dpo.dpo_trainer import DPOTrainer
 from tunix.sft.dpo.dpo_trainer import DpoTrainer
 from tunix.sft.dpo.dpo_trainer import DPOTrainingConfig
