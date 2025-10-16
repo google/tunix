@@ -14,6 +14,7 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 from tunix.models.gemma import model as gemma_lib
+from tunix.sft import utils
 
 # Keep the import below for google internal lint.
 import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
@@ -279,7 +280,7 @@ class Sampler:
     input_mask = input_mask.at[:, :num_input_tokens].set(
         all_input_ids != self.vocab.pad_id()
     )
-    positions = gemma_lib.build_positions_from_mask(input_mask)
+    positions = utils.build_positions_from_mask(input_mask)
 
     done = jnp.zeros((batch_size,), dtype=jnp.bool_)
 
