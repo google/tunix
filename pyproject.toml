@@ -19,21 +19,22 @@ classifiers = [
 ]
 dependencies = [
   "datasets",
+  "flax>=0.11.1",
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
   "jaxtyping",
+  "jinja2",
   "kagglehub",
   "omegaconf",
+  "python-dotenv",
   "qwix",
   "sentencepiece",
   "tensorboardX",
   "tensorflow_datasets",
   "tqdm",
   "transformers",
-  "python-dotenv",
-  "jinja2",
+  "hf_transfer",
 ]
 
 [project.optional-dependencies]
@@ -49,12 +50,10 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-    "flax>=0.11.2",
+  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
-    "flax>=0.11.2",
-    "numba",
-    "vllm",
+  # Manully install vLLM & tpu-inferece
 ]
 
 [project.urls]
