@@ -17,7 +17,7 @@
 import asyncio
 
 from absl.testing import absltest
-from tunix.rl.experimental.agentic.QueueManager import group_queue_manager
+from tunix.rl.experimental.agentic.queue_manager import group_queue_manager
 
 
 def _create_item(

@@ -238,10 +238,11 @@ class ToolAgent(LLMBaseAgent):
     # Record complete step with conversation context and parsed action
     step = Step(
         chat_completions=copy.deepcopy(self._messages),
-        model_response=response,
-        action=tool_calls_dict,
+        action=Action(action=tool_calls_dict),
         observation=self._obs_cache,
+        model_response=response,
     )
+
     self._trajectory.steps.append(step)
 
     return Action(action=tool_calls_dict)

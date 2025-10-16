@@ -26,7 +26,7 @@ from collections.abc import Hashable
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
-from tunix.rl.experimental.agentic.QueueManager import group_queue_manager
+from tunix.rl.experimental.agentic.queue_manager import group_queue_manager
 from tunix.rl.experimental.agentic.trajectory import trajectory_collect_engine
 
 
