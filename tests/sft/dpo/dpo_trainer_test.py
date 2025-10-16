@@ -172,6 +172,10 @@ class DPOTrainerTest(parameterized.TestCase):
           dpo_trainer.metrics_logger.get_metric_history(metric_name, "train"),
           dpo_trainer._train_steps,
       )
+      self.assertLen(
+          dpo_trainer.metrics_logger.get_metric_history(metric_name, "eval"),
+          3,
+      )
 
   @parameterized.named_parameters(
       dict(

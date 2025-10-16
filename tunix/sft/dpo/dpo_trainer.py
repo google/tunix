@@ -192,6 +192,15 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     # If reference model is not provided, we don't use it in the loss term.
     self._ref_model_exists = ref_model is not None
 
+    self._aux_metrics_to_log = {
+        "rewards/chosen": np.mean,
+        "rewards/rejected": np.mean,
+        "rewards/margin": np.mean,
+        "rewards/accuracy": np.mean,
+        "log_probs/chosen": np.mean,
+        "log_probs/rejected": np.mean,
+    }
+
   @override
   def _prepare_inputs(
       self,
@@ -276,27 +285,31 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:
-    m, s = self._mode, self._train_steps
-    self.metrics_logger.log("rewards/chosen", aux["rewards/chosen"], m, s)
-    self.metrics_logger.log("rewards/rejected", aux["rewards/rejected"], m, s)
-    self.metrics_logger.log("rewards/margin", aux["rewards/margin"], m, s)
-    self.metrics_logger.log("rewards/accuracy", aux["rewards/accuracy"], m, s)
-    self.metrics_logger.log("log_probs/chosen", aux["log_probs/chosen"], m, s)
-    self.metrics_logger.log(
-        "log_probs/rejected", aux["log_probs/rejected"], m, s
-    )
+    assert self._buffered_train_metrics is not None
+    for metric_name, op in self._aux_metrics_to_log.items():
+      if metric_name not in self._buffered_train_metrics.additional_metrics:
+        self._buffered_train_metrics.additional_metrics[metric_name] = (
+            [aux[metric_name]],
+            op,
+        )
+      else:
+        self._buffered_train_metrics.additional_metrics[metric_name][0].append(
+            aux[metric_name]
+        )
 
   @override
   def _post_process_eval_step(self, aux: Any) -> None:
-    m, s = self._mode, self._train_steps
-    self.metrics_logger.log("rewards/chosen", aux["rewards/chosen"], m, s)
-    self.metrics_logger.log("rewards/rejected", aux["rewards/rejected"], m, s)
-    self.metrics_logger.log("rewards/margin", aux["rewards/margin"], m, s)
-    self.metrics_logger.log("rewards/accuracy", aux["rewards/accuracy"], m, s)
-    self.metrics_logger.log("log_probs/chosen", aux["log_probs/chosen"], m, s)
-    self.metrics_logger.log(
-        "log_probs/rejected", aux["log_probs/rejected"], m, s
-    )
+    assert self._buffered_eval_metrics is not None
+    for metric_name, op in self._aux_metrics_to_log.items():
+      if metric_name not in self._buffered_eval_metrics.additional_metrics:
+        self._buffered_eval_metrics.additional_metrics[metric_name] = (
+            [aux[metric_name]],
+            op,
+        )
+      else:
+        self._buffered_eval_metrics.additional_metrics[metric_name][0].append(
+            aux[metric_name]
+        )
 
 
 def dpo_loss_fn(
