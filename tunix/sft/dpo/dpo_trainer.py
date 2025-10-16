@@ -174,7 +174,14 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         else tokenizer_adapter.TokenizerAdapter(tokenizer)
     )
 
-    self.loss_fn = dpo_loss_fn
+    self.with_loss_fn(dpo_loss_fn, has_aux=True)
+    self.with_gen_model_input_fn(
+        lambda x: {
+            "train_example": x,
+            "beta": self.dpo_config.beta,
+            "label_smoothing": self.dpo_config.label_smoothing,
+        }
+    )
     self.gen_model_input_fn = lambda x: {
         "train_example": x,
         "beta": self.dpo_config.beta,

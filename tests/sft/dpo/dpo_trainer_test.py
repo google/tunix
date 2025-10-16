@@ -128,7 +128,7 @@ class DPOTrainerTest(parameterized.TestCase):
     if use_ref_model:
       ref_model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     dpo_config = dpo_lib.DPOTrainingConfig(
-        eval_every_n_steps=10,
+        eval_every_n_steps=5,
         max_steps=10,
     )
     dpo_trainer = dpo_lib.DPOTrainer(
@@ -146,7 +146,16 @@ class DPOTrainerTest(parameterized.TestCase):
         rejected_ids,
         rejected_mask,
     )
-    dpo_trainer.train(train_ds, None)
+    eval_ds = _dummy_dataset(
+        MySource(np.arange(2)),
+        prompt_ids,
+        prompt_mask,
+        chosen_ids,
+        chosen_mask,
+        rejected_ids,
+        rejected_mask,
+    )
+    dpo_trainer.train(train_ds, eval_ds=eval_ds)
 
     variables = nnx.state(model, nnx.Param)
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
