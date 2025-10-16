@@ -444,10 +444,12 @@ class PeftTrainer:
       return self.optimizer.opt_state.hyperparams["learning_rate"].value
     except AttributeError:
       for chainpart in self.optimizer.opt_state:
-        if isinstance(chainpart, optax.EmptyState):
-          break
         if hasattr(chainpart, "hyperparams"):
           return chainpart.hyperparams["learning_rate"].value
+        if isinstance(chainpart, tuple):
+          for chainpart_ in chainpart:
+            if hasattr(chainpart_, "hyperparams"):
+              return chainpart_.hyperparams["learning_rate"].value
       return None
 
   def _log_metrics(
@@ -548,7 +550,7 @@ class PeftTrainer:
 
   @property
   def _tqdm_train_metrics(self) -> list[str]:
-    return ["loss", "perplexity", "steps_per_sec", "learning_rate"]
+    return ["loss", "perplexity", "steps_per_sec"]
 
   def _may_update_pbar(
       self,
