@@ -14,10 +14,9 @@
 
 import os
 import grain
-from grain.multiprocessing import MultiprocessingOptions
 import tensorflow_datasets as tfds
-import tensorflow_datasets.text.gsm8k
-from transformers import AutoTokenizer
+# For OSS usage
+# import tensorflow_datasets.text.gsm8k
 
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"
