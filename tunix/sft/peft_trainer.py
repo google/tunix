@@ -28,6 +28,7 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import jax.sharding as shd
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+from metrax import logging as metrax_logging
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
@@ -61,6 +62,9 @@ class TrainingConfig:
 
   # Configs for the metrics logger.
   metrics_logging_options: metrics_logger.MetricsLoggerOptions | None = None
+
+  # Additional logging backends to use.
+  additional_logging_backends: list[metrax_logging.LoggingBackend] | None = None
 
   # Configs for the profiler.
   profiler_options: profiler.ProfilerOptions | None = None
@@ -206,6 +210,7 @@ class PeftTrainer:
     self.metrics_logger = metrics_logger.MetricsLogger(
         self.config.metrics_logging_options,
         metric_prefix=self.config.metric_prefix,
+        additional_backends=self.config.additional_logging_backends,
     )
     self.is_managed_externally = False
 
