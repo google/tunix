@@ -324,7 +324,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         else ('rewards/' + reward_fns.__name__,)
     )
     for metric_name in [
-        'rewards/overall',
+        'rewards/sum',
         *rewards_metrics,
         'completions/mean_length',
         'completions/max_length',
@@ -855,7 +855,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     def my_reward_fn(trajectories, prompts, **kwargs):
       for t_id, prompt in zip(kwargs['trajectory_ids'], prompts):
         trajectories[kwargs['mode']][t_id] = prompt
-      return 1.0
+      return [1.0]
 
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
