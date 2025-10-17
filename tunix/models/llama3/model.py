@@ -141,6 +141,33 @@ class ModelConfig:
         weight_tying=False,
     )
 
+  @classmethod
+  def llama3_70b(cls):
+    return cls(
+        num_layers=80,
+        vocab_size=128256,
+        embed_dim=8192,
+        hidden_dim=28672,
+        num_heads=64,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-05,
+        rope_theta=500_000,
+    )
+
+  @classmethod
+  def llama3_405b(cls):
+    return cls(
+        num_layers=126,
+        vocab_size=128256,
+        embed_dim=16384,
+        hidden_dim=53248,
+        num_heads=128,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-05,
+        rope_theta=500_000,
+    )
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
