@@ -334,33 +334,52 @@ GEMMA3_ATTENTION_PATTERN = (
 )
 
 
-def _create_sliding_mask(
-    segment_pos: jnp.ndarray,  # [B, seq_len]
-    cache_len: int,
+def find_last_one_index(attn_mask: jnp.ndarray) -> jnp.ndarray:
+  """Finds the index of the last (rightmost) '1' from attn_mask."""
+  cache_len = attn_mask.shape[-1]
+
+  # 1. check if the entire row is all zeros.
+  all_zeros_mask = jnp.all(attn_mask == 0, axis=-1)
+
+  # 2. reverse the rows in the attn_mask
+  reversed_matrix = attn_mask[:, :, ::-1]
+
+  # 3. find the fist 1 from the right.
+  first_one_from_right = jnp.argmax(reversed_matrix, axis=-1)
+
+  # 4. covert back to the original index
+  last_one_index_original = cache_len - 1 - first_one_from_right
+
+  # 5. return the final index, 0 for rows are all zeros.
+  final_indices = jnp.where(
+      all_zeros_mask,
+      0,
+      last_one_index_original,
+  )
+
+  return final_indices.squeeze(axis=-1)
+
+
+def create_sliding_window_mask(
+    attn_mask: jnp.ndarray,  # [B, seq_len, cache_len] seq_len=1 for decoding
     sliding_window_size: int,
-):
-  """Helper function to create sliding mask for local attention.
+) -> jnp.ndarray:
+  """Helper function to create sliding window mask for local attention."""
+  upper_index = find_last_one_index(attn_mask)
 
-  It generates the sliding mask based on current segment position, the window
-  is [segment_pos - window, segment_pos + window]
+  # 1. compute the window start position
+  window_start_pos = upper_index - sliding_window_size + 1
 
-  Args:
-    segment_pos: Current segment position of shape [B, seq_len].
-    cache_len: The length of the cache.
-    sliding_window_size: The size of the sliding window.
+  # 2. create window mask
+  abs_pos = jnp.arange(attn_mask.shape[-1])
+  window_mask = abs_pos[None, :] >= window_start_pos[:, None]
 
-  Returns:
-    The sliding mask of shape [B, seq_len, cache_len].
-  """
-  cache_positions = jnp.arange(cache_len)
+  # 3. create causal mask
+  causal_mask = abs_pos[None, :] <= upper_index[:, None]
 
-  cache_positions = cache_positions[None, None, :]  # [1, 1, cache_len]
-  segment_pos = segment_pos[:, :, None]  # [B, seq_len, 1]
-
-  # abs_pos - window <= key_abs_pos <= abs_pos + window
-  sliding_mask = cache_positions >= segment_pos - sliding_window_size + 1
-  sliding_mask *= cache_positions <= segment_pos + sliding_window_size - 1
-  return sliding_mask  # [B, seq_len, cache_len]
+  # 4. create final mask
+  final_mask = window_mask & causal_mask
+  return final_mask[:, None, :]  # [B, 1, cache_len]
 
 
 class Attention(nnx.Module):
@@ -497,11 +516,16 @@ class Attention(nnx.Module):
       logits = jnp.einsum('BTNH,BSNH->BTNS', query_scaled, key_proj)
 
     if self.attn_type == AttentionType.LOCAL_SLIDING:
-      sliding_mask = _create_sliding_mask(
-          segment_pos,
-          cache_len=attn_mask.shape[-1],
-          sliding_window_size=self.sliding_window_size,
-      )
+      if segment_pos.shape[1] == 1:  # for decoding
+        sliding_mask = create_sliding_window_mask(
+            attn_mask,
+            sliding_window_size=self.sliding_window_size,
+        )
+      else:  # for prefill
+        all_ones = jnp.ones_like(attn_mask)
+        sliding_mask = jnp.triu(
+            all_ones, -1 * self.sliding_window_size + 1
+        ) * jnp.tril(all_ones, self.sliding_window_size - 1)
       attn_mask = sliding_mask * attn_mask
 
     padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)

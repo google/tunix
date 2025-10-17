@@ -692,6 +692,7 @@ class Sampler(base_sampler.BaseSampler):
     max_tokens_length = max(len(x) for x in tokens)
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
+
     all_input_ids = jnp.array([
         utils.pad_to_length(
             x,
@@ -701,11 +702,12 @@ class Sampler(base_sampler.BaseSampler):
         )
         for x in tokens
     ])
+
     total_sampling_steps = max_prompt_length + max_generation_steps
     if total_sampling_steps > self.cache_config.cache_size:
       raise ValueError(
-          'Total sampling steps must be less than the cache size'
-          f' {self.cache_config.cache_size}.'
+          f'Total sampling steps {total_sampling_steps} must be less than the'
+          f' cache size {self.cache_config.cache_size}.'
       )
 
     if seed is None:
