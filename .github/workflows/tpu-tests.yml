@@ -29,8 +29,12 @@ concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || github.event_name == 'schedule' && format('{0}-schedule', github.workflow) || github.run_id }}
   cancel-in-progress: true
 
+env:
+  HF_HOME: ~/.cache/huggingface
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+
 jobs:
-  run:
+  run_prod:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
@@ -40,6 +44,16 @@ jobs:
         CLOUD_TPU_ACCELERATOR: v5e-8
         JAX_PLATFORMS: tpu
     steps:
+
+    # Cache Hugging Face hub
+    - name: Cache HF hub
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+        restore-keys: |
+          hf-${{ runner.os }}-
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
@@ -47,8 +61,8 @@ jobs:
 
     - name: Install tunix dependencies
       run: |
-        pip install -e .
-        pip install pytest pytest-xdist jinja2
+        pip install -e .[prod]
+        pip install pytest pytest-xdist
 
     - name: Verify TPU availability
       run: |
@@ -85,7 +99,6 @@ jobs:
 
     - name: Run tunix generation tests (PASSED only)
       run: |
-        # vllm_sampler_test depends on vllm TPU which is not OSS yet
         # tokenizer_adapter_test requires access to gated repo
         python -m pytest tests/generate/ -v --tb=short \
           --ignore=tests/generate/vllm_sampler_test.py \
@@ -94,7 +107,7 @@ jobs:
     - name: Run tunix SFT tests
       run: |
         python -m pytest tests/sft/ -v --tb=short
-    
+
     - name: Run tunix SFT integration tests
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -115,28 +128,28 @@ jobs:
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
-        
+
         # Download GSM8K dataset
         mkdir -p /tmp/grpo_test/rl/grpo/data
         python3 -c "
         from datasets import load_dataset
         import json
-        
+
         # Download and save GSM8K train split
         dataset = load_dataset('openai/gsm8k', 'main', split='train')
         train_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
         with open('/tmp/grpo_test/rl/grpo/data/gsm8k_train.json', 'w') as f:
             json.dump(train_data, f)
-        
+
         # Download and save GSM8K test split
         dataset = load_dataset('openai/gsm8k', 'main', split='test')
         test_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
         with open('/tmp/grpo_test/rl/grpo/data/gsm8k_test.json', 'w') as f:
             json.dump(test_data, f)
-        
+
         print('GSM8K dataset downloaded successfully')
         "
-        
+
         # Run GRPO demo script with minimal configuration
         python3 scripts/grpo_demo_llama3_qwen2.py \
           --root-dir=/tmp/grpo_test \
@@ -155,4 +168,49 @@ jobs:
         else
           exit "${code:-0}"
         fi
+
+  run_dev:
+    runs-on: [linux-x86-ct5lp-224-8tpu]
+    environment: testing
+    container:
+      image: vllm/vllm-tpu:v0.11.1
+      options: --privileged
+      env:
+        CLOUD_TPU_ACCELERATOR: v5e-8
+        JAX_PLATFORMS: tpu
+    steps:
+      # Cache Hugging Face hub
+      - name: Cache HF hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            hf-${{ runner.os }}-
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Tunix and tpu-inference
+        run: |
+          echo "Current directory:"
+          pwd
+          pip install --upgrade pip setuptools wheel
+
+          # Install Tunix
+          pip uninstall torch torch-xla libtpu jax jaxlib -y
+          pip install -e .[dev]
+
+          # Install tpu-inference
+          pip uninstall torch libtpu jax jaxlib -y
+          pip install tpu-inference==v0.11.1 --force-reinstall
+          pip install pytest pytest-xdist
+
+      - name: Run tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          pytest tests/generate/vllm_sampler_test.py -v --tb=short
 

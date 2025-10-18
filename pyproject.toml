@@ -19,21 +19,23 @@ classifiers = [
 ]
 dependencies = [
   "datasets",
+  "flax>=0.11.1",
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
   "jaxtyping",
+  "jinja2",  # Huggingface chat template
   "kagglehub",
-  "omegaconf",
+  "numba",
+  "omegaconf", # CLI config
+  "python-dotenv",  # Huggingface API key
   "qwix",
   "sentencepiece",
   "tensorboardX",
   "tensorflow_datasets",
   "tqdm",
   "transformers",
-  "python-dotenv",
-  "jinja2",
+  "hf_transfer",  # Huggingface caching in CI
 ]
 
 [project.optional-dependencies]
@@ -49,12 +51,10 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-    "flax>=0.11.2",
+  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
-    "flax>=0.11.2",
-    "numba",
-    "vllm",
+  # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
 ]
 
 [project.urls]
