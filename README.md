@@ -83,13 +83,19 @@ pip install git+https://github.com/google/tunix
 ```
 
 3. From source (editable install) If you plan to modify the codebase and run it
-   in development mode:
+   in development mode. If you'd like to install vllm, the tpu-inference
+   supported version is not released yet, please follow the instructions to
+   install manually
+   (https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html)
+   or download the docker image (vllm/vllm-tpu:v0.11.1) then
+   `pip install tpu-inference` for TPU backend:
 
 ```sh
 git clone https://github.com/google/tunix.git
 cd tunix
 pip install -e ".[dev]"
 
+# Then install vLLM and tpu-inference
 ```
 
 ## Getting Started
