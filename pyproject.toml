@@ -22,7 +22,7 @@ dependencies = [
   "gcsfs",
   "grain",
   "huggingface_hub",
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
+  "jax>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
   "jaxtyping",
   "kagglehub",
   "omegaconf",
