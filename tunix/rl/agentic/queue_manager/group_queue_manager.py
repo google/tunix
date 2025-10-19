@@ -15,6 +15,7 @@
 """Manages queues of trajectory items, grouping them by group_id and episode_id."""
 
 from __future__ import annotations
+
 import asyncio
 import collections
 from collections.abc import Hashable

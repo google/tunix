@@ -20,7 +20,7 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template
 
 
 def get_recent_assistant_user_messages(
-    chat_completions_messages: list[dict[str, Any]]
+    chat_completions_messages: list[dict[str, Any]],
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
   """Extracts the most recent assistant message and environment messages (user/tool) from a chat completions list.
 

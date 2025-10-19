@@ -29,12 +29,17 @@ from tunix.distillation.distillation_trainer import DistillationTrainer
 from tunix.distillation.distillation_trainer import TrainingConfig as DistillationTrainingConfig
 from tunix.generate.sampler import CacheConfig
 from tunix.generate.sampler import Sampler
-from tunix.generate.tokenizer_adapter import TokenizerAdapter, Tokenizer
+from tunix.generate.tokenizer_adapter import Tokenizer
+from tunix.generate.tokenizer_adapter import TokenizerAdapter
 from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GrpoConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner
 from tunix.rl.grpo.grpo_learner import GrpoLearner
 from tunix.rl.grpo.grpo_learner import RewardFn
+from tunix.rl.orpo.orpo_trainer import ORPOTrainer
+from tunix.rl.orpo.orpo_trainer import OrpoTrainer
+from tunix.rl.orpo.orpo_trainer import ORPOTrainingConfig
+from tunix.rl.orpo.orpo_trainer import OrpoTrainingConfig
 from tunix.rl.ppo.ppo_learner import PPOConfig
 from tunix.rl.ppo.ppo_learner import PpoConfig
 from tunix.rl.ppo.ppo_learner import PPOLearner

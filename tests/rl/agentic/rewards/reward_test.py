@@ -32,6 +32,7 @@ class RewardTest(parameterized.TestCase):
 
   def test_registry(self):
     """Tests the reward function registry mechanism."""
+
     # A simple reward function for testing registration
     def test_fn(task, action):
       return reward_types.RewardOutput(0.5, {})

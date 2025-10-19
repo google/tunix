@@ -208,5 +208,6 @@ class RlClusterTest(parameterized.TestCase):
     called_prompts = rl_cluster.rollout.generate.call_args[0][0]
     self.assertEqual(called_prompts, ['formatted prompt'])
 
+
 if __name__ == '__main__':
   absltest.main()

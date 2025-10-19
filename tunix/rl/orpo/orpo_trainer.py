@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DPO trainer."""
+"""ORPO trainer."""
 
 from __future__ import annotations
 
@@ -34,10 +34,10 @@ from typing_extensions import override
 
 @flax.struct.dataclass(frozen=True)
 class DataInput:
-  """Training data input for DPO.
+  """Training data input for ORPO.
 
   This can be used when inputs are raw strings. Tokenization, padding and
-  preprocessing is taken care of by `DPOTrainer`.
+  preprocessing is taken care of by `ORPOTrainer`.
 
   Attributes:
     prompts: A list of prompts.
@@ -52,7 +52,7 @@ class DataInput:
 
 @flax.struct.dataclass(frozen=True)
 class TrainingInput:
-  """Tokenized training input for DPO.
+  """Tokenized training input for ORPO.
 
   This can be used when inputs are already tokenized, padded and preprocessed.
 
@@ -81,17 +81,15 @@ class TrainExample:
   input_ids: jax.Array  # Concatenated [prompt_ids, completion_ids]
   positions: jax.Array
   attention_mask: jax.Array
-  ref_chosen_logps: jax.Array
-  ref_rejected_logps: jax.Array
   completion_mask: jax.Array
   logits_to_keep: int = flax.struct.field(pytree_node=False)
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class DPOTrainingConfig(peft_trainer.TrainingConfig):
-  """DPO Training Config."""
+class ORPOTrainingConfig(peft_trainer.TrainingConfig):
+  """ORPO Training Config."""
 
-  beta: float = 0.1  # 𝛽 for KL penalty https://arxiv.org/pdf/2305.18290
+  lambda_orpo: float = 0.1  # Weight for preference loss
   label_smoothing: float = 0.0
 
   # Should be specified only if your input has strings instead of tokenized IDs.
@@ -109,7 +107,7 @@ def compute_logps(
     completion_mask,
 ):
   """Computes the log probabilities for chosen and rejected tokens."""
-  token_logps = common.get_per_token_logps(
+  token_logps, _ = common.get_per_token_logps(
       model,
       input_tokens=input_ids,
       positions=positions,
@@ -124,48 +122,41 @@ def compute_logps(
   return chosen_logps, rejected_logps
 
 
-class DPOTrainer(peft_trainer.PeftTrainer):
-  """Direct Preference Optimization (DPO) trainer.
+class ORPOTrainer(peft_trainer.PeftTrainer):
+  """Odds Ratio Preference Optimization (ORPO) trainer.
 
-  DPO is a preference tuning method for aligning large language models with
-  human or AI preferences. It is a more efficient, performant alternative
-  to RLHF.
+  ORPO is a memory-efficient preference tuning method that combines
+  supervised fine-tuning with preference alignment without requiring
+  a separate reference model. This makes it approximately 50% more
+  memory-efficient than DPO.
 
-  DPO is simpler because it eliminates the need for text generation in the
-  training loop. Moreover, DPO bypasses the reward modeling step entirely, i.e.,
-  we do not need to train a separate reward model. It uses a dataset of
-  preferences (pairs of "chosen" and "rejected responses) to directly optimize
-  the policy model by using a classification-style loss.
+  ORPO optimizes the model using a combined loss that incorporates:
+  1. Standard SFT loss on chosen responses
+  2. Preference learning via odds ratio between chosen and rejected responses
 
   References:
-  - https://arxiv.org/abs/2305.18290
+  - https://arxiv.org/abs/2403.07691
   """
 
   def __init__(
       self,
       model: nnx.Module,
-      ref_model: nnx.Module,
       optimizer: optax.GradientTransformation,
-      training_config: DPOTrainingConfig,
+      training_config: ORPOTrainingConfig,
       tokenizer: Any | None = None,
   ):
-    """Initializes the DPO trainer.
+    """Initializes the ORPO trainer.
 
     Args:
       model: The policy model to be trained.
-      ref_model: The reference/anchor model which is kept fixed/frozen during
-        training. It is used to prevent the policy model from drifting too far
-        from its original capabilities. If `ref_model` is None, we don't use it
-        in the loss term.
       optimizer: The optimizer used for training the policy model.
-      training_config: A `DPOTrainingConfig` object containing DPO-specific
-        hyperparameters like `beta` and `label_smoothing`.
+      training_config: An `ORPOTrainingConfig` object containing ORPO-specific
+        hyperparameters like `lambda_orpo` and `label_smoothing`.
       tokenizer: An optional tokenizer. If provided, the trainer can accept
         string inputs and tokenize them internally.
     """
     self.model = model
-    self.ref_model = ref_model
-    self.dpo_config = training_config
+    self.orpo_config = training_config
     super().__init__(model, optimizer, training_config)
 
     self.tokenizer = (
@@ -174,23 +165,20 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         else tokenizer_adapter.TokenizerAdapter(tokenizer)
     )
 
-    self.with_loss_fn(dpo_loss_fn, has_aux=True)
+    self.with_loss_fn(orpo_loss_fn, has_aux=True)
     self.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
-            "beta": self.dpo_config.beta,
-            "label_smoothing": self.dpo_config.label_smoothing,
+            "lambda_orpo": self.orpo_config.lambda_orpo,
+            "label_smoothing": self.orpo_config.label_smoothing,
         }
     )
     self.gen_model_input_fn = lambda x: {
         "train_example": x,
-        "beta": self.dpo_config.beta,
-        "label_smoothing": self.dpo_config.label_smoothing,
+        "lambda_orpo": self.orpo_config.lambda_orpo,
+        "label_smoothing": self.orpo_config.label_smoothing,
     }
     self._has_aux = True
-
-    # If reference model is not provided, we don't use it in the loss term.
-    self._ref_model_exists = ref_model is not None
 
     self._aux_metrics_to_log = {
         "rewards/chosen": np.mean,
@@ -199,6 +187,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         "rewards/accuracy": np.mean,
         "log_probs/chosen": np.mean,
         "log_probs/rejected": np.mean,
+        "odds_ratio": np.mean,
     }
 
   @override
@@ -216,11 +205,11 @@ class DPOTrainer(peft_trainer.PeftTrainer):
             "Tokenizer must be provided if training input is not tokenized."
         )
 
-      max_prompt_length = self.dpo_config.max_prompt_length
-      max_response_length = self.dpo_config.max_response_length
+      max_prompt_length = self.orpo_config.max_prompt_length
+      max_response_length = self.orpo_config.max_response_length
       if (
-          self.dpo_config.max_prompt_length is None
-          or self.dpo_config.max_response_length is None
+          self.orpo_config.max_prompt_length is None
+          or self.orpo_config.max_response_length is None
       ):
         raise ValueError(
             "max_prompt_length and max_response_length must be provided if "
@@ -229,15 +218,15 @@ class DPOTrainer(peft_trainer.PeftTrainer):
             f"max_response_length={max_response_length}."
         )
 
-      training_input = process_dpo_record(
+      training_input = process_orpo_record(
           record={
               "prompts": training_input.prompts,
               "chosen_responses": training_input.chosen_responses,
               "rejected_responses": training_input.rejected_responses,
           },
           tokenizer=self.tokenizer,
-          max_prompt_length=self.dpo_config.max_prompt_length,
-          max_response_length=self.dpo_config.max_response_length,
+          max_prompt_length=self.orpo_config.max_prompt_length,
+          max_response_length=self.orpo_config.max_response_length,
       )
 
     # Concatenate chosen and rejected IDs so we can do a forward pass together.
@@ -261,24 +250,10 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     logits_to_keep = completion_ids.shape[1]
     positions = common.build_positions_from_mask(mask)
 
-    # Compute the log probabilities for the chosen and rejected tokens.
-    ref_chosen_logps = None
-    ref_rejected_logps = None
-    if self._ref_model_exists:
-      ref_chosen_logps, ref_rejected_logps = compute_logps(
-          self.ref_model,
-          input_ids,
-          positions,
-          attention_mask,
-          logits_to_keep,
-          completion_mask,
-      )
     return TrainExample(
         input_ids=input_ids,
         positions=positions,
         attention_mask=attention_mask,
-        ref_chosen_logps=ref_chosen_logps,
-        ref_rejected_logps=ref_rejected_logps,
         completion_mask=completion_mask,
         logits_to_keep=logits_to_keep,
     )
@@ -312,13 +287,27 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         )
 
 
-def dpo_loss_fn(
+def orpo_loss_fn(
     model: nnx.Module,
     train_example: TrainExample,
-    beta: float,
+    lambda_orpo: float,
     label_smoothing: float,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-  """DPO loss function."""
+  """ORPO loss function.
+
+  ORPO combines SFT loss with preference learning via odds ratios.
+  The loss is: SFT_loss - lambda_orpo * log(odds_ratio)
+  where odds_ratio = P(chosen) / P(rejected)
+
+  Args:
+    model: The model to compute loss for.
+    train_example: Training example containing input_ids, masks, etc.
+    lambda_orpo: Weight for the preference loss term.
+    label_smoothing: Label smoothing factor.
+
+  Returns:
+    A tuple of (loss, auxiliary_metrics_dict).
+  """
   chosen_logps, rejected_logps = compute_logps(
       model,
       train_example.input_ids,
@@ -328,22 +317,26 @@ def dpo_loss_fn(
       train_example.completion_mask,
   )
 
-  # Compute DPO loss.
-  chosen_log_ratio = chosen_logps
-  if train_example.ref_chosen_logps is not None:
-    chosen_log_ratio = chosen_log_ratio - train_example.ref_chosen_logps
-  rejected_log_ratio = rejected_logps
-  if train_example.ref_rejected_logps is not None:
-    rejected_log_ratio = rejected_log_ratio - train_example.ref_rejected_logps
-  delta = chosen_log_ratio - rejected_log_ratio
+  # Compute ORPO loss using log probabilities directly (no reference model)
+  # ORPO uses the odds ratio: exp(log_chosen - log_rejected)
+  # The preference loss is: -log(sigmoid(log_odds))
+  log_odds = chosen_logps - rejected_logps
+
+  # Apply label smoothing similar to DPO
   losses = -(
-      jax.nn.log_sigmoid(beta * delta) * (1 - label_smoothing)
-      + jax.nn.log_sigmoid(-beta * delta) * label_smoothing
+      jax.nn.log_sigmoid(log_odds) * (1 - label_smoothing)
+      + jax.nn.log_sigmoid(-log_odds) * label_smoothing
   )
 
-  # Compute rewards.
-  chosen_rewards = beta * chosen_log_ratio
-  rejected_rewards = beta * rejected_log_ratio
+  # Scale preference loss by lambda_orpo
+  preference_loss = lambda_orpo * losses
+
+  # Compute rewards for logging (scaled by lambda_orpo for interpretability)
+  chosen_rewards = lambda_orpo * chosen_logps
+  rejected_rewards = lambda_orpo * rejected_logps
+
+  # Compute odds ratio for logging
+  odds_ratio = jnp.exp(log_odds)
 
   aux = {
       "rewards/chosen": chosen_rewards.mean(),
@@ -352,9 +345,10 @@ def dpo_loss_fn(
       "rewards/accuracy": (chosen_rewards > rejected_rewards).mean(),
       "log_probs/chosen": chosen_logps.mean(),
       "log_probs/rejected": rejected_logps.mean(),
+      "odds_ratio": odds_ratio.mean(),
   }
 
-  return losses.mean(), aux
+  return preference_loss.mean(), aux
 
 
 def _generate_ids_and_masks(
@@ -413,18 +407,18 @@ def _preprocess_dict(
   else:
     raise ValueError(
         "Training input must contain either tokenized fields "
-        f"({training_input_fields}) or raw string fields "
+        f"({tokenized_input_fields}) or raw string fields "
         f"({training_input_fields}). Received: {training_input.keys()}."
     )
 
 
-def process_dpo_record(
+def process_orpo_record(
     record: dict[str, str | list[str]],
     tokenizer: Any,
     max_prompt_length: int,
     max_response_length: int,
 ) -> TrainingInput:
-  """Processes and tokenizes a single record for DPO training.
+  """Processes and tokenizes a single record for ORPO training.
 
   This function takes a dictionary containing a prompt, a chosen response,
   and a rejected response. It tokenizes each text field and creates the
@@ -492,5 +486,5 @@ def process_dpo_record(
   )
 
 
-DpoTrainingConfig = DPOTrainingConfig
-DpoTrainer = DPOTrainer
+OrpoTrainingConfig = ORPOTrainingConfig
+OrpoTrainer = ORPOTrainer

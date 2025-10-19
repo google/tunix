@@ -55,7 +55,6 @@ from tunix.cli.utils import model
         model_name="qwen3-14b",
     ),
 )
-
 class ModelTest(parameterized.TestCase):
 
   def test_obtain_model_params_valid(self, model_name: str):
