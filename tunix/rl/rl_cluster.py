@@ -182,6 +182,7 @@ class ClusterConfig:
   )
   rollout_mapping_config: mappings.MappingConfig | None = None
 
+  rollout_vllm_server_mode: bool = False
   rollout_vllm_model_version: str = ""
   rollout_vllm_lora_config: dict[str, Any] | None = None
   rollout_vllm_hbm_utilization: float = 0.2
@@ -415,6 +416,7 @@ class RLCluster:
           lora_config=self.cluster_config.rollout_vllm_lora_config,
           rollout_engine=backend,
           mapping_config=self.cluster_config.rollout_mapping_config,
+          server_mode=self.cluster_config.rollout_vllm_server_mode,
       )
     else:
       raise NotImplementedError(

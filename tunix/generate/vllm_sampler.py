@@ -15,9 +15,10 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import dataclasses
+from itertools import count
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from absl import logging
 import jax
@@ -29,8 +30,12 @@ from tunix.generate.mappings import MappingConfig
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
 from vllm import LLM
+from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import SamplingParams
+from vllm_async_driver import VLLMInProcessDriver
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -56,6 +61,7 @@ class VllmConfig:
   # transferring data between CPU and TPU/GPU memory.
   swap_space: float = 4.0  # in GiB
   lora_config: Optional[Dict[str, Any]] = None
+  server_mode: bool = False
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -89,8 +95,16 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.config = config
     self.args = self._vllm_config(config)
-    self.llm = LLM(**self.args)
+    self._driver: VLLMInProcessDriver | None = None
+    self.llm: LLM | None = None
+    self._request_counter = count()
+
+    if config.server_mode:
+      self._driver = self._create_driver()
+    else:
+      self.llm = LLM(**self.args)
 
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
@@ -136,6 +150,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["additional_config"] = {}
     args["model"] = config.model_version
     args["max_model_len"] = config.max_model_len
+    args["tensor_parallel_size"] = self._find_tp_size(config.mesh)
     args["gpu_memory_utilization"] = config.hbm_utilization
     args["swap_space"] = config.swap_space
     if config.lora_config is not None:
@@ -144,14 +159,33 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
             "device_indexes": device_indexes,
-            "tensor_parallelism": self._find_tp_size(config.mesh),
         }
     }
     return args
 
+  def _build_engine_args(self) -> EngineArgs:
+    engine_kwargs = dict(self.args)
+    engine_kwargs.setdefault("disable_log_stats", True)
+    return EngineArgs(**engine_kwargs)
+
+  def _create_driver(self) -> VLLMInProcessDriver:
+    engine_args = self._build_engine_args()
+    return VLLMInProcessDriver.from_engine_args(
+        engine_args,
+    )
+
+  def stop(self):
+    if self._driver is not None:
+      self._driver.shutdown()
+      self._driver = None
+
   @property
   def _model_runner(self):
-    return self.llm.llm_engine.model_executor.driver_worker.model_runner
+    if self.llm is not None:
+      return self.llm.llm_engine.model_executor.driver_worker.model_runner
+    if self._driver is not None:
+      return self._driver.llm_engine.model_executor.driver_worker.model_runner
+    raise RuntimeError("vLLM engine is not initialized.")
 
   @property
   def transformer(self):
@@ -212,6 +246,38 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         )
     return decoded_outputs, out_logprobs, out_tokens
 
+  def _generate_server_mode(
+      self,
+      prompts: List[TokensPrompt],
+      sampling_params: Union[SamplingParams, BeamSearchParams],
+  ) -> List[RequestOutput]:
+    """Generate the response in server mode."""
+    if self._driver is None:
+      raise RuntimeError("vLLM in-process driver is not initialized.")
+
+    futures = []
+    for idx, prompt in enumerate(prompts):
+      request_id = str(next(self._request_counter))
+      params = sampling_params
+      if idx > 0 and hasattr(sampling_params, "clone"):
+        params = sampling_params.clone()
+      future = self._driver.submit_request(
+          request_id=request_id,
+          prompt=prompt,
+          params=params,
+      )
+      futures.append(future)
+
+    outputs: List[RequestOutput] = []
+    for future in futures:
+      result = future.result()
+      if not isinstance(result, RequestOutput):
+        raise TypeError(
+            f"Expected RequestOutput from driver, received {type(result)}."
+        )
+      outputs.append(result)
+    return outputs
+
   def __call__(
       self,
       input_strings: List[str],
@@ -227,6 +293,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       echo: bool = False,
       pad_output: bool = False,
   ) -> base_sampler.SamplerOutput:
+    """The entry point API for vLLM Sampler"""
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
       raise ValueError(
@@ -236,34 +303,49 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           f"{self.args['max_model_len']}."
       )
     if beam_size is not None:
-      self.sampling_params = self.llm.sampling_params.BeamSearchParams(
+      self.sampling_params = BeamSearchParams(
           beam_width=beam_size,
           max_tokens=max_generation_steps,
           ignore_eos=False,
           temperature=temperature,
       )
     else:
-      self.sampling_params = self.llm.get_default_sampling_params()
-      self.sampling_params.detokenize = False
-      self.sampling_params.max_tokens = max_generation_steps
-      self.sampling_params.n = multi_sampling
-      self.sampling_params.temperature = temperature
-      self.sampling_params.logprobs = 1  # b/428730696
-      self.sampling_params.prompt_logprobs = 1  # b/428730696
-      self.sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
-      self.sampling_params.skip_special_tokens = True
+      if self._driver is not None:
+        diff_params = (
+            self._driver.llm_engine.model_config.get_diff_sampling_param()
+        )
+        if diff_params:
+          sampling_params = SamplingParams.from_optional(**diff_params)
+        else:
+          sampling_params = SamplingParams()
+      else:
+        sampling_params = self.llm.get_default_sampling_params()
+      sampling_params.detokenize = False
+      sampling_params.max_tokens = max_generation_steps
+      sampling_params.n = multi_sampling
+      sampling_params.temperature = temperature
+      sampling_params.logprobs = 1  # b/428730696
+      sampling_params.prompt_logprobs = 1  # b/428730696
+      sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
+      sampling_params.skip_special_tokens = True
 
       if top_p is not None:
-        self.sampling_params.top_p = top_p
+        sampling_params.top_p = top_p
       if top_k is not None:
-        self.sampling_params.top_k = top_k
+        sampling_params.top_k = top_k
+
+      self.sampling_params = sampling_params
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    outputs = self.llm.generate(
-        prompts=[TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
-        sampling_params=self.sampling_params,
-        use_tqdm=True,
-    )
+    prompt_objects = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids]
+    if self._driver is not None:
+      outputs = self._generate_server_mode(prompt_objects, self.sampling_params)
+    else:
+      outputs = self.llm.generate(
+          prompts=prompt_objects,
+          sampling_params=self.sampling_params,
+          use_tqdm=True,
+      )
     decoded_outputs, out_logprobs, out_tokens = self.detokenize(
         input_strings, outputs
     )

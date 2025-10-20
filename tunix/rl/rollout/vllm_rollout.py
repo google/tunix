@@ -38,6 +38,7 @@ class VllmRollout(base_rollout.BaseRollout):
       init_with_random_weights: bool,
       tpu_backend_type: str,
       swap_space: float = 4.0,  # in GiB
+      server_mode: bool = False,
       lora_config: Optional[Dict[str, str]] = None,
       mapping_config: Optional[mappings.MappingConfig] = None,
       rollout_engine: str = "vllm_jax",
@@ -58,6 +59,7 @@ class VllmRollout(base_rollout.BaseRollout):
             mapping_config=mapping_config,
             lora_config=lora_config,
             swap_space=swap_space,
+            server_mode=server_mode,
         ),
     )
     state = nnx.state(model)

@@ -24,18 +24,15 @@ python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 """
 
 import argparse
-import gc
 import json
 import os
 import pprint
 import re
-import shutil
 
 from absl import logging
 from flax import nnx
 import grain
 import jax
-from jax import numpy as jnp
 import optax
 from orbax import checkpoint as ocp
 import qwix
@@ -104,6 +101,13 @@ parser.add_argument(
     choices=["vanilla", "vllm"],
     required=False,
     help="Rollout engine to use (vanilla or vllm).",
+)
+parser.add_argument(
+    "--rollout-server-mode",
+    type=bool,
+    default=False,
+    required=False,
+    help="Rollout engine server model.",
 )
 
 # Parse arguments
@@ -796,6 +800,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     rollout_vllm_model_version=VLLM_MODEL_VERSION,
     rollout_vllm_hbm_utilization=0.2,
     rollout_vllm_tpu_backend_type="jax",
+    rollout_vllm_server_mode=args.rollout_server_mode,
 )
 
 grpo_config = grpo_learner.GRPOConfig(

@@ -12,22 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import os
 import re
+import socket
 import tempfile
+import threading
+import time
+from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import jax
 import numpy as np
 import qwix
 import transformers
+from tunix.generate import mappings
 from tunix.generate import sampler as vanilla_sampler
 from tunix.generate import vllm_sampler
-from tunix.generate import mappings
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
-from tunix.tests import test_common as tc
 from tunix.sft import utils as base_utils
+from tunix.tests import test_common as tc
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import SamplingParams
 
 # vLLM Jax backend suggest to use old model desing for now.
 # os.environ["NEW_MODEL_DESIGN"]="True"
@@ -39,10 +46,6 @@ class VllmSamplerTest(absltest.TestCase):
   @classmethod
   def setUpClass(cls) -> None:
     super().setUpClass()
-    mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
-    axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
-
     cls.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
     temp_dir = tempfile.gettempdir()
     cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
@@ -51,6 +54,10 @@ class VllmSamplerTest(absltest.TestCase):
 
     # TODO(b/432096319): Enable after LoRA support in vLLM
     cls.enable_lora = False
+
+    mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
+    axis_names = ("fsdp", "tp")
+    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
 
   def load_llama3_model(self, model_version: str, enable_lora: bool = False):
     model_config = {
@@ -77,9 +84,22 @@ class VllmSamplerTest(absltest.TestCase):
     # nnx.display(llama3)
     return llama3, model_config
 
-  def test_vllm_sampler(self):
+  # Parametized test always fails on vLLM HBM usage exceeding limit, no matter how much HBM we allocated to it, and no matter how we clear the Jax cache (delete all the live arrays, gc collect, clear cache, clear test cache). vLLM will allocate all the assigned HBM to weights + KV cache. The conclusion is parametized test doesn't reset Jax properly, therefore the 2nd test adds on top of the previous HBM usage. This is the workaround for that.
+  def test_vllm_sampler_batch_mode(self):
+    self._run_vllm_sampler(server_mode=False)
+
+  def test_vllm_sampler_server_mode(self):
+    self._run_vllm_sampler(server_mode=True)
+
+  def _run_vllm_sampler(self, server_mode):
     tunix_model, model_config = self.load_llama3_model(
         self.repo_id, enable_lora=self.enable_lora
+    )
+
+    base_utils.show_hbm_usage("After loading tunix model")
+
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path
     )
 
     args = {}
@@ -95,8 +115,7 @@ class VllmSamplerTest(absltest.TestCase):
           # "bias": "none",
       }
 
-    base_utils.show_hbm_usage("After loading tunix model")
-
+    # Sampler setup
     model_tokenizer = transformers.AutoTokenizer.from_pretrained(
         self.model_path
     )
@@ -144,6 +163,7 @@ class VllmSamplerTest(absltest.TestCase):
         tpu_backend_type="jax",
         mapping_config=mapping_config,
         lora_config=args["additional_config"]["lora_config"],
+        server_mode=server_mode,
     )
 
     vl_sampler = vllm_sampler.VllmSampler(
@@ -200,6 +220,92 @@ class VllmSamplerTest(absltest.TestCase):
               vllm_state["model"]["embed"]["embedding"].value,
           )
       )
+    if vllm_config.server_mode:
+      vl_sampler.stop()
+
+  def test_server_mode_e2e_real_model_out_of_order(self):
+    tunix_model, _ = self.load_llama3_model(
+        self.repo_id, enable_lora=self.enable_lora
+    )
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_path)
+
+    prompts = [
+        "Please summarize the following text concisely:\n"
+        + " ".join(["alpha"] * length)
+        for length in [320, 80, 400, 40, 360, 20, 300, 120, 340, 60]
+    ]
+
+    mapping_config = mappings.MappingConfig.build(tunix_model)
+    vllm_config = vllm_sampler.VllmConfig(
+        model_version=self.model_path,
+        max_model_len=512,
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type=None,
+        mapping_config=mapping_config,
+        server_mode=True,
+    )
+
+    vl_sampler = vllm_sampler.VllmSampler(
+        tokenizer=tokenizer,
+        config=vllm_config,
+    )
+    self.addCleanup(vl_sampler.stop)
+
+    state = nnx.state(tunix_model)
+    vl_sampler.load_checkpoint(state)
+
+    driver = vl_sampler._driver
+    self.assertIsNotNone(driver)
+
+    base_params = SamplingParams()
+    base_params.detokenize = True
+    base_params.max_tokens = 64
+    base_params.n = 1
+    base_params.temperature = 0.0
+    base_params.top_k = 1
+    base_params.stop_token_ids = [tokenizer.eos_token_id]
+    base_params.skip_special_tokens = True
+
+    submitted_order = [str(i) for i in range(len(prompts))]
+    futures = []
+    for idx, prompt in enumerate(prompts):
+      token_ids = vl_sampler.tokenize(prompt)
+      prompt_obj = TokensPrompt(prompt_token_ids=token_ids)
+      params = base_params.clone()
+      future = driver.submit_request(
+          request_id=str(idx),
+          prompt=prompt_obj,
+          params=params,
+      )
+      futures.append(future)
+
+    completion_order = []
+    results_by_request: dict[str, object] = {}
+    for future in concurrent.futures.as_completed(futures, timeout=600):
+      output = future.result()
+      completion_order.append(output.request_id)
+      results_by_request[output.request_id] = output
+
+    self.assertCountEqual(completion_order, submitted_order)
+    self.assertNotEqual(
+        completion_order,
+        submitted_order,
+        msg=(
+            "Completions arrived strictly in submission order; "
+            "continuous batching did not reorder responses."
+        ),
+    )
+
+    for request_id in submitted_order:
+      output = results_by_request[request_id]
+      self.assertTrue(output.finished)
+      self.assertGreater(len(output.outputs), 0)
+
+    if vllm_config.server_mode:
+      vl_sampler.stop()
 
 
 if __name__ == "__main__":

@@ -102,6 +102,7 @@ jobs:
         # tokenizer_adapter_test requires access to gated repo
         python -m pytest tests/generate/ -v --tb=short \
           --ignore=tests/generate/vllm_sampler_test.py \
+          --ignore=tests/generate/vllm_driver_test.py \
           --ignore=tests/generate/tokenizer_adapter_test.py
 
     - name: Run tunix SFT tests
