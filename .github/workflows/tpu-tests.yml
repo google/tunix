@@ -198,6 +198,7 @@ jobs:
         run: |
           echo "Current directory:"
           pwd
+          ls
           pip install --upgrade pip setuptools wheel
 
           # Install Tunix
@@ -215,6 +216,7 @@ jobs:
         run: |
           pytest tests/generate/vllm_driver_test.py -v --tb=short
           pytest tests/generate/vllm_sampler_test.py --collect-only -q > test_collections.txt
+          cat test_collections.txt
           while read -r test; do
             pytest "$test" -v --tb=short
           done < test_collections.txt
