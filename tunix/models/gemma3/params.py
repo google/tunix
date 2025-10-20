@@ -60,7 +60,7 @@ def create_model_from_checkpoint(
       lambda: model_lib.Gemma3(model_config, rngs=nnx.Rngs(0))
   )
   params = ocp.StandardCheckpointer().restore(checkpoint_path)
-  params = _map_from_upstream_checkpoint(params)
+  params = map_from_upstream_checkpoint(params)
   if mesh is not None:
     params = jax.tree.map(
         lambda x, shd: jnp.asarray(x, device=shd, dtype=dtype),
@@ -89,7 +89,7 @@ def create_tokenizer(
   return spm_processor
 
 
-def _map_from_upstream_checkpoint(params):
+def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
   """Map from upstream checkpoint to our implementation."""
   # From:
   #
@@ -142,6 +142,8 @@ def _map_from_upstream_checkpoint(params):
       new_params[(*layer_idx, 'mlp', 'up_proj', 'kernel')] = value[1].T
     elif module_path[1:] == ['mlp', 'linear']:
       new_params[(*layer_idx, 'mlp', 'down_proj', 'kernel')] = value
+    elif module_path[1:] == ['post_attention_norm'] and model_type != 'gemma3':
+      new_params[(*layer_idx, 'post_attn_norm', 'scale')] = value
     else:
       new_params[(*layer_idx, *module_path[1:], param_name)] = value
   return flax.traverse_util.unflatten_dict(new_params)
