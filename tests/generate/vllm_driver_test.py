@@ -17,7 +17,7 @@ import time
 from typing import Iterable
 
 from absl.testing import absltest
-from tunix.generate.vllm_driver import VLLMInProcessDriver
+from tunix.generate.vllm_async_driver import VLLMInProcessDriver
 
 
 # TODO(b/453660461): Add extensive concurrency tests.
