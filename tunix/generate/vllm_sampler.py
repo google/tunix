@@ -25,9 +25,10 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 from tunix.generate import base_sampler
+from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils
 from tunix.generate.mappings import MappingConfig
-import tunix.generate.tokenizer_adapter as tok_adapter
+from tunix.generate.vllm_async_driver import VLLMInProcessDriver
 from tunix.rl import reshard
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
@@ -35,7 +36,6 @@ from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sampling_params import SamplingParams
-from vllm_async_driver import VLLMInProcessDriver
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
