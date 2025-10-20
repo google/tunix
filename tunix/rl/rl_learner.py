@@ -32,6 +32,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
+from tunix.perf import trace as perf_trace
 
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 
@@ -117,6 +118,9 @@ class RLLearner(abc.ABC):
     )
     self._compute_logps_micro_batch_size = (
         self._training_config.compute_logps_micro_batch_size
+    )
+    self._perf_collector = perf_trace.PerfCollector(
+        self._training_config.performance_metrics_config
     )
     sft_utils.show_hbm_usage(title="RLLearner init")
 
@@ -618,53 +622,91 @@ class RLLearner(abc.ABC):
               "trainer", step_num=initial_steps
           ):
             while True:
-              with sft_utils.time_measure(suppress_logging=True) as timer:
-                curr_train_ds = train_data_queue.get(block=True)
+              perf_session = self._perf_collector.start_session(
+                  "learner_iteration",
+                  context_id={
+                      "global_step": self.rl_cluster.global_steps,
+                      "iter_step": self.rl_cluster.actor_trainer.iter_steps,
+                  },
+                  sequence_id=self.rl_cluster.actor_trainer.iter_steps,
+                  attributes={
+                      "mode": "train",
+                      "async_rollout": self.can_enable_async_rollout,
+                  },
+              )
+              session_recorded = False
+              should_break = False
+              try:
+                with perf_session.blocked_span("train_queue_wait"):
+                  with sft_utils.time_measure(suppress_logging=True) as timer:
+                    curr_train_ds = train_data_queue.get(block=True)
+                wait_time = timer()
+                if curr_train_ds is None:
+                  should_break = True
+                  continue
 
-              if curr_train_ds is None:
-                break
+                if self.can_enable_async_rollout:
+                  self.rl_cluster.buffer_metrics(
+                      {
+                          "actor_dequeue_time": (
+                              wait_time,
+                              np.mean,
+                          ),
+                      },
+                      mode=rl_cluster_lib.Mode.TRAIN,
+                  )
 
-              if self.can_enable_async_rollout:
-                self.rl_cluster.buffer_metrics(
-                    {
-                        "actor_dequeue_time": (
-                            timer(),
-                            np.mean,
-                        ),
-                    },
-                    mode=rl_cluster_lib.Mode.TRAIN,
-                )
-
-              if (
-                  eval_ds
-                  and not curr_eval_ds
-                  and self.rl_cluster.actor_trainer.train_steps
-                  % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
-                  == 0
-              ):
-                self._eval_iter_steps = 0
-                self._prepare_data(
-                    iterator=iter(eval_ds),
-                    proceed_num_steps=-1,
-                    sample_repeat=self._num_generations(),
-                    batch_repeat=1,
-                    service_target_batch_size=service_target_batch_size,
-                    data_queue=eval_data_queue,
-                    async_loading=False,
-                    mode=rl_cluster_lib.Mode.EVAL,
-                )
-                curr_eval_ds = eval_data_queue.get(block=True)
-              self.rl_cluster.update_actor(
-                  curr_train_ds,
-                  curr_eval_ds,
-                  skip_jit,
-              )  # loop over μ
-              if hasattr(self.rl_cluster, "critic_trainer"):
-                self.rl_cluster.update_critic(
-                    curr_train_ds,
-                    curr_eval_ds,
-                    skip_jit,
-                )  # loop over μ
+                if (
+                    eval_ds
+                    and not curr_eval_ds
+                    and self.rl_cluster.actor_trainer.train_steps
+                    % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
+                    == 0
+                ):
+                  self._eval_iter_steps = 0
+                  with perf_session.busy_span("prepare_eval_data"):
+                    self._prepare_data(
+                        iterator=iter(eval_ds),
+                        proceed_num_steps=-1,
+                        sample_repeat=self._num_generations(),
+                        batch_repeat=1,
+                        service_target_batch_size=service_target_batch_size,
+                        data_queue=eval_data_queue,
+                        async_loading=False,
+                        mode=rl_cluster_lib.Mode.EVAL,
+                    )
+                  with perf_session.blocked_span("eval_queue_wait"):
+                    curr_eval_ds = eval_data_queue.get(block=True)
+                with perf_session.busy_span("actor_update"):
+                  self.rl_cluster.update_actor(
+                      curr_train_ds,
+                      curr_eval_ds,
+                      skip_jit,
+                  )  # loop over μ
+                if hasattr(self.rl_cluster, "critic_trainer"):
+                  with perf_session.busy_span("critic_update"):
+                    self.rl_cluster.update_critic(
+                        curr_train_ds,
+                        curr_eval_ds,
+                        skip_jit,
+                    )  # loop over μ
+                session_recorded = True
+              finally:
+                if session_recorded and perf_session.enabled:
+                  perf_metrics = perf_session.metric_entries(
+                      prefix="perf/rl/learner"
+                  )
+                  if perf_metrics:
+                    metrics_to_buffer = {
+                        metric_name: (value, np.mean)
+                        for metric_name, value in perf_metrics.items()
+                    }
+                    self.rl_cluster.buffer_metrics(
+                        metrics_to_buffer, mode=rl_cluster_lib.Mode.TRAIN
+                    )
+                perf_session.finish()
+                if should_break:
+                  break
 
           # call to throw stop iteration as a singal to break the loop
           future.result()
@@ -690,3 +732,4 @@ class RLLearner(abc.ABC):
       except StopIteration:
         break
     self.rl_cluster.close()
+    self._perf_collector.close()

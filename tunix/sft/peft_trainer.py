@@ -40,6 +40,7 @@ from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import system_metrics_calculator
 from tunix.sft import utils
+from tunix.perf import trace as perf_trace
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
@@ -76,6 +77,9 @@ class TrainingConfig:
 
   # Progress bar description.
   pbar_description: str | None = "Training"
+
+  # Performance metrics instrumentation config.
+  performance_metrics_config: perf_trace.PerformanceMetricsConfig | None = None
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -207,6 +211,9 @@ class PeftTrainer:
         metric_prefix=self.config.metric_prefix,
     )
     self.is_managed_externally = False
+    self._perf_collector = perf_trace.PerfCollector(
+        self.config.performance_metrics_config
+    )
 
     self._train_steps = 0  # represent # of times model has been updated
     self._iter_steps = 0  # represent # of times trainer has looped
@@ -585,98 +592,128 @@ class PeftTrainer:
     last_step_completion_time = time.perf_counter()
     with utils.time_measure("Train loop"):
       while True:
-        self._prof.maybe_activate(self._iter_steps)
-        with jax.profiler.StepTraceAnnotation(
-            "train", step_num=self._iter_steps
-        ):
-          train_example = None
-          if self.data_hooks:
-            train_example = self.data_hooks.load_next_train_batch(self)
-          else:
-            try:
-              train_example = next(train_iterator)
-              if not self.is_managed_externally:
-                # TODO(mridulsahu): Add support to restore the iterator state
-                # instead of skipping the already trained examples.
-                if index < self._iter_steps:
-                  # Skip the examples that are already trained.
+        perf_session = self._perf_collector.start_session(
+            "train_step",
+            context_id={
+                "train_step": self._train_steps,
+                "iter_step": self._iter_steps,
+            },
+            sequence_id=self._iter_steps,
+            attributes={"mode": "train"},
+        )
+        session_recorded = False
+        try:
+          self._prof.maybe_activate(self._iter_steps)
+          with jax.profiler.StepTraceAnnotation(
+              "train", step_num=self._iter_steps
+          ):
+            train_example = None
+            with perf_session.blocked_span("train_data_load"):
+              if self.data_hooks:
+                train_example = self.data_hooks.load_next_train_batch(self)
+              else:
+                try:
+                  train_example = next(train_iterator)
+                  if not self.is_managed_externally:
+                    # TODO(mridulsahu): Add support to restore the iterator state
+                    # instead of skipping the already trained examples.
+                    if index < self._iter_steps:
+                      # Skip the examples that are already trained.
+                      index += 1
+                      continue
                   index += 1
-                  continue
-              index += 1
-            except StopIteration:
-              pass
+                except StopIteration:
+                  pass
 
-          if train_example is None:
-            break
+            if train_example is None:
+              break
 
-          # Stop training if max_steps is reached.
-          if (
-              self.config.max_steps is not None
-              and self._train_steps >= self.config.max_steps
-          ):
-            break
+            # Stop training if max_steps is reached.
+            if (
+                self.config.max_steps is not None
+                and self._train_steps >= self.config.max_steps
+            ):
+              break
 
-          train_example = self._prepare_inputs(train_example)
-          train_example = self._shard_input(train_example)
+            with perf_session.busy_span("prepare_inputs"):
+              train_example = self._prepare_inputs(train_example)
+            with perf_session.busy_span("shard_input"):
+              train_example = self._shard_input(train_example)
 
-          if not self._flops_measured and not skip_jit:
-            self._flops_measured = True
+            if not self._flops_measured and not skip_jit:
+              self._flops_measured = True
+              with perf_session.busy_span("measure_tflops"):
+                tflops_per_step = (
+                    system_metrics_calculator.measure_tflops_per_step(
+                        train_step_fn=train_step,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        train_example=train_example,
+                    )
+                )
+              if tflops_per_step is not None:
+                self.metrics_logger.log(
+                    "tflops_per_step", tflops_per_step, self._mode, 0
+                )
 
-            tflops_per_step = system_metrics_calculator.measure_tflops_per_step(
-                train_step_fn=train_step,
-                model=self.model,
-                optimizer=self.optimizer,
-                train_example=train_example,
-            )
-            if tflops_per_step is not None:
-              self.metrics_logger.log(
-                  "tflops_per_step", tflops_per_step, self._mode, 0
+            with perf_session.blocked_span("throttle_wait"):
+              self._throttler.wait_for_next()
+            if self.training_hooks:
+              with perf_session.busy_span("hooks/on_train_step_start"):
+                self.training_hooks.on_train_step_start(self)
+            with perf_session.busy_span("train_step_compute"):
+              train_loss, aux = train_step(
+                  self.model, self.optimizer, train_example
               )
+            session_recorded = True
 
-          self._throttler.wait_for_next()
-          if self.training_hooks:
-            self.training_hooks.on_train_step_start(self)
-          train_loss, aux = train_step(
-              self.model, self.optimizer, train_example
-          )
+            current_time = time.perf_counter()
+            step_time_delta = current_time - last_step_completion_time
+            last_step_completion_time = current_time
 
-          current_time = time.perf_counter()
-          step_time_delta = current_time - last_step_completion_time
-          last_step_completion_time = current_time
-
-          self._throttler.add_computation(train_loss)
-          self._buffered_train_metrics = self._buffer_metrics(
-              self._buffered_train_metrics,
-              loss=train_loss,
-              step=self._train_steps,
-              step_time_delta=step_time_delta,
-          )
-          # NB: put this after self._buffer_metrics is important
-          self._post_process_train_step(aux)
-          self._iter_steps += 1
-
-          if (
-              self._iter_steps
-              % self.config.get_with_default("gradient_accumulation_steps", 1)
-              == 0
-          ):
-            self._train_steps += 1
-            self._write_train_metrics()
-
-            # Checkpoint frequency is configured by checkpointing_options.
-            self.checkpoint_manager.save(
-                self._train_steps,
-                self.model,
-                save_only_lora_params=self._lora_enabled,
-            )
+            self._throttler.add_computation(train_loss)
+            with perf_session.busy_span("buffer_metrics"):
+              self._buffered_train_metrics = self._buffer_metrics(
+                  self._buffered_train_metrics,
+                  loss=train_loss,
+                  step=self._train_steps,
+                  step_time_delta=step_time_delta,
+              )
+            with perf_session.busy_span("post_process_train_step"):
+              self._post_process_train_step(aux)
+            self._iter_steps += 1
 
             if (
-                eval_ds
-                and self._train_steps % self.config.eval_every_n_steps == 0
+                self._iter_steps
+                % self.config.get_with_default("gradient_accumulation_steps", 1)
+                == 0
             ):
-              self._run_eval(eval_ds, eval_step)
+              self._train_steps += 1
+              with perf_session.busy_span("write_train_metrics"):
+                self._write_train_metrics()
 
-        self._prof.maybe_deactivate(self._iter_steps)
+              with perf_session.busy_span("checkpoint_save"):
+                self.checkpoint_manager.save(
+                    self._train_steps,
+                    self.model,
+                    save_only_lora_params=self._lora_enabled,
+                )
+
+              if (
+                  eval_ds
+                  and self._train_steps % self.config.eval_every_n_steps == 0
+              ):
+                with perf_session.busy_span("eval_run"):
+                  self._run_eval(eval_ds, eval_step)
+        finally:
+          if session_recorded and perf_session.enabled:
+            perf_metrics = perf_session.metric_entries(prefix="perf/train")
+            for metric_name, value in perf_metrics.items():
+              self.metrics_logger.log(
+                  metric_name, value, self._mode, self._iter_steps
+              )
+          perf_session.finish()
+          self._prof.maybe_deactivate(self._iter_steps)
 
     self._throttler.wait_for_all()
     if self.training_hooks:
@@ -717,6 +754,7 @@ class PeftTrainer:
     if self._pbar is not None:
       self._pbar.close()
       self._pbar = None
+    self._perf_collector.close()
 
   def _run_eval(
       self,
@@ -725,50 +763,75 @@ class PeftTrainer:
   ) -> None:
     """Runs evaluation loop."""
     logging.info("Running evaluation on train step %d.", self._train_steps)
+    perf_session = self._perf_collector.start_session(
+        "eval_loop",
+        context_id={"train_step": self._train_steps},
+        sequence_id=self._train_steps,
+        attributes={"mode": "eval"},
+    )
     eval_iterator = iter(eval_ds)
-    with self._switch_mode(metrics_logger.Mode.EVAL):
-      eval_loss, eval_steps = 0, 0
-      while True:
-        if self.data_hooks:
-          eval_example = self.data_hooks.load_next_eval_batch(self)
-        else:
-          try:
-            eval_example = next(eval_iterator)
-          except StopIteration:
-            eval_example = None
-        if eval_example is None:
-          break
-        eval_example = self._prepare_inputs(eval_example)
-        eval_example = self._shard_input(eval_example)
+    session_recorded = False
+    try:
+      with self._switch_mode(metrics_logger.Mode.EVAL):
+        eval_loss, eval_steps = 0, 0
+        while True:
+          with perf_session.blocked_span("eval_data_load"):
+            if self.data_hooks:
+              eval_example = self.data_hooks.load_next_eval_batch(self)
+            else:
+              try:
+                eval_example = next(eval_iterator)
+              except StopIteration:
+                eval_example = None
+          if eval_example is None:
+            break
+          with perf_session.busy_span("prepare_inputs"):
+            eval_example = self._prepare_inputs(eval_example)
+          with perf_session.busy_span("shard_input"):
+            eval_example = self._shard_input(eval_example)
+          if self.training_hooks:
+            with perf_session.busy_span("hooks/on_eval_step_start"):
+              self.training_hooks.on_eval_step_start(self)
+          with perf_session.busy_span("eval_step_compute"):
+            loss, aux = eval_step_fn(self.model, eval_example)
+          loss = jax.lax.stop_gradient(loss)
+          with perf_session.busy_span("buffer_metrics"):
+            self._buffered_eval_metrics = self._buffer_metrics(
+                self._buffered_eval_metrics,
+                loss=loss,
+                step=self._train_steps,
+            )
+          with perf_session.busy_span("post_process_eval_step"):
+            self._post_process_eval_step(aux)
+          eval_loss += loss
+          eval_steps += 1
+          session_recorded = True
+
+        if eval_steps == 0:
+          logging.warning(
+              "No eval examples found. Skipping eval metrics logging."
+          )
+          return
+
+        with perf_session.busy_span("write_eval_metrics"):
+          self._write_metrics(self._buffered_eval_metrics)
+        logging.info(
+            "Train step %d eval loss: %f - eval perplexity: %f",
+            self._train_steps,
+            self.metrics_logger.get_metric("loss", "eval"),
+            self.metrics_logger.get_metric("perplexity", "eval"),
+        )
+        self._buffered_eval_metrics = None
         if self.training_hooks:
-          self.training_hooks.on_eval_step_start(self)
-        loss, aux = eval_step_fn(self.model, eval_example)
-        loss = jax.lax.stop_gradient(loss)
-        self._buffered_eval_metrics = self._buffer_metrics(
-            self._buffered_eval_metrics,
-            loss=loss,
-            step=self._train_steps,
-        )
-        self._post_process_eval_step(aux)
-        eval_loss += loss
-        eval_steps += 1
-
-      if eval_steps == 0:
-        logging.warning(
-            "No eval examples found. Skipping eval metrics logging."
-        )
-        return
-
-      self._write_metrics(self._buffered_eval_metrics)
-      logging.info(
-          "Train step %d eval loss: %f - eval perplexity: %f",
-          self._train_steps,
-          self.metrics_logger.get_metric("loss", "eval"),
-          self.metrics_logger.get_metric("perplexity", "eval"),
-      )
-      self._buffered_eval_metrics = None
-      if self.training_hooks:
-        self.training_hooks.on_eval_step_end(self, eval_loss)
+          self.training_hooks.on_eval_step_end(self, eval_loss)
+    finally:
+      if session_recorded and perf_session.enabled:
+        perf_metrics = perf_session.metric_entries(prefix="perf/eval")
+        for metric_name, value in perf_metrics.items():
+          self.metrics_logger.log(
+              metric_name, value, metrics_logger.Mode.EVAL, self._train_steps
+          )
+      perf_session.finish()
 
 
 def _default_loss_fn(

@@ -46,6 +46,7 @@ from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from tunix.sft import utils as sft_utils
+from tunix.perf import trace as perf_trace
 
 ModelOrPath = nnx.Module | str
 
@@ -256,6 +257,9 @@ class RLCluster:
 
     self._rl_metrics_logger = metrics_logger.MetricsLogger(
         self.cluster_config.training_config.metrics_logging_options
+    )
+    self._perf_collector = perf_trace.PerfCollector(
+        self.cluster_config.training_config.performance_metrics_config
     )
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
@@ -554,6 +558,7 @@ class RLCluster:
     self.actor_trainer.close()
     if getattr(self, "critic_trainer", None):
       self.critic_trainer.close()
+    self._perf_collector.close()
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
@@ -625,16 +630,68 @@ class RLCluster:
         cur_metrics.metrics[metric_name][0].append(value)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.ACTOR]:
-      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      self.actor_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+    perf_session = self._perf_collector.start_session(
+        "actor_update",
+        context_id={
+            "global_step": self.global_steps,
+            "train_step": self.actor_trainer.train_steps,
+        },
+        sequence_id=self.global_steps,
+        attributes={"role": "actor"},
+    )
+    session_recorded = False
+    try:
+      with self.cluster_config.role_to_mesh[Role.ACTOR]:
+        with perf_session.blocked_span("load_model_from_cpu"):
+          self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+        with perf_session.busy_span("train_actor"):
+          self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+        with perf_session.blocked_span("offload_model_to_cpu"):
+          self._maybe_offload_model_to_cpu(
+              self.actor_trainer.model, Role.ACTOR
+          )
+        session_recorded = True
+    finally:
+      if session_recorded and perf_session.enabled:
+        perf_metrics = perf_session.metric_entries(prefix="perf/rl/actor")
+        for metric_name, value in perf_metrics.items():
+          self._rl_metrics_logger.log(
+              metric_name, value, metrics_logger.Mode.TRAIN, self.global_steps
+          )
+      perf_session.finish()
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.CRITIC]:
-      self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      self._critic_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
+    perf_session = self._perf_collector.start_session(
+        "critic_update",
+        context_id={
+            "global_step": self.global_steps,
+            "train_step": self.critic_trainer.train_steps,
+        },
+        sequence_id=self.global_steps,
+        attributes={"role": "critic"},
+    )
+    session_recorded = False
+    try:
+      with self.cluster_config.role_to_mesh[Role.CRITIC]:
+        with perf_session.blocked_span("load_model_from_cpu"):
+          self._maybe_load_model_from_cpu(
+              self.critic_trainer.model, Role.CRITIC
+          )
+        with perf_session.busy_span("train_critic"):
+          self._critic_trainer.train(train_ds, eval_ds, skip_jit)
+        with perf_session.blocked_span("offload_model_to_cpu"):
+          self._maybe_offload_model_to_cpu(
+              self.critic_trainer.model, Role.CRITIC
+          )
+        session_recorded = True
+    finally:
+      if session_recorded and perf_session.enabled:
+        perf_metrics = perf_session.metric_entries(prefix="perf/rl/critic")
+        for metric_name, value in perf_metrics.items():
+          self._rl_metrics_logger.log(
+              metric_name, value, metrics_logger.Mode.TRAIN, self.global_steps
+          )
+      perf_session.finish()
 
   def generate(
       self,
@@ -658,66 +715,101 @@ class RLCluster:
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
     """
-    if apply_chat_template:
-      if self.tokenizer is None:
-        raise ValueError("Tokenizer must be initialized to use chat templates.")
-      string_prompts = [
-          self.tokenizer.apply_chat_template(
-              prompt,  # pytype: disable=wrong-arg-types
-              add_generation_prompt=True,
-              tokenize=False,
-              enable_thinking=False,
-          )
-          for prompt in prompts
-      ]
-    else:
-      string_prompts = prompts  # pytype: disable=annotation-type-mismatch
-
-    if len(string_prompts) == 0:
-      raise ValueError("Cannot generate from an empty list of prompts.")
-    micro_batch_size = micro_batch_size or len(string_prompts)
-
-    with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
-      model = self.rollout.model()
-      self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
-
-      if isinstance(self.cluster_config.rollout_config, dict):
-        rollout_config = self.cluster_config.rollout_config[mode]
-      else:
-        rollout_config = self.cluster_config.rollout_config
-      outputs = [
-          self.rollout.generate(string_prompts[s], rollout_config)
-          for s in rl_utils.chunk_slices_by_size(
-              stop=len(string_prompts), step=micro_batch_size
-          )
-      ]
-      self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
-
-    texts = list(itertools.chain.from_iterable(out.text for out in outputs))
-
-    logprobs = None
-    if outputs[0].logprobs is not None:
-      logprobs = list(
-          itertools.chain.from_iterable(out.logprobs for out in outputs)
-      )
-
-    logits = None
-    if isinstance(outputs[0].logits, jnp.ndarray):
-      logits = jnp.concatenate([out.logits for out in outputs], axis=0)
-
-    return base_rollout.RolloutOutput(
-        text=texts,
-        logits=logits,
-        tokens=jnp.concatenate([out.tokens for out in outputs], axis=0),
-        left_padded_prompt_tokens=jnp.concatenate(
-            [out.left_padded_prompt_tokens for out in outputs], axis=0
-        ),
-        logprobs=logprobs,
+    perf_session = self._perf_collector.start_session(
+        "rollout_generate",
+        context_id={
+            "mode": str(mode),
+            "prompt_count": len(prompts),
+        },
+        sequence_id=self.global_steps if mode == Mode.TRAIN else None,
+        attributes={"role": "rollout"},
     )
+    session_recorded = False
+    try:
+      if apply_chat_template:
+        if self.tokenizer is None:
+          raise ValueError(
+              "Tokenizer must be initialized to use chat templates."
+          )
+        with perf_session.busy_span("apply_chat_template"):
+          string_prompts = [
+              self.tokenizer.apply_chat_template(
+                  prompt,  # pytype: disable=wrong-arg-types
+                  add_generation_prompt=True,
+                  tokenize=False,
+                  enable_thinking=False,
+              )
+              for prompt in prompts
+          ]
+      else:
+        string_prompts = prompts  # pytype: disable=annotation-type-mismatch
+
+      if len(string_prompts) == 0:
+        raise ValueError("Cannot generate from an empty list of prompts.")
+      micro_batch_size = micro_batch_size or len(string_prompts)
+
+      outputs: list[base_rollout.RolloutOutput] = []
+      with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
+        model = self.rollout.model()
+        with perf_session.blocked_span("load_rollout_model"):
+          self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
+        if self.cluster_config.offload_to_cpu:
+          with perf_session.busy_span("sync_rollout_params_from_actor"):
+            self.rollout.update_params(nnx.state(model))
+
+        if isinstance(self.cluster_config.rollout_config, dict):
+          rollout_config = self.cluster_config.rollout_config[mode]
+        else:
+          rollout_config = self.cluster_config.rollout_config
+        with perf_session.busy_span("rollout_generate"):
+          outputs = [
+              self.rollout.generate(string_prompts[s], rollout_config)
+              for s in rl_utils.chunk_slices_by_size(
+                  stop=len(string_prompts), step=micro_batch_size
+              )
+          ]
+        with perf_session.blocked_span("offload_rollout_model"):
+          self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
+        if self.cluster_config.offload_to_cpu:
+          with perf_session.busy_span("sync_actor_params_from_rollout"):
+            self.rollout.update_params(nnx.state(model))
+
+      with perf_session.busy_span("aggregate_rollout_outputs"):
+        texts = list(itertools.chain.from_iterable(out.text for out in outputs))
+        logprobs = None
+        if outputs and outputs[0].logprobs is not None:
+          logprobs = list(
+              itertools.chain.from_iterable(out.logprobs for out in outputs)
+          )
+        logits = None
+        if outputs and isinstance(outputs[0].logits, jnp.ndarray):
+          logits = jnp.concatenate([out.logits for out in outputs], axis=0)
+        tokens = jnp.concatenate([out.tokens for out in outputs], axis=0)
+        left_padded_tokens = jnp.concatenate(
+            [out.left_padded_prompt_tokens for out in outputs], axis=0
+        )
+        result = base_rollout.RolloutOutput(
+            text=texts,
+            logits=logits,
+            tokens=tokens,
+            left_padded_prompt_tokens=left_padded_tokens,
+            logprobs=logprobs,
+        )
+      session_recorded = True
+      return result
+    finally:
+      if session_recorded and perf_session.enabled:
+        perf_metrics = perf_session.metric_entries(prefix="perf/rl/rollout")
+        metrics_mode = (
+            metrics_logger.Mode.TRAIN
+            if mode == Mode.TRAIN
+            else metrics_logger.Mode.EVAL
+        )
+        for metric_name, value in perf_metrics.items():
+          self._rl_metrics_logger.log(
+              metric_name, value, metrics_mode, self.global_steps
+          )
+      perf_session.finish()
 
   def get_ref_per_token_logps(
       self,

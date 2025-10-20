@@ -10,6 +10,7 @@
 code-of-conduct.md
 contributing.md
 gallery.rst
+performance.md
 ```
 
 ```{eval-rst}
