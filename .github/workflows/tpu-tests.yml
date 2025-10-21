@@ -103,7 +103,8 @@ jobs:
         python -m pytest tests/generate/ -v --tb=short \
           --ignore=tests/generate/vllm_sampler_test.py \
           --ignore=tests/generate/vllm_driver_test.py \
-          --ignore=tests/generate/tokenizer_adapter_test.py
+          --ignore=tests/generate/tokenizer_adapter_test.py \
+          --ignore=tests/generate/sglang_jax_sampler_test.py
 
     - name: Run tunix SFT tests
       run: |
@@ -194,7 +195,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Tunix and tpu-inference
+      - name: Setup Tunix , tpu-inference and dependencies
         run: |
           echo "Current directory:"
           pwd
@@ -208,6 +209,8 @@ jobs:
           pip uninstall torch libtpu jax jaxlib -y
           pip install tpu-inference==v0.11.1 --force-reinstall
           pip install pytest pytest-xdist
+          
+          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e .
 
       - name: Run tests
         env:
@@ -218,5 +221,4 @@ jobs:
           while read -r test; do
             pytest "$test" -v --tb=short
           done < test_collections.txt
-
-
+          pytest tests/generate/sglang_jax_sampler_test.py -v --tb=short
