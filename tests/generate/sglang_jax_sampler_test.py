@@ -41,14 +41,16 @@ class SglangJaxSamplerTest(absltest.TestCase):
     axis_names = ("fsdp", "tp")
     cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
 
-    cls.repo_id = "meta-llama/Llama-3.1-8B-Instruct"
+    cls.repo_id = (  ## use smaller models to prevent OOM in v5e
+        "meta-llama/Llama-3.2-3B-Instruct"
+    )
     temp_dir = tempfile.gettempdir()
     cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
     tc.download_from_huggingface(repo_id=cls.repo_id, model_path=cls.model_path)
 
   def load_llama3_model(self, model_version: str):
     model_config = {
-        "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
+        "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
         "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
     }
     assert (
@@ -159,10 +161,8 @@ class SglangJaxSamplerTest(absltest.TestCase):
     _, sglangjax_state = nnx.split(vl_sampler._model_runner.model)
     self.assertTrue(
         np.allclose(
-            tunix_state["lm_head"]["w"].value,
-            jnp.transpose(
-                sglangjax_state["lm_head"]["embedding"].value, (1, 0)
-            ),
+            tunix_state["embedder"]["input_embedding"].value,
+            sglangjax_state["transformer"]["embed_tokens"]["embedding"].value,
         )
     )
 
