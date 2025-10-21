@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import concurrent.futures
+import functools
 import os
 import re
 import socket
@@ -35,6 +37,7 @@ from tunix.sft import utils as base_utils
 from tunix.tests import test_common as tc
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
+import asyncio
 
 # vLLM Jax backend suggest to use old model desing for now.
 # os.environ["NEW_MODEL_DESIGN"]="True"
@@ -223,18 +226,12 @@ class VllmSamplerTest(absltest.TestCase):
     if vllm_config.server_mode:
       vl_sampler.stop()
 
-  def test_server_mode_e2e_real_model_out_of_order(self):
+  def test_vllm_sampler_run_in_executor_concurrency(self):
     tunix_model, _ = self.load_llama3_model(
         self.repo_id, enable_lora=self.enable_lora
     )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_path)
-
-    prompts = [
-        "Please summarize the following text concisely:\n"
-        + " ".join(["alpha"] * length)
-        for length in [320, 80, 400, 40, 360, 20, 300, 120, 340, 60]
-    ]
 
     mapping_config = mappings.MappingConfig.build(tunix_model)
     vllm_config = vllm_sampler.VllmConfig(
@@ -243,7 +240,7 @@ class VllmSamplerTest(absltest.TestCase):
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
-        tpu_backend_type=None,
+        tpu_backend_type="jax",
         mapping_config=mapping_config,
         server_mode=True,
     )
@@ -257,56 +254,105 @@ class VllmSamplerTest(absltest.TestCase):
     state = nnx.state(tunix_model)
     vl_sampler.load_checkpoint(state)
 
-    driver = vl_sampler._driver
-    self.assertIsNotNone(driver)
+    base_prompts = [
+        "Hello, my name is Tom.",
+        "The capital of France is",
+        "why is sky blue?",
+        "Explain the theory of relativity in simple terms.",
+        "List three benefits of regular exercise.",
+        "Write a haiku about winter.",
+        "Summarize the plot of Romeo and Juliet.",
+        "Give me a recipe for pancakes.",
+        "What is the boiling point of water at sea level?",
+        "Share a motivational quote about perseverance.",
+    ]
+    prompts = list(base_prompts)
+    templated_prompts = tc.batch_templatize(prompts, tokenizer)
 
-    base_params = SamplingParams()
-    base_params.detokenize = True
-    base_params.max_tokens = 64
-    base_params.n = 1
-    base_params.temperature = 0.0
-    base_params.top_k = 1
-    base_params.stop_token_ids = [tokenizer.eos_token_id]
-    base_params.skip_special_tokens = True
+    expected_keywords = {
+        base_prompts[0]: ["Tom", "help"],
+        base_prompts[1]: ["Paris"],
+        base_prompts[2]: ["Rayleigh", "scattering"],
+        base_prompts[3]: ["relativity", "einstein"],
+        base_prompts[4]: ["health", "energy"],
+        base_prompts[5]: ["winter"],
+        base_prompts[6]: ["romeo", "juliet"],
+        base_prompts[7]: ["pancake"],
+        base_prompts[8]: ["100", "celsius"],
+        base_prompts[9]: ["seven", "eight"],
+    }
+    prompt_expectations = [
+        (prompt, expected_keywords.get(prompt, [])) for prompt in prompts
+    ]
 
-    submitted_order = [str(i) for i in range(len(prompts))]
-    futures = []
-    for idx, prompt in enumerate(prompts):
-      token_ids = vl_sampler.tokenize(prompt)
-      prompt_obj = TokensPrompt(prompt_token_ids=token_ids)
-      params = base_params.clone()
-      future = driver.submit_request(
-          request_id=str(idx),
-          prompt=prompt_obj,
-          params=params,
+    delays = [0.05 * (len(prompts) - idx) for idx in range(len(prompts))]
+
+    def _call_sampler(templated_prompt: str, delay: float):
+      time.sleep(delay)
+      return vl_sampler(
+          input_strings=[templated_prompt],
+          max_generation_steps=128,
+          max_prompt_length=None,
+          temperature=0.0,
+          top_k=1,
+          seed=0,
+          echo=False,
+          pad_output=True,
       )
-      futures.append(future)
 
-    completion_order = []
-    results_by_request: dict[str, object] = {}
-    for future in concurrent.futures.as_completed(futures, timeout=600):
-      output = future.result()
-      completion_order.append(output.request_id)
-      results_by_request[output.request_id] = output
+    async def __call_sampler_async(index: int, templated_prompt: str, delay: float):
+      loop = asyncio.get_running_loop()
+      result = await loop.run_in_executor(
+          None,
+          _call_sampler,
+          templated_prompt,
+          delay,
+      )
+      return index, result
 
-    self.assertCountEqual(completion_order, submitted_order)
+    async def dispatch_requests():
+      loop = asyncio.get_running_loop()
+      tasks = []
+      for idx, templated_prompt in enumerate(templated_prompts):
+        task = loop.create_task(
+            __call_sampler_async(
+                idx, templated_prompt, delays[idx]
+            )
+        )
+
+        tasks.append(task)
+
+      completion_order = []
+      results_by_idx = {}
+      for task in asyncio.as_completed(tasks):
+        idx, result = await task
+        completion_order.append(idx)
+        results_by_idx[idx] = result
+
+      ordered_results = [results_by_idx[i] for i in range(len(tasks))]
+      return ordered_results, completion_order
+
+    results, completion_order = asyncio.run(dispatch_requests())
+
+    self.assertLen(results, len(prompts))
+
+    for (prompt, expectations), sampler_output in zip(
+        prompt_expectations, results
+    ):
+      tc.validate_llm_outputs(
+          [(prompt, expectations)], sampler_output.text
+      )
+
+    expected_order = list(range(len(prompts)))
+    self.assertCountEqual(completion_order, expected_order)
     self.assertNotEqual(
         completion_order,
-        submitted_order,
+        expected_order,
         msg=(
-            "Completions arrived strictly in submission order; "
-            "continuous batching did not reorder responses."
+            "Responses returned strictly in submission order; "
+            "expected out-of-order completions."
         ),
     )
-
-    for request_id in submitted_order:
-      output = results_by_request[request_id]
-      self.assertTrue(output.finished)
-      self.assertGreater(len(output.outputs), 0)
-
-    if vllm_config.server_mode:
-      vl_sampler.stop()
-
 
 if __name__ == "__main__":
   absltest.main()
