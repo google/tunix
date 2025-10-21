@@ -214,7 +214,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           pytest tests/generate/vllm_driver_test.py -v --tb=short
-          pytest tests/generate/vllm_sampler_test.py --collect-only -q > test_collections.txt
+          pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
           while read -r test; do
             pytest "$test" -v --tb=short
           done < test_collections.txt
