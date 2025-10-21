@@ -639,6 +639,8 @@ class Block(nnx.Module):
 
     if self.use_pre_ffw_norm:
       outputs = self.pre_ffw_norm(attn_output)
+    else:
+      outputs = attn_output
     outputs = self.mlp(outputs)
 
     if self.use_post_ffw_norm:
