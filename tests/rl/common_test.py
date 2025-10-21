@@ -107,7 +107,7 @@ class CommonTest(parameterized.TestCase):
     input_tokens = jax.random.randint(rng, shape=(2, 4), minval=0, maxval=8)
     positions = jnp.ones((2, 4))
     attn_mask = common.make_causal_attn_mask(positions)
-    per_token_logps, _ = common.get_per_token_logps(
+    per_token_logps = common.get_per_token_logps(
         model, input_tokens, positions, attn_mask, logits_to_keep=2
     )
     np.testing.assert_allclose(
@@ -123,12 +123,13 @@ class CommonTest(parameterized.TestCase):
     completion_tokens = jnp.array(
         [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
     )
-    per_token_logps, _ = common.compute_per_token_logps(
+    per_token_logps = common.compute_per_token_logps(
         model,
         prompt_tokens,
         completion_tokens,
         pad_id=0,
         eos_id=-1,
+        return_logits=False,
     )
     np.testing.assert_allclose(
         per_token_logps,
@@ -140,6 +141,15 @@ class CommonTest(parameterized.TestCase):
         atol=1e-1,
         rtol=1e-2,
     )
+    _, logits = common.compute_per_token_logps(
+        model,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+        return_logits=True,
+    )
+    np.testing.assert_equal(logits.shape, (3, 4, 256))
 
   def test_make_completion_mask(self):
     completion_ids = jnp.array([

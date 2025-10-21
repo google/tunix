@@ -551,6 +551,7 @@ def ppo_policy_loss_fn(
       pad_id=pad_id,
       eos_id=eos_id,
       stop_gradient=False,
+      return_logits=True,
   )
 
   advantages = train_example.advantages

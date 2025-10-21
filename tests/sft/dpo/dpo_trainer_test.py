@@ -249,7 +249,6 @@ class DPOTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     per_token_logps = np.random.normal(0, 5, size=(8, 4))
     ref_per_token_logps = np.random.normal(0, 5, size=(8, 4)).sum(axis=-1)
-    logits = np.random.normal(0, 5, size=(8, 4, 32))
     train_example = dpo_lib.TrainExample(
         input_ids=jnp.arange(0, 32).reshape(8, 4),
         positions=jnp.ones((8, 4)),
@@ -261,9 +260,7 @@ class DPOTrainerTest(parameterized.TestCase):
     )
 
     with mock.patch.object(
-        common,
-        "get_per_token_logps",
-        return_value=(jnp.array(per_token_logps), jnp.array(logits)),
+        common, "get_per_token_logps", return_value=jnp.array(per_token_logps)
     ):
       loss, _ = dpo_lib.dpo_loss_fn(model, train_example, 0.1, 0)
       np.testing.assert_allclose(loss, 0.753059, atol=1e-5)

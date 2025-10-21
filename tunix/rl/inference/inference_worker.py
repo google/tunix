@@ -65,7 +65,9 @@ class InferenceWorker:
         pad_id=pad_id,
         eos_id=eos_id,
         completion_mask=completion_mask,
-    )[0]
+        stop_gradient=True,
+        return_logits=False,
+    )
 
   def get_values(
       self,
