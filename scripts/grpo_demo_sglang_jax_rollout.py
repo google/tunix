@@ -1,10 +1,11 @@
 r"""Demo script for GRPO with Llama3.2 3B model.
 
-This script demonstrates how to run GRPO with a Llama3.2 3B model and sglang-jax rollout. It includes
+This script demonstrates how to run GRPO with a Llama3.2 3B or DeepSeek-R1-Distill-Qwen-1.5B model and sglang-jax rollout. It includes
 training, evaluation, and inference. In addition, It is based on examples/grpo_demo.ipynb
 
 """
 
+import argparse
 import csv
 import functools
 import gc
@@ -32,13 +33,26 @@ from tunix.generate import mappings
 from tunix.generate import sglang_jax_sampler as sampler_lib
 from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.models.llama3 import model as llama_lib
-from tunix.models.llama3 import params as params_lib
+from tunix.models.llama3 import params as llama3_params_lib
+from tunix.models.qwen2 import model as qwen2_lib
+from tunix.models.qwen2 import params as qwen2_params_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import sglang_jax_rollout
 from tunix.sft import metrics_logger
+
+# Parse command line options
+parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
+parser.add_argument(
+    "--model-version",
+    type=str,
+    default="meta-llama/Llama-3.2-3B-Instruct",
+    required=False,
+    help="The model version to use.",
+)
+args = parser.parse_args()
 
 # ====== Data ======
 TRAIN_DATA_DIR = "./data/train"
@@ -134,7 +148,7 @@ def show_hbm_usage():
     print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
 
 
-repo_id = "meta-llama/Llama-3.2-3B-Instruct"
+repo_id = args.model_version
 model_tokenizer = transformers.AutoTokenizer.from_pretrained(repo_id)
 
 reasoning_start = "<reasoning>"
@@ -380,10 +394,13 @@ def get_lora_model(base_model, mesh):
 #   ref_model, mesh, model_config = get_gemma_ref_model(
 #       ckpt_path=os.path.join(INTERMEDIATE_CKPT_DIR, "state")
 #   )
-def load_llama3_model(model_version: str, enable_lora: bool = False):
+def load_model(model_version: str, enable_lora: bool = False):
   model_config = {
       "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
       "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
+      "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": (
+          qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b
+      ),
   }
   assert (
       model_version in model_config
@@ -391,17 +408,23 @@ def load_llama3_model(model_version: str, enable_lora: bool = False):
   model_config = model_config[model_version]()
 
   mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
+  if "Qwen" in model_version:
+    mesh_shape = (1, 2)  # because the num_key_value_heads is 2
   axis_names = ("fsdp", "tp")
   mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
-
-  llama3 = params_lib.create_model_from_safe_tensors(
-      model_path, model_config, mesh
-  )
-  return llama3, mesh, model_config
+  if "Llama-3" in model_version:
+    model = llama3_params_lib.create_model_from_safe_tensors(
+        model_path, model_config, mesh
+    )
+  elif "Qwen" in model_version:
+    model = qwen2_params_lib.create_model_from_safe_tensors(
+        model_path, model_config, mesh
+    )
+  return model, mesh, model_config
 
 
 print("before reference")
-ref_model, mesh, model_config = load_llama3_model(repo_id)
+ref_model, mesh, model_config = load_model(repo_id)
 show_hbm_usage()
 # Policy model
 

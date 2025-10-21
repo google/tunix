@@ -209,8 +209,6 @@ jobs:
           pip uninstall torch libtpu jax jaxlib -y
           pip install tpu-inference==v0.11.1 --force-reinstall
           pip install pytest pytest-xdist
-          
-          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e .
 
       - name: Run tests
         env:
@@ -221,4 +219,14 @@ jobs:
           while read -r test; do
             pytest "$test" -v --tb=short
           done < test_collections.txt
-          pytest tests/generate/sglang_jax_sampler_test.py -v --tb=short
+
+      - name: Run install sglang-jax && test
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          ## because sglang-jax has codes like jax.local_devices('cpu')
+          unset JAX_PLATFORMS 
+          cd ..
+          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
+          cd tunix && python tests/generate/sglang_jax_sampler_test.py 
+          
