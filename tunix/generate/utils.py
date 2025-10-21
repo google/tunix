@@ -18,6 +18,7 @@
 import functools
 import gc
 import logging
+import math
 import re
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -468,17 +469,22 @@ def _apply_transpose(
     return val
 
   last_key = src_key.split('.')[-1]
+  all_key = src_key
+  target_key = ''
   if last_key in transpose_keys and 'lora' not in last_key:
+    target_key = last_key
+  elif all_key in transpose_keys and 'lora' not in all_key:
+    target_key = all_key
+  if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
-    return jnp.transpose(val, transpose_keys[last_key])
-
+    return jnp.transpose(val, transpose_keys[target_key])
   return val
 
 
-def _reshape_attention_bias(
+def _reshape_attention(
     val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
 ) -> jnp.ndarray:
-  """Reshape attention bias tensors with special handling.
+  """Reshape attention tensors with special handling.
 
   Args:
       val: Value to reshape.
@@ -500,7 +506,17 @@ def _reshape_attention_bias(
         new_shape,
     )
     return jnp.reshape(val, new_shape)
-
+  ## here exists tgt_shape is (4096, 1024), but the val shape is (4096, 8, 128) case, so needs reshape
+  if re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(
+      src_key
+  ) and math.prod(tgt_shape) == math.prod(val.shape):
+    logging.debug(
+        'Reshaping attention proj on %s: %s -> %s',
+        src_key,
+        val.shape,
+        tgt_shape,
+    )
+    return jnp.reshape(val, tgt_shape)
   raise ShapeMismatchError(
       f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
   )
@@ -527,7 +543,7 @@ def _align_shape(
 
   # Handle rank mismatch
   if len(val.shape) != len(tgt_shape):
-    return _reshape_attention_bias(val, tgt_shape, src_key)
+    return _reshape_attention(val, tgt_shape, src_key)
 
   original_shape = val.shape
   # Check if this is an attention weight that can be padded/repeated
@@ -544,7 +560,9 @@ def _align_shape(
   for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, tgt_shape)):
     if src_dim < tgt_dim:
       # For QKV, H is dim(-1); For O, H is dim(-2), same for Tunix and vLLM
-      if i == len(val.shape) - 1 or ('o_proj' in src_key and  i == len(val.shape) - 2):
+      if i == len(val.shape) - 1 or (
+          'o_proj' in src_key and i == len(val.shape) - 2
+      ):
         # Head dimension: pad with zeros
         pad_width.append((0, tgt_dim - src_dim))
       else:
@@ -623,7 +641,12 @@ def transfer_state_with_mappings(
   sharding_dict = None
   if reshard_fn:
     sharding_dict = {
-        key: tgt_params.value.sharding for key, tgt_params in tgt_flat_list
+        key: (
+            tgt_params.value.sharding
+            if hasattr(tgt_params, 'value')
+            else tgt_params.sharding
+        )
+        for key, tgt_params in tgt_flat_list
     }
 
   # Build source-to-target mapping
@@ -659,13 +682,20 @@ def transfer_state_with_mappings(
 
   # Batch reshard and assign if resharding is configured
   if reshard_fn:
-    tgt_flat_dict = {key: tgt_params.value for key, tgt_params in tgt_flat_list}
+    tgt_flat_dict = {
+        key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
+        for key, tgt_params in tgt_flat_list
+    }
     resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for tgt_key, tgt_param in tgt_flat_list:
-      if tgt_key not in resharded_values_flat_dict:
-        raise MappingError(f'Key {tgt_key} not found in resharded values')
-      tgt_param.value = resharded_values_flat_dict[tgt_key]
+      assert (
+          tgt_key in resharded_values_flat_dict
+      ), f'Key {tgt_key} not in resharded values'
+      if hasattr(tgt_param, 'value'):
+        tgt_param.value = resharded_values_flat_dict[tgt_key]
+      else:
+        tgt_param = resharded_values_flat_dict[tgt_key]
 
   return dst_state.from_flat_path(tgt_flat_list)
 
