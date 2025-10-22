@@ -14,8 +14,10 @@
 """Helper functions for GRPO Trainer."""
 
 import jax
+from tunix.rl import function_registry
 
 
+@function_registry.register_advantage_estimator("grpo")
 def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
   """Compute group relative advantages.
 
