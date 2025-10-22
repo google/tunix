@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import itertools
 import os
+import shutil
 import tempfile
 import types
+import uuid
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -1096,6 +1097,120 @@ class GRPOLearnerTest(parameterized.TestCase):
     self.assertEqual(
         40 // (mini_batch_size or batch_size),
         grpo_learner.rl_cluster.actor_trainer.train_steps,
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_mini_batch',
+          max_steps=8,
+          batch_size=8,
+          mini_batch_size=8,
+      ),
+      dict(
+          testcase_name='multi_mini_batch',
+          max_steps=8,
+          batch_size=8,
+          mini_batch_size=4,
+      ),
+  )
+  def test_checkpoint_with_mini_batch(
+      self, max_steps, batch_size, mini_batch_size
+  ):
+    ckpt_dir = f'/tmp/{self.id()}/{uuid.uuid4()}/checkpoint'
+    if os.path.exists(ckpt_dir):
+      shutil.rmtree(ckpt_dir)
+
+    def create_learner(
+        ckpt_dir,
+        max_steps,
+    ):
+      vocab = tc.MockVocab()
+      model = tc.ToyTransformer(
+          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+      )
+      ref_model = tc.ToyTransformer(
+          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+      )
+
+      mesh = pxla.thread_resources.env.physical_mesh
+      cluster_config = rl_cluster_lib.ClusterConfig(
+          role_to_mesh={
+              rl_cluster_lib.Role.ACTOR: mesh,
+              rl_cluster_lib.Role.REFERENCE: mesh,
+              rl_cluster_lib.Role.ROLLOUT: mesh,
+          },
+          rollout_engine='vanilla',
+          offload_to_cpu=False,
+          training_config=rl_cluster_lib.RLTrainingConfig(
+              actor_optimizer=optax.sgd(1e-3),
+              eval_every_n_steps=2,
+              max_steps=max_steps,
+              mini_batch_size=mini_batch_size,
+              train_micro_batch_size=mini_batch_size,
+              rollout_micro_batch_size=mini_batch_size,
+              compute_logps_micro_batch_size=mini_batch_size,
+              checkpointing_options=ocp.CheckpointManagerOptions(
+                  save_interval_steps=4,
+              ),
+              checkpoint_root_directory=ckpt_dir,
+          ),
+          rollout_config=base_rollout.RolloutConfig(
+              max_tokens_to_generate=10,
+              max_prompt_length=32,
+              kv_cache_size=256,
+              temperature=0.5,
+          ),
+      )
+      rl_cluster = rl_cluster_lib.RLCluster(
+          actor=model,
+          reference=ref_model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+      grpo_config = grpo_lib.GRPOConfig(
+          num_generations=2,
+          num_iterations=1,
+      )
+      grpo_learner = grpo_lib.GRPOLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=reward_1,
+          grpo_config=grpo_config,
+      )
+      return grpo_learner
+
+    # make sure we have enough rows
+    train_ds = _dummy_dataset(MySource(repeat=100), batch_size=batch_size)
+
+    grpo_learner = create_learner(ckpt_dir, max_steps=max_steps)
+    self.assertEqual(grpo_learner.rl_cluster.global_steps, 0)
+    grpo_learner.train(train_ds, None)
+    self.assertEqual(
+        grpo_learner.rl_cluster.global_steps,
+        max_steps * mini_batch_size / batch_size,
+    )
+
+    # Increase max_steps and so we continue training from checkpoint.
+    grpo_learner2 = create_learner(ckpt_dir, max_steps=max_steps * 2)
+    self.assertEqual(
+        grpo_learner2.rl_cluster.global_steps,
+        grpo_learner.rl_cluster.global_steps,
+    )
+    self.assertEqual(
+        grpo_learner2.rl_cluster.actor_trainer._restored_custom_metadata,
+        {
+            'global_step': grpo_learner.rl_cluster.global_steps
+        },
+    )
+
+    # double the batch size it should also work with checkpoint resumption.
+    batch_size *= 2
+    train_ds = _dummy_dataset(MySource(repeat=100), batch_size=batch_size)
+    grpo_learner2.train(train_ds, None)
+    self.assertEqual(
+        grpo_learner2.rl_cluster.global_steps,
+        grpo_learner.rl_cluster.global_steps
+        + max_steps * mini_batch_size / batch_size,
     )
 
 

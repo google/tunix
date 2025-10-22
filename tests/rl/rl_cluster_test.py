@@ -126,6 +126,12 @@ class RlClusterTest(parameterized.TestCase):
     )
     self.assertEqual(cfg.gradient_accumulation_steps, 2)
 
+    cfg = rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+    )
+    self.assertEqual(cfg.gradient_accumulation_steps, None)
+
     for mini_batch_size, train_micro_batch_size in zip(
         [8, -8, None], [3, 4, 4]
     ):
@@ -207,6 +213,7 @@ class RlClusterTest(parameterized.TestCase):
     rl_cluster.rollout.generate.assert_called_once()
     called_prompts = rl_cluster.rollout.generate.call_args[0][0]
     self.assertEqual(called_prompts, ['formatted prompt'])
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -31,6 +31,7 @@ class Trainer(peft_trainer.PeftTrainer):
       model: nnx.Module,
       optimizer: optax.GradientTransformation,
       training_config: peft_trainer.TrainingConfig,
+      custom_checkpoint_metadata_fn: Callable[[], dict[str, Any]],
   ):
     super().__init__(
         model,
@@ -39,6 +40,7 @@ class Trainer(peft_trainer.PeftTrainer):
     )
     self.rl_metrics_to_log = {}  # Metric name -> key in aux.
     self.tqdm_metrics_to_display = []
+    self.custom_checkpoint_metadata_fn = custom_checkpoint_metadata_fn
 
   def with_rl_metrics_to_log(
       self,
@@ -50,6 +52,13 @@ class Trainer(peft_trainer.PeftTrainer):
       self, tqdm_metrics_to_display: list[str | Callable[[], str]]
   ) -> None:
     self.tqdm_metrics_to_display = tqdm_metrics_to_display
+
+  @override
+  def custom_checkpoint_metadata(self) -> dict[str, Any]:
+    return self.custom_checkpoint_metadata_fn()
+
+  def restored_global_step(self) -> int:
+    return self._restored_custom_metadata.get("global_step", 0)
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:

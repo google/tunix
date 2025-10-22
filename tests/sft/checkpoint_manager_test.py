@@ -15,7 +15,9 @@
 """Peft Checkpoint manager unittest."""
 
 import os
+import tempfile
 from absl.testing import absltest
+from absl.testing import parameterized
 from etils import epath
 from flax import config as flax_config
 from flax import nnx
@@ -25,7 +27,6 @@ import jax.sharding as shd
 import numpy as np
 import qwix
 from tunix.sft import checkpoint_manager
-import tempfile
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
@@ -85,7 +86,7 @@ def create_sharded_model(model_ctor, rngs, mesh):
   return model, state_sharding
 
 
-class CheckpointManagerTest(absltest.TestCase):
+class CheckpointManagerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -105,7 +106,7 @@ class CheckpointManagerTest(absltest.TestCase):
     )
     self.assertIsNone(peft_checkpoint_manager.latest_step())
     self.assertFalse(peft_checkpoint_manager.save(1, None))
-    self.assertEqual(peft_checkpoint_manager.maybe_restore(None), 0)
+    self.assertEqual(peft_checkpoint_manager.maybe_restore(None), (0, {}))
 
   def test_checkpoint_manager_options_none_sets_default(self):
     peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
@@ -147,7 +148,7 @@ class CheckpointManagerTest(absltest.TestCase):
     nnx.update(model, changed_state)
 
     # Restore the model params.
-    self.assertEqual(peft_checkpoint_manager.maybe_restore(model), 1)
+    self.assertEqual(peft_checkpoint_manager.maybe_restore(model), (1, {}))
     # Check the model params are restored correctly.
     jax.tree.map_with_path(
         assert_close,
@@ -166,7 +167,9 @@ class CheckpointManagerTest(absltest.TestCase):
     self.assertTrue(peft_checkpoint_manager.save(1, unsharded_model))
 
     # Restore the model without shardings.
-    self.assertEqual(peft_checkpoint_manager.maybe_restore(unsharded_model), 1)
+    self.assertEqual(
+        peft_checkpoint_manager.maybe_restore(unsharded_model), (1, {})
+    )
     unsharded_variables = nnx.state(unsharded_model, nnx.Param)
     # Check the model shardings are restored correctly.
     self.assertIsInstance(
@@ -179,7 +182,7 @@ class CheckpointManagerTest(absltest.TestCase):
     )
 
     # Restore the model with shardings.
-    self.assertEqual(peft_checkpoint_manager.maybe_restore(model), 1)
+    self.assertEqual(peft_checkpoint_manager.maybe_restore(model), (1, {}))
     # Check the model shardings are restored correctly.
     variables = nnx.state(model, nnx.Param)
 
@@ -225,7 +228,7 @@ class CheckpointManagerTest(absltest.TestCase):
         peft_checkpoint_manager.maybe_restore(
             model, restore_only_lora_params=True
         ),
-        1,
+        (1, {}),
     )
     # Check the model lora params are restored correctly.
     jax.tree.map_with_path(
@@ -240,12 +243,22 @@ class CheckpointManagerTest(absltest.TestCase):
         nnx.state(model, nnx.filterlib.Not(nnx.LoRAParam)),
     )
 
-  def test_restore_with_backward_compatibility(self):
+  def test_save_and_restore_with_custom_metadata(self):
+    ckpt_manager = checkpoint_manager.CheckpointManager(self.temp_path)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    custom_metadata = {'foo': 1, 'bar': 2}
+    ckpt_manager.save(1, model, custom_metadata=custom_metadata)
+    restored_step, restored_metadata = ckpt_manager.maybe_restore(model)
+    self.assertEqual(restored_step, 1)
+    self.assertEqual(restored_metadata, custom_metadata)
+
+  @parameterized.parameters(['test_data/checkpoints'])
+  def test_restore_with_backward_compatibility(self, ckpt_path):
     # The checkpoints in test_data is saved with StandardSave. The test is to
     # verify the checkpoint manager with PyTreeRestore can still restore the
     # checkpoints saved with StandardSave.
-    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
-        os.path.join(os.path.dirname(__file__), 'test_data/checkpoints')
+    ckpt_manager = checkpoint_manager.CheckpointManager(
+        os.path.join(os.path.dirname(__file__), ckpt_path)
     )
     model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
     expected_state = nnx.state(model)
@@ -254,7 +267,7 @@ class CheckpointManagerTest(absltest.TestCase):
     nnx.update(model, changed_state)
 
     # Restore the model params.
-    self.assertEqual(peft_checkpoint_manager.maybe_restore(model), 1)
+    self.assertEqual(ckpt_manager.maybe_restore(model), (1, {}))
     # Check the model params are restored correctly.
     jax.tree.map_with_path(
         assert_close,

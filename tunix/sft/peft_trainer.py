@@ -218,8 +218,10 @@ class PeftTrainer:
     self._pbar = None
     self._flops_measured: bool = False
 
-    self._train_steps = self.checkpoint_manager.maybe_restore(
-        self.model, restore_only_lora_params=self._lora_enabled
+    self._train_steps, self._restored_custom_metadata = (
+        self.checkpoint_manager.maybe_restore(
+            self.model, restore_only_lora_params=self._lora_enabled
+        )
     )
     self._iter_steps = self._train_steps * self.config.get_with_default(
         "gradient_accumulation_steps", 1
@@ -668,6 +670,7 @@ class PeftTrainer:
                 self._train_steps,
                 self.model,
                 save_only_lora_params=self._lora_enabled,
+                custom_metadata=self.custom_checkpoint_metadata(),
             )
 
             if (
@@ -703,6 +706,10 @@ class PeftTrainer:
   def iter_steps(self) -> int:
     """Returns the number of iterator steps taken."""
     return self._iter_steps
+
+  def custom_checkpoint_metadata(self) -> dict[str, Any]:
+    """Override this function to return the custom metadata for the checkpoint manager."""
+    return {}
 
   def close(self):
     """Closes the trainer and its associated resources.
