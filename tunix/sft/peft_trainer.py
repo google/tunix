@@ -480,7 +480,8 @@ class PeftTrainer:
       step_time_delta: float = 0.0,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
-    loss = np.array(loss)
+    # Cast to fp32 for logging, because NumPy doesn't support bf16.
+    loss = np.array(loss).astype(np.float32)
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
           step=step, losses=[loss], step_time_deltas=[step_time_delta]
@@ -804,4 +805,7 @@ def _default_loss_fn(
 
   # Return the negative log likelihood (NLL) loss.
   # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
-  return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+  loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+  # Cast loss back to logits dtype.
+  loss = loss.astype(logits.dtype)
+  return loss
