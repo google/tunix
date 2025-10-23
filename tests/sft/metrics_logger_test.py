@@ -1,12 +1,13 @@
 """Metrics logger unittest."""
 
 import os
+import tempfile
 from unittest import mock
 
 from absl.testing import absltest
+from metrax import logging as metrax_logging
 import numpy as np
 from tunix.sft import metrics_logger
-import tempfile
 
 
 class MetricLoggerTest(absltest.TestCase):
@@ -15,17 +16,16 @@ class MetricLoggerTest(absltest.TestCase):
     super().setUp()
     try:
       self.log_dir = self.create_tempdir().full_path
-    except Exception:
+    except AttributeError:
       self.log_dir = tempfile.TemporaryDirectory().name
 
-  @mock.patch("tunix.sft.metrics_logger.datetime")
-  @mock.patch("tunix.sft.metrics_logger.wandb")
+  @mock.patch("metrax.logging.logging_backend.datetime")
+  @mock.patch("metrax.logging.logging_backend.wandb")
   def test_metrics_logger(self, mock_wandb, mock_datetime):
     fixed_timestamp_str = "2025-07-17_13-56-53"
     mock_datetime.datetime.now.return_value.strftime.return_value = (
         fixed_timestamp_str
     )
-    metrics_logger.wandb = mock_wandb
     logger = metrics_logger.MetricsLogger(
         metrics_logger.MetricsLoggerOptions(
             log_dir=self.log_dir, flush_every_n_steps=1
@@ -65,6 +65,44 @@ class MetricLoggerTest(absltest.TestCase):
 
     logger.close()
     mock_wandb.finish.assert_called_once()
+
+  # Updated patches to mock the backend classes as used by metrics_logger
+  @mock.patch("tunix.sft.metrics_logger.TensorBoardBackend")
+  @mock.patch("tunix.sft.metrics_logger.WandbBackend")
+  def test_additional_and_default_backends_are_called(
+      self, mock_wandb_backend, mock_tensor_board_backend
+  ):
+    """Tests that default (TB, W&B) and custom backends are all called."""
+    mock_tb_instance = mock_tensor_board_backend.return_value
+    mock_wandb_instance = mock_wandb_backend.return_value
+
+    mock_additional_backend = mock.Mock(spec=metrax_logging.LoggingBackend)
+
+    logger = metrics_logger.MetricsLogger(
+        metrics_logger.MetricsLoggerOptions(log_dir=self.log_dir),
+        metric_prefix="test_prefix/",
+        additional_backends=[mock_additional_backend],
+    )
+
+    logger.log("custom_loss", 1.23, metrics_logger.Mode.TRAIN, step=100)
+    expected_args = ("test_prefix/train/custom_loss", 1.23)
+    expected_kwargs = {"step": 100}
+
+    mock_tb_instance.log_scalar.assert_called_once_with(
+        *expected_args, **expected_kwargs
+    )
+    mock_wandb_instance.log_scalar.assert_called_once_with(
+        *expected_args, **expected_kwargs
+    )
+    mock_additional_backend.log_scalar.assert_called_once_with(
+        *expected_args, **expected_kwargs
+    )
+
+    logger.close()
+
+    mock_tb_instance.close.assert_called_once()
+    mock_wandb_instance.close.assert_called_once()
+    mock_additional_backend.close.assert_called_once()
 
 
 if __name__ == "__main__":
