@@ -36,8 +36,8 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
 from tunix.generate import mappings
-# Internal placeholder for vllm rollout worker stub, don't change this line.
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
+# Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -96,7 +96,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
       will be trained in the same optimizer as the actor model.
     mini_batch_size: The mini-batch size used for policy weight updates. One
       mini-batch corresponds to one optimizer update. `mini_batch_size` must be
-      divisible by the batch size used for data loading.
+      divisible by the global batch size.
     train_micro_batch_size: The micro-batch size used for gradient
       accumulation at training time. `train_micro_batch_size` must be
       divisible by `mini_batch_size`.
@@ -132,8 +132,8 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     if self.train_micro_batch_size is not None:
       if self.mini_batch_size is None:
         raise ValueError(
-            "For RL training, `batch_size` and `mini_batch_size` must be set"
-            " when `train_micro_batch_size` is set."
+            "For RL training, `mini_batch_size` must be set when"
+            " `train_micro_batch_size` is set."
         )
       rl_utils.check_divisibility(
           self.train_micro_batch_size,
@@ -477,6 +477,9 @@ class RLCluster:
           model=self.critic,
           optimizer=self.cluster_config.training_config.critic_optimizer,
           training_config=critic_config,
+          custom_checkpoint_metadata_fn=lambda: {
+              "global_step": self.global_steps + 1
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-longå
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
@@ -493,6 +496,9 @@ class RLCluster:
         model=self.train_actor,
         optimizer=self.cluster_config.training_config.actor_optimizer,
         training_config=actor_config,
+        custom_checkpoint_metadata_fn=lambda: {
+            "global_step": self.global_steps + 1
+        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-longå
     )
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -673,10 +679,10 @@ class RLCluster:
     """Generates text from the given prompts.
 
     Args:
-      prompts: A list of prompts to generate text from. If
-        `apply_chat_template` is True, this should be a list of conversations
-        (each a list of dictionaries with 'role' and 'content'). Otherwise, it
-        should be a list of strings.
+      prompts: A list of prompts to generate text from. If `apply_chat_template`
+        is True, this should be a list of conversations (each a list of
+        dictionaries with 'role' and 'content'). Otherwise, it should be a list
+        of strings.
       apply_chat_template: Whether to apply chat template to the prompts.
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no

@@ -628,7 +628,7 @@ class Sampler(base_sampler.BaseSampler):
 
   def __call__(
       self,
-      input_strings: Sequence[str],
+      input_strings: str | Sequence[str],
       max_generation_steps: int,
       max_prompt_length: int | None = None,
       echo: bool = False,
@@ -675,6 +675,9 @@ class Sampler(base_sampler.BaseSampler):
       sampler_output: A SamplerOutput object containing the generated samples.
     """
     self.eos_ids = jnp.array(eos_tokens or [self.tokenizer.eos_id()])
+    input_strings = (
+        [input_strings] if isinstance(input_strings, str) else input_strings
+    )
 
     forbidden_token_ids = None
     if forbidden_tokens is not None:
