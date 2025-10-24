@@ -85,7 +85,7 @@ class QueryPreAttentionNormalisation(enum.Enum):
   BY_ONE_OVER_SQRT_EMBED_DIM_DIV_NUM_HEADS = enum.auto()
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@dataclasses.dataclass(slots=True, kw_only=True)
 class ModelConfig:
   """Transformer config."""
 
