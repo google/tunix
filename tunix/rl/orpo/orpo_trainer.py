@@ -107,7 +107,7 @@ def compute_logps(
     completion_mask,
 ):
   """Computes the log probabilities for chosen and rejected tokens."""
-  token_logps, _ = common.get_per_token_logps(
+  token_logps = common.get_per_token_logps(
       model,
       input_tokens=input_ids,
       positions=positions,
@@ -193,13 +193,13 @@ class ORPOTrainer(peft_trainer.PeftTrainer):
   @override
   def _prepare_inputs(
       self,
-      training_input: dict[str, Any] | DataInput | TrainingInput,
+      input_data: dict[str, Any] | DataInput | TrainingInput,
   ) -> Any:
-    if isinstance(training_input, dict):
-      training_input = _preprocess_dict(training_input)
+    if isinstance(input_data, dict):
+      input_data = _preprocess_dict(input_data)
 
     # If the inputs are list of strings, let's tokenise them and pad them.
-    if isinstance(training_input, DataInput):
+    if isinstance(input_data, DataInput):
       if self.tokenizer is None:
         raise ValueError(
             "Tokenizer must be provided if training input is not tokenized."
@@ -218,11 +218,11 @@ class ORPOTrainer(peft_trainer.PeftTrainer):
             f"max_response_length={max_response_length}."
         )
 
-      training_input = process_orpo_record(
+      input_data = process_orpo_record(
           record={
-              "prompts": training_input.prompts,
-              "chosen_responses": training_input.chosen_responses,
-              "rejected_responses": training_input.rejected_responses,
+              "prompts": input_data.prompts,
+              "chosen_responses": input_data.chosen_responses,
+              "rejected_responses": input_data.rejected_responses,
           },
           tokenizer=self.tokenizer,
           max_prompt_length=self.orpo_config.max_prompt_length,
@@ -231,16 +231,16 @@ class ORPOTrainer(peft_trainer.PeftTrainer):
 
     # Concatenate chosen and rejected IDs so we can do a forward pass together.
     prompt_ids = jnp.concatenate(
-        [training_input.prompt_ids, training_input.prompt_ids], axis=0
+        [input_data.prompt_ids, input_data.prompt_ids], axis=0
     )
     prompt_mask = jnp.concatenate(
-        [training_input.prompt_mask, training_input.prompt_mask], axis=0
+        [input_data.prompt_mask, input_data.prompt_mask], axis=0
     )
     completion_ids = jnp.concatenate(
-        [training_input.chosen_ids, training_input.rejected_ids], axis=0
+        [input_data.chosen_ids, input_data.rejected_ids], axis=0
     )
     completion_mask = jnp.concatenate(
-        [training_input.chosen_mask, training_input.rejected_mask], axis=0
+        [input_data.chosen_mask, input_data.rejected_mask], axis=0
     )
     input_ids = jnp.concat([prompt_ids, completion_ids], axis=1)
 

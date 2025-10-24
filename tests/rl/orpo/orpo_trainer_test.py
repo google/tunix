@@ -222,7 +222,6 @@ class ORPOTrainerTest(parameterized.TestCase):
     np.random.seed(0)
     model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     per_token_logps = np.random.normal(0, 5, size=(8, 4))
-    logits = np.random.normal(0, 5, size=(8, 4, 32))
     train_example = orpo_lib.TrainExample(
         input_ids=jnp.arange(0, 32).reshape(8, 4),
         positions=jnp.ones((8, 4)),
@@ -234,7 +233,7 @@ class ORPOTrainerTest(parameterized.TestCase):
     with mock.patch.object(
         common,
         "get_per_token_logps",
-        return_value=(jnp.array(per_token_logps), jnp.array(logits)),
+        return_value=jnp.array(per_token_logps),
     ):
       loss, aux = orpo_lib.orpo_loss_fn(model, train_example, 0.1, 0)
       # Loss should be a scalar and finite
