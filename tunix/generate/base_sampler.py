@@ -21,6 +21,9 @@ from flax import nnx
 from flax.nnx import statelib
 import jax
 
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
+
 
 @dataclasses.dataclass
 class SamplerOutput:
@@ -41,20 +44,20 @@ class SamplerOutput:
   logprobs: Optional[list[float]]
 
 
-class BaseSampler(abc.ABC):
+class BaseSampler(ABC):
   """Base class for samplers."""
 
   @property
-  @abc.abstractmethod
+  @abstractmethod
   def transformer(self) -> nnx.Module:
     """Returns the transformer module used by the sampler."""
 
   @property
-  @abc.abstractmethod
+  @abstractmethod
   def transformer_state(self) -> statelib.State:
     """Returns the transformer state used by the sampler."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def __call__(
       self,
       input_strings: List[str],
@@ -72,6 +75,6 @@ class BaseSampler(abc.ABC):
   ):
     """Returns a list of generated samples for the input strings."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def tokenize(self, input_string: str) -> jax.Array:
     """Returns the tokenized the input string."""
