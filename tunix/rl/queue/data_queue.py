@@ -14,29 +14,29 @@
 
 """Data queue interface."""
 
-import abc
+from abc import ABC, abstractmethod
 import queue
 from typing import Generic, TypeVar
 
 _T = TypeVar("_T")
 
 
-class AbstractDataQueue(abc.ABC, Generic[_T]):
+class AbstractDataQueue(ABC, Generic[_T]):
   """Abstract base class for data queues."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def put(self, item: _T) -> None:
     """Puts an item into the queue."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def get(self, block: bool = True, timeout: float | None = None) -> _T:
     """Gets an item from the queue."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def qsize(self) -> int:
     """Returns the approximate size of the queue."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def close(self) -> None:
     """Closes the queue."""
 

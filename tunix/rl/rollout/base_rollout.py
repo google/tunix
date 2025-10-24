@@ -22,6 +22,9 @@ import jax
 from jax import numpy as jnp
 import jaxtyping
 
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
+
 
 @dataclasses.dataclass(frozen=True)
 class CacheConfig:
@@ -97,10 +100,10 @@ class RolloutConfig:
   eos_tokens: list[int] | None = None
 
 
-class BaseRollout(abc.ABC):
+class BaseRollout(ABC):
   """Base RolloutWorker."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def generate(
       self,
       prompts: list[str],
@@ -109,7 +112,7 @@ class BaseRollout(abc.ABC):
   ) -> RolloutOutput:
     """Generates samples from the model."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def get_per_token_logps(
       self,
       prompt_tokens: jax.Array,
@@ -118,7 +121,7 @@ class BaseRollout(abc.ABC):
   ) -> jax.Array:
     """Returns per-token log probabilities from the model."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def update_params(
       self,
       params: jaxtyping.PyTree,
@@ -126,14 +129,14 @@ class BaseRollout(abc.ABC):
   ) -> None:
     """Updates the rollout model parameters."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def pad_id(self) -> int:
     """Returns the pad id."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def eos_id(self) -> int:
     """Returns the eos id."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""
