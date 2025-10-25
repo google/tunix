@@ -19,6 +19,7 @@ import contextlib
 import copy
 import dataclasses
 import enum
+import functools
 import gc
 import itertools
 import operator
@@ -153,7 +154,9 @@ class ClusterConfig:
   Parameters:
     role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
       disaggregated setup.
-    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm".
+    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
+        Alternatively, if a subclass of `base_rollout.BaseRollout` is provided,
+        it will be used as the rollout engine.
     offload_to_cpu: Whether to offload models to CPU at each step..
     training_config: RL training config.
     rollout_config: Rollout config. It may be different for different modes,
@@ -174,7 +177,7 @@ class ClusterConfig:
   """
 
   role_to_mesh: dict[Role, Mesh]
-  rollout_engine: str = "vanilla"
+  rollout_engine: str | type[base_rollout.BaseRollout] = "vanilla"
   offload_to_cpu: bool = False
 
   training_config: RLTrainingConfig
@@ -366,14 +369,17 @@ class RLCluster:
   def _init_cluster(self):
     """Initializes the RL cluster."""
     # 1. Initialize rollout.
-    if self.cluster_config.rollout_engine not in [
+    if isinstance(
+        self.cluster_config.rollout_engine, str
+    ) and self.cluster_config.rollout_engine not in [
         "vanilla",
         "vllm",
         "sglang_jax",
     ]:
       raise ValueError(
-          "`cluster_config.rollout_engine` should be one of `'vanilla'` or "
-          f"`'vllm'`. Received: '{self.cluster_config.rollout_engine}'."
+          "`cluster_config.rollout_engine` should be one of `'vanilla'` or"
+          " `'vllm'` or `'sglang_jax'`. Received:"
+          f" '{self.cluster_config.rollout_engine}'."
       )
     if isinstance(self.cluster_config.rollout_config, dict):
       max_kv_cache_size = max(
@@ -442,7 +448,24 @@ class RLCluster:
           enable_deterministic_sampling=self.cluster_config.rollout_sglang_jax_enable_deterministic_sampling,
           mapping_config=self.cluster_config.rollout_mapping_config,
       )
-
+    elif (
+        isinstance(self.cluster_config.rollout_engine, type)
+        and issubclass(
+            self.cluster_config.rollout_engine, base_rollout.BaseRollout
+        )
+    ) or (
+        isinstance(self.cluster_config.rollout_engine, functools.partial)
+        and issubclass(
+            self.cluster_config.rollout_engine.func,
+            base_rollout.BaseRollout,
+        )
+    ):
+      self._rollout = self.cluster_config.rollout_engine(
+          rollout_actor=self.rollout_actor,
+          tokenizer=self.tokenizer,
+          mesh=self.r2m[Role.ROLLOUT],
+          rl_cluster_config=self.cluster_config,
+      )
     else:
       raise NotImplementedError(
           f"Rollout engine {self.cluster_config.rollout_engine} not supported"

@@ -101,6 +101,10 @@ class BaseRollout(abc.ABC):
   """Base RolloutWorker."""
 
   @abc.abstractmethod
+  def __init__(self, **kwargs):
+    """Initializes the rollout worker."""
+
+  @abc.abstractmethod
   def generate(
       self,
       prompts: list[str],
