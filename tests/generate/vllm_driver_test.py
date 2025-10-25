@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import functools
 import threading
 import time
 from typing import Iterable
@@ -89,6 +91,62 @@ class _FakeLLMEngine:
     pass
 
 
+class _ControllableLLMEngine:
+  """Engine that completes requests after configurable delays."""
+
+  def __init__(self, completion_delays: dict[str, float], *, auto_release=True):
+    self._completion_delays = completion_delays
+    self._pending: dict[str, float] = {}
+    self._lock = threading.Lock()
+    self._release_event = threading.Event()
+    if auto_release:
+      self._release_event.set()
+    self._abort_calls: list[list[str]] = []
+    self.engine_core = _StubEngineCore()
+
+  def add_request(self, request_id: str, *_, **__):
+    ready_time = time.monotonic() + self._completion_delays.get(
+        request_id, 0.0
+    )
+    with self._lock:
+      self._pending[request_id] = ready_time
+
+  def has_unfinished_requests(self) -> bool:
+    with self._lock:
+      return bool(self._pending)
+
+  def step(self):
+    if not self._release_event.is_set():
+      time.sleep(0.001)
+      return []
+
+    now = time.monotonic()
+    with self._lock:
+      ready = sorted(
+          (
+              (ready_time, request_id)
+              for request_id, ready_time in self._pending.items()
+              if now >= ready_time
+          )
+      )
+      for _, request_id in ready:
+        self._pending.pop(request_id, None)
+    return [_DummyRequestOutput(request_id) for _, request_id in ready]
+
+  def abort_request(self, request_ids):
+    with self._lock:
+      for request_id in request_ids:
+        self._pending.pop(request_id, None)
+    self._abort_calls.append(list(request_ids))
+
+  def allow_completions(self):
+    self._release_event.set()
+
+  @property
+  def abort_calls(self):
+    return list(self._abort_calls)
+
+
 class VllmDriverAsyncTest(absltest.TestCase):
 
   def test_out_of_order_completions_preserved(self):
@@ -134,6 +192,113 @@ class VllmDriverAsyncTest(absltest.TestCase):
     # All completions should be observed, but not necessarily in submit order.
     self.assertEqual(finished_order, completion_order)
     self.assertNotEqual(finished_order, request_ids)
+
+  def test_asyncio_run_in_executor_out_of_order(self):
+    request_ids = [f"req-{i}" for i in range(10)]
+    # Later submissions finish earlier to enforce out-of-order completions.
+    delays = {
+        request_id: 0.02 * (len(request_ids) - idx)
+        for idx, request_id in enumerate(request_ids)
+    }
+    engine = _ControllableLLMEngine(delays)
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=True)
+    self.addCleanup(driver.shutdown)
+
+    def _call_driver(request_id: str, delay: float):
+      time.sleep(delay)
+      future = driver.submit_request(
+          request_id=request_id,
+          prompt={"prompt_token_ids": [request_id]},
+          params=object(),
+      )
+      return future.result(timeout=5.0)
+
+    async def dispatch_requests():
+      loop = asyncio.get_running_loop()
+      futures = []
+      future_to_idx = {}
+      for idx, request_id in enumerate(request_ids):
+        future = loop.run_in_executor(
+            None,
+            functools.partial(_call_driver, request_id, delays[request_id]),
+        )
+        future_to_idx[future] = idx
+        futures.append(future)
+
+      completion_order = []
+      results_by_idx = {}
+      for future in asyncio.as_completed(futures):
+        result = await future
+        idx = future_to_idx[future]
+        completion_order.append(idx)
+        results_by_idx[idx] = result
+
+      ordered_results = [results_by_idx[i] for i in range(len(futures))]
+      return ordered_results, completion_order
+
+    results, completion_order = asyncio.run(dispatch_requests())
+
+    self.assertLen(results, len(request_ids))
+    for request_id, result in zip(request_ids, results):
+      self.assertEqual(request_id, result.request_id)
+
+    expected_order = list(range(len(request_ids)))
+    self.assertCountEqual(completion_order, expected_order)
+    self.assertNotEqual(
+        completion_order,
+        expected_order,
+        msg=(
+            "Responses returned strictly in submission order; "
+            "expected out-of-order completions."
+        ),
+    )
+
+  def test_cancel_request_aborts_engine_and_future(self):
+    delays = {"req-0": 0.5, "req-1": 0.5}
+    engine = _ControllableLLMEngine(delays, auto_release=False)
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=True)
+    self.addCleanup(driver.shutdown)
+
+    future_a = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [0]},
+        params=object(),
+    )
+    future_b = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    driver.cancel("req-0")
+    self.assertTrue(future_a.cancelled())
+    self.assertIn(["req-0"], engine.abort_calls)
+
+    engine.allow_completions()
+    result = future_b.result(timeout=5.0)
+    self.assertEqual("req-1", result.request_id)
+
+  def test_stop_mid_generation_and_restart(self):
+    engine = _ControllableLLMEngine({"req-0": 0.01}, auto_release=False)
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=True)
+    self.addCleanup(driver.shutdown)
+
+    future = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [0]},
+        params=object(),
+    )
+
+    # Allow the background loop to observe the pending request, then stop.
+    time.sleep(0.01)
+    driver.stop()
+    self.assertFalse(future.done())
+
+    driver.start()
+    engine.allow_completions()
+
+    result = future.result(timeout=5.0)
+    self.assertEqual("req-0", result.request_id)
 
 
 if __name__ == "__main__":
