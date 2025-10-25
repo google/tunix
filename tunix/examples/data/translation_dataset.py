@@ -24,7 +24,6 @@ import tensorflow_datasets as tfds
 from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.sft.peft_trainer import TrainingInput  # pylint: disable=g-importing-member
 
-
 INPUT_TEMPLATE = {
     "prefix": "Translate this into French:\n",
     "suffix": "\n",

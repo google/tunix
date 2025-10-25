@@ -14,22 +14,21 @@
 
 """Common test utilities."""
 
-from typing import List, Tuple, Any
 from collections.abc import Iterable
 import dataclasses
+import gc
+import os
+import shutil
+from typing import Any, List, Tuple
 
 from flax import config as flax_config
 from flax import nnx
+import huggingface_hub
 import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-
 import sentencepiece as spm
-import huggingface_hub
-import os
-import shutil
-import gc
 
 if hasattr(flax_config, 'flax_always_shard_variable'):
   flax_config.update('flax_always_shard_variable', False)

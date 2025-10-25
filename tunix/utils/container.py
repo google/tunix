@@ -15,10 +15,9 @@
 """Container for flax modules."""
 from flax import nnx
 
-
 ModuleList = list
 
-# To accomodate github requirements. nnx.List is available in flax 0.12.0 and 
+# To accomodate github requirements. nnx.List is available in flax 0.12.0 and
 # later.
 if hasattr(nnx, "List"):
   ModuleList = nnx.List  # noqa: N816 (public alias)

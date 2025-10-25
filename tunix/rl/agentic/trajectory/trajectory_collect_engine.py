@@ -31,7 +31,6 @@ from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 
-
 BaseEnv = base_environment.BaseEnv
 Trajectory = base_agent.Trajectory
 LLMBaseAgent = base_agent.LLMBaseAgent
@@ -57,8 +56,9 @@ class TrajectoryCollectEngine:
       env=None,
       *,
       model_call: Callable[[list[Dict[str, str]]], str],
-      final_reward_fn: Optional[Callable[[Dict[str, Any], str],
-                                         reward_types.RewardOutput]] = None,
+      final_reward_fn: Optional[
+          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+      ] = None,
       max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,
@@ -143,14 +143,12 @@ class TrajectoryCollectEngine:
               "assistant_masks": getattr(step, "assistant_masks", []),
               "env_tokens": getattr(step, "env_tokens", []),
               "env_masks": getattr(step, "env_masks", []),
-              "conversation_tokens": (
-                  getattr(step, "assistant_tokens", [])
-                  + getattr(step, "env_tokens", [])
-              ),
-              "conversation_masks": (
-                  getattr(step, "assistant_masks", [])
-                  + getattr(step, "env_masks", [])
-              ),
+              "conversation_tokens": getattr(
+                  step, "assistant_tokens", []
+              ) + getattr(step, "env_tokens", []),
+              "conversation_masks": getattr(
+                  step, "assistant_masks", []
+              ) + getattr(step, "env_masks", []),
               "reward": step.reward,
               "mc_return": step.mc_return,
           }
@@ -187,8 +185,9 @@ class TrajectoryCollectEngine:
       pairs: List[Tuple[LLMBaseAgent, BaseEnv]],
       *,
       model_call: Callable[[list[Dict[str, str]]], str],
-      final_reward_fn: Optional[Callable[[Dict[str, Any], str],
-                                         reward_types.RewardOutput]] = None,
+      final_reward_fn: Optional[
+          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+      ] = None,
       max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,

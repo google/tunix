@@ -178,9 +178,7 @@ def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
   expression = question_str.replace("= ?", "").replace("=", "").strip()
 
   try:
-    answer_str = (
-        action.replace("The answer is ", "").strip().rstrip(".")
-    )
+    answer_str = action.replace("The answer is ", "").strip().rstrip(".")
     answer = float(answer_str)
     correct_value = eval(expression)
     tolerance = 1e-6
