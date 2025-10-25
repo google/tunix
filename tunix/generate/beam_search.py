@@ -93,7 +93,7 @@ def beam_search_step(
     cache: dict[str, dict[str, jaxtyping.Array]],
     logits_buffer: jax.Array | None,
     state: _BeamSearchSamplingState,
-    pad_token_id: int,
+    pad_token_id: jax.Array,
     decoding_step: int,
 ) -> tuple[_BeamSearchSamplingState, dict[str, Any]]:
   """Beam search step.

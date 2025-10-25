@@ -679,14 +679,47 @@ class HyperParameters:
     return config_oconf
 
   def obtain_reward_fn(self) -> List[Callable[..., Any]]:
+    """Obtain reward function from the config."""
     reward_fns = []
-    logging.info(
-        "self.config['reward_functions'] %s", self.config["reward_functions"]
-    )
-    for path_str in self.config["reward_functions"]:
-      function = self._get_function_from_path(path_str)
-      if function:
-        reward_fns.append(function)
+    for reward_fn_path in self.config["reward_functions"]:
+      module_name = os.path.splitext(os.path.basename(reward_fn_path))[0]
+      spec = importlib.util.spec_from_file_location(module_name, reward_fn_path)
+
+      if spec is None:
+        raise ImportError(f"Cannot find spec for module at {reward_fn_path}")
+      if spec.loader is None:
+        raise ImportError(f"Spec for module {module_name} has no loader")
+
+      module = importlib.util.module_from_spec(spec)
+
+      try:
+        spec.loader.exec_module(module)
+      except Exception as e:
+        raise ImportError(
+            f"Failed to execute module {module_name} from {reward_fn_path}: {e}"
+        )
+
+      if self.config["verl_compatible"]:
+
+        def reward_fn(prompts, completions, reward_model, **kwargs):
+          del prompts, kwargs
+          ground_truths = reward_model["ground_truth"]
+          return [
+              module.compute_score(c, gt)
+              for c, gt in zip(completions, ground_truths)
+          ]
+
+        reward_fns.append(reward_fn)
+
+      else:
+        # Get all defined functions in the file as reward functions
+        defined_functions = []
+        for _, member in inspect.getmembers(module):
+          if inspect.isfunction(member):
+            # Check if the function was defined in this module
+            if member.__module__ == module_name:
+              defined_functions.append(member)
+        reward_fns.extend(defined_functions)
     return reward_fns
 
   def _get_function_from_path(self, path_str):

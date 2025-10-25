@@ -29,6 +29,7 @@ from tunix.distillation.distillation_trainer import DistillationTrainer
 from tunix.distillation.distillation_trainer import TrainingConfig as DistillationTrainingConfig
 from tunix.generate.sampler import CacheConfig
 from tunix.generate.sampler import Sampler
+from tunix.generate.tokenizer_adapter import TokenizerAdapter, Tokenizer
 from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GrpoConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner
@@ -44,6 +45,7 @@ from tunix.rl.rl_cluster import RLCluster
 from tunix.rl.rl_cluster import RLTrainingConfig
 from tunix.rl.rl_cluster import Role
 from tunix.rl.rollout.base_rollout import RolloutConfig
+from tunix.sft.checkpoint_manager import CheckpointManager
 from tunix.sft.dpo.dpo_trainer import DPOTrainer
 from tunix.sft.dpo.dpo_trainer import DpoTrainer
 from tunix.sft.dpo.dpo_trainer import DPOTrainingConfig

@@ -14,10 +14,13 @@
 
 """Checkpoint manager for PEFT."""
 
+import os
 import time
+from typing import Any, Tuple
 
 from absl import logging
 from flax import nnx
+import jax
 import orbax.checkpoint as ocp
 
 _DEFAULT_CHECKPOINTING_OPTIONS = ocp.CheckpointManagerOptions(
@@ -45,8 +48,24 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if root_directory is not None:
+      # When using Pathways, the checkpoint manager only supports persistence
+      # APIs now.
+      if 'proxy' in os.getenv('JAX_PLATFORMS', ''):
+        item_handlers = {
+            'model_params': ocp.PyTreeCheckpointHandler(
+                use_ocdbt=False,
+                use_zarr3=False,
+            ),
+        }
+        logging.info('Using persistence APIs for checkpointing with Pathways.')
+      else:
+        item_handlers = {
+            'model_params': ocp.PyTreeCheckpointHandler(),
+        }
+      item_handlers['custom_metadata'] = ocp.JsonCheckpointHandler()
       self._checkpoint_manager = ocp.CheckpointManager(
           root_directory,
+          item_handlers=item_handlers,
           options=options or _DEFAULT_CHECKPOINTING_OPTIONS,
       )
 
@@ -62,6 +81,7 @@ class CheckpointManager:
       model: nnx.Module,
       save_only_lora_params: bool = False,
       force: bool = False,
+      custom_metadata: dict[str, Any] | None = None,
   ) -> bool:
     """Saves the params for the given step.
 
@@ -71,6 +91,7 @@ class CheckpointManager:
       save_only_lora_params: Whether to save only the LoRA params.
       force: Whether to save the checkpoint regardless of the save decision
         policy.
+      custom_metadata: Custom metadata to save with the checkpoint.
 
     Returns:
       Whether the checkpoint was saved.
@@ -83,11 +104,15 @@ class CheckpointManager:
       params = nnx.state(model, nnx.LoRAParam)
     else:
       params = nnx.state(model)
+    checkpoint_args = ocp.args.PyTreeSave(
+        item=params, save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params)
+    )
     return self._checkpoint_manager.save(
         step,
         args=ocp.args.Composite(
-            model_params=ocp.args.StandardSave(params),
+            model_params=checkpoint_args,
         ),
+        custom_metadata=custom_metadata or {},
         force=force,
     )
 
@@ -96,7 +121,7 @@ class CheckpointManager:
       model: nnx.Module,
       step: int | None = None,
       restore_only_lora_params: bool = False,
-  ) -> int:
+  ) -> Tuple[int, dict[str, Any]]:
     """Restores the params from the latest checkpoint if available and updates the model provided.
 
     Args:
@@ -107,34 +132,48 @@ class CheckpointManager:
 
     Returns:
       The step of the restored checkpoint or 0 if no checkpoint is available.
+
+    Raises:
+      RuntimeError: If the checkpoint cannot be restored.
     """
     restore_start = time.time()
     if self._checkpoint_manager is None:
-      return 0
+      return 0, {}
     if step is None:
       step = self._checkpoint_manager.latest_step()
       # If no checkpoint is available, return 0.
       if step is None:
-        return 0
+        return 0, {}
     # Load the params from the checkpoint.
     if restore_only_lora_params:
       abstract_params = nnx.state(model, nnx.LoRAParam)
     else:
       abstract_params = nnx.state(model)
+
+    def map_to_pspec(data):
+      return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
+
+    restore_args_dict = jax.tree_util.tree_map(map_to_pspec, abstract_params)
+    checkpoint_args = ocp.args.PyTreeRestore(
+        item=abstract_params, restore_args=restore_args_dict
+    )
+
     ckpt = self._checkpoint_manager.restore(
         step,
         args=ocp.args.Composite(
-            model_params=ocp.args.StandardRestore(abstract_params),
+            model_params=checkpoint_args,
         ),
     )
     # Update the model state with params from the restored checkpoint.
     nnx.update(model, ckpt.model_params)
     logging.info(
-        "Restored params from step: %d in %.3f seconds",
+        'Restored params from step: %d in %.3f seconds',
         step,
         time.time() - restore_start,
     )
-    return step
+    metadata = self._checkpoint_manager.metadata(step)
+    custom_metadata = metadata.custom_metadata if metadata else {}
+    return step, custom_metadata
 
   def close(self):
     """Closes the checkpoint manager."""

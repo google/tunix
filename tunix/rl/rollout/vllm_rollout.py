@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, Tuple
 from flax import nnx
 import jax
 import jaxtyping
+from tunix.generate import mappings
 from tunix.generate import vllm_sampler
 from tunix.rl.rollout import base_rollout
 
@@ -32,29 +33,25 @@ class VllmRollout(base_rollout.BaseRollout):
       tokenizer: Any,
       cache_config_or_size: base_rollout.CacheConfig | int,
       mesh: jax.sharding.Mesh,
-      model_version: str,
-      hbm_utilization: float,
-      init_with_random_weights: bool,
-      tpu_backend_type: str,
-      lora_config: Optional[Dict[str, str]] = None,
+      rollout_config: base_rollout.RolloutConfig,
   ):
     self.mesh = mesh
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=rollout_config.rollout_mapping_config, model=model, backend="vllm_jax",
+    )
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
             max_model_len=cache_config_or_size,
             mesh=mesh,
-            model_version=model_version,
-            hbm_utilization=hbm_utilization,
-            init_with_random_weights=init_with_random_weights,
-            tpu_backend_type=tpu_backend_type,
-            mapping_config=vllm_sampler.MappingConfig(
-                to_hf_mappings=model.to_hf_mappings(),
-                to_hf_transpose_keys=model.to_hf_transpose_keys(),
-                to_hf_hook_fns=model.to_hf_hook_fns(),
-                lora_to_hf_mappings=model.lora_to_hf_mappings(),
-                lora_config=lora_config,
-            ),
+            model_version=rollout_config.rollout_vllm_model_version,
+            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
+            init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
+            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
+            mapping_config=mapping_config,
+            lora_config=rollout_config.rollout_vllm_lora_config,
+            swap_space=rollout_config.rollout_vllm_swap_space_size_gb,
+            server_mode=rollout_config.rollout_vllm_server_mode,
         ),
     )
     state = nnx.state(model)

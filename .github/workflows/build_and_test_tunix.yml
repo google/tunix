@@ -41,17 +41,32 @@ jobs:
     name: Build tunix package
     uses: ./.github/workflows/build_package.yml
 
+  # copybara:strip_begin
+  # LINT.IfChange()
+  # copybara:strip_end
   tunix_cpu_unit_tests:
+  # copybara:strip_begin
+  # LINT.ThenChange(Internal path for github_actions, don't change this line.)
+  # copybara:strip_end
     needs: build_tunix_package
-    uses: ./.github/workflows/run_tests_against_package.yml
+    uses: ./.github/workflows/cpu-tests.yml
 
-  tunix_tpu_tests:
+
+  # copybara:strip_begin
+  # LINT.IfChange()
+  # copybara:strip_end
+  tunix_tpu_unit_tests:
+  # copybara:strip_begin
+  # LINT.ThenChange(Internal path for github_actions, don't change this line.)
+  # copybara:strip_end
     needs: build_tunix_package
     uses: ./.github/workflows/tpu-tests.yml
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [tunix_cpu_unit_tests, tunix_tpu_tests]
+    needs: [build_tunix_package,tunix_cpu_unit_tests, tunix_tpu_unit_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:

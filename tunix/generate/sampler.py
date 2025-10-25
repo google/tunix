@@ -404,7 +404,7 @@ class Sampler(base_sampler.BaseSampler):
   def _sample(
       self,
       logits: jnp.ndarray,
-      eos: int,
+      eos: jax.Array,
       cache: dict[str, dict[str, jaxtyping.Array]],
       sampler_state: _SamplingState,
   ) -> _SamplingState:
@@ -427,7 +427,7 @@ class Sampler(base_sampler.BaseSampler):
           cache=cache,
           logits_buffer=logits_buffer,
           state=beam_search_state,
-          pad_token_id=eos,
+          pad_token_id=eos[0],
           decoding_step=decoding_step,
       )
       cache = updated_args['cache']
@@ -454,7 +454,7 @@ class Sampler(base_sampler.BaseSampler):
           next_token_candidate
       )
 
-    done = done | jnp.equal(token_buffer[:, decoding_step + 1], eos)
+    done = done | jnp.isin(token_buffer[:, decoding_step + 1], eos)
     return _SamplingState(
         decoding_step=sampler_state.decoding_step + 1,
         num_input_tokens=sampler_state.num_input_tokens,
@@ -558,7 +558,7 @@ class Sampler(base_sampler.BaseSampler):
     updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
-        eos=self.tokenizer.eos_id(),
+        eos=self.eos_ids,
         sampler_state=updated_sampling_state,
     )
     return updated_sampler_state
@@ -608,7 +608,7 @@ class Sampler(base_sampler.BaseSampler):
     updated_sampler_state = self._sample(
         logits=logits,
         cache=cache,
-        eos=self.tokenizer.eos_id(),
+        eos=self.eos_ids,
         sampler_state=sampler_state,
     )
 
@@ -628,11 +628,12 @@ class Sampler(base_sampler.BaseSampler):
 
   def __call__(
       self,
-      input_strings: Sequence[str],
+      input_strings: str | Sequence[str],
       max_generation_steps: int,
       max_prompt_length: int | None = None,
       echo: bool = False,
       return_logits: bool = False,
+      eos_tokens: Sequence[int] | None = None,
       forbidden_tokens: Sequence[str] | None = None,
       temperature: float = 0.0,
       top_p: Optional[float] = None,
@@ -655,6 +656,8 @@ class Sampler(base_sampler.BaseSampler):
         recompilation on different prompt lengths.
       echo: whgether to return the prompt as part of the output sample.
       return_logits: whether to return per-step logits used during generation.
+      eos_tokens: end of sequence tokens to stop generation. If None, the
+        tokenizer's eos_id will be used.
       forbidden_tokens: list of tokens that are forbidden to be generated. Each
         token must map to a single token id in the vocab.
       temperature: temperature for sampling.
@@ -671,6 +674,11 @@ class Sampler(base_sampler.BaseSampler):
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
     """
+    self.eos_ids = jnp.array(eos_tokens or [self.tokenizer.eos_id()])
+    input_strings = (
+        [input_strings] if isinstance(input_strings, str) else input_strings
+    )
+
     forbidden_token_ids = None
     if forbidden_tokens is not None:
       forbidden_token_ids = []
@@ -687,6 +695,7 @@ class Sampler(base_sampler.BaseSampler):
     max_tokens_length = max(len(x) for x in tokens)
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
+
     all_input_ids = jnp.array([
         utils.pad_to_length(
             x,
@@ -696,11 +705,12 @@ class Sampler(base_sampler.BaseSampler):
         )
         for x in tokens
     ])
+
     total_sampling_steps = max_prompt_length + max_generation_steps
     if total_sampling_steps > self.cache_config.cache_size:
       raise ValueError(
-          'Total sampling steps must be less than the cache size'
-          f' {self.cache_config.cache_size}.'
+          f'Total sampling steps {total_sampling_steps} must be less than the'
+          f' cache size {self.cache_config.cache_size}.'
       )
 
     if seed is None:
@@ -748,7 +758,7 @@ class Sampler(base_sampler.BaseSampler):
           return_logits,
           echo,
           self.tokenizer.pad_id(),
-          self.tokenizer.eos_id(),
+          self.eos_ids,
           max_prompt_length,
           max_len,
       )
@@ -768,7 +778,7 @@ class Sampler(base_sampler.BaseSampler):
         )
         end_idx = (
             utils.find_first_eos_idx(
-                token_buffer[max_prompt_length:], self.tokenizer.eos_id()
+                token_buffer[max_prompt_length:], self.eos_ids
             )
             + max_prompt_length
         )

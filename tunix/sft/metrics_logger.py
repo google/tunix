@@ -109,6 +109,9 @@ def register_jax_monitoring(metrics_logger_options: MetricsLoggerOptions):
     A list containing registered metric writers. Currently only returns a
     single TensorBoard Summary Writer instance.
   """
+  # Only register the writer on the main process to avoid race conditions.
+  if jax.process_index() != 0:
+    return []
   # Register TensorBoard backend.
   tensorboard_summary_writer = writer.SummaryWriter(
       logdir=metrics_logger_options.log_dir

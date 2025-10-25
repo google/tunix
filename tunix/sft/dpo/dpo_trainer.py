@@ -109,7 +109,7 @@ def compute_logps(
     completion_mask,
 ):
   """Computes the log probabilities for chosen and rejected tokens."""
-  token_logps, _ = common.get_per_token_logps(
+  token_logps = common.get_per_token_logps(
       model,
       input_tokens=input_ids,
       positions=positions,
@@ -155,7 +155,8 @@ class DPOTrainer(peft_trainer.PeftTrainer):
       model: The policy model to be trained.
       ref_model: The reference/anchor model which is kept fixed/frozen during
         training. It is used to prevent the policy model from drifting too far
-        from its original capabilities.
+        from its original capabilities. If `ref_model` is None, we don't use it
+        in the loss term.
       optimizer: The optimizer used for training the policy model.
       training_config: A `DPOTrainingConfig` object containing DPO-specific
         hyperparameters like `beta` and `label_smoothing`.
@@ -173,13 +174,32 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         else tokenizer_adapter.TokenizerAdapter(tokenizer)
     )
 
-    self.loss_fn = dpo_loss_fn
+    self.with_loss_fn(dpo_loss_fn, has_aux=True)
+    self.with_gen_model_input_fn(
+        lambda x: {
+            "train_example": x,
+            "beta": self.dpo_config.beta,
+            "label_smoothing": self.dpo_config.label_smoothing,
+        }
+    )
     self.gen_model_input_fn = lambda x: {
         "train_example": x,
         "beta": self.dpo_config.beta,
         "label_smoothing": self.dpo_config.label_smoothing,
     }
     self._has_aux = True
+
+    # If reference model is not provided, we don't use it in the loss term.
+    self._ref_model_exists = ref_model is not None
+
+    self._aux_metrics_to_log = {
+        "rewards/chosen": np.mean,
+        "rewards/rejected": np.mean,
+        "rewards/margin": np.mean,
+        "rewards/accuracy": np.mean,
+        "log_probs/chosen": np.mean,
+        "log_probs/rejected": np.mean,
+    }
 
   @override
   def _prepare_inputs(
@@ -242,14 +262,17 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     positions = common.build_positions_from_mask(mask)
 
     # Compute the log probabilities for the chosen and rejected tokens.
-    ref_chosen_logps, ref_rejected_logps = compute_logps(
-        self.ref_model,
-        input_ids,
-        positions,
-        attention_mask,
-        logits_to_keep,
-        completion_mask,
-    )
+    ref_chosen_logps = None
+    ref_rejected_logps = None
+    if self._ref_model_exists:
+      ref_chosen_logps, ref_rejected_logps = compute_logps(
+          self.ref_model,
+          input_ids,
+          positions,
+          attention_mask,
+          logits_to_keep,
+          completion_mask,
+      )
     return TrainExample(
         input_ids=input_ids,
         positions=positions,
@@ -262,27 +285,31 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:
-    m, s = self._mode, self._train_steps
-    self.metrics_logger.log("rewards/chosen", aux["rewards/chosen"], m, s)
-    self.metrics_logger.log("rewards/rejected", aux["rewards/rejected"], m, s)
-    self.metrics_logger.log("rewards/margin", aux["rewards/margin"], m, s)
-    self.metrics_logger.log("rewards/accuracy", aux["rewards/accuracy"], m, s)
-    self.metrics_logger.log("log_probs/chosen", aux["log_probs/chosen"], m, s)
-    self.metrics_logger.log(
-        "log_probs/rejected", aux["log_probs/rejected"], m, s
-    )
+    assert self._buffered_train_metrics is not None
+    for metric_name, op in self._aux_metrics_to_log.items():
+      if metric_name not in self._buffered_train_metrics.additional_metrics:
+        self._buffered_train_metrics.additional_metrics[metric_name] = (
+            [aux[metric_name]],
+            op,
+        )
+      else:
+        self._buffered_train_metrics.additional_metrics[metric_name][0].append(
+            aux[metric_name]
+        )
 
   @override
   def _post_process_eval_step(self, aux: Any) -> None:
-    m, s = self._mode, self._train_steps
-    self.metrics_logger.log("rewards/chosen", aux["rewards/chosen"], m, s)
-    self.metrics_logger.log("rewards/rejected", aux["rewards/rejected"], m, s)
-    self.metrics_logger.log("rewards/margin", aux["rewards/margin"], m, s)
-    self.metrics_logger.log("rewards/accuracy", aux["rewards/accuracy"], m, s)
-    self.metrics_logger.log("log_probs/chosen", aux["log_probs/chosen"], m, s)
-    self.metrics_logger.log(
-        "log_probs/rejected", aux["log_probs/rejected"], m, s
-    )
+    assert self._buffered_eval_metrics is not None
+    for metric_name, op in self._aux_metrics_to_log.items():
+      if metric_name not in self._buffered_eval_metrics.additional_metrics:
+        self._buffered_eval_metrics.additional_metrics[metric_name] = (
+            [aux[metric_name]],
+            op,
+        )
+      else:
+        self._buffered_eval_metrics.additional_metrics[metric_name][0].append(
+            aux[metric_name]
+        )
 
 
 def dpo_loss_fn(
@@ -301,19 +328,27 @@ def dpo_loss_fn(
       train_example.completion_mask,
   )
 
-  chosen_rewards = chosen_logps - train_example.ref_chosen_logps
-  rejected_rewards = rejected_logps - train_example.ref_rejected_logps
-  margin = chosen_rewards - rejected_rewards
-
-  losses = (
-      -jax.nn.log_sigmoid(beta * margin) * (1 - label_smoothing)
-      - jax.nn.log_sigmoid(-beta * margin) * label_smoothing
+  # Compute DPO loss.
+  chosen_log_ratio = chosen_logps
+  if train_example.ref_chosen_logps is not None:
+    chosen_log_ratio = chosen_log_ratio - train_example.ref_chosen_logps
+  rejected_log_ratio = rejected_logps
+  if train_example.ref_rejected_logps is not None:
+    rejected_log_ratio = rejected_log_ratio - train_example.ref_rejected_logps
+  delta = chosen_log_ratio - rejected_log_ratio
+  losses = -(
+      jax.nn.log_sigmoid(beta * delta) * (1 - label_smoothing)
+      + jax.nn.log_sigmoid(-beta * delta) * label_smoothing
   )
+
+  # Compute rewards.
+  chosen_rewards = beta * chosen_log_ratio
+  rejected_rewards = beta * rejected_log_ratio
 
   aux = {
       "rewards/chosen": chosen_rewards.mean(),
       "rewards/rejected": rejected_rewards.mean(),
-      "rewards/margin": margin.mean(),
+      "rewards/margin": (chosen_rewards - rejected_rewards).mean(),
       "rewards/accuracy": (chosen_rewards > rejected_rewards).mean(),
       "log_probs/chosen": chosen_logps.mean(),
       "log_probs/rejected": rejected_logps.mean(),

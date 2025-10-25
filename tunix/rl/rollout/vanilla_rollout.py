@@ -62,6 +62,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         top_k=rollout_config.top_k,
         seed=rollout_config.seed,
         pad_output=True,
+        eos_tokens=rollout_config.eos_tokens,
     )
     return base_rollout.RolloutOutput(
         text=output.text,
@@ -85,7 +86,9 @@ class VanillaRollout(base_rollout.BaseRollout):
         pad_id=self.pad_id(),
         eos_id=self.eos_id(),
         completion_mask=completion_mask,
-    )[0]
+        stop_gradient=True,
+        return_logits=False,
+    )
 
   def update_params(
       self,

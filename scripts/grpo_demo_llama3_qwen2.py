@@ -24,19 +24,15 @@ python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 """
 
 import argparse
-import gc
 import json
 import os
 import pprint
 import re
-import shutil
 
 from absl import logging
 from flax import nnx
 import grain
-import huggingface_hub
 import jax
-from jax import numpy as jnp
 import optax
 from orbax import checkpoint as ocp
 import qwix
@@ -51,6 +47,7 @@ from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import utils
+from tunix.tests import test_common as tc
 
 logging.set_verbosity(logging.INFO)
 
@@ -82,6 +79,35 @@ parser.add_argument(
     default="meta-llama/Llama-3.2-1B-Instruct",
     required=False,
     help="The model version to use.",
+)
+parser.add_argument(
+      "--num-batches",
+      type=int,
+      default=1869,
+      required=False,
+      help="Number of batches for training.",
+  )
+parser.add_argument(
+    "--num-test-batches",
+    type=int,
+    default=50,
+    required=False,
+    help="Number of test batches for evaluation.",
+)
+parser.add_argument(
+    "--rollout-engine",
+    type=str,
+    default="vanilla",
+    choices=["vanilla", "vllm"],
+    required=False,
+    help="Rollout engine to use (vanilla or vllm).",
+)
+parser.add_argument(
+    "--rollout-server-mode",
+    type=bool,
+    default=False,
+    required=False,
+    help="Rollout engine server model.",
 )
 
 # Parse arguments
@@ -162,13 +188,13 @@ EPSILON = 0.2
 # ====== Training ======
 # 2 is the max we can do on v5e-8 with llama3 8B model.
 # 4 is the max we can do on v5e-8 with llama3 1B model.
-BATCH_SIZE = 4
+TRAIN_MICRO_BATCH_SIZE = 4
 # To speed up for quick workflow validation, we can change NUM_BATCHES to e.g. 2
-NUM_BATCHES = 1869
+NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 # To speed up for quick workflow validation, we can change it to e.g. 1
-NUM_TEST_BATCHES = 50
+NUM_TEST_BATCHES = args.num_test_batches
 
 EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
@@ -218,40 +244,12 @@ PROFILER_PATH = os.path.join(
     args.root_dir, "rl/grpo/demo/experiments/llama3/profiler"
 )
 
-
-def delete_directory(path: str):
-  if os.path.exists(path):
-    if os.path.isdir(path):
-      shutil.rmtree(path)
-      print(f"Deleted directory: {path}")
-    else:
-      print(f"Path exists but is not a directory: {path}")
-  else:
-    print(f"Directory does not exist: {path}")
-
-
 # Delete local checkpoint directory
-delete_directory(CKPT_DIR)
+tc.delete_directory(CKPT_DIR)
+tc.clear_jax_arrays()
 
-for name, obj in list(globals().items()):
-  if isinstance(obj, jnp.ndarray):
-    del globals()[name]
-gc.collect()
-
-
-# Download data
-def download_hf_checkpoint(repo_id, local_dir):
-  all_files = huggingface_hub.list_repo_files(repo_id)
-  filtered_files = [f for f in all_files if not f.startswith("original/")]
-
-  for filename in filtered_files:
-    huggingface_hub.hf_hub_download(
-        repo_id=repo_id, filename=filename, local_dir=local_dir
-    )
-  print(f"Downloaded {filtered_files} to: {local_dir}")
-
-
-download_hf_checkpoint(HF_MODEL_VERSION, VLLM_MODEL_VERSION)
+# Download checkpoints
+tc.download_from_huggingface(repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION)
 
 
 def download_from_gcs(zip_gcs_path, target_path):
@@ -284,7 +282,6 @@ def load_json_from_local(path):
   # with gfile.Open(path, "rb") as f:
   with open(path, "rb") as f:
     return json.loads(f.read())
-
 
 show_hbm_usage()
 
@@ -344,7 +341,7 @@ def get_dataset(path: str) -> grain.MapDataset:
   return loaded_dataset
 
 
-dataset = get_dataset(TRAIN_DATA_PATH).batch(BATCH_SIZE)[:NUM_BATCHES]
+dataset = get_dataset(TRAIN_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_BATCHES]
 
 if TRAIN_FRACTION == 1.0:
   train_dataset = dataset.repeat(NUM_EPOCHS)
@@ -355,7 +352,7 @@ else:
 
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
-test_dataset = get_dataset(TEST_DATA_PATH).batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
+test_dataset = get_dataset(TEST_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_TEST_BATCHES]
 
 print(
     f"train_dataset size: {len(train_dataset)}, val_dataset size:"
@@ -778,13 +775,14 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rl_cluster_lib.Role.REFERENCE: mesh,
         rl_cluster_lib.Role.ROLLOUT: mesh,
     },
-    rollout_engine="vllm",
+    rollout_engine=args.rollout_engine,
     offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
-        gradient_accumulation_steps=1,
+        mini_batch_size=TRAIN_MICRO_BATCH_SIZE,
+        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -798,10 +796,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
+        rollout_vllm_model_version=VLLM_MODEL_VERSION,
+        rollout_vllm_hbm_utilization=0.2,
+        rollout_vllm_tpu_backend_type="jax",
+        rollout_vllm_server_mode=args.rollout_server_mode,
     ),
-    rollout_vllm_model_version=VLLM_MODEL_VERSION,
-    rollout_vllm_hbm_utilization=0.2,
-    rollout_vllm_tpu_backend_type="jax",
+
 )
 
 grpo_config = grpo_learner.GRPOConfig(
@@ -874,7 +874,7 @@ with mesh:
 
 show_hbm_usage("After training the reference lora model")
 
-trained_ckpt_path = os.path.join(CKPT_DIR, str(MAX_STEPS), "model_params")
+trained_ckpt_path = os.path.join(CKPT_DIR, "actor", str(MAX_STEPS), "model_params")
 
 filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
 abs_params = jax.tree.map(

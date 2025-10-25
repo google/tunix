@@ -32,25 +32,26 @@ class DummyLearner(rl_learner.RLLearner):
 class RLLearnerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
-      ('1', None, None, None, None, [32, 32, 32, 32]),
-      ('2', 8, None, None, None, [8, 8, 8, 8]),
-      ('3', 8, 2, None, None, [8, 2, 2, 2]),
-      ('4', 8, 4, 8, None, [8, 4, 8, 4]),
-      ('5', 8, 4, None, 4, [8, 4, 4, 4]),
-      ('6', 16, 8, 16, 8, [16, 8, 16, 8]),
+      ('1', None, None, None, None, [32, 32], False),
+      ('2', 8, None, None, None, [8, 8], False),
+      ('3', 8, 2, None, None, [2, 2], False),
+      ('4', 8, 4, 4, 4, [4, 4], False),
+      ('5', 8, 4, 3, 4, [], True),
+      ('6', 8, 4, 4, 3, [], True),
   )
   def test_micro_batching(
       self,
       mini_batch_size,
-      training_micro_batch_size,
+      train_micro_batch_size,
       rollout_micro_batch_size,
       compute_logps_micro_batch_size,
       expected_values,
+      expect_failure,
   ):
     config = rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
         mini_batch_size=mini_batch_size,
-        training_micro_batch_size=training_micro_batch_size,
+        train_micro_batch_size=train_micro_batch_size,
         rollout_micro_batch_size=rollout_micro_batch_size,
         compute_logps_micro_batch_size=compute_logps_micro_batch_size,
         eval_every_n_steps=1,
@@ -74,23 +75,22 @@ class RLLearnerTest(parameterized.TestCase):
     full_batch_size = 32
     train_ds = [{'prompts': [''] * full_batch_size}]
 
-    learner.train(train_ds)
+    if expect_failure:
+      with self.assertRaises(ValueError):
+        learner.train(train_ds)
+    else:
+      learner.train(train_ds)
+      (
+          expected_rollout_micro,
+          expected_compute_logps_micro,
+      ) = expected_values
 
-    (
-        expected_mini_batch,
-        expected_training_micro,
-        expected_rollout_micro,
-        expected_compute_logps_micro,
-    ) = expected_values
-
-    self.assertEqual(learner._mini_batch_size, expected_mini_batch)
-    self.assertEqual(
-        learner._training_micro_batch_size, expected_training_micro
-    )
-    self.assertEqual(learner._rollout_micro_batch_size, expected_rollout_micro)
-    self.assertEqual(
-        learner._compute_logps_micro_batch_size, expected_compute_logps_micro
-    )
+      self.assertEqual(
+          learner._rollout_micro_batch_size, expected_rollout_micro
+      )
+      self.assertEqual(
+          learner._compute_logps_micro_batch_size, expected_compute_logps_micro
+      )
 
 
 if __name__ == '__main__':
