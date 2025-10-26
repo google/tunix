@@ -33,25 +33,33 @@ class VllmRollout(base_rollout.BaseRollout):
       tokenizer: Any,
       cache_config_or_size: base_rollout.CacheConfig | int,
       mesh: jax.sharding.Mesh,
-      rollout_config: base_rollout.RolloutConfig,
+      model_version: str,
+      hbm_utilization: float,
+      init_with_random_weights: bool,
+      tpu_backend_type: str,
+      swap_space: float = 4.0,  # in GiB
+      server_mode: bool = False,
+      lora_config: Optional[Dict[str, str]] = None,
+      mapping_config: Optional[mappings.MappingConfig] = None,
+      rollout_engine: str = "vllm_jax",
   ):
     self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
-        mapping_obj=rollout_config.rollout_mapping_config, model=model, backend="vllm_jax",
+        mapping_obj=mapping_config, model=model, backend=rollout_engine
     )
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
             max_model_len=cache_config_or_size,
             mesh=mesh,
-            model_version=rollout_config.rollout_vllm_model_version,
-            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
-            init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
-            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
+            model_version=model_version,
+            hbm_utilization=hbm_utilization,
+            init_with_random_weights=init_with_random_weights,
+            tpu_backend_type=tpu_backend_type,
             mapping_config=mapping_config,
-            lora_config=rollout_config.rollout_vllm_lora_config,
-            swap_space=rollout_config.rollout_vllm_swap_space_size_gb,
-            server_mode=rollout_config.rollout_vllm_server_mode,
+            lora_config=lora_config,
+            swap_space=swap_space,
+            server_mode=server_mode,
         ),
     )
     state = nnx.state(model)
