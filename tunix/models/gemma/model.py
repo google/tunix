@@ -83,7 +83,7 @@ class ShardingConfig:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True)
 class ModelConfig:
   """Configuration for the gemma transformer."""
 
@@ -480,7 +480,11 @@ class Attention(nnx.Module):
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
 
@@ -660,6 +664,7 @@ class Block(nnx.Module):
   @property
   def use_pre_ffw_norm(self):
     return hasattr(self, 'pre_ffw_norm') and self.pre_ffw_norm is not None
+
 
 class RMSNorm(nnx.Module):
   """RMSNorm layer."""

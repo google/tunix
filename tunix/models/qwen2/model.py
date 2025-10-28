@@ -80,7 +80,7 @@ class ShardingConfig:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True)
 class ModelConfig:
   """Configuration for the Qwen3 model."""
 
@@ -483,7 +483,9 @@ class Attention(nnx.Module):
       cos: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block)(x, cache, attn_mask, sin, cos)
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
     else:
       return self.block(x, cache, attn_mask, sin, cos)
 

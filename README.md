@@ -62,13 +62,13 @@ Tunix is still under development, here's a glimpse of the current features:
   - Addtional state-of-the-art RL and distillation algorithms
 - **Scalability:**
   - Multi-host distributed training
-  - Optimized rollout with vLLM
+  - Optimized rollout with vLLM or SGLang-Jax
 - **User Guides:**
   - More advanced RL recipe
 
 ## Installation
 
-You can install Tunix in several ways:
+- You can install Tunix in several ways:
 
 1. From PyPI (recommended):
 
@@ -98,6 +98,17 @@ pip install -e ".[dev]"
 # Then install vLLM and tpu-inference
 ```
 
+- Using tunix with SGLang-Jax rollout
+
+1. Install tunix using above ways
+1. Then install SGLang-Jax
+
+```
+git clone git@github.com:sgl-project/sglang-jax.git
+cd sglang-jax/python
+pip install -e .
+```
+
 ## Getting Started
 
 To get started, we have a bunch of detailed examples and tutorials.
@@ -105,6 +116,7 @@ To get started, we have a bunch of detailed examples and tutorials.
 - [PEFT Gemma with QLoRA](https://github.com/google/tunix/blob/main/examples/qlora_demo.ipynb)
 - [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_demo.ipynb)
 - [Logit Distillation using Gemma models](https://github.com/google/tunix/blob/main/examples/logit_distillation.ipynb)
+- [Training Llama3 or Qwen2 using GRPO and SGLang-Jax rollout](https://github.com/google/tunix/blob/main/scripts/grpo_demo_sglang_jax_rollout.py)
 
 To setup Jupyter notebook on single host GCP TPU VM, please refer to the
 [setup script](https://github.com/google/tunix/blob/main/scripts/setup_notebook_tpu_single_host.sh).

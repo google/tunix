@@ -163,7 +163,7 @@ jobs:
     - name: Run tunix tests not covered by the above categories
       run: |
         # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
-        python -m pytest tests/ -v --tb=short --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ || code=$?
+        python -m pytest tests/ -v --tb=short --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ || code=$?
         if [ "${code:-0}" = "5" ]; then
           echo "No tests collected (expected)."
           exit 0

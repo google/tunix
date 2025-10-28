@@ -23,22 +23,31 @@ on:
 permissions:
   contents: read
 jobs: 
+  # copybara:strip_begin
+  # LINT.IfChange()
+  # copybara:strip_end
   run:
+  # copybara:strip_begin
+  # LINT.ThenChange(Internal path for github_actions, don't change this line.)
+  # copybara:strip_end
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+
       - name: Download the tunix wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: tunix-wheel
+
       - name: Install the tunix wheel
         run: |
           python -m pip install --upgrade pip
           python -m pip install google_tunix-*-py3-none-any.whl
           python -m pip install pytest
+
       - name: Verify Tunix imports from installed package
         run: |
           python3 -c "
@@ -59,3 +68,8 @@ jobs:
       - name: Run Cli utils tests
         run: |
           python -m pytest tests/cli/utils/ -v --tb=short
+
+      - name: Run model alignment tests
+        run: |
+          python -m pip install torch
+          python -m pytest tests/model_alignment/ -v --tb=short

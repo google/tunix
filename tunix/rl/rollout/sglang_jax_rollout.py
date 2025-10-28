@@ -33,29 +33,22 @@ class SglangJaxRollout(base_rollout.BaseRollout):
       model: Any,
       tokenizer: Any,
       mesh: jax.sharding.Mesh,
-      model_version: str,
-      context_length: int,
-      mem_fraction_static: float,
-      init_with_random_weights: bool,
-      disable_radix_cache: bool,
-      enable_deterministic_sampling: bool,
-      mapping_config: Optional[mappings.MappingConfig] = None,
-      rollout_engine: str = "sglang_jax",
+      rollout_config: base_rollout.RolloutConfig,
   ):
     self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
-        mapping_obj=mapping_config, model=model, backend=rollout_engine
+        mapping_obj=rollout_config.rollout_mapping_config, model=model, backend="sglang_jax",
     )
     self._sampler = sglang_jax_sampler.SglangJaxSampler(
         tokenizer=tokenizer,
         config=sglang_jax_sampler.SglangJaxConfig(
             mesh=mesh,
-            context_length=context_length,
-            model_version=model_version,
-            mem_fraction_static=mem_fraction_static,
-            init_with_random_weights=init_with_random_weights,
-            disable_radix_cache=disable_radix_cache,
-            enable_deterministic_sampling=enable_deterministic_sampling,
+            context_length=rollout_config.rollout_sglang_jax_context_length,
+            model_version=rollout_config.rollout_sglang_jax_model_version,
+            mem_fraction_static=rollout_config.rollout_sglang_jax_mem_fraction_static,
+            init_with_random_weights=rollout_config.rollout_sglang_jax_init_with_random_weights,
+            disable_radix_cache=rollout_config.rollout_sglang_jax_disable_radix_cache,
+            enable_deterministic_sampling=rollout_config.rollout_sglang_jax_enable_deterministic_sampling,
             mapping_config=mapping_config,
         ),
     )
