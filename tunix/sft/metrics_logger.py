@@ -95,6 +95,13 @@ def log_to_wandb(
   current_step = _get_step(kwargs)
 
   if wandb is not None:
+    if wandb.run is None:
+      wandb_run_name = (
+          datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+          + "_"
+          + "test_run"
+      )
+      wandb.init(project="tunix", name=wandb_run_name, anonymous="allow")
     event = _preprocess_event_name(event)
     wandb.log({event: scalar_value}, step=current_step)
 
