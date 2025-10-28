@@ -36,7 +36,6 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
-from tunix.generate import mappings
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.rl import reshard
@@ -184,22 +183,6 @@ class ClusterConfig:
   rollout_config: (
       dict[Mode, base_rollout.RolloutConfig] | base_rollout.RolloutConfig
   )
-  rollout_mapping_config: mappings.MappingConfig | None = None
-
-  rollout_vllm_server_mode: bool = False
-  rollout_vllm_model_version: str = ""
-  rollout_vllm_lora_config: dict[str, Any] | None = None
-  rollout_vllm_hbm_utilization: float = 0.2
-  rollout_vllm_init_with_random_weights: bool = True
-  rollout_vllm_tpu_backend_type: str | None = None
-  rollout_vllm_swap_space_size_gb: float = 4.0  # in GiB
-
-  rollout_sglang_jax_model_version: str = ""
-  rollout_sglang_jax_context_length: int = 8192
-  rollout_sglang_jax_mem_fraction_static: float = 0.2
-  rollout_sglang_jax_init_with_random_weights: bool = True
-  rollout_sglang_jax_disable_radix_cache: bool = True
-  rollout_sglang_jax_enable_deterministic_sampling: bool = False
 
 
 class RLCluster:
@@ -408,45 +391,48 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
+      loaded_vllm_config = None
+      if isinstance(
+              self.cluster_config.rollout_config, base_rollout.RolloutConfig
+          ):
+        loaded_vllm_config = self.cluster_config.rollout_config
+      elif isinstance(self.cluster_config.rollout_config, dict):
+        loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
 
-      if self.cluster_config.rollout_vllm_model_version is None:
+      if loaded_vllm_config is None:
+        raise ValueError("Rollout vllm model config is missing!")
+
+      if loaded_vllm_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
 
-      backend = (
-          self.cluster_config.rollout_engine
-          + "_"
-          + self.cluster_config.rollout_vllm_tpu_backend_type
-      )
       # TODO(linchai): maybe support offloading for vllm rollout.
       self._rollout = vllm_rollout.VllmRollout(
           self.rollout_actor,
           self.tokenizer,
           cache_config_or_size=max_kv_cache_size,
           mesh=self.r2m[Role.ROLLOUT],
-          model_version=self.cluster_config.rollout_vllm_model_version,
-          hbm_utilization=self.cluster_config.rollout_vllm_hbm_utilization,
-          init_with_random_weights=self.cluster_config.rollout_vllm_init_with_random_weights,
-          tpu_backend_type=self.cluster_config.rollout_vllm_tpu_backend_type,
-          swap_space=self.cluster_config.rollout_vllm_swap_space_size_gb,
-          lora_config=self.cluster_config.rollout_vllm_lora_config,
-          rollout_engine=backend,
-          mapping_config=self.cluster_config.rollout_mapping_config,
-          server_mode=self.cluster_config.rollout_vllm_server_mode,
+          rollout_config=loaded_vllm_config,
       )
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
+      if isinstance(
+          self.cluster_config.rollout_config, base_rollout.RolloutConfig
+      ):
+        loaded_sglang_jax_config = self.cluster_config.rollout_config
+      elif isinstance(self.cluster_config.rollout_config, dict):
+        loaded_sglang_jax_config = self.cluster_config.rollout_config[
+            Mode.TRAIN
+        ]
+      else:
+        raise ValueError(
+            "Rollout sglang jax model config is missing!"
+        )
 
       self._rollout = sglang_jax_rollout.SglangJaxRollout(
           self.rollout_actor,
           self.tokenizer,
           mesh=self.r2m[Role.ROLLOUT],
-          model_version=self.cluster_config.rollout_sglang_jax_model_version,
-          context_length=self.cluster_config.rollout_sglang_jax_context_length,
-          mem_fraction_static=self.cluster_config.rollout_sglang_jax_mem_fraction_static,
-          init_with_random_weights=self.cluster_config.rollout_sglang_jax_init_with_random_weights,
-          disable_radix_cache=self.cluster_config.rollout_sglang_jax_disable_radix_cache,
-          enable_deterministic_sampling=self.cluster_config.rollout_sglang_jax_enable_deterministic_sampling,
-          mapping_config=self.cluster_config.rollout_mapping_config,
+          rollout_config=loaded_sglang_jax_config,
       )
     elif (
         isinstance(self.cluster_config.rollout_engine, type)
@@ -464,7 +450,7 @@ class RLCluster:
           rollout_actor=self.rollout_actor,
           tokenizer=self.tokenizer,
           mesh=self.r2m[Role.ROLLOUT],
-          rl_cluster_config=self.cluster_config,
+          rollout_config=self.cluster_config.rollout_config,
       )
     else:
       raise NotImplementedError(

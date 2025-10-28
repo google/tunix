@@ -15,6 +15,7 @@
 import functools
 import os
 from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -23,12 +24,15 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import optax
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from transformers import tokenization_utils_base
+from tunix.generate import mappings
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 
+
+PreTrainedTokenizerBase = tokenization_utils_base.PreTrainedTokenizerBase
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 Mesh = jax.sharding.Mesh
@@ -220,7 +224,7 @@ class RlClusterTest(parameterized.TestCase):
 
       def __init__(self, my_arg: int = 0, **kwargs):
         self.my_arg = my_arg
-        self.config = kwargs['rl_cluster_config']
+        self.config = kwargs['rollout_config']
 
       def generate(
           self,
@@ -287,6 +291,16 @@ class RlClusterTest(parameterized.TestCase):
               max_prompt_length=256,
               kv_cache_size=1024,
               data_type=jnp.bfloat16,
+              rollout_mapping_config=mappings.MappingConfig.build(
+                  mapping_obj={
+                      'to_hf_mappings': None,
+                      'lora_to_hf_mappings': None,
+                      'to_hf_hook_fns': None,
+                      'to_hf_transpose_keys': None,
+                  },
+                  model=None,
+                  backend=None,
+              ),
           ),
       )
 
@@ -311,7 +325,7 @@ class RlClusterTest(parameterized.TestCase):
     )
     self.assertIsInstance(rl_cluster.rollout, CustomRolloutEngine)
     self.assertEqual(rl_cluster.rollout.my_arg, 1)
-    self.assertEqual(rl_cluster.rollout.config, cluster_config)
+    self.assertEqual(rl_cluster.rollout.config, cluster_config.rollout_config)
 
     # 2. class type
     cluster_config = create_cluster_config(CustomRolloutEngine)
@@ -323,7 +337,7 @@ class RlClusterTest(parameterized.TestCase):
     )
     self.assertIsInstance(rl_cluster.rollout, CustomRolloutEngine)
     self.assertEqual(rl_cluster.rollout.my_arg, 0)
-    self.assertEqual(rl_cluster.rollout.config, cluster_config)
+    self.assertEqual(rl_cluster.rollout.config, cluster_config.rollout_config)
 
 
 if __name__ == '__main__':

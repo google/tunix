@@ -786,13 +786,13 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
+        rollout_sglang_jax_model_version=model_path,
+        rollout_sglang_jax_context_length=2048,
+        rollout_sglang_jax_mem_fraction_static=0.4,
+        rollout_sglang_jax_init_with_random_weights=True,
+        rollout_sglang_jax_disable_radix_cache=True,
+        rollout_sglang_jax_enable_deterministic_sampling=False,
     ),
-    rollout_sglang_jax_model_version=model_path,
-    rollout_sglang_jax_context_length=2048,
-    rollout_sglang_jax_mem_fraction_static=0.4,
-    rollout_sglang_jax_init_with_random_weights=True,
-    rollout_sglang_jax_disable_radix_cache=True,
-    rollout_sglang_jax_enable_deterministic_sampling=False,
 )
 
 grpo_config = GRPOConfig(
