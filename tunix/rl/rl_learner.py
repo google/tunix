@@ -33,6 +33,9 @@ from tunix.rl import utils as rl_utils
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
+
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 
 # prompts, completions, **kargs -> rewards
@@ -41,7 +44,7 @@ RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
 
-class RLLearner(abc.ABC):
+class RLLearner(ABC):
   """Base class that should be extended by specific RL algorithms."""
 
   def __init__(
@@ -120,7 +123,7 @@ class RLLearner(abc.ABC):
     )
     sft_utils.show_hbm_usage(title="RLLearner init")
 
-  @abc.abstractmethod
+  @abstractmethod
   def _generate_and_compute_advantage(
       self,
       training_input: TrainingInputT,
@@ -128,17 +131,17 @@ class RLLearner(abc.ABC):
   ) -> common.TrainExample:
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def _compute_trajectory_ids(
       self, example: TrainingInputT, steps: int
   ) -> List[str]:
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def _num_iterations(self) -> int:
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def _num_generations(self) -> int:
     pass
 

@@ -21,8 +21,11 @@ from typing import Any, Optional, Tuple
 import jax
 from jax import numpy as jnp
 import jaxtyping
-
 from tunix.generate import mappings
+
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
+
 
 @dataclasses.dataclass(frozen=True)
 class CacheConfig:
@@ -123,7 +126,6 @@ class RolloutConfig:
   # Swap space size for vLLM rollout engine, in GiB.
   rollout_vllm_swap_space_size_gb: float = 4.0
 
-
   # SG-Lang JAX specific rollout configs.
 
   # Model version for SG-Lang JAX rollout engine.
@@ -145,14 +147,14 @@ class RolloutConfig:
   rollout_sglang_jax_enable_deterministic_sampling: bool = False
 
 
-class BaseRollout(abc.ABC):
+class BaseRollout(ABC):
   """Base RolloutWorker."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def __init__(self, **kwargs):
     """Initializes the rollout worker."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def generate(
       self,
       prompts: list[str],
@@ -161,7 +163,7 @@ class BaseRollout(abc.ABC):
   ) -> RolloutOutput:
     """Generates samples from the model."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def get_per_token_logps(
       self,
       prompt_tokens: jax.Array,
@@ -170,7 +172,7 @@ class BaseRollout(abc.ABC):
   ) -> jax.Array:
     """Returns per-token log probabilities from the model."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def update_params(
       self,
       params: jaxtyping.PyTree,
@@ -178,14 +180,14 @@ class BaseRollout(abc.ABC):
   ) -> None:
     """Updates the rollout model parameters."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def pad_id(self) -> int:
     """Returns the pad id."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def eos_id(self) -> int:
     """Returns the eos id."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""
