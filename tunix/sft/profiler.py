@@ -75,7 +75,7 @@ class Profiler:
         or self._is_active
     ):
       return
-    logging.info("Starting JAX profiler at step %d.", step)
+    print(f"Starting JAX profiler at step {step}.")
     if self._profiler_options.set_profile_options:
       profile_options = jax.profiler.ProfileOptions()
       profile_options.host_tracer_level = (
@@ -99,7 +99,7 @@ class Profiler:
         or not self._is_active
     ):
       return
-    logging.info("Stopping JAX profiler at step %d.", step)
+    print(f"Stopping JAX profiler at step {step}.")
     jax.profiler.stop_trace()
     self._is_active = False
 
