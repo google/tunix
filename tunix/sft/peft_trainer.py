@@ -512,12 +512,19 @@ class PeftTrainer:
     self._buffered_train_metrics = None
 
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
+    def _to_np_array(v):
+      if isinstance(v, jax.Array):
+        return np.asarray(v, dtype=np.float32)
+      elif isinstance(v, list):
+        return [_to_np_array(x) for x in v]
+      return v
+
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
         step_time_delta=metrics_buffer.step_time_delta,
         additional_metrics={
-            k: op(v)
+            k: op(_to_np_array(v))
             for k, (
                 v,
                 op,
