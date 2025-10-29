@@ -50,7 +50,7 @@ class Profiler:
       return
     self._profiler_options = profiler_options
     self._do_not_profile = False
-    self._is_active = False
+    # self._is_active = False
     self._output_path = profiler_options.log_dir
     # This is step number, starting from 0.
     self._first_profile_step = (
@@ -72,7 +72,7 @@ class Profiler:
     if (
         self._do_not_profile
         or step != self._first_profile_step
-        or self._is_active
+        # or self._is_active
     ):
       return
     print(f"Starting JAX profiler at step {step}.")
@@ -89,19 +89,19 @@ class Profiler:
       )
     else:
       jax.profiler.start_trace(log_dir=self._output_path)
-    self._is_active = True
+    # self._is_active = True
 
   def maybe_deactivate(self, step: int):
     """End the profiler."""
     if (
         self._do_not_profile
         or step != self._last_profile_step
-        or not self._is_active
+        # or not self._is_active
     ):
       return
     print(f"Stopping JAX profiler at step {step}.")
     jax.profiler.stop_trace()
-    self._is_active = False
+    # self._is_active = False
 
   def _set_last_profile_step(self, profiler_steps, max_step):
     calculated_last_step = self._first_profile_step + profiler_steps
