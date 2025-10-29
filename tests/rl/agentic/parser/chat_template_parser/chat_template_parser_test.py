@@ -147,5 +147,47 @@ class LlamaChatTemplateParserTest(absltest.TestCase):
       p.parse(messages)
 
 
+class GemmaChatTemplateParserTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mock_tokenizer = mock.Mock()
+    self.parser = parser.GemmaChatTemplateParser(self.mock_tokenizer)
+
+  def test_preprocess_with_system_and_user(self):
+    messages = [
+        {'role': 'system', 'content': 'System prompt.'},
+        {'role': 'user', 'content': 'User prompt.'},
+    ]
+    processed = self.parser.preprocess_messages(messages)
+    self.assertEqual(len(processed), 1)
+    self.assertEqual(processed[0]['role'], 'user')
+    self.assertEqual(
+        processed[0]['content'], 'System prompt.\nUser prompt.'
+    )
+
+  def test_preprocess_with_system_only(self):
+    messages = [{'role': 'system', 'content': 'System prompt.'}]
+    processed = self.parser.preprocess_messages(messages)
+    self.assertEqual(len(processed), 1)
+    self.assertEqual(processed[0]['role'], 'user')
+    self.assertEqual(processed[0]['content'], 'System prompt.')
+
+  def test_preprocess_with_no_system_message(self):
+    messages = [
+        {'role': 'user', 'content': 'User prompt.'},
+        {'role': 'assistant', 'content': 'Assistant response.'},
+    ]
+    processed = self.parser.preprocess_messages(messages)
+    self.assertEqual(processed, messages)
+
+  def test_parse_raises_error_for_direct_system_message(self):
+    message = {'role': 'system', 'content': 'System prompt.'}
+    with self.assertRaises(ValueError):
+      # Directly test _parse_message to ensure it raises for system messages
+      # that might bypass the preprocessing in parse().
+      self.parser._parse_message(message)
+
+
 if __name__ == '__main__':
   absltest.main()
