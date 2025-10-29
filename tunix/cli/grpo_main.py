@@ -117,9 +117,10 @@ class GrpoPipeline(config.HyperParameters):
       ).batch(self.config["batch_size"])
     else:
       dataset = data_lib.create_dataset(
-          self.config["dataset_name"],
-          self.config["batch_size"],
-          self.config["num_batches"],
+          dataset_name=self.config["dataset_name"],
+          batch_size=self.config["batch_size"],
+          num_batches=self.config["num_batches"],
+          tfds_download=self.config["tfds_download"],
       )
 
     mesh = self.create_mesh("actor_model_config")

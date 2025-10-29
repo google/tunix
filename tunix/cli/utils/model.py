@@ -34,7 +34,6 @@ from tunix.models.qwen3 import model as qwen3_lib
 from tunix.oss import utils as oss_utils
 from tunix.rl import reshard
 
-
 # Map prefixes to the target object containing the methods.
 CONFIG_MAP = {
     'gemma': gemma_lib.ModelConfig,
@@ -419,7 +418,6 @@ def create_model(
   elif model_source == 'huggingface':
     # for all other model
     oss_utils.hf_pipeline(model_config)
-
   else:
     logging.error(
         'Unsupported workflow: from %s to download %s.',
