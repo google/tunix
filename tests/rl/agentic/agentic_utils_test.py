@@ -275,6 +275,63 @@ class MessagesToTokensTest(unittest.TestCase):
         expected_text, add_special_tokens=False
     )
 
+  def test_with_preprocess_messages(self):
+    mock_parser_with_preprocess = mock.Mock(
+        spec=['parse', 'assistant_token', 'preprocess_messages']
+    )
+    mock_parser_with_preprocess.assistant_token = ''
+    mock_parser_with_preprocess.parse.side_effect = (
+        self.mock_parser.parse.side_effect
+    )
+    messages = [
+        {'role': 'system', 'content': 'system'},
+        {'role': 'user', 'content': 'user'},
+    ]
+    processed_messages = [{'role': 'user', 'content': 'processed'}]
+    mock_parser_with_preprocess.preprocess_messages.return_value = (
+        processed_messages
+    )
+
+    utils.tokenize_and_generate_masks(
+        messages=messages,
+        tokenizer=self.mock_tokenizer,
+        parser=mock_parser_with_preprocess,
+    )
+
+    mock_parser_with_preprocess.preprocess_messages.assert_called_once_with(
+        messages
+    )
+    # Check that parse was called on the preprocessed message.
+    calls = mock_parser_with_preprocess.parse.call_args_list
+    self.assertEqual(len(calls), 1)
+    self.assertEqual(
+        calls[0],
+        mock.call(
+            messages=[processed_messages[0]],
+            add_generation_prompt=False,
+            is_first_msg=False,
+        ),
+    )
+
+  def test_with_tokenizer_without_add_special_tokens_arg(self):
+    mock_tokenizer_simple = mock.Mock(spec=['encode'])
+    # Simple tokenizer mock: returns list of char codes
+    mock_tokenizer_simple.encode.side_effect = lambda s: [ord(c) for c in s]
+
+    messages = [{'role': 'user', 'content': 'hi'}]
+    expected_text = 'role:user content:hi'
+    expected_tokens = [ord(c) for c in expected_text]
+
+    tokens, masks = utils.tokenize_and_generate_masks(
+        messages=messages,
+        tokenizer=mock_tokenizer_simple,
+        parser=self.mock_parser,
+    )
+
+    self.assertEqual(tokens, expected_tokens)
+    self.assertEqual(masks, [0] * len(expected_tokens))
+    mock_tokenizer_simple.encode.assert_called_with(expected_text)
+
 
 if __name__ == '__main__':
   absltest.main()
