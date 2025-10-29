@@ -164,6 +164,13 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
     expected_tokens = {
+        'conversation_text': [
+            {'role': 'user', 'content': 'initial_obs'},
+            {'role': 'assistant', 'content': 'response1'},
+            {'role': 'user', 'content': 'obs1'},
+            {'role': 'assistant', 'content': 'response2'},
+            {'role': 'user', 'content': 'obs2'},
+        ],
         'prompt_tokens': [101],
         'conversation_tokens': [201, 202, 301, 302, 203, 204, 303, 304],
         'conversation_masks': [1, 1, 1, 1, 1, 1, 1, 1],
@@ -178,20 +185,20 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       self.assertIs(call.kwargs['parser'], self.mock_chat_parser)
 
     # Verify that the initial prompt tokenization in _reset is called with
-    # contains_first_msg=True and contains_generation_msg=True.
+    # contains_first_msg=True and contains_generation_msg=False.
     self.assertGreaterEqual(mock_convert.call_count, 1)
     self.assertTrue(
         mock_convert.call_args_list[0].kwargs['contains_first_msg'],
         'contains_first_msg should be True for initial prompt tokenization',
     )
-    self.assertTrue(
+    self.assertFalse(
         mock_convert.call_args_list[0].kwargs['contains_generation_msg'],
-        'contains_generation_msg should be True for initial prompt'
+        'contains_generation_msg should be False for initial prompt'
         ' tokenization',
     )
 
-    # Verify that tokenization for model responses has
-    # contains_generation_msg=False and for environment observations it is True.
+    # Verify that tokenization for model responses and environment observations
+    # has contains_generation_msg=False.
     self.assertEqual(mock_convert.call_count, 5)
     # Calls 1 and 3 are for model responses.
     self.assertFalse(
@@ -201,10 +208,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         mock_convert.call_args_list[3].kwargs['contains_generation_msg']
     )
     # Calls 2 and 4 are for environment observations.
-    self.assertTrue(
+    self.assertFalse(
         mock_convert.call_args_list[2].kwargs['contains_generation_msg']
     )
-    self.assertTrue(
+    self.assertFalse(
         mock_convert.call_args_list[4].kwargs['contains_generation_msg']
     )
 
