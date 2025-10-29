@@ -118,7 +118,7 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    return np.mean(self.losses)
+    return np.mean(np.asarray(self.losses))
 
   @property
   def step_time_delta(self):
@@ -480,7 +480,6 @@ class PeftTrainer:
       step_time_delta: float = 0.0,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
-    loss = np.array(loss)
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
           step=step, losses=[loss], step_time_deltas=[step_time_delta]

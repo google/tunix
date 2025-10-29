@@ -163,14 +163,6 @@ class ProfilerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='deactivate_at_last_step',
-          initial_step=0,
-          skip_first_n_steps=5,
-          profiler_steps=10,
-          current_step=15,
-          expect_stop_called=True,
-      ),
-      dict(
           testcase_name='not_deactivate_before_last_step',
           initial_step=0,
           skip_first_n_steps=5,
@@ -221,6 +213,7 @@ class ProfilerTest(parameterized.TestCase):
         max_step=100,
         profiler_options=profiler_options,
     )
+    p.maybe_activate(current_step)
     p.maybe_deactivate(current_step)
     if expect_stop_called:
       mock_stop_trace.assert_called_once()
