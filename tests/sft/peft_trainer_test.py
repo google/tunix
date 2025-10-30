@@ -309,7 +309,7 @@ class PeftTrainerTest(parameterized.TestCase):
     unsharded_variables = nnx.state(unsharded_model, nnx.Param)
     self.assertIsInstance(
         unsharded_variables.layers[0].w1.kernel.value.sharding,
-        jax._src.lib.xla_client.SingleDeviceSharding,
+        jax.sharding.SingleDeviceSharding,
     )
     jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)
 
