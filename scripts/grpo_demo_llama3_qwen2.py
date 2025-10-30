@@ -422,12 +422,6 @@ def get_lora_model(base_model, model_mesh=None):
       base_model, lora_provider, **model_input
   )
 
-  with model_mesh:
-    state = nnx.state(lora_model)
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    nnx.update(lora_model, sharded_state)
-
   return lora_model
 
 
