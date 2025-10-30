@@ -250,7 +250,8 @@ class RLCluster:
     self.global_steps = 0
 
     self._rl_metrics_logger = metrics_logger.MetricsLogger(
-        self.cluster_config.training_config.metrics_logging_options
+        self.cluster_config.training_config.metrics_logging_options,
+        additional_backends=cluster_config.training_config.additional_logging_backends,
     )
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
