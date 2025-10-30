@@ -165,6 +165,10 @@ class MetricsLogger:
       step: int,
   ):
     """Logs the scalar metric value for the given metric name and mode."""
+    if not isinstance(scalar_value, float):
+      logging.info(
+          "debug: logging metric %s with value %s", metric_name, scalar_value
+      )
     self._metrics[mode][metric_name].append(scalar_value)
     jax.monitoring.record_scalar(
         f"{self.metric_prefix}{mode}/{metric_name}", scalar_value, step=step
