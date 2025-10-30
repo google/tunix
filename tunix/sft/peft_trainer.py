@@ -231,7 +231,7 @@ class PeftTrainer:
     self._jitted_eval_step_fn = None
     self._prof = profiler.Profiler(
         initial_step=self._iter_steps,
-        max_step=self.config.max_steps,
+        max_step=self.config.max_steps * self.config.gradient_accumulation_steps,
         profiler_options=self.config.profiler_options,
     )
     self._buffered_train_metrics: MetricsBuffer | None = None
