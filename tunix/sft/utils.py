@@ -154,6 +154,7 @@ def show_hbm_usage(title=""):
     logging.info(
         "%s - Pathways not available. Using default HBM stats collector", title
     )
+    devices = jax.local_devices()
     hbm_stats = _jax_hbm_usage_gb(devices)
 
     for i, (used, limit) in enumerate(hbm_stats):
