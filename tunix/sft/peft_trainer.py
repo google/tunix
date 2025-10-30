@@ -373,9 +373,7 @@ class PeftTrainer:
         self._jitted_train_step_fn = nnx.jit(
             train_step, donate_argnames=("optimizer",)
         )
-        self._jitted_eval_step_fn = nnx.jit(
-            eval_step, donate_argnames=("model",)
-        )
+        self._jitted_eval_step_fn = nnx.jit(eval_step)
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
   def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
