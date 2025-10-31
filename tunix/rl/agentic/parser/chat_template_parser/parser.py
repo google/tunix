@@ -18,7 +18,6 @@ import abc
 import dataclasses
 from typing import Dict, List
 
-
 dataclass = dataclasses.dataclass
 abstractmethod = abc.abstractmethod
 ABC = abc.ABC

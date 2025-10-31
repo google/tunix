@@ -131,6 +131,7 @@ class ToolManagerTest(unittest.IsolatedAsyncioTestCase, parameterized.TestCase):
 
   def test_register_mcp_tool(self):
     manager = tool_manager.ToolManager(self.tool_map)
+
     class NewTool(base_tool.BaseTool):
 
       def get_json_schema(self) -> dict[str, Any]:

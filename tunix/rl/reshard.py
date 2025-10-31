@@ -118,9 +118,7 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
             sharding_dims[(i, None)] = 1
           # Only handles two-level logical axis rules for now.
           elif isinstance(axis, str):
-            sharding_dims[(i, mesh.axis_names.index(axis))] = (
-                mesh.shape[axis]
-            )
+            sharding_dims[(i, mesh.axis_names.index(axis))] = mesh.shape[axis]
           else:
             raise ValueError(f'Unsupported axis name: {axis_name}')
       else:
@@ -329,13 +327,11 @@ def _get_reshard_fn_pathwaysutils(
   # This import is expected to fail sometimes internally if pathwaysutils is
   # not linked to the binary.
   try:
+    from pathwaysutils import jax as pw_jax  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
     from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
     from pathwaysutils.experimental import split_by_mesh_axis  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-    from pathwaysutils import jax as pw_jax  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
   except ImportError:
-    logging.info(
-        'Cannot import PathwaysUtils and experimental reshard API.'
-    )
+    logging.info('Cannot import PathwaysUtils and experimental reshard API.')
     raise
   else:
     if 'proxy' not in os.getenv('JAX_PLATFORMS', ''):
@@ -362,7 +358,6 @@ def _get_reshard_fn_pathwaysutils(
           x = _experimental_pre_reshard(
               split_by_mesh_axis.split_by_mesh_axis, x, sharding
           )
-
 
       return experimental_reshard.reshard(
           x,

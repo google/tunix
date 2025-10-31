@@ -29,7 +29,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
 from tunix.rl.agentic.queue_manager import group_queue_manager
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
-
 Trajectory = trajectory_collect_engine.Trajectory
 LLMBaseAgent = trajectory_collect_engine.LLMBaseAgent
 BaseEnv = trajectory_collect_engine.BaseEnv

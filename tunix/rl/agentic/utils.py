@@ -55,7 +55,7 @@ def pad_prompt_and_completion(
 
 
 def get_recent_assistant_user_messages(
-    chat_completions_messages: list[dict[str, Any]]
+    chat_completions_messages: list[dict[str, Any]],
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
   """Extracts the most recent assistant message and environment messages (user/tool) from a chat completions list.
 

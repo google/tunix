@@ -15,8 +15,8 @@
 
 import re
 from typing import Callable, List
-from absl import logging
 
+from absl import logging
 
 # Define the expected signature with type hints
 ExpectedSignature = Callable[..., List[float]]

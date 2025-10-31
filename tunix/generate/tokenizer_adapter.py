@@ -20,9 +20,8 @@ from typing import Any
 
 from etils import epath
 import numpy as np
-import transformers
-
 import sentencepiece as spm
+import transformers
 
 
 class TokenizerType(enum.Enum):

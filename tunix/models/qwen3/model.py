@@ -27,7 +27,6 @@ import jax.sharding as shd
 import jaxtyping
 from tunix.utils import container
 
-
 if hasattr(flax.config, 'flax_always_shard_variable'):
   flax.config.update('flax_always_shard_variable', False)
 

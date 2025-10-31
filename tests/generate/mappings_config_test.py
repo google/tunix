@@ -6,6 +6,7 @@ from tunix.generate import mappings
 from tunix.models.llama3 import model as model_lib
 from flax import nnx
 
+
 class MappingConfigTest(absltest.TestCase):
 
   @classmethod
@@ -15,8 +16,7 @@ class MappingConfigTest(absltest.TestCase):
 
   def test_from_object_with_none_errors_out(self):
     with self.assertRaisesRegex(
-        AssertionError,
-        "Either mapping_obj or model must be provided"
+        AssertionError, 'Either mapping_obj or model must be provided'
     ):
       cfg = mappings.MappingConfig.build()
 
@@ -51,32 +51,35 @@ class MappingConfigTest(absltest.TestCase):
     self.assertTrue(
         cfg.to_hf_mappings['embedder.input_embedding'],
         (
-          'model.embed.embedding',
-          ('model', None),
-        )
+            'model.embed.embedding',
+            ('model', None),
+        ),
     )
 
     self.assertTrue(
         cfg.lora_to_hf_mappings['layers.*.mlp.gate_proj.kernel_lora_a'],
         (
-          'model.layers.*.mlp.gate_proj.kernel_lora_a',
-          (None, None),
-        )
+            'model.layers.*.mlp.gate_proj.kernel_lora_a',
+            (None, None),
+        ),
     )
 
-    self.assertEqual(cfg.to_hf_transpose_keys, {'embedding': (1, 0)},)
-
+    self.assertEqual(
+        cfg.to_hf_transpose_keys,
+        {'embedding': (1, 0)},
+    )
 
   def test_build_mapping_config_with_overrides(self):
-    override = {'embedder.input_embedding': (
-          'fake.path.embedding',
-          ('fake_dim', None),
-      )}
-    cfg = mappings.MappingConfig.build(
-        {"to_hf_mappings":override,
-        "to_hf_hook_fns":{'override': lambda x: x},
-        }
-    )
+    override = {
+        'embedder.input_embedding': (
+            'fake.path.embedding',
+            ('fake_dim', None),
+        )
+    }
+    cfg = mappings.MappingConfig.build({
+        'to_hf_mappings': override,
+        'to_hf_hook_fns': {'override': lambda x: x},
+    })
     self.assertEqual(cfg.to_hf_mappings, override)
     self.assertIn('override', cfg.to_hf_hook_fns)
     self.assertTrue(callable(cfg.to_hf_hook_fns['override']))

@@ -37,10 +37,13 @@ class RecentMessagesTest(parameterized.TestCase):
               {'role': 'user', 'content': 'Hello'},
               {'role': 'tool', 'content': 'Tool output'},
           ],
-          (None, [
-              {'role': 'user', 'content': 'Hello'},
-              {'role': 'tool', 'content': 'Tool output'},
-          ]),
+          (
+              None,
+              [
+                  {'role': 'user', 'content': 'Hello'},
+                  {'role': 'tool', 'content': 'Tool output'},
+              ],
+          ),
       ),
       (
           'only_assistant_message',
@@ -87,9 +90,7 @@ class RecentMessagesTest(parameterized.TestCase):
           ({'role': 'assistant', 'content': 'Hello!'}, []),
       ),
   )
-  def test_get_recent_assistant_user_messages(
-      self, messages, expected_output
-  ):
+  def test_get_recent_assistant_user_messages(self, messages, expected_output):
     self.assertEqual(
         utils.get_recent_assistant_user_messages(messages), expected_output
     )

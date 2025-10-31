@@ -50,35 +50,40 @@ class QwenChatTemplateParserTest(absltest.TestCase):
         {'role': 'user', 'content': 'Hello'},
     ]
     result = p.parse(messages)
-    expected = ('<|im_start|>system\nYou are Qwen.<|im_end|>\n'
-                '<|im_start|>user\nHello<|im_end|>\n')
+    expected = (
+        '<|im_start|>system\nYou are Qwen.<|im_end|>\n'
+        '<|im_start|>user\nHello<|im_end|>\n'
+    )
     self.assertEqual(result, expected)
 
   def test_parse_without_system_message_and_is_first_msg(self):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, is_first_msg=True)
-    expected = ('<|im_start|>system\n'
-                'You are Qwen, created by Alibaba Cloud. You are a helpful'
-                ' assistant.<|im_end|>\n'
-                '<|im_start|>user\nHello<|im_end|>\n')
+    expected = (
+        '<|im_start|>system\n'
+        'You are Qwen, created by Alibaba Cloud. You are a helpful'
+        ' assistant.<|im_end|>\n'
+        '<|im_start|>user\nHello<|im_end|>\n'
+    )
     self.assertEqual(result, expected)
 
   def test_parse_with_add_generation_prompt(self):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, add_generation_prompt=True)
-    expected = ('<|im_start|>user\nHello<|im_end|>\n'
-                '<|im_start|>assistant\n')
+    expected = '<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n'
     self.assertEqual(result, expected)
 
   def test_parse_with_tool_message(self):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'tool', 'content': 'Tool output'}]
     result = p.parse(messages)
-    expected = ('<|im_start|>user\n'
-                '<tool_response>\nTool output\n</tool_response>'
-                '<|im_end|>\n')
+    expected = (
+        '<|im_start|>user\n'
+        '<tool_response>\nTool output\n</tool_response>'
+        '<|im_end|>\n'
+    )
     self.assertEqual(result, expected)
 
   def test_parse_with_disable_thinking(self):
@@ -125,19 +130,23 @@ class LlamaChatTemplateParserTest(absltest.TestCase):
     p = parser.LlamaChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, add_generation_prompt=True)
-    expected = ('<|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|>'
-                '<|start_header_id|>assistant<|end_header_id|>\n\n')
+    expected = (
+        '<|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|>'
+        '<|start_header_id|>assistant<|end_header_id|>\n\n'
+    )
     self.assertEqual(result, expected)
 
   def test_parse_with_tool_message(self):
     p = parser.LlamaChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'tool', 'content': 'Tool output'}]
     result = p.parse(messages)
-    expected = ('<|start_header_id|>user<|end_header_id|>\n\n'
-                '<|start_header_id|>tool_response<|end_header_id|>\n\n'
-                'Tool output'
-                '<|eot_id|>'
-                '<|eot_id|>')
+    expected = (
+        '<|start_header_id|>user<|end_header_id|>\n\n'
+        '<|start_header_id|>tool_response<|end_header_id|>\n\n'
+        'Tool output'
+        '<|eot_id|>'
+        '<|eot_id|>'
+    )
     self.assertEqual(result, expected)
 
   def test_parse_with_unsupported_role_raises_error(self):

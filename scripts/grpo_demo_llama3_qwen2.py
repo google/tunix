@@ -81,12 +81,12 @@ parser.add_argument(
     help="The model version to use.",
 )
 parser.add_argument(
-      "--num-batches",
-      type=int,
-      default=1869,
-      required=False,
-      help="Number of batches for training.",
-  )
+    "--num-batches",
+    type=int,
+    default=1869,
+    required=False,
+    help="Number of batches for training.",
+)
 parser.add_argument(
     "--num-test-batches",
     type=int,
@@ -249,7 +249,9 @@ tc.delete_directory(CKPT_DIR)
 tc.clear_jax_arrays()
 
 # Download checkpoints
-tc.download_from_huggingface(repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION)
+tc.download_from_huggingface(
+    repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION
+)
 
 
 def download_from_gcs(zip_gcs_path, target_path):
@@ -282,6 +284,7 @@ def load_json_from_local(path):
   # with gfile.Open(path, "rb") as f:
   with open(path, "rb") as f:
     return json.loads(f.read())
+
 
 show_hbm_usage()
 
@@ -341,7 +344,9 @@ def get_dataset(path: str) -> grain.MapDataset:
   return loaded_dataset
 
 
-dataset = get_dataset(TRAIN_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_BATCHES]
+dataset = get_dataset(TRAIN_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[
+    :NUM_BATCHES
+]
 
 if TRAIN_FRACTION == 1.0:
   train_dataset = dataset.repeat(NUM_EPOCHS)
@@ -352,7 +357,9 @@ else:
 
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
-test_dataset = get_dataset(TEST_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_TEST_BATCHES]
+test_dataset = get_dataset(TEST_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[
+    :NUM_TEST_BATCHES
+]
 
 print(
     f"train_dataset size: {len(train_dataset)}, val_dataset size:"
@@ -868,7 +875,9 @@ with mesh:
 
 show_hbm_usage("After training the reference lora model")
 
-trained_ckpt_path = os.path.join(CKPT_DIR, "actor", str(MAX_STEPS), "model_params")
+trained_ckpt_path = os.path.join(
+    CKPT_DIR, "actor", str(MAX_STEPS), "model_params"
+)
 
 filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
 abs_params = jax.tree.map(

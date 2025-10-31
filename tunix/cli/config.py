@@ -23,6 +23,7 @@ import pathlib
 import shutil
 import stat
 from typing import Any, Dict, List, Sequence
+
 from absl import logging
 import dotenv
 import jax
@@ -47,6 +48,7 @@ def string_to_bool(s: str) -> bool:
   if s.lower() == "false":
     return False
   raise ValueError(f"Can't convert {s} to bool")
+
 
 _yaml_types_to_parser = {
     str: str,
