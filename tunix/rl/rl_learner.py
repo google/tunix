@@ -512,7 +512,6 @@ class RLLearner(ABC):
     Yields:
       `TrainingInputT` dicts, each with `micro_batch_size` samples.
     """
-
     buffer = {}
 
     def get_buffer_len(buf: dict[str, list[Any]]) -> int:
@@ -532,14 +531,14 @@ class RLLearner(ABC):
         else:
           buffer[key].append(values)
 
-    while get_buffer_len(buffer) >= micro_batch_size:
-      micro_batch = {}
-      for key in buffer:
-        micro_batch_list_slice = buffer[key][:micro_batch_size]
-        micro_batch[key] = np.array(micro_batch_list_slice)
-        buffer[key] = buffer[key][micro_batch_size:]
+      while get_buffer_len(buffer) >= micro_batch_size:
+        micro_batch = {}
+        for key in buffer:
+          micro_batch_list_slice = buffer[key][:micro_batch_size]
+          micro_batch[key] = np.array(micro_batch_list_slice)
+          buffer[key] = buffer[key][micro_batch_size:]
 
-      yield micro_batch
+        yield micro_batch
 
   def train(
       self,

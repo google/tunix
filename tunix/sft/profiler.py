@@ -15,6 +15,7 @@
 """Profiler class for Tunix trainers."""
 
 import dataclasses
+import threading
 
 from absl import logging
 import jax
@@ -38,6 +39,9 @@ class ProfilerOptions:
 
 class Profiler:
   """Activate/deactivate a profiler based on the ProfilerOptions."""
+
+  _lock = threading.Lock()
+  _is_active: bool = False
 
   def __init__(
       self,
@@ -65,32 +69,51 @@ class Profiler:
           f"First profile step {self._first_profile_step} cannot be greater"
           f" than the last profile step {self._last_profile_step}."
       )
+    self._started_by_this_instance = False
 
   def maybe_activate(self, step: int):
     """Start the profiler."""
     if self._do_not_profile or step != self._first_profile_step:
       return
-    logging.info("Starting JAX profiler at step %d.", step)
-    if self._profiler_options.set_profile_options:
-      profile_options = jax.profiler.ProfileOptions()
-      profile_options.host_tracer_level = (
-          self._profiler_options.host_tracer_level
-      )
-      profile_options.python_tracer_level = (
-          self._profiler_options.python_tracer_level
-      )
-      jax.profiler.start_trace(
-          log_dir=self._output_path, profiler_options=profile_options
-      )
-    else:
-      jax.profiler.start_trace(log_dir=self._output_path)
+    with Profiler._lock:
+      if Profiler._is_active:
+        logging.warning(
+            "A JAX profiler is already active. Skipping activation of this"
+            " profiler."
+        )
+        return
+      logging.info("Starting JAX profiler at step %d.", step)
+      if self._profiler_options.set_profile_options:
+        profile_options = jax.profiler.ProfileOptions()
+        profile_options.host_tracer_level = (
+            self._profiler_options.host_tracer_level
+        )
+        profile_options.python_tracer_level = (
+            self._profiler_options.python_tracer_level
+        )
+        jax.profiler.start_trace(
+            log_dir=self._output_path, profiler_options=profile_options
+        )
+      else:
+        jax.profiler.start_trace(log_dir=self._output_path)
+      Profiler._is_active = True
+      self._started_by_this_instance = True
 
   def maybe_deactivate(self, step: int):
     """End the profiler."""
     if self._do_not_profile or step != self._last_profile_step:
       return
-    logging.info("Stopping JAX profiler at step %d.", step)
-    jax.profiler.stop_trace()
+    with Profiler._lock:
+      if not self._started_by_this_instance:
+        logging.warning(
+            "This profiler instance did not start JAX profiler. Skipping"
+            " deactivation."
+        )
+        return
+      logging.info("Stopping JAX profiler at step %d.", step)
+      jax.profiler.stop_trace()
+      Profiler._is_active = False
+      self._started_by_this_instance = False
 
   def _set_last_profile_step(self, profiler_steps, max_step):
     calculated_last_step = self._first_profile_step + profiler_steps

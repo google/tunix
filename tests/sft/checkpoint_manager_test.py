@@ -174,11 +174,11 @@ class CheckpointManagerTest(parameterized.TestCase):
     # Check the model shardings are restored correctly.
     self.assertIsInstance(
         unsharded_variables.w1.kernel.value.sharding,
-        jax._src.lib.xla_client.SingleDeviceSharding,
+        jax.sharding.SingleDeviceSharding,
     )
     self.assertIsInstance(
         unsharded_variables.w2.kernel.value.sharding,
-        jax._src.lib.xla_client.SingleDeviceSharding,
+        jax.sharding.SingleDeviceSharding,
     )
 
     # Restore the model with shardings.

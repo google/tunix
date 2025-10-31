@@ -171,6 +171,7 @@ class TrajectoryCollectEngine:
           conversation_masks.extend(step.env_masks)
 
       return {
+          "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
           "conversation_tokens": conversation_tokens,
           "conversation_masks": conversation_masks,
@@ -252,7 +253,7 @@ class TrajectoryCollectEngine:
           tokenizer=self.tokenizer,
           parser=self.chat_parser,
           contains_first_msg=True,
-          contains_generation_msg=True,
+          contains_generation_msg=False,
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
 
@@ -313,7 +314,7 @@ class TrajectoryCollectEngine:
               tokenizer=self.tokenizer,
               parser=self.chat_parser,
               contains_first_msg=False,
-              contains_generation_msg=True,
+              contains_generation_msg=False,
           )
           cur_step.env_tokens = env_tokens
           cur_step.env_masks = env_masks

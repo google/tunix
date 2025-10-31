@@ -35,6 +35,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
+from tunix.sft import profiler
 from tunix.tests import test_common as tc
 from typing_extensions import override
 
@@ -1026,6 +1027,11 @@ class GRPOLearnerTest(parameterized.TestCase):
               train_micro_batch_size=train_micro_batch_size,
               rollout_micro_batch_size=rollout_micro_batch_size,
               compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+              profiler_options=profiler.ProfilerOptions(
+                  profiler_steps=2,
+                  skip_first_n_steps=1,
+                  log_dir='/tmp/profiler',
+              ),
           ),
           rollout_config=base_rollout.RolloutConfig(
               max_tokens_to_generate=10,
@@ -1054,8 +1060,8 @@ class GRPOLearnerTest(parameterized.TestCase):
       )
       return grpo_learner, model
 
-    #  40 rows with repeat=10.
-    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=batch_size)
+    #  80 rows with repeat=20.
+    train_ds = _dummy_dataset(MySource(repeat=20), batch_size=batch_size)
     eval_ds = _dummy_dataset(batch_size=1)
 
     # Baseline with no micro batching.
@@ -1071,7 +1077,7 @@ class GRPOLearnerTest(parameterized.TestCase):
 
     grpo_learner.train(train_ds, eval_ds)
     self.assertEqual(
-        40 // batch_size, grpo_learner.rl_cluster.actor_trainer.train_steps
+        80 // batch_size, grpo_learner.rl_cluster.actor_trainer.train_steps
     )
 
     base_variables = nnx.state(model, nnx.Param)
@@ -1095,7 +1101,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertEqual(base_trajectories, micro_batch_trajectories)
     self.assertEqual(
-        40 // (mini_batch_size or batch_size),
+        80 // (mini_batch_size or batch_size),
         grpo_learner.rl_cluster.actor_trainer.train_steps,
     )
 
@@ -1198,9 +1204,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertEqual(
         grpo_learner2.rl_cluster.actor_trainer._restored_custom_metadata,
-        {
-            'global_step': grpo_learner.rl_cluster.global_steps
-        },
+        {'global_step': grpo_learner.rl_cluster.global_steps},
     )
 
     # double the batch size it should also work with checkpoint resumption.
