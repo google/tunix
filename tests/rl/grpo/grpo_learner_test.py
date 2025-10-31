@@ -325,16 +325,17 @@ class GRPOLearnerTest(parameterized.TestCase):
         if isinstance(reward_fns, list)
         else ('rewards/' + reward_fns.__name__,)
     )
+    # Metric 'prompts' and 'completions' are not logged in native metric logger because jax.monitoring does not support string values.
     for metric_name in [
         'rewards/sum',
+        'rewards/min',
+        'rewards/max',
         *rewards_metrics,
-        'completions/mean_length',
-        'completions/max_length',
-        'completions/min_length',
         'test_metric',
     ]:
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
+
       self.assertLen(
           rl_metric_logger.get_metric_history(metric_name, 'train'),
           grpo_learner.rl_cluster.global_steps,
