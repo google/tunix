@@ -194,7 +194,10 @@ class Sampler(base_sampler.BaseSampler):
     # we separate out state and graph def so that the state can be passed as an
     # argument to _decode_fn, resulting in it not being treated as a static
     # arg. This greatly reduces the size of the HLO and reduces compile time
-    self._compiled_decode_fn = jax.jit(self._decode_fn)
+    self._compiled_decode_fn = jax.jit(
+        self._decode_fn,
+        donate_argnums=(1,),
+    )
     self._compiled_prefill_fn = jax.jit(self._prefill_fn)
 
   @property
@@ -564,67 +567,66 @@ class Sampler(base_sampler.BaseSampler):
     return updated_sampler_state
 
   def _decode_fn(
-      self,
-      params: statelib.State,
-      sampling_state: _SamplingState,
+      self, params: statelib.State, sampling_state: _SamplingState
   ) -> _SamplingState:
-    """Internal generating function (to be jitted)."""
+    # Build/merge once, outside the loop body.
+    transformer = nnx.merge(self._transformer_graphdef, params)
 
-    def sample_with_params(sampler_state: _SamplingState):
-      return self._sample_step(params, sampler_state)
-
-    def cond_fn(sampler_state: _SamplingState):
+    def cond_fn(carry):
+      sampler_state, _params = carry
       return (
           sampler_state.decoding_step < sampler_state.total_sampling_steps
       ) & jnp.any(jnp.logical_not(sampler_state.done))
 
-    return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
+    def body_fn(carry):
+      sampler_state, _params = carry
+      batch_size = sampler_state.token_buffer.shape[0]
+      decoding_step = sampler_state.decoding_step
 
-  def _sample_step(
-      self, params: statelib.State, sampler_state: _SamplingState
-  ) -> _SamplingState:
-    """Performs a single sampling step."""
-    batch_size = sampler_state.token_buffer.shape[0]
-    decoding_step = sampler_state.decoding_step
+      last_token = sampler_state.token_buffer[:, decoding_step].reshape(
+          (batch_size, 1)
+      )
+      step_positions = jnp.expand_dims(
+          sampler_state.positions[:, decoding_step], -1
+      )
 
-    last_token = sampler_state.token_buffer[:, decoding_step]
-    last_token = last_token.reshape((batch_size, 1))
-    step_positions = jnp.expand_dims(
-        sampler_state.positions[:, decoding_step], -1
-    )
+      input_mask = sampler_state.token_buffer == self.tokenizer.pad_id()
+      attention_mask = utils.compute_attention_masks(
+          decoding_step, self.cache_config.cache_size, input_mask
+      )
 
-    input_mask = sampler_state.token_buffer == self.tokenizer.pad_id()
-    attention_mask = utils.compute_attention_masks(
-        decoding_step, self.cache_config.cache_size, input_mask
-    )
+      # Use the already-merged transformer.
+      logits, cache = transformer(
+          last_token,
+          step_positions,
+          sampler_state.cache,
+          attention_mask,
+      )
 
-    transformer = nnx.merge(self._transformer_graphdef, params)
-    logits, cache = transformer(
-        last_token,
-        step_positions,
-        sampler_state.cache,
-        attention_mask,
-    )
-    updated_sampler_state = self._sample(
-        logits=logits,
-        cache=cache,
-        eos=self.eos_ids,
-        sampler_state=sampler_state,
-    )
+      updated_sampler_state = self._sample(
+          logits=logits,
+          cache=cache,
+          eos=self.eos_ids,
+          sampler_state=sampler_state,
+      )
 
-    if updated_sampler_state.logits_buffer is not None:
-      next_logits = jnp.squeeze(logits, 1)
-      logits_buffer = updated_sampler_state.logits_buffer.at[
-          :, decoding_step + 1
-      ].set(next_logits)
-    else:
-      logits_buffer = None
+      if updated_sampler_state.logits_buffer is not None:
+        next_logits = jnp.squeeze(logits, 1)
+        logits_buffer = updated_sampler_state.logits_buffer.at[
+            :, decoding_step + 1
+        ].set(next_logits)
+      else:
+        logits_buffer = None
 
-    updated_sampler_state = dataclasses.replace(
-        updated_sampler_state,
-        logits_buffer=logits_buffer,
-    )
-    return updated_sampler_state
+      updated_sampler_state = dataclasses.replace(
+          updated_sampler_state, logits_buffer=logits_buffer
+      )
+      return (updated_sampler_state, _params)
+
+    init_carry = (sampling_state, params)
+    final_carry = jax.lax.while_loop(cond_fn, body_fn, init_carry)
+    final_state, _ = final_carry
+    return final_state
 
   def __call__(
       self,
