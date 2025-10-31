@@ -590,12 +590,51 @@ class GRPOLearner(rl_learner.RLLearner):
   def _run_async(coro: asyncio.Future) -> Any:
     """Runs a coroutine, handling existing event loops correctly."""
     try:
-      # Use the running loop if one exists.
       loop = asyncio.get_running_loop()
-      return loop.run_until_complete(coro)
     except RuntimeError:
-      # If no loop is running, start a new one.
+      # asyncio.get_running_loop() raises RuntimeError if no loop is running.
+      # If no loop is running, start a new one using asyncio.run().
       return asyncio.run(coro)
+    else:
+      # If a loop is already running, use it to run the coroutine.
+      return loop.run_until_complete(coro)
+
+  async def _producer(self, orchestrator, prompt_queue, train_data_queue):
+    """Produces training examples from prompts in the prompt_queue."""
+    prompt_iterator = iter(lambda: prompt_queue.get(block=True), None)
+    async for batch, cached_inputs in self._orchestrator_producer(
+        orchestrator=orchestrator,
+        prompt_iterator=prompt_iterator,
+        episodes_per_pair=1,
+        collect_mode="Token",
+    ):
+      try:
+        train_examples = self._batch_to_train_example(
+            batch_results=batch,
+            cached_inputs_for_window=cached_inputs,
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
+        for train_example in train_examples:
+          train_data_queue.put(train_example)
+      except Exception as e:
+        if not isinstance(e, RuntimeError):
+          logging.exception(
+              "Exception in _producer while processing batch: %s", e
+          )
+        raise
+    # Signal production is complete for this batch.
+    train_data_queue.put(None)
+
+  def _data_consumer_batch_generator(
+      self, queue: queue_lib.AbstractDataQueue, batch_size: int
+  ):
+    """Yields micro-batches from a queue until a None is received."""
+    item_iterator = iter(lambda: queue.get(block=True), None)
+    while True:
+      batch = list(itertools.islice(item_iterator, batch_size))
+      if not batch:
+        return  # The iterator is exhausted.
+      yield batch
 
   def train(
       self,
@@ -669,42 +708,6 @@ class GRPOLearner(rl_learner.RLLearner):
     prompt_queue = queue_lib.SimpleDataQueue(maxsize=full_batch_size + 1)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
-    async def _producer():
-      """Produces training examples from prompts in the prompt_queue."""
-      prompt_iterator = iter(lambda: prompt_queue.get(block=True), None)
-      async for batch, cached_inputs in self._orchestrator_producer(
-          orchestrator=orchestrator,
-          prompt_iterator=prompt_iterator,
-          episodes_per_pair=1,
-          collect_mode="Token",
-      ):
-        try:
-          train_examples = self._batch_to_train_example(
-              batch_results=batch,
-              cached_inputs_for_window=cached_inputs,
-              mode=rl_cluster_lib.Mode.TRAIN,
-          )
-          for train_example in train_examples:
-            train_data_queue.put(train_example)
-        except Exception as e:
-          logging.exception(
-              "Exception in _producer while processing batch: %s", e
-          )
-          raise
-      # Signal production is complete for this batch.
-      train_data_queue.put(None)
-
-    def data_consumer_batch_generator(
-        queue: queue_lib.AbstractDataQueue, batch_size: int
-    ):
-      """Yields micro-batches from a queue until a None is received."""
-      item_iterator = iter(lambda: queue.get(block=True), None)
-      while True:
-        batch = list(itertools.islice(item_iterator, batch_size))
-        if not batch:
-          return  # The iterator is exhausted.
-        yield batch
-
     for full_batch in full_dataset_iterator:
       # 1. Fill prompt queue for the current full batch.
       for prompt in self._create_micro_batch_iterator([full_batch], 1):
@@ -712,9 +715,12 @@ class GRPOLearner(rl_learner.RLLearner):
       prompt_queue.put(None)  # Signal end of prompts.
 
       # 2. Start producer for this batch.
-      producer_future = self.executor.submit(self._run_async, _producer())
+      producer_future = self.executor.submit(
+          self._run_async,
+          self._producer(orchestrator, prompt_queue, train_data_queue),
+      )
 
-      train_data_gen = data_consumer_batch_generator(
+      train_data_gen = self._data_consumer_batch_generator(
           train_data_queue, train_micro_batch_size * self._num_generations()
       )
 
