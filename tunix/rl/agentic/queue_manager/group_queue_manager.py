@@ -54,17 +54,12 @@ class GroupQueueManager:
     self._capacity = asyncio.Condition(self._lock)
     self._have_ready = asyncio.Event()
     self._batch_buf: List[TrajectoryItem] = []
-    self._notify_all_task: Optional[asyncio.Task[None]] = None
 
-  def put_exception(self, exc: BaseException):
+  async def put_exception(self, exc: BaseException):
     self._exc = exc
     self._have_ready.set()
-
-    async def _notify_all():
-      async with self._capacity:
-        self._capacity.notify_all()
-
-    self._notify_all_task = asyncio.create_task(_notify_all())
+    async with self._capacity:
+      self._capacity.notify_all()
 
   async def prepare_clear(self):
     self._clearing = True

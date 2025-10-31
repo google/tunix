@@ -125,7 +125,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     async def _run_test():
       manager = group_queue_manager.GroupQueueManager(group_size=2)
       exc = ValueError("Test Exception")
-      manager.put_exception(exc)
+      await manager.put_exception(exc)
 
       with self.assertRaises(ValueError):
         await manager.put(_create_item("g1", 1))

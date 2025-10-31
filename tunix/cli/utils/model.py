@@ -33,6 +33,7 @@ from tunix.models.gemma3 import params as gemma3_params_lib
 from tunix.models.llama3 import model as llama3_lib
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen3 import model as qwen3_lib
+from tunix.rl import reshard
 
 
 # Map prefixes to the target object containing the methods.
@@ -252,13 +253,8 @@ def apply_lora_to_model(base_model, mesh, lora_config):
   lora_model = qwix.apply_lora_to_model(
       base_model, lora_provider, **model_input
   )
-
-  with mesh:
-    state = nnx.state(lora_model)
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    nnx.update(lora_model, sharded_state)
-
+  if mesh is not None:
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
   return lora_model
 
 

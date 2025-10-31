@@ -198,6 +198,14 @@ class MetricsLogger:
 
   def close(self):
     """Closes the metrics logger."""
+    try:
+      # Either unregister our listeners with Jax private API, or just clear all
+      # the listeners. No perfect solution here.
+      jax.monitoring.clear_event_listeners()
+    except Exception:  # pylint: disable=broad-exception-caught
+      # We didn't register the scalar listener, so this is expected.
+      pass
+
     if self._summary_writers:
       # TODO(b/413717077): Solution for destructing lister in jax.monitoring.
       for summary_writer in self._summary_writers:

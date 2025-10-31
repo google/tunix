@@ -16,7 +16,42 @@
 
 from typing import Any, Optional
 
+import numpy as np
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
+
+
+def pad_prompt_and_completion(
+    prompt_tokens: list[int],
+    completion_tokens: list[int],
+    max_prompt_length: int,
+    max_generation_steps: int,
+    pad_id: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  """Pads prompt tokens to the left and completion tokens to the right."""
+
+  def left_pad(x, length, pad):
+    x = np.asarray(x, dtype=np.int32)
+    if x.size >= length:
+      return x[-length:]
+    pad_part = np.full(length - x.size, pad, np.int32)
+    return np.concatenate([pad_part, x], axis=0)
+
+  def right_pad(x, length, pad):
+    x = np.asarray(x, dtype=np.int32)
+    if x.size >= length:
+      return x[:length]
+    pad_part = np.full(length - x.size, pad, np.int32)
+    return np.concatenate([x, pad_part], axis=0)
+
+  left_padded_prompt_tokens = left_pad(prompt_tokens, max_prompt_length, pad_id)
+  right_padded_completion_tokens = right_pad(
+      completion_tokens, max_generation_steps, pad_id
+  )
+  tokens = np.concatenate(
+      [left_padded_prompt_tokens, right_padded_completion_tokens], axis=0
+  )
+
+  return left_padded_prompt_tokens, right_padded_completion_tokens, tokens
 
 
 def get_recent_assistant_user_messages(
@@ -83,7 +118,12 @@ def convert_single_message(
       msg_text = msg_text[len(assistant_token) :]
 
   # Tokenize
-  tokens = tokenizer.encode(msg_text, add_special_tokens=False)
+  # Some tokenizers (like raw sentencepiece) have an `encode` method that
+  # doesn't accept `add_special_tokens`.
+  try:
+    tokens = tokenizer.encode(msg_text, add_special_tokens=False)
+  except TypeError:
+    tokens = tokenizer.encode(msg_text)
 
   # Create mask (1 for assistant, 0 for others)
   mask_value = 1 if msg["role"] == "assistant" else 0
@@ -115,6 +155,11 @@ def tokenize_and_generate_masks(
   Returns:
     A tuple containing (all_tokens, all_masks).
   """
+  # For parsers that require preprocessing (e.g., merging system messages),
+  # apply it before iterating message by message.
+  if hasattr(parser, "preprocess_messages"):
+    messages = parser.preprocess_messages(messages)
+
   all_tokens = []
   all_masks = []
 

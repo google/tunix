@@ -20,6 +20,8 @@ from typing import Any, Callable, Protocol, TypeVar
 from flax import nnx
 import jax
 
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
 R = TypeVar("R")
 
 
@@ -29,7 +31,7 @@ class ModelForwardCallable(Protocol[R]):
     ...
 
 
-class BaseStrategy(abc.ABC):
+class BaseStrategy(ABC):
   """Abstract Base Class for all distillation strategies.
 
   Defines the common interface for computing the distillation loss. Concrete
@@ -53,13 +55,13 @@ class BaseStrategy(abc.ABC):
     self._teacher_forward_fn = nnx.jit(teacher_forward_fn)
     self._labels_fn = nnx.jit(labels_fn)
 
-  @abc.abstractmethod
+  @abstractmethod
   def compute_loss(
       self, student_output: Any, teacher_output: Any, labels: jax.Array
   ) -> jax.Array:
     """Computes the distillation loss based on model outputs and labels."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def compute_eval_loss(
       self, student_output: Any, labels: jax.Array
   ) -> jax.Array:

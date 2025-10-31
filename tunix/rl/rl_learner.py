@@ -33,6 +33,9 @@ from tunix.rl import utils as rl_utils
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
+
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 
 # prompts, completions, **kargs -> rewards
@@ -41,7 +44,7 @@ RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
 
-class RLLearner(abc.ABC):
+class RLLearner(ABC):
   """Base class that should be extended by specific RL algorithms."""
 
   def __init__(
@@ -120,7 +123,7 @@ class RLLearner(abc.ABC):
     )
     sft_utils.show_hbm_usage(title="RLLearner init")
 
-  @abc.abstractmethod
+  @abstractmethod
   def _generate_and_compute_advantage(
       self,
       training_input: TrainingInputT,
@@ -128,17 +131,17 @@ class RLLearner(abc.ABC):
   ) -> common.TrainExample:
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def _compute_trajectory_ids(
       self, example: TrainingInputT, steps: int
   ) -> List[str]:
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def _num_iterations(self) -> int:
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def _num_generations(self) -> int:
     pass
 
@@ -185,35 +188,38 @@ class RLLearner(abc.ABC):
             f"Content of r: {r}"
         )
       rewards[:, i] = np.array(r)
+      for reward in r:
+        self.rl_cluster.buffer_metrics(
+            {
+                f"rewards/{reward_fn.__name__}": (
+                    reward,
+                    np.mean,
+                ),
+            },
+            mode=mode,
+        )
+
+    rewards = np.nansum(rewards, axis=1)
+    for trajectory_idx in range(len(prompts)):
+      trajectory_rewards = rewards[trajectory_idx]
       self.rl_cluster.buffer_metrics(
           {
-              f"rewards/{reward_fn.__name__}": (
-                  np.mean(r),
+              "rewards/sum": (
+                  np.sum(trajectory_rewards),
                   np.mean,
               ),
           },
           mode=mode,
       )
-
-    rewards = np.nansum(rewards, axis=1)
-    self.rl_cluster.buffer_metrics(
-        {
-            "rewards/overall": (
-                np.mean(rewards),
-                np.mean,
-            ),
-        },
-        mode=mode,
-    )
-    self.rl_cluster.buffer_metrics(
-        {
-            "rewards/min": (
-                np.min(rewards),
-                np.min,
-            ),
-        },
-        mode=mode,
-    )
+      self.rl_cluster.buffer_metrics(
+          {
+              "rewards/min": (
+                  np.min(trajectory_rewards),
+                  np.min,
+              ),
+          },
+          mode=mode,
+      )
     for p, c in zip(prompts, completions):
       self.rl_cluster.buffer_metrics(
           {
@@ -506,7 +512,6 @@ class RLLearner(abc.ABC):
     Yields:
       `TrainingInputT` dicts, each with `micro_batch_size` samples.
     """
-
     buffer = {}
 
     def get_buffer_len(buf: dict[str, list[Any]]) -> int:
@@ -526,14 +531,14 @@ class RLLearner(abc.ABC):
         else:
           buffer[key].append(values)
 
-    while get_buffer_len(buffer) >= micro_batch_size:
-      micro_batch = {}
-      for key in buffer:
-        micro_batch_list_slice = buffer[key][:micro_batch_size]
-        micro_batch[key] = np.array(micro_batch_list_slice)
-        buffer[key] = buffer[key][micro_batch_size:]
+      while get_buffer_len(buffer) >= micro_batch_size:
+        micro_batch = {}
+        for key in buffer:
+          micro_batch_list_slice = buffer[key][:micro_batch_size]
+          micro_batch[key] = np.array(micro_batch_list_slice)
+          buffer[key] = buffer[key][micro_batch_size:]
 
-      yield micro_batch
+        yield micro_batch
 
   def train(
       self,

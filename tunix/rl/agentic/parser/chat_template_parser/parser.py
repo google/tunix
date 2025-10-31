@@ -200,3 +200,67 @@ class LlamaChatTemplateParser(BaseChatTemplateParser):
 
   def _init_generation_prompt(self) -> str:
     return self.tokens.assistant_token
+
+
+class GemmaChatTemplateParser(BaseChatTemplateParser):
+  """Parser for Gemma models."""
+
+  def _init_tokens(self) -> TokenConfig:
+    return TokenConfig(
+        bos_token="<bos>",
+        eot_token="<end_of_turn>\n",
+        user_token="<start_of_turn>user\n",
+        assistant_token="<start_of_turn>model\n",
+    )
+
+  def _parse_assistant(self, message: Dict[str, str]) -> str:
+    return self.tokens.assistant_token + message["content"]
+
+  def _parse_system(self, message: Dict[str, str]) -> str:
+    # This should not be called if parse() is used, as it handles the system
+    # prompt by merging it. Raise error for unexpected system messages.
+    del message  # Unused.
+    raise ValueError(
+        "Gemma models do not support system messages directly. The system"
+        " prompt should be the first message and is handled by merging with"
+        " the first user message."
+    )
+
+  def preprocess_messages(
+      self, messages: List[Dict[str, str]]
+  ) -> List[Dict[str, str]]:
+    """Preprocesses messages, merging system prompt into the first user prompt."""
+    processed_messages = list(messages)
+    if processed_messages and processed_messages[0]["role"] == "system":
+      system_message = processed_messages.pop(0)
+      if processed_messages and processed_messages[0]["role"] == "user":
+        processed_messages[0]["content"] = (
+            system_message["content"] + "\n" + processed_messages[0]["content"]
+        )
+      else:
+        processed_messages.insert(
+            0, {"role": "user", "content": system_message["content"]}
+        )
+    return processed_messages
+
+  def parse(
+      self,
+      messages: List[Dict[str, str]],
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    """Parses messages for Gemma. System prompt is prepended to user prompt."""
+    processed_messages = self.preprocess_messages(messages)
+
+    result = ""
+
+    for message in processed_messages:
+      result += self._parse_message(message)
+
+    if add_generation_prompt:
+      result += self.generation_prompt
+
+    return result
+
+  def _init_generation_prompt(self) -> str:
+    return self.tokens.assistant_token

@@ -118,7 +118,7 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    return np.mean(self.losses)
+    return np.mean(np.asarray(self.losses))
 
   @property
   def step_time_delta(self):
@@ -229,9 +229,15 @@ class PeftTrainer:
 
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
+    max_step = None
+    if self.config.max_steps is not None:
+      max_step = (
+          self.config.max_steps
+          * self.config.get_with_default("gradient_accumulation_steps", 1)
+      )
     self._prof = profiler.Profiler(
         initial_step=self._iter_steps,
-        max_step=self.config.max_steps,
+        max_step=max_step,
         profiler_options=self.config.profiler_options,
     )
     self._buffered_train_metrics: MetricsBuffer | None = None
@@ -373,9 +379,7 @@ class PeftTrainer:
         self._jitted_train_step_fn = nnx.jit(
             train_step, donate_argnames=("optimizer",)
         )
-        self._jitted_eval_step_fn = nnx.jit(
-            eval_step, donate_argnames=("model",)
-        )
+        self._jitted_eval_step_fn = nnx.jit(eval_step)
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
   def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
@@ -480,7 +484,6 @@ class PeftTrainer:
       step_time_delta: float = 0.0,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
-    loss = np.array(loss)
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
           step=step, losses=[loss], step_time_deltas=[step_time_delta]
@@ -512,12 +515,19 @@ class PeftTrainer:
     self._buffered_train_metrics = None
 
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
+    def _to_np_array(v):
+      if isinstance(v, jax.Array):
+        return np.asarray(v, dtype=np.float32)
+      elif isinstance(v, list):
+        return [_to_np_array(x) for x in v]
+      return v
+
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
         step_time_delta=metrics_buffer.step_time_delta,
         additional_metrics={
-            k: op(v)
+            k: op(_to_np_array(v))
             for k, (
                 v,
                 op,
