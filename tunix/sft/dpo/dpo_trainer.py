@@ -40,7 +40,7 @@ class DataInput:
   """Training data input for DPO.
 
   This can be used when inputs are raw strings. Tokenization, padding and
-  preprocessing is taken care of by `DpoTrainer`.
+  preprocessing is taken care of by `DPOTrainer`.
 
   Attributes:
     prompts: A list of either strings, or dicts with "text" and "image" keys.
