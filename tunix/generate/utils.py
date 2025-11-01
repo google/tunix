@@ -20,11 +20,12 @@ import gc
 import logging
 import math
 import re
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from flax import nnx
 import jax
 from jax import lax
+import jax.image as jimg
 import jax.numpy as jnp
 
 
