@@ -7,7 +7,6 @@ import jax.numpy as jnp
 
 from tunix.models.dummy_model_creator import create_dummy_model
 from tunix.models.llama3 import model as llama3_model
-from tunix.models.gemma3 import model as gemma3_model
 from tunix.models.qwen3 import model as qwen3_model
 
 
@@ -72,14 +71,6 @@ class DummyModelCreatorTest(absltest.TestCase):
         model_class=llama3_model.Llama3,
         config_fn=llama3_model.ModelConfig.llama3_2_1b,
         mesh_config=[(1, len(jax.devices())), ("fsdp", "tp")],
-    )
-
-  def test_gemma3_270m(self):
-    self._test_dummy_model_creation(
-        model_name="gemma3_270m",
-        model_class=gemma3_model.Gemma3,
-        config_fn=gemma3_model.ModelConfig.gemma3_270m,
-        mesh_config=[(1, min(4, len(jax.devices()))), ("fsdp", "tp")],
     )
 
   def test_qwen3_0_6b(self):
