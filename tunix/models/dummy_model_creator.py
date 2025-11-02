@@ -23,11 +23,10 @@ import contextlib
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
+import hashlib
 
 
-from line_profiler import profile
-
-@profile
 def create_dummy_model(
     model_class,
     config,
@@ -65,22 +64,30 @@ def create_dummy_model(
 
   rngs = nnx.Rngs(random_seed)
 
-  @profile
-  def make_random_init_fn(rngs, scale, dtype):
-    @profile
-    def init_fn(path, param, shard=None):
-      arr = scale * rngs.params.normal(param.shape, dtype)
-      if shard is not None:
-        return jax.device_put(arr, shard)
-      return arr
+  from functools import partial
+  @partial(nnx.jit, static_argnums=(2, 3,))
+  def make_param(rngs, scale, shape, dt):
+    return scale * rngs.params.normal(shape, dt)
 
-    return init_fn
+  def make_random_tensor(path, param, shard=None):
+    shape = param.shape
+    dt = dtype or getattr(param, "dtype", None) or jnp.float32
 
-  random_init_fn = make_random_init_fn(rngs, scale, dtype)
+    if shard is None:
+      #return scale * rngs.params.normal(shape, dt)
+      return make_param(rngs, scale, shape, dt)
+    else:
+      shard_shape = shard.shard_shape(shape)
+
+      def _callback(index):
+        #return scale * rngs.params.normal(shard_shape, dt)
+        return make_param(rngs, scale, shard_shape, dt)
+
+      return jax.make_array_from_callback(shape, shard, _callback)
 
   if sharding_dict is not None:
-    state_dict = jax.tree.map_with_path(random_init_fn, state_dict, sharding_dict)
+    state_dict = jax.tree.map_with_path(make_random_tensor, state_dict, sharding_dict)
   else:
-    state_dict = jax.tree.map_with_path(random_init_fn, state_dict)
+    state_dict = jax.tree.map_with_path(make_random_tensor, state_dict)
 
   return nnx.merge(graph_def, state_dict)
