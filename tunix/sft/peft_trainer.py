@@ -619,6 +619,7 @@ class PeftTrainer:
               pass
 
           if train_example is None:
+            self._prof.maybe_deactivate(self._iter_steps)
             break
 
           # Stop training if max_steps is reached.
