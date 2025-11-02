@@ -42,7 +42,7 @@ class TrainExample(common.TrainExample):
 class GRPOConfig:
   """Configuration for GRPO algorithm.
 
-  Parameters:
+  Attributes:
     num_generations: The number of times the policy generates multiple
       responses for a given prompt within a single training step. This
       corresponds to 'G' in Algorithm 1 in the paper. A higher value means
