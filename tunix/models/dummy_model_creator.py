@@ -19,12 +19,11 @@ but generates random parameters instead of loading them from files.
 """
 
 import contextlib
+from functools import partial
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
-import numpy as np
-import hashlib
+from flax import nnx
 
 
 def create_dummy_model(
@@ -47,6 +46,7 @@ def create_dummy_model(
 
   Returns:
     Model instance with randomly initialized weights (sharded if a mesh is provided).
+
   """
   context_manager = mesh if mesh is not None else contextlib.nullcontext()
 
@@ -64,7 +64,6 @@ def create_dummy_model(
 
   rngs = nnx.Rngs(random_seed)
 
-  from functools import partial
   @partial(nnx.jit, static_argnums=(2, 3,))
   def make_param(rngs, scale, shape, dt):
     return scale * rngs.params.normal(shape, dt)
