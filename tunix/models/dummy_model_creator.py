@@ -73,13 +73,11 @@ def create_dummy_model(
     dt = dtype or getattr(param, "dtype", None) or jnp.float32
 
     if shard is None:
-      #return scale * rngs.params.normal(shape, dt)
       return make_param(rngs, scale, shape, dt)
     else:
       shard_shape = shard.shard_shape(shape)
 
       def _callback(index):
-        #return scale * rngs.params.normal(shard_shape, dt)
         return make_param(rngs, scale, shard_shape, dt)
 
       return jax.make_array_from_callback(shape, shard, _callback)
