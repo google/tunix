@@ -162,7 +162,7 @@ class SglangJaxSamplerTest(absltest.TestCase):
     self.assertTrue(
         np.allclose(
             tunix_state["embedder"]["input_embedding"].value,
-            sglangjax_state["transformer"]["embed_tokens"]["embedding"].value,
+            sglangjax_state["model"]["embed_tokens"]["embedding"].value,
         )
     )
 

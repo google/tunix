@@ -108,7 +108,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["model_path"] = config.model_version
     args["precompile_bs_paddings"] = [1, 64]
     args["precompile_token_paddings"] = [8192]
-    args["disable_jax_precompile"] = True
     args["page_size"] = 64
     args["context_length"] = config.context_length
     args["tp_size"] = self._find_tp_size(config.mesh)
