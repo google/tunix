@@ -793,7 +793,6 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rollout_vllm_model_version=VLLM_MODEL_VERSION,
         rollout_vllm_hbm_utilization=0.2,
         rollout_vllm_tpu_backend_type="jax",
-        rollout_vllm_server_mode=args.rollout_server_mode,
     ),
 
 )
