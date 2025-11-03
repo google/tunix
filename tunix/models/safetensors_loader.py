@@ -26,6 +26,11 @@ import jax
 import jax.numpy as jnp
 import safetensors.flax as safetensors
 
+# DO NOT CHNAGE THIS IMPORT. This is used in both oss and GOOGLE_INTERNAL_PACKAGE_PATH.
+from tunix.oss import utils
+
+load_file_from_gcs = utils.load_file_from_gcs
+
 
 def torch_key_to_jax_key(mapping, source_key):
   """Convert torch key to jax key using the provided mapping."""
@@ -78,6 +83,9 @@ def load_and_create_model(
   Returns:
       Model instance with loaded weights
   """
+
+  file_dir = load_file_from_gcs(file_dir)
+
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
 
   if not files:

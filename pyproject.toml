@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
   "datasets",
   "flax>=0.11.1",
+  "fsspec",  # gcsfs dependency
   "gcsfs",
   "grain",
   "huggingface_hub",
@@ -28,9 +29,11 @@ dependencies = [
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "qwix",
   "sentencepiece",
+  "sympy",  # Eval result parsing
   "tensorboardX",
   "tensorflow_datasets",
   "tqdm",
