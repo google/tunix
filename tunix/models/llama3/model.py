@@ -66,9 +66,9 @@ class ShardingConfig:
     return ShardingConfig(
         emb_vd=('tp', fsdp),
         emb_dv=(fsdp, 'tp'),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_ndh=('tp', fsdp, None),
-        o_weight_nhd=('tp', None, fsdp),
+        q_weight_ndh=('tp', None, fsdp),
+        kv_weight_ndh=('tp', None, fsdp),
+        o_weight_nhd=(None, fsdp, 'tp'),
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
