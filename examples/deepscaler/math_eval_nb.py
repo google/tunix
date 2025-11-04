@@ -7,6 +7,8 @@ import os
 import fsspec
 
 from transformers import AutoTokenizer
+from tunix.generate import mappings
+
 
 try:
   from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
@@ -173,6 +175,7 @@ class Qwen25MathEvaluator:
       mesh_config=None,
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
+      sampler_type: str = "vanilla",  # vanilla, vllm, or sglang-jax
   ):
     self.model_config = model_config
     self.model_version = model_version
@@ -180,6 +183,7 @@ class Qwen25MathEvaluator:
     self.dataset = dataset
     self.max_prompt_length = max_prompt_length
     self.max_generation_steps = max_generation_steps
+    self.sampler_type = sampler_type
 
     if mesh_config is None:
       # Default: 4-way tensor parallelism
@@ -223,11 +227,37 @@ class Qwen25MathEvaluator:
         head_dim=self.model_config.head_dim,
     )
 
-    self.sampler = sampler_lib.Sampler(
-        transformer=self.model,
-        tokenizer=self.tokenizer,
-        cache_config=cache_config,
-    )
+    if self.sampler_type == "vanilla":
+      self.sampler = sampler_lib.Sampler(
+          transformer=self.model,
+          tokenizer=self.tokenizer,
+          cache_config=cache_config,
+      )
+    elif self.sampler_type == "sglang-jax":
+      from tunix.generate import sglang_jax_sampler  # pylint: disable=g-import-not-at-top
+
+      mapping_config = mappings.MappingConfig.build(
+          mapping_obj=None,
+          model=self.model,
+          backend="sglang_jax",
+      )
+      self.sampler = sglang_jax_sampler.SglangJaxSampler(
+          tokenizer=self.tokenizer,
+          config=sglang_jax_sampler.SglangJaxConfig(
+              mesh=self.mesh,
+              context_length=self.max_prompt_length
+              + self.max_generation_steps
+              + 100,
+              model_version=self.model_version,
+              mem_fraction_static=0.4,
+              init_with_random_weights=False,
+              disable_radix_cache=True,
+              enable_deterministic_sampling=False,
+              mapping_config=mapping_config,
+          ),
+      )
+    else:
+      raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
     print("Sampler created successfully!")
 
@@ -315,17 +345,31 @@ class Qwen25MathEvaluator:
     stop_token_id = self.tokenizer.encode("<|im_end|>")[0]
 
     # Generate
-    out_data = self.sampler(
-        input_strings=prompts,
-        max_generation_steps=safe_gen_length,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        echo=False,
-        eos_tokens=[stop_token_id],
-        seed=jax.random.PRNGKey(seed) if seed is not None else None,
-    )
-
+    if self.sampler_type == "vanilla":
+      out_data = self.sampler(
+          input_strings=prompts,
+          max_generation_steps=safe_gen_length,
+          temperature=temperature,
+          top_k=top_k,
+          top_p=top_p,
+          echo=False,
+          eos_tokens=[stop_token_id],
+          seed=jax.random.PRNGKey(seed) if seed is not None else None,
+      )
+    elif self.sampler_type == "sglang-jax":
+      out_data = self.sampler(
+          input_strings=prompts,
+          max_generation_steps=safe_gen_length,
+          max_prompt_length=self.max_prompt_length,
+          temperature=temperature,
+          top_p=top_p,
+          top_k=top_k,
+          seed=seed,
+          echo=False,
+          pad_output=True,
+      )
+    else:
+      raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
     return out_data.text
 
   def evaluate(
