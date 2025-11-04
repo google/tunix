@@ -1,14 +1,16 @@
 # %%
 from pprint import pprint
-from datasets import Dataset
+import datasets as datasets_lib
 import grain
 import pandas as pd
 import os
 import fsspec
 
-from transformers import AutoTokenizer
+import transformers
 from tunix.generate import mappings
 
+Dataset = datasets_lib.Dataset
+AutoTokenizer = transformers.AutoTokenizer
 
 try:
   from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
@@ -38,7 +40,7 @@ with cm:
   from tunix.generate import sampler as sampler_lib
   from tunix.utils import math_utils
 # %%
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import jax
 from tqdm.auto import tqdm
 import re
@@ -46,7 +48,7 @@ import re
 # Only used for Math500
 def extract_answer_robust(passage: str) -> str:
   if not passage:
-    return None
+    return ""
 
   # Pattern 1: Look for \boxed{...} with proper matching braces
   # This handles nested braces like \boxed{\frac{1}{2}}
@@ -107,7 +109,7 @@ def extract_answer_robust(passage: str) -> str:
         break
     return answer.strip().rstrip(".,;:)")
 
-  return None
+  return ""
 # %%
 
 # only used for AIME-2024
@@ -159,10 +161,6 @@ def evaluate_correctness(response: Any, ground_truths: Any) -> bool:
   print(f" {model_answer=} {ground_truths=} IS NOT CORRECT")
   return False
 # %%
-
-from transformers import AutoTokenizer
-from pprint import pprint
-import grain
 
 class Qwen25MathEvaluator:
 
@@ -228,20 +226,20 @@ class Qwen25MathEvaluator:
     )
 
     if self.sampler_type == "vanilla":
-      self.sampler = sampler_lib.Sampler(
+      self.sampler_vanilla = sampler_lib.Sampler(
           transformer=self.model,
           tokenizer=self.tokenizer,
           cache_config=cache_config,
       )
     elif self.sampler_type == "sglang-jax":
-      from tunix.generate import sglang_jax_sampler  # pylint: disable=g-import-not-at-top
+      from tunix.google.stubs import sglang_jax_sampler_stub as sglang_jax_sampler  # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
           model=self.model,
           backend="sglang_jax",
       )
-      self.sampler = sglang_jax_sampler.SglangJaxSampler(
+      self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(
           tokenizer=self.tokenizer,
           config=sglang_jax_sampler.SglangJaxConfig(
               mesh=self.mesh,
@@ -328,8 +326,12 @@ class Qwen25MathEvaluator:
       temperature: float = 0.6,
       top_k: int = 50,
       top_p: float = 0.95,
-      seed: int = None,
+      seed: int | None = None,
   ) -> str:
+    if self.tokenizer is None:
+      raise RuntimeError(
+          "Model components not loaded. Call load_model() first."
+      )
     max_length = max(len(self.tokenizer.encode(p)) for p in prompts)
     cache_size = self.max_prompt_length + self.max_generation_steps + 100
     safe_gen_length = min(
@@ -346,7 +348,7 @@ class Qwen25MathEvaluator:
 
     # Generate
     if self.sampler_type == "vanilla":
-      out_data = self.sampler(
+      out_data = self.sampler_vanilla(
           input_strings=prompts,
           max_generation_steps=safe_gen_length,
           temperature=temperature,
@@ -357,7 +359,7 @@ class Qwen25MathEvaluator:
           seed=jax.random.PRNGKey(seed) if seed is not None else None,
       )
     elif self.sampler_type == "sglang-jax":
-      out_data = self.sampler(
+      out_data = self.sampler_sglang(
           input_strings=prompts,
           max_generation_steps=safe_gen_length,
           max_prompt_length=self.max_prompt_length,
@@ -370,22 +372,22 @@ class Qwen25MathEvaluator:
       )
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
-    return out_data.text
+    return out_data.text[0]
 
   def evaluate(
       self,
       batch_size: int = 8,
-      num_batches: int = None,
+      num_batches: int | None = None,
       temperature: float = 0.6,
-      top_k: int = 50,
-      top_p: float = 0.95,
+      top_k: Optional[int] = 50,
+      top_p: Optional[float] = 0.95,
       num_passes: int = 1,
       debug_first_n: int = 3,  # NEW: Debug first N examples
   ) -> Dict[str, Any]:
     print("=" * 60)
     print("Starting Evaluation")
     print("=" * 60)
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  Batch size: {batch_size}")
     print(f"  Num batches: {num_batches or 'all'}")
     print(f"  Temperature: {temperature}")
@@ -467,7 +469,8 @@ class Qwen25MathEvaluator:
           print(f"Ground truth: {answer}")
           print("=" * 60 + "\n")
           print(f"Prompt (first 300 chars): {prompt[:]}")
-          print(f"Prompt length: {len(self.tokenizer.encode(prompt))} tokens")
+          if self.tokenizer is not None and hasattr(self.tokenizer, "encode"):
+            print(f"Prompt length: {len(self.tokenizer.encode(prompt))} tokens")
           print("=" * 60 + "\n")
           for i, (response, ans, cor) in enumerate(
               zip(responses, extracted_answers, answer_correct)
@@ -553,7 +556,7 @@ evaluator.load_model()
 print("\nStarting evaluation...")
 results = evaluator.evaluate(
     batch_size=8,
-    # num_batches=3,
+    num_batches=None,
     temperature=0.6,
     top_k=50,
     top_p=0.95,
@@ -592,7 +595,7 @@ print("\nStarting evaluation...")
 
 results = evaluator.evaluate(
     batch_size=1,
-    # num_batches=3,
+    num_batches=None,
     temperature=0.6,
     top_k=None,
     top_p=0.95,
