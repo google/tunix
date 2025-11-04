@@ -118,7 +118,7 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    return np.mean(np.array([np.array(x) for x in self.losses]))
+    return np.mean(np.asarray(self.losses))
 
   @property
   def step_time_delta(self):
@@ -229,15 +229,9 @@ class PeftTrainer:
 
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
-    max_step = None
-    if self.config.max_steps is not None:
-      max_step = (
-          self.config.max_steps
-          * self.config.get_with_default("gradient_accumulation_steps", 1)
-      )
     self._prof = profiler.Profiler(
         initial_step=self._iter_steps,
-        max_step=max_step,
+        max_step=self.config.max_steps,
         profiler_options=self.config.profiler_options,
     )
     self._buffered_train_metrics: MetricsBuffer | None = None

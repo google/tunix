@@ -144,9 +144,8 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
   )
   # Not able to handle resharding with undividable shardings.
   if src_largest_shards % dst_largest_shards != 0:
-    logging.debug(
-        'Resharding with undividable shardings is not optimized with'
-        ' experimental pre-reshard.'
+    logging.warning(
+        'Resharding with undividable shardings is not supported.'
         ' source_sharding=%s, target_sharding=%s',
         source_sharding,
         target_sharding,

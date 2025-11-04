@@ -13,46 +13,46 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
   return {
       'lm_head.w': ('lm_head.embedding', (None, 'model')),
       'embedder.input_embedding': (
-          'model.embed_tokens.embedding',
+          'transformer.embed_tokens.embedding',
           ('model', None),
       ),
       'layers.*.input_layernorm.w': (
-          'model.layers.*.input_layernorm.scale',
+          'transformer.layers.*.input_layernorm.scale',
           (None,),
       ),
       'layers.*.mlp.down_proj.kernel': (
-          'model.layers.*.mlp.down_proj.weight',
+          'transformer.layers.*.mlp.down_proj.weight',
           ('model', None),
       ),
       'layers.*.mlp.gate_proj.kernel': (
-          'model.layers.*.mlp.gate_proj.weight',
+          'transformer.layers.*.mlp.gate_proj.weight',
           (None, 'model'),
       ),
       'layers.*.mlp.up_proj.kernel': (
-          'model.layers.*.mlp.up_proj.weight',
+          'transformer.layers.*.mlp.up_proj.weight',
           (None, 'model'),
       ),
       'layers.*.post_attention_layernorm.w': (
-          'model.layers.*.post_attention_layernorm.scale',
+          'transformer.layers.*.post_attention_layernorm.scale',
           (None,),
       ),
       'layers.*.attn.k_proj.w': (
-          'model.layers.*.self_attn.k_proj.weight',
+          'transformer.layers.*.self_attn.k_proj.weight',
           (None, 'model', None),
       ),
       'layers.*.attn.o_proj.w': (
-          'model.layers.*.self_attn.o_proj.weight',
+          'transformer.layers.*.self_attn.o_proj.weight',
           ('model', None, None),
       ),
       'layers.*.attn.q_proj.w': (
-          'model.layers.*.self_attn.q_proj.weight',
+          'transformer.layers.*.self_attn.q_proj.weight',
           (None, 'model', None),
       ),
       'layers.*.attn.v_proj.w': (
-          'model.layers.*.self_attn.v_proj.weight',
+          'transformer.layers.*.self_attn.v_proj.weight',
           (None, 'model', None),
       ),
-      'final_norm.w': ('model.norm.scale', (None,)),
+      'final_norm.w': ('transformer.norm.scale', (None,)),
   }
 
 
