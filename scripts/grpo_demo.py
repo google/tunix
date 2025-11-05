@@ -18,7 +18,7 @@ This script demonstrates how to run GRPO with a Llama3 model. It includes
 training, evaluation, and inference.
 
 Example usage:
-python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
+python3 grpo_demo.py --root-dir=/path/to/root_dir \
 --model-version=Qwen/Qwen2.5-0.5B
 
 """
@@ -122,7 +122,7 @@ parser.add_argument(
     "--rollout-engine",
     type=str,
     default="vanilla",
-    choices=["vanilla", "vllm"],
+    choices=["vanilla", "vllm", "sglang_jax"],
     required=False,
     help="Rollout engine to use (vanilla or vllm).",
 )
@@ -397,6 +397,9 @@ MODEL_CONFIG = {
     "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
     "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2_5_0_5b,
     "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2_5_7b,
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": (
+        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b
+    ),
 }
 
 
@@ -822,6 +825,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rollout_vllm_hbm_utilization=0.2,
         rollout_vllm_tpu_backend_type="jax",
         rollout_vllm_server_mode=args.rollout_server_mode,
+        rollout_sglang_jax_model_version=VLLM_MODEL_VERSION,
+        rollout_sglang_jax_context_length=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+        rollout_sglang_jax_mem_fraction_static=0.2,
+        rollout_sglang_jax_init_with_random_weights=True,
+        rollout_sglang_jax_disable_radix_cache=True,
+        rollout_sglang_jax_enable_deterministic_sampling=False,
     ),
 )
 
