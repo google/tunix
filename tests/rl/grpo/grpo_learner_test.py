@@ -325,16 +325,17 @@ class GRPOLearnerTest(parameterized.TestCase):
         if isinstance(reward_fns, list)
         else ('rewards/' + reward_fns.__name__,)
     )
+    # Metric 'prompts' and 'completions' are not logged in native metric logger because jax.monitoring does not support string values.
     for metric_name in [
         'rewards/sum',
+        'rewards/min',
+        'rewards/max',
         *rewards_metrics,
-        'completions/mean_length',
-        'completions/max_length',
-        'completions/min_length',
         'test_metric',
     ]:
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
+
       self.assertLen(
           rl_metric_logger.get_metric_history(metric_name, 'train'),
           grpo_learner.rl_cluster.global_steps,
@@ -1216,6 +1217,81 @@ class GRPOLearnerTest(parameterized.TestCase):
         grpo_learner.rl_cluster.global_steps
         + max_steps * mini_batch_size / batch_size,
     )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_reward_fn',
+          reward_fns=reward_1,
+      ),
+      dict(
+          testcase_name='multiple_reward_fns',
+          reward_fns=[
+              reward_1,
+              reward_2,
+          ],
+      ),
+      dict(
+          testcase_name='single_reward_fn_gspo',
+          reward_fns=reward_1,
+      ),
+  )
+  def test_compute_rewards_shape(self, reward_fns):
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    ref_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=2,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+    rl_cluster.with_external_metrics_logger(print)
+
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        loss_algo='grpo',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fns,
+        grpo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {'test_metric': (1.0, np.mean)}],
+    )
+    prompts = ['p0', 'p1', 'p2']
+    completions = ['c1', 'c2', 'c3']
+    answers = ['a1', 'a2', 'a3']
+    rewards = grpo_learner._compute_rewards(
+        prompts=prompts,
+        completions=completions,
+        answer=answers,
+        mode=rl_cluster_lib.Mode.TRAIN,
+    )
+    self.assertLen(rewards, len(prompts))
 
 
 if __name__ == '__main__':
