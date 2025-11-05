@@ -337,12 +337,10 @@ class GRPOLearner(rl_learner.RLLearner):
     micro_batches = [cached_inputs_for_window[0]] * num_generations
     training_input = rl_utils.merge_micro_batches(micro_batches)
 
-    steps = (
-        self._iter_steps
-        if mode == rl_cluster_lib.Mode.TRAIN
-        else self._eval_iter_steps
+    prompt_index = (
+        batch_results[0].pair_index // self.grpo_config.num_generations
     )
-    trajectory_ids = self._compute_trajectory_ids(training_input, steps)
+    trajectory_ids = self._compute_trajectory_ids(training_input, prompt_index)
     assert "trajectory_ids" not in training_input
     training_input["trajectory_ids"] = trajectory_ids
     for t_id in trajectory_ids:
@@ -552,7 +550,7 @@ class GRPOLearner(rl_learner.RLLearner):
     )
 
   def _compute_trajectory_ids(
-      self, example: TrainingInputT, steps: int
+      self, example: TrainingInputT, prompt_index: int
   ) -> List[str]:
     """Computes the trajectory ID for each prompt in the batch.
 
@@ -560,15 +558,24 @@ class GRPOLearner(rl_learner.RLLearner):
     row_offset is the row index of the example data source and
     group_offset is the group index of the example in the generation group.
 
+    In agentic GRPO, this method is called when processing rollouts for a
+    single prompt, so `len(example["prompts"])` == `num_generations`,
+    meaning `batch_size` will be 1.
+
     Args:
-      example: The training input data.
-      steps: The number of steps taken so far.
+      example: The training input data for one prompt group.
+      prompt_index: The index of the prompt in the dataset.
 
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
     batch_size = len(example["prompts"]) // self.grpo_config.num_generations
-    row_offset = steps * batch_size
+    if batch_size != 1:
+      raise ValueError(
+          "_compute_trajectory_ids expects inputs for a single prompt group,"
+          f" but got batch_size={batch_size}"
+      )
+    row_offset = prompt_index
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),
         self.grpo_config.num_generations,
@@ -591,7 +598,7 @@ class GRPOLearner(rl_learner.RLLearner):
     return self.grpo_config.num_generations
 
   @staticmethod
-  def _run_async(coro: Coroutine) -> Any:
+  def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
     """Runs a coroutine, handling existing event loops correctly."""
     try:
       loop = asyncio.get_running_loop()
@@ -619,8 +626,9 @@ class GRPOLearner(rl_learner.RLLearner):
               cached_inputs_for_window=cached_inputs,
               mode=rl_cluster_lib.Mode.TRAIN,
           )
-          for train_example in train_examples:
-            train_data_queue.put(train_example)
+          for _ in range(self.grpo_config.num_iterations):
+            for train_example in train_examples:
+              train_data_queue.put(train_example)
         except Exception as e:
           if not isinstance(e, RuntimeError):
             logging.exception(
@@ -714,6 +722,13 @@ class GRPOLearner(rl_learner.RLLearner):
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
     for full_batch in full_dataset_iterator:
+      if self.rl_cluster.global_steps >= self._training_config.max_steps:
+        logging.info(
+            "Reached max_steps: %d >= %d",
+            self.rl_cluster.global_steps,
+            self._training_config.max_steps,
+        )
+        break
       # 1. Fill prompt queue for the current full batch.
       for prompt in self._create_micro_batch_iterator(iter([full_batch]), 1):
         prompt_queue.put(prompt)
@@ -779,7 +794,8 @@ class GRPOLearner(rl_learner.RLLearner):
       if self.should_sync_weights:
         logging.info("Syncing weights after processing full batch.")
         self.rl_cluster.sync_weights()
-      self.rl_cluster.global_steps += 1
+      else:
+        self.rl_cluster.global_steps += 1
 
     self.rl_cluster.close()
 
