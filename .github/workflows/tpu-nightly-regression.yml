@@ -1,0 +1,102 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+
+name: Tunix Nightly Regression
+
+on:
+  workflow_call:
+    secrets:
+      HF_TOKEN:
+        required: true
+        description: 'HuggingFace token for model downloads'
+
+concurrency:
+  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
+  group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || github.event_name == 'schedule' && format('{0}-schedule', github.workflow) || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  HF_HOME: ~/.cache/huggingface
+  HF_HUB_ENABLE_HF_TRANSFER: "1"
+
+jobs:
+  run_prod:
+    runs-on: [linux-x86-ct5lp-224-8tpu]
+    environment: testing
+    container:
+      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:jax0.7.1_rev1
+      options: --privileged
+      env:
+        CLOUD_TPU_ACCELERATOR: v5e-8
+        JAX_PLATFORMS: tpu
+    steps:
+
+    # Cache Hugging Face hub
+    - name: Cache HF hub
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+        restore-keys: |
+          hf-${{ runner.os }}-
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install tunix dependencies
+      run: |
+        pip install -e .[prod]
+        pip install pytest pytest-xdist
+
+    - name: Verify TPU availability
+      run: |
+        python -c "
+        import jax
+        print(f'JAX version: {jax.__version__}')
+        print(f'JAX devices: {jax.devices()}')
+
+        # Check if we have TPU devices specifically
+        devices = jax.devices()
+        has_tpu = len(devices) > 0 and all(device.platform == 'tpu' for device in devices)
+        print(f'TPU available: {has_tpu}')
+
+        if not has_tpu:
+            print('ERROR: No TPU devices found! Expected TPU devices but got:', [device.platform for device in devices])
+            exit(1)
+        else:
+            print(f'SUCCESS: Found {len(devices)} TPU device(s)')
+        "
+
+    - name: Run regression scripts
+      id: regression_tests
+      run: |
+        FAILED=0
+        echo "Running tunix/oss/examples/deepscaler/math_eval_nb.py..."
+        python tunix/oss/examples/deepscaler/math_eval_nb.py || FAILED=1
+
+        echo "Running tunix/oss/scripts/grpo_demo_llama3_qwen2.py..."
+        python tunix/oss/scripts/grpo_demo_llama3_qwen2.py || FAILED=1
+        
+        if [ "$FAILED" -ne 0 ]; then
+          echo "One or more scripts failed!"
+          exit 1
+        fi
+
+
+          
