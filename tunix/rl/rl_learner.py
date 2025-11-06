@@ -401,9 +401,10 @@ class RLLearner(ABC):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        # Fetch one training micro-batch
-        example = next(iterator)
-        cur_batch_size = len(example["prompts"])
+        with self.rl_cluster.perf.interval("data_loading"):
+          # Fetch one training micro-batch
+          example = next(iterator)
+          cur_batch_size = len(example["prompts"])
 
         # Buffer the fetched micro-batch. We accumulate micro-batches and track
         # their sizes and the total number of samples. This allows us to form a
@@ -667,14 +668,18 @@ class RLLearner(ABC):
           self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
 
         if self.should_sync_weights:
-          with jax.profiler.StepTraceAnnotation(
-              "sync_sampler_weights", step_num=initial_steps
-          ):
-            self.rl_cluster.sync_weights()
+          with self.rl_cluster.perf.interval("weight_sync"):
+            with jax.profiler.StepTraceAnnotation(
+                "sync_sampler_weights", step_num=initial_steps
+            ):
+              self.rl_cluster.sync_weights()
         else:
           self.rl_cluster.global_steps += (
               1  # manually increment the global steps.
           )
+
+        self.rl_cluster.perf.end_epoch()
+
         if (
             self.rl_cluster.actor_trainer.train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps

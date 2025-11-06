@@ -44,6 +44,8 @@ from tunix.rl.rl_cluster import MetricsBuffer
 from tunix.rl.rl_cluster import RLCluster
 from tunix.rl.rl_cluster import RLTrainingConfig
 from tunix.rl.rl_cluster import Role
+from tunix.perf.metrics import PerfMetricsConfig
+from tunix.perf.metrics import PerfMetricsApi
 from tunix.rl.rollout.base_rollout import RolloutConfig
 from tunix.sft.checkpoint_manager import CheckpointManager
 from tunix.sft.dpo.dpo_trainer import DPOTrainer
