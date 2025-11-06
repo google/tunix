@@ -19,6 +19,8 @@ This provides a mapping from the upstream checkpoints[1] to our implementation.
 [1] https://github.com/google-deepmind/gemma
 """
 
+import functools
+
 from etils import epath
 import flax
 from flax import nnx
@@ -51,21 +53,22 @@ def create_model_from_checkpoint(
     checkpoint_path: str,
     model_config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
+    dtype: jnp.dtype = jnp.bfloat16,
 ) -> model_lib.Gemma3:
   """Load a Gemma3 model from a checkpoint."""
   abs_model = nnx.eval_shape(
       lambda: model_lib.Gemma3(model_config, rngs=nnx.Rngs(0))
   )
   params = ocp.StandardCheckpointer().restore(checkpoint_path)
-  params = _map_from_upstream_checkpoint(params)
+  params = map_from_upstream_checkpoint(params)
   if mesh is not None:
     params = jax.tree.map(
-        lambda x, shd: jnp.asarray(x, device=shd),
+        lambda x, shd: jnp.asarray(x, device=shd, dtype=dtype),
         params,
         nnx.to_pure_dict(nnx.get_named_sharding(nnx.state(abs_model), mesh)),
     )
   else:
-    params = jax.tree.map(jnp.asarray, params)
+    params = jax.tree.map(functools.partial(jnp.asarray, dtype=dtype), params)
   nnx.update(abs_model, params)
   return abs_model
 
@@ -86,7 +89,7 @@ def create_tokenizer(
   return spm_processor
 
 
-def _map_from_upstream_checkpoint(params):
+def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
   """Map from upstream checkpoint to our implementation."""
   # From:
   #
@@ -139,6 +142,8 @@ def _map_from_upstream_checkpoint(params):
       new_params[(*layer_idx, 'mlp', 'up_proj', 'kernel')] = value[1].T
     elif module_path[1:] == ['mlp', 'linear']:
       new_params[(*layer_idx, 'mlp', 'down_proj', 'kernel')] = value
+    elif module_path[1:] == ['post_attention_norm'] and model_type != 'gemma3':
+      new_params[(*layer_idx, 'post_attn_norm', 'scale')] = value
     else:
       new_params[(*layer_idx, *module_path[1:], param_name)] = value
   return flax.traverse_util.unflatten_dict(new_params)

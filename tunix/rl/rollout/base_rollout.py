@@ -21,6 +21,10 @@ from typing import Any, Optional, Tuple
 import jax
 from jax import numpy as jnp
 import jaxtyping
+from tunix.generate import mappings
+
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,11 +100,61 @@ class RolloutConfig:
   # will be used.
   eos_tokens: list[int] | None = None
 
+  # Weights mapping config for the rollout model.
+  rollout_mapping_config: mappings.MappingConfig | None = None
 
-class BaseRollout(abc.ABC):
+  # vLLM specific rollout configs.
+
+  # Whether to run rollout in vLLM server mode or batch inference mode.
+  rollout_vllm_server_mode: bool = False
+
+  # Model version for vLLM rollout engine.
+  rollout_vllm_model_version: str = ""
+
+  # LoRA config for vLLM rollout engine.
+  rollout_vllm_lora_config: dict[str, Any] | None = None
+
+  # Allocated HBM fraction for vLLM rollout engine.
+  rollout_vllm_hbm_utilization: float = 0.2
+
+  # Whether to initialize vLLM model with random weights or huggingface weights.
+  rollout_vllm_init_with_random_weights: bool = True
+
+  # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
+  rollout_vllm_tpu_backend_type: str | None = None
+
+  # Swap space size for vLLM rollout engine, in GiB.
+  rollout_vllm_swap_space_size_gb: float = 4.0
+
+  # SG-Lang JAX specific rollout configs.
+
+  # Model version for SG-Lang JAX rollout engine.
+  rollout_sglang_jax_model_version: str = ""
+
+  # Context length for SG-Lang JAX rollout engine.
+  rollout_sglang_jax_context_length: int = 8192
+
+  # Allocated HBM fraction for SG-Lang JAX rollout engine.
+  rollout_sglang_jax_mem_fraction_static: float = 0.2
+
+  # Whether to initialize SG-Lang JAX model with random weights.
+  rollout_sglang_jax_init_with_random_weights: bool = True
+
+  # Radix cache disabling flag for SG-Lang JAX rollout engine. Default to True for RL.
+  rollout_sglang_jax_disable_radix_cache: bool = True
+
+  # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
+  rollout_sglang_jax_enable_deterministic_sampling: bool = False
+
+
+class BaseRollout(ABC):
   """Base RolloutWorker."""
 
-  @abc.abstractmethod
+  @abstractmethod
+  def __init__(self, **kwargs):
+    """Initializes the rollout worker."""
+
+  @abstractmethod
   def generate(
       self,
       prompts: list[str],
@@ -109,7 +163,7 @@ class BaseRollout(abc.ABC):
   ) -> RolloutOutput:
     """Generates samples from the model."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def get_per_token_logps(
       self,
       prompt_tokens: jax.Array,
@@ -118,7 +172,7 @@ class BaseRollout(abc.ABC):
   ) -> jax.Array:
     """Returns per-token log probabilities from the model."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def update_params(
       self,
       params: jaxtyping.PyTree,
@@ -126,14 +180,14 @@ class BaseRollout(abc.ABC):
   ) -> None:
     """Updates the rollout model parameters."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def pad_id(self) -> int:
     """Returns the pad id."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def eos_id(self) -> int:
     """Returns the eos id."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""

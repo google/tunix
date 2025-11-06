@@ -42,7 +42,7 @@ class TrainExample(common.TrainExample):
 class GRPOConfig:
   """Configuration for GRPO algorithm.
 
-  Parameters:
+  Attributes:
     num_generations: The number of times the policy generates multiple
       responses for a given prompt within a single training step. This
       corresponds to 'G' in Algorithm 1 in the paper. A higher value means
@@ -195,10 +195,21 @@ class GRPOLearner(rl_learner.RLLearner):
 
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
-    # Change: Accept only positional arguments for loss_fn.
     loss_fn = (
         lambda model, train_example, beta, epsilon, epsilon_high, loss_algo, dr_grpo, max_tokens, eliminate_non_diverse_groups, debug, num_generations: grpo_loss_fn(
-            model, train_example, beta, epsilon, epsilon_high, loss_algo, dr_grpo, max_tokens, eliminate_non_diverse_groups, debug, num_generations
+            model,
+            train_example,
+            beta=beta,
+            epsilon=epsilon,
+            pad_id=self.rl_cluster.rollout.pad_id(),
+            eos_id=self.rl_cluster.rollout.eos_id(),
+            loss_algo=loss_algo,
+            epsilon_high=epsilon_high,
+            dr_grpo=dr_grpo,
+            max_tokens=max_tokens,
+            eliminate_non_diverse_groups=eliminate_non_diverse_groups,
+            debug=debug,
+            num_generations=num_generations,
         )
     )
 
@@ -440,8 +451,10 @@ def grpo_loss_fn(
     train_example,
     beta,
     epsilon,
-    epsilon_high,
     loss_algo,
+    pad_id,
+    eos_id,
+    epsilon_high,
     dr_grpo,
     max_tokens,
     eliminate_non_diverse_groups,
@@ -459,11 +472,13 @@ def grpo_loss_fn(
     train_example: A `TrainExample` instance containing the processed input
       data, including prompt IDs, completion IDs, masks, advantages, and
       per-token log probabilities from the reference and policy models.
-    beta: The coefficient for the KL divergence penalty. A value of 0.0 means
-      no KL penalty is applied.
+    beta: The coefficient for the KL divergence penalty. A value of 0.0 means no
+      KL penalty is applied.
     epsilon: Epsilon value for clipping.
-    epsilon_high: Epsilon value for upper bound clipping.
     loss_algo: The loss algorithm to use. Can be grpo or gspo-token.
+    pad_id: The pad ID from tokenizer.
+    eos_id: The eos ID from.
+    epsilon_high: Epsilon value for upper bound clipping.
     dr_grpo: If True, use DR-GRPO variant.
     max_tokens: Maximum generation tokens for DR-GRPO normalization.
     eliminate_non_diverse_groups: If True, discard groups with identical
@@ -474,26 +489,19 @@ def grpo_loss_fn(
   Returns:
     A tuple containing the loss and an aux dictionary.
   """
-  prompt_ids, prompt_mask = (
-      train_example.prompt_ids,
-      train_example.prompt_mask,
-  )
   completion_ids, completion_mask = (
       train_example.completion_ids,
       train_example.completion_mask,
   )
-  input_ids = jnp.concat([prompt_ids, completion_ids], axis=1)
-  prompt_completion_mask = jnp.concat([prompt_mask, completion_mask], axis=-1)
-  attention_mask = common.make_causal_attn_mask(prompt_completion_mask)
-  logits_to_keep = completion_ids.shape[1]
-  positions = common.build_positions_from_mask(prompt_completion_mask)
 
-  per_token_logps, _ = common.get_per_token_logps(
+  per_token_logps = common.compute_per_token_logps(
       model,
-      input_tokens=input_ids,
-      positions=positions,
-      attn_mask=attention_mask,
-      logits_to_keep=logits_to_keep,
+      prompt_tokens=train_example.prompt_ids,
+      completion_tokens=completion_ids,
+      pad_id=pad_id,
+      eos_id=eos_id,
+      stop_gradient=False,
+      return_logits=False,
   )
   advantages = train_example.advantages
 
@@ -593,6 +601,7 @@ def grpo_loss_fn(
     loss = (per_token_loss * completion_mask).sum() / loss_denominator
 
   return loss, aux
+
 
 GrpoConfig = GRPOConfig
 GrpoLearner = GRPOLearner

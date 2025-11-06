@@ -27,6 +27,10 @@ from tunix.cli.utils import model
         model_name="gemma2-2b",
     ),
     dict(
+        testcase_name="gemma2-2b-it",
+        model_name="gemma2-2b-it",
+    ),
+    dict(
         testcase_name="gemma2-9b",
         model_name="gemma2-9b",
     ),
@@ -61,8 +65,11 @@ class ModelTest(parameterized.TestCase):
   def test_obtain_model_params_valid(self, model_name: str):
     model.obtain_model_params(model_name)
 
-  def test_get_model_module_valid(self, model_name: str):
-    model.get_model_module(model_name)
+  def test_create_model_dynamically_routing(self, model_name: str):
+    model_module = model.get_model_module(model_name)
+    if not model_name.startswith("gemma"):
+      # TODO(b/444572467)
+      getattr(model_module, "create_model_from_safe_tensors")
 
 
 if __name__ == "__main__":

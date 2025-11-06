@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import itertools
 import os
+import shutil
 import tempfile
 import types
+import uuid
 from absl.testing import absltest
 from absl.testing import parameterized
 import chex
@@ -34,6 +35,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
+from tunix.sft import profiler
 from tunix.tests import test_common as tc
 from typing_extensions import override
 
@@ -323,16 +325,17 @@ class GRPOLearnerTest(parameterized.TestCase):
         if isinstance(reward_fns, list)
         else ('rewards/' + reward_fns.__name__,)
     )
+    # Metric 'prompts' and 'completions' are not logged in native metric logger because jax.monitoring does not support string values.
     for metric_name in [
-        'rewards/overall',
+        'rewards/sum',
+        'rewards/min',
+        'rewards/max',
         *rewards_metrics,
-        'completions/mean_length',
-        'completions/max_length',
-        'completions/min_length',
         'test_metric',
     ]:
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
+
       self.assertLen(
           rl_metric_logger.get_metric_history(metric_name, 'train'),
           grpo_learner.rl_cluster.global_steps,
@@ -855,7 +858,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     def my_reward_fn(trajectories, prompts, **kwargs):
       for t_id, prompt in zip(kwargs['trajectory_ids'], prompts):
         trajectories[kwargs['mode']][t_id] = prompt
-      return 1.0
+      return [1.0] * len(prompts)
 
     vocab = tc.MockVocab()
     model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
@@ -1025,6 +1028,11 @@ class GRPOLearnerTest(parameterized.TestCase):
               train_micro_batch_size=train_micro_batch_size,
               rollout_micro_batch_size=rollout_micro_batch_size,
               compute_logps_micro_batch_size=compute_logps_micro_batch_size,
+              profiler_options=profiler.ProfilerOptions(
+                  profiler_steps=2,
+                  skip_first_n_steps=1,
+                  log_dir='/tmp/profiler',
+              ),
           ),
           rollout_config=base_rollout.RolloutConfig(
               max_tokens_to_generate=10,
@@ -1053,8 +1061,8 @@ class GRPOLearnerTest(parameterized.TestCase):
       )
       return grpo_learner, model
 
-    #  40 rows with repeat=10.
-    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=batch_size)
+    #  80 rows with repeat=20.
+    train_ds = _dummy_dataset(MySource(repeat=20), batch_size=batch_size)
     eval_ds = _dummy_dataset(batch_size=1)
 
     # Baseline with no micro batching.
@@ -1070,7 +1078,7 @@ class GRPOLearnerTest(parameterized.TestCase):
 
     grpo_learner.train(train_ds, eval_ds)
     self.assertEqual(
-        40 // batch_size, grpo_learner.rl_cluster.actor_trainer.train_steps
+        80 // batch_size, grpo_learner.rl_cluster.actor_trainer.train_steps
     )
 
     base_variables = nnx.state(model, nnx.Param)
@@ -1094,9 +1102,196 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertEqual(base_trajectories, micro_batch_trajectories)
     self.assertEqual(
-        40 // (mini_batch_size or batch_size),
+        80 // (mini_batch_size or batch_size),
         grpo_learner.rl_cluster.actor_trainer.train_steps,
     )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_mini_batch',
+          max_steps=8,
+          batch_size=8,
+          mini_batch_size=8,
+      ),
+      dict(
+          testcase_name='multi_mini_batch',
+          max_steps=8,
+          batch_size=8,
+          mini_batch_size=4,
+      ),
+  )
+  def test_checkpoint_with_mini_batch(
+      self, max_steps, batch_size, mini_batch_size
+  ):
+    ckpt_dir = f'/tmp/{self.id()}/{uuid.uuid4()}/checkpoint'
+    if os.path.exists(ckpt_dir):
+      shutil.rmtree(ckpt_dir)
+
+    def create_learner(
+        ckpt_dir,
+        max_steps,
+    ):
+      vocab = tc.MockVocab()
+      model = tc.ToyTransformer(
+          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+      )
+      ref_model = tc.ToyTransformer(
+          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+      )
+
+      mesh = pxla.thread_resources.env.physical_mesh
+      cluster_config = rl_cluster_lib.ClusterConfig(
+          role_to_mesh={
+              rl_cluster_lib.Role.ACTOR: mesh,
+              rl_cluster_lib.Role.REFERENCE: mesh,
+              rl_cluster_lib.Role.ROLLOUT: mesh,
+          },
+          rollout_engine='vanilla',
+          offload_to_cpu=False,
+          training_config=rl_cluster_lib.RLTrainingConfig(
+              actor_optimizer=optax.sgd(1e-3),
+              eval_every_n_steps=2,
+              max_steps=max_steps,
+              mini_batch_size=mini_batch_size,
+              train_micro_batch_size=mini_batch_size,
+              rollout_micro_batch_size=mini_batch_size,
+              compute_logps_micro_batch_size=mini_batch_size,
+              checkpointing_options=ocp.CheckpointManagerOptions(
+                  save_interval_steps=4,
+              ),
+              checkpoint_root_directory=ckpt_dir,
+          ),
+          rollout_config=base_rollout.RolloutConfig(
+              max_tokens_to_generate=10,
+              max_prompt_length=32,
+              kv_cache_size=256,
+              temperature=0.5,
+          ),
+      )
+      rl_cluster = rl_cluster_lib.RLCluster(
+          actor=model,
+          reference=ref_model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+      grpo_config = grpo_lib.GRPOConfig(
+          num_generations=2,
+          num_iterations=1,
+      )
+      grpo_learner = grpo_lib.GRPOLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=reward_1,
+          grpo_config=grpo_config,
+      )
+      return grpo_learner
+
+    # make sure we have enough rows
+    train_ds = _dummy_dataset(MySource(repeat=100), batch_size=batch_size)
+
+    grpo_learner = create_learner(ckpt_dir, max_steps=max_steps)
+    self.assertEqual(grpo_learner.rl_cluster.global_steps, 0)
+    grpo_learner.train(train_ds, None)
+    self.assertEqual(
+        grpo_learner.rl_cluster.global_steps,
+        max_steps * mini_batch_size / batch_size,
+    )
+
+    # Increase max_steps and so we continue training from checkpoint.
+    grpo_learner2 = create_learner(ckpt_dir, max_steps=max_steps * 2)
+    self.assertEqual(
+        grpo_learner2.rl_cluster.global_steps,
+        grpo_learner.rl_cluster.global_steps,
+    )
+    self.assertEqual(
+        grpo_learner2.rl_cluster.actor_trainer._restored_custom_metadata,
+        {'global_step': grpo_learner.rl_cluster.global_steps},
+    )
+
+    # double the batch size it should also work with checkpoint resumption.
+    batch_size *= 2
+    train_ds = _dummy_dataset(MySource(repeat=100), batch_size=batch_size)
+    grpo_learner2.train(train_ds, None)
+    self.assertEqual(
+        grpo_learner2.rl_cluster.global_steps,
+        grpo_learner.rl_cluster.global_steps
+        + max_steps * mini_batch_size / batch_size,
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_reward_fn',
+          reward_fns=reward_1,
+      ),
+      dict(
+          testcase_name='multiple_reward_fns',
+          reward_fns=[
+              reward_1,
+              reward_2,
+          ],
+      ),
+      dict(
+          testcase_name='single_reward_fn_gspo',
+          reward_fns=reward_1,
+      ),
+  )
+  def test_compute_rewards_shape(self, reward_fns):
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    ref_model = tc.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=2,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+    rl_cluster.with_external_metrics_logger(print)
+
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        loss_algo='grpo',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fns,
+        grpo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {'test_metric': (1.0, np.mean)}],
+    )
+    prompts = ['p0', 'p1', 'p2']
+    completions = ['c1', 'c2', 'c3']
+    answers = ['a1', 'a2', 'a3']
+    rewards = grpo_learner._compute_rewards(
+        prompts=prompts,
+        completions=completions,
+        answer=answers,
+        mode=rl_cluster_lib.Mode.TRAIN,
+    )
+    self.assertLen(rewards, len(prompts))
 
 
 if __name__ == '__main__':

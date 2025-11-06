@@ -17,28 +17,30 @@
 import abc
 from typing import Any
 
+ABC = abc.ABC
+abstractmethod = abc.abstractmethod
 PeftTrainer = Any
 
 
-class TrainingHooks(abc.ABC):
+class TrainingHooks(ABC):
   """Hooks to be used for training."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def on_train_start(self, train_ctx: "PeftTrainer.PeftTrainer"):
     """Called at the beginning of training."""
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def on_train_end(self, train_ctx: "PeftTrainer.PeftTrainer"):
     """Called at the end of training."""
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def on_train_step_start(self, train_ctx: "PeftTrainer.PeftTrainer"):
     """Called at the beginning of a training step."""
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def on_train_step_end(
       self,
       train_ctx: "PeftTrainer.PeftTrainer",
@@ -49,12 +51,12 @@ class TrainingHooks(abc.ABC):
     """Called at the end of a training step."""
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def on_eval_step_start(self, train_ctx: "PeftTrainer.PeftTrainer"):
     """Called at the beginning of an evaluation step."""
     pass
 
-  @abc.abstractmethod
+  @abstractmethod
   def on_eval_step_end(
       self, train_ctx: "PeftTrainer.PeftTrainer", eval_loss: float
   ):
@@ -62,15 +64,15 @@ class TrainingHooks(abc.ABC):
     pass
 
 
-class DataHooks(abc.ABC):
+class DataHooks(ABC):
   """Hooks to wire in external data loader and processing logic."""
 
-  @abc.abstractmethod
+  @abstractmethod
   def load_next_train_batch(self, train_ctx: "PeftTrainer.PeftTrainer") -> Any:
     """Loads the next batch of data for training."""
     raise NotImplementedError()
 
-  @abc.abstractmethod
+  @abstractmethod
   def load_next_eval_batch(self, train_ctx: "PeftTrainer.PeftTrainer") -> Any:
     """Loads the next batch of data for evaluation."""
     raise NotImplementedError()

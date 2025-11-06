@@ -80,7 +80,7 @@ class ShardingConfig:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True)
 class ModelConfig:
   """Configuration for the Qwen3 model."""
 
@@ -141,6 +141,21 @@ class ModelConfig:
         num_kv_heads=2,
         norm_eps=1e-06,
         rope_theta=1_000_000,
+        use_tied_embedding=True,
+    )
+
+  @classmethod
+  def qwen2_5_math_1_5b(cls):  # qwen2.5-math-1.5B
+    return cls(
+        num_layers=28,
+        vocab_size=151936,
+        embed_dim=1536,
+        hidden_dim=8960,
+        num_heads=12,
+        head_dim=128,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10000,
         use_tied_embedding=True,
     )
 
@@ -468,7 +483,9 @@ class Attention(nnx.Module):
       cos: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block)(x, cache, attn_mask, sin, cos)
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
     else:
       return self.block(x, cache, attn_mask, sin, cos)
 

@@ -26,7 +26,8 @@ from typing import Any, Callable
 from absl import logging
 import jax
 import jaxtyping
-
+from flax import nnx
+from tunix.rl import utils
 
 # TODO(tsbao): move this to util
 def callback_on_ready(
@@ -143,8 +144,9 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
   )
   # Not able to handle resharding with undividable shardings.
   if src_largest_shards % dst_largest_shards != 0:
-    logging.warning(
-        'Resharding with undividable shardings is not supported.'
+    logging.debug(
+        'Resharding with undividable shardings is not optimized with'
+        ' experimental pre-reshard.'
         ' source_sharding=%s, target_sharding=%s',
         source_sharding,
         target_sharding,
@@ -483,3 +485,22 @@ def reshard_pytree(
       ),
   )
   return resharded_array
+
+
+def reshard_model_to_mesh(model: nnx.Module, mesh: jax.sharding.Mesh):
+  """Reshard the lora model if the mesh is specified and the lora model mesh is not the same as the input mesh."""
+  model_mesh = utils.get_pytree_mesh_info(nnx.state(model))
+  if mesh is not None and model_mesh != mesh:
+    with mesh:
+      graph_def, state = nnx.split(model)
+      default_memory_kind = jax.devices()[0].default_memory().kind
+      dst_shardings = jax.tree_util.tree_map(
+          lambda x: jax.sharding.NamedSharding(
+              mesh,
+              x,
+              memory_kind=default_memory_kind,
+          ),
+          nnx.get_partition_spec(state),
+      )
+      model = nnx.merge(graph_def, reshard_pytree(state, dst_shardings))
+  return model

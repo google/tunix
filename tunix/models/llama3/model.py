@@ -141,6 +141,34 @@ class ModelConfig:
         weight_tying=False,
     )
 
+  @classmethod
+  def llama3_70b(cls):
+    return cls(
+        num_layers=80,
+        vocab_size=128256,
+        embed_dim=8192,
+        hidden_dim=28672,
+        num_heads=64,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-05,
+        rope_theta=500_000,
+    )
+
+  @classmethod
+  def llama3_405b(cls):
+    return cls(
+        num_layers=126,
+        vocab_size=128256,
+        embed_dim=16384,
+        hidden_dim=53248,
+        num_heads=128,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-05,
+        rope_theta=500_000,
+    )
+
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
@@ -373,7 +401,11 @@ class Attention(nnx.Module):
       attn_mask: jaxtyping.Array | None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
 

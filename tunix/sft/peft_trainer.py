@@ -118,7 +118,7 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    return np.mean(self.losses)
+    return np.mean(np.array([np.array(x) for x in self.losses]))
 
   @property
   def step_time_delta(self):
@@ -184,7 +184,6 @@ class PeftTrainer:
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
   ):
-    self._validate_config(training_config)
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
@@ -219,8 +218,10 @@ class PeftTrainer:
     self._pbar = None
     self._flops_measured: bool = False
 
-    self._train_steps = self.checkpoint_manager.maybe_restore(
-        self.model, restore_only_lora_params=self._lora_enabled
+    self._train_steps, self._restored_custom_metadata = (
+        self.checkpoint_manager.maybe_restore(
+            self.model, restore_only_lora_params=self._lora_enabled
+        )
     )
     self._iter_steps = self._train_steps * self.config.get_with_default(
         "gradient_accumulation_steps", 1
@@ -228,9 +229,15 @@ class PeftTrainer:
 
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
+    max_step = None
+    if self.config.max_steps is not None:
+      max_step = (
+          self.config.max_steps
+          * self.config.get_with_default("gradient_accumulation_steps", 1)
+      )
     self._prof = profiler.Profiler(
         initial_step=self._iter_steps,
-        max_step=self.config.max_steps,
+        max_step=max_step,
         profiler_options=self.config.profiler_options,
     )
     self._buffered_train_metrics: MetricsBuffer | None = None
@@ -238,19 +245,6 @@ class PeftTrainer:
     self._buffered_eval_metrics: MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
-
-  def _validate_config(self, training_config: TrainingConfig):
-    if (
-        training_config.gradient_accumulation_steps is not None
-        and training_config.eval_every_n_steps
-        % training_config.gradient_accumulation_steps
-        != 0
-    ):
-      raise ValueError(
-          "eval_every_n_steps must be divisible by gradient_accumulation_steps,"
-          f" but got {training_config.eval_every_n_steps} and"
-          f" {training_config.gradient_accumulation_steps}"
-      )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -385,9 +379,7 @@ class PeftTrainer:
         self._jitted_train_step_fn = nnx.jit(
             train_step, donate_argnames=("optimizer",)
         )
-        self._jitted_eval_step_fn = nnx.jit(
-            eval_step, donate_argnames=("model",)
-        )
+        self._jitted_eval_step_fn = nnx.jit(eval_step)
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
   def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
@@ -492,7 +484,6 @@ class PeftTrainer:
       step_time_delta: float = 0.0,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
-    loss = np.array(loss)
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
           step=step, losses=[loss], step_time_deltas=[step_time_delta]
@@ -524,12 +515,19 @@ class PeftTrainer:
     self._buffered_train_metrics = None
 
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
+    def _to_np_array(v):
+      if isinstance(v, jax.Array):
+        return np.asarray(v, dtype=np.float32)
+      elif isinstance(v, list):
+        return [_to_np_array(x) for x in v]
+      return v
+
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
         step_time_delta=metrics_buffer.step_time_delta,
         additional_metrics={
-            k: op(v)
+            k: op(_to_np_array(v))
             for k, (
                 v,
                 op,
@@ -682,6 +680,7 @@ class PeftTrainer:
                 self._train_steps,
                 self.model,
                 save_only_lora_params=self._lora_enabled,
+                custom_metadata=self.custom_checkpoint_metadata(),
             )
 
             if (
@@ -717,6 +716,10 @@ class PeftTrainer:
   def iter_steps(self) -> int:
     """Returns the number of iterator steps taken."""
     return self._iter_steps
+
+  def custom_checkpoint_metadata(self) -> dict[str, Any]:
+    """Override this function to return the custom metadata for the checkpoint manager."""
+    return {}
 
   def close(self):
     """Closes the trainer and its associated resources.

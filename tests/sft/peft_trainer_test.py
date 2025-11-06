@@ -309,7 +309,7 @@ class PeftTrainerTest(parameterized.TestCase):
     unsharded_variables = nnx.state(unsharded_model, nnx.Param)
     self.assertIsInstance(
         unsharded_variables.layers[0].w1.kernel.value.sharding,
-        jax._src.lib.xla_client.SingleDeviceSharding,
+        jax.sharding.SingleDeviceSharding,
     )
     jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)
 
@@ -469,7 +469,7 @@ class PeftTrainerTest(parameterized.TestCase):
   ):
     mock_checkpoint_manager = mock.MagicMock()
     mock_checkpoint_manager_init.return_value = mock_checkpoint_manager
-    mock_checkpoint_manager.maybe_restore.return_value = resume_step
+    mock_checkpoint_manager.maybe_restore.return_value = (resume_step, {})
     mock_checkpoint_manager.save.return_value = True
     mock_checkpoint_manager.latest_step.return_value = (
         expected_save_steps[-1] - 1
@@ -499,7 +499,9 @@ class PeftTrainerTest(parameterized.TestCase):
         [
             mock.call.maybe_restore(mock.ANY, restore_only_lora_params=True),
             *[
-                mock.call.save(i, mock.ANY, save_only_lora_params=True)
+                mock.call.save(
+                    i, mock.ANY, save_only_lora_params=True, custom_metadata={}
+                )
                 for i in expected_save_steps
             ],
             mock.call.latest_step(),
@@ -567,19 +569,6 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.metrics_logger.get_metric('learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
-
-  def test_invalid_config(self):
-    # eval_every_n_steps must be divisible by gradient_accumulation_steps.
-    config = peft_trainer.TrainingConfig(
-        eval_every_n_steps=2,
-        max_steps=100,
-        gradient_accumulation_steps=3,
-    )
-    rngs = nnx.Rngs(0)
-    model = tc.ToyTransformer(rngs=rngs)
-    optimizer = optax.sgd(1e-3)
-    with self.assertRaises(ValueError):
-      peft_trainer.PeftTrainer(model, optimizer, config)
 
 
 if __name__ == '__main__':

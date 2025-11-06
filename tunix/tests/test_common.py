@@ -14,22 +14,23 @@
 
 """Common test utilities."""
 
-from typing import List, Tuple, Any
 from collections.abc import Iterable
 import dataclasses
+import gc
+import os
+import shutil
+from typing import Any, List, Tuple
 
 from flax import config as flax_config
 from flax import nnx
+import huggingface_hub
 import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
+from tunix.rl import reshard
 
 import sentencepiece as spm
-import huggingface_hub
-import os
-import shutil
-import gc
 
 if hasattr(flax_config, 'flax_always_shard_variable'):
   flax_config.update('flax_always_shard_variable', False)
@@ -159,11 +160,7 @@ def get_lora_model(
       model, lora_provider, **dummy_model_input
   )
   if mesh is not None:
-    with mesh:
-      state = nnx.state(lora_model)
-      pspecs = nnx.get_partition_spec(state)
-      sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-      nnx.update(lora_model, sharded_state)
+    lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
   return lora_model
 
 
@@ -215,9 +212,13 @@ class MockVocab(spm.SentencePieceProcessor):
     reverse_mapping = {v: k for k, v in self._mapping_text_to_id.items()}
     return ' '.join(reverse_mapping[e] for e in ids)
 
-  def EncodeAsIds(self, text: str) -> list[int]:  # pylint: disable=invalid-name
+  def EncodeAsIds(self, text: str, **kwargs) -> list[int]:  # pylint: disable=invalid-name
     words = text.split(' ')
-    return [self._mapping_text_to_id[word] for word in words]
+    return [
+        self._mapping_text_to_id[word]
+        for word in words
+        if word in self._mapping_text_to_id
+    ]
 
 
 class MockTransformerWithScoreHead(nnx.Module):

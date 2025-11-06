@@ -14,14 +14,22 @@
 
 """Common utilities for loading model weights from safetensors files."""
 
+import concurrent.futures
 import contextlib
+import os
 import re
+import threading
 
 from etils import epath
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import safetensors.flax as safetensors
+
+# DO NOT CHNAGE THIS IMPORT. This is used in both oss and GOOGLE_INTERNAL_PACKAGE_PATH.
+from tunix.oss import utils
+
+load_file_from_gcs = utils.load_file_from_gcs
 
 
 def torch_key_to_jax_key(mapping, source_key):
@@ -75,6 +83,9 @@ def load_and_create_model(
   Returns:
       Model instance with loaded weights
   """
+
+  file_dir = load_file_from_gcs(file_dir)
+
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
 
   if not files:
@@ -96,13 +107,18 @@ def load_and_create_model(
 
   key_map = key_mapping(config)
 
+  file_lock = threading.Lock()
+
   # Load tensors from all files
   for f in files:
     file_loaded_tensors = {}
     with safetensors.safe_open(f, framework="numpy") as sf:
-      for k_name in sf.keys():
+      keys = sf.keys()
+
+      def process_key(k_name, f, sf_file, file_loaded_tensors):
         try:
-          v = sf.get_tensor(k_name)
+          with file_lock:
+            v = sf_file.get_tensor(k_name)  # get_tensor is not thread-safe
           jax_key_mapped, transform = torch_key_to_jax_key(key_map, k_name)
 
           if transform is not None:
@@ -126,6 +142,18 @@ def load_and_create_model(
           raise RuntimeError(
               f"Failed to load tensor {k_name} from file {f.name}: {e}"
           ) from e
+
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=os.cpu_count()
+      ) as executor:
+        futures = [
+            executor.submit(process_key, key, f, sf, file_loaded_tensors)
+            for key in keys
+        ]
+
+      for future in concurrent.futures.as_completed(futures):
+        if future.exception():
+          raise future.exception()
 
     # Apply preprocessing if provided (e.g., for MoE expert stacking)
     if preprocess_fn is not None:

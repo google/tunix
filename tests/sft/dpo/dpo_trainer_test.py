@@ -128,7 +128,7 @@ class DPOTrainerTest(parameterized.TestCase):
     if use_ref_model:
       ref_model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     dpo_config = dpo_lib.DPOTrainingConfig(
-        eval_every_n_steps=10,
+        eval_every_n_steps=5,
         max_steps=10,
     )
     dpo_trainer = dpo_lib.DPOTrainer(
@@ -146,7 +146,16 @@ class DPOTrainerTest(parameterized.TestCase):
         rejected_ids,
         rejected_mask,
     )
-    dpo_trainer.train(train_ds, None)
+    eval_ds = _dummy_dataset(
+        MySource(np.arange(2)),
+        prompt_ids,
+        prompt_mask,
+        chosen_ids,
+        chosen_mask,
+        rejected_ids,
+        rejected_mask,
+    )
+    dpo_trainer.train(train_ds, eval_ds=eval_ds)
 
     variables = nnx.state(model, nnx.Param)
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
@@ -162,6 +171,10 @@ class DPOTrainerTest(parameterized.TestCase):
       self.assertLen(
           dpo_trainer.metrics_logger.get_metric_history(metric_name, "train"),
           dpo_trainer._train_steps,
+      )
+      self.assertLen(
+          dpo_trainer.metrics_logger.get_metric_history(metric_name, "eval"),
+          3,
       )
 
   @parameterized.named_parameters(
@@ -236,7 +249,6 @@ class DPOTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(rngs=nnx.Rngs(0))
     per_token_logps = np.random.normal(0, 5, size=(8, 4))
     ref_per_token_logps = np.random.normal(0, 5, size=(8, 4)).sum(axis=-1)
-    logits = np.random.normal(0, 5, size=(8, 4, 32))
     train_example = dpo_lib.TrainExample(
         input_ids=jnp.arange(0, 32).reshape(8, 4),
         positions=jnp.ones((8, 4)),
@@ -248,9 +260,7 @@ class DPOTrainerTest(parameterized.TestCase):
     )
 
     with mock.patch.object(
-        common,
-        "get_per_token_logps",
-        return_value=(jnp.array(per_token_logps), jnp.array(logits)),
+        common, "get_per_token_logps", return_value=jnp.array(per_token_logps)
     ):
       loss, _ = dpo_lib.dpo_loss_fn(model, train_example, 0.1, 0)
       np.testing.assert_allclose(loss, 0.753059, atol=1e-5)

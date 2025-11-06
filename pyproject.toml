@@ -7,7 +7,7 @@ authors = [
 description = "A lightweight JAX-native LLM post-training framework."
 requires-python = ">=3.11"
 readme = "README.md"
-license = "Apache-2.0"
+license = { text = "Apache-2.0" }
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -19,20 +19,26 @@ classifiers = [
 ]
 dependencies = [
   "datasets",
+  "flax>=0.11.1",
+  "fsspec",  # gcsfs dependency
   "gcsfs",
   "grain",
   "huggingface_hub",
   "jaxtyping",
+  "jinja2",  # Huggingface chat template
   "kagglehub",
-  "omegaconf",
-  "qwix",
+  "numba",
+  "omegaconf", # CLI config
+  "pylatexenc",  # Eval result parsing
+  "python-dotenv",  # Huggingface API key
+  "qwix<=0.1.1",  # Newer version of qwix depends on unreleased flax beyond 0.12.0
   "sentencepiece",
+  "sympy",  # Eval result parsing
   "tensorboardX",
   "tensorflow_datasets",
   "tqdm",
   "transformers",
-  "python-dotenv",
-  "jinja2",
+  "hf_transfer",  # Huggingface caching in CI
 ]
 
 [project.optional-dependencies]
@@ -48,14 +54,10 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-    "jax[tpu]>=0.6.0,<=0.7.1", # Newer libtpu version has some perf regression on cloud TPU, pin to <=0.7.1 for now. b/448646341
-    "flax>=0.11.2",
+  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
-    "jax[tpu]>=0.7.2",  # vLLM TPU backend only works with latest Jax
-    "flax>=0.11.2",
-    "numba",
-    "vllm",
+  # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
 ]
 
 [project.urls]
