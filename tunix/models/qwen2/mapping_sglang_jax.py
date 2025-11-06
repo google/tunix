@@ -13,58 +13,58 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
   return {
       'lm_head.w': ('lm_head.embedding', (None, 'model')),
       'embedder.input_embedding': (
-          'transformer.embed_tokens.embedding',
+          'model.embed_tokens.embedding',
           ('model', None),
       ),
       'layers.*.input_layernorm.w': (
-          'transformer.layers.*.input_layernorm.scale',
+          'model.layers.*.input_layernorm.scale',
           (None,),
       ),
       'layers.*.mlp.down_proj.kernel': (
-          'transformer.layers.*.mlp.down_proj.weight',
+          'model.layers.*.mlp.down_proj.weight',
           ('model', None),
       ),
       'layers.*.mlp.gate_proj.kernel': (
-          'transformer.layers.*.mlp.gate_proj.weight',
+          'model.layers.*.mlp.gate_proj.weight',
           (None, 'model'),
       ),
       'layers.*.mlp.up_proj.kernel': (
-          'transformer.layers.*.mlp.up_proj.weight',
+          'model.layers.*.mlp.up_proj.weight',
           (None, 'model'),
       ),
       'layers.*.post_attention_layernorm.w': (
-          'transformer.layers.*.post_attention_layernorm.scale',
+          'model.layers.*.post_attention_layernorm.scale',
           (None,),
       ),
       'layers.*.attn.k_proj.w': (
-          'transformer.layers.*.self_attn.k_proj.weight',
+          'model.layers.*.self_attn.k_proj.weight',
           (None, 'model', None),
       ),
       'layers.*.attn.k_bias': (
-          'transformer.layers.*.self_attn.k_proj.bias',
+          'model.layers.*.self_attn.k_proj.bias',
           (None,),
       ),
       'layers.*.attn.o_proj.w': (
-          'transformer.layers.*.self_attn.o_proj.weight',
+          'model.layers.*.self_attn.o_proj.weight',
           ('model', None, None),
       ),
       'layers.*.attn.q_proj.w': (
-          'transformer.layers.*.self_attn.q_proj.weight',
+          'model.layers.*.self_attn.q_proj.weight',
           (None, 'model', None),
       ),
       'layers.*.attn.q_bias': (
-          'transformer.layers.*.self_attn.q_proj.bias',
+          'model.layers.*.self_attn.q_proj.bias',
           (None,),
       ),
       'layers.*.attn.v_proj.w': (
-          'transformer.layers.*.self_attn.v_proj.weight',
+          'model.layers.*.self_attn.v_proj.weight',
           (None, 'model', None),
       ),
       'layers.*.attn.v_bias': (
-          'transformer.layers.*.self_attn.v_proj.bias',
+          'model.layers.*.self_attn.v_proj.bias',
           (None,),
       ),
-      'final_norm.w': ('transformer.norm.scale', (None,)),
+      'final_norm.w': ('model.norm.scale', (None,)),
   }
 
 

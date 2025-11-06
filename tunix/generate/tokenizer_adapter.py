@@ -129,6 +129,79 @@ class TokenizerAdapter:
   def tokenizer(self) -> Any:
     return self._tokenizer
 
+  def apply_chat_template(
+      self,
+      messages: list[dict[str, str]],
+      add_generation_prompt: bool = True,
+      tokenize: bool = False,
+      **kwargs,
+  ) -> str | list[int]:
+    """Applies a chat template to format a list of messages.
+
+    Primarily for HuggingFace tokenizers, this formats conversation history
+    into a single string or token sequence.
+
+    Args:
+      messages: Conversation turns, each with 'role' and 'content'.
+      add_generation_prompt: Whether to append a generation prompt.
+      tokenize: If True, returns token IDs; otherwise, returns a string.
+      **kwargs: Additional args for the underlying `apply_chat_template`.
+
+    Returns:
+      The formatted chat as a string or list of token IDs.
+
+    Raises:
+      NotImplementedError: If chat templating is not supported by the tokenizer.
+    """
+    if self._tokenizer_type == TokenizerType.HF:
+      return self._tokenizer.apply_chat_template(
+          messages,
+          add_generation_prompt=add_generation_prompt,
+          tokenize=tokenize,
+          **kwargs,
+      )
+    elif self._tokenizer_type == TokenizerType.SP:
+      # TODO(haoyugao): The tokenizer type is SP but the template is for
+      # Gemma. This should be aligned, for example by adding a 'gemma'
+      # tokenizer type or a flag. For now, all sentencepiece tokenizers default
+      # to using the Gemma chat template.
+      return self._apply_gemma_chat_template(
+          messages, add_generation_prompt, tokenize
+      )
+    else:
+      if hasattr(self._tokenizer, 'apply_chat_template'):
+        return self._tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=tokenize,
+            **kwargs,
+        )
+      # Implements the Gemma chat template format as a fallback.
+      return self._apply_gemma_chat_template(
+          messages, add_generation_prompt, tokenize
+      )
+
+  def _apply_gemma_chat_template(
+      self,
+      messages: list[dict[str, str]],
+      add_generation_prompt: bool,
+      tokenize: bool,
+  ) -> str | list[int]:
+    """Applies the Gemma chat template format."""
+    chat_str = ''
+    for message in messages:
+      role = message.get('role')
+      content = message.get('content')
+      if role in ('user', 'model'):
+        chat_str += f'<start_of_turn>{role}\n{content}<end_of_turn>\n'
+
+    if add_generation_prompt:
+      chat_str += '<start_of_turn>model\n'
+
+    if tokenize:
+      return self.encode(chat_str)
+    return chat_str
+
 
 class Tokenizer(TokenizerAdapter):
   """Tokenizing and encoding/decoding text using TokenizerAdapter."""
@@ -166,75 +239,6 @@ class Tokenizer(TokenizerAdapter):
     else:
       raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
     super().__init__(tokenizer)
-
-  def apply_chat_template(
-      self,
-      messages: list[dict[str, str]],
-      add_generation_prompt: bool = True,
-      tokenize: bool = False,
-      **kwargs,
-  ) -> str | list[int]:
-    """Applies a chat template to format a list of messages.
-
-    Primarily for HuggingFace tokenizers, this formats conversation history
-    into a single string or token sequence.
-
-    Args:
-      messages: Conversation turns, each with 'role' and 'content'.
-      add_generation_prompt: Whether to append a generation prompt.
-      tokenize: If True, returns token IDs; otherwise, returns a string.
-      **kwargs: Additional args for the underlying `apply_chat_template`.
-
-    Returns:
-      The formatted chat as a string or list of token IDs.
-
-    Raises:
-      NotImplementedError: If chat templating is not supported by the tokenizer.
-    """
-    if self._tokenizer_type == TokenizerType.HF:
-      return self._tokenizer.apply_chat_template(
-          messages,
-          add_generation_prompt=add_generation_prompt,
-          tokenize=tokenize,
-          **kwargs,
-      )
-    elif self._tokenizer_type == TokenizerType.SP:
-      return self._apply_gemma_chat_template(
-          messages, add_generation_prompt, tokenize
-      )
-    else:
-      if hasattr(self._tokenizer, 'apply_chat_template'):
-        return self._tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=add_generation_prompt,
-            tokenize=tokenize,
-            **kwargs,
-        )
-      # Implements the Gemma chat template format as a fallback.
-      return self._apply_gemma_chat_template(
-          messages, add_generation_prompt, tokenize
-      )
-
-  def _apply_gemma_chat_template(
-      self,
-      messages: list[dict[str, str]],
-      add_generation_prompt: bool,
-      tokenize: bool,
-  ) -> str | list[int]:
-    """Applies the Gemma chat template format."""
-    chat_str = ''
-    for message in messages:
-      role = message.get('role')
-      content = message.get('content')
-      if role in ('user', 'model'):
-        chat_str += f'<start_of_turn>{role}\n{content}<end_of_turn>\n'
-
-    if add_generation_prompt:
-      chat_str += '<start_of_turn>model\n'
-
-    if tokenize:
-      return self.encode(chat_str)
-    return chat_str
 
   def tokenize(
       self,

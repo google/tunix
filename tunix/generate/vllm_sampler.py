@@ -199,7 +199,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
-  def tokenize(self, input_string: str) -> List[int]:
+  def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = (

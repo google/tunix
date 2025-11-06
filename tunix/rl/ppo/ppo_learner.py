@@ -44,7 +44,7 @@ class TrainExample(common.TrainExample):
 class PPOConfig:
   """Configuration for PPO learner.
 
-  Parameters:
+  Attributes:
     num_ppo_epochs: The number of optimization epochs per batch of rollouts.
     mini_batch_size: The batch size on which the actual model updates happen.
       The rollout phase (`generate_and_compute_advantages`) happen on a larger
@@ -238,6 +238,7 @@ class PPOLearner(rl_learner.RLLearner):
     # "experiences".
     completion_output = self.rl_cluster.generate(
         prompts=training_input["prompts"],
+        micro_batch_size=self._rollout_micro_batch_size,
     )
     completion_ids = completion_output.tokens
     prompt_ids = completion_output.left_padded_prompt_tokens
@@ -261,6 +262,7 @@ class PPOLearner(rl_learner.RLLearner):
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
+          micro_batch_size=self._compute_logps_micro_batch_size,
       )
     else:
       ref_per_token_logps = None
@@ -272,6 +274,7 @@ class PPOLearner(rl_learner.RLLearner):
     old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
         prompt_tokens=prompt_ids,
         completion_tokens=completion_ids,
+        micro_batch_size=self._compute_logps_micro_batch_size,
     )
 
     # ===== Value computation ======

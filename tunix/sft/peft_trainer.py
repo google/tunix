@@ -118,7 +118,7 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    return np.mean(np.asarray(self.losses))
+    return np.mean(np.array([np.array(x) for x in self.losses]))
 
   @property
   def step_time_delta(self):

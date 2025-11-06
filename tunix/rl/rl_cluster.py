@@ -90,7 +90,7 @@ class Role(enum.Enum):
 class RLTrainingConfig(peft_trainer.TrainingConfig):
   """RLTraining config.
 
-  Parameters:
+  Attributes:
     actor_optimizer: Optimizer for the actor model.
     critic_optimizer: Optimizer for the critic model. If None, the critic model
       will be trained in the same optimizer as the actor model.
@@ -150,7 +150,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
 class ClusterConfig:
   """Cluster config.
 
-  Parameters:
+  Attributes:
     role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
       disaggregated setup.
     rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".

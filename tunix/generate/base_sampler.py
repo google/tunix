@@ -76,5 +76,5 @@ class BaseSampler(ABC):
     """Returns a list of generated samples for the input strings."""
 
   @abstractmethod
-  def tokenize(self, input_string: str) -> jax.Array:
+  def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Returns the tokenized the input string."""

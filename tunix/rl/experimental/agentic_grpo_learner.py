@@ -33,7 +33,7 @@ import asyncio
 import contextlib
 import dataclasses
 import itertools
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Coroutine, Iterable, List, Sequence
 
 from absl import logging
 import flax
@@ -337,12 +337,10 @@ class GRPOLearner(rl_learner.RLLearner):
     micro_batches = [cached_inputs_for_window[0]] * num_generations
     training_input = rl_utils.merge_micro_batches(micro_batches)
 
-    steps = (
-        self._iter_steps
-        if mode == rl_cluster_lib.Mode.TRAIN
-        else self._eval_iter_steps
+    prompt_index = (
+        batch_results[0].pair_index // self.grpo_config.num_generations
     )
-    trajectory_ids = self._compute_trajectory_ids(training_input, steps)
+    trajectory_ids = self._compute_trajectory_ids(training_input, prompt_index)
     assert "trajectory_ids" not in training_input
     training_input["trajectory_ids"] = trajectory_ids
     for t_id in trajectory_ids:
@@ -408,6 +406,8 @@ class GRPOLearner(rl_learner.RLLearner):
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_cluster.cluster_config.rollout_config
+    if isinstance(rollout_config, dict):
+      rollout_config = rollout_config[mode]
     max_prompt_length = rollout_config.max_prompt_length
     max_tokens_to_generate = rollout_config.max_tokens_to_generate
     all_padded_prompt_ids = []
@@ -545,10 +545,12 @@ class GRPOLearner(rl_learner.RLLearner):
       training_input: The input data for training.
       mode: The current mode (TRAIN or EVAL).
     """
-    return None
+    raise NotImplementedError(
+        "_generate_and_compute_advantage is not used in AgenticGRPOLearner"
+    )
 
   def _compute_trajectory_ids(
-      self, example: TrainingInputT, steps: int
+      self, example: TrainingInputT, prompt_index: int
   ) -> List[str]:
     """Computes the trajectory ID for each prompt in the batch.
 
@@ -556,15 +558,24 @@ class GRPOLearner(rl_learner.RLLearner):
     row_offset is the row index of the example data source and
     group_offset is the group index of the example in the generation group.
 
+    In agentic GRPO, this method is called when processing rollouts for a
+    single prompt, so `len(example["prompts"])` == `num_generations`,
+    meaning `batch_size` will be 1.
+
     Args:
-      example: The training input data.
-      steps: The number of steps taken so far.
+      example: The training input data for one prompt group.
+      prompt_index: The index of the prompt in the dataset.
 
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
     batch_size = len(example["prompts"]) // self.grpo_config.num_generations
-    row_offset = steps * batch_size
+    if batch_size != 1:
+      raise ValueError(
+          "_compute_trajectory_ids expects inputs for a single prompt group,"
+          f" but got batch_size={batch_size}"
+      )
+    row_offset = prompt_index
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),
         self.grpo_config.num_generations,
@@ -587,15 +598,57 @@ class GRPOLearner(rl_learner.RLLearner):
     return self.grpo_config.num_generations
 
   @staticmethod
-  def _run_async(coro: asyncio.Future) -> Any:
+  def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
     """Runs a coroutine, handling existing event loops correctly."""
     try:
-      # Use the running loop if one exists.
       loop = asyncio.get_running_loop()
-      return loop.run_until_complete(coro)
     except RuntimeError:
-      # If no loop is running, start a new one.
+      # asyncio.get_running_loop() raises RuntimeError if no loop is running.
+      # If no loop is running, start a new one using asyncio.run().
       return asyncio.run(coro)
+    else:
+      # If a loop is already running, use it to run the coroutine.
+      return loop.run_until_complete(coro)
+
+  async def _producer(self, orchestrator, prompt_queue, train_data_queue):
+    """Produces training examples from prompts in the prompt_queue."""
+    prompt_iterator = iter(lambda: prompt_queue.get(block=True), None)
+    try:
+      async for batch, cached_inputs in self._orchestrator_producer(
+          orchestrator=orchestrator,
+          prompt_iterator=prompt_iterator,
+          episodes_per_pair=1,
+          collect_mode="Token",
+      ):
+        try:
+          train_examples = self._batch_to_train_example(
+              batch_results=batch,
+              cached_inputs_for_window=cached_inputs,
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+          for _ in range(self.grpo_config.num_iterations):
+            for train_example in train_examples:
+              train_data_queue.put(train_example)
+        except Exception as e:
+          if not isinstance(e, RuntimeError):
+            logging.exception(
+                "Exception in _producer while processing batch: %s", e
+            )
+          raise
+    finally:
+      # Signal production is complete for this batch, even if errors occurred.
+      train_data_queue.put(None)
+
+  def _data_consumer_batch_generator(
+      self, queue: queue_lib.AbstractDataQueue, batch_size: int
+  ):
+    """Yields micro-batches from a queue until a None is received."""
+    item_iterator = iter(lambda: queue.get(block=True), None)
+    while True:
+      batch = list(itertools.islice(item_iterator, batch_size))
+      if not batch:
+        return  # The iterator is exhausted.
+      yield batch
 
   def train(
       self,
@@ -655,11 +708,10 @@ class GRPOLearner(rl_learner.RLLearner):
     )
 
     logging.info("Starting GRPOLearner training loop.")
-    orchestrator = self._build_orchestrator()
     full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
 
     all_eval_prompts = (
-        list(self._create_micro_batch_iterator(eval_dataset, 1))
+        list(self._create_micro_batch_iterator(iter(eval_dataset), 1))
         if eval_dataset
         else []
     )
@@ -669,58 +721,35 @@ class GRPOLearner(rl_learner.RLLearner):
     prompt_queue = queue_lib.SimpleDataQueue(maxsize=full_batch_size + 1)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
-    async def _producer():
-      """Produces training examples from prompts in the prompt_queue."""
-      prompt_iterator = iter(lambda: prompt_queue.get(block=True), None)
-      async for batch, cached_inputs in self._orchestrator_producer(
-          orchestrator=orchestrator,
-          prompt_iterator=prompt_iterator,
-          episodes_per_pair=1,
-          collect_mode="Token",
-      ):
-        try:
-          train_examples = self._batch_to_train_example(
-              batch_results=batch,
-              cached_inputs_for_window=cached_inputs,
-              mode=rl_cluster_lib.Mode.TRAIN,
-          )
-          for train_example in train_examples:
-            train_data_queue.put(train_example)
-        except Exception as e:
-          logging.exception(
-              "Exception in _producer while processing batch: %s", e
-          )
-          raise
-      # Signal production is complete for this batch.
-      train_data_queue.put(None)
-
-    def data_consumer_batch_generator(
-        queue: queue_lib.AbstractDataQueue, batch_size: int
-    ):
-      """Yields micro-batches from a queue until a None is received."""
-      item_iterator = iter(lambda: queue.get(block=True), None)
-      while True:
-        batch = list(itertools.islice(item_iterator, batch_size))
-        if not batch:
-          return  # The iterator is exhausted.
-        yield batch
-
     for full_batch in full_dataset_iterator:
+      if self.rl_cluster.global_steps >= self._training_config.max_steps:
+        logging.info(
+            "Reached max_steps: %d >= %d",
+            self.rl_cluster.global_steps,
+            self._training_config.max_steps,
+        )
+        break
       # 1. Fill prompt queue for the current full batch.
-      for prompt in self._create_micro_batch_iterator([full_batch], 1):
+      for prompt in self._create_micro_batch_iterator(iter([full_batch]), 1):
         prompt_queue.put(prompt)
       prompt_queue.put(None)  # Signal end of prompts.
 
       # 2. Start producer for this batch.
-      producer_future = self.executor.submit(self._run_async, _producer())
+      orchestrator = self._build_orchestrator()
+      producer_future = self.executor.submit(
+          self._run_async,
+          self._producer(orchestrator, prompt_queue, train_data_queue),
+      )
 
-      train_data_gen = data_consumer_batch_generator(
+      train_data_gen = self._data_consumer_batch_generator(
           train_data_queue, train_micro_batch_size * self._num_generations()
       )
 
       for train_micro_batch in train_data_gen:
-        num_examples = len(train_micro_batch)
-        self._iter_steps += num_examples
+        self._iter_steps += 1
+        merged_train_micro_batch = jax.tree.map(
+            lambda *xs: np.concatenate(xs, axis=0), *train_micro_batch
+        )
 
         # --- Evaluation Logic ---
         current_eval_dataset = None
@@ -753,7 +782,7 @@ class GRPOLearner(rl_learner.RLLearner):
 
         # --- Training Step ---
         self.rl_cluster.update_actor(
-            train_micro_batch, current_eval_dataset, skip_jit
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
