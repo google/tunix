@@ -223,6 +223,14 @@ class VllmSamplerTest(absltest.TestCase):
               vllm_state["model"]["embed"]["embedding"].value,
           )
       )
+
+    assert vllm_sampler.transformer is not None, (
+        "vLLM model is not available."
+    )
+    assert vllm_sampler.transformer_state is not None, (
+        "vLLM state is not available."
+    )
+
     if vllm_config.server_mode:
       vl_sampler.stop()
 
@@ -249,6 +257,7 @@ class VllmSamplerTest(absltest.TestCase):
         tokenizer=tokenizer,
         config=vllm_config,
     )
+
     self.addCleanup(vl_sampler.stop)
 
     state = nnx.state(tunix_model)
@@ -352,6 +361,13 @@ class VllmSamplerTest(absltest.TestCase):
             "Responses returned strictly in submission order; "
             "expected out-of-order completions."
         ),
+    )
+
+    assert vllm_sampler.transformer is not None, (
+        "vLLM model is not available."
+    )
+    assert vllm_sampler.transformer_state is not None, (
+        "vLLM state is not available."
     )
 
 if __name__ == "__main__":

@@ -189,8 +189,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   @property
   def transformer(self):
-    # vLLM doesn't expose the underlying model
-    return None
+    if hasattr(self._model_runner, "model"):
+      return self._model_runner.model
+    else:
+      raise AttributeError("vLLM model runner doesn't have model.")
 
   @property
   def transformer_state(self):
