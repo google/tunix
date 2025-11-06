@@ -19,10 +19,8 @@ import re
 from typing import Any, Tuple
 from absl import logging
 from flax import nnx
-import huggingface_hub as hf
 import jax
 import jax.numpy as jnp
-import kagglehub
 from orbax import checkpoint as ocp
 import qwix
 from tunix.generate import tokenizer_adapter as tokenizer_lib
@@ -33,6 +31,7 @@ from tunix.models.gemma3 import params as gemma3_params_lib
 from tunix.models.llama3 import model as llama3_lib
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen3 import model as qwen3_lib
+from tunix.oss import utils as oss_utils
 from tunix.rl import reshard
 
 
@@ -258,31 +257,6 @@ def apply_lora_to_model(base_model, mesh, lora_config):
   return lora_model
 
 
-def _kaggle_pipeline(model_config: dict[str, Any]):
-  if 'KAGGLE_USERNAME' not in os.environ or 'KAGGLE_KEY' not in os.environ:
-    kagglehub.login()
-  os.environ['KAGGLEHUB_CACHE'] = model_config['model_download_path']
-  return kagglehub.model_download(model_config['model_id'])
-
-
-def _hf_pipeline(model_config: dict[str, Any]):
-  if 'HF_TOKEN' not in os.environ:
-    hf.login()
-  all_files = hf.list_repo_files(model_config['model_id'])
-  filtered_files = [f for f in all_files if not f.startswith('original/')]
-  for filename in filtered_files:
-    hf.hf_hub_download(
-        repo_id=model_config['model_id'],
-        filename=filename,
-        local_dir=model_config['model_download_path'],
-    )
-  logging.info(
-      'Downloaded %s to: %s',
-      filtered_files,
-      model_config['model_download_path'],
-  )
-
-
 def _gemma_conversion(
     model_config: dict[str, Any], gemma: nnx.Module, params, mesh
 ):
@@ -405,7 +379,7 @@ def create_model(
 
     # Download model from Kaggle requires NNX conversion and can takes long
     # time. It is recommended to save the NNX converted model for later runs.
-    ckpt_path = _kaggle_pipeline(model_config)
+    ckpt_path = oss_utils.kaggle_pipeline(model_config)
     intermediate_ckpt_dir = model_config['intermediate_ckpt_dir']
     skip_nnx_conversion: bool = os.path.exists(intermediate_ckpt_dir)
 
@@ -444,7 +418,7 @@ def create_model(
 
   elif model_source == 'huggingface':
     # for all other model
-    _hf_pipeline(model_config)
+    oss_utils.hf_pipeline(model_config)
 
   else:
     logging.error(

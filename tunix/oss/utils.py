@@ -14,22 +14,26 @@
 """Utils for OSS code."""
 
 import os
+from typing import Any
 
 import fsspec
+from absl import logging
+import huggingface_hub as hf
+import kagglehub
 
 
 def pathways_available() -> bool:
   if "proxy" not in os.getenv("JAX_PLATFORMS", ""):
     return False
   try:
-    import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import
+    import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import # pytype: disable=import-error
 
     return True
   except ImportError:
     return False
 
 
-def load_file_from_gcs(file_dir: str, target_dir: str = None) -> str:
+def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
   """Load file from GCS."""
   if file_dir.startswith("/"):
     return file_dir
@@ -53,4 +57,31 @@ def load_file_from_gcs(file_dir: str, target_dir: str = None) -> str:
     raise ImportError(
         "Please install google-cloud-storage to load model from GCS."
     ) from e
+
+
+def kaggle_pipeline(model_config: dict[str, Any]):
+  """Download model from Kaggle."""
+  if 'KAGGLE_USERNAME' not in os.environ or 'KAGGLE_KEY' not in os.environ:
+    kagglehub.login()
+  os.environ['KAGGLEHUB_CACHE'] = model_config['model_download_path']
+  return kagglehub.model_download(model_config['model_id'])
+
+
+def hf_pipeline(model_config: dict[str, Any]):
+  """Download model from HuggingFace."""
+  if 'HF_TOKEN' not in os.environ:
+    hf.login()
+  all_files = hf.list_repo_files(model_config['model_id'])
+  filtered_files = [f for f in all_files if not f.startswith('original/')]
+  for filename in filtered_files:
+    hf.hf_hub_download(
+        repo_id=model_config['model_id'],
+        filename=filename,
+        local_dir=model_config['model_download_path'],
+    )
+  logging.info(
+      'Downloaded %s to: %s',
+      filtered_files,
+      model_config['model_download_path'],
+  )
 
