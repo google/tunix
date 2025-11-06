@@ -212,9 +212,13 @@ class MockVocab(spm.SentencePieceProcessor):
     reverse_mapping = {v: k for k, v in self._mapping_text_to_id.items()}
     return ' '.join(reverse_mapping[e] for e in ids)
 
-  def EncodeAsIds(self, text: str) -> list[int]:  # pylint: disable=invalid-name
+  def EncodeAsIds(self, text: str, **kwargs) -> list[int]:  # pylint: disable=invalid-name
     words = text.split(' ')
-    return [self._mapping_text_to_id[word] for word in words]
+    return [
+        self._mapping_text_to_id[word]
+        for word in words
+        if word in self._mapping_text_to_id
+    ]
 
 
 class MockTransformerWithScoreHead(nnx.Module):
