@@ -20,10 +20,15 @@ from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
 
-from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-from etils import ecolab
+# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+# from etils import ecolab
 import optax
 from orbax import checkpoint as ocp
+
+import pathwaysutils
+pathwaysutils.initialize()
+
+print("jax devices: ", jax.devices())
 
 try:
   from etils import ecolab
@@ -166,9 +171,9 @@ if NOTEBOOK_ENV == "g3":
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/rl/data"
-  MODEL_PATH_PREFIX = "gs://tunix/rl/models"
-  CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
+  DATA_PATH_PREFIX = "gs://linchai-bucket-dev/rl/data"
+  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
+  CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
