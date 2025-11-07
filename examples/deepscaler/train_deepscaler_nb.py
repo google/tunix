@@ -263,7 +263,11 @@ for s in iter(test_dataset):
 show_hbm_usage()
 
 # %%
-mesh = jax.make_mesh((1, 4), ('fsdp', 'tp'))
+mesh = jax.make_mesh(
+    (1, 4),
+    ("fsdp", "tp"),
+    axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+)
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
 print("model_path: ", MODEL_PATH)
 qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)

@@ -147,7 +147,11 @@ class QwenAlignTest(parameterized.TestCase):
     jax_model = model_params.create_model_from_safe_tensors(
         model_path,
         model_config(),
-        mesh=jax.make_mesh((1, 1), ("fsdp", "tp")),
+        mesh=jax.make_mesh(
+            (1, 1),
+            ("fsdp", "tp"),
+            axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+        ),
         dtype=jnp.float32,
     )
     print("JAX model loaded.")
