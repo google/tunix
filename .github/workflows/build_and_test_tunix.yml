@@ -17,8 +17,11 @@
 
 name: Tunix Package Tests
 
+# Trigger the workflow only when code is merging to the 'main' branch.
 on:
-  pull_request:
+  pull_request: # Automatically trigger on pull requests affecting this file
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
