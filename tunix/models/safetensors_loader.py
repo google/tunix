@@ -16,9 +16,12 @@
 
 import concurrent.futures
 import contextlib
+import functools
+import operator
 import os
 import re
 import threading
+from typing import Any
 
 from etils import epath
 from flax import nnx
@@ -58,6 +61,21 @@ def path_to_key(path):
   return ".".join(
       str(stoi(key.key if hasattr(key, "key") else key)) for key in path
   )
+
+
+def flatten_nested_dict(nested_dict: dict[str, Any], parent_key="", sep="."):
+  """Flatten a nested dictionary."""
+  items = []
+
+  for key, value in nested_dict.items():
+    new_key = parent_key + sep + str(key) if parent_key else key
+
+    if isinstance(value, dict) and value:
+      items.extend(flatten_nested_dict(value, new_key, sep=sep).items())
+    else:
+      items.append((new_key, value))
+
+  return dict(items)
 
 
 def load_and_create_model(
@@ -102,6 +120,7 @@ def load_and_create_model(
 
   if mesh is not None:
     sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
+    sharding_dict = flatten_nested_dict(sharding_dict)
   else:
     sharding_dict = None
 
@@ -110,7 +129,7 @@ def load_and_create_model(
   file_lock = threading.Lock()
 
   # Load tensors from all files
-  for f in files:
+  def process_file(f):
     file_loaded_tensors = {}
     with safetensors.safe_open(f, framework="numpy") as sf:
       keys = sf.keys()
@@ -131,6 +150,13 @@ def load_and_create_model(
           current_arr = jnp.array(v)
           if dtype and current_arr.dtype != dtype:
             current_arr = current_arr.astype(dtype)
+
+          if sharding_dict is not None:
+            current_arr = jax.device_put(
+                current_arr, sharding_dict[jax_key_mapped]
+            )
+          else:
+            current_arr = jax.device_put(current_arr, jax.devices()[0])
 
           if jax_key_mapped in file_loaded_tensors:
             raise ValueError(
@@ -159,33 +185,30 @@ def load_and_create_model(
     if preprocess_fn is not None:
       file_loaded_tensors = preprocess_fn(file_loaded_tensors)
 
-    def make_update_tensor_fn(current_file_tensors):
-      def update_tensor(path, param, shard=None):
-        current_path_key = path_to_key(path)
-        if current_path_key in current_file_tensors:
-          loaded_arr = current_file_tensors[current_path_key]
-          if loaded_arr.shape != param.shape:
-            raise ValueError(
-                f"Shape mismatch for {current_path_key}: got"
-                f" {loaded_arr.shape}, expected {param.shape}"
-            )
-          if shard is not None:
-            return jax.device_put(loaded_arr, shard)
-          else:
-            return jax.device_put(loaded_arr, jax.devices()[0])
-        return param
+    return file_loaded_tensors
 
-      return update_tensor
+  with concurrent.futures.ThreadPoolExecutor(
+      max_workers=len(files)
+  ) as executor:
+    all_tensors = list(executor.map(process_file, files))
 
-    current_file_update_tensor = make_update_tensor_fn(file_loaded_tensors)
+  merged_tensors = functools.reduce(operator.or_, all_tensors)
 
-    if sharding_dict is not None:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict, sharding_dict
-      )
-    else:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict
-      )
+  def update_tensor(path, param, merged_tensors):
+    current_path_key = path_to_key(path)
+    if current_path_key in merged_tensors:
+      loaded_arr = merged_tensors[current_path_key]
+      if loaded_arr.shape != param.shape:
+        raise ValueError(
+            f"Shape mismatch for {current_path_key}: got"
+            f" {loaded_arr.shape}, expected {param.shape}"
+        )
+      return loaded_arr
+    raise ValueError(f"Tensor {current_path_key} not found in merged tensors.")
+
+  state_dict = jax.tree.map_with_path(
+      functools.partial(update_tensor, merged_tensors=merged_tensors),
+      state_dict,
+  )
 
   return nnx.merge(graph_def, state_dict)
