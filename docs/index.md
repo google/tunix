@@ -9,6 +9,7 @@
 
 code-of-conduct.md
 contributing.md
+programming_guide.md
 gallery.rst
 ```
 
