@@ -168,7 +168,38 @@ class PPOLearner(rl_learner.RLLearner):
     )
 
     # ===== Configure the actor (policy) trainer =====
-    self.rl_cluster.actor_trainer.with_loss_fn(ppo_policy_loss_fn, has_aux=True)
+    if (
+        self.rl_cluster.cluster_config.training_config.off_policy
+        == "compensated"
+    ):
+      input_ppo_policy_loss_fn = lambda model, prev_model, train_example, epsilon_low, epsilon_high, epsilon_c, entropy_coef, pad_id, eos_id, off_policy: ppo_policy_loss_fn(
+          model,
+          prev_model,
+          train_example,
+          epsilon_low=epsilon_low,
+          epsilon_high=epsilon_high,
+          epsilon_c=epsilon_c,
+          entropy_coef=entropy_coef,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          off_policy=off_policy,
+      )
+    else:
+      input_ppo_policy_loss_fn = lambda model, train_example, epsilon_low, epsilon_high, epsilon_c, entropy_coef, pad_id, eos_id, off_policy: ppo_policy_loss_fn(
+          model,
+          None,
+          train_example,
+          epsilon_low=epsilon_low,
+          epsilon_high=epsilon_high,
+          epsilon_c=epsilon_c,
+          entropy_coef=entropy_coef,
+          pad_id=pad_id,
+          eos_id=eos_id,
+          off_policy=off_policy,
+      )
+    self.rl_cluster.actor_trainer.with_loss_fn(
+        input_ppo_policy_loss_fn, has_aux=True
+    )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
@@ -178,6 +209,9 @@ class PPOLearner(rl_learner.RLLearner):
             "entropy_coef": self.ppo_config.entropy_coef,
             "pad_id": self.rl_cluster.rollout.pad_id(),
             "eos_id": self.rl_cluster.rollout.eos_id(),
+            "off_policy": (
+                self.rl_cluster.cluster_config.training_config.off_policy
+            ),
         }
     )
 
@@ -529,6 +563,7 @@ def ppo_value_loss_fn(
 
 def ppo_policy_loss_fn(
     model: nnx.Module,
+    prev_model: nnx.Module | None,
     train_example: TrainExample,
     epsilon_low: float,
     epsilon_high: float,
@@ -536,6 +571,7 @@ def ppo_policy_loss_fn(
     entropy_coef: float | None,
     pad_id: int,
     eos_id: int,
+    off_policy: str = "",
 ):
   """Computes the policy loss for PPO."""
 
@@ -562,7 +598,22 @@ def ppo_policy_loss_fn(
   # Compute ratio.
   old_per_token_logps = train_example.old_per_token_logps
   ratio = jnp.exp(per_token_logps - old_per_token_logps)
-  ratio_clipped = jnp.clip(ratio, 1 - epsilon_low, 1 + epsilon_high)
+
+  if off_policy is None or off_policy == "vanilla" or prev_model is None:
+    ratio_clipped = jnp.clip(ratio, 1 - epsilon_low, 1 + epsilon_high)
+  else:  # First mini batch after weight sync last model is None
+    proximal_per_token_logps, _ = common.compute_per_token_logps(
+        prev_model,
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        stop_gradient=True,
+        return_logits=False,
+    )
+    actor_to_prox_ration = jnp.exp(per_token_logps - proximal_per_token_logps)
+    prox_to_behav_ratio = jnp.exp(proximal_per_token_logps - old_per_token_logps)
+    ratio_clipped = prox_to_behav_ratio * jnp.clip(actor_to_prox_ration, 1 - epsilon_low, 1 + epsilon_high)
 
   # Vanilla PPO loss
   pg_losses_1 = -ratio * advantages

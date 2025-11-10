@@ -585,7 +585,11 @@ class RLLearner(ABC):
     while True:  # loop over M
       try:
         initial_steps = self._iter_steps
-        for _ in range(full_batch_size // mini_batch_size):
+        for _ in range(
+            (self.rl_cluster.cluster_config.training_config.max_staleness + 1)
+            * full_batch_size
+            // mini_batch_size
+        ):
           # reserve 1 for None and the other for repeated interable
           # if batch_repeat > 1
           train_data_queue = queue_lib.SimpleDataQueue(
@@ -671,6 +675,7 @@ class RLLearner(ABC):
               "sync_sampler_weights", step_num=initial_steps
           ):
             self.rl_cluster.sync_weights()
+            self.rl_cluster.actor_trainer.prev_model = None
         else:
           self.rl_cluster.global_steps += (
               1  # manually increment the global steps.
