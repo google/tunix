@@ -139,15 +139,33 @@ class GRPOLearner(rl_learner.RLLearner):
 
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
-    loss_fn = lambda model, train_example, beta, epsilon: grpo_loss_fn(
-        model,
-        train_example,
-        beta=beta,
-        epsilon=epsilon,
-        pad_id=self.rl_cluster.rollout.pad_id(),
-        eos_id=self.rl_cluster.rollout.eos_id(),
-        loss_algo=self.grpo_config.loss_algo,
-    )
+    if (
+        self.rl_cluster.cluster_config.training_config.off_policy
+        == "compensated"
+    ):
+      loss_fn = lambda model, prev_model, train_example, beta, epsilon: grpo_loss_fn(
+          model,
+          prev_model,
+          train_example,
+          beta=beta,
+          epsilon=epsilon,
+          pad_id=self.rl_cluster.rollout.pad_id(),
+          eos_id=self.rl_cluster.rollout.eos_id(),
+          loss_algo=self.grpo_config.loss_algo,
+          off_policy=self.rl_cluster.cluster_config.training_config.off_policy,
+      )
+    else:
+      loss_fn = lambda model, train_example, beta, epsilon: grpo_loss_fn(
+          model,
+          None,
+          train_example,
+          beta=beta,
+          epsilon=epsilon,
+          pad_id=self.rl_cluster.rollout.pad_id(),
+          eos_id=self.rl_cluster.rollout.eos_id(),
+          loss_algo=self.grpo_config.loss_algo,
+          off_policy=self.rl_cluster.cluster_config.training_config.off_policy,
+      )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
         loss_fn,
@@ -370,12 +388,14 @@ class GRPOLearner(rl_learner.RLLearner):
 
 def grpo_loss_fn(
     model,
+    prev_model,
     train_example,
     beta,
     epsilon,
     loss_algo,
     pad_id,
     eos_id,
+    off_policy,
 ):
   """GRPO loss function.
 
@@ -385,6 +405,7 @@ def grpo_loss_fn(
 
   Args:
     model: The policy model to be trained.
+    prev_model: The last policy model used for training.
     train_example: A `TrainExample` instance containing the processed input
       data, including prompt IDs, completion IDs, masks, advantages, and
       per-token log probabilities from the reference and policy models.
@@ -394,6 +415,8 @@ def grpo_loss_fn(
     loss_algo: The loss algorithm to use. Can be grpo or gspo-token.
     pad_id: The pad ID from tokenizer.
     eos_id: The eos ID from.
+    off_policy: The off-policy correction to use. E.g. "vanilla",
+      "compensated".
 
   Returns:
     A tuple containing the loss and an aux dictionary.
@@ -432,7 +455,29 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   coef_1 = jnp.exp(seq_importance_ratio)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
+
+  if (
+      off_policy is None or off_policy == "vanilla" or prev_model is None
+  ):  # On-policy or vanilla Off-policy
+    coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
+  else:
+    # Proximal compensated Off-policy, prev_model is None for the first
+    # mini-batch after weight sync
+    proximal_per_token_logps = common.compute_per_token_logps(
+        prev_model,
+        prompt_tokens=train_example.prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_id,
+        eos_id=eos_id,
+        stop_gradient=True,
+        return_logits=False,
+    )
+    coef_2 = jnp.clip(
+        jnp.exp(per_token_logps - proximal_per_token_logps),
+        1 - epsilon,
+        1 + epsilon,
+    )
+    coef_2 = jnp.exp(proximal_per_token_logps - old_per_token_logps) * coef_2
 
   # TODO(tsbao): We should handle token level advantages.
   per_token_loss = -jnp.minimum(

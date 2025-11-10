@@ -77,6 +77,12 @@ class TrainingConfig:
   # Progress bar description.
   pbar_description: str | None = "Training"
 
+  # Tracks the last model used for training mini batch.
+  off_policy: str = ""
+
+  # Max staleness of the model before it is considered stale.
+  max_staleness: int = 0
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -176,6 +182,7 @@ class PeftTrainer:
     is_managed_externally: Whether the trainer is managed externally.
     training_hooks: The training hooks to use.
     data_hooks: The data hooks to use.
+    prev_model: The model used for training previousmini batch.
   """
 
   def __init__(
@@ -245,6 +252,7 @@ class PeftTrainer:
     self._buffered_eval_metrics: MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
+    self.prev_model = None
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -313,8 +321,14 @@ class PeftTrainer:
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
         has_aux=self._has_aux,
     )
-    out, grads = grad_fn(model, **inputs)
-    optimizer.update(model, grads)
+    if self.config.off_policy == "compensated" and self.prev_model is not None:
+      out, grad = grad_fn(model, self.prev_model, **inputs)
+    else:
+      out, grad = grad_fn(model, **inputs)
+
+    optimizer.update(model, grad)
+    self.prev_model = model if self.config.off_policy == "compensated" else None
+
     if self._has_aux:
       loss, aux = out
       return loss, aux
