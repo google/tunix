@@ -31,7 +31,12 @@ from tunix.perf import metrics
 JaxDevice = Any
 PerfMetricsApi = metrics.PerfMetricsApi
 
+
 class NoopTracer:
+  """An no-op tracer that does nothing."""
+
+  def synchronize(self) -> None:
+    pass
 
   def dump(self) -> None:
     pass
@@ -98,7 +103,9 @@ class PerfTracer(NoopTracer):
       timelines[timeline.id] = timeline
     return timelines
 
-  def _get_or_create_device_timeline(self, id: str | JaxDevice) -> DeviceTimeline:
+  def _get_or_create_device_timeline(
+      self, id: str | JaxDevice
+  ) -> DeviceTimeline:
     # if it's a JAX device object, convert to id
     if hasattr(id, "platform") and hasattr(id, "id"):
       id = getattr(id, "platform") + str(getattr(id, "id"))
@@ -115,7 +122,9 @@ class PerfTracer(NoopTracer):
   ) -> BatchDeviceTimeline:
     if isinstance(ids, np.ndarray):
       ids = ids.flatten().tolist()
-    return BatchDeviceTimeline([self._get_or_create_device_timeline(id) for id in ids])
+    return BatchDeviceTimeline(
+        [self._get_or_create_device_timeline(id) for id in ids]
+    )
 
   def synchronize(self) -> None:
     _synchronize_devices()
@@ -134,7 +143,6 @@ class PerfTracer(NoopTracer):
   @property
   def all(self) -> list[str]:
     """Returns all device ids.
-    
     To be used to set `devices` in interval().
     """
     return list(self._device_timelines.keys())
@@ -147,7 +155,8 @@ class PerfTracer(NoopTracer):
   ):
     """Collect an interval for host and devices.
 
-    Host interval will always be collected, device intervals will be collected for devices listed in `devices`.
+    Host interval will always be collected, device intervals will be collected
+    for devices listed in `devices`.
 
     Usage:
       1. Collect an interval for host only.
@@ -207,12 +216,14 @@ class BaseTimeline:
     self.epochs = []
 
   def __eq__(self, other: object) -> bool:
-    return (isinstance(other, BaseTimeline)
+    return (
+        isinstance(other, BaseTimeline)
         and self.id == other.id
         and self.born == other.born
         and self.intervals == other.intervals
         and self.labels == other.labels
-        and self.epochs == other.epochs)
+        and self.epochs == other.epochs
+    )
 
   def __repr__(self) -> str:
     out = f"[{self.id}] "
@@ -286,7 +297,7 @@ class DeviceTimeline(BaseTimeline):
     self._threads: list[threading.Thread] = []
 
   def interval(
-      self, label: str, host_begin: float, data: jaxtyping.PyTree
+      self, label: str, host_begin: float, waitlist: jaxtyping.PyTree
   ) -> None:
     """Record a new interval for device (e.g. TPU).
 
@@ -296,6 +307,13 @@ class DeviceTimeline(BaseTimeline):
 
     The interval end time is determined when all JAX computations associated
     with 'data' finish.
+
+    Args:
+      label: The label of the interval.
+      host_begin: The begin time of the interval on the host, used to infer the
+        begin time of the interval on the device.
+      waitlist: The JAX computation to be tracked, used to infer the end time of
+        the interval on the device.
     """
 
     def on_success():
@@ -308,7 +326,7 @@ class DeviceTimeline(BaseTimeline):
     def on_failure(e: Exception):
       raise e
 
-    t = _async_wait(waitlist=data, success=on_success, failure=on_failure)
+    t = _async_wait(waitlist=waitlist, success=on_success, failure=on_failure)
     self._threads.append(t)
 
   def wait_pending_intervals(self) -> None:

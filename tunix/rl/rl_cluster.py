@@ -408,8 +408,8 @@ class RLCluster:
       from tunix.rl.rollout import vllm_rollout
       loaded_vllm_config = None
       if isinstance(
-              self.cluster_config.rollout_config, base_rollout.RolloutConfig
-          ):
+          self.cluster_config.rollout_config, base_rollout.RolloutConfig
+      ):
         loaded_vllm_config = self.cluster_config.rollout_config
       elif isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
@@ -606,7 +606,7 @@ class RLCluster:
     return self._critic_trainer
 
   @property
-  def perf(self) -> perf_trace.PerfTracer:
+  def perf(self) -> perf_trace.NoopTracer | perf_trace.PerfTracer:
     return self._perf
 
   def close(self):
@@ -758,7 +758,9 @@ class RLCluster:
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
-        interval.device_end([[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs])
+        interval.device_end(
+            [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
+        )
 
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
