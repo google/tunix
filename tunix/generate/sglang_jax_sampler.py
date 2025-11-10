@@ -42,6 +42,8 @@ class SglangJaxConfig:
   disable_radix_cache: bool
   enable_deterministic_sampling: bool
   mapping_config: mappings.MappingConfig
+  # Note: use_sort_for_toppk_minp may be removed in the future. It depends on SGLang-Jax.
+  use_sort_for_toppk_minp: bool = True
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -119,6 +121,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       args["enable_deterministic_sampling"] = True
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
+    args["use_sort_for_toppk_minp"] = config.use_sort_for_toppk_minp
     return args
 
   @property
