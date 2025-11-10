@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import trace as trace_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
@@ -113,6 +114,7 @@ class GRPOLearnerTest(parameterized.TestCase):
                 )
             ),
             buffer_metrics=lambda x, mode: None,
+            perf=trace_lib.NoopTracer(),
         )
 
         self._rollout_micro_batch_size = 1

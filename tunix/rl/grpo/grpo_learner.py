@@ -206,41 +206,51 @@ class GRPOLearner(rl_learner.RLLearner):
     completion_mask = completion_mask * completion_padding_mask
 
     if self.grpo_config.beta != 0.0:
-      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
-          micro_batch_size=(
-              self._compute_logps_micro_batch_size
-              * self.grpo_config.num_generations
-          ),
-      )
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
+      # TODO(yangmu): use function decorator to trace this part, same below.
+      with self.rl_cluster.perf.interval("ref_inference", devices) as interval:
+        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            pad_id=pad_value,
+            eos_id=eos_value,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.grpo_config.num_generations
+            ),
+        )
+        interval.device_end([ref_per_token_logps])
     else:
       ref_per_token_logps = None
     if self.grpo_config.num_iterations > 1:
-      old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          micro_batch_size=(
-              self._compute_logps_micro_batch_size
-              * self.grpo_config.num_generations
-          ),
-      )
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
+      with self.rl_cluster.perf.interval(
+          "old_actor_inference", devices
+      ) as interval:
+        old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.grpo_config.num_generations
+            ),
+        )
+        interval.device_end([old_per_token_logps])
     else:
       old_per_token_logps = None
 
-    # Compute rewards and advantages
-    rewards = self._compute_rewards(
-        prompts=training_input["prompts"],
-        completions=completion_text,
-        mode=mode,
-        **{k: v for k, v in training_input.items() if k != "prompts"},
-    )
+    with self.rl_cluster.perf.interval("advantage_computation"):
+      # Compute rewards and advantages
+      rewards = self._compute_rewards(
+          prompts=training_input["prompts"],
+          completions=completion_text,
+          mode=mode,
+          **{k: v for k, v in training_input.items() if k != "prompts"},
+      )
 
-    advantages = grpo_helpers.compute_advantages(
-        rewards, self.grpo_config.num_generations
-    )
+      advantages = grpo_helpers.compute_advantages(
+          rewards, self.grpo_config.num_generations
+      )
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
@@ -403,6 +413,7 @@ def grpo_loss_fn(
       train_example.completion_mask,
   )
 
+  # TODO(yangmu): trace this part as "actor_inference_and_training".
   per_token_logps = common.compute_per_token_logps(
       model,
       prompt_tokens=train_example.prompt_ids,

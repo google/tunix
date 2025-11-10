@@ -24,6 +24,7 @@ import gc
 import itertools
 import operator
 import os
+import time
 from typing import Any, Callable, Dict, Tuple
 
 from absl import logging
@@ -38,6 +39,8 @@ import jaxtyping
 import optax
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
+from tunix.perf import metrics as perf_metrics
+from tunix.perf import trace as perf_trace
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -197,6 +200,7 @@ class RLCluster:
       reward: ModelOrPath | None = None,
       tokenizer: Any | None,
       cluster_config: ClusterConfig,
+      perf_config: perf_metrics.PerfMetricsConfig | None = None,
   ):
     self.cluster_config = cluster_config
     self.r2m = cluster_config.role_to_mesh
@@ -255,6 +259,14 @@ class RLCluster:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
+
+    if perf_config is None:
+      self._perf = perf_trace.NoopTracer()
+    else:
+      devices = []
+      for mesh in cluster_config.role_to_mesh.values():
+        devices.extend(*mesh.devices)
+      self._perf = perf_trace.PerfTracer(devices)
 
   def _init_backbone_sharing_map(
       self,
@@ -393,8 +405,8 @@ class RLCluster:
       from tunix.rl.rollout import vllm_rollout
       loaded_vllm_config = None
       if isinstance(
-              self.cluster_config.rollout_config, base_rollout.RolloutConfig
-          ):
+          self.cluster_config.rollout_config, base_rollout.RolloutConfig
+      ):
         loaded_vllm_config = self.cluster_config.rollout_config
       elif isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
@@ -590,6 +602,10 @@ class RLCluster:
   def critic_trainer(self) -> rl_trainer.Trainer:
     return self._critic_trainer
 
+  @property
+  def perf(self) -> perf_trace.NoopTracer | perf_trace.PerfTracer:
+    return self._perf
+
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
@@ -667,15 +683,17 @@ class RLCluster:
         cur_metrics.metrics[metric_name][0].append(value)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.ACTOR]:
+    with self.cluster_config.role_to_mesh[Role.ACTOR] as mesh:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+      with self._perf.interval("actor_training", mesh.devices):
+        self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.CRITIC]:
+    with self.cluster_config.role_to_mesh[Role.CRITIC] as mesh:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      self._critic_trainer.train(train_ds, eval_ds, skip_jit)
+      with self._perf.interval("critic_training", mesh.devices):
+        self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
   def generate(
@@ -719,7 +737,7 @@ class RLCluster:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
+    with self.cluster_config.role_to_mesh[Role.ROLLOUT] as mesh:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -729,12 +747,18 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
-      outputs = [
-          self.rollout.generate(string_prompts[s], rollout_config)
-          for s in rl_utils.chunk_slices_by_size(
-              stop=len(string_prompts), step=micro_batch_size
-          )
-      ]
+
+      with self._perf.interval("rollout", mesh.devices) as interval:
+        outputs = [
+            self.rollout.generate(string_prompts[s], rollout_config)
+            for s in rl_utils.chunk_slices_by_size(
+                stop=len(string_prompts), step=micro_batch_size
+            )
+        ]
+        interval.device_end(
+            [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
+        )
+
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
