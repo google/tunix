@@ -51,22 +51,56 @@ class GRPOConfig:
     beta: The coefficient for the KL divergence penalty (𝛽) in the GRPO loss
       function. This term prevents policy updates from deviating too far from
       the reference model. A value of 0.0 means no KL penalty is applied.
-    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
-      PPO, it ensures stable updates.
-    loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
+    epsilon: Epsilon value for clipping lower bound (𝜀 in GRPO loss in paper).
+      Similar to PPO, it ensures stable updates.
+    epsilon_high: Defaults to epsilon. Epsilon value for clipping upper bound. If None, defaults to
+      epsilon for symmetric clipping. Set higher than epsilon for asymmetric
+      clipping.
+      # Clip Higher introduced in DAPO (https://arxiv.org/pdf/2503.14476),
+      # also used in Magistral and VAPO (https://arxiv.org/abs/2504.05118)
+    loss_algo: Defaults to "grpo". use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the
       paper. For GSPO, we use gspo-token loss which is more flexible.
+    dr_grpo: Defaults to False. If True, use DR-GRPO variant which:
+      - Only subtracts mean rewards (no std dev normalization)
+      - Normalizes loss by max_tokens instead of actual token counts
+      See: DR-GRPO https://arxiv.org/pdf/2503.20783
+    max_tokens: Only used if dr_grpo is True. Maximum generation tokens for DR-GRPO normalization. If None
+      and dr_grpo is True, will attempt to infer from rollout config.
+    magistral_adv_norm: Defaults to False. If True, normalize advantages by mini-batch std dev
+      instead of group std dev after subtracting group mean.
+      See: Magistral https://arxiv.org/pdf/2506.10910
+    eliminate_non_diverse_groups: Defaults to False. If True, discard groups where all rewards
+      are identical (0 or 1), as they provide no learning signal. Do this by
+      setting loss for this group to 0.
+      # Introduced in Magistral paper (https://arxiv.org/pdf/2506.10910)
+    debug: Defaults to False. If True, print detailed debug information during training.
+  Contributions:
+    - GSPO: sequence-level importance sampling.
+    - DR-GRPO: removes length normalization and std dev term for unbiased length and difficulty, eliminating difficulty/length bias.
+    - DAPO: introduced clip higher (epsilon_high).
+    - Magistral: introduced eliminate non-diverse groups and magistral_adv_norm (batch-wise normalization instead of group-wise).
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
     - GSPO: https://www.arxiv.org/pdf/2507.18071
+    - Magistral: https://arxiv.org/pdf/2506.10910
+    - DR-GRPO: https://arxiv.org/pdf/2503.20783
+    - DAPO (Clip Higher): https://arxiv.org/pdf/2503.14476
+    - VAPO: https://arxiv.org/abs/2504.05118
   """
 
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
   epsilon: float = 0.2
+  epsilon_high: float | None = None  # New parameter for asymmetric clipping
   loss_algo: str = "grpo"  # grpo or gspo-token
+  dr_grpo: bool = False  # New parameter for DR-GRPO variant
+  max_tokens: int | None = None  # New parameter for DR-GRPO loss normalization
+  magistral_adv_norm: bool = False  # New parameter for alternative normalization
+  eliminate_non_diverse_groups: bool = False  # New parameter to filter groups
+  debug: bool = False  # New parameter to control debug output
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -78,6 +112,28 @@ class GRPOConfig:
       raise ValueError(
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
+      )
+    # Set epsilon_high to epsilon if not specified (symmetric clipping)
+    if self.epsilon_high is None:
+      self.epsilon_high = self.epsilon
+
+    # Debug logging for configuration
+    if self.debug:
+      print("[GRPO Config] Debug mode: ENABLED")
+      print(
+          "[GRPO Config] Clip-Higher:"
+          f" epsilon={self.epsilon}, epsilon_high={self.epsilon_high}"
+      )
+      print(
+          "[GRPO Config] DR-GRPO:"
+          f" enabled={self.dr_grpo}, max_tokens={self.max_tokens}"
+      )
+      print(
+          "[GRPO Config] Magistral Adv Norm: enabled={self.magistral_adv_norm}"
+      )
+      print(
+          "[GRPO Config] Eliminate Non-Diverse Groups:"
+          f" enabled={self.eliminate_non_diverse_groups}"
       )
 
 
@@ -139,14 +195,22 @@ class GRPOLearner(rl_learner.RLLearner):
 
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
-    loss_fn = lambda model, train_example, beta, epsilon: grpo_loss_fn(
-        model,
-        train_example,
-        beta=beta,
-        epsilon=epsilon,
-        pad_id=self.rl_cluster.rollout.pad_id(),
-        eos_id=self.rl_cluster.rollout.eos_id(),
-        loss_algo=self.grpo_config.loss_algo,
+    loss_fn = (
+        lambda model, train_example, beta, epsilon, epsilon_high, loss_algo, dr_grpo, max_tokens, eliminate_non_diverse_groups, debug, num_generations: grpo_loss_fn(
+            model,
+            train_example,
+            beta=beta,
+            epsilon=epsilon,
+            pad_id=self.rl_cluster.rollout.pad_id(),
+            eos_id=self.rl_cluster.rollout.eos_id(),
+            loss_algo=loss_algo,
+            epsilon_high=epsilon_high,
+            dr_grpo=dr_grpo,
+            max_tokens=max_tokens,
+            eliminate_non_diverse_groups=eliminate_non_diverse_groups,
+            debug=debug,
+            num_generations=num_generations,
+        )
     )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
@@ -158,6 +222,15 @@ class GRPOLearner(rl_learner.RLLearner):
             "train_example": x,
             "beta": self.grpo_config.beta,
             "epsilon": self.grpo_config.epsilon,
+            "epsilon_high": self.grpo_config.epsilon_high,
+            "loss_algo": self.grpo_config.loss_algo,
+            "dr_grpo": self.grpo_config.dr_grpo,
+            "max_tokens": self.grpo_config.max_tokens,
+            "eliminate_non_diverse_groups": (
+                self.grpo_config.eliminate_non_diverse_groups
+            ),
+            "debug": self.grpo_config.debug,
+            "num_generations": self.grpo_config.num_generations,
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
@@ -239,7 +312,12 @@ class GRPOLearner(rl_learner.RLLearner):
     )
 
     advantages = grpo_helpers.compute_advantages(
-        rewards, self.grpo_config.num_generations
+        rewards,
+        self.grpo_config.num_generations,
+        dr_grpo=self.grpo_config.dr_grpo,
+        magistral_adv_norm=self.grpo_config.magistral_adv_norm,
+        eliminate_non_diverse_groups=self.grpo_config.eliminate_non_diverse_groups,
+        debug=self.grpo_config.debug,
     )
 
     # Log completion lengths.
@@ -376,6 +454,12 @@ def grpo_loss_fn(
     loss_algo,
     pad_id,
     eos_id,
+    epsilon_high,
+    dr_grpo,
+    max_tokens,
+    eliminate_non_diverse_groups,
+    debug,
+    num_generations,
 ):
   """GRPO loss function.
 
@@ -394,6 +478,13 @@ def grpo_loss_fn(
     loss_algo: The loss algorithm to use. Can be grpo or gspo-token.
     pad_id: The pad ID from tokenizer.
     eos_id: The eos ID from.
+    epsilon_high: Epsilon value for upper bound clipping.
+    dr_grpo: If True, use DR-GRPO variant.
+    max_tokens: Maximum generation tokens for DR-GRPO normalization.
+    eliminate_non_diverse_groups: If True, discard groups with identical
+      rewards.
+    debug: If True, print detailed debug information.
+    num_generations: Number of generations per prompt.
 
   Returns:
     A tuple containing the loss and an aux dictionary.
@@ -432,7 +523,7 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   coef_1 = jnp.exp(seq_importance_ratio)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
+  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
 
   # TODO(tsbao): We should handle token level advantages.
   per_token_loss = -jnp.minimum(
@@ -440,7 +531,11 @@ def grpo_loss_fn(
       coef_2 * jnp.expand_dims(advantages, 1),
   )
 
-  if loss_algo == "gspo-token":
+  if dr_grpo:
+    if max_tokens is None:
+      max_tokens = completion_ids.shape[1]
+    loss_denominator = max_tokens * completion_ids.shape[0]
+  elif loss_algo == "gspo-token":
     loss_denominator = jnp.clip(completion_mask.sum(axis=-1), min=1)
   else:  # grpo
     loss_denominator = jnp.clip(completion_mask.sum(), min=1)
@@ -453,13 +548,56 @@ def grpo_loss_fn(
     per_token_loss = per_token_loss + beta * kl
 
     # Log mean KL.
-    aux["kl"] = (kl * completion_mask).sum() / loss_denominator.mean()
+    kl_denominator = (
+        loss_denominator.mean()
+        if loss_algo == "gspo-token" and not dr_grpo
+        else loss_denominator
+    )
+    aux["kl"] = (kl * completion_mask).sum() / kl_denominator
+
+  if eliminate_non_diverse_groups:
+    reshaped_advantages = advantages.reshape(-1, num_generations)
+    is_non_diverse_group = jnp.all(reshaped_advantages == 0, axis=1)
+
+    if debug:
+      num_total_groups = advantages.shape[0] // num_generations
+      num_eliminated = jnp.sum(is_non_diverse_group)
+      jax.debug.print(
+          "[GRPO Loss] Eliminating {elim}/{total} non-diverse groups",
+          elim=num_eliminated,
+          total=num_total_groups,
+      )
+
+    # Create a mask for valid groups
+    valid_group_mask = 1.0 - jnp.repeat(
+        is_non_diverse_group, num_generations, axis=0
+    ).astype(jnp.float32)
+    valid_group_mask = jnp.expand_dims(valid_group_mask, 1)
+
+    per_token_loss = per_token_loss * valid_group_mask
+
+    # Also mask KL in aux
+    if beta != 0.0:
+      kl_denominator = (
+          loss_denominator.mean()
+          if loss_algo == "gspo-token" and not dr_grpo
+          else loss_denominator
+      )
+      aux["kl"] = (kl * completion_mask * valid_group_mask).sum() / (
+          kl_denominator + 1e-8
+      )
+
+  if debug:
+    jax.debug.print(
+        "[GRPO Loss] loss_denominator: {denom}",
+        denom=loss_denominator,
+    )
 
   if loss_algo == "gspo-token":
     loss = (
         (per_token_loss * completion_mask).sum(axis=-1) / loss_denominator
     ).mean()
-  else:  # grpo
+  else:  # grpo or dr_grpo
     loss = (per_token_loss * completion_mask).sum() / loss_denominator
 
   return loss, aux
