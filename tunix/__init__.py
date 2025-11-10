@@ -30,6 +30,11 @@ from tunix.distillation.distillation_trainer import TrainingConfig as Distillati
 from tunix.generate.sampler import CacheConfig
 from tunix.generate.sampler import Sampler
 from tunix.generate.tokenizer_adapter import TokenizerAdapter, Tokenizer
+from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.environments import task_environment
+from tunix.rl.agentic.rewards import reward
+from tunix.rl.agentic.trajectory import trajectory_collect_engine
+from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GrpoConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner

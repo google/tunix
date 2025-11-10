@@ -9,7 +9,7 @@ import os
 from pprint import pprint
 import re
 
-from etils import ecolab
+# from etils import ecolab
 from flax import nnx
 import grain
 import humanize
@@ -104,8 +104,8 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
+BATCH_SIZE = 164
+MINI_BATCH_SIZE = 32
 ROLLOUT_MICRO_BATCH_SIZE = 8
 LOGPS_MICRO_BATCH_SIZE = 8
 NUM_BATCHES = 30

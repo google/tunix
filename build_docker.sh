@@ -10,7 +10,11 @@
 set -e
 
 DOCKERFILE=./Dockerfile
-BUILD_ARGS=""
+
+if [ ! -f "$DOCKERFILE" ]; then
+    echo "Error: Dockerfile not found at $DOCKERFILE"
+    exit 1
+fi
 
 export LOCAL_IMAGE_NAME=tunix_base_image
 echo "Building base image: $LOCAL_IMAGE_NAME"
@@ -23,16 +27,16 @@ export DOCKER_BUILDKIT=1
 echo "Starting to build your docker image. This will take a few minutes but the image can be reused as you iterate."
 
 build_ai_image() {
-    if [[ -z ${LOCAL_IMAGE_NAME+x} ]]; then
-        echo "Error: LOCAL_IMAGE_NAME is unset, please set it!"
-        exit 1
-    fi
     COMMIT_HASH=$(git rev-parse --short HEAD)
     echo "Building Tunix Image at commit hash ${COMMIT_HASH}..."
 
-    sudo docker build \
+    DOCKER_COMMAND="docker"
+    if ! docker info >/dev/null 2>&1; then
+        DOCKER_COMMAND="sudo docker"
+    fi
+
+    $DOCKER_COMMAND build \
         --network=host \
-        ${BUILD_ARGS} \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }
