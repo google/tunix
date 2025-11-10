@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -21,16 +22,32 @@ from tunix.rl.grpo import grpo_helpers
 jax.config.update("jax_threefry_partitionable", False)
 
 
-class GRPOHelpersTest(absltest.TestCase):
+class GRPOHelpersTest(parameterized.TestCase):
 
-  def test_compute_advantages(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="std_scale",
+          std_scale=True,
+          expected_value=[
+              [0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474],
+          ],
+      ),
+      dict(
+          testcase_name="no_std_scale",
+          std_scale=False,
+          expected_value=[
+              [0.10245, -0.372365, 0.269915, 0.246179, -0.051432, -0.194747],
+          ],
+      ),
+  )
+  def test_compute_advantages(self, std_scale, expected_value):
     rng = jax.random.PRNGKey(0)
     rewards = jax.random.uniform(rng, shape=(1, 6))
-    advantages = grpo_helpers.compute_advantages(rewards, num_generations=3)
-    expected_value = jnp.array(
-        [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
+    advantages = grpo_helpers.compute_advantages(
+        rewards, num_generations=3, std_scale=std_scale
     )
-    np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
+    expected_array = jnp.array(expected_value)
+    np.testing.assert_allclose(advantages, expected_array, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

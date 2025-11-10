@@ -16,19 +16,26 @@
 import jax
 
 
-def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
+def compute_advantages(
+    rewards: jax.Array, num_generations: int, std_scale: bool = True
+) -> jax.Array:
   """Compute group relative advantages.
 
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    std_scale: Whether to divide advantages by the standard deviation.
 
   Returns:
     Group relative advantages.
   """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=1)
-  std_grouped_rewards = rewards.reshape(-1, num_generations).std(axis=1, ddof=1)
+  reshaped_rewards = rewards.reshape(-1, num_generations)
 
-  mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
-  std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+  mean_grouped_rewards = reshaped_rewards.mean(axis=1).repeat(num_generations)
+  advantages = rewards - mean_grouped_rewards
+
+  if not std_scale:
+    return advantages
+
+  std_grouped_rewards = reshaped_rewards.std(axis=1, ddof=1)
+  return advantages / (std_grouped_rewards + 1e-4).repeat(num_generations)

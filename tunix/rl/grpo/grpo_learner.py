@@ -56,10 +56,12 @@ class GRPOConfig:
     loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the
       paper. For GSPO, we use gspo-token loss which is more flexible.
+    done_right: Whether to use done-right GRPO (Dr. GRPO) adjustments.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
     - GSPO: https://www.arxiv.org/pdf/2507.18071
+    - Dr. GRPO: https://arxiv.org/pdf/2503.20783
   """
 
   num_generations: int = 2
@@ -67,6 +69,7 @@ class GRPOConfig:
   beta: float = 0.04
   epsilon: float = 0.2
   loss_algo: str = "grpo"  # grpo or gspo-token
+  done_right: bool = False
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -239,7 +242,10 @@ class GRPOLearner(rl_learner.RLLearner):
     )
 
     advantages = grpo_helpers.compute_advantages(
-        rewards, self.grpo_config.num_generations
+        rewards,
+        self.grpo_config.num_generations,
+        # Do not scale by std for Dr. GRPO
+        std_scale=not self.grpo_config.done_right,
     )
 
     # Log completion lengths.
