@@ -91,10 +91,8 @@ jobs:
       run: |
         # tokenizer_adapter_test requires access to gated repo
         python -m pytest tests/generate/ -v --tb=short \
-          --ignore=tests/generate/vllm_sampler_test.py \
           --ignore=tests/generate/vllm_driver_test.py \
-          --ignore=tests/generate/tokenizer_adapter_test.py \
-          --ignore=tests/generate/sglang_jax_sampler_test.py
+          --ignore=tests/generate/tokenizer_adapter_test.py
 
     - name: Run tunix SFT tests
       run: |
@@ -193,7 +191,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          pytest tests/generate/vllm_driver_test.py -v --tb=short
           pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
           while read -r test; do
             pytest "$test" -v --tb=short
