@@ -103,6 +103,10 @@ class RolloutConfig:
   # Weights mapping config for the rollout model.
   rollout_mapping_config: mappings.MappingConfig | None = None
 
+  # Parallelism configs.
+  tensor_parallel_size: int = -1
+  data_parallel_size: int = -1
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.
@@ -125,6 +129,9 @@ class RolloutConfig:
 
   # Swap space size for vLLM rollout engine, in GiB.
   rollout_vllm_swap_space_size_gb: float = 4.0
+
+  # Whether to enable asynchronous scheduling for vLLM rollout engine.
+  rollout_vllm_async_scheduling: bool = False
 
   # SG-Lang JAX specific rollout configs.
 
