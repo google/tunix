@@ -99,10 +99,22 @@ _MODEL_INFO_MAP = {
         id='gemma3_270m',
         category='gemma3',
     ),
+    'gemma-3-270m-it': ModelTestInfo(
+        family='gemma3',
+        version='270m_it',
+        id='gemma3_270m_it',
+        category='gemma3',
+    ),
     'gemma-3-1b': ModelTestInfo(
         family='gemma3',
         version='1b',
         id='gemma3_1b',
+        category='gemma3',
+    ),
+    'gemma-3-1b-it': ModelTestInfo(
+        family='gemma3',
+        version='1b_it',
+        id='gemma3_1b_it',
         category='gemma3',
     ),
     'gemma-3-4b': ModelTestInfo(
@@ -111,16 +123,34 @@ _MODEL_INFO_MAP = {
         id='gemma3_4b',
         category='gemma3',
     ),
+    'gemma-3-4b-it': ModelTestInfo(
+        family='gemma3',
+        version='4b_it',
+        id='gemma3_4b_it',
+        category='gemma3',
+    ),
     'gemma-3-12b': ModelTestInfo(
         family='gemma3',
         version='12b',
         id='gemma3_12b',
         category='gemma3',
     ),
+    'gemma-3-12b-it': ModelTestInfo(
+        family='gemma3',
+        version='12b_it',
+        id='gemma3_12b_it',
+        category='gemma3',
+    ),
     'gemma-3-27b': ModelTestInfo(
         family='gemma3',
         version='27b',
         id='gemma3_27b',
+        category='gemma3',
+    ),
+    'gemma-3-27b-it': ModelTestInfo(
+        family='gemma3',
+        version='27b_it',
+        id='gemma3_27b_it',
         category='gemma3',
     ),
     'llama3-70b': ModelTestInfo(

@@ -132,6 +132,14 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma3_270m_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-270M instruction-tuned text-only config."""
+    return cls.gemma3_270m(sharding_config=sharding_config)
+
+  @classmethod
   def gemma3_1b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -149,6 +157,14 @@ class ModelConfig:
         global_base_frequency=1_000_000,
         shd_config=sharding_config,
     )
+
+  @classmethod
+  def gemma3_1b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-1B instruction-tuned text-only config."""
+    return cls.gemma3_1b(sharding_config=sharding_config)
 
   @classmethod
   def gemma3_4b(
@@ -170,6 +186,14 @@ class ModelConfig:
         global_scale_factor=8.0,
         shd_config=sharding_config,
     )
+
+  @classmethod
+  def gemma3_4b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-4B instruction-tuned text-only config."""
+    return cls.gemma3_4b(sharding_config=sharding_config)
 
   @classmethod
   def gemma3_12b(
@@ -194,6 +218,14 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma3_12b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-12B instruction-tuned text-only config."""
+    return cls.gemma3_12b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma3_27b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -214,6 +246,14 @@ class ModelConfig:
         global_scale_factor=8.0,
         shd_config=sharding_config,
     )
+
+  @classmethod
+  def gemma3_27b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-27B instruction-tuned text-only config."""
+    return cls.gemma3_27b(sharding_config=sharding_config)
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
