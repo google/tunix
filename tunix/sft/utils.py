@@ -145,11 +145,11 @@ def show_hbm_usage(title=""):
   gc.collect()
 
   if google_utils.pathways_available():
-    logging.info("%s - Using Pathways compatible HBM stats collector", title)
+    print(title, " - Using Pathways compatible HBM stats collector")
     devices = jax.devices()
     hbm_stats = _pathways_hbm_usage_gb(devices)
     for i, (used, _) in enumerate(hbm_stats):
-      logging.info("Using %s on %s", fmt_size(used), devices[i])
+      print(f"Using {fmt_size(used)} on {devices[i]}")
   else:
     logging.info(
         "%s - Pathways not available. Using default HBM stats collector", title
