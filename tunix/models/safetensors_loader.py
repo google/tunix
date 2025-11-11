@@ -83,8 +83,9 @@ def load_and_create_model(
   Returns:
       Model instance with loaded weights
   """
-  if file_dir.startswith("gs://"):
-    file_dir = load_file_from_gcs(file_dir)
+
+  file_dir = load_file_from_gcs(file_dir)
+  print("Loading safetensors from directory:", file_dir)
 
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
 
@@ -148,6 +149,7 @@ def load_and_create_model(
       with concurrent.futures.ThreadPoolExecutor(
           max_workers=os.cpu_count()
       ) as executor:
+        print(f"Loading tensors from file: {f.name} with {len(keys)} keys.")
         futures = [
             executor.submit(process_key, key, f, sf, file_loaded_tensors)
             for key in keys
