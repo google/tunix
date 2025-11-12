@@ -69,13 +69,8 @@ class MetricsLogger:
   def __init__(
       self,
       metrics_logger_options: MetricsLoggerOptions | None = None,
-      metric_prefix: str = "",
   ):
-    self._metrics = {
-        Mode.TRAIN: collections.defaultdict(list),
-        Mode.EVAL: collections.defaultdict(list),
-    }
-    self.metric_prefix = metric_prefix
+    self._metrics = {}
     self._backends = (
         metrics_logger_options.create_backends()
         if metrics_logger_options
@@ -87,38 +82,46 @@ class MetricsLogger:
 
   def log(
       self,
+      metrics_prefix: str,
       metric_name: str,
       scalar_value: float | np.ndarray,
       mode: Mode | str,
       step: int,
   ):
     """Logs the scalar metric value to local history and via jax.monitoring."""
-    self._metrics[mode][metric_name].append(scalar_value)
+    prefix_metrics = self._metrics.setdefault(metrics_prefix, {})
+    mode_metrics = prefix_metrics.setdefault(mode, collections.defaultdict(list))
+    mode_metrics[metric_name].append(scalar_value)
+
     jax.monitoring.record_scalar(
-        f"{self.metric_prefix}{mode}/{metric_name}", scalar_value, step=step
+        f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step
     )
 
-  def metric_exists(self, metric_name: str, mode: Mode | str) -> bool:
+  def metric_exists(self, metrics_prefix, metric_name: str, mode: Mode | str) -> bool:
     """Checks if the metric exists for the given metric name and mode."""
-    return metric_name in self._metrics[mode]
+    if metrics_prefix not in self._metrics:
+      return False
+    if mode not in self._metrics[metrics_prefix]:
+      return False
+    return metric_name in self._metrics[metrics_prefix][mode]
 
-  def get_metric(self, metric_name: str, mode: Mode | str):
+  def get_metric(self, metrics_prefix, metric_name: str, mode: Mode | str):
     """Returns the mean metric value for the given metric name and mode."""
-    if not self.metric_exists(metric_name, mode):
-      raise ValueError(f"Metric '{metric_name}' not found for mode '{mode}'.")
-    values = np.stack(self._metrics[mode][metric_name])
+    if not self.metric_exists(metrics_prefix, metric_name, mode):
+      raise ValueError(f"Metric '{metrics_prefix}/{mode}/{metric_name}' not found.")
+    values = np.stack(self._metrics[metrics_prefix][mode][metric_name])
     if metric_name == "perplexity":
       return _calculate_geometric_mean(values)
     return np.mean(values)
 
-  def get_metric_history(self, metric_name: str, mode: Mode | str):
+  def get_metric_history(self, metrics_prefix, metric_name: str, mode: Mode | str):
     """Returns all past metric values for the given metric name and mode."""
-    if not self.metric_exists(metric_name, mode):
+    if not self.metric_exists(metrics_prefix, metric_name, mode):
       raise ValueError(
-          f"Metric '{metric_name}' not found for mode '{mode}'. Available"
-          f" metrics for mode '{mode}': {list(self._metrics[mode].keys())}"
+          f" Metric '{metrics_prefix}/{mode}/{metric_name}' not found. Available"
+          f" metrics for mode '{mode}': {list(self._metrics[metrics_prefix][mode].keys())}"
       )
-    return np.stack(self._metrics[mode][metric_name])
+    return np.stack(self._metrics[metrics_prefix][mode][metric_name])
 
   def close(self):
     """Closes all registered logging backends."""
