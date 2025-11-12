@@ -51,14 +51,19 @@ with cm:
   import jax
   import numpy as np
   from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
-  from tunix.models.qwen2 import params
-  from tunix.models.qwen2 import model
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.sft import utils
   from tunix.rl.rollout import base_rollout
   from tunix.sft import metrics_logger
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
+
+# %%
+#%%
+import jax
+jax.config.update('jax_platforms', "pathways")
+jax.config.update("jax_backend_target", "/bns/ro/borg/ro/bns/linchai/linchai_group_207211951.1.pw_resource_manager/0:pathways")
+print(f"{jax.devices()}")
 # %%
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -99,11 +104,11 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
-ROLLOUT_MICRO_BATCH_SIZE = 8
-LOGPS_MICRO_BATCH_SIZE = 8
-NUM_BATCHES = 30
+BATCH_SIZE = 32
+MINI_BATCH_SIZE = 32
+# ROLLOUT_MICRO_BATCH_SIZE = 8
+# LOGPS_MICRO_BATCH_SIZE = 8
+NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
@@ -264,13 +269,13 @@ show_hbm_usage()
 
 # %%
 mesh = jax.make_mesh(
-    (1, 4),
-    ("fsdp", "tp"),
+    *MESH,
     axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
 )
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
-print("model_path: ", MODEL_PATH)
-qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+print("MODEL_PATH: ", MODEL_PATH)
+with jax.set_mesh(mesh):
+  qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
 # nnx.display(model)
 
 # %%
@@ -335,6 +340,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
+        mini_batch_size=MINI_BATCH_SIZE,
+        train_micro_batch_size = 1,  # larger than 1 will cause OOM on HBM
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -349,6 +356,13 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+        # following is for sglang-jax if ROLLOUT_ENGINE = "sglang-jax"
+        # rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_sglang_jax_context_length=2048 + 8192,
+        # rollout_sglang_jax_mem_fraction_static=0.2,
+        # rollout_sglang_jax_init_with_random_weights=True,
+        # rollout_sglang_jax_disable_radix_cache=True,
+        # rollout_sglang_jax_enable_deterministic_sampling=False,
     ),
 )
 
@@ -358,11 +372,12 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
+    max_concurrency=2,
 )
 
 # %%
 # RL cluster
-with mesh:
+with jax.set_mesh(mesh):
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=qwen2,
       reference=qwen2,
