@@ -96,6 +96,7 @@ class PeftTrainerTest(parameterized.TestCase):
 
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
 
+
   def test_compile_once(self):
     class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
 
@@ -132,19 +133,19 @@ class PeftTrainerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     self.assertGreater(
-        trainer.metrics_logger.get_metric('perplexity', 'train'), 0
+        trainer.metrics_logger.get_metric('', 'perplexity', 'train'), 0
     )
     self.assertEqual(
-        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
     self.assertGreater(
-        trainer.metrics_logger.get_metric('perplexity', 'eval'), 0
+        trainer.metrics_logger.get_metric('', 'perplexity', 'eval'), 0
     )
     self.assertGreater(trainer._train_steps, 0)
 
     self.assertLen(
-        trainer.metrics_logger.get_metric_history('perplexity', 'train'),
+        trainer.metrics_logger.get_metric_history('', 'perplexity', 'train'),
         trainer._train_steps,
     )
 
@@ -373,7 +374,7 @@ class PeftTrainerTest(parameterized.TestCase):
         tc.assert_not_equal, original_lora_params, lora_params
     )
     self.assertEqual(
-        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
 
@@ -403,7 +404,7 @@ class PeftTrainerTest(parameterized.TestCase):
 
       trainer.train(train_ds, self.eval_ds)
       self.assertEqual(
-          trainer.metrics_logger.get_metric('learning_rate', 'train'),
+          trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
           TEST_LEARNING_RATE,
       )
       return nnx.state(model, nnx.Param), trainer
@@ -427,8 +428,8 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(trainer.train_steps, grad_accu_trainer.train_steps)
     self.assertEqual(trainer.iter_steps * 2, grad_accu_trainer.iter_steps)
     np.testing.assert_allclose(
-        trainer.metrics_logger.get_metric('loss', 'train'),
-        grad_accu_trainer.metrics_logger.get_metric('loss', 'train'),
+        trainer.metrics_logger.get_metric('', 'loss', 'train'),
+        grad_accu_trainer.metrics_logger.get_metric('', 'loss', 'train'),
         atol=1e-5,
         rtol=1e-5,
     )
@@ -566,7 +567,7 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(
-        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
 

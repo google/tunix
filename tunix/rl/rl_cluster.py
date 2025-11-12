@@ -248,6 +248,12 @@ class RLCluster:
     )
 
     self.tokenizer = tokenizer
+    self._rl_metrics_logger = metrics_logger.MetricsLogger(
+        self.cluster_config.training_config.metrics_logging_options
+    )
+    self._buffered_train_metrics: list[MetricsBuffer] = []
+    self._buffered_eval_metrics: list[MetricsBuffer] = []
+    self._external_metrics_logger = None
     self._init_cluster()
     gc.collect()
 
@@ -255,13 +261,6 @@ class RLCluster:
     # algorithm. E.g. when loading from a checkpoint with additional inner loops
     # that update the model, we should properly update the global steps.
     self.global_steps = 0
-
-    self._rl_metrics_logger = metrics_logger.MetricsLogger(
-        self.cluster_config.training_config.metrics_logging_options
-    )
-    self._buffered_train_metrics: list[MetricsBuffer] = []
-    self._buffered_eval_metrics: list[MetricsBuffer] = []
-    self._external_metrics_logger = None
 
     if perf_config is None:
       self._perf = perf_trace.NoopTracer()
@@ -491,7 +490,7 @@ class RLCluster:
         and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
     ):
       critic_config = copy.deepcopy(self.cluster_config.training_config)
-      critic_config.metric_prefix = "critic/"
+      critic_config.metrics_prefix = "critic"
       critic_config.pbar_description = "Critic Training"
       if critic_config.checkpoint_root_directory is not None:
         critic_config.checkpoint_root_directory = os.path.join(
@@ -503,14 +502,15 @@ class RLCluster:
           training_config=critic_config,
           custom_checkpoint_metadata_fn=lambda: {
               "global_step": self.global_steps + 1
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-longå
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          metrics_logger=self._rl_metrics_logger,
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
 
     self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
     actor_config = copy.deepcopy(self.cluster_config.training_config)
-    actor_config.metric_prefix = "actor/"
+    actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
     if actor_config.checkpoint_root_directory is not None:
       actor_config.checkpoint_root_directory = os.path.join(
@@ -522,7 +522,8 @@ class RLCluster:
         training_config=actor_config,
         custom_checkpoint_metadata_fn=lambda: {
             "global_step": self.global_steps + 1
-        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-longå
+        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+        metrics_logger=self._rl_metrics_logger,
     )
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -623,10 +624,11 @@ class RLCluster:
         continue  # jax.monitoring does not support string values.
       if op is None:
         self._rl_metrics_logger.log(  # pytype: disable=wrong-arg-types
-            metric_name, value, metrics_buffer.mode, metrics_buffer.global_steps
+            "global", metric_name, value, metrics_buffer.mode, metrics_buffer.global_steps
         )
       else:
         self._rl_metrics_logger.log(
+            "global",
             metric_name,
             op(value),
             metrics_buffer.mode,
