@@ -4,6 +4,8 @@ For the full list of built-in configuration values, see the documentation:
 https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
 
+import logging
+
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
@@ -17,7 +19,7 @@ author = "Tunix Developers"
 extensions = [
     "myst_nb",
     "sphinx_gallery.gen_gallery",
-    "sphinxcontrib.collections",
+    "sphinx_collections",
     # api docs
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
@@ -30,7 +32,10 @@ exclude_patterns = [
     "_build",
     "Thumbs.db",
     ".DS_Store",
-    "_collections/examples/model_load/from_safetensor_load/*",
+    "_collections/examples/model_load/from_safetensor_load/*"
+    "_collections/examples/rl/README.md",
+    "_collections/examples/sft/**",
+    "_collections/examples/deepscaler/**",
 ]
 
 source_suffix = [".rst", ".md", ".ipynb"]
@@ -54,9 +59,10 @@ html_theme_options = {
 sphinx_gallery_conf = {
     "examples_dirs": "_collections/examples",  # path to your example scripts
     "gallery_dirs": (
-        "_collections/gallery/"
+        "_collections/gallery"
     ),  # path to where to save gallery generated output
     "filename_pattern": "*.py",
+    "ignore_pattern": r"rl/|sft/|deepscaler/",
 }
 
 # -- Options for myst -------------------------------------------------------
@@ -76,8 +82,13 @@ nb_execution_excludepatterns = [
 collections = {
     "examples": {
         "driver": "copy_folder",
-        "source": "../examples/",
-        "ignore": "../examples/model_load/from_safetensor_load/*",
+        "source": "../examples",
+        "ignore": [
+            "model_load",
+            "rl",
+            "sft",
+            "deepscaler",
+        ],
     }
 }
 
@@ -103,3 +114,25 @@ intersphinx_mapping = {
     "flax": ("https://flax.readthedocs.io/en/stable/", None),
     "jax": ("https://docs.jax.dev/en/latest/", None),
 }
+
+
+
+class FilterSphinxWarnings(logging.Filter):
+    """Filter autosummary 'duplicate object description' warnings.
+
+    These warnings are unnecessary as they do not cause missing documentation
+    or rendering issues, so it is safe to filter them out.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        super().__init__()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+
+        filter_out = ("duplicate object description",)
+
+        if msg.strip().startswith(filter_out):
+            return False
+        return True
