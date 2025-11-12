@@ -34,7 +34,7 @@ pathwaysutils.initialize()
 print("jax devices: ", jax.devices())
 
 try:
-  wandb.login(key="e27080071466d108dc7c16fc6ff885b296d8b608")
+  wandb.login(key="")
   print("linchai: logged in to W&B")
 except wandb.errors.UsageError as e:
   print(f"Failed to log in to W&B: {e}")
@@ -256,7 +256,7 @@ show_hbm_usage("after model loading with fp32")
 DEEPSCALER_DATA_PATH = os.path.join("gs://linchai-bucket-dev/rl/data/", "DeepScaleR-Preview-Dataset/deepscaler.json")
 # AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
 
-os.environ["HF_TOKEN"] = "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"
+os.environ["HF_TOKEN"] = ""
 
 def create_datasets(
     train_ds_path: str = DEEPSCALER_DATA_PATH
