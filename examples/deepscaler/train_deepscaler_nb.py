@@ -253,7 +253,7 @@ show_hbm_usage("after model loading with fp32")
 DEEPSCALER_DATA_PATH = os.path.join("gs://linchai-bucket-dev/rl/data/", "DeepScaleR-Preview-Dataset/deepscaler.json")
 # AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
 
-os.environ["HF_TOKEN"] = ""
+
 
 def create_datasets(
     train_ds_path: str = DEEPSCALER_DATA_PATH
