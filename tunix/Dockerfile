@@ -24,14 +24,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3.12 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
 RUN pip install gcsfs
 RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+RUN pip install --upgrade wandb
 
+# Set a directory to clone sglang-jax into
+WORKDIR /usr/src
+# Clone the repository using HTTPS
+RUN git clone https://github.com/sgl-project/sglang-jax.git
+# Install the package in editable mode
+# The -e flag means the installation links to the source code in /usr/src/sglang-jax
+RUN cd sglang-jax/python && pip install --no-cache-dir -e .
 
-# Set the working directory
+# Reset the working directory to /app
 WORKDIR /app
 
 # Copy the project files to the image

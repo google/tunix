@@ -33,6 +33,7 @@ import asyncio
 import contextlib
 import dataclasses
 import itertools
+from time import sleep
 from typing import Any, Coroutine, Iterable, List, Sequence
 
 from absl import logging
@@ -721,7 +722,11 @@ class GRPOLearner(rl_learner.RLLearner):
     prompt_queue = queue_lib.SimpleDataQueue(maxsize=full_batch_size + 1)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
+    iteration = 0
     for full_batch in full_dataset_iterator:
+      iteration += 1
+      sleep(10) # For debug purpose
+      print(f"Starting training iteration {iteration}.")
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         print(
             "Reached max_steps: %d >= %d",
