@@ -71,6 +71,12 @@ class MetricsLogger:
       metrics_logger_options: MetricsLoggerOptions | None = None,
       metric_prefix: str = "",
   ):
+    # Clear any existing Jax event listeners.
+    try:
+      jax.monitoring.clear_event_listeners()
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+
     self._metrics = {
         Mode.TRAIN: collections.defaultdict(list),
         Mode.EVAL: collections.defaultdict(list),
