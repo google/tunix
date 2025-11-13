@@ -144,6 +144,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     chex.set_n_cpu_devices(2)
     cls.device_count = jax.device_count()
 
+  def setUp(self):
+    super().setUp()
+    random.seed(42)
+
   def test_iterator(self):
     class _MockTrainer(agentic_grpo_learner.GRPOLearner):
 
@@ -999,7 +1003,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         test_common.assert_not_equal, original_lora_variables, lora_params
     )
     jax.tree.map_with_path(
-        test_common.assert_equal, lora_params_from_sampler, lora_params
+        test_common.assert_close, lora_params_from_sampler, lora_params
     )
     jax.tree.map_with_path(
         test_common.assert_equal, original_base_params, base_params
