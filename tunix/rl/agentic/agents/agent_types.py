@@ -37,7 +37,7 @@ class Action:
   can interpret and execute.
 
   Attributes:
-      action (Any): The action payload, format depends on the environment
+    action: The action payload, format depends on the environment.
   """
 
   action: Any = None
@@ -52,16 +52,15 @@ class Step:
   response, and associated metadata for tracking and analysis.
 
   Attributes:
-      chat_completions (list[dict[str, str]]): Messages sent to LLM (OpenAI Chat
-        API format)
-      thought (str): Agent's reasoning or chain-of-thought for this step
-      action (Action): Parsed structured action from LLM response
-      observation (Any): Environment's response after executing the action
-      model_response (str): Raw text output from the language model
-      info (dict): Additional metadata (timestamps, debug info, trace IDs, etc.)
-      reward (float): Immediate reward signal from environment for this step
-      done (bool): Terminal state flag - True if episode has ended
-      mc_return (float): Monte Carlo return from this step to episode end
+    chat_completions: Messages sent to LLM (OpenAI Chat API format).
+    thought: Agent's reasoning or chain-of-thought for this step.
+    action: Parsed structured action from LLM response.
+    observation: Environment's response after executing the action.
+    model_response: Raw text output from the language model.
+    info: Additional metadata (timestamps, debug info, trace IDs, etc.).
+    reward: Immediate reward signal from environment for this step.
+    done: Terminal state flag - True if episode has ended.
+    mc_return: Monte Carlo return from this step to episode end.
   """
 
   chat_completions: list[dict[str, str]] = field(default_factory=list)
@@ -84,15 +83,29 @@ class Trajectory:
   the primary data structure for episode storage, analysis, and replay.
 
   Attributes:
-      task (Any): Task description, initial prompt, or episode specification
-      steps (list[Step]): Chronologically ordered sequence of interaction steps
-      reward (float): Total episode reward (cumulative or final environment
-        score)
+    task: Task description, initial prompt, or episode specification.
+    steps: Chronologically ordered sequence of interaction steps.
+    reward: Total episode reward (cumulative or final environment score).
   """
 
   task: Any = None
   steps: list[Step] = field(default_factory=list)
   reward: float = 0.0
+
+  def to_dict(self) -> dict[str, Any]:
+    """Convert trajectory to dictionary format for serialization.
+
+    Useful for logging, storage, or transmission over APIs. All Step objects
+    are recursively converted to dictionaries using dataclass serialization.
+
+    Returns:
+      dict: Serializable dictionary representation of the trajectory.
+    """
+    return {
+        "task": self.task,
+        "steps": [asdict(step) for step in self.steps],
+        "reward": float(self.reward),
+    }
 
 
 @dataclass
@@ -100,12 +113,12 @@ class TrajectoryItem:
   """Represents an item within a Trajectory, potentially for pairing or grouping.
 
   Attributes:
-      pair_index (int): Index for pairing.
-      group_id (collections.abc.Hashable): Identifier for grouping trajectories.
-      episode_id (int): Unique identifier for the episode.
-      start_step (int): The starting step index within the full trajectory.
-      traj (Trajectory): The Trajectory object itself.
-      metadata (Dict[str, Any]): Additional metadata.
+    pair_index: Index for pairing.
+    group_id: Identifier for grouping trajectories.
+    episode_id: Unique identifier for the episode.
+    start_step: The starting step index within the full trajectory.
+    traj: The Trajectory object itself.
+    metadata: Additional metadata.
   """
 
   pair_index: int
@@ -114,21 +127,3 @@ class TrajectoryItem:
   start_step: int
   traj: Trajectory
   metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-def to_dict(self) -> dict[str, Any]:
-  """Convert trajectory to dictionary format for serialization.
-
-  Useful for logging, storage, or transmission over APIs. All Step objects
-    are recursively converted to dictionaries using dataclass serialization.
-
-  Args:
-      self: The Trajectory object to convert.
-
-  Returns:
-      dict: Serializable dictionary representation of the trajectory
-  """
-  return {
-      "steps": [asdict(step) for step in self.steps],
-      "reward": float(self.reward),
-  }
