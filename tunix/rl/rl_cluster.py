@@ -267,7 +267,7 @@ class RLCluster:
     else:
       devices = []
       for mesh in cluster_config.role_to_mesh.values():
-        devices.extend(*mesh.devices)
+        devices.extend(mesh.devices.flatten().tolist())
       self._perf = perf_trace.PerfTracer(devices)
 
   def _init_backbone_sharing_map(
