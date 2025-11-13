@@ -76,6 +76,9 @@ class GRPOConfig:
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
+    offpolicy_steps: If > 0, run in n-step off-policy mode. Data generation
+      of batch i+n is overlapped with training of batch i.
+      If 0, run in on-policy mode.
   """
 
   num_generations: int = 2
@@ -85,6 +88,7 @@ class GRPOConfig:
   loss_algo: str = "grpo"  # grpo or gspo-token
   system_prompt: str = ""
   max_concurrency: int = 16
+  offpolicy_steps: int = 0
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -602,13 +606,28 @@ class GRPOLearner(rl_learner.RLLearner):
     """Runs a coroutine, handling existing event loops correctly."""
     try:
       loop = asyncio.get_running_loop()
+      # If a loop is already running, use it to run the coroutine.
+      return loop.run_until_complete(coro)
     except RuntimeError:
       # asyncio.get_running_loop() raises RuntimeError if no loop is running.
       # If no loop is running, start a new one using asyncio.run().
       return asyncio.run(coro)
-    else:
-      # If a loop is already running, use it to run the coroutine.
-      return loop.run_until_complete(coro)
+
+  async def _run_eval_rollouts(
+      self,
+      eval_orchestrator: rollout_orchestrator.RolloutOrchestrator,
+      all_eval_prompts: List[TrainingInputT],
+  ) -> List[TrainExample]:
+    """Runs evaluation rollouts and converts results to TrainExamples."""
+    eval_examples = []
+    async for batch, cached_inputs in self._orchestrator_producer(
+        eval_orchestrator, all_eval_prompts, episodes_per_pair=1
+    ):
+      train_examples = self._batch_to_train_example(
+          batch, cached_inputs, rl_cluster_lib.Mode.EVAL
+      )
+      eval_examples.extend(train_examples)
+    return eval_examples
 
   async def _producer(self, orchestrator, prompt_queue, train_data_queue):
     """Produces training examples from prompts in the prompt_queue."""
@@ -679,7 +698,12 @@ class GRPOLearner(rl_learner.RLLearner):
       skip_jit: If True, JIT compilation is skipped for the training step.
     """
     full_batch_iterator = iter(train_dataset)
-    first_item = next(full_batch_iterator)
+    try:
+      first_item = next(full_batch_iterator)
+    except StopIteration:
+      self.rl_cluster.close()
+      return
+
     full_batch_size = len(first_item["prompts"])
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -708,7 +732,6 @@ class GRPOLearner(rl_learner.RLLearner):
     )
 
     logging.info("Starting GRPOLearner training loop.")
-    full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
 
     all_eval_prompts = (
         list(self._create_micro_batch_iterator(iter(eval_dataset), 1))
@@ -721,7 +744,65 @@ class GRPOLearner(rl_learner.RLLearner):
     prompt_queue = queue_lib.SimpleDataQueue(maxsize=full_batch_size + 1)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
-    for full_batch in full_dataset_iterator:
+    if self.grpo_config.offpolicy_steps > 0:
+      # In off-policy mode, we pre-fill the training queue by running
+      # the producer for each of the first `offpolicy_steps` batches.
+      # Each producer run processes one batch and adds a `None`
+      # sentinel to the queue, allowing the consumer to process
+      # one batch at a time.
+      batches_for_initial_production = [first_item]
+      for _ in range(self.grpo_config.offpolicy_steps - 1):
+        try:
+          batches_for_initial_production.append(next(full_batch_iterator))
+        except StopIteration:
+          break
+
+      logging.info(
+          "Off-policy mode: pre-producing %d batches before training.",
+          len(batches_for_initial_production),
+      )
+      for i, batch in enumerate(batches_for_initial_production):
+        logging.info("Pre-producing batch %d...", i)
+        batch_prompt_queue = queue_lib.SimpleDataQueue(
+            maxsize=full_batch_size + 1
+        )
+        for prompt in self._create_micro_batch_iterator(iter([batch]), 1):
+          batch_prompt_queue.put(prompt)
+        batch_prompt_queue.put(None)
+        orchestrator = self._build_orchestrator()
+        producer_future = self.executor.submit(
+            self._run_async,
+            self._producer(
+                orchestrator, batch_prompt_queue, train_data_queue
+            ),
+        )
+        # This blocking call makes pre-production sequential. This is
+        # acceptable for `offpolicy_steps=1`, but for larger values, this
+        # should be removed to allow rollouts and training to run
+        # concurrently. In a fully parallel design, the trainer would signal
+        # the rollout producers to pause for weight synchronization.
+        # TODO(haoyugao): Implement a fully asynchronous pipeline to decouple the
+        # producer and consumer for off-policy training.
+        producer_future.result()
+
+      items_per_batch = (
+          full_batch_size
+          * self.grpo_config.num_generations
+          * self.grpo_config.num_iterations
+      )
+      expected_queue_size = len(batches_for_initial_production) * (
+          items_per_batch + 1
+      )
+      if train_data_queue.qsize() != expected_queue_size:
+        raise ValueError(
+            f"Train data queue size mismatch: got {train_data_queue.qsize()}, "
+            f"expected {expected_queue_size}"
+        )
+      loop_iterator = full_batch_iterator
+    else:
+      loop_iterator = itertools.chain([first_item], full_batch_iterator)
+
+    for batch in loop_iterator:
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         logging.info(
             "Reached max_steps: %d >= %d",
@@ -729,18 +810,24 @@ class GRPOLearner(rl_learner.RLLearner):
             self._training_config.max_steps,
         )
         break
-      # 1. Fill prompt queue for the current full batch.
-      for prompt in self._create_micro_batch_iterator(iter([full_batch]), 1):
-        prompt_queue.put(prompt)
-      prompt_queue.put(None)  # Signal end of prompts.
 
-      # 2. Start producer for this batch.
+      # Start producer for new batch. In off-policy mode, this runs in parallel
+      # with training on data from n steps ago. In on-policy mode, training
+      # will consume from this producer immediately.
+      for prompt in self._create_micro_batch_iterator(iter([batch]), 1):
+        prompt_queue.put(prompt)
+      prompt_queue.put(None)
+      # A new orchestrator is created for each batch to ensure a clean state
+      # for the rollout generation. This prevents any state from leaking
+      # between batches and ensures the orchestrator is configured with the
+      # latest model parameters after any weight updates.
       orchestrator = self._build_orchestrator()
       producer_future = self.executor.submit(
           self._run_async,
           self._producer(orchestrator, prompt_queue, train_data_queue),
       )
 
+      # Train on data d_i-n (off-policy) or d_i (on-policy), which is in queue
       train_data_gen = self._data_consumer_batch_generator(
           train_data_queue, train_micro_batch_size * self._num_generations()
       )
@@ -753,32 +840,74 @@ class GRPOLearner(rl_learner.RLLearner):
 
         # --- Evaluation Logic ---
         current_eval_dataset = None
-        # Run eval based on actor train steps, not this learner's steps
+
         if (
             all_eval_prompts
             and self.rl_cluster.actor_trainer.train_steps
             % training_config.eval_every_n_steps
             == 0
         ):
-          # Create a new orchestrator for eval to not interfere
+          self._eval_iter_steps = 0
           eval_orchestrator = self._build_orchestrator()
+          eval_producer_future = self.executor.submit(
+              self._run_async,
+              self._run_eval_rollouts(eval_orchestrator, all_eval_prompts)
+          )
+          eval_examples = eval_producer_future.result()
+          current_eval_dataset = eval_examples
+          self._eval_iter_steps += 1
 
-          async def _eval_runner(current_eval_orchestrator):
-            eval_examples = []
-            self._eval_iter_steps = 0
-            async for batch, cached_inputs in self._orchestrator_producer(
-                current_eval_orchestrator, all_eval_prompts, episodes_per_pair=1
-            ):
-              train_examples = self._batch_to_train_example(
-                  batch, cached_inputs, rl_cluster_lib.Mode.EVAL
-              )
-              eval_examples.extend(train_examples)
-              self._eval_iter_steps += len(train_examples)
-            return eval_examples
+        # --- Training Step ---
+        self.rl_cluster.update_actor(
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
+        )
+        # TODO(haoyugao): Support PPO.
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              [merged_train_micro_batch], current_eval_dataset, skip_jit
+          )
 
-          eval_examples = self._run_async(_eval_runner(eval_orchestrator))
-          if eval_examples:
-            current_eval_dataset = eval_examples
+      if producer_future:
+        producer_future.result()
+
+      # --- Weight Sync Logic ---
+      if self.should_sync_weights:
+        logging.info("Syncing weights after processing full batch.")
+        self.rl_cluster.sync_weights()
+      else:
+        self.rl_cluster.global_steps += 1
+
+    # TODO(haoyugao): There will be no need to run the tail process after
+    # we decouple the producer and consumer.
+    for _ in range(self.grpo_config.offpolicy_steps):
+      # After loop, train the last batch if max_steps not reached
+      if self.rl_cluster.global_steps >= self._training_config.max_steps:
+        break
+      train_data_gen = self._data_consumer_batch_generator(
+          train_data_queue, train_micro_batch_size * self._num_generations()
+      )
+      for train_micro_batch in train_data_gen:
+        self._iter_steps += 1
+        merged_train_micro_batch = jax.tree.map(
+            lambda *xs: np.concatenate(xs, axis=0), *train_micro_batch
+        )
+        # --- Evaluation Logic ---
+        current_eval_dataset = None
+        if (
+            all_eval_prompts
+            and self.rl_cluster.actor_trainer.train_steps
+            % training_config.eval_every_n_steps
+            == -1
+        ):
+          self._eval_iter_steps = 0
+          eval_orchestrator = self._build_orchestrator()
+          eval_producer_future = self.executor.submit(
+              self._run_async,
+              self._run_eval_rollouts(eval_orchestrator, all_eval_prompts)
+          )
+          eval_examples = eval_producer_future.result()
+          current_eval_dataset = eval_examples
+          self._eval_iter_steps += 1
 
         # --- Training Step ---
         self.rl_cluster.update_actor(
@@ -786,10 +915,9 @@ class GRPOLearner(rl_learner.RLLearner):
         )
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
-              train_micro_batch, current_eval_dataset, skip_jit
+              [merged_train_micro_batch], current_eval_dataset, skip_jit
           )
 
-      _ = producer_future.result()
       # --- Weight Sync Logic ---
       if self.should_sync_weights:
         logging.info("Syncing weights after processing full batch.")
