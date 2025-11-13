@@ -665,6 +665,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
+      if ckpt_dir:
+        checkpointing_options = ocp.CheckpointManagerOptions(
+            save_interval_steps=1,
+        )
+      else:
+        checkpointing_options = None
       training_config = rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optax.sgd(1e-3),
           eval_every_n_steps=10,  # avoid eval
@@ -673,11 +679,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           train_micro_batch_size=mini_batch_size,
           rollout_micro_batch_size=mini_batch_size,
           compute_logps_micro_batch_size=mini_batch_size,
-          checkpointing_options=ocp.CheckpointManagerOptions(
-              save_interval_steps=1,
-          )
-          if ckpt_dir
-          else None,
+          checkpointing_options=checkpointing_options,
           checkpoint_root_directory=ckpt_dir,
       )
       cluster_config = rl_cluster_lib.ClusterConfig(
@@ -920,6 +922,88 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           10,
           msg=f"metric_name: {metric_name}",
       )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="on_policy",
+          offpolicy_steps=0,
+      ),
+      dict(
+          testcase_name="off_policy_step_1",
+          offpolicy_steps=1,
+      ),
+      dict(
+          testcase_name="off_policy_step_2",
+          offpolicy_steps=2,
+      ),
+  )
+  def test_on_off_policy_training(self, offpolicy_steps):
+    vocab = test_common.MockVocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    ref_model = test_common.ToyTransformer(
+        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=2,
+            max_steps=4,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        loss_algo="grpo",
+        offpolicy_steps=offpolicy_steps,
+    )
+    grpo_learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        grpo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
+        chat_parser=MockChatParser(),
+    )
+    train_ds = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    eval_ds = _dummy_dataset(batch_size=1)
+
+    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+      grpo_learner.train(train_ds, eval_ds)
+
+    variables = nnx.state(model, nnx.Param)
+    jax.tree.map_with_path(
+        test_common.assert_not_equal, original_variables, variables
+    )
+
+    self.assertEqual(
+        grpo_learner.rl_cluster.global_steps,
+        4,
+    )
 
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.
