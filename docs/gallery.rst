@@ -64,23 +64,6 @@
       <div class="sphx-glr-thumbnail-title">QLoRA Demo</div>
     </div>
 
-
-.. raw:: html
-
-    <div class="sphx-glr-thumbcontainer" tooltip="DPO Demo with user-assistant conversations">
-
-.. only:: html
-
-  .. image:: _static/img/sphx_glr_local_module_thumb.png
-    :alt: DPO Demo
-
-  :doc:`_collections/examples/dpo_demo`
-
-.. raw:: html
-
-      <div class="sphx-glr-thumbnail-title">DPO Demo with user-assistant conversations</div>
-    </div>
-
 .. raw:: html
 
     <div class="sphx-glr-thumbcontainer" tooltip="DPO Demo with math (gsm8k)">
