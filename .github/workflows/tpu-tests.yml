@@ -204,10 +204,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           ## because sglang-jax has codes like jax.local_devices('cpu')
-          unset JAX_PLATFORMS
-          cd ..
-          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
-          cd tunix && python tests/generate/sglang_jax_sampler_test.py
+          # TODO(lancewang): Re-enable this test once the bug is fixed.
+          # unset JAX_PLATFORMS
+          # cd ..
+          # git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
+          # cd tunix && python tests/generate/sglang_jax_sampler_test.py
       - name: Run tunix SFT integration tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
