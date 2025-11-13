@@ -898,12 +898,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       ):
         continue
       self.assertLen(
-          rl_metric_logger.get_metric_history(metric_name, "train"),
+          rl_metric_logger.get_metric_history("global", metric_name, "train"),
           grpo_learner.rl_cluster.global_steps,
           msg=f"metric_name: {metric_name}",
       )
       self.assertLen(
-          rl_metric_logger.get_metric_history(metric_name, "eval"),
+          rl_metric_logger.get_metric_history("global", metric_name, "eval"),
           10,
           msg=f"metric_name: {metric_name}",
       )
@@ -911,12 +911,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
     for metric_name in ["loss", "kl"]:
       self.assertLen(
-          metric_logger.get_metric_history(metric_name, "train"),
+          metric_logger.get_metric_history("actor", metric_name, "train"),
           grpo_learner.rl_cluster.actor_trainer.train_steps,
           msg=f"metric_name: {metric_name}",
       )
       self.assertLen(
-          metric_logger.get_metric_history(metric_name, "eval"),
+          metric_logger.get_metric_history("actor", metric_name, "eval"),
           10,
           msg=f"metric_name: {metric_name}",
       )
