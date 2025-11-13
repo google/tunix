@@ -210,10 +210,13 @@ jobs:
         run: |
           ## because sglang-jax has codes like jax.local_devices('cpu')
           # TODO(lancewang): Re-enable this test once the bug is fixed.
-          # unset JAX_PLATFORMS
-          # cd ..
-          # git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
-          # cd tunix && python tests/generate/sglang_jax_sampler_test.py
+          unset JAX_PLATFORMS
+          pip list | egrep 'jax|flax|libtpu'
+          cd ..
+          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
+          pip install jax==0.8.0 flax==0.12.0 libtpu==0.0.24
+          pip list | egrep 'jax|flax|libtpu'
+          cd tunix && python tests/generate/sglang_jax_sampler_test.py
       - name: Run tunix SFT integration tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
