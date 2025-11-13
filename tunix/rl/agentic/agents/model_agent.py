@@ -66,7 +66,8 @@ class ModelAgent(LLMBaseAgent):
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})
     elif not observation:
-      logger.info(
+      # If no observation is returned, the trajectory has ended.
+      logger.debug(
           "No observation returned, trajectory ended."
       )
     else:
