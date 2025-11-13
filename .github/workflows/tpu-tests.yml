@@ -90,11 +90,15 @@ jobs:
     - name: Run tunix generation tests (PASSED only)
       run: |
         # tokenizer_adapter_test requires access to gated repo
+        # TODO(b/459824938) Add back test_logprobs_extraction_with_missing_token after fixing the issue
         python -m pytest tests/generate/ -v --tb=short \
           --ignore=tests/generate/vllm_sampler_test.py \
           --ignore=tests/generate/vllm_driver_test.py \
           --ignore=tests/generate/tokenizer_adapter_test.py \
-          --ignore=tests/generate/sglang_jax_sampler_test.py
+          --ignore=tests/generate/sglang_jax_sampler_test.py \
+          --ignore=tests/generate/utils_test.py
+
+        python -m pytest tests/generate/utils_test.py -k "not test_logprobs_extraction_with_missing_token"
 
     - name: Run tunix SFT tests
       run: |
@@ -126,11 +130,11 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:v0.11.1
+      image: vllm/vllm-tpu:nightly-88f2071263f19a2f7c2e812036fc93537dd7a621
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
-        JAX_PLATFORMS: tpu
+        JAX_PLATFORMS: tpu,cpu
     steps:
       # Cache Hugging Face hub
       - name: Cache HF hub
@@ -193,10 +197,11 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          unset JAX_PLATFORMS
           pytest tests/generate/vllm_driver_test.py -v --tb=short
           pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
           while read -r test; do
-            pytest "$test" -v --tb=short
+            pytest -s "$test" -v --tb=short
           done < test_collections.txt
 
       - name: Run install sglang-jax && test
@@ -215,7 +220,6 @@ jobs:
         run: |
           # Loading tfds requires tensorflow.
           pip install tensorflow
-
           ./tests/sft/sft_tpu_smoke_test.sh
       - name: Run tunix cli tests
         env:

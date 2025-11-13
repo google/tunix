@@ -133,6 +133,21 @@ parser.add_argument(
     required=False,
     help="Rollout engine server model.",
 )
+parser.add_argument(
+    "--async-scheduling",
+    type=bool,
+    default=False,
+    required=False,
+    help="Rollout engine asynchronous scheduling.",
+)
+parser.add_argument(
+    "--rollout-data-parallel-size",
+    type=int,
+    default=1,
+    required=False,
+    help="Rollout engine data parallel size.",
+)
+
 
 # Parse arguments
 args = parser.parse_args()
@@ -182,7 +197,7 @@ elif "Qwen2.5-7B-Instruct" in args.model_version:
 else:
   TOTAL_TPU_TO_USE = jax.device_count()
 
-MESH = [(1, TOTAL_TPU_TO_USE), ("fsdp", "tp")]  # YY
+MESH = [(args.rollout_data_parallel_size, TOTAL_TPU_TO_USE // args.rollout_data_parallel_size), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -818,10 +833,13 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
+        data_parallel_size=MESH[0][0],
+        tensor_parallel_size=MESH[0][1],
         rollout_vllm_model_version=VLLM_MODEL_VERSION,
         rollout_vllm_hbm_utilization=0.2,
         rollout_vllm_tpu_backend_type="jax",
         rollout_vllm_server_mode=args.rollout_server_mode,
+        rollout_vllm_async_scheduling=args.async_scheduling,
     ),
 )
 
