@@ -38,8 +38,10 @@ from tunix.rl import reshard
 # Map prefixes to the target object containing the methods.
 CONFIG_MAP = {
     'gemma': gemma_lib.ModelConfig,
+    'gemma1.1': gemma_lib.ModelConfig,
     'gemma2': gemma_lib.ModelConfig,
     'gemma3': gemma3_lib.ModelConfig,
+    'llama3': llama3_lib.ModelConfig,
     'llama3.1': llama3_lib.ModelConfig,
     'llama3.2': llama3_lib.ModelConfig,
     'qwen2.5': qwen2_lib.ModelConfig,
@@ -57,7 +59,7 @@ def get_model_module(model_name: str) -> Any:
     raise ValueError(f'Invalid model name format: {model_name}')
   model_type = match.group(0)
   # Construct the full module path, e.g.,.path.to.your.models.qwen2.params
-  if model_name.startswith('gemma2'):
+  if model_name.startswith('gemma1') or model_name.startswith('gemma2'):
     model_type = 'gemma'
   module_path = f'{_BASE_MODULE_PATH}.{model_type}.params'
   try:
@@ -107,8 +109,8 @@ def create_model_dynamically(
   return create_fn(file_dir=file_dir, config=model_config, mesh=mesh)
 
 
-def _get_core_version(model_name: str, matched_prefix: str) -> str:
-  """Extracts the core version string from the model name."""
+def _get_version(model_name: str, matched_prefix: str) -> str:
+  """Extracts the version string from the model name."""
   if not model_name.startswith(matched_prefix):
     return ''
 
@@ -121,9 +123,7 @@ def _get_core_version(model_name: str, matched_prefix: str) -> str:
   if not suffix:
     return ''
 
-  # The core version is the part before the first hyphen (e.g., in "-it")
-  core_version = suffix.split('-')[0]
-  return core_version.replace('.', '_')
+  return suffix.replace('.', '_').replace('-', '_')
 
 
 def obtain_model_params(model_name: str) -> Any:
@@ -163,7 +163,7 @@ def obtain_model_params(model_name: str) -> Any:
   logging.info('Routing %s using prefix %s', model_name, matched_prefix)
 
   family_snake = matched_prefix.replace('-', '_').replace('.', '_')
-  core_version = _get_core_version(model_name, matched_prefix)
+  core_version = _get_version(model_name, matched_prefix)
 
   if not core_version:
     raise ValueError(
