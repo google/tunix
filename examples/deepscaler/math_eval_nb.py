@@ -530,15 +530,15 @@ MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "MATH-500/test.jsonl")
 AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
 MODEL_MAPPING = {
     "Qwen/Qwen2.5-1.5B-Instruct": (
-        qwen2_lib.ModelConfig.qwen2_5_1_5b(),
+        qwen2_lib.ModelConfig.qwen2p5_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it"),
     ),
     "DeepSeek-R1-Distill-Qwen-1.5B": (
-        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b(),
+        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B"),
     ),
     "DeepScaleR-1.5B-Preview": (
-        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b(),
+        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
 }

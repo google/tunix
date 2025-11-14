@@ -66,19 +66,19 @@ class DummyModelCreatorTest(absltest.TestCase):
       self.assertEqual(logits.shape[1], seqlen, f"{model_name}: seq length mismatch")
       self.assertEqual(logits.shape[2], vocab, f"{model_name}: vocab size mismatch")
 
-  def test_llama3_2_1b(self):
+  def test_llama3p2_1b(self):
     self._test_dummy_model_creation(
-        model_name="llama3_2_1b",
+        model_name="llama3p2_1b",
         model_class=llama3_model.Llama3,
-        config_fn=llama3_model.ModelConfig.llama3_2_1b,
+        config_fn=llama3_model.ModelConfig.llama3p2_1b,
         mesh_config=[(1, len(jax.devices())), ("fsdp", "tp")],
     )
 
-  def test_qwen3_0_6b(self):
+  def test_qwen3_0p6b(self):
     self._test_dummy_model_creation(
-        model_name="qwen3_0_6b",
+        model_name="qwen3_0p6b",
         model_class=qwen3_model.Qwen3,
-        config_fn=qwen3_model.ModelConfig.qwen3_0_6b,
+        config_fn=qwen3_model.ModelConfig.qwen3_0p6b,
         mesh_config=[(1, len(jax.devices())), ("fsdp", "tp")],
     )
 
@@ -92,4 +92,3 @@ if __name__ == "__main__":
   else:
     # Running as a script - use absltest.main()
     absltest.main()
-
