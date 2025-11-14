@@ -92,7 +92,9 @@ def load_and_create_model(
     raise ValueError(f"No safetensors found in {file_dir}")
 
   # Create model structure
-  context_manager = mesh if mesh is not None else contextlib.nullcontext()
+  context_manager = (
+      jax.set_mesh(mesh) if mesh is not None else contextlib.nullcontext()
+  )
 
   with context_manager:
     model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))
