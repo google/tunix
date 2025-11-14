@@ -25,9 +25,9 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import safetensors.flax as safetensors
-
 # DO NOT CHNAGE THIS IMPORT. This is used in both oss and GOOGLE_INTERNAL_PACKAGE_PATH.
 from tunix.oss import utils
+from tunix.utils import compat
 
 load_file_from_gcs = utils.load_file_from_gcs
 
@@ -93,7 +93,7 @@ def load_and_create_model(
 
   # Create model structure
   context_manager = (
-      jax.set_mesh(mesh) if mesh is not None else contextlib.nullcontext()
+      compat.set_mesh(mesh) if mesh is not None else contextlib.nullcontext()
   )
 
   with context_manager:

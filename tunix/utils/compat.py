@@ -12,13 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Container for flax modules."""
+"""Compatibility utils for old jax and flax versions."""
+
 from flax import nnx
+import jax
 
 
+# Flax version compatibility.
 ModuleList = list
 
-# To accomodate github requirements. nnx.List is available in flax 0.12.0 and 
+# To accomodate github requirements. nnx.List is available in flax 0.12.0 and
 # later.
 if hasattr(nnx, "List"):
   ModuleList = nnx.List  # noqa: N816 (public alias)
+
+
+# JAX version compatibility
+if hasattr(jax.sharding, "use_mesh"):
+  set_mesh = jax.sharding.use_mesh
+else:
+  set_mesh = jax.set_mesh
