@@ -20,6 +20,7 @@ This provides a mapping from the upstream checkpoints[1] to our implementation.
 """
 
 import functools
+from typing import Any
 
 from etils import epath
 import flax
@@ -27,6 +28,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
+from tunix.models import safetensors_saver
 from tunix.models.gemma3 import model as model_lib
 
 # Keep the import below for google internal lint.
@@ -147,3 +149,69 @@ def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
     else:
       new_params[(*layer_idx, *module_path[1:], param_name)] = value
   return flax.traverse_util.unflatten_dict(new_params)
+
+
+def _extract_gemma3_lora_layers(layer: Any) -> dict[str, tuple[Any, Any]]:
+  """Extract LoRA layers from a Gemma3 model.
+
+  Args:
+    layer: Gemma3 model layer with possible LoRA weights.
+
+  Returns:
+    Dict mapping custom extracted layer paths to (lora_a, lora_b) tuples.
+  """
+  if hasattr(layer.attn, 'kv_einsum'):
+    proj = layer.attn.kv_einsum
+    path = safetensors_saver.qwix_path_to_str(proj.qwix_path)
+    return {
+        path.replace('kv_einsum', 'k_einsum'): (proj.w_lora_a, proj.w_lora_b[:, 0]),
+        path.replace('kv_einsum', 'v_einsum'): (proj.w_lora_a, proj.w_lora_b[:, 1]),
+    }
+  return {}
+
+def _gemma3_state_key_to_safetensors_key(lora_name: str) -> str:
+  """Transform Gemma3 layer path to safetensors state dict key.
+
+  Args:
+    lora_name: Internal layer path (e.g., 'layers.0.attn.q_einsum').
+
+  Returns:
+    Safetensors state dict key (e.g., 'model.layers.0.self_attn.q_proj.weight').
+  """
+  return (
+      f'model.{lora_name}.weight'
+      .replace('.attn.', '.self_attn.')
+      .replace('q_einsum', 'q_proj')
+      .replace('k_einsum', 'k_proj')
+      .replace('v_einsum', 'v_proj')
+      .replace('attn_vec_einsum', 'o_proj')
+  )
+
+
+def save_lora_merged_model_as_safetensors(
+    local_model_path: str,
+    output_dir: str,
+    lora_model: model_lib.Gemma3,
+    rank: int,
+    alpha: float,
+):
+  """Saves a Gemma3 model with LoRA weights merged in safetensors format.
+
+  Args:
+    local_model_path: Path to the base model safetensors checkpoint directory.
+    output_dir: Directory where the merged model will be saved.
+    lora_model: Gemma3 model instance with LoRA weights.
+    rank: LoRA rank used during training.
+    alpha: LoRA alpha used during training.
+  """
+  safetensors_saver.save_lora_merged_model_as_safetensors(
+      local_model_path=local_model_path,
+      output_dir=output_dir,
+      lora_model=lora_model,
+      rank=rank,
+      alpha=alpha,
+      state_key_transform_fn=_gemma3_state_key_to_safetensors_key,
+      field_patterns=('q_einsum', 'attn_vec_einsum', 'gate_proj', 'up_proj', 'down_proj'),
+      custom_layer_extractor_fn=_extract_gemma3_lora_layers,
+  )
+
