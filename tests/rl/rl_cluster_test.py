@@ -171,7 +171,7 @@ class RlClusterTest(parameterized.TestCase):
     cfg = rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
         critic_optimizer=None,
-        mini_batch_size=8,
+        mini_batch_size=4,
         train_micro_batch_size=4,
         eval_every_n_steps=1,
     )
