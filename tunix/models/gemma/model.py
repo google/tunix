@@ -123,6 +123,14 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma_2b_it(cls):
+    return cls.gemma_2b()
+
+  @classmethod
+  def gemma1_1_2b_it(cls):  # gemma1.1-2b-it
+    return cls.gemma_2b()
+
+  @classmethod
   def gemma_7b(cls):
     num_layers = 28
     return cls(
@@ -139,6 +147,14 @@ class ModelConfig:
         use_pre_ffw_norm=False,
         use_post_ffw_norm=False,
     )
+
+  @classmethod
+  def gemma_7b_it(cls):
+    return cls.gemma_7b()
+
+  @classmethod
+  def gemma1_1_7b_it(cls):  # gemma1.1-7b-it
+    return cls.gemma_7b()
 
   @classmethod
   def gemma2_2b(cls):
@@ -165,6 +181,10 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma2_2b_it(cls):
+    return cls.gemma2_2b()
+
+  @classmethod
   def gemma2_9b(cls):
     num_layers = 42
     return cls(
@@ -187,6 +207,10 @@ class ModelConfig:
         attn_logits_soft_cap=50.0,
         sliding_window_size=4096,
     )
+
+  @classmethod
+  def gemma2_9b_it(cls):
+    return cls.gemma2_9b()
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
@@ -820,16 +844,15 @@ class Transformer(nnx.Module, pytree=False):
       cls, params: params_lib.Params, version: str
   ) -> 'Transformer':
 
-    if version in ['2b', '2b-it', '1.1-2b-it']:
-      config = ModelConfig.gemma_2b()
-    elif version in ['7b', '7b-it', '1.1-7b-it']:
-      config = ModelConfig.gemma_7b()
-    elif version in ['2-2b', '2-2b-it']:
-      config = ModelConfig.gemma2_2b()
-    elif version in ['2-9b', '2-9b-it']:
-      config = ModelConfig.gemma2_9b()
+    if version.startswith('2-'):
+      config_id = version.replace('2-', 'gemma2_')
     else:
-      raise ValueError(f'Unsupported version: {version}')
+      config_id = 'gemma_' + version
+    config_id = config_id.replace('.', '_').replace('-', '_')
+    try:
+      config = getattr(ModelConfig, config_id)()
+    except AttributeError as exc:
+      raise ValueError(f'Unsupported version: {version}') from exc
 
     return module_from_linen_variables(
         module_factory=lambda: cls(config, rngs=nnx.Rngs(params=0)),
