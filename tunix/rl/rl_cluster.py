@@ -753,6 +753,14 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
+>>>> ORIGINAL //depot/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/rl/rl_cluster.py#47
+      outputs = [
+          self.rollout.generate(string_prompts[s], rollout_config)
+          for s in rl_utils.chunk_slices_by_size(
+              stop=len(string_prompts), step=micro_batch_size
+          )
+      ]
+==== THEIRS //depot/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/rl/rl_cluster.py#50
 
       with self._perf.interval("rollout", mesh.devices) as interval:
         outputs = [
@@ -765,6 +773,15 @@ class RLCluster:
             [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
         )
 
+==== YOURS //linchai:tunix_9:21182:citc/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/rl/rl_cluster.py
+      outputs = [
+          self.rollout.generate(string_prompts[s], rollout_config)
+          for s in rl_utils.chunk_slices_by_size(
+              stop=len(string_prompts), step=micro_batch_size
+          )
+      ]
+      logging.info("len(outputs): %s", len(outputs))
+<<<<
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
