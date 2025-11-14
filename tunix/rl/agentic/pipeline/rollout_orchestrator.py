@@ -389,6 +389,7 @@ class RolloutOrchestrator:
           seen += len(batch)
         all_done = all(t.done() for t in self._tasks)
         if all_done:
+          await manager.prepare_clear()
           # After all tasks are done, there might still be items in the
           # manager's queue. We need to drain the queue to get all trajectories.
           while True:
@@ -398,7 +399,7 @@ class RolloutOrchestrator:
             yield remaining_batch
             seen += len(remaining_batch)
 
-          if seen != expected:
+          if episodes_per_pair and seen != expected:
             raise ValueError(
                 f"Expected {expected} trajectories, but only got {seen}"
             )
