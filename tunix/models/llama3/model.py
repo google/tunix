@@ -96,7 +96,7 @@ class ModelConfig:
   remat_config: RematConfig = RematConfig.NONE
 
   @classmethod
-  def llama3_2_1b(cls):
+  def llama3p2_1b(cls):
     return cls(
         num_layers=16,
         vocab_size=128256,
@@ -112,7 +112,7 @@ class ModelConfig:
 
   # Llama3.2 3B
   @classmethod
-  def llama3_2_3b(cls):
+  def llama3p2_3b(cls):
     return cls(
         num_layers=28,  # ← from num_hidden_layers
         vocab_size=128256,  # ← from vocab_size
@@ -127,7 +127,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def llama3_1_8b(cls):
+  def llama3p1_8b(cls):
     return cls(
         num_layers=32,
         vocab_size=128256,
