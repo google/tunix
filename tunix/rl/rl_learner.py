@@ -27,6 +27,7 @@ import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.perf import metrics as metrics_lib
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
@@ -678,7 +679,13 @@ class RLLearner(ABC):
               1  # manually increment the global steps.
           )
 
-        self.rl_cluster.perf.end_epoch()
+        context = metrics_lib.PerfMetricsContext(
+            global_steps=self.rl_cluster.global_steps
+        )
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf.end_epoch(context),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
 
         if (
             self.rl_cluster.actor_trainer.train_steps
