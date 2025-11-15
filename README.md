@@ -86,7 +86,7 @@ pip install git+https://github.com/google/tunix
    in development mode. If you'd like to install vllm, the tpu-inference
    supported version is not released yet, please follow the instructions to
    install manually
-   (https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html)
+   (https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/)
    or download the docker image (vllm/vllm-tpu:v0.11.1) then
    `pip install tpu-inference` for TPU backend:
 
@@ -113,8 +113,8 @@ pip install -e .
 
 To get started, we have a bunch of detailed examples and tutorials.
 
-- [PEFT Gemma with QLoRA](https://github.com/google/tunix/blob/main/examples/qlora_demo.ipynb)
-- [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_demo.ipynb)
+- [PEFT Gemma with QLoRA](https://github.com/google/tunix/blob/main/examples/qlora_gemma.ipynb)
+- [Training Gemma on grade school Math problems using GRPO](https://github.com/google/tunix/blob/main/examples/grpo_gemma.ipynb)
 - [Logit Distillation using Gemma models](https://github.com/google/tunix/blob/main/examples/logit_distillation.ipynb)
 - [Training Llama3 or Qwen2 using GRPO and SGLang-Jax rollout](https://github.com/google/tunix/blob/main/scripts/grpo_demo_sglang_jax_rollout.py)
 
