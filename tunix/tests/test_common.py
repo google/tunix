@@ -36,19 +36,33 @@ if hasattr(flax_config, 'flax_always_shard_variable'):
   flax_config.update('flax_always_shard_variable', False)
 
 
+def _convert_to_nparray(arr):
+  if isinstance(arr, jax.Array):
+    return np.asarray(arr)
+  return arr
+
 def assert_equal(path, x, y):
-  np.testing.assert_array_equal(x, y, err_msg=f'Mismatch at path: {path}')
+  np.testing.assert_array_equal(
+      _convert_to_nparray(x),
+      _convert_to_nparray(y),
+      err_msg=f'Mismatch at path: {path}',
+  )
 
 
 def assert_not_equal(path, x, y):
   np.testing.assert_(
-      np.any(np.not_equal(x, y)), msg=f'Unexpected match at path: {path}'
+      np.any(np.not_equal(_convert_to_nparray(x), _convert_to_nparray(y))),
+      msg=f'Unexpected match at path: {path}',
   )
 
 
 def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
   np.testing.assert_allclose(
-      x, y, atol, rtol, err_msg=f'Mismatch at path: {path}'
+      _convert_to_nparray(x),
+      _convert_to_nparray(y),
+      atol,
+      rtol,
+      err_msg=f'Mismatch at path: {path}',
   )
 
 

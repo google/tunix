@@ -32,6 +32,7 @@ from tunix.sft import hooks
 from tunix.sft import peft_trainer
 from tunix.sft import profiler
 from tunix.tests import test_common as tc
+from tunix.utils import compat
 
 TEST_LEARNING_RATE = 1e-3
 
@@ -49,7 +50,7 @@ def create_sharded_model(model_ctor, rngs, mesh):
     nnx.update(model, sharded_state)
     return model, state
 
-  with mesh:
+  with compat.set_mesh(mesh):
     model, state = _create_sharded_model(model_ctor, rngs)
   state_sharding = nnx.get_named_sharding(state, mesh)
   return model, state_sharding
@@ -174,7 +175,7 @@ class PeftTrainerTest(parameterized.TestCase):
         config,
     )
 
-    with mesh:
+    with compat.set_mesh(mesh):
       processed_input = trainer._shard_input(sharded_input[0])
 
     # Output objects are same as input objects if no new sharding operation was
