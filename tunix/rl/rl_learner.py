@@ -587,86 +587,16 @@ class RLLearner(ABC):
     while True:  # loop over M
       try:
         initial_steps = self._iter_steps
-        for _ in range(full_batch_size // mini_batch_size):
-          # reserve 1 for None and the other for repeated interable
-          # if batch_repeat > 1
-          train_data_queue = queue_lib.SimpleDataQueue(
-              maxsize=grad_acc_steps * self._num_iterations() + 1
-          )
-          # Use an unbounded queue for evaluation data.
-          eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
-          initial_steps = self._iter_steps
-          future = self.executor.submit(
-              self._prepare_data,
-              iterator=train_iterator,
-              proceed_num_steps=grad_acc_steps,
-              sample_repeat=self._num_generations(),
-              batch_repeat=self._num_iterations(),
-              service_target_batch_size=service_target_batch_size,
-              data_queue=train_data_queue,
-              async_loading=self.can_enable_async_rollout,
-              mode=rl_cluster_lib.Mode.TRAIN,
-          )
 
-          curr_eval_ds = None
-          with jax.profiler.StepTraceAnnotation(
-              "trainer", step_num=initial_steps
-          ):
-            while True:
-              with sft_utils.time_measure(suppress_logging=True) as timer:
-                curr_train_ds = train_data_queue.get(block=True)
-
-              if curr_train_ds is None:
-                break
-
-              if self.can_enable_async_rollout:
-                self.rl_cluster.buffer_metrics(
-                    {
-                        "actor_dequeue_time": (
-                            timer(),
-                            np.mean,
-                        ),
-                    },
-                    mode=rl_cluster_lib.Mode.TRAIN,
-                )
-
-              if (
-                  eval_ds
-                  and not curr_eval_ds
-                  and self.rl_cluster.actor_trainer.train_steps
-                  % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
-                  == 0
-              ):
-                self._eval_iter_steps = 0
-                self._prepare_data(
-                    iterator=iter(eval_ds),
-                    proceed_num_steps=-1,
-                    sample_repeat=self._num_generations(),
-                    batch_repeat=1,
-                    service_target_batch_size=service_target_batch_size,
-                    data_queue=eval_data_queue,
-                    async_loading=False,
-                    mode=rl_cluster_lib.Mode.EVAL,
-                )
-                curr_eval_ds = eval_data_queue.get(block=True)
-              self.rl_cluster.update_actor(
-                  curr_train_ds,
-                  curr_eval_ds,
-                  skip_jit,
-              )  # loop over μ
-              if hasattr(self.rl_cluster, "critic_trainer"):
-                self.rl_cluster.update_critic(
-                    curr_train_ds,
-                    curr_eval_ds,
-                    skip_jit,
-                )  # loop over μ
-
-          # call to throw stop iteration as a singal to break the loop
-          future.result()
-          # sync the iter steps with internel trainer, this is based on the
-          # assumption that the trainer internally doesn't reset the iter steps.
-          # there is current a unit test to ensure this assumption.
-          self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
+        self._run_global_step(
+          full_batch_size,
+          mini_batch_size,
+          service_target_batch_size,
+          grad_acc_steps,
+          train_iterator,
+          eval_ds,
+          skip_jit,
+        )
 
         if self.should_sync_weights:
           with self.rl_cluster.perf.interval("weight_sync"):
@@ -695,3 +625,127 @@ class RLLearner(ABC):
       except StopIteration:
         break
     self.rl_cluster.close()
+
+  def _run_global_step(self,
+                      full_batch_size: int,
+                      mini_batch_size: int,
+                      service_target_batch_size: int,
+                      grad_acc_steps: int,
+                      train_iterator: Iterator[TrainingInputT],
+                      eval_ds: Iterable[TrainingInputT] | None,
+                      skip_jit: bool) -> None:
+    for _ in range(full_batch_size // mini_batch_size):
+      initial_steps = self._iter_steps
+
+      self._run_mini_batch_step(
+        initial_steps,
+        service_target_batch_size,
+        grad_acc_steps,
+        train_iterator,
+        eval_ds,
+        skip_jit,
+      )
+
+      # sync the iter steps with internel trainer, this is based on the
+      # assumption that the trainer internally doesn't reset the iter steps.
+      # there is current a unit test to ensure this assumption.
+      self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
+
+  def _run_mini_batch_step(self,
+                           initial_steps: int,
+                           service_target_batch_size: int,
+                           grad_acc_steps: int,
+                           train_iterator: Iterator[TrainingInputT],
+                           eval_ds: Iterable[TrainingInputT] | None,
+                           skip_jit: bool) -> None:
+    self._run_all_micro_batch_steps(
+        initial_steps,
+        service_target_batch_size,
+        grad_acc_steps,
+        train_iterator,
+        eval_ds,
+        skip_jit,
+    )
+
+  def _run_all_micro_batch_steps(self,
+                                 initial_steps: int,
+                                 service_target_batch_size: int,
+                                 grad_acc_steps: int,
+                                 train_iterator: Iterator[TrainingInputT],
+                                 eval_ds: Iterable[TrainingInputT] | None,
+                                 skip_jit: bool) -> None:
+    # reserve 1 for None and the other for repeated interable
+    # if batch_repeat > 1
+    train_data_queue = queue_lib.SimpleDataQueue(
+        maxsize=grad_acc_steps * self._num_iterations() + 1
+    )
+    # Use an unbounded queue for evaluation data.
+    eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+
+    future = self.executor.submit(
+        self._prepare_data,
+        iterator=train_iterator,
+        proceed_num_steps=grad_acc_steps,
+        sample_repeat=self._num_generations(),
+        batch_repeat=self._num_iterations(),
+        service_target_batch_size=service_target_batch_size,
+        data_queue=train_data_queue,
+        async_loading=self.can_enable_async_rollout,
+        mode=rl_cluster_lib.Mode.TRAIN,
+    )
+
+    curr_eval_ds = None
+    with jax.profiler.StepTraceAnnotation(
+        "trainer", step_num=initial_steps
+    ):
+      while True:
+        with sft_utils.time_measure(suppress_logging=True) as timer:
+          curr_train_ds = train_data_queue.get(block=True)
+
+        if curr_train_ds is None:
+          break
+
+        if self.can_enable_async_rollout:
+          self.rl_cluster.buffer_metrics(
+              {
+                  "actor_dequeue_time": (
+                      timer(),
+                      np.mean,
+                  ),
+              },
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+
+        if (
+            eval_ds
+            and not curr_eval_ds
+            and self.rl_cluster.actor_trainer.train_steps
+            % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
+            == 0
+        ):
+          self._eval_iter_steps = 0
+          self._prepare_data(
+              iterator=iter(eval_ds),
+              proceed_num_steps=-1,
+              sample_repeat=self._num_generations(),
+              batch_repeat=1,
+              service_target_batch_size=service_target_batch_size,
+              data_queue=eval_data_queue,
+              async_loading=False,
+              mode=rl_cluster_lib.Mode.EVAL,
+          )
+          curr_eval_ds = eval_data_queue.get(block=True)
+        self.rl_cluster.update_actor(
+            curr_train_ds,
+            curr_eval_ds,
+            skip_jit,
+        )  # loop over μ
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              curr_train_ds,
+              curr_eval_ds,
+              skip_jit,
+          )  # loop over μ
+
+    # call to throw stop iteration as a singal to break the loop
+    future.result()
