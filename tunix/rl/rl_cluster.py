@@ -52,21 +52,8 @@ from tunix.sft import peft_trainer
 from tunix.sft import utils as sft_utils
 
 ModelOrPath = nnx.Module | str
-
-
-MetricsT = Dict[
-    str, Tuple[ArrayLike | str, Callable[[jax.Array], jax.Array] | None]
-]  # Metrics to be buffered: name -> (values, optional agg_fn)
-
-
-@dataclasses.dataclass(slots=True)
-class MetricsBuffer:
-  global_steps: int
-  # Metrics to be buffered: name -> (list of (values), optional agg_fn)
-  metrics: dict[
-      str, tuple[list[ArrayLike | str], Callable[[ArrayLike], ArrayLike] | None]
-  ] = dataclasses.field(default_factory=dict)
-  mode: str = "train"
+MetricsT = perf_metrics.MetricsT
+MetricsBuffer = perf_metrics.MetricsBuffer
 
 
 class Mode(enum.Enum):
@@ -268,7 +255,7 @@ class RLCluster:
       devices = []
       for mesh in cluster_config.role_to_mesh.values():
         devices.extend(mesh.devices.flatten().tolist())
-      self._perf = perf_trace.PerfTracer(devices)
+      self._perf = perf_trace.PerfTracer(devices, perf_config.custom_export_fn)
 
   def _init_backbone_sharing_map(
       self,

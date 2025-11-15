@@ -29,7 +29,20 @@ from tunix.perf import metrics
 
 
 JaxDevice = Any
+MetricsT = metrics.MetricsT
 PerfMetricsApi = metrics.PerfMetricsApi
+PerfMetricsContext = metrics.PerfMetricsContext
+PerfMetricsQuery = metrics.PerfMetricsQuery
+
+
+def create_timeline_id(id: str | JaxDevice) -> str:
+  if isinstance(id, str):
+    return id
+  elif hasattr(id, "platform") and hasattr(id, "id"):
+    # if it's a JAX device object, convert to string
+    return getattr(id, "platform") + str(getattr(id, "id"))
+  else:
+    raise ValueError(f"Unsupport id type: {type(id)}")
 
 
 class NoopTracer:
@@ -42,7 +55,7 @@ class NoopTracer:
     pass
 
   def export(self) -> PerfMetricsApi:
-    return PerfMetricsApi({})
+    return PerfMetricsApi({}, "")
 
   @property
   def all(self) -> list[str]:
@@ -59,14 +72,14 @@ class NoopTracer:
     finally:
       pass
 
-  def end_epoch(self) -> None:
-    pass
+  def end_epoch(self, context: PerfMetricsContext | None = None) -> MetricsT:
+    return {}
 
 class PerfTracer(NoopTracer):
-  """Provides an API to collect events to construct host and devices timelines.
+  """Provides an API to collect events to construct thread and devices timelines.
 
   Usage:
-    1. Collect intervals for host and devices.
+    1. Collect intervals for thread and devices.
 
       with tracer.interval("label")
         ...
@@ -85,37 +98,49 @@ class PerfTracer(NoopTracer):
       api = tracer.export()
   """
 
-  def __init__(self, devices: list[str | JaxDevice] | np.ndarray | None = None):
+  def __init__(
+      self,
+      devices: list[str | JaxDevice] | np.ndarray | None = None,
+      export_fn: (
+          Callable[[PerfMetricsQuery, PerfMetricsContext], MetricsT] | None
+      ) = None,
+  ):
+    self._epoch = 0
+    self._export_fn = export_fn
+
     # align all timelines with the same born time.
     self._born = time.perf_counter()
 
-    self._host_timeline: HostTimeline = HostTimeline("host", self._born)
+    self._main_thread_id = str(threading.get_ident())
+
+    self._thread_timelines: dict[str, ThreadTimeline] = {}
+    self._get_or_create_thread_timeline(self._main_thread_id)
     self._device_timelines: dict[str, DeviceTimeline] = {}
     if devices:
       for device in devices:
         self._get_or_create_device_timeline(device)
 
   def _get_timelines(self) -> dict[str, BaseTimeline]:
-    timelines: dict[str, BaseTimeline] = {
-        self._host_timeline.id: self._host_timeline
-    }
+    timelines: dict[str, BaseTimeline] = {}
+    for timeline in self._thread_timelines.values():
+      timelines[timeline.id] = timeline
     for timeline in self._device_timelines.values():
       timelines[timeline.id] = timeline
     return timelines
 
+  def _get_or_create_thread_timeline(self, id: str) -> ThreadTimeline:
+    if id not in self._thread_timelines:
+      self._thread_timelines[id] = ThreadTimeline(id, self._born)
+    return self._thread_timelines[id]
+
   def _get_or_create_device_timeline(
       self, id: str | JaxDevice
   ) -> DeviceTimeline:
-    # if it's a JAX device object, convert to id
-    if hasattr(id, "platform") and hasattr(id, "id"):
-      id = getattr(id, "platform") + str(getattr(id, "id"))
+    tid = create_timeline_id(id)
 
-    if not isinstance(id, str):
-      raise ValueError(f"Unsupport id type: {type(id)}")
-
-    if id not in self._device_timelines:
-      self._device_timelines[id] = DeviceTimeline(id, self._born)
-    return self._device_timelines[id]
+    if tid not in self._device_timelines:
+      self._device_timelines[tid] = DeviceTimeline(tid, self._born)
+    return self._device_timelines[tid]
 
   def _get_or_create_device_timelines(
       self, ids: list[str | JaxDevice] | np.ndarray
@@ -138,7 +163,7 @@ class PerfTracer(NoopTracer):
 
   def export(self) -> PerfMetricsApi:
     self.synchronize()
-    return PerfMetricsApi(self._get_timelines())
+    return PerfMetricsApi(self._get_timelines(), self._main_thread_id)
 
   @property
   def all(self) -> list[str]:
@@ -153,18 +178,21 @@ class PerfTracer(NoopTracer):
       label: str,
       devices: list[str | JaxDevice] | np.ndarray | None = None,
   ):
-    """Collect an interval for host and devices.
+    """Collect an interval for thread and devices.
 
-    Host interval will always be collected, device intervals will be collected
+    Thread interval will always be collected, device intervals will be collected
     for devices listed in `devices`.
 
     Usage:
-      1. Collect an interval for host only.
+      1. Collect an interval for thread only. (thread defaults to "main")
 
         with tracer.interval("label"):
           ...
 
-      2. Collect an interval for host and devices.
+        with tracer.interval("label", thread="my_thread"):
+          ...
+
+      2. Collect an interval for thread and devices.
 
         with tracer.interval("label", devices=tracer.all) as interval:
           ...
@@ -174,19 +202,40 @@ class PerfTracer(NoopTracer):
       label: The label of the interval.
       devices: The devices to collect the interval for.
     """
-
-    host_begin = self._host_timeline.begin(label)
+    thread = str(threading.get_ident())
+    thread_begin = self._get_or_create_thread_timeline(thread).begin(label)
     device_waitlist = _DeviceWaitlist()
     try:
       yield device_waitlist
     finally:
-      self._host_timeline.end()
+      self._thread_timelines[thread].end()
       if devices is not None:
-        self._get_or_create_device_timelines(devices).interval(label, host_begin, device_waitlist._data)  # pylint: disable=protected-access
+        self._get_or_create_device_timelines(devices).interval(label, thread_begin, device_waitlist._data)  # pylint: disable=protected-access
 
-  def end_epoch(self) -> None:
+  def end_epoch(self, context: PerfMetricsContext | None = None) -> MetricsT:
+    # TODO(yangmu): revisit this, may not be needed.
+    now = time.perf_counter()
+    for thread_timeline in self._thread_timelines.values():
+      with thread_timeline.interval("end_epoch"):
+        pass
+    for device_timeline in self._device_timelines.values():
+      device_timeline.interval("end_epoch", now, [])
+
+    if context is None:
+      context = PerfMetricsContext()
+    context.epoch = self._epoch
+    self._epoch += 1
+
     for timeline in self._get_timelines().values():
       timeline.end_epoch()
+
+    if self._export_fn is not None:
+      query = PerfMetricsQuery(
+          self._get_timelines(), self._main_thread_id
+      ).epoch([context.epoch])
+      return self._export_fn(query, context)
+    else:
+      return {}
 
 
 class _DeviceWaitlist:
@@ -245,8 +294,8 @@ class BaseTimeline:
       self.epochs.append(len(self.intervals))
 
 
-class HostTimeline(BaseTimeline):
-  """Manages a custom-annotated timeline for the host."""
+class ThreadTimeline(BaseTimeline):
+  """Manages a custom-annotated timeline for a thread."""
 
   def __init__(self, id: str, born: float):
     super().__init__(id, born)
@@ -297,11 +346,11 @@ class DeviceTimeline(BaseTimeline):
     self._threads: list[threading.Thread] = []
 
   def interval(
-      self, label: str, host_begin: float, waitlist: jaxtyping.PyTree
+      self, label: str, thread_begin: float, waitlist: jaxtyping.PyTree
   ) -> None:
     """Record a new interval for device (e.g. TPU).
 
-    The interval begin time is inferred from the host begin time (i.e. host
+    The interval begin time is inferred from the thread begin time (i.e. thread
     launches a computation on the device) and the end time of prevous interval
     on the same device, the late one is used.
 
@@ -310,14 +359,14 @@ class DeviceTimeline(BaseTimeline):
 
     Args:
       label: The label of the interval.
-      host_begin: The begin time of the interval on the host, used to infer the
-        begin time of the interval on the device.
+      thread_begin: The begin time of the interval on the thread, used to infer
+        the begin time of the interval on the device.
       waitlist: The JAX computation to be tracked, used to infer the end time of
         the interval on the device.
     """
 
     def on_success():
-      begin = host_begin
+      begin = thread_begin
       if len(self.intervals) > 0:
         begin = max(begin, self.intervals[-1][1])
       self.intervals.append((begin, time.perf_counter()))  # type: ignore
@@ -326,8 +375,11 @@ class DeviceTimeline(BaseTimeline):
     def on_failure(e: Exception):
       raise e
 
-    t = _async_wait(waitlist=waitlist, success=on_success, failure=on_failure)
-    self._threads.append(t)
+    if not waitlist:
+      on_success()
+    else:
+      t = _async_wait(waitlist=waitlist, success=on_success, failure=on_failure)
+      self._threads.append(t)
 
   def wait_pending_intervals(self) -> None:
     for t in self._threads:
@@ -347,10 +399,10 @@ class BatchDeviceTimeline:
     return out
 
   def interval(
-      self, label: str, host_begin: float, data: jaxtyping.PyTree
+      self, label: str, thread_begin: float, data: jaxtyping.PyTree
   ) -> None:
     for timeline in self._timelines:
-      timeline.interval(label, host_begin, data)
+      timeline.interval(label, thread_begin, data)
 
   def end_epoch(self) -> None:
     for timeline in self._timelines:
