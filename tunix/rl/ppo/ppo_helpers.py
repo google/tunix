@@ -17,8 +17,12 @@ import functools
 
 import jax
 import jax.numpy as jnp
+from tunix.rl import function_registry
+
+registry = function_registry.default_registry
 
 
+@registry.register("advantage_estimator", "gae")
 @jax.jit
 def compute_gae_advantages(
     rewards: jax.Array,

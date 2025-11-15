@@ -21,12 +21,14 @@ from concurrent import futures
 import itertools
 import math
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
+from typing import Generic, TypeVar
 
 from absl import logging
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
@@ -43,13 +45,16 @@ RewardFn = Callable[..., List[float]]
 
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
+TConfig = TypeVar("TConfig", bound=algo_config_lib.AlgorithmConfig)
 
-class RLLearner(ABC):
+
+class RLLearner(abc.ABC, Generic[TConfig]):
   """Base class that should be extended by specific RL algorithms."""
 
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
+      algo_config: TConfig,
       reward_fns: RewardFn | List[RewardFn],
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
@@ -58,6 +63,8 @@ class RLLearner(ABC):
 
     Args:
       rl_cluster: RL cluster containing actor, reference and reward models.
+      algo_config: An instance of `AlgorithmConfig` containing all
+        training-specific configuration options.
       reward_fns: A single callable or a list of callables that compute a scalar
         reward for given prompts and completions. Each function should accept
         `prompts`, `completions` and optional keyword arguments, and return a
@@ -72,6 +79,7 @@ class RLLearner(ABC):
       data_shuffle_seed: The seed for shuffling the data.
     """
     self.rl_cluster = rl_cluster
+    self.algo_config = algo_config
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
@@ -91,7 +99,7 @@ class RLLearner(ABC):
     self.rl_cluster.global_steps = (
         self.rl_cluster.actor_trainer.restored_global_step()
     )
-
+    # Current iter steps for micro-batch based training.
     self._iter_steps = 0
     self._eval_iter_steps = 0
 
@@ -527,7 +535,6 @@ class RLLearner(ABC):
           buffer[key] = buffer[key][micro_batch_size:]
 
         yield micro_batch
-
   def train(
       self,
       train_ds: Iterable[TrainingInputT],
@@ -595,6 +602,7 @@ class RLLearner(ABC):
           # Use an unbounded queue for evaluation data.
           eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
           initial_steps = self._iter_steps
+
           future = self.executor.submit(
               self._prepare_data,
               iterator=train_iterator,
@@ -652,15 +660,15 @@ class RLLearner(ABC):
                   curr_train_ds,
                   curr_eval_ds,
                   skip_jit,
-              )  # loop over μ
+              )  # loop over μ num_iterations
               if hasattr(self.rl_cluster, "critic_trainer"):
                 self.rl_cluster.update_critic(
                     curr_train_ds,
                     curr_eval_ds,
                     skip_jit,
-                )  # loop over μ
+                )  # loop over μ num_iterations
 
-          # call to throw stop iteration as a singal to break the loop
+          # call to throw stop iteration as a signal to break the loop
           future.result()
           # sync the iter steps with internel trainer, this is based on the
           # assumption that the trainer internally doesn't reset the iter steps.
