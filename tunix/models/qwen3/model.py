@@ -25,7 +25,7 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-from tunix.utils import container
+from tunix.utils import compat
 
 
 if hasattr(flax.config, 'flax_always_shard_variable'):
@@ -82,7 +82,7 @@ class ShardingConfig:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True)
 class ModelConfig:
   """Configuration for the Qwen3 model."""
 
@@ -415,7 +415,11 @@ class Attention(nnx.Module):
       attn_mask: jaxtyping.Array | None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.config.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
 
@@ -633,7 +637,7 @@ class Qwen3(nnx.Module, pytree=False):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.layers = container.ModuleList([
+    self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
         for _ in range(config.num_layers)
     ])

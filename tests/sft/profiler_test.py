@@ -30,6 +30,8 @@ class ProfilerTest(parameterized.TestCase):
       self.log_dir = self.create_tempdir().full_path
     except Exception:
       self.log_dir = tempfile.TemporaryDirectory().name
+    # Reset class variable state to ensure test isolation.
+    profiler.Profiler._is_active = False
 
   @mock.patch('jax.process_index', return_value=0)
   @mock.patch('jax.profiler.start_trace')
@@ -163,14 +165,6 @@ class ProfilerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='deactivate_at_last_step',
-          initial_step=0,
-          skip_first_n_steps=5,
-          profiler_steps=10,
-          current_step=15,
-          expect_stop_called=True,
-      ),
-      dict(
           testcase_name='not_deactivate_before_last_step',
           initial_step=0,
           skip_first_n_steps=5,
@@ -198,8 +192,10 @@ class ProfilerTest(parameterized.TestCase):
   )
   @mock.patch('jax.process_index', return_value=0)
   @mock.patch('jax.profiler.stop_trace')
+  @mock.patch('jax.profiler.start_trace')
   def test_maybe_deactivate(
       self,
+      mock_start_trace,
       mock_stop_trace,
       _,
       initial_step,
@@ -221,11 +217,46 @@ class ProfilerTest(parameterized.TestCase):
         max_step=100,
         profiler_options=profiler_options,
     )
+    if not profiler_options_none:
+      p.maybe_activate(initial_step + skip_first_n_steps)
+      mock_start_trace.assert_called_once()
     p.maybe_deactivate(current_step)
     if expect_stop_called:
       mock_stop_trace.assert_called_once()
     else:
       mock_stop_trace.assert_not_called()
+
+  @mock.patch('jax.process_index', return_value=0)
+  @mock.patch('jax.profiler.stop_trace')
+  @mock.patch('jax.profiler.start_trace')
+  def test_multiple_profiler_instances(
+      self, mock_start_trace, mock_stop_trace, _
+  ):
+    profiler_options = profiler.ProfilerOptions(
+        log_dir=self.log_dir, skip_first_n_steps=5, profiler_steps=10
+    )
+    p1 = profiler.Profiler(
+        initial_step=0, max_step=100, profiler_options=profiler_options
+    )
+    p2 = profiler.Profiler(
+        initial_step=0, max_step=100, profiler_options=profiler_options
+    )
+
+    # First profiler activates.
+    p1.maybe_activate(5)
+    mock_start_trace.assert_called_once()
+
+    # Second profiler tries to activate but should be skipped.
+    p2.maybe_activate(5)
+    mock_start_trace.assert_called_once()  # Still called only once.
+
+    # Second profiler tries to deactivate but should be skipped.
+    p2.maybe_deactivate(15)
+    mock_stop_trace.assert_not_called()
+
+    # First profiler deactivates.
+    p1.maybe_deactivate(15)
+    mock_stop_trace.assert_called_once()
 
   @parameterized.named_parameters(
       dict(

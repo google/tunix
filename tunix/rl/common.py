@@ -156,14 +156,14 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
-@nnx.jit(static_argnums=(4,))
+@nnx.jit(static_argnames=("logits_to_keep"))
 def get_per_token_logps(
     model: nnx.Module,
     input_tokens: jax.Array,
     positions: jax.Array,
     attn_mask: jax.Array,
     logits_to_keep: int,
-) -> tuple[jax.Array, jax.Array]:
+) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
   logits, _ = model(
       input_tokens, positions=positions, attention_mask=attn_mask, cache=None
@@ -171,7 +171,7 @@ def get_per_token_logps(
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]
   per_token_logps = selective_log_softmax(logits, input_tokens)
-  return per_token_logps, logits
+  return per_token_logps
 
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
@@ -201,7 +201,7 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask
 
 
-@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))
+@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"))
 def compute_per_token_logps(
     model: nnx.Module,
     prompt_tokens: jax.Array,
@@ -210,22 +210,28 @@ def compute_per_token_logps(
     eos_id: int,
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
+    return_logits: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
-  prompt_completion_ids, positions, attn_mask = process_ids(
+  input_tokens, positions, attn_mask = process_ids(
       prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
-  per_token_logps, logits = get_per_token_logps(
-      model,
-      input_tokens=prompt_completion_ids,
-      positions=positions,
-      attn_mask=attn_mask,
-      logits_to_keep=completion_tokens.shape[1],
+  logits, _ = model(
+      input_tokens, positions=positions, attention_mask=attn_mask, cache=None
   )
+  logits_to_keep = completion_tokens.shape[1]
+  logits = logits[:, -logits_to_keep - 1 : -1, :]
+  input_tokens = input_tokens[:, -logits_to_keep:]
+  per_token_logps = selective_log_softmax(logits, input_tokens)
+
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
     logits = jax.lax.stop_gradient(logits)
-  return per_token_logps, logits
+
+  if return_logits:
+    return per_token_logps, logits
+  else:
+    return per_token_logps
 
 
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))

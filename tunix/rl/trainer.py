@@ -14,13 +14,14 @@
 
 """RL Trainer."""
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from flax import nnx
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import optax
 from tunix.sft import peft_trainer
 from typing_extensions import override
+from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-import
 
 
 class Trainer(peft_trainer.PeftTrainer):
@@ -31,14 +32,18 @@ class Trainer(peft_trainer.PeftTrainer):
       model: nnx.Module,
       optimizer: optax.GradientTransformation,
       training_config: peft_trainer.TrainingConfig,
+      custom_checkpoint_metadata_fn: Callable[[], dict[str, Any]],
+      metrics_logger: Optional[MetricsLogger] = None,
   ):
     super().__init__(
         model,
         optimizer,
         training_config,
+        metrics_logger,
     )
     self.rl_metrics_to_log = {}  # Metric name -> key in aux.
     self.tqdm_metrics_to_display = []
+    self.custom_checkpoint_metadata_fn = custom_checkpoint_metadata_fn
 
   def with_rl_metrics_to_log(
       self,
@@ -50,6 +55,13 @@ class Trainer(peft_trainer.PeftTrainer):
       self, tqdm_metrics_to_display: list[str | Callable[[], str]]
   ) -> None:
     self.tqdm_metrics_to_display = tqdm_metrics_to_display
+
+  @override
+  def custom_checkpoint_metadata(self) -> dict[str, Any]:
+    return self.custom_checkpoint_metadata_fn()
+
+  def restored_global_step(self) -> int:
+    return self._restored_custom_metadata.get("global_step", 0)
 
   @override
   def _post_process_train_step(self, aux: Any) -> None:

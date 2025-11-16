@@ -18,7 +18,7 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import time
-from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
 
 from absl import logging
 import flax
@@ -34,7 +34,7 @@ import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
-from tunix.sft import metrics_logger
+from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
@@ -43,6 +43,8 @@ from tunix.sft import utils
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
+MetricsLogger = sft_metrics_logger.MetricsLogger
+MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -60,7 +62,7 @@ class TrainingConfig:
   checkpointing_options: ocp.CheckpointManagerOptions | None = None
 
   # Configs for the metrics logger.
-  metrics_logging_options: metrics_logger.MetricsLoggerOptions | None = None
+  metrics_logging_options: MetricsLoggerOptions | None = None
 
   # Configs for the profiler.
   profiler_options: profiler.ProfilerOptions | None = None
@@ -72,7 +74,7 @@ class TrainingConfig:
 
   # Prefix for metric names for logging. Not sticking it in
   # `metrics_logging_options` because the latter is optional.
-  metric_prefix: str = ""
+  metrics_prefix: str = ""
 
   # Progress bar description.
   pbar_description: str | None = "Training"
@@ -118,7 +120,7 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    return np.mean(self.losses)
+    return np.mean(np.array([np.array(x) for x in self.losses]))
 
   @property
   def step_time_delta(self):
@@ -183,6 +185,7 @@ class PeftTrainer:
       model: nnx.Module,
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
+      metrics_logger: Optional[MetricsLogger] = None,
   ):
     self.model = model
     self.config = training_config
@@ -202,10 +205,12 @@ class PeftTrainer:
         root_directory=self.config.checkpoint_root_directory,
         options=self.config.checkpointing_options,
     )
-    self.metrics_logger = metrics_logger.MetricsLogger(
-        self.config.metrics_logging_options,
-        metric_prefix=self.config.metric_prefix,
-    )
+    self.metrics_logger = metrics_logger
+    self.metrics_prefix = self.config.metrics_prefix
+    if self.metrics_logger is None:
+      self.metrics_logger = MetricsLogger(
+          self.config.metrics_logging_options,
+      )
     self.is_managed_externally = False
 
     self._train_steps = 0  # represent # of times model has been updated
@@ -213,13 +218,15 @@ class PeftTrainer:
     self._throttler = inflight_throttler.InflightThrottler(
         max_inflight=training_config.max_inflight_computations
     )
-    self._mode: metrics_logger.Mode = metrics_logger.Mode.TRAIN
+    self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
     self._flops_measured: bool = False
 
-    self._train_steps = self.checkpoint_manager.maybe_restore(
-        self.model, restore_only_lora_params=self._lora_enabled
+    self._train_steps, self._restored_custom_metadata = (
+        self.checkpoint_manager.maybe_restore(
+            self.model, restore_only_lora_params=self._lora_enabled
+        )
     )
     self._iter_steps = self._train_steps * self.config.get_with_default(
         "gradient_accumulation_steps", 1
@@ -227,9 +234,15 @@ class PeftTrainer:
 
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
+    max_step = None
+    if self.config.max_steps is not None:
+      max_step = (
+          self.config.max_steps
+          * self.config.get_with_default("gradient_accumulation_steps", 1)
+      )
     self._prof = profiler.Profiler(
         initial_step=self._iter_steps,
-        max_step=self.config.max_steps,
+        max_step=max_step,
         profiler_options=self.config.profiler_options,
     )
     self._buffered_train_metrics: MetricsBuffer | None = None
@@ -371,9 +384,7 @@ class PeftTrainer:
         self._jitted_train_step_fn = nnx.jit(
             train_step, donate_argnames=("optimizer",)
         )
-        self._jitted_eval_step_fn = nnx.jit(
-            eval_step, donate_argnames=("model",)
-        )
+        self._jitted_eval_step_fn = nnx.jit(eval_step)
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
   def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
@@ -445,22 +456,36 @@ class PeftTrainer:
   ):
     """Logs the metrics to the metrics logger and console."""
     perplexity = np.exp(loss)
-    self.metrics_logger.log("loss", loss, self._mode, step)
-    self.metrics_logger.log("perplexity", perplexity, self._mode, step)
+    self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)
+    self.metrics_logger.log(
+        self.metrics_prefix, "perplexity", perplexity, self._mode, step
+    )
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
       self.metrics_logger.log(
-          "learning_rate", jax.device_get(learning_rate), self._mode, step
+          self.metrics_prefix,
+          "learning_rate",
+          jax.device_get(learning_rate),
+          self._mode,
+          step,
       )
     if step_time_delta is not None:
       self.metrics_logger.log(
-          "step_time_sec", step_time_delta, self._mode, step
+          self.metrics_prefix,
+          "step_time_sec",
+          step_time_delta,
+          self._mode,
+          step,
       )
       self.metrics_logger.log(
-          "steps_per_sec", 1.0 / (step_time_delta + 1e-9), self._mode, step
+          self.metrics_prefix,
+          "steps_per_sec",
+          1.0 / (step_time_delta + 1e-9),
+          self._mode,
+          step,
       )
 
-    if self._mode == metrics_logger.Mode.TRAIN:
+    if self._mode == sft_metrics_logger.Mode.TRAIN:
       logging.info(
           "Train step %d training loss: %f  - training perplexity: %f",
           step,
@@ -468,7 +493,7 @@ class PeftTrainer:
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(k, v, self._mode, step)
+      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)
 
   def _buffer_metrics(
       self,
@@ -478,7 +503,6 @@ class PeftTrainer:
       step_time_delta: float = 0.0,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
-    loss = np.array(loss)
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
           step=step, losses=[loss], step_time_deltas=[step_time_delta]
@@ -510,12 +534,19 @@ class PeftTrainer:
     self._buffered_train_metrics = None
 
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
+    def _to_np_array(v):
+      if isinstance(v, jax.Array):
+        return np.asarray(v, dtype=np.float32)
+      elif isinstance(v, list):
+        return [_to_np_array(x) for x in v]
+      return v
+
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
         step_time_delta=metrics_buffer.step_time_delta,
         additional_metrics={
-            k: op(v)
+            k: op(_to_np_array(v))
             for k, (
                 v,
                 op,
@@ -524,7 +555,7 @@ class PeftTrainer:
     )
 
   @contextlib.contextmanager
-  def _switch_mode(self, mode: metrics_logger.Mode):
+  def _switch_mode(self, mode: sft_metrics_logger.Mode):
     original_mode = self._mode
     self._mode = mode
     try:
@@ -548,7 +579,7 @@ class PeftTrainer:
       self._pbar.update_metrics(metrics, self._mode, ndigits=3)
       self._pbar.update()
 
-    if self.training_hooks and self._mode == metrics_logger.Mode.TRAIN:
+    if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
       self.training_hooks.on_train_step_end(self, step, loss, step_time)
 
   def train(
@@ -571,6 +602,7 @@ class PeftTrainer:
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
+          metrics_prefix=self.metrics_prefix,
           metrics_logger=self.metrics_logger,
           initial_steps=self._train_steps,
           max_steps=self.config.max_steps,
@@ -630,7 +662,11 @@ class PeftTrainer:
             )
             if tflops_per_step is not None:
               self.metrics_logger.log(
-                  "tflops_per_step", tflops_per_step, self._mode, 0
+                  self.metrics_prefix,
+                  "tflops_per_step",
+                  tflops_per_step,
+                  self._mode,
+                  0,
               )
 
           self._throttler.wait_for_next()
@@ -668,6 +704,7 @@ class PeftTrainer:
                 self._train_steps,
                 self.model,
                 save_only_lora_params=self._lora_enabled,
+                custom_metadata=self.custom_checkpoint_metadata(),
             )
 
             if (
@@ -704,6 +741,10 @@ class PeftTrainer:
     """Returns the number of iterator steps taken."""
     return self._iter_steps
 
+  def custom_checkpoint_metadata(self) -> dict[str, Any]:
+    """Override this function to return the custom metadata for the checkpoint manager."""
+    return {}
+
   def close(self):
     """Closes the trainer and its associated resources.
 
@@ -726,7 +767,7 @@ class PeftTrainer:
     """Runs evaluation loop."""
     logging.info("Running evaluation on train step %d.", self._train_steps)
     eval_iterator = iter(eval_ds)
-    with self._switch_mode(metrics_logger.Mode.EVAL):
+    with self._switch_mode(sft_metrics_logger.Mode.EVAL):
       eval_loss, eval_steps = 0, 0
       while True:
         if self.data_hooks:
@@ -763,8 +804,10 @@ class PeftTrainer:
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
           self._train_steps,
-          self.metrics_logger.get_metric("loss", "eval"),
-          self.metrics_logger.get_metric("perplexity", "eval"),
+          self.metrics_logger.get_metric(self.metrics_prefix, "loss", "eval"),
+          self.metrics_logger.get_metric(
+              self.metrics_prefix, "perplexity", "eval"
+          ),
       )
       self._buffered_eval_metrics = None
       if self.training_hooks:

@@ -83,7 +83,7 @@ class ShardingConfig:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True)
 class ModelConfig:
   """Configuration for the gemma transformer."""
 
@@ -96,6 +96,7 @@ class ModelConfig:
   num_kv_heads: int
   final_logit_softcap: float | None
   use_post_attn_norm: bool
+  use_pre_ffw_norm: bool
   use_post_ffw_norm: bool
   attention_types: Iterable[AttentionType]
   attn_logits_soft_cap: float | None = None
@@ -116,9 +117,18 @@ class ModelConfig:
         num_kv_heads=1,
         final_logit_softcap=None,
         attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=False,
+        use_post_attn_norm=True,
+        use_pre_ffw_norm=False,
         use_post_ffw_norm=False,
     )
+
+  @classmethod
+  def gemma_2b_it(cls):
+    return cls.gemma_2b()
+
+  @classmethod
+  def gemma1_1_2b_it(cls):  # gemma1.1-2b-it
+    return cls.gemma_2b()
 
   @classmethod
   def gemma_7b(cls):
@@ -133,9 +143,18 @@ class ModelConfig:
         num_kv_heads=16,
         final_logit_softcap=None,
         attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=False,
+        use_post_attn_norm=True,
+        use_pre_ffw_norm=False,
         use_post_ffw_norm=False,
     )
+
+  @classmethod
+  def gemma_7b_it(cls):
+    return cls.gemma_7b()
+
+  @classmethod
+  def gemma1_1_7b_it(cls):  # gemma1.1-7b-it
+    return cls.gemma_7b()
 
   @classmethod
   def gemma2_2b(cls):
@@ -155,10 +174,15 @@ class ModelConfig:
         )
         * int(num_layers / 2),
         use_post_attn_norm=True,
+        use_pre_ffw_norm=True,
         use_post_ffw_norm=True,
         attn_logits_soft_cap=50.0,
         sliding_window_size=4096,
     )
+
+  @classmethod
+  def gemma2_2b_it(cls):
+    return cls.gemma2_2b()
 
   @classmethod
   def gemma2_9b(cls):
@@ -178,10 +202,15 @@ class ModelConfig:
         )
         * int(num_layers / 2),
         use_post_attn_norm=True,
+        use_pre_ffw_norm=True,
         use_post_ffw_norm=True,
         attn_logits_soft_cap=50.0,
         sliding_window_size=4096,
     )
+
+  @classmethod
+  def gemma2_9b_it(cls):
+    return cls.gemma2_9b()
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
@@ -475,7 +504,11 @@ class Attention(nnx.Module):
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if self.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self.block)(x, segment_pos, cache, attn_mask)
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
     else:
       return self.block(x, segment_pos, cache, attn_mask)
 
@@ -572,6 +605,7 @@ class Block(nnx.Module):
       embed_dim: int,
       head_dim: int,
       hidden_dim: int,
+      use_pre_ffw_norm: bool,
       use_post_attn_norm: bool,
       use_post_ffw_norm: bool,
       attn_type: AttentionType,
@@ -600,7 +634,8 @@ class Block(nnx.Module):
     if use_post_attn_norm:
       self.post_attn_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
 
-    self.pre_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
+    if use_pre_ffw_norm:
+      self.pre_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
     self.mlp = FeedForward(
         features=embed_dim,
         hidden_dim=hidden_dim,
@@ -630,7 +665,10 @@ class Block(nnx.Module):
 
     attn_output += x
 
-    outputs = self.pre_ffw_norm(attn_output)
+    if self.use_pre_ffw_norm:
+      outputs = self.pre_ffw_norm(attn_output)
+    else:
+      outputs = attn_output
     outputs = self.mlp(outputs)
 
     if self.use_post_ffw_norm:
@@ -646,6 +684,10 @@ class Block(nnx.Module):
   @property
   def use_post_ffw_norm(self):
     return hasattr(self, 'post_ffw_norm') and self.post_ffw_norm is not None
+
+  @property
+  def use_pre_ffw_norm(self):
+    return hasattr(self, 'pre_ffw_norm') and self.pre_ffw_norm is not None
 
 
 class RMSNorm(nnx.Module):
@@ -802,16 +844,15 @@ class Transformer(nnx.Module, pytree=False):
       cls, params: params_lib.Params, version: str
   ) -> 'Transformer':
 
-    if version in ['2b', '2b-it', '1.1-2b-it']:
-      config = ModelConfig.gemma_2b()
-    elif version in ['7b', '7b-it', '1.1-7b-it']:
-      config = ModelConfig.gemma_7b()
-    elif version in ['2-2b', '2-2b-it']:
-      config = ModelConfig.gemma2_2b()
-    elif version in ['2-9b', '2-9b-it']:
-      config = ModelConfig.gemma2_9b()
+    if version.startswith('2-'):
+      config_id = version.replace('2-', 'gemma2_')
     else:
-      raise ValueError(f'Unsupported version: {version}')
+      config_id = 'gemma_' + version
+    config_id = config_id.replace('.', '_').replace('-', '_')
+    try:
+      config = getattr(ModelConfig, config_id)()
+    except AttributeError as exc:
+      raise ValueError(f'Unsupported version: {version}') from exc
 
     return module_from_linen_variables(
         module_factory=lambda: cls(config, rngs=nnx.Rngs(params=0)),
@@ -842,6 +883,7 @@ class Transformer(nnx.Module, pytree=False):
             hidden_dim=config.hidden_dim,
             sliding_window_size=config.sliding_window_size,
             use_post_attn_norm=config.use_post_attn_norm,
+            use_pre_ffw_norm=config.use_pre_ffw_norm,
             use_post_ffw_norm=config.use_post_ffw_norm,
             attn_logits_soft_cap=config.attn_logits_soft_cap,
             attn_type=attn_type,

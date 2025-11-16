@@ -42,7 +42,7 @@ class TrainExample(common.TrainExample):
 class GRPOConfig:
   """Configuration for GRPO algorithm.
 
-  Parameters:
+  Attributes:
     num_generations: The number of times the policy generates multiple
       responses for a given prompt within a single training step. This
       corresponds to 'G' in Algorithm 1 in the paper. A higher value means
@@ -144,6 +144,8 @@ class GRPOLearner(rl_learner.RLLearner):
         train_example,
         beta=beta,
         epsilon=epsilon,
+        pad_id=self.rl_cluster.rollout.pad_id(),
+        eos_id=self.rl_cluster.rollout.eos_id(),
         loss_algo=self.grpo_config.loss_algo,
     )
 
@@ -204,41 +206,51 @@ class GRPOLearner(rl_learner.RLLearner):
     completion_mask = completion_mask * completion_padding_mask
 
     if self.grpo_config.beta != 0.0:
-      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
-          micro_batch_size=(
-              self._compute_logps_micro_batch_size
-              * self.grpo_config.num_generations
-          ),
-      )
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
+      # TODO(yangmu): use function decorator to trace this part, same below.
+      with self.rl_cluster.perf.interval("ref_inference", devices) as interval:
+        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            pad_id=pad_value,
+            eos_id=eos_value,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.grpo_config.num_generations
+            ),
+        )
+        interval.device_end([ref_per_token_logps])
     else:
       ref_per_token_logps = None
     if self.grpo_config.num_iterations > 1:
-      old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          micro_batch_size=(
-              self._compute_logps_micro_batch_size
-              * self.grpo_config.num_generations
-          ),
-      )
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
+      with self.rl_cluster.perf.interval(
+          "old_actor_inference", devices
+      ) as interval:
+        old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.grpo_config.num_generations
+            ),
+        )
+        interval.device_end([old_per_token_logps])
     else:
       old_per_token_logps = None
 
-    # Compute rewards and advantages
-    rewards = self._compute_rewards(
-        prompts=training_input["prompts"],
-        completions=completion_text,
-        mode=mode,
-        **{k: v for k, v in training_input.items() if k != "prompts"},
-    )
+    with self.rl_cluster.perf.interval("advantage_computation"):
+      # Compute rewards and advantages
+      rewards = self._compute_rewards(
+          prompts=training_input["prompts"],
+          completions=completion_text,
+          mode=mode,
+          **{k: v for k, v in training_input.items() if k != "prompts"},
+      )
 
-    advantages = grpo_helpers.compute_advantages(
-        rewards, self.grpo_config.num_generations
-    )
+      advantages = grpo_helpers.compute_advantages(
+          rewards, self.grpo_config.num_generations
+      )
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
@@ -366,7 +378,15 @@ class GRPOLearner(rl_learner.RLLearner):
     super().train(train_ds, eval_ds, skip_jit)
 
 
-def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
+def grpo_loss_fn(
+    model,
+    train_example,
+    beta,
+    epsilon,
+    loss_algo,
+    pad_id,
+    eos_id,
+):
   """GRPO loss function.
 
   The loss aims to maximize the expected advantage of the chosen actions while
@@ -378,34 +398,30 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
     train_example: A `TrainExample` instance containing the processed input
       data, including prompt IDs, completion IDs, masks, advantages, and
       per-token log probabilities from the reference and policy models.
-    beta: The coefficient for the KL divergence penalty. A value of 0.0 means
-      no KL penalty is applied.
+    beta: The coefficient for the KL divergence penalty. A value of 0.0 means no
+      KL penalty is applied.
     epsilon: Epsilon value for clipping.
     loss_algo: The loss algorithm to use. Can be grpo or gspo-token.
+    pad_id: The pad ID from tokenizer.
+    eos_id: The eos ID from.
 
   Returns:
     A tuple containing the loss and an aux dictionary.
   """
-  prompt_ids, prompt_mask = (
-      train_example.prompt_ids,
-      train_example.prompt_mask,
-  )
   completion_ids, completion_mask = (
       train_example.completion_ids,
       train_example.completion_mask,
   )
-  input_ids = jnp.concat([prompt_ids, completion_ids], axis=1)
-  prompt_completion_mask = jnp.concat([prompt_mask, completion_mask], axis=-1)
-  attention_mask = common.make_causal_attn_mask(prompt_completion_mask)
-  logits_to_keep = completion_ids.shape[1]
-  positions = common.build_positions_from_mask(prompt_completion_mask)
 
-  per_token_logps, _ = common.get_per_token_logps(
+  # TODO(yangmu): trace this part as "actor_inference_and_training".
+  per_token_logps = common.compute_per_token_logps(
       model,
-      input_tokens=input_ids,
-      positions=positions,
-      attn_mask=attention_mask,
-      logits_to_keep=logits_to_keep,
+      prompt_tokens=train_example.prompt_ids,
+      completion_tokens=completion_ids,
+      pad_id=pad_id,
+      eos_id=eos_id,
+      stop_gradient=False,
+      return_logits=False,
   )
   advantages = train_example.advantages
 
@@ -458,6 +474,7 @@ def grpo_loss_fn(model, train_example, beta, epsilon, loss_algo):
     loss = (per_token_loss * completion_mask).sum() / loss_denominator
 
   return loss, aux
+
 
 GrpoConfig = GRPOConfig
 GrpoLearner = GRPOLearner

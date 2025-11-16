@@ -19,10 +19,12 @@ import contextlib
 import copy
 import dataclasses
 import enum
+import functools
 import gc
 import itertools
 import operator
 import os
+import time
 from typing import Any, Callable, Dict, Tuple
 
 from absl import logging
@@ -35,8 +37,10 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import jaxtyping
 import optax
-from tunix.generate import mappings
+# Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
+from tunix.perf import metrics as perf_metrics
+from tunix.perf import trace as perf_trace
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -89,13 +93,13 @@ class Role(enum.Enum):
 class RLTrainingConfig(peft_trainer.TrainingConfig):
   """RLTraining config.
 
-  Parameters:
+  Attributes:
     actor_optimizer: Optimizer for the actor model.
     critic_optimizer: Optimizer for the critic model. If None, the critic model
       will be trained in the same optimizer as the actor model.
     mini_batch_size: The mini-batch size used for policy weight updates. One
       mini-batch corresponds to one optimizer update. `mini_batch_size` must be
-      divisible by the batch size used for data loading.
+      divisible by the global batch size.
     train_micro_batch_size: The micro-batch size used for gradient
       accumulation at training time. `train_micro_batch_size` must be
       divisible by `mini_batch_size`.
@@ -131,8 +135,8 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     if self.train_micro_batch_size is not None:
       if self.mini_batch_size is None:
         raise ValueError(
-            "For RL training, `batch_size` and `mini_batch_size` must be set"
-            " when `train_micro_batch_size` is set."
+            "For RL training, `mini_batch_size` must be set when"
+            " `train_micro_batch_size` is set."
         )
       rl_utils.check_divisibility(
           self.train_micro_batch_size,
@@ -149,10 +153,12 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
 class ClusterConfig:
   """Cluster config.
 
-  Parameters:
+  Attributes:
     role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
       disaggregated setup.
-    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm".
+    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
+        Alternatively, if a subclass of `base_rollout.BaseRollout` is provided,
+        it will be used as the rollout engine.
     offload_to_cpu: Whether to offload models to CPU at each step..
     training_config: RL training config.
     rollout_config: Rollout config. It may be different for different modes,
@@ -173,21 +179,13 @@ class ClusterConfig:
   """
 
   role_to_mesh: dict[Role, Mesh]
-  rollout_engine: str = "vanilla"
+  rollout_engine: str | type[base_rollout.BaseRollout] = "vanilla"
   offload_to_cpu: bool = False
 
   training_config: RLTrainingConfig
   rollout_config: (
       dict[Mode, base_rollout.RolloutConfig] | base_rollout.RolloutConfig
   )
-  rollout_mapping_config: mappings.MappingConfig | None = None
-
-  rollout_vllm_model_version: str = ""
-  rollout_vllm_lora_config: dict[str, Any] | None = None
-  rollout_vllm_hbm_utilization: float = 0.2
-  rollout_vllm_init_with_random_weights: bool = True
-  rollout_vllm_tpu_backend_type: str | None = None
-  rollout_vllm_swap_space_size_gb: float = 4.0  # in GiB
 
 
 class RLCluster:
@@ -202,6 +200,7 @@ class RLCluster:
       reward: ModelOrPath | None = None,
       tokenizer: Any | None,
       cluster_config: ClusterConfig,
+      perf_config: perf_metrics.PerfMetricsConfig | None = None,
   ):
     self.cluster_config = cluster_config
     self.r2m = cluster_config.role_to_mesh
@@ -246,6 +245,12 @@ class RLCluster:
     )
 
     self.tokenizer = tokenizer
+    self._rl_metrics_logger = metrics_logger.MetricsLogger(
+        self.cluster_config.training_config.metrics_logging_options
+    )
+    self._buffered_train_metrics: list[MetricsBuffer] = []
+    self._buffered_eval_metrics: list[MetricsBuffer] = []
+    self._external_metrics_logger = None
     self._init_cluster()
     gc.collect()
 
@@ -254,12 +259,13 @@ class RLCluster:
     # that update the model, we should properly update the global steps.
     self.global_steps = 0
 
-    self._rl_metrics_logger = metrics_logger.MetricsLogger(
-        self.cluster_config.training_config.metrics_logging_options
-    )
-    self._buffered_train_metrics: list[MetricsBuffer] = []
-    self._buffered_eval_metrics: list[MetricsBuffer] = []
-    self._external_metrics_logger = None
+    if perf_config is None:
+      self._perf = perf_trace.NoopTracer()
+    else:
+      devices = []
+      for mesh in cluster_config.role_to_mesh.values():
+        devices.extend(mesh.devices.flatten().tolist())
+      self._perf = perf_trace.PerfTracer(devices)
 
   def _init_backbone_sharing_map(
       self,
@@ -357,13 +363,17 @@ class RLCluster:
   def _init_cluster(self):
     """Initializes the RL cluster."""
     # 1. Initialize rollout.
-    if self.cluster_config.rollout_engine not in [
+    if isinstance(
+        self.cluster_config.rollout_engine, str
+    ) and self.cluster_config.rollout_engine not in [
         "vanilla",
         "vllm",
+        "sglang_jax",
     ]:
       raise ValueError(
-          "`cluster_config.rollout_engine` should be one of `'vanilla'` or "
-          f"`'vllm'`. Received: '{self.cluster_config.rollout_engine}'."
+          "`cluster_config.rollout_engine` should be one of `'vanilla'` or"
+          " `'vllm'` or `'sglang_jax'`. Received:"
+          f" '{self.cluster_config.rollout_engine}'."
       )
     if isinstance(self.cluster_config.rollout_config, dict):
       max_kv_cache_size = max(
@@ -392,29 +402,66 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
+      loaded_vllm_config = None
+      if isinstance(
+          self.cluster_config.rollout_config, base_rollout.RolloutConfig
+      ):
+        loaded_vllm_config = self.cluster_config.rollout_config
+      elif isinstance(self.cluster_config.rollout_config, dict):
+        loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
 
-      if self.cluster_config.rollout_vllm_model_version is None:
+      if loaded_vllm_config is None:
+        raise ValueError("Rollout vllm model config is missing!")
+
+      if loaded_vllm_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
 
-      backend = (
-          self.cluster_config.rollout_engine
-          + "_"
-          + self.cluster_config.rollout_vllm_tpu_backend_type
-      )
       # TODO(linchai): maybe support offloading for vllm rollout.
       self._rollout = vllm_rollout.VllmRollout(
           self.rollout_actor,
           self.tokenizer,
           cache_config_or_size=max_kv_cache_size,
           mesh=self.r2m[Role.ROLLOUT],
-          model_version=self.cluster_config.rollout_vllm_model_version,
-          hbm_utilization=self.cluster_config.rollout_vllm_hbm_utilization,
-          init_with_random_weights=self.cluster_config.rollout_vllm_init_with_random_weights,
-          tpu_backend_type=self.cluster_config.rollout_vllm_tpu_backend_type,
-          swap_space=self.cluster_config.rollout_vllm_swap_space_size_gb,
-          lora_config=self.cluster_config.rollout_vllm_lora_config,
-          rollout_engine=backend,
-          mapping_config=self.cluster_config.rollout_mapping_config,
+          rollout_config=loaded_vllm_config,
+      )
+    elif self.cluster_config.rollout_engine == "sglang_jax":
+      from tunix.rl.rollout import sglang_jax_rollout
+      if isinstance(
+          self.cluster_config.rollout_config, base_rollout.RolloutConfig
+      ):
+        loaded_sglang_jax_config = self.cluster_config.rollout_config
+      elif isinstance(self.cluster_config.rollout_config, dict):
+        loaded_sglang_jax_config = self.cluster_config.rollout_config[
+            Mode.TRAIN
+        ]
+      else:
+        raise ValueError(
+            "Rollout sglang jax model config is missing!"
+        )
+
+      self._rollout = sglang_jax_rollout.SglangJaxRollout(
+          self.rollout_actor,
+          self.tokenizer,
+          mesh=self.r2m[Role.ROLLOUT],
+          rollout_config=loaded_sglang_jax_config,
+      )
+    elif (
+        isinstance(self.cluster_config.rollout_engine, type)
+        and issubclass(
+            self.cluster_config.rollout_engine, base_rollout.BaseRollout
+        )
+    ) or (
+        isinstance(self.cluster_config.rollout_engine, functools.partial)
+        and issubclass(
+            self.cluster_config.rollout_engine.func,
+            base_rollout.BaseRollout,
+        )
+    ):
+      self._rollout = self.cluster_config.rollout_engine(
+          rollout_actor=self.rollout_actor,
+          tokenizer=self.tokenizer,
+          mesh=self.r2m[Role.ROLLOUT],
+          rollout_config=self.cluster_config.rollout_config,
       )
     else:
       raise NotImplementedError(
@@ -440,7 +487,7 @@ class RLCluster:
         and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
     ):
       critic_config = copy.deepcopy(self.cluster_config.training_config)
-      critic_config.metric_prefix = "critic/"
+      critic_config.metrics_prefix = "critic"
       critic_config.pbar_description = "Critic Training"
       if critic_config.checkpoint_root_directory is not None:
         critic_config.checkpoint_root_directory = os.path.join(
@@ -450,13 +497,17 @@ class RLCluster:
           model=self.critic,
           optimizer=self.cluster_config.training_config.critic_optimizer,
           training_config=critic_config,
+          custom_checkpoint_metadata_fn=lambda: {
+              "global_step": self.global_steps + 1
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          metrics_logger=self._rl_metrics_logger,
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
 
     self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
     actor_config = copy.deepcopy(self.cluster_config.training_config)
-    actor_config.metric_prefix = "actor/"
+    actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
     if actor_config.checkpoint_root_directory is not None:
       actor_config.checkpoint_root_directory = os.path.join(
@@ -466,6 +517,10 @@ class RLCluster:
         model=self.train_actor,
         optimizer=self.cluster_config.training_config.actor_optimizer,
         training_config=actor_config,
+        custom_checkpoint_metadata_fn=lambda: {
+            "global_step": self.global_steps + 1
+        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+        metrics_logger=self._rl_metrics_logger,
     )
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -548,6 +603,10 @@ class RLCluster:
   def critic_trainer(self) -> rl_trainer.Trainer:
     return self._critic_trainer
 
+  @property
+  def perf(self) -> perf_trace.NoopTracer | perf_trace.PerfTracer:
+    return self._perf
+
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
@@ -562,10 +621,15 @@ class RLCluster:
         continue  # jax.monitoring does not support string values.
       if op is None:
         self._rl_metrics_logger.log(  # pytype: disable=wrong-arg-types
-            metric_name, value, metrics_buffer.mode, metrics_buffer.global_steps
+            "global",
+            metric_name,
+            value,
+            metrics_buffer.mode,
+            metrics_buffer.global_steps,
         )
       else:
         self._rl_metrics_logger.log(
+            "global",
             metric_name,
             op(value),
             metrics_buffer.mode,
@@ -625,15 +689,17 @@ class RLCluster:
         cur_metrics.metrics[metric_name][0].append(value)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.ACTOR]:
+    with self.cluster_config.role_to_mesh[Role.ACTOR] as mesh:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+      with self._perf.interval("actor_training", mesh.devices):
+        self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.CRITIC]:
+    with self.cluster_config.role_to_mesh[Role.CRITIC] as mesh:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      self._critic_trainer.train(train_ds, eval_ds, skip_jit)
+      with self._perf.interval("critic_training", mesh.devices):
+        self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
   def generate(
@@ -646,10 +712,10 @@ class RLCluster:
     """Generates text from the given prompts.
 
     Args:
-      prompts: A list of prompts to generate text from. If
-        `apply_chat_template` is True, this should be a list of conversations
-        (each a list of dictionaries with 'role' and 'content'). Otherwise, it
-        should be a list of strings.
+      prompts: A list of prompts to generate text from. If `apply_chat_template`
+        is True, this should be a list of conversations (each a list of
+        dictionaries with 'role' and 'content'). Otherwise, it should be a list
+        of strings.
       apply_chat_template: Whether to apply chat template to the prompts.
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
@@ -677,7 +743,7 @@ class RLCluster:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
+    with self.cluster_config.role_to_mesh[Role.ROLLOUT] as mesh:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -687,12 +753,18 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
-      outputs = [
-          self.rollout.generate(string_prompts[s], rollout_config)
-          for s in rl_utils.chunk_slices_by_size(
-              stop=len(string_prompts), step=micro_batch_size
-          )
-      ]
+
+      with self._perf.interval("rollout", mesh.devices) as interval:
+        outputs = [
+            self.rollout.generate(string_prompts[s], rollout_config)
+            for s in rl_utils.chunk_slices_by_size(
+                stop=len(string_prompts), step=micro_batch_size
+            )
+        ]
+        interval.device_end(
+            [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
+        )
+
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))

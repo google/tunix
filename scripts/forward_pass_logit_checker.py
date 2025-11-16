@@ -246,7 +246,11 @@ def convert_jax_weight_to_torch(
 def main(test_args):
   devices = jax.devices()
   print(f"Running on devices: {devices}")
-  mesh = mesh = jax.make_mesh((1, len(devices)), ("fsdp", "tp"))
+  mesh = mesh = jax.make_mesh(
+      (1, len(devices)),
+      ("fsdp", "tp"),
+      axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+  )
   hf_name, tunix_model_loader, tunix_tokenizer_loader = SUPPORTED_MODELS[
       test_args.model_name
   ]

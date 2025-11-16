@@ -32,6 +32,7 @@ from tunix.sft import hooks
 from tunix.sft import peft_trainer
 from tunix.sft import profiler
 from tunix.tests import test_common as tc
+from tunix.utils import compat
 
 TEST_LEARNING_RATE = 1e-3
 
@@ -49,7 +50,7 @@ def create_sharded_model(model_ctor, rngs, mesh):
     nnx.update(model, sharded_state)
     return model, state
 
-  with mesh:
+  with compat.set_mesh(mesh):
     model, state = _create_sharded_model(model_ctor, rngs)
   state_sharding = nnx.get_named_sharding(state, mesh)
   return model, state_sharding
@@ -132,19 +133,19 @@ class PeftTrainerTest(parameterized.TestCase):
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
 
     self.assertGreater(
-        trainer.metrics_logger.get_metric('perplexity', 'train'), 0
+        trainer.metrics_logger.get_metric('', 'perplexity', 'train'), 0
     )
     self.assertEqual(
-        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
     self.assertGreater(
-        trainer.metrics_logger.get_metric('perplexity', 'eval'), 0
+        trainer.metrics_logger.get_metric('', 'perplexity', 'eval'), 0
     )
     self.assertGreater(trainer._train_steps, 0)
 
     self.assertLen(
-        trainer.metrics_logger.get_metric_history('perplexity', 'train'),
+        trainer.metrics_logger.get_metric_history('', 'perplexity', 'train'),
         trainer._train_steps,
     )
 
@@ -173,7 +174,7 @@ class PeftTrainerTest(parameterized.TestCase):
         config,
     )
 
-    with mesh:
+    with compat.set_mesh(mesh):
       processed_input = trainer._shard_input(sharded_input[0])
 
     # Output objects are same as input objects if no new sharding operation was
@@ -309,7 +310,7 @@ class PeftTrainerTest(parameterized.TestCase):
     unsharded_variables = nnx.state(unsharded_model, nnx.Param)
     self.assertIsInstance(
         unsharded_variables.layers[0].w1.kernel.value.sharding,
-        jax._src.lib.xla_client.SingleDeviceSharding,
+        jax.sharding.SingleDeviceSharding,
     )
     jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)
 
@@ -373,7 +374,7 @@ class PeftTrainerTest(parameterized.TestCase):
         tc.assert_not_equal, original_lora_params, lora_params
     )
     self.assertEqual(
-        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
 
@@ -403,7 +404,7 @@ class PeftTrainerTest(parameterized.TestCase):
 
       trainer.train(train_ds, self.eval_ds)
       self.assertEqual(
-          trainer.metrics_logger.get_metric('learning_rate', 'train'),
+          trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
           TEST_LEARNING_RATE,
       )
       return nnx.state(model, nnx.Param), trainer
@@ -427,8 +428,8 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(trainer.train_steps, grad_accu_trainer.train_steps)
     self.assertEqual(trainer.iter_steps * 2, grad_accu_trainer.iter_steps)
     np.testing.assert_allclose(
-        trainer.metrics_logger.get_metric('loss', 'train'),
-        grad_accu_trainer.metrics_logger.get_metric('loss', 'train'),
+        trainer.metrics_logger.get_metric('', 'loss', 'train'),
+        grad_accu_trainer.metrics_logger.get_metric('', 'loss', 'train'),
         atol=1e-5,
         rtol=1e-5,
     )
@@ -469,7 +470,7 @@ class PeftTrainerTest(parameterized.TestCase):
   ):
     mock_checkpoint_manager = mock.MagicMock()
     mock_checkpoint_manager_init.return_value = mock_checkpoint_manager
-    mock_checkpoint_manager.maybe_restore.return_value = resume_step
+    mock_checkpoint_manager.maybe_restore.return_value = (resume_step, {})
     mock_checkpoint_manager.save.return_value = True
     mock_checkpoint_manager.latest_step.return_value = (
         expected_save_steps[-1] - 1
@@ -499,7 +500,9 @@ class PeftTrainerTest(parameterized.TestCase):
         [
             mock.call.maybe_restore(mock.ANY, restore_only_lora_params=True),
             *[
-                mock.call.save(i, mock.ANY, save_only_lora_params=True)
+                mock.call.save(
+                    i, mock.ANY, save_only_lora_params=True, custom_metadata={}
+                )
                 for i in expected_save_steps
             ],
             mock.call.latest_step(),
@@ -564,7 +567,7 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
     trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(
-        trainer.metrics_logger.get_metric('learning_rate', 'train'),
+        trainer.metrics_logger.get_metric('', 'learning_rate', 'train'),
         TEST_LEARNING_RATE,
     )
 

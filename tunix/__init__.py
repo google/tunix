@@ -30,6 +30,8 @@ from tunix.distillation.distillation_trainer import TrainingConfig as Distillati
 from tunix.generate.sampler import CacheConfig
 from tunix.generate.sampler import Sampler
 from tunix.generate.tokenizer_adapter import TokenizerAdapter, Tokenizer
+from tunix.perf.metrics import PerfMetricsApi
+from tunix.perf.metrics import PerfMetricsConfig
 from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GrpoConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner

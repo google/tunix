@@ -12,6 +12,7 @@ class ProgressBar:
 
   def __init__(
       self,
+      metrics_prefix: str,
       metrics_logger: ml.MetricsLogger,
       initial_steps: int,
       max_steps: int,
@@ -36,6 +37,7 @@ class ProgressBar:
     self.metrics = {}
     self.initial_steps = initial_steps
     self.max_steps = max_steps
+    self.metrics_prefix = metrics_prefix
     self.metrics_logger = metrics_logger
     self.description = description
     self.disable_warning_for_metrics = {"learning_rate"}
@@ -44,9 +46,13 @@ class ProgressBar:
     """Update metric corresponding to `metric_name`."""
 
     mode_str = str(mode)
-    if self.metrics_logger.metric_exists(metric_name, mode):
-      self.metrics[f"{mode_str}_{metric_name}"] = round(
-          self.metrics_logger.get_metric(metric_name, mode).item(),
+    if self.metrics_logger.metric_exists(
+        self.metrics_prefix, metric_name, mode
+    ):
+      self.metrics[f"{self.metrics_prefix}_{mode_str}_{metric_name}"] = round(
+          self.metrics_logger.get_metric(
+              self.metrics_prefix, metric_name, mode
+          ).item(),
           ndigits,
       )
     elif metric_name not in self.disable_warning_for_metrics:
@@ -68,15 +74,15 @@ class ProgressBar:
     """Sort metrics by mode."""
     sorted_metrics = {}
 
-    for mode_metric_name, metric_value in self.metrics.items():
-      mode = mode_metric_name.split("_")[0]
+    for prefix_mode_metric_name, metric_value in self.metrics.items():
+      mode = prefix_mode_metric_name.split("_")[1]
       if mode == "train":
-        sorted_metrics[mode_metric_name] = metric_value
+        sorted_metrics[prefix_mode_metric_name] = metric_value
 
-    for mode_metric_name, metric_value in self.metrics.items():
-      mode = mode_metric_name.split("_")[0]
+    for prefix_mode_metric_name, metric_value in self.metrics.items():
+      mode = prefix_mode_metric_name.split("_")[1]
       if mode == "eval":
-        sorted_metrics[mode_metric_name] = metric_value
+        sorted_metrics[prefix_mode_metric_name] = metric_value
 
     self.metrics = sorted_metrics
 

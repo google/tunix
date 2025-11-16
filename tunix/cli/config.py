@@ -458,7 +458,11 @@ class HyperParameters:
           f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
           f"but found {num_devices}."
       )
-    return jax.make_mesh(tuple(axis_shapes), tuple(axis_names))
+    return jax.make_mesh(
+        tuple(axis_shapes),
+        tuple(axis_names),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(tuple(axis_names)),
+    )
 
   def obtain_training_config_dict(self, key):
     """Obtain training config dictionary from specified key in self.config.

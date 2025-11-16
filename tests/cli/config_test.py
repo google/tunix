@@ -295,7 +295,14 @@ class ConfigTest(parameterized.TestCase):
     mock_device_count_fn.return_value = mock_num_devices
     hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
     mesh = hp.create_mesh("model_config")
-    self.assertEqual(mesh, jax.make_mesh(expected[0], expected[1]))
+    self.assertEqual(
+        mesh,
+        jax.make_mesh(
+            expected[0],
+            expected[1],
+            axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
+        ),
+    )
 
   @parameterized.named_parameters(
       dict(
