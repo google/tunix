@@ -97,6 +97,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.data_parallel_size > 1:
       os.environ["NEW_MODEL_DESIGN"] = "True"
 
+    # tpu-inference backend recently removed this environment variable, however
+    # still set it here for backward compatibility.
+    if config.init_with_random_weights:
+      os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
