@@ -84,7 +84,8 @@ def load_and_create_model(
       Model instance with loaded weights
   """
 
-  file_dir = load_file_from_gcs(file_dir)
+  if file_dir.startswith("gs://"):
+    file_dir = load_file_from_gcs(file_dir)
 
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
 
