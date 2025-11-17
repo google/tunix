@@ -117,7 +117,7 @@ from tunix.models.gemma3 import params_safetensors as params_safetensors_lib
 local_path = '[PLACEHOLDER]'
 MESH = [(1, 1), ("fsdp", "tp")]
 
-mesh = jax.make_mesh(*MESH)
+mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 with mesh:
   model = params_safetensors_lib.create_model_from_safe_tensors(
       os.path.abspath(local_path), (model_config), mesh, dtype=jnp.bfloat16

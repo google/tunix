@@ -58,7 +58,7 @@ class VllmSamplerTest(absltest.TestCase):
 
     mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
     axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
 
   def load_llama3_model(self, model_version: str, enable_lora: bool = False):
     model_config = {

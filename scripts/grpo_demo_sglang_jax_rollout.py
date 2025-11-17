@@ -345,7 +345,7 @@ download_from_huggingface(repo_id=repo_id, model_path=model_path)
 #   gc.collect()
 #
 # def get_gemma_ref_model(ckpt_path):
-#   mesh = jax.make_mesh(*MESH)
+#   mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 #   model_config = gemma_lib.ModelConfig.gemma2_2b()
 #   abs_gemma: nnx.Module = nnx.eval_shape(
 #       lambda: gemma_lib.Transformer(model_config, rngs=nnx.Rngs(params=0))
@@ -405,7 +405,7 @@ def load_model(model_version: str, enable_lora: bool = False):
   if "Qwen" in model_version:
     mesh_shape = (1, 2)  # because the num_key_value_heads is 2
   axis_names = ("fsdp", "tp")
-  mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+  mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape))
   if "Llama-3" in model_version:
     model = llama3_params_lib.create_model_from_safe_tensors(
         model_path, model_config, mesh

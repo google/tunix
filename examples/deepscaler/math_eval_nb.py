@@ -186,7 +186,7 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.mesh = jax.make_mesh(*mesh_config)
+    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
     self.tokenizer = None
     self.model = None
     self.sampler = None

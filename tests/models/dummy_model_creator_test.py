@@ -8,13 +8,14 @@ import jax.numpy as jnp
 from tunix.models.dummy_model_creator import create_dummy_model
 from tunix.models.llama3 import model as llama3_model
 from tunix.models.qwen3 import model as qwen3_model
+from tunix.tests import test_common
 
 
 class DummyModelCreatorTest(absltest.TestCase):
 
   def _test_dummy_model_creation(self, *, model_name, model_class, config_fn, mesh_config):
     config = config_fn()
-    mesh = jax.make_mesh(*mesh_config)
+    mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
 
     with mesh:
       # pylint: disable=broad-exception-caught
@@ -81,16 +82,14 @@ class DummyModelCreatorTest(absltest.TestCase):
         mesh_config=[(1, len(jax.devices())), ("fsdp", "tp")],
     )
 
-
 if __name__ == "__main__":
   # Check if running in Jupyter/IPython environment
-  try:
-    get_ipython()
+  if test_common.is_running_in_colab():
     # Running in Jupyter/IPython - run tests directly to avoid SystemExit
     suite = unittest.TestLoader().loadTestsFromTestCase(DummyModelCreatorTest)
     runner = unittest.TextTestRunner(verbosity=2)
     runner.run(suite)
-  except NameError:
+  else:
     # Running as a script - use absltest.main()
     absltest.main()
 

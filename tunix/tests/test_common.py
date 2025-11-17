@@ -19,6 +19,7 @@ import dataclasses
 import gc
 import os
 import shutil
+import sys
 from typing import Any, List, Tuple
 
 from flax import config as flax_config
@@ -326,3 +327,13 @@ def clear_jax_arrays():
     if isinstance(obj, jnp.ndarray):
       del globals()[name]
   gc.collect()
+
+
+def is_running_in_colab() -> bool:
+  """Checks if the code is running within a Colab IPython kernel."""
+  try:
+    # get_ipython() is defined in IPython. Check for 'kernel' attribute
+    # which is characteristic of a Colab/Jupyter kernel.
+    return hasattr(sys.modules['IPython'].get_ipython(), 'kernel')
+  except (NameError, KeyError, AttributeError):
+    return False

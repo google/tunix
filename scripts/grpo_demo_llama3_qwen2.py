@@ -431,7 +431,11 @@ def get_trainer_model(ckpt_path, model_mesh, ref_model_config):
 
 def get_ref_model():
   ckpt_path = os.path.join(NNX_CKPT_DIR)
-  model_mesh = jax.make_mesh(*MESH, devices=jax.devices()[:TOTAL_TPU_TO_USE])
+  model_mesh = jax.make_mesh(
+      *MESH,
+      devices=jax.devices()[:TOTAL_TPU_TO_USE],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]),
+  )
   ref_model_config = MODEL_CONFIG[HF_MODEL_VERSION]()
   model = get_trainer_model(ckpt_path, model_mesh, ref_model_config)
   return model, model_mesh, ref_model_config
