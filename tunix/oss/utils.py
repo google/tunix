@@ -16,14 +16,14 @@
 import os
 from typing import Any
 
-import fsspec
 from absl import logging
+import fsspec
 import huggingface_hub as hf
 import kagglehub
 
 
 def pathways_available() -> bool:
-  if "proxy" not in os.getenv("JAX_PLATFORMS", ""):
+  if 'proxy' not in os.getenv('JAX_PLATFORMS', ''):
     return False
   try:
     import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import # pytype: disable=import-error
@@ -35,13 +35,17 @@ def pathways_available() -> bool:
 
 def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
   """Load file from GCS."""
-  if file_dir.startswith("/"):
-    return file_dir
+  if (
+      file_dir.startswith('/')
+      or file_dir.startswith('./')
+      or file_dir.startswith('../')
+  ):
+    return os.path.abspath(file_dir)
 
-  if not file_dir.startswith("gs://"):
-    raise ValueError(f"Invalid GCS path: {file_dir}")
+  if not file_dir.startswith('gs://'):
+    raise ValueError(f'Invalid GCS path: {file_dir}')
 
-  _, prefix = file_dir[5:].split("/", 1)
+  _, prefix = file_dir[5:].split('/', 1)
   try:
     import tempfile  # pylint: disable=g-import-not-at-top
 
@@ -49,13 +53,13 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
       target_dir = tempfile.gettempdir()
     local_dir = os.path.join(target_dir, prefix)
 
-    fsspec_fs = fsspec.filesystem("gs")
+    fsspec_fs = fsspec.filesystem('gs')
     fsspec_fs.get(file_dir, local_dir, recursive=True)
 
     return local_dir
   except ImportError as e:
     raise ImportError(
-        "Please install google-cloud-storage to load model from GCS."
+        'Please install google-cloud-storage to load model from GCS.'
     ) from e
 
 
@@ -84,4 +88,3 @@ def hf_pipeline(model_config: dict[str, Any]):
       filtered_files,
       model_config['model_download_path'],
   )
-
