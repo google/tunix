@@ -944,6 +944,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         self.rl_cluster.update_actor(
             [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
+        print("update actor scheduled.")
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
               [merged_train_micro_batch], current_eval_dataset, skip_jit
@@ -955,6 +956,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         self.rl_cluster.sync_weights()
       else:
         self.rl_cluster.global_steps += 1
+        print("No weight sync, updating global steps:", self.rl_cluster.global_steps)
 
     self.rl_cluster.close()
 

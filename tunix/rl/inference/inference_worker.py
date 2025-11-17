@@ -56,6 +56,7 @@ class InferenceWorker:
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     ref_model = self._models.get("reference")
+    print("InferenceWorker: get_ref_per_token_logps called. ref_model has embedder:", hasattr(ref_model, 'embedder'))
     if ref_model is None:
       raise ValueError("Reference model is not available.")
     return common.compute_per_token_logps(
