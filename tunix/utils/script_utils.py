@@ -27,10 +27,6 @@ except ImportError:
   gfile = None
   ENV = 'oss'
 
-if ENV == 'oss':
-  import tensorflow_datasets as tfds
-  import fsspec
-
 
 def get_dataset(
     path: str,
@@ -47,9 +43,11 @@ def get_dataset(
       data = json.loads(f.read())
   else:  # oss
     if path.startswith('gs://'):
+      import fsspec
       with fsspec.open(path, 'r') as f:
         data = json.load(f)
     else:
+      import tensorflow_datasets as tfds
       print(
           f"Downloading {dataset_name.upper()} dataset ('{split}' split) to"
           f" '{path}'..."

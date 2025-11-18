@@ -14,10 +14,28 @@ class BackendMappingMixin:
 
   @classmethod
   def _backend_registry(cls) -> Dict[str, Any]:
-    module = cls.__module__
-    package_name = module.rsplit('.', 1)[0] if '.' in module else module
-    package = importlib.import_module(package_name)
-    return getattr(package, 'BACKEND_MAPPINGS', {})
+    package_names: list[str] = []
+
+    def maybe_add_package(module_name: str | None) -> None:
+      if not module_name:
+        return
+      package = module_name.rsplit('.', 1)[0] if '.' in module_name else module_name
+      if package not in package_names:
+        package_names.append(package)
+
+    maybe_add_package(cls.__module__)
+    for base in cls.__mro__[1:]:  # Skip cls itself (already added).
+      maybe_add_package(getattr(base, '__module__', None))
+
+    for package_name in package_names:
+      try:
+        package = importlib.import_module(package_name)
+      except ModuleNotFoundError:
+        continue
+      registry = getattr(package, 'BACKEND_MAPPINGS', None)
+      if registry:
+        return registry
+    return {}
 
   @classmethod
   def mapping_for(cls, backend: str | None = None) -> Dict[str, Any]:

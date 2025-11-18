@@ -12,8 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
+"""Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models.
 
+This module is used by both synchronous and asynchronous Tunix pipelines. The
+Sglang engine internally keeps an event loop and its ``generate`` method calls
+``loop.run_until_complete``. When Tunix is already running inside an asyncio
+loop (e.g. agentic pipelines), calling ``generate`` directly will raise
+``RuntimeError: this event loop is already running``. To make the sampler
+work in both contexts we detect a running loop and dispatch the asynchronous
+variant of the Sglang API using ``run_coroutine_threadsafe`` instead of trying
+to re-enter the running loop.
+"""
+
+import asyncio
 import dataclasses
 import math
 import os
@@ -217,7 +228,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           sampling_params[i]["sampling_seed"] = seed
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    outputs = self.engine.generate(
+    outputs = self._generate_with_loop_guard(
         input_ids=[ids for ids in prompt_ids],
         sampling_params=sampling_params,
     )
@@ -255,4 +266,42 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         tokens=all_output_ids,
         padded_prompt_tokens=all_input_ids,
         logprobs=None,
+    )
+
+  def _generate_with_loop_guard(
+      self,
+      *,
+      input_ids: List[List[int]],
+      sampling_params: List[dict],
+  ):
+    """Runs the SGLang generation handling already-running event loops.
+
+    SGLang's synchronous ``Engine.generate`` calls ``loop.run_until_complete``
+    on the engine's loop. If that loop is already running (e.g., Tunix agentic
+    runner uses ``asyncio.run``), calling ``run_until_complete`` would fail.
+    In that case we schedule ``async_generate`` onto the same loop using
+    ``run_coroutine_threadsafe``. When the loop is not running we fall back to
+    the original synchronous call for minimal overhead.
+    """
+
+    # If the engine loop is alive and already running, we must not re-enter it
+    # with ``run_until_complete`` or ``run_forever``.
+    if getattr(self.engine, "loop", None) is not None:
+      loop = self.engine.loop
+      if loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(
+            self.engine.async_generate(
+                input_ids=input_ids,
+                sampling_params=sampling_params,
+                stream=False,
+            ),
+            loop,
+        )
+        return future.result()
+
+    # Default path: the engine loop is not running yet; reuse the synchronous
+    # API which will create/run the loop internally.
+    return self.engine.generate(
+        input_ids=input_ids,
+        sampling_params=sampling_params,
     )

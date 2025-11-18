@@ -737,6 +737,31 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         continue
       train_micro_batch = filtered_train_micro_batch
 
+      # def _block_until_ready(value):
+      #   if value is None:
+      #     print(f"YY vaule is None.")
+      #     return None
+      #   block_until_ready = getattr(value, "block_until_ready", None)
+      #   if block_until_ready is not None:
+      #     try:
+      #       block_until_ready()
+      #       return jax.device_get(value)
+      #     except Exception as exc:  # pylint: disable=broad-exception-caught
+      #       logging.warning(
+      #           "Failed to block leaf %s until ready: %s", type(value), exc
+      #       )
+      #       return value
+      #   return value
+
+      # def _concat_micro_batch_leaves(*xs):
+      #   ready_leaves = [_block_until_ready(x) for x in xs]
+      #   if any(leaf is None for leaf in ready_leaves):
+      #     return None
+      #   return np.concatenate(ready_leaves, axis=0)
+
+      # merged_train_micro_batch = jax.tree.map(
+      #     _concat_micro_batch_leaves, *train_micro_batch
+      # )
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
