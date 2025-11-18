@@ -390,10 +390,14 @@ def get_lora_model(base_model, mesh):
 #   )
 def load_model(model_version: str, enable_lora: bool = False):
   model_config = {
+      "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
       "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
       "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
       "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": (
           qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b
+      ),
+      "Qwen/Qwen2.5-1.5B-Instruct": (
+          qwen2_lib.ModelConfig.qwen2_5_1_5b
       ),
   }
   assert (
