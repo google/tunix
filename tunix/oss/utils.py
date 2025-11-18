@@ -35,13 +35,6 @@ def pathways_available() -> bool:
 
 def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
   """Load file from GCS."""
-  if (
-      file_dir.startswith('/')
-      or file_dir.startswith('./')
-      or file_dir.startswith('../')
-  ):
-    return os.path.abspath(file_dir)
-
   if not file_dir.startswith('gs://'):
     raise ValueError(f'Invalid GCS path: {file_dir}')
 

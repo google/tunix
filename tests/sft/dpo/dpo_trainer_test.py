@@ -122,11 +122,11 @@ class DPOTrainerTest(parameterized.TestCase):
       rejected_mask,
       use_ref_model,
   ):
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = None
     if use_ref_model:
-      ref_model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+      ref_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     dpo_config = dpo_lib.DPOTrainingConfig(
         eval_every_n_steps=5,
         max_steps=10,
@@ -205,11 +205,13 @@ class DPOTrainerTest(parameterized.TestCase):
   def test_dpo_trainer_with_string_inputs(self, train_ds):
     tokenizer = tc.MockVocab()
     model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=tokenizer.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=tokenizer.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     original_ref_variables = jax.tree.map(
         jnp.copy, nnx.state(ref_model, nnx.Param)
@@ -252,7 +254,7 @@ class DPOTrainerTest(parameterized.TestCase):
 
   def test_dpo_loss_fn(self):
     np.random.seed(0)
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     per_token_logps = np.random.normal(0, 5, size=(8, 4))
     ref_per_token_logps = np.random.normal(0, 5, size=(8, 4)).sum(axis=-1)
     train_example = dpo_lib.TrainExample(
@@ -278,10 +280,12 @@ class DPOTrainerTest(parameterized.TestCase):
     tokenizer = tc.MockVocab()
 
     model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=tokenizer.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=tokenizer.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=tokenizer.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     dpo_trainer = dpo_lib.DPOTrainer(
         model=model,
@@ -334,8 +338,8 @@ class DPOTrainerTest(parameterized.TestCase):
     self.assertEqual(out.logits_to_keep, 3)
 
   def test_dpo_prepare_inputs(self):
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0))
-    ref_model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    ref_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     dpo_trainer = dpo_lib.DPOTrainer(
         model=model,
         ref_model=ref_model,

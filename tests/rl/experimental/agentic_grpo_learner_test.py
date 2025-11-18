@@ -239,10 +239,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     vocab = test_common.MockVocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     ref_model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -375,10 +377,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       vocab = test_common.MockVocab()
       tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
       model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -480,10 +484,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       vocab = test_common.MockVocab()
       tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
       model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -575,10 +581,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       vocab = test_common.MockVocab()
       tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
       model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -658,10 +666,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       vocab = test_common.MockVocab()
       tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
       model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = test_common.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -749,10 +759,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     vocab = test_common.MockVocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     ref_model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     mesh = pxla.thread_resources.env.physical_mesh
     cluster_config = rl_cluster_lib.ClusterConfig(
@@ -815,11 +827,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     vocab = test_common.MockVocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -941,11 +955,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     vocab = test_common.MockVocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -1023,7 +1039,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     vocab = test_common.MockVocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     ref_model = test_common.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     actor_model = test_common.get_lora_model(
         ref_model,

@@ -76,7 +76,10 @@ class ConfigTest(parameterized.TestCase):
 
   def run_test_peft_trainer(self, hp):
     rngs = nnx.Rngs(hp.config["model_config"]["rng_seed"])
-    model = tc.ToyTransformer(rngs=rngs)
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(),
+        rngs=rngs,
+    )
     optimizer = hp.create_optimizer("optimizer_config")
     training_config = peft_trainer.TrainingConfig(
         **hp.obtain_training_config_dict("training_config")

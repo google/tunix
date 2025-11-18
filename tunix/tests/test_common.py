@@ -104,9 +104,10 @@ class Decoder(nnx.Module):
 class ModelConfig:
   """Model config for testing."""
 
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
+  num_layers: int = 4
+  num_kv_heads: int = 4
+  head_dim: int = 16
+  vocab_size: int = 256
 
 
 class ToyTransformer(nnx.Module, pytree=False):
@@ -114,17 +115,15 @@ class ToyTransformer(nnx.Module, pytree=False):
 
   def __init__(
       self,
+      config: ModelConfig,
+      *,
       rngs: nnx.Rngs,
-      vocab_size: int = 256,
-      num_layers: int = 4,
   ):
-    self.config = ModelConfig(
-        num_layers=num_layers, num_kv_heads=4, head_dim=16
-    )
-    self.emb = nnx.Embed(vocab_size, 16, rngs=rngs)
-    self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
+    self.config = config
+    self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
+    self.layers = [Decoder(rngs=rngs) for _ in range(config.num_layers)]
     self.lm_head = nnx.Linear(
-        in_features=16, out_features=vocab_size, rngs=rngs
+        in_features=16, out_features=config.vocab_size, rngs=rngs
     )
 
     self.head_dim = 16

@@ -294,13 +294,15 @@ class PPOLearnerTest(parameterized.TestCase):
       entropy_coef,
   ):
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     original_model_variables = jax.tree.map(
         jnp.copy, nnx.state(model, nnx.Param)
     )
 
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     value_model = utils.create_critic_model(model)
@@ -311,7 +313,8 @@ class PPOLearnerTest(parameterized.TestCase):
 
     if use_reward_model:
       reward_model = tc.ToyTransformer(
-          rngs=nnx.Rngs(2), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(2),
       )
       reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
@@ -563,13 +566,15 @@ class PPOLearnerTest(parameterized.TestCase):
       return wrapper
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     original_model_variables = jax.tree.map(
         jnp.copy, nnx.state(model, nnx.Param)
     )
 
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     value_model = utils.create_critic_model(model)
@@ -579,7 +584,7 @@ class PPOLearnerTest(parameterized.TestCase):
     )
 
     reward_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(2), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(2)
     )
     reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 

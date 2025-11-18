@@ -83,9 +83,11 @@ class RlClusterTest(parameterized.TestCase):
     )
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     original_actor_mesh = utils.get_pytree_mesh_info(nnx.state(model))
@@ -157,7 +159,9 @@ class RlClusterTest(parameterized.TestCase):
         ),
     )
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     perf_config = rl_cluster_lib.perf_metrics.PerfMetricsConfig()
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
@@ -228,7 +232,9 @@ class RlClusterTest(parameterized.TestCase):
     mock_tokenizer.pad_id = 0
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
 
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
@@ -351,9 +357,11 @@ class RlClusterTest(parameterized.TestCase):
       )
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     original_actor_mesh = utils.get_pytree_mesh_info(nnx.state(model))

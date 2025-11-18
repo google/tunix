@@ -228,10 +228,13 @@ class GRPOLearnerTest(parameterized.TestCase):
   )
   def test_grpo_learner(self, reward_fns, loss_algo):
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -505,10 +508,12 @@ class GRPOLearnerTest(parameterized.TestCase):
       return wrapper
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -615,7 +620,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     vocab = tc.MockVocab()
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
     actor_model = tc.get_lora_model(
         ref_model,
@@ -691,9 +696,11 @@ class GRPOLearnerTest(parameterized.TestCase):
         raise ValueError('test exception')
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -740,9 +747,11 @@ class GRPOLearnerTest(parameterized.TestCase):
 
   def test_resume_training(self):
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -794,7 +803,7 @@ class GRPOLearnerTest(parameterized.TestCase):
       temp_path = tempfile.TemporaryDirectory().name
 
     model2 = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     cluster_config2 = rl_cluster_lib.ClusterConfig(
@@ -863,10 +872,12 @@ class GRPOLearnerTest(parameterized.TestCase):
       return [1.0] * len(prompts)
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
 
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -1007,10 +1018,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     ):
       vocab = tc.MockVocab()
       model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -1135,10 +1148,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     ):
       vocab = tc.MockVocab()
       model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -1239,9 +1254,11 @@ class GRPOLearnerTest(parameterized.TestCase):
   )
   def test_compute_rewards_shape(self, reward_fns):
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh

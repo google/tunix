@@ -60,7 +60,8 @@ class SamplerTest(parameterized.TestCase):
   def test_samples_padding_output(self, max_prompt_length, echo, return_logits):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
@@ -135,7 +136,8 @@ class SamplerTest(parameterized.TestCase):
   def test_samples(self, max_prompt_length, echo):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
@@ -221,7 +223,8 @@ class SamplerTest(parameterized.TestCase):
   def test_prompt_padding_bucketization(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
@@ -254,7 +257,7 @@ class SamplerTest(parameterized.TestCase):
   def test_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
@@ -272,7 +275,8 @@ class SamplerTest(parameterized.TestCase):
     ).logits
 
     new_transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
     )
     sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
     new_logits = sampler(
@@ -285,7 +289,10 @@ class SamplerTest(parameterized.TestCase):
   def test_lora_state_update(self):
     vocab = tc.MockVocab()
     transformer = tc.get_lora_model(
-        tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+        tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+            rngs=nnx.Rngs(0),
+        )
     )
 
     sampler = sampler_lib.Sampler(
@@ -304,7 +311,10 @@ class SamplerTest(parameterized.TestCase):
     ).logits
 
     new_transformer = tc.get_lora_model(
-        tc.ToyTransformer(rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize())
+        tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+            rngs=nnx.Rngs(42),
+        )
     )
     # Since LoRA_b is initialized to 0, we need to add a small perturbation to
     # the LoRA params to make sure that the new params are different from the
@@ -324,7 +334,8 @@ class SamplerTest(parameterized.TestCase):
     vocab = tc.MockVocab()
 
     transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize(), num_layers=4
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), num_layers=4),
+        rngs=nnx.Rngs(0),
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
@@ -338,7 +349,8 @@ class SamplerTest(parameterized.TestCase):
     )
 
     new_transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize(), num_layers=6
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), num_layers=6),
+        rngs=nnx.Rngs(42),
     )
     with self.assertRaisesRegex(ValueError, '.*must have the same structure.*'):
       sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
@@ -348,7 +360,10 @@ class SamplerTest(parameterized.TestCase):
 
     transformer = tc.get_lora_model(
         tc.ToyTransformer(
-            rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize(), num_layers=4
+            config=tc.ModelConfig(
+                vocab_size=vocab.GetPieceSize(), num_layers=4
+            ),
+            rngs=nnx.Rngs(0),
         )
     )
     sampler = sampler_lib.Sampler(
@@ -364,7 +379,10 @@ class SamplerTest(parameterized.TestCase):
 
     new_transformer = tc.get_lora_model(
         tc.ToyTransformer(
-            rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize(), num_layers=6
+            config=tc.ModelConfig(
+                vocab_size=vocab.GetPieceSize(), num_layers=6
+            ),
+            rngs=nnx.Rngs(42),
         )
     )
     with self.assertRaisesRegex(ValueError, '.*must have the same structure.*'):
@@ -373,7 +391,8 @@ class SamplerTest(parameterized.TestCase):
   def test_eos_tokens(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        rngs=nnx.Rngs(42), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
     )
     sampler = sampler_lib.Sampler(
         transformer=transformer,
