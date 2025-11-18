@@ -672,6 +672,8 @@ class PeftTrainer:
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
+          print("Pefttrainer: train_step called. self.model has embedder:", hasattr(self.model, 'embedder'))
+
           train_loss, aux = train_step(
               self.model, self.optimizer, train_example
           )
