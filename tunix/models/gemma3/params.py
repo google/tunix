@@ -169,7 +169,7 @@ def _extract_gemma3_lora_layers(layer: Any) -> dict[str, tuple[Any, Any]]:
     }
   return {}
 
-def _gemma3_state_key_transform(lora_name: str) -> str:
+def _gemma3_state_key_to_safetensors_key(lora_name: str) -> str:
   """Transform Gemma3 layer path to safetensors state dict key.
 
   Args:
@@ -193,7 +193,7 @@ def save_lora_merged_model_as_safetensors(
     output_dir: str,
     lora_model: model_lib.Gemma3,
     rank: int,
-    alpha: int,
+    alpha: float,
 ):
   """Saves a Gemma3 model with LoRA weights merged in safetensors format.
 
@@ -210,9 +210,8 @@ def save_lora_merged_model_as_safetensors(
       lora_model=lora_model,
       rank=rank,
       alpha=alpha,
-      state_key_transform_fn=_gemma3_state_key_transform,
-      attn_field_patterns=('q_einsum', 'attn_vec_einsum'),
-      mlp_field_patterns=('gate_proj', 'up_proj', 'down_proj'),
+      state_key_transform_fn=_gemma3_state_key_to_safetensors_key,
+      field_patterns=('q_einsum', 'attn_vec_einsum', 'gate_proj', 'up_proj', 'down_proj'),
       custom_layer_extractor_fn=_extract_gemma3_lora_layers,
   )
 

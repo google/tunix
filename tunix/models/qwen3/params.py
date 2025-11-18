@@ -129,7 +129,7 @@ def create_model_from_safe_tensors(
   )
 
 
-def _qwen3_state_key_transform(lora_name: str) -> str:
+def _qwen3_state_key_to_safetensors_key(lora_name: str) -> str:
   """Transform Qwen3 layer path to safetensors state dict key.
 
   Args:
@@ -146,7 +146,7 @@ def save_lora_merged_model_as_safetensors(
     output_dir: str,
     lora_model: model_lib.Qwen3,
     rank: int,
-    alpha: int,
+    alpha: float,
 ):
   """Saves a Qwen3 model with LoRA weights merged in safetensors format.
 
@@ -163,8 +163,7 @@ def save_lora_merged_model_as_safetensors(
       lora_model=lora_model,
       rank=rank,
       alpha=alpha,
-      state_key_transform_fn=_qwen3_state_key_transform,
-      attn_field_patterns=('q_proj', 'k_proj', 'v_proj', 'o_proj'),
-      mlp_field_patterns=('gate_proj', 'up_proj', 'down_proj'),
+      state_key_transform_fn=_qwen3_state_key_to_safetensors_key,
+      field_patterns=('q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'),
   )
 

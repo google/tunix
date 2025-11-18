@@ -18,6 +18,7 @@ import os
 import shutil
 from typing import Any, Callable
 
+from flax import nnx
 import jax.numpy as jnp
 import safetensors.numpy as safe_np
 
@@ -26,15 +27,35 @@ def qwix_path_to_str(qwix_path) -> str:
     return '.'.join([str(field) for field in qwix_path])
 
 
+def _extract_lora_from_component(component: Any, proj_name: str, lora_a_attr: str, lora_b_attr: str) -> tuple[str, tuple[Any, Any]] | None:
+  """Extracts LoRA weights from a component (attn or mlp) if projection exists.
+
+  Args:
+    component: The component (e.g., layer.attn or layer.mlp) to check.
+    proj_name: Name of the projection to look for (e.g., 'q_proj', 'gate_proj').
+    lora_a_attr: Name of the LoRA A matrix attribute (e.g., 'w_lora_a', 'kernel_lora_a').
+    lora_b_attr: Name of the LoRA B matrix attribute (e.g., 'w_lora_b', 'kernel_lora_b').
+
+  Returns:
+    A tuple of (path_str, (lora_a, lora_b)) if the projection exists, None otherwise.
+  """
+  if hasattr(component, proj_name):
+    proj = getattr(component, proj_name)
+    path = qwix_path_to_str(proj.qwix_path)
+    lora_a = getattr(proj, lora_a_attr)
+    lora_b = getattr(proj, lora_b_attr)
+    return (path, (lora_a, lora_b))
+  return None
+
+
 def save_lora_merged_model_as_safetensors(
     local_model_path: str,
     output_dir: str,
     lora_model: Any,
     rank: int,
-    alpha: int,
+    alpha: float,
     state_key_transform_fn: Callable[[str], str],
-    attn_field_patterns: tuple[str, ...],
-    mlp_field_patterns: tuple[str, ...],
+    field_patterns: tuple[str, ...],
     custom_layer_extractor_fn: Callable[[Any], Any] | None = None,
 ):
   """Saves a model with LoRA weights merged in safetensors format.
@@ -50,10 +71,7 @@ def save_lora_merged_model_as_safetensors(
     alpha: LoRA alpha used during training.
     state_key_transform_fn: Function that transforms model layer paths to
       safetensors state dict keys.
-    attn_field_patterns: Tuple of attention projection field names to look for
-      in each layer.
-    mlp_field_patterns: Tuple of MLP projection field names to look for in each
-      layer.
+    field_patterns: Tuple of projection field names to look for in each layer (both attn and mlp).
     custom_layer_extractor_fn: Optional function that extracts or updates LoRA
       layers for a given layer; it should accept the current layer and return a dict
       of the new/updated LoRA layers' names as strings to a tuple of the
@@ -67,17 +85,16 @@ def save_lora_merged_model_as_safetensors(
   # Extract LoRA layers using the model-specific function
   lora_layers = {}
   for layer in lora_model.layers:
-    for proj_name in attn_field_patterns:
-      if hasattr(layer.attn, proj_name):
-        proj = getattr(layer.attn, proj_name)
-        path = qwix_path_to_str(proj.qwix_path)
-        lora_layers[path] = (proj.w_lora_a, proj.w_lora_b)
+    for proj_name in field_patterns:
+      # Check attention layers
+      if result := _extract_lora_from_component(layer.attn, proj_name, 'w_lora_a', 'w_lora_b'):
+        path, lora_params = result
+        lora_layers[path] = lora_params
 
-    for proj_name in mlp_field_patterns:
-      if hasattr(layer.mlp, proj_name):
-        proj = getattr(layer.mlp, proj_name)
-        path = qwix_path_to_str(proj.qwix_path)
-        lora_layers[path] = (proj.kernel_lora_a, proj.kernel_lora_b)
+      # Check MLP layers
+      if result := _extract_lora_from_component(layer.mlp, proj_name, 'kernel_lora_a', 'kernel_lora_b'):
+        path, lora_params = result
+        lora_layers[path] = lora_params
 
     if custom_layer_extractor_fn:
       lora_layers |= custom_layer_extractor_fn(layer)
