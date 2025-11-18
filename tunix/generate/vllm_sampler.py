@@ -36,6 +36,7 @@ from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sampling_params import SamplingParams
+import numpy as np
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -370,6 +371,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.sampling_params = sampling_params
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
+    with np.printoptions(threshold=np.inf, linewidth=np.inf):
+      logger.info(f"--- prompt_ids: %s", prompt_ids)
+
     prompt_objects = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids]
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, self.sampling_params)
