@@ -20,6 +20,7 @@ import gc
 import logging
 import math
 import re
+import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from flax import nnx
@@ -637,6 +638,7 @@ def transfer_state_with_mappings(
   Returns:
     The target state with the transferred values.
   """
+  start_time = time.time()  # start time for weight conversion
   # Get flat target state
   tgt_flat_list = dst_state.flat_state()
   # Build sharding dictionary if resharding is needed
@@ -699,7 +701,17 @@ def transfer_state_with_mappings(
       else:
         tgt_param = resharded_values_flat_dict[tgt_key]
 
-  return dst_state.from_flat_path(tgt_flat_list)
+  logging.info(
+      'Weight conversion to VLLM format took %s seconds',
+      time.time() - start_time,
+  )
+
+  transfer_start_time = time.time()
+  transferred_state = dst_state.from_flat_path(tgt_flat_list)
+  logging.info(
+      'Transferring state took %s seconds', time.time() - transfer_start_time
+  )
+  return transferred_state
 
 
 def verify_state_closeness(golden_state, state, atol=1e-2):
