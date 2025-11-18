@@ -46,6 +46,9 @@ source_suffix = [".rst", ".md", ".ipynb"]
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
 html_logo = "_static/img/tunix.png"
+html_css_files = [
+    'custom.css',
+]
 
 html_theme_options = {
     "show_toc_level": 2,
