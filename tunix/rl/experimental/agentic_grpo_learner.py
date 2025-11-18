@@ -33,7 +33,7 @@ import asyncio
 import contextlib
 import dataclasses
 import itertools
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Coroutine, Iterable, List, Sequence
 
 from absl import logging
 import flax
@@ -76,6 +76,9 @@ class GRPOConfig:
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
+    offpolicy_steps: If > 0, run in n-step off-policy mode. Data generation
+      of batch i+n is overlapped with training of batch i.
+      If 0, run in on-policy mode.
   """
 
   num_generations: int = 2
@@ -85,6 +88,7 @@ class GRPOConfig:
   loss_algo: str = "grpo"  # grpo or gspo-token
   system_prompt: str = ""
   max_concurrency: int = 16
+  offpolicy_steps: int = 0
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -337,12 +341,10 @@ class GRPOLearner(rl_learner.RLLearner):
     micro_batches = [cached_inputs_for_window[0]] * num_generations
     training_input = rl_utils.merge_micro_batches(micro_batches)
 
-    steps = (
-        self._iter_steps
-        if mode == rl_cluster_lib.Mode.TRAIN
-        else self._eval_iter_steps
+    prompt_index = (
+        batch_results[0].pair_index // self.grpo_config.num_generations
     )
-    trajectory_ids = self._compute_trajectory_ids(training_input, steps)
+    trajectory_ids = self._compute_trajectory_ids(training_input, prompt_index)
     assert "trajectory_ids" not in training_input
     training_input["trajectory_ids"] = trajectory_ids
     for t_id in trajectory_ids:
@@ -408,6 +410,8 @@ class GRPOLearner(rl_learner.RLLearner):
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_cluster.cluster_config.rollout_config
+    if isinstance(rollout_config, dict):
+      rollout_config = rollout_config[mode]
     max_prompt_length = rollout_config.max_prompt_length
     max_tokens_to_generate = rollout_config.max_tokens_to_generate
     all_padded_prompt_ids = []
@@ -545,10 +549,12 @@ class GRPOLearner(rl_learner.RLLearner):
       training_input: The input data for training.
       mode: The current mode (TRAIN or EVAL).
     """
-    return None
+    raise NotImplementedError(
+        "_generate_and_compute_advantage is not used in AgenticGRPOLearner"
+    )
 
   def _compute_trajectory_ids(
-      self, example: TrainingInputT, steps: int
+      self, example: TrainingInputT, prompt_index: int
   ) -> List[str]:
     """Computes the trajectory ID for each prompt in the batch.
 
@@ -556,15 +562,24 @@ class GRPOLearner(rl_learner.RLLearner):
     row_offset is the row index of the example data source and
     group_offset is the group index of the example in the generation group.
 
+    In agentic GRPO, this method is called when processing rollouts for a
+    single prompt, so `len(example["prompts"])` == `num_generations`,
+    meaning `batch_size` will be 1.
+
     Args:
-      example: The training input data.
-      steps: The number of steps taken so far.
+      example: The training input data for one prompt group.
+      prompt_index: The index of the prompt in the dataset.
 
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
     batch_size = len(example["prompts"]) // self.grpo_config.num_generations
-    row_offset = steps * batch_size
+    if batch_size != 1:
+      raise ValueError(
+          "_compute_trajectory_ids expects inputs for a single prompt group,"
+          f" but got batch_size={batch_size}"
+      )
+    row_offset = prompt_index
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),
         self.grpo_config.num_generations,
@@ -587,15 +602,72 @@ class GRPOLearner(rl_learner.RLLearner):
     return self.grpo_config.num_generations
 
   @staticmethod
-  def _run_async(coro: asyncio.Future) -> Any:
+  def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
     """Runs a coroutine, handling existing event loops correctly."""
     try:
-      # Use the running loop if one exists.
       loop = asyncio.get_running_loop()
+      # If a loop is already running, use it to run the coroutine.
       return loop.run_until_complete(coro)
     except RuntimeError:
-      # If no loop is running, start a new one.
+      # asyncio.get_running_loop() raises RuntimeError if no loop is running.
+      # If no loop is running, start a new one using asyncio.run().
       return asyncio.run(coro)
+
+  async def _run_eval_rollouts(
+      self,
+      eval_orchestrator: rollout_orchestrator.RolloutOrchestrator,
+      all_eval_prompts: List[TrainingInputT],
+  ) -> List[TrainExample]:
+    """Runs evaluation rollouts and converts results to TrainExamples."""
+    eval_examples = []
+    async for batch, cached_inputs in self._orchestrator_producer(
+        eval_orchestrator, all_eval_prompts, episodes_per_pair=1
+    ):
+      train_examples = self._batch_to_train_example(
+          batch, cached_inputs, rl_cluster_lib.Mode.EVAL
+      )
+      eval_examples.extend(train_examples)
+    return eval_examples
+
+  async def _producer(self, orchestrator, prompt_queue, train_data_queue):
+    """Produces training examples from prompts in the prompt_queue."""
+    prompt_iterator = iter(lambda: prompt_queue.get(block=True), None)
+    try:
+      async for batch, cached_inputs in self._orchestrator_producer(
+          orchestrator=orchestrator,
+          prompt_iterator=prompt_iterator,
+          episodes_per_pair=1,
+          collect_mode="Token",
+      ):
+        try:
+          train_examples = self._batch_to_train_example(
+              batch_results=batch,
+              cached_inputs_for_window=cached_inputs,
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+          for _ in range(self.grpo_config.num_iterations):
+            for train_example in train_examples:
+              train_data_queue.put(train_example)
+        except Exception as e:
+          if not isinstance(e, RuntimeError):
+            logging.exception(
+                "Exception in _producer while processing batch: %s", e
+            )
+          raise
+    finally:
+      # Signal production is complete for this batch, even if errors occurred.
+      train_data_queue.put(None)
+
+  def _data_consumer_batch_generator(
+      self, queue: queue_lib.AbstractDataQueue, batch_size: int
+  ):
+    """Yields micro-batches from a queue until a None is received."""
+    item_iterator = iter(lambda: queue.get(block=True), None)
+    while True:
+      batch = list(itertools.islice(item_iterator, batch_size))
+      if not batch:
+        return  # The iterator is exhausted.
+      yield batch
 
   def train(
       self,
@@ -626,7 +698,12 @@ class GRPOLearner(rl_learner.RLLearner):
       skip_jit: If True, JIT compilation is skipped for the training step.
     """
     full_batch_iterator = iter(train_dataset)
-    first_item = next(full_batch_iterator)
+    try:
+      first_item = next(full_batch_iterator)
+    except StopIteration:
+      self.rl_cluster.close()
+      return
+
     full_batch_size = len(first_item["prompts"])
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -655,11 +732,9 @@ class GRPOLearner(rl_learner.RLLearner):
     )
 
     logging.info("Starting GRPOLearner training loop.")
-    orchestrator = self._build_orchestrator()
-    full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
 
     all_eval_prompts = (
-        list(self._create_micro_batch_iterator(eval_dataset, 1))
+        list(self._create_micro_batch_iterator(iter(eval_dataset), 1))
         if eval_dataset
         else []
     )
@@ -669,98 +744,180 @@ class GRPOLearner(rl_learner.RLLearner):
     prompt_queue = queue_lib.SimpleDataQueue(maxsize=full_batch_size + 1)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
-    async def _producer():
-      """Produces training examples from prompts in the prompt_queue."""
-      prompt_iterator = iter(lambda: prompt_queue.get(block=True), None)
-      async for batch, cached_inputs in self._orchestrator_producer(
-          orchestrator=orchestrator,
-          prompt_iterator=prompt_iterator,
-          episodes_per_pair=1,
-          collect_mode="Token",
-      ):
+    if self.grpo_config.offpolicy_steps > 0:
+      # In off-policy mode, we pre-fill the training queue by running
+      # the producer for each of the first `offpolicy_steps` batches.
+      # Each producer run processes one batch and adds a `None`
+      # sentinel to the queue, allowing the consumer to process
+      # one batch at a time.
+      batches_for_initial_production = [first_item]
+      for _ in range(self.grpo_config.offpolicy_steps - 1):
         try:
-          train_examples = self._batch_to_train_example(
-              batch_results=batch,
-              cached_inputs_for_window=cached_inputs,
-              mode=rl_cluster_lib.Mode.TRAIN,
-          )
-          for train_example in train_examples:
-            train_data_queue.put(train_example)
-        except Exception as e:
-          logging.exception(
-              "Exception in _producer while processing batch: %s", e
-          )
-          raise
-      # Signal production is complete for this batch.
-      train_data_queue.put(None)
+          batches_for_initial_production.append(next(full_batch_iterator))
+        except StopIteration:
+          break
 
-    def data_consumer_batch_generator(
-        queue: queue_lib.AbstractDataQueue, batch_size: int
-    ):
-      """Yields micro-batches from a queue until a None is received."""
-      item_iterator = iter(lambda: queue.get(block=True), None)
-      while True:
-        batch = list(itertools.islice(item_iterator, batch_size))
-        if not batch:
-          return  # The iterator is exhausted.
-        yield batch
+      logging.info(
+          "Off-policy mode: pre-producing %d batches before training.",
+          len(batches_for_initial_production),
+      )
+      for i, batch in enumerate(batches_for_initial_production):
+        logging.info("Pre-producing batch %d...", i)
+        batch_prompt_queue = queue_lib.SimpleDataQueue(
+            maxsize=full_batch_size + 1
+        )
+        for prompt in self._create_micro_batch_iterator(iter([batch]), 1):
+          batch_prompt_queue.put(prompt)
+        batch_prompt_queue.put(None)
+        orchestrator = self._build_orchestrator()
+        producer_future = self.executor.submit(
+            self._run_async,
+            self._producer(
+                orchestrator, batch_prompt_queue, train_data_queue
+            ),
+        )
+        # This blocking call makes pre-production sequential. This is
+        # acceptable for `offpolicy_steps=1`, but for larger values, this
+        # should be removed to allow rollouts and training to run
+        # concurrently. In a fully parallel design, the trainer would signal
+        # the rollout producers to pause for weight synchronization.
+        # TODO(haoyugao): Implement a fully asynchronous pipeline to decouple the
+        # producer and consumer for off-policy training.
+        producer_future.result()
 
-    for full_batch in full_dataset_iterator:
-      # 1. Fill prompt queue for the current full batch.
-      for prompt in self._create_micro_batch_iterator([full_batch], 1):
+      items_per_batch = (
+          full_batch_size
+          * self.grpo_config.num_generations
+          * self.grpo_config.num_iterations
+      )
+      expected_queue_size = len(batches_for_initial_production) * (
+          items_per_batch + 1
+      )
+      if train_data_queue.qsize() != expected_queue_size:
+        raise ValueError(
+            f"Train data queue size mismatch: got {train_data_queue.qsize()}, "
+            f"expected {expected_queue_size}"
+        )
+      loop_iterator = full_batch_iterator
+    else:
+      loop_iterator = itertools.chain([first_item], full_batch_iterator)
+
+    for batch in loop_iterator:
+      if self.rl_cluster.global_steps >= self._training_config.max_steps:
+        logging.info(
+            "Reached max_steps: %d >= %d",
+            self.rl_cluster.global_steps,
+            self._training_config.max_steps,
+        )
+        break
+
+      # Start producer for new batch. In off-policy mode, this runs in parallel
+      # with training on data from n steps ago. In on-policy mode, training
+      # will consume from this producer immediately.
+      for prompt in self._create_micro_batch_iterator(iter([batch]), 1):
         prompt_queue.put(prompt)
-      prompt_queue.put(None)  # Signal end of prompts.
+      prompt_queue.put(None)
+      # A new orchestrator is created for each batch to ensure a clean state
+      # for the rollout generation. This prevents any state from leaking
+      # between batches and ensures the orchestrator is configured with the
+      # latest model parameters after any weight updates.
+      orchestrator = self._build_orchestrator()
+      producer_future = self.executor.submit(
+          self._run_async,
+          self._producer(orchestrator, prompt_queue, train_data_queue),
+      )
 
-      # 2. Start producer for this batch.
-      producer_future = self.executor.submit(self._run_async, _producer())
-
-      train_data_gen = data_consumer_batch_generator(
+      # Train on data d_i-n (off-policy) or d_i (on-policy), which is in queue
+      train_data_gen = self._data_consumer_batch_generator(
           train_data_queue, train_micro_batch_size * self._num_generations()
       )
 
       for train_micro_batch in train_data_gen:
-        num_examples = len(train_micro_batch)
-        self._iter_steps += num_examples
+        self._iter_steps += 1
+        merged_train_micro_batch = jax.tree.map(
+            lambda *xs: np.concatenate(xs, axis=0), *train_micro_batch
+        )
 
         # --- Evaluation Logic ---
         current_eval_dataset = None
-        # Run eval based on actor train steps, not this learner's steps
+
         if (
             all_eval_prompts
             and self.rl_cluster.actor_trainer.train_steps
             % training_config.eval_every_n_steps
             == 0
         ):
-          # Create a new orchestrator for eval to not interfere
+          self._eval_iter_steps = 0
           eval_orchestrator = self._build_orchestrator()
-
-          async def _eval_runner(current_eval_orchestrator):
-            eval_examples = []
-            self._eval_iter_steps = 0
-            async for batch, cached_inputs in self._orchestrator_producer(
-                current_eval_orchestrator, all_eval_prompts, episodes_per_pair=1
-            ):
-              train_examples = self._batch_to_train_example(
-                  batch, cached_inputs, rl_cluster_lib.Mode.EVAL
-              )
-              eval_examples.extend(train_examples)
-              self._eval_iter_steps += len(train_examples)
-            return eval_examples
-
-          eval_examples = self._run_async(_eval_runner(eval_orchestrator))
-          if eval_examples:
-            current_eval_dataset = eval_examples
+          eval_producer_future = self.executor.submit(
+              self._run_async,
+              self._run_eval_rollouts(eval_orchestrator, all_eval_prompts)
+          )
+          eval_examples = eval_producer_future.result()
+          current_eval_dataset = eval_examples
+          self._eval_iter_steps += 1
 
         # --- Training Step ---
         self.rl_cluster.update_actor(
-            train_micro_batch, current_eval_dataset, skip_jit
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
+        )
+        # TODO(haoyugao): Support PPO.
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              [merged_train_micro_batch], current_eval_dataset, skip_jit
+          )
+
+      if producer_future:
+        producer_future.result()
+
+      # --- Weight Sync Logic ---
+      if self.should_sync_weights:
+        logging.info("Syncing weights after processing full batch.")
+        self.rl_cluster.sync_weights()
+      else:
+        self.rl_cluster.global_steps += 1
+
+    # TODO(haoyugao): There will be no need to run the tail process after
+    # we decouple the producer and consumer.
+    for _ in range(self.grpo_config.offpolicy_steps):
+      # After loop, train the last batch if max_steps not reached
+      if self.rl_cluster.global_steps >= self._training_config.max_steps:
+        break
+      train_data_gen = self._data_consumer_batch_generator(
+          train_data_queue, train_micro_batch_size * self._num_generations()
+      )
+      for train_micro_batch in train_data_gen:
+        self._iter_steps += 1
+        merged_train_micro_batch = jax.tree.map(
+            lambda *xs: np.concatenate(xs, axis=0), *train_micro_batch
+        )
+        # --- Evaluation Logic ---
+        current_eval_dataset = None
+        if (
+            all_eval_prompts
+            and self.rl_cluster.actor_trainer.train_steps
+            % training_config.eval_every_n_steps
+            == -1
+        ):
+          self._eval_iter_steps = 0
+          eval_orchestrator = self._build_orchestrator()
+          eval_producer_future = self.executor.submit(
+              self._run_async,
+              self._run_eval_rollouts(eval_orchestrator, all_eval_prompts)
+          )
+          eval_examples = eval_producer_future.result()
+          current_eval_dataset = eval_examples
+          self._eval_iter_steps += 1
+
+        # --- Training Step ---
+        self.rl_cluster.update_actor(
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
-              train_micro_batch, current_eval_dataset, skip_jit
+              [merged_train_micro_batch], current_eval_dataset, skip_jit
           )
 
-      _ = producer_future.result()
       # --- Weight Sync Logic ---
       if self.should_sync_weights:
         logging.info("Syncing weights after processing full batch.")

@@ -39,7 +39,7 @@ class SglangJaxSamplerTest(absltest.TestCase):
     super().setUpClass()
     mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
     axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
 
     cls.repo_id = (  ## use smaller models to prevent OOM in v5e
         "meta-llama/Llama-3.2-3B-Instruct"
@@ -162,7 +162,7 @@ class SglangJaxSamplerTest(absltest.TestCase):
     self.assertTrue(
         np.allclose(
             tunix_state["embedder"]["input_embedding"].value,
-            sglangjax_state["transformer"]["embed_tokens"]["embedding"].value,
+            sglangjax_state["model"]["embed_tokens"]["embedding"].value,
         )
     )
 

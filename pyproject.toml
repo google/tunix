@@ -7,7 +7,7 @@ authors = [
 description = "A lightweight JAX-native LLM post-training framework."
 requires-python = ">=3.11"
 readme = "README.md"
-license = "Apache-2.0"
+license = { text = "Apache-2.0" }
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -20,7 +20,8 @@ classifiers = [
 dependencies = [
   "datasets",
   "flax>=0.11.1",
-  "gcsfs",
+  "fsspec",  # notebook dependency
+  "google-metrax>=0.2.3",
   "grain",
   "huggingface_hub",
   "jaxtyping",
@@ -28,10 +29,11 @@ dependencies = [
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
-  "qwix",
+  "qwix<=0.1.1",  # Newer version of qwix depends on unreleased flax beyond 0.12.0
   "sentencepiece",
-  "tensorboardX",
+  "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
   "transformers",

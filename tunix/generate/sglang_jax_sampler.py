@@ -42,6 +42,8 @@ class SglangJaxConfig:
   disable_radix_cache: bool
   enable_deterministic_sampling: bool
   mapping_config: mappings.MappingConfig
+  # Note: use_sort_for_toppk_minp may be removed in the future. It depends on SGLang-Jax.
+  use_sort_for_toppk_minp: bool = True
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -108,7 +110,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["model_path"] = config.model_version
     args["precompile_bs_paddings"] = [1, 64]
     args["precompile_token_paddings"] = [8192]
-    args["disable_jax_precompile"] = True
     args["page_size"] = 64
     args["context_length"] = config.context_length
     args["tp_size"] = self._find_tp_size(config.mesh)
@@ -120,6 +121,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       args["enable_deterministic_sampling"] = True
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
+    args["use_sort_for_toppk_minp"] = config.use_sort_for_toppk_minp
     return args
 
   @property
@@ -140,7 +142,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
   def transformer_state(self):
     return nnx.split(self._model_runner.model)[1]
 
-  def tokenize(self, input_string: str) -> List[int]:
+  def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = (
@@ -159,11 +161,11 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self,
       input_strings: List[str],
       max_generation_steps: int,
-      max_prompt_length: int = None,
+      max_prompt_length: int | None = None,
       temperature: float = 0.0,
-      top_p: float = None,
-      top_k: int = None,
-      beam_size: int = None,
+      top_p: float | None = None,
+      top_k: int | None = None,
+      beam_size: int | None = None,
       seed: Optional[Union[List[int], int]] = None,
       multi_sampling: int = 1,
       return_logits: bool = True,

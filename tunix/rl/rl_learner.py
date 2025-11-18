@@ -27,6 +27,7 @@ import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.perf import metrics as metrics_lib
 from tunix.rl import common
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
@@ -161,8 +162,9 @@ class RLLearner(ABC):
       **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
-      A JAX array (shape `[num_prompts, num_reward_fns]`) of scalar rewards for
-      each prompt-completion pair. The rewards are computed using the provided
+      A JAX array (shape `[num_prompts]`) of scalar rewards for
+      each prompt-completion pair. The rewards are the sum across all the
+      provided
       reward functions.
 
     Raises:
@@ -173,9 +175,15 @@ class RLLearner(ABC):
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
-    rewards = np.zeros((len(prompts), len(self.reward_fns)))
+
+    num_prompts = len(prompts)
+    num_reward_fns = len(self.reward_fns)
+    rewards = np.zeros((num_prompts, num_reward_fns))
+
+    # Compute all rewards for each prompt-completion pair.
     for i, reward_fn in enumerate(self.reward_fns):
       r = reward_fn(prompts=prompts, completions=completions, **kwargs)
+
       if r is None:
         raise RuntimeError(
             f"Failed to obtain result from {reward_fn.__name__}. Result is"
@@ -184,58 +192,38 @@ class RLLearner(ABC):
       if isinstance(r, list) and len(r) != len(prompts):
         raise RuntimeError(
             f"Length mismatch after {reward_fn.__name__}: "
-            f"len(r)={len(r)}, len(prompts)={len(prompts)}. "
+            f"len(r)={len(r)}, len(prompts)={num_prompts}. "
             f"Content of r: {r}"
         )
+
       rewards[:, i] = np.array(r)
-      for reward in r:
-        self.rl_cluster.buffer_metrics(
-            {
-                f"rewards/{reward_fn.__name__}": (
-                    reward,
-                    np.mean,
-                ),
-            },
-            mode=mode,
-        )
 
-    rewards = np.nansum(rewards, axis=1)
-    for trajectory_idx in range(len(prompts)):
-      trajectory_rewards = rewards[trajectory_idx]
-      self.rl_cluster.buffer_metrics(
-          {
-              "rewards/sum": (
-                  np.sum(trajectory_rewards),
-                  np.mean,
-              ),
-          },
-          mode=mode,
-      )
-      self.rl_cluster.buffer_metrics(
-          {
-              "rewards/min": (
-                  np.min(trajectory_rewards),
-                  np.min,
-              ),
-          },
-          mode=mode,
-      )
-    for p, c in zip(prompts, completions):
-      self.rl_cluster.buffer_metrics(
-          {
-              "prompts": (
-                  p,
-                  None,
-              ),
-              "completions": (
-                  c,
-                  None,
-              ),
-          },
-          mode=mode,
-      )
+    # Sum rewards across all reward functions for each prompt.
+    sum_rewards = np.nansum(rewards, axis=1)
 
-    return jnp.array(rewards)
+    # Log all metrics in a single loop
+    for j, (prompt, completion) in enumerate(zip(prompts, completions)):
+      metrics_to_log = {}
+
+      # Log prompts and completions.
+      metrics_to_log["prompts"] = (prompt, None)
+      metrics_to_log["completions"] = (completion, None)
+
+      # Log the summed rewards for this trajectory.
+      trajectory_sum = sum_rewards[j]
+      metrics_to_log["rewards/sum"] = (trajectory_sum, np.mean)
+      metrics_to_log["rewards/min"] = (np.min(rewards[j]), np.min)
+      metrics_to_log["rewards/max"] = (np.max(rewards[j]), np.max)
+
+      # Log individual rewards for this trajectory
+      for i, reward_fn in enumerate(self.reward_fns):
+        metric_name = f"rewards/{reward_fn.__name__}"
+        metrics_to_log[metric_name] = (rewards[j, i], np.mean)
+
+      # Log all metrics for this trajectory in one call
+      self.rl_cluster.buffer_metrics(metrics_to_log, mode=mode)
+
+    return jnp.array(sum_rewards)
 
   def _process_accumulated_batches(
       self,
@@ -414,9 +402,10 @@ class RLLearner(ABC):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        # Fetch one training micro-batch
-        example = next(iterator)
-        cur_batch_size = len(example["prompts"])
+        with self.rl_cluster.perf.interval("data_loading"):
+          # Fetch one training micro-batch
+          example = next(iterator)
+          cur_batch_size = len(example["prompts"])
 
         # Buffer the fetched micro-batch. We accumulate micro-batches and track
         # their sizes and the total number of samples. This allows us to form a
@@ -680,14 +669,24 @@ class RLLearner(ABC):
           self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
 
         if self.should_sync_weights:
-          with jax.profiler.StepTraceAnnotation(
-              "sync_sampler_weights", step_num=initial_steps
-          ):
-            self.rl_cluster.sync_weights()
+          with self.rl_cluster.perf.interval("weight_sync"):
+            with jax.profiler.StepTraceAnnotation(
+                "sync_sampler_weights", step_num=initial_steps
+            ):
+              self.rl_cluster.sync_weights()
         else:
           self.rl_cluster.global_steps += (
               1  # manually increment the global steps.
           )
+
+        context = metrics_lib.PerfMetricsContext(
+            global_steps=self.rl_cluster.global_steps
+        )
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf.end_epoch(context),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
+
         if (
             self.rl_cluster.actor_trainer.train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps

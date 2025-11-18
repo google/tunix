@@ -24,6 +24,7 @@ import gc
 import itertools
 import operator
 import os
+import time
 from typing import Any, Callable, Dict, Tuple
 
 from absl import logging
@@ -38,6 +39,8 @@ import jaxtyping
 import optax
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
+from tunix.perf import metrics as perf_metrics
+from tunix.perf import trace as perf_trace
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -49,21 +52,8 @@ from tunix.sft import peft_trainer
 from tunix.sft import utils as sft_utils
 
 ModelOrPath = nnx.Module | str
-
-
-MetricsT = Dict[
-    str, Tuple[ArrayLike | str, Callable[[jax.Array], jax.Array] | None]
-]  # Metrics to be buffered: name -> (values, optional agg_fn)
-
-
-@dataclasses.dataclass(slots=True)
-class MetricsBuffer:
-  global_steps: int
-  # Metrics to be buffered: name -> (list of (values), optional agg_fn)
-  metrics: dict[
-      str, tuple[list[ArrayLike | str], Callable[[ArrayLike], ArrayLike] | None]
-  ] = dataclasses.field(default_factory=dict)
-  mode: str = "train"
+MetricsT = perf_metrics.MetricsT
+MetricsBuffer = perf_metrics.MetricsBuffer
 
 
 class Mode(enum.Enum):
@@ -90,7 +80,7 @@ class Role(enum.Enum):
 class RLTrainingConfig(peft_trainer.TrainingConfig):
   """RLTraining config.
 
-  Parameters:
+  Attributes:
     actor_optimizer: Optimizer for the actor model.
     critic_optimizer: Optimizer for the critic model. If None, the critic model
       will be trained in the same optimizer as the actor model.
@@ -150,7 +140,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
 class ClusterConfig:
   """Cluster config.
 
-  Parameters:
+  Attributes:
     role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
       disaggregated setup.
     rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
@@ -197,6 +187,7 @@ class RLCluster:
       reward: ModelOrPath | None = None,
       tokenizer: Any | None,
       cluster_config: ClusterConfig,
+      perf_config: perf_metrics.PerfMetricsConfig | None = None,
   ):
     self.cluster_config = cluster_config
     self.r2m = cluster_config.role_to_mesh
@@ -241,6 +232,12 @@ class RLCluster:
     )
 
     self.tokenizer = tokenizer
+    self._rl_metrics_logger = metrics_logger.MetricsLogger(
+        self.cluster_config.training_config.metrics_logging_options
+    )
+    self._buffered_train_metrics: list[MetricsBuffer] = []
+    self._buffered_eval_metrics: list[MetricsBuffer] = []
+    self._external_metrics_logger = None
     self._init_cluster()
     gc.collect()
 
@@ -249,12 +246,13 @@ class RLCluster:
     # that update the model, we should properly update the global steps.
     self.global_steps = 0
 
-    self._rl_metrics_logger = metrics_logger.MetricsLogger(
-        self.cluster_config.training_config.metrics_logging_options
-    )
-    self._buffered_train_metrics: list[MetricsBuffer] = []
-    self._buffered_eval_metrics: list[MetricsBuffer] = []
-    self._external_metrics_logger = None
+    if perf_config is None:
+      self._perf = perf_trace.NoopTracer()
+    else:
+      devices = []
+      for mesh in cluster_config.role_to_mesh.values():
+        devices.extend(mesh.devices.flatten().tolist())
+      self._perf = perf_trace.PerfTracer(devices, perf_config.custom_export_fn)
 
   def _init_backbone_sharing_map(
       self,
@@ -393,8 +391,8 @@ class RLCluster:
       from tunix.rl.rollout import vllm_rollout
       loaded_vllm_config = None
       if isinstance(
-              self.cluster_config.rollout_config, base_rollout.RolloutConfig
-          ):
+          self.cluster_config.rollout_config, base_rollout.RolloutConfig
+      ):
         loaded_vllm_config = self.cluster_config.rollout_config
       elif isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
@@ -476,7 +474,7 @@ class RLCluster:
         and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
     ):
       critic_config = copy.deepcopy(self.cluster_config.training_config)
-      critic_config.metric_prefix = "critic/"
+      critic_config.metrics_prefix = "critic"
       critic_config.pbar_description = "Critic Training"
       if critic_config.checkpoint_root_directory is not None:
         critic_config.checkpoint_root_directory = os.path.join(
@@ -488,14 +486,15 @@ class RLCluster:
           training_config=critic_config,
           custom_checkpoint_metadata_fn=lambda: {
               "global_step": self.global_steps + 1
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-longå
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          metrics_logger=self._rl_metrics_logger,
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
 
     self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
     actor_config = copy.deepcopy(self.cluster_config.training_config)
-    actor_config.metric_prefix = "actor/"
+    actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
     if actor_config.checkpoint_root_directory is not None:
       actor_config.checkpoint_root_directory = os.path.join(
@@ -507,7 +506,8 @@ class RLCluster:
         training_config=actor_config,
         custom_checkpoint_metadata_fn=lambda: {
             "global_step": self.global_steps + 1
-        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-longå
+        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+        metrics_logger=self._rl_metrics_logger,
     )
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -590,6 +590,10 @@ class RLCluster:
   def critic_trainer(self) -> rl_trainer.Trainer:
     return self._critic_trainer
 
+  @property
+  def perf(self) -> perf_trace.NoopTracer | perf_trace.PerfTracer:
+    return self._perf
+
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
@@ -604,10 +608,15 @@ class RLCluster:
         continue  # jax.monitoring does not support string values.
       if op is None:
         self._rl_metrics_logger.log(  # pytype: disable=wrong-arg-types
-            metric_name, value, metrics_buffer.mode, metrics_buffer.global_steps
+            "global",
+            metric_name,
+            value,
+            metrics_buffer.mode,
+            metrics_buffer.global_steps,
         )
       else:
         self._rl_metrics_logger.log(
+            "global",
             metric_name,
             op(value),
             metrics_buffer.mode,
@@ -667,15 +676,17 @@ class RLCluster:
         cur_metrics.metrics[metric_name][0].append(value)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.ACTOR]:
+    with self.cluster_config.role_to_mesh[Role.ACTOR] as mesh:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+      with self._perf.interval("actor_training", mesh.devices):
+        self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[Role.CRITIC]:
+    with self.cluster_config.role_to_mesh[Role.CRITIC] as mesh:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      self._critic_trainer.train(train_ds, eval_ds, skip_jit)
+      with self._perf.interval("critic_training", mesh.devices):
+        self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
   def generate(
@@ -719,7 +730,7 @@ class RLCluster:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    with self.cluster_config.role_to_mesh[Role.ROLLOUT]:
+    with self.cluster_config.role_to_mesh[Role.ROLLOUT] as mesh:
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -729,12 +740,18 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
-      outputs = [
-          self.rollout.generate(string_prompts[s], rollout_config)
-          for s in rl_utils.chunk_slices_by_size(
-              stop=len(string_prompts), step=micro_batch_size
-          )
-      ]
+
+      with self._perf.interval("rollout", mesh.devices) as interval:
+        outputs = [
+            self.rollout.generate(string_prompts[s], rollout_config)
+            for s in rl_utils.chunk_slices_by_size(
+                stop=len(string_prompts), step=micro_batch_size
+            )
+        ]
+        interval.device_end(
+            [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
+        )
+
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))

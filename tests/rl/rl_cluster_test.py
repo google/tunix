@@ -83,9 +83,11 @@ class RlClusterTest(parameterized.TestCase):
     )
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     original_actor_mesh = utils.get_pytree_mesh_info(nnx.state(model))
@@ -120,6 +122,54 @@ class RlClusterTest(parameterized.TestCase):
         nnx.state(rl_cluster.inference_worker._models['reference'])
     )
     self.assertEqual(ref_model_mesh, actor_mesh)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='2d_mesh',
+          reshape_dims=(-1, 1),
+          mesh_axes=('fsdp', 'tp'),
+      ),
+      dict(
+          testcase_name='3d_mesh',
+          reshape_dims=(1, -1, 1),
+          mesh_axes=('data', 'fsdp', 'tp'),
+      ),
+  )
+  def test_init_with_perf_config(self, reshape_dims, mesh_axes):
+    mesh = Mesh(np.array(jax.devices()).reshape(*reshape_dims), mesh_axes)
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    perf_config = rl_cluster_lib.perf_metrics.PerfMetricsConfig()
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+        perf_config=perf_config,
+    )
+    self.assertIsInstance(rl_cluster.perf, rl_cluster_lib.perf_trace.PerfTracer)
 
   def test_batch_size_config(self):
     cfg = rl_cluster_lib.RLTrainingConfig(
@@ -182,7 +232,9 @@ class RlClusterTest(parameterized.TestCase):
     mock_tokenizer.pad_id = 0
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
 
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
@@ -305,9 +357,11 @@ class RlClusterTest(parameterized.TestCase):
       )
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     original_actor_mesh = utils.get_pytree_mesh_info(nnx.state(model))

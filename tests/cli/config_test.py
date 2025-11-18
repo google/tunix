@@ -76,7 +76,10 @@ class ConfigTest(parameterized.TestCase):
 
   def run_test_peft_trainer(self, hp):
     rngs = nnx.Rngs(hp.config["model_config"]["rng_seed"])
-    model = tc.ToyTransformer(rngs=rngs)
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(),
+        rngs=rngs,
+    )
     optimizer = hp.create_optimizer("optimizer_config")
     training_config = peft_trainer.TrainingConfig(
         **hp.obtain_training_config_dict("training_config")
@@ -295,7 +298,14 @@ class ConfigTest(parameterized.TestCase):
     mock_device_count_fn.return_value = mock_num_devices
     hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
     mesh = hp.create_mesh("model_config")
-    self.assertEqual(mesh, jax.make_mesh(expected[0], expected[1]))
+    self.assertEqual(
+        mesh,
+        jax.make_mesh(
+            expected[0],
+            expected[1],
+            axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
+        ),
+    )
 
   @parameterized.named_parameters(
       dict(

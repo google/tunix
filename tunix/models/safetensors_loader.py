@@ -25,6 +25,11 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import safetensors.flax as safetensors
+# DO NOT CHNAGE THIS IMPORT. This is used in both oss and GOOGLE_INTERNAL_PACKAGE_PATH.
+from tunix.oss import utils
+from tunix.utils import compat
+
+load_file_from_gcs = utils.load_file_from_gcs
 
 
 def torch_key_to_jax_key(mapping, source_key):
@@ -78,13 +83,18 @@ def load_and_create_model(
   Returns:
       Model instance with loaded weights
   """
+  if file_dir.startswith("gs://"):
+    file_dir = load_file_from_gcs(file_dir)
+
   files = list(epath.Path(file_dir).expanduser().glob("*.safetensors"))
 
   if not files:
     raise ValueError(f"No safetensors found in {file_dir}")
 
   # Create model structure
-  context_manager = mesh if mesh is not None else contextlib.nullcontext()
+  context_manager = (
+      compat.set_mesh(mesh) if mesh is not None else contextlib.nullcontext()
+  )
 
   with context_manager:
     model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))

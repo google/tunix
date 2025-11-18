@@ -394,7 +394,7 @@ class Sampler(base_sampler.BaseSampler):
         beam_search_sampling_state=None,
     )
 
-  def tokenize(self, input_string: str) -> jax.Array:
+  def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []

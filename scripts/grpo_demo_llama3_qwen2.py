@@ -81,18 +81,42 @@ parser.add_argument(
     help="The model version to use.",
 )
 parser.add_argument(
-      "--num-batches",
-      type=int,
-      default=1869,
-      required=False,
-      help="Number of batches for training.",
-  )
+    "--num-batches",
+    type=int,
+    default=1869,
+    required=False,
+    help=(
+        "Number of batches for training. Defaults to total number of samples //"
+        " global batch size."
+    ),
+)
 parser.add_argument(
     "--num-test-batches",
     type=int,
     default=50,
     required=False,
     help="Number of test batches for evaluation.",
+)
+parser.add_argument(
+    "--global-batch-size",
+    type=int,
+    default=4,
+    required=False,
+    help="Number of global batches for learning.",
+)
+parser.add_argument(
+    "--train-micro-batch-size",
+    type=int,
+    default=2,
+    required=False,
+    help="Number of micro batches for training.",
+)
+parser.add_argument(
+    "--train-mini-batch-size",
+    type=int,
+    default=4,
+    required=False,
+    help="Number of mini batches for training.",
 )
 parser.add_argument(
     "--rollout-engine",
@@ -109,6 +133,21 @@ parser.add_argument(
     required=False,
     help="Rollout engine server model.",
 )
+parser.add_argument(
+    "--async-scheduling",
+    type=bool,
+    default=False,
+    required=False,
+    help="Rollout engine asynchronous scheduling.",
+)
+parser.add_argument(
+    "--rollout-data-parallel-size",
+    type=int,
+    default=1,
+    required=False,
+    help="Rollout engine data parallel size.",
+)
+
 
 # Parse arguments
 args = parser.parse_args()
@@ -158,12 +197,12 @@ elif "Qwen2.5-7B-Instruct" in args.model_version:
 else:
   TOTAL_TPU_TO_USE = jax.device_count()
 
-MESH = [(1, TOTAL_TPU_TO_USE), ("fsdp", "tp")]  # YY
+MESH = [(args.rollout_data_parallel_size, TOTAL_TPU_TO_USE // args.rollout_data_parallel_size), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 256
-TOTAL_GENERATION_STEPS = 1024  # YY 768
+TOTAL_GENERATION_STEPS = 768
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.9
@@ -186,17 +225,14 @@ BETA = 0.08
 EPSILON = 0.2
 
 # ====== Training ======
-# 2 is the max we can do on v5e-8 with llama3 8B model.
-# 4 is the max we can do on v5e-8 with llama3 1B model.
-TRAIN_MICRO_BATCH_SIZE = 4
 # To speed up for quick workflow validation, we can change NUM_BATCHES to e.g. 2
-NUM_BATCHES = args.num_batches
+NUM_BATCHES = min(args.num_batches, 7473 // args.global_batch_size)
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 # To speed up for quick workflow validation, we can change it to e.g. 1
 NUM_TEST_BATCHES = args.num_test_batches
 
-EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
 
 # Number of training steps.
@@ -249,7 +285,9 @@ tc.delete_directory(CKPT_DIR)
 tc.clear_jax_arrays()
 
 # Download checkpoints
-tc.download_from_huggingface(repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION)
+tc.download_from_huggingface(
+    repo_id=HF_MODEL_VERSION, model_path=VLLM_MODEL_VERSION
+)
 
 
 def download_from_gcs(zip_gcs_path, target_path):
@@ -282,6 +320,7 @@ def load_json_from_local(path):
   # with gfile.Open(path, "rb") as f:
   with open(path, "rb") as f:
     return json.loads(f.read())
+
 
 show_hbm_usage()
 
@@ -341,7 +380,9 @@ def get_dataset(path: str) -> grain.MapDataset:
   return loaded_dataset
 
 
-dataset = get_dataset(TRAIN_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_BATCHES]
+dataset = get_dataset(TRAIN_DATA_PATH).batch(args.global_batch_size)[
+    :NUM_BATCHES
+]
 
 if TRAIN_FRACTION == 1.0:
   train_dataset = dataset.repeat(NUM_EPOCHS)
@@ -352,7 +393,9 @@ else:
 
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
-test_dataset = get_dataset(TEST_DATA_PATH).batch(TRAIN_MICRO_BATCH_SIZE)[:NUM_TEST_BATCHES]
+test_dataset = get_dataset(TEST_DATA_PATH).batch(args.global_batch_size)[
+    :NUM_TEST_BATCHES
+]
 
 print(
     f"train_dataset size: {len(train_dataset)}, val_dataset size:"
@@ -388,7 +431,11 @@ def get_trainer_model(ckpt_path, model_mesh, ref_model_config):
 
 def get_ref_model():
   ckpt_path = os.path.join(NNX_CKPT_DIR)
-  model_mesh = jax.make_mesh(*MESH, devices=jax.devices()[:TOTAL_TPU_TO_USE])
+  model_mesh = jax.make_mesh(
+      *MESH,
+      devices=jax.devices()[:TOTAL_TPU_TO_USE],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]),
+  )
   ref_model_config = MODEL_CONFIG[HF_MODEL_VERSION]()
   model = get_trainer_model(ckpt_path, model_mesh, ref_model_config)
   return model, model_mesh, ref_model_config
@@ -620,7 +667,7 @@ def generate(
 
   out_data = sampler(
       input_strings=input_batch,
-      max_generation_steps=768,
+      max_generation_steps=TOTAL_GENERATION_STEPS,
       temperature=temperature,
       top_k=top_k,
       top_p=top_p,
@@ -775,8 +822,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
-        mini_batch_size=TRAIN_MICRO_BATCH_SIZE,
-        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+        mini_batch_size=args.train_mini_batch_size,
+        train_micro_batch_size=args.train_micro_batch_size,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -790,12 +837,14 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
+        data_parallel_size=MESH[0][0],
+        tensor_parallel_size=MESH[0][1],
         rollout_vllm_model_version=VLLM_MODEL_VERSION,
         rollout_vllm_hbm_utilization=0.2,
         rollout_vllm_tpu_backend_type="jax",
         rollout_vllm_server_mode=args.rollout_server_mode,
+        rollout_vllm_async_scheduling=args.async_scheduling,
     ),
-
 )
 
 grpo_config = grpo_learner.GRPOConfig(
@@ -868,7 +917,9 @@ with mesh:
 
 show_hbm_usage("After training the reference lora model")
 
-trained_ckpt_path = os.path.join(CKPT_DIR, "actor", str(MAX_STEPS), "model_params")
+trained_ckpt_path = os.path.join(
+    CKPT_DIR, "actor", str(MAX_STEPS), "model_params"
+)
 
 filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
 abs_params = jax.tree.map(

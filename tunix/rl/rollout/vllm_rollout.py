@@ -52,6 +52,9 @@ class VllmRollout(base_rollout.BaseRollout):
             lora_config=rollout_config.rollout_vllm_lora_config,
             swap_space=rollout_config.rollout_vllm_swap_space_size_gb,
             server_mode=rollout_config.rollout_vllm_server_mode,
+            async_scheduling=rollout_config.rollout_vllm_async_scheduling,
+            tensor_parallel_size=rollout_config.tensor_parallel_size,
+            data_parallel_size=rollout_config.data_parallel_size,
         ),
     )
     state = nnx.state(model)

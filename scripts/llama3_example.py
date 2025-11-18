@@ -34,7 +34,11 @@ MODEL_CP_PATH = os.path.join(temp_dir, "models", MODEL_VERSION)
 
 all_files = tc.download_from_huggingface(repo_id=MODEL_VERSION, model_path=MODEL_CP_PATH)
 
-mesh = jax.make_mesh((1, len(jax.devices())), ("fsdp", "tp"))
+mesh = jax.make_mesh(
+    (1, len(jax.devices())),
+    ("fsdp", "tp"),
+    axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+)
 config = (
     model.ModelConfig.llama3_2_1b()
 )  # pick corresponding config based on model version

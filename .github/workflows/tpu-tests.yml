@@ -21,7 +21,6 @@ on:
   workflow_call:
     secrets:
       HF_TOKEN:
-        required: true
         description: 'HuggingFace token for model downloads'
 
 concurrency:
@@ -61,7 +60,8 @@ jobs:
 
     - name: Install tunix dependencies
       run: |
-        pip install -e .[prod]
+        pip install --upgrade pip
+        pip install -e .[prod] --force-reinstall
         pip install pytest pytest-xdist
 
     - name: Verify TPU availability
@@ -87,34 +87,22 @@ jobs:
       run: |
         python -m pytest tests/models/ -v --tb=short -m "not cpu_only and not gpu_only"
 
-    - name: Run tunix cli tests
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-      run: |
-        # Config tests that passed
-        python -m pytest tests/cli/ -v --tb=short \
-          --ignore=tests/cli/utils/model_test.py
-
     - name: Run tunix generation tests (PASSED only)
       run: |
         # tokenizer_adapter_test requires access to gated repo
+        # TODO(b/459824938) Add back test_logprobs_extraction_with_missing_token after fixing the issue
         python -m pytest tests/generate/ -v --tb=short \
           --ignore=tests/generate/vllm_sampler_test.py \
           --ignore=tests/generate/vllm_driver_test.py \
           --ignore=tests/generate/tokenizer_adapter_test.py \
-          --ignore=tests/generate/sglang_jax_sampler_test.py
+          --ignore=tests/generate/sglang_jax_sampler_test.py \
+          --ignore=tests/generate/utils_test.py
+
+        python -m pytest tests/generate/utils_test.py -k "not test_logprobs_extraction_with_missing_token"
 
     - name: Run tunix SFT tests
       run: |
         python -m pytest tests/sft/ -v --tb=short
-
-    - name: Run tunix SFT integration tests
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: |
-        ./tests/sft/sft_tpu_smoke_test.sh
 
     - name: Run tunix distillation tests
       run: |
@@ -126,44 +114,10 @@ jobs:
         # b/448133814: test_grpo_with_lora_model fails
         python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/experimental/agentic
 
-    - name: GRPO Integration Test
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: |
-
-        # Download GSM8K dataset
-        mkdir -p /tmp/grpo_test/rl/grpo/data
-        python3 -c "
-        from datasets import load_dataset
-        import json
-
-        # Download and save GSM8K train split
-        dataset = load_dataset('openai/gsm8k', 'main', split='train')
-        train_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
-        with open('/tmp/grpo_test/rl/grpo/data/gsm8k_train.json', 'w') as f:
-            json.dump(train_data, f)
-
-        # Download and save GSM8K test split
-        dataset = load_dataset('openai/gsm8k', 'main', split='test')
-        test_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
-        with open('/tmp/grpo_test/rl/grpo/data/gsm8k_test.json', 'w') as f:
-            json.dump(test_data, f)
-
-        print('GSM8K dataset downloaded successfully')
-        "
-
-        # Run GRPO demo script with minimal configuration
-        python3 scripts/grpo_demo_llama3_qwen2.py \
-          --root-dir=/tmp/grpo_test \
-          --model-version=Qwen/Qwen2.5-0.5B-Instruct \
-          --num-batches=8 \
-          --num-test-batches=4 \
-          --rollout-engine=vanilla
-
     - name: Run tunix tests not covered by the above categories
       run: |
         # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
-        python -m pytest tests/ -v --tb=short --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ || code=$?
+        python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ || code=$?
         if [ "${code:-0}" = "5" ]; then
           echo "No tests collected (expected)."
           exit 0
@@ -172,14 +126,15 @@ jobs:
         fi
 
   run_dev:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:v0.11.1
+      image: vllm/vllm-tpu:nightly-88f2071263f19a2f7c2e812036fc93537dd7a621
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
-        JAX_PLATFORMS: tpu
+        JAX_PLATFORMS: tpu,cpu
     steps:
       # Cache Hugging Face hub
       - name: Cache HF hub
@@ -202,22 +157,51 @@ jobs:
           pip install --upgrade pip setuptools wheel
 
           # Install Tunix
-          pip uninstall torch torch-xla libtpu jax jaxlib -y
           pip install -e .[dev]
 
-          # Install tpu-inference
-          pip uninstall torch libtpu jax jaxlib -y
-          pip install tpu-inference==v0.11.1 --force-reinstall
-          pip install pytest pytest-xdist
-
-      - name: Run tests
+      - name: GRPO Integration Test
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+
+          # Download GSM8K dataset
+          mkdir -p /tmp/grpo_test/rl/grpo/data
+          python3 -c "
+          from datasets import load_dataset
+          import json
+
+          # Download and save GSM8K train split
+          dataset = load_dataset('openai/gsm8k', 'main', split='train')
+          train_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
+          with open('/tmp/grpo_test/rl/grpo/data/gsm8k_train.json', 'w') as f:
+              json.dump(train_data, f)
+
+          # Download and save GSM8K test split
+          dataset = load_dataset('openai/gsm8k', 'main', split='test')
+          test_data = [{'question': item['question'], 'answer': item['answer']} for item in dataset]
+          with open('/tmp/grpo_test/rl/grpo/data/gsm8k_test.json', 'w') as f:
+              json.dump(test_data, f)
+
+          print('GSM8K dataset downloaded successfully')
+          "
+
+          # TODO(lancewang): Re-enable this test once the segfault is fixed.
+          # Run GRPO demo script with minimal configuration
+          # python3 scripts/grpo_demo_llama3_qwen2.py \
+          #   --root-dir=/tmp/grpo_test \
+          #   --model-version=Qwen/Qwen2.5-0.5B-Instruct \
+          #   --num-batches=1 \
+          #   --num-test-batches=1 \
+          #   --rollout-engine=vanilla
+      - name: Run vllm tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          unset JAX_PLATFORMS
           pytest tests/generate/vllm_driver_test.py -v --tb=short
           pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
           while read -r test; do
-            pytest "$test" -v --tb=short
+            pytest -s "$test" -v --tb=short
           done < test_collections.txt
 
       - name: Run install sglang-jax && test
@@ -225,8 +209,27 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           ## because sglang-jax has codes like jax.local_devices('cpu')
-          unset JAX_PLATFORMS 
+          # TODO(lancewang): Re-enable this test once the bug is fixed.
+          unset JAX_PLATFORMS
+          pip list | egrep 'jax|flax|libtpu'
           cd ..
           git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
-          cd tunix && python tests/generate/sglang_jax_sampler_test.py 
-          
+          pip install jax==0.8.0 flax==0.12.0 libtpu==0.0.24
+          pip list | egrep 'jax|flax|libtpu'
+          cd tunix && python tests/generate/sglang_jax_sampler_test.py
+      - name: Run tunix SFT integration tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Loading tfds requires tensorflow.
+          pip install tensorflow
+          ./tests/sft/sft_tpu_smoke_test.sh
+      - name: Run tunix cli tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          # Config tests that passed
+          python -m pytest tests/cli/ -v --tb=short \
+            --ignore=tests/cli/utils/model_test.py

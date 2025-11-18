@@ -103,7 +103,7 @@ class CommonTest(parameterized.TestCase):
 
   def test_get_per_token_logps(self):
     rng = jax.random.PRNGKey(0)
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     input_tokens = jax.random.randint(rng, shape=(2, 4), minval=0, maxval=8)
     positions = jnp.ones((2, 4))
     attn_mask = common.make_causal_attn_mask(positions)
@@ -118,7 +118,7 @@ class CommonTest(parameterized.TestCase):
     )
 
   def test_compute_per_token_logps(self):
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0))
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     prompt_tokens = jnp.array([[1, 2, 3, 4], [0, 0, 1, 2], [0, 1, 2, 3]])
     completion_tokens = jnp.array(
         [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]

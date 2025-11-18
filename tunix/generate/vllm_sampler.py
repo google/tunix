@@ -62,6 +62,9 @@ class VllmConfig:
   swap_space: float = 4.0  # in GiB
   lora_config: Optional[Dict[str, Any]] = None
   server_mode: bool = False
+  async_scheduling: bool = False
+  tensor_parallel_size: int = -1
+  data_parallel_size: int = -1
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -89,8 +92,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # Select vllm TPU backend type, there are jax, torchax and torchxla
     if config.tpu_backend_type:
       os.environ["TPU_BACKEND_TYPE"] = config.tpu_backend_type
-    # Init vLLM model with random weights to speed up bootstrap time, because
-    # model weights are synced from trainer later on
+
+    # vLLM DP only works with the new model design
+    if config.data_parallel_size > 1:
+      os.environ["NEW_MODEL_DESIGN"] = "True"
+
+    # tpu-inference backend recently removed this environment variable, however
+    # still set it here for backward compatibility.
     if config.init_with_random_weights:
       os.environ["JAX_RANDOM_WEIGHTS"] = "True"
 
@@ -139,20 +147,45 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise NotImplementedError("Only support in memory weight sync as of now.")
 
-  def _find_tp_size(self, mesh: jax.sharding.Mesh) -> int:
+  def _find_total_size(self, mesh: jax.sharding.Mesh) -> int:
     """Finds the tensor parallel size from the mesh."""
     # since vllm doesn't support DP yet, simply return the total rank size.
     return math.prod(mesh.shape.values())
 
   def _vllm_config(self, config: VllmConfig):
     """Setup vllm config from Tunix Vllm config."""
+    tensor_parallel_size = config.tensor_parallel_size
+    data_parallel_size = config.data_parallel_size
+    total_mesh_devices = self._find_total_size(config.mesh)
+
+    if config.tensor_parallel_size == -1 and config.data_parallel_size == -1:
+      tensor_parallel_size = total_mesh_devices
+      data_parallel_size = 1
+    elif config.tensor_parallel_size == -1:
+      tensor_parallel_size = (
+          total_mesh_devices // data_parallel_size
+      )
+    elif config.data_parallel_size == -1:
+      data_parallel_size = (
+          total_mesh_devices // tensor_parallel_size
+      )
+
     args = {}
-    args["additional_config"] = {}
+    # Init vLLM model with random weights to speed up bootstrap time, because
+    # model weights are synced from trainer later on
+    if config.init_with_random_weights:
+      args["load_format"]="dummy"
+
     args["model"] = config.model_version
     args["max_model_len"] = config.max_model_len
-    args["tensor_parallel_size"] = self._find_tp_size(config.mesh)
     args["gpu_memory_utilization"] = config.hbm_utilization
     args["swap_space"] = config.swap_space
+
+    args["data_parallel_size"] = data_parallel_size
+    args["tensor_parallel_size"] = tensor_parallel_size
+    args["async_scheduling"] = config.async_scheduling
+
+    args["additional_config"] = {}
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
     device_indexes = config.mesh.device_ids.flatten().tolist()
@@ -199,7 +232,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise AttributeError("vLLM model runner doesn't have state.")
 
-  def tokenize(self, input_string: str) -> List[int]:
+  def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = (

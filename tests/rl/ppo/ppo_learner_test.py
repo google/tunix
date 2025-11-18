@@ -294,13 +294,15 @@ class PPOLearnerTest(parameterized.TestCase):
       entropy_coef,
   ):
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     original_model_variables = jax.tree.map(
         jnp.copy, nnx.state(model, nnx.Param)
     )
 
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     value_model = utils.create_critic_model(model)
@@ -311,7 +313,8 @@ class PPOLearnerTest(parameterized.TestCase):
 
     if use_reward_model:
       reward_model = tc.ToyTransformer(
-          rngs=nnx.Rngs(2), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(2),
       )
       reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
@@ -406,7 +409,7 @@ class PPOLearnerTest(parameterized.TestCase):
     ]:
       self.assertLen(
           ppo_learner.rl_cluster._rl_metrics_logger.get_metric_history(
-              metric_name, 'train'
+              'global', metric_name, 'train'
           ),
           ppo_learner.rl_cluster.global_steps,
       )
@@ -417,11 +420,11 @@ class PPOLearnerTest(parameterized.TestCase):
       expected_metrics.append('pg_clipfrac_lower')
     for metric_name in expected_metrics:
       self.assertLen(
-          actor_metric_logger.get_metric_history(metric_name, 'train'),
+          actor_metric_logger.get_metric_history('actor', metric_name, 'train'),
           ppo_learner._iter_steps,
       )
       self.assertLen(
-          actor_metric_logger.get_metric_history(metric_name, 'eval'),
+          actor_metric_logger.get_metric_history('actor', metric_name, 'eval'),
           ppo_learner.rl_cluster.actor_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
           msg=f'metric_name: {metric_name}',
@@ -430,11 +433,15 @@ class PPOLearnerTest(parameterized.TestCase):
     critic_metric_logger = ppo_learner.rl_cluster.critic_trainer.metrics_logger
     for metric_name in ['loss', 'vpred_mean', 'vf_clipfrac']:
       self.assertLen(
-          critic_metric_logger.get_metric_history(metric_name, 'train'),
+          critic_metric_logger.get_metric_history(
+              'critic', metric_name, 'train'
+          ),
           ppo_learner.rl_cluster.critic_trainer.train_steps,
       )
       self.assertLen(
-          critic_metric_logger.get_metric_history(metric_name, 'eval'),
+          critic_metric_logger.get_metric_history(
+              'critic', metric_name, 'eval'
+          ),
           ppo_learner.rl_cluster.critic_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
       )
@@ -559,13 +566,15 @@ class PPOLearnerTest(parameterized.TestCase):
       return wrapper
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     original_model_variables = jax.tree.map(
         jnp.copy, nnx.state(model, nnx.Param)
     )
 
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     value_model = utils.create_critic_model(model)
@@ -575,7 +584,7 @@ class PPOLearnerTest(parameterized.TestCase):
     )
 
     reward_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(2), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(2)
     )
     reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 

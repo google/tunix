@@ -19,10 +19,8 @@ import re
 from typing import Any, Tuple
 from absl import logging
 from flax import nnx
-import huggingface_hub as hf
 import jax
 import jax.numpy as jnp
-import kagglehub
 from orbax import checkpoint as ocp
 import qwix
 from tunix.generate import tokenizer_adapter as tokenizer_lib
@@ -33,14 +31,17 @@ from tunix.models.gemma3 import params as gemma3_params_lib
 from tunix.models.llama3 import model as llama3_lib
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen3 import model as qwen3_lib
+from tunix.oss import utils as oss_utils
 from tunix.rl import reshard
 
 
 # Map prefixes to the target object containing the methods.
 CONFIG_MAP = {
     'gemma': gemma_lib.ModelConfig,
+    'gemma1.1': gemma_lib.ModelConfig,
     'gemma2': gemma_lib.ModelConfig,
     'gemma3': gemma3_lib.ModelConfig,
+    'llama3': llama3_lib.ModelConfig,
     'llama3.1': llama3_lib.ModelConfig,
     'llama3.2': llama3_lib.ModelConfig,
     'qwen2.5': qwen2_lib.ModelConfig,
@@ -58,7 +59,7 @@ def get_model_module(model_name: str) -> Any:
     raise ValueError(f'Invalid model name format: {model_name}')
   model_type = match.group(0)
   # Construct the full module path, e.g.,.path.to.your.models.qwen2.params
-  if model_name.startswith('gemma2'):
+  if model_name.startswith('gemma1') or model_name.startswith('gemma2'):
     model_type = 'gemma'
   module_path = f'{_BASE_MODULE_PATH}.{model_type}.params'
   try:
@@ -108,8 +109,8 @@ def create_model_dynamically(
   return create_fn(file_dir=file_dir, config=model_config, mesh=mesh)
 
 
-def _get_core_version(model_name: str, matched_prefix: str) -> str:
-  """Extracts the core version string from the model name."""
+def _get_version(model_name: str, matched_prefix: str) -> str:
+  """Extracts the version string from the model name."""
   if not model_name.startswith(matched_prefix):
     return ''
 
@@ -122,9 +123,7 @@ def _get_core_version(model_name: str, matched_prefix: str) -> str:
   if not suffix:
     return ''
 
-  # The core version is the part before the first hyphen (e.g., in "-it")
-  core_version = suffix.split('-')[0]
-  return core_version.replace('.', '_')
+  return suffix.replace('.', '_').replace('-', '_')
 
 
 def obtain_model_params(model_name: str) -> Any:
@@ -164,7 +163,7 @@ def obtain_model_params(model_name: str) -> Any:
   logging.info('Routing %s using prefix %s', model_name, matched_prefix)
 
   family_snake = matched_prefix.replace('-', '_').replace('.', '_')
-  core_version = _get_core_version(model_name, matched_prefix)
+  core_version = _get_version(model_name, matched_prefix)
 
   if not core_version:
     raise ValueError(
@@ -256,31 +255,6 @@ def apply_lora_to_model(base_model, mesh, lora_config):
   if mesh is not None:
     lora_model = reshard.reshard_model_to_mesh(lora_model, mesh)
   return lora_model
-
-
-def _kaggle_pipeline(model_config: dict[str, Any]):
-  if 'KAGGLE_USERNAME' not in os.environ or 'KAGGLE_KEY' not in os.environ:
-    kagglehub.login()
-  os.environ['KAGGLEHUB_CACHE'] = model_config['model_download_path']
-  return kagglehub.model_download(model_config['model_id'])
-
-
-def _hf_pipeline(model_config: dict[str, Any]):
-  if 'HF_TOKEN' not in os.environ:
-    hf.login()
-  all_files = hf.list_repo_files(model_config['model_id'])
-  filtered_files = [f for f in all_files if not f.startswith('original/')]
-  for filename in filtered_files:
-    hf.hf_hub_download(
-        repo_id=model_config['model_id'],
-        filename=filename,
-        local_dir=model_config['model_download_path'],
-    )
-  logging.info(
-      'Downloaded %s to: %s',
-      filtered_files,
-      model_config['model_download_path'],
-  )
 
 
 def _gemma_conversion(
@@ -405,7 +379,7 @@ def create_model(
 
     # Download model from Kaggle requires NNX conversion and can takes long
     # time. It is recommended to save the NNX converted model for later runs.
-    ckpt_path = _kaggle_pipeline(model_config)
+    ckpt_path = oss_utils.kaggle_pipeline(model_config)
     intermediate_ckpt_dir = model_config['intermediate_ckpt_dir']
     skip_nnx_conversion: bool = os.path.exists(intermediate_ckpt_dir)
 
@@ -444,7 +418,7 @@ def create_model(
 
   elif model_source == 'huggingface':
     # for all other model
-    _hf_pipeline(model_config)
+    oss_utils.hf_pipeline(model_config)
 
   else:
     logging.error(

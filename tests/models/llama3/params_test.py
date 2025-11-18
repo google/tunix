@@ -82,7 +82,7 @@ class Llama3ParamsTest(absltest.TestCase):
       )
 
     config = config_fn()
-    mesh = jax.make_mesh(*mesh_config)
+    mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
 
     with mesh:
       # Test that model loading completes without exceptions

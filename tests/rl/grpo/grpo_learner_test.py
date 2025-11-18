@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import trace as trace_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
@@ -113,6 +114,7 @@ class GRPOLearnerTest(parameterized.TestCase):
                 )
             ),
             buffer_metrics=lambda x, mode: None,
+            perf=trace_lib.NoopTracer(),
         )
 
         self._rollout_micro_batch_size = 1
@@ -226,10 +228,13 @@ class GRPOLearnerTest(parameterized.TestCase):
   )
   def test_grpo_learner(self, reward_fns, loss_algo):
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -325,23 +330,24 @@ class GRPOLearnerTest(parameterized.TestCase):
         if isinstance(reward_fns, list)
         else ('rewards/' + reward_fns.__name__,)
     )
+    # Metric 'prompts' and 'completions' are not logged in native metric logger because jax.monitoring does not support string values.
     for metric_name in [
         'rewards/sum',
+        'rewards/min',
+        'rewards/max',
         *rewards_metrics,
-        'completions/mean_length',
-        'completions/max_length',
-        'completions/min_length',
         'test_metric',
     ]:
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
+
       self.assertLen(
-          rl_metric_logger.get_metric_history(metric_name, 'train'),
+          rl_metric_logger.get_metric_history('global', metric_name, 'train'),
           grpo_learner.rl_cluster.global_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
-          rl_metric_logger.get_metric_history(metric_name, 'eval'),
+          rl_metric_logger.get_metric_history('global', metric_name, 'eval'),
           grpo_learner.rl_cluster.actor_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
           msg=f'metric_name: {metric_name}',
@@ -350,12 +356,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
     for metric_name in ['loss', 'kl']:
       self.assertLen(
-          metric_logger.get_metric_history(metric_name, 'train'),
+          metric_logger.get_metric_history('actor', metric_name, 'train'),
           grpo_learner.rl_cluster.actor_trainer.train_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
-          metric_logger.get_metric_history(metric_name, 'eval'),
+          metric_logger.get_metric_history('actor', metric_name, 'eval'),
           grpo_learner.rl_cluster.actor_trainer.train_steps
           / cluster_config.training_config.eval_every_n_steps,
           msg=f'metric_name: {metric_name}',
@@ -502,10 +508,12 @@ class GRPOLearnerTest(parameterized.TestCase):
       return wrapper
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -590,7 +598,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertLen(
         grpo_learner.rl_cluster.actor_trainer.metrics_logger.get_metric_history(
-            'kl', 'train'
+            'actor', 'kl', 'train'
         ),
         grpo_learner.rl_cluster.actor_trainer.train_steps,
     )
@@ -612,7 +620,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     vocab = tc.MockVocab()
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
     actor_model = tc.get_lora_model(
         ref_model,
@@ -688,9 +696,11 @@ class GRPOLearnerTest(parameterized.TestCase):
         raise ValueError('test exception')
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -737,9 +747,11 @@ class GRPOLearnerTest(parameterized.TestCase):
 
   def test_resume_training(self):
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -791,7 +803,7 @@ class GRPOLearnerTest(parameterized.TestCase):
       temp_path = tempfile.TemporaryDirectory().name
 
     model2 = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     cluster_config2 = rl_cluster_lib.ClusterConfig(
@@ -860,10 +872,12 @@ class GRPOLearnerTest(parameterized.TestCase):
       return [1.0] * len(prompts)
 
     vocab = tc.MockVocab()
-    model = tc.ToyTransformer(rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize())
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
 
     ref_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
 
     mesh = pxla.thread_resources.env.physical_mesh
@@ -1004,10 +1018,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     ):
       vocab = tc.MockVocab()
       model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -1132,10 +1148,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     ):
       vocab = tc.MockVocab()
       model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
       ref_model = tc.ToyTransformer(
-          rngs=nnx.Rngs(0), vocab_size=vocab.GetPieceSize()
+          config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+          rngs=nnx.Rngs(0),
       )
 
       mesh = pxla.thread_resources.env.physical_mesh
@@ -1216,6 +1234,83 @@ class GRPOLearnerTest(parameterized.TestCase):
         grpo_learner.rl_cluster.global_steps
         + max_steps * mini_batch_size / batch_size,
     )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_reward_fn',
+          reward_fns=reward_1,
+      ),
+      dict(
+          testcase_name='multiple_reward_fns',
+          reward_fns=[
+              reward_1,
+              reward_2,
+          ],
+      ),
+      dict(
+          testcase_name='single_reward_fn_gspo',
+          reward_fns=reward_1,
+      ),
+  )
+  def test_compute_rewards_shape(self, reward_fns):
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    ref_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=2,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+    rl_cluster.with_external_metrics_logger(print)
+
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        loss_algo='grpo',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fns,
+        grpo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {'test_metric': (1.0, np.mean)}],
+    )
+    prompts = ['p0', 'p1', 'p2']
+    completions = ['c1', 'c2', 'c3']
+    answers = ['a1', 'a2', 'a3']
+    rewards = grpo_learner._compute_rewards(
+        prompts=prompts,
+        completions=completions,
+        answer=answers,
+        mode=rl_cluster_lib.Mode.TRAIN,
+    )
+    self.assertLen(rewards, len(prompts))
 
 
 if __name__ == '__main__':

@@ -26,7 +26,7 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
-from tunix.utils import container
+from tunix.utils import compat
 
 K_MASK = -2.3819763e38
 
@@ -536,7 +536,7 @@ class Llama3(BackendMappingMixin, nnx.Module):
         rngs=rngs,
         shd_config=config.shd_config,
     )
-    self.layers = container.ModuleList([
+    self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(
