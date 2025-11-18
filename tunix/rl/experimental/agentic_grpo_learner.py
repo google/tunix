@@ -33,14 +33,16 @@ import asyncio
 import contextlib
 import dataclasses
 import itertools
-from typing import Any, Coroutine, Iterable, List, Sequence
+from typing import Any, Coroutine, Iterable, List, Sequence, TypeVar
 
 from absl import logging
 import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
+from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
 from tunix.rl import utils as rl_utils
@@ -50,14 +52,13 @@ from tunix.rl.agentic.environments import task_environment
 from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
-from tunix.rl.grpo import grpo_helpers
+from tunix.rl.grpo import grpo_helpers  # pylint: disable=unused-import
+from tunix.rl.grpo import grpo_learner as grpo_learner_lib  # pylint: disable=unused-import
 from tunix.rl.queue import data_queue as queue_lib
-
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
-
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
@@ -65,7 +66,7 @@ class TrainExample(common.TrainExample):
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class GRPOConfig:
+class GRPOConfig(algo_config_lib.AlgorithmConfig):
   """Configuration for GRPO algorithm.
 
   Parameters:
@@ -80,12 +81,21 @@ class GRPOConfig:
       of batch i+n is overlapped with training of batch i.
       If 0, run in on-policy mode.
   """
-
+  algo_variant: str = "grpo"
+  advantage_estimator: str = "grpo"
+  policy_loss_fn: str = "grpo"
+  loss_agg_mode: str = "sequence-mean-token-mean"
+  loss_algo: (
+      str
+  ) = (  # grpo or gspo-token # TODO(sizhi): Remove this option once gspo is
+      # refactored to a separate loss fn.
+      "grpo"
+  )
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
   epsilon: float = 0.2
-  loss_algo: str = "grpo"  # grpo or gspo-token
+  epsilon_high: float | None = None  # 0.28 from DAPO.
   system_prompt: str = ""
   max_concurrency: int = 16
   offpolicy_steps: int = 0
@@ -96,6 +106,8 @@ class GRPOConfig:
           "num_generations must be greater than 1. Received: "
           f"{self.num_generations}"
       )
+    if self.epsilon_high is None:
+      self.epsilon_high = self.epsilon
     if self.loss_algo not in ["grpo", "gspo-token"]:
       raise ValueError(
           "loss_algo should be either grpo or gspo-token. Received: "
@@ -103,7 +115,10 @@ class GRPOConfig:
       )
 
 
-class GRPOLearner(rl_learner.RLLearner):
+TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
+
+
+class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
   """An RLLearner that implements the GRPO algorithm in an agentic setting.
 
   GRPO is a reinforcement learning algorithm designed to enhance the reasoning
@@ -122,7 +137,7 @@ class GRPOLearner(rl_learner.RLLearner):
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
       reward_fns: RewardFn | List[RewardFn],
-      grpo_config: GRPOConfig,
+      algo_config: TGrpoConfig,
       chat_parser: Any,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
@@ -135,7 +150,7 @@ class GRPOLearner(rl_learner.RLLearner):
         scalar reward for given prompts and completions. Each function should
         accept `prompts`, `completions` and optional keyword arguments, and
         return a list of float rewards.
-      grpo_config: An instance of `GRPOConfig` containing all GRPO specific
+      algo_config: An instance of `TGrpoConfig` containing all GRPO specific
         parameters.
       chat_parser: A parser to handle chat message formatting.
       metric_fns: A sequence of callables that compute metrics for the
@@ -153,25 +168,34 @@ class GRPOLearner(rl_learner.RLLearner):
            ...       # ... }
       data_shuffle_seed: The seed used to shuffle the training data.
     """  # fmt: skip
-    self.grpo_config = grpo_config
+    self.algo_config = algo_config
     self.chat_parser = chat_parser
     self.tokenizer = rl_cluster.tokenizer
     super().__init__(
         rl_cluster=rl_cluster,
+        algo_config=algo_config,
         reward_fns=reward_fns,
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,
     )
 
     # Workaround to pass loss fn with algorithm flag
-    loss_fn = lambda model, train_example, beta, epsilon: grpo_loss_fn(
+    policy_loss_fn = function_registry.get_policy_loss_fn(
+        self.algo_config.policy_loss_fn
+    )
+    logging.info(
+        "algo_config.policy_loss_fn: %s", self.algo_config.policy_loss_fn
+    )
+    logging.info("type(policy_loss_fn): %s", type(policy_loss_fn))
+
+    # Log the string representation of the callable
+    logging.info("repr(policy_loss_fn): %r", policy_loss_fn)
+    loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
         model,
         train_example,
-        beta=beta,
-        epsilon=epsilon,
+        algo_config=self.algo_config,
         pad_id=self.rl_cluster.rollout.pad_id(),
         eos_id=self.rl_cluster.rollout.eos_id(),
-        loss_algo=self.grpo_config.loss_algo,
     )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
@@ -181,13 +205,12 @@ class GRPOLearner(rl_learner.RLLearner):
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
-            "beta": self.grpo_config.beta,
-            "epsilon": self.grpo_config.epsilon,
+            "algo_config": self.algo_config,
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
-        lambda: "kl" if self.grpo_config.beta != 0.0 else None,
+        lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
 
   def _make_agent_env_pair(
@@ -215,7 +238,7 @@ class GRPOLearner(rl_learner.RLLearner):
     for key, value in single_example.items():
       if key not in ["prompts", "_original_input"]:
         task[key] = value[0]
-    agent = model_agent.ModelAgent(system_prompt=self.grpo_config.system_prompt)
+    agent = model_agent.ModelAgent(system_prompt=self.algo_config.system_prompt)
     # TODO: b/456528861 - Support both single-turn and multi-turn from config.
     env = task_environment.TaskEnvironment(
         task=task,
@@ -238,7 +261,7 @@ class GRPOLearner(rl_learner.RLLearner):
             tokenizer=self.tokenizer,
             chat_parser=self.chat_parser,
         ),
-        max_concurrency=self.grpo_config.max_concurrency,
+        max_concurrency=self.algo_config.max_concurrency,
     )
 
   async def _orchestrator_producer(
@@ -271,7 +294,7 @@ class GRPOLearner(rl_learner.RLLearner):
     def pairs_stream_generator():
       """Yield (agent, env) pairs with unique group_id per original prompt."""
       for i, single_example in enumerate(prompt_iterator):
-        for _ in range(self.grpo_config.num_generations):
+        for _ in range(self.algo_config.num_generations):
           # group_id=i ensures all generations for the same prompt are grouped
           yield self._make_agent_env_pair(single_example, group_id=i)
 
@@ -279,7 +302,7 @@ class GRPOLearner(rl_learner.RLLearner):
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pairs_stream_generator(),
-            group_size=self.grpo_config.num_generations,
+            group_size=self.algo_config.num_generations,
             group_key=lambda i, env, traj: env.task["group_id"],
             episodes_per_pair=episodes_per_pair,
             collect_mode=collect_mode,
@@ -291,7 +314,7 @@ class GRPOLearner(rl_learner.RLLearner):
 
     # Consume full groups and yield them with their original input.
     async_generator = orchestrator.yield_batches(
-        batch_size=self.grpo_config.num_generations
+        batch_size=self.algo_config.num_generations
     )
     try:
       async with contextlib.aclosing(async_generator) as stream:
@@ -337,12 +360,12 @@ class GRPOLearner(rl_learner.RLLearner):
     """
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
-    num_generations = self.grpo_config.num_generations
+    num_generations = self.algo_config.num_generations
     micro_batches = [cached_inputs_for_window[0]] * num_generations
     training_input = rl_utils.merge_micro_batches(micro_batches)
 
     prompt_index = (
-        batch_results[0].pair_index // self.grpo_config.num_generations
+        batch_results[0].pair_index // self.algo_config.num_generations
     )
     trajectory_ids = self._compute_trajectory_ids(training_input, prompt_index)
     assert "trajectory_ids" not in training_input
@@ -444,7 +467,7 @@ class GRPOLearner(rl_learner.RLLearner):
         completion_ids, eos_tok=eos_value
     )
     completion_mask = completion_mask * completion_padding_mask
-    if self.grpo_config.beta != 0.0:
+    if self.algo_config.beta != 0.0:
       ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
@@ -455,7 +478,7 @@ class GRPOLearner(rl_learner.RLLearner):
     else:
       ref_per_token_logps = None
     logging.debug("Ref logps computed.")
-    if self.grpo_config.num_iterations > 1:
+    if self.algo_config.num_iterations > 1:
       old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
@@ -483,9 +506,13 @@ class GRPOLearner(rl_learner.RLLearner):
     )
 
     logging.debug("Rewards computed: %s", rewards)
-    advantages = grpo_helpers.compute_advantages(
-        rewards, self.grpo_config.num_generations
+    advantage_estimator = function_registry.get_advantage_estimator(
+        self.algo_config.advantage_estimator
     )
+    advantages = advantage_estimator(
+        rewards=rewards, num_generations=self.algo_config.num_generations
+    )
+    logging.info("Advantages computed: %s", advantages)
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
@@ -532,7 +559,7 @@ class GRPOLearner(rl_learner.RLLearner):
     )
     return [
         rl_utils.get_batch_slice(combined_batch, slice(i, i + 1))
-        for i in range(self.grpo_config.num_generations)
+        for i in range(self.algo_config.num_generations)
     ]
 
   def _generate_and_compute_advantage(
@@ -573,7 +600,7 @@ class GRPOLearner(rl_learner.RLLearner):
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
-    batch_size = len(example["prompts"]) // self.grpo_config.num_generations
+    batch_size = len(example["prompts"]) // self.algo_config.num_generations
     if batch_size != 1:
       raise ValueError(
           "_compute_trajectory_ids expects inputs for a single prompt group,"
@@ -582,11 +609,11 @@ class GRPOLearner(rl_learner.RLLearner):
     row_offset = prompt_index
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),
-        self.grpo_config.num_generations,
+        self.algo_config.num_generations,
         axis=0,
     )
     group_offsets = np.tile(
-        np.arange(self.grpo_config.num_generations),
+        np.arange(self.algo_config.num_generations),
         batch_size,
     )
     return [
@@ -595,11 +622,11 @@ class GRPOLearner(rl_learner.RLLearner):
 
   def _num_iterations(self) -> int:
     """Returns the number of GRPO iterations per batch."""
-    return self.grpo_config.num_iterations
+    return self.algo_config.num_iterations
 
   def _num_generations(self) -> int:
     """Returns the number of generations per prompt."""
-    return self.grpo_config.num_generations
+    return self.algo_config.num_generations
 
   @staticmethod
   def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
@@ -645,7 +672,7 @@ class GRPOLearner(rl_learner.RLLearner):
               cached_inputs_for_window=cached_inputs,
               mode=rl_cluster_lib.Mode.TRAIN,
           )
-          for _ in range(self.grpo_config.num_iterations):
+          for _ in range(self.algo_config.num_iterations):
             for train_example in train_examples:
               train_data_queue.put(train_example)
         except Exception as e:
@@ -744,14 +771,14 @@ class GRPOLearner(rl_learner.RLLearner):
     prompt_queue = queue_lib.SimpleDataQueue(maxsize=full_batch_size + 1)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
-    if self.grpo_config.offpolicy_steps > 0:
+    if self.algo_config.offpolicy_steps > 0:
       # In off-policy mode, we pre-fill the training queue by running
       # the producer for each of the first `offpolicy_steps` batches.
       # Each producer run processes one batch and adds a `None`
       # sentinel to the queue, allowing the consumer to process
       # one batch at a time.
       batches_for_initial_production = [first_item]
-      for _ in range(self.grpo_config.offpolicy_steps - 1):
+      for _ in range(self.algo_config.offpolicy_steps - 1):
         try:
           batches_for_initial_production.append(next(full_batch_iterator))
         except StopIteration:
@@ -787,8 +814,8 @@ class GRPOLearner(rl_learner.RLLearner):
 
       items_per_batch = (
           full_batch_size
-          * self.grpo_config.num_generations
-          * self.grpo_config.num_iterations
+          * self.algo_config.num_generations
+          * self.algo_config.num_iterations
       )
       expected_queue_size = len(batches_for_initial_production) * (
           items_per_batch + 1
@@ -879,7 +906,7 @@ class GRPOLearner(rl_learner.RLLearner):
 
     # TODO(haoyugao): There will be no need to run the tail process after
     # we decouple the producer and consumer.
-    for _ in range(self.grpo_config.offpolicy_steps):
+    for _ in range(self.algo_config.offpolicy_steps):
       # After loop, train the last batch if max_steps not reached
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         break
@@ -926,103 +953,6 @@ class GRPOLearner(rl_learner.RLLearner):
         self.rl_cluster.global_steps += 1
 
     self.rl_cluster.close()
-
-
-def grpo_loss_fn(
-    model,
-    train_example,
-    beta,
-    epsilon,
-    loss_algo,
-    pad_id,
-    eos_id,
-):
-  """GRPO loss function.
-
-  The loss aims to maximize the expected advantage of the chosen actions while
-  constraining the policy updates to stay within a certain range of the
-  reference policy.
-
-  Args:
-    model: The policy model to be trained.
-    train_example: A `TrainExample` instance containing the processed input
-      data, including prompt IDs, completion IDs, masks, advantages, and
-      per-token log probabilities from the reference and policy models.
-    beta: The coefficient for the KL divergence penalty. A value of 0.0 means no
-      KL penalty is applied.
-    epsilon: Epsilon value for clipping.
-    loss_algo: The loss algorithm to use. Can be grpo or gspo-token.
-    pad_id: The pad ID from tokenizer.
-    eos_id: The eos ID from.
-
-  Returns:
-    A tuple containing the loss and an aux dictionary.
-  """
-  completion_ids, completion_mask = (
-      train_example.completion_ids,
-      train_example.completion_mask,
-  )
-
-  per_token_logps = common.compute_per_token_logps(
-      model,
-      prompt_tokens=train_example.prompt_ids,
-      completion_tokens=completion_ids,
-      pad_id=pad_id,
-      eos_id=eos_id,
-      stop_gradient=False,
-      return_logits=False,
-  )
-  advantages = train_example.advantages
-
-  if train_example.old_per_token_logps is None:
-    old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
-  else:
-    old_per_token_logps = train_example.old_per_token_logps
-
-  seq_importance_ratio = per_token_logps - old_per_token_logps
-  if loss_algo == "gspo-token":
-    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
-        axis=-1
-    ) / jnp.clip(completion_mask.sum(-1), min=1)
-    seq_importance_ratio = (
-        per_token_logps
-        - jax.lax.stop_gradient(per_token_logps)
-        + jnp.expand_dims(jax.lax.stop_gradient(seq_importance_ratio), axis=-1)
-    )
-    seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
-
-  coef_1 = jnp.exp(seq_importance_ratio)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon)
-
-  # TODO(tsbao): We should handle token level advantages.
-  per_token_loss = -jnp.minimum(
-      coef_1 * jnp.expand_dims(advantages, 1),
-      coef_2 * jnp.expand_dims(advantages, 1),
-  )
-
-  if loss_algo == "gspo-token":
-    loss_denominator = jnp.clip(completion_mask.sum(axis=-1), min=1)
-  else:  # grpo
-    loss_denominator = jnp.clip(completion_mask.sum(), min=1)
-
-  aux = {"kl": 0.0}
-  if beta != 0.0:
-    kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
-    )
-    per_token_loss = per_token_loss + beta * kl
-
-    # Log mean KL.
-    aux["kl"] = (kl * completion_mask).sum() / loss_denominator.mean()
-
-  if loss_algo == "gspo-token":
-    loss = (
-        (per_token_loss * completion_mask).sum(axis=-1) / loss_denominator
-    ).mean()
-  else:  # grpo
-    loss = (per_token_loss * completion_mask).sum() / loss_denominator
-
-  return loss, aux
 
 
 GrpoConfig = GRPOConfig

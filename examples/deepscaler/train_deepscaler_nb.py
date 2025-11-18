@@ -373,8 +373,10 @@ with mesh:
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
-    reward_fns=[math_rewards.math_reward,],
-    grpo_config=grpo_config,
+    reward_fns=[
+        math_rewards.math_reward,
+    ],
+    algo_config=grpo_config,
     chat_parser=chat_parser,
 )
 
