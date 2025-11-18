@@ -767,6 +767,7 @@ class RLCluster:
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
     """
+    print(f"YY rollout engine prompts: {prompts}")
     if apply_chat_template:
       if self.tokenizer is None:
         raise ValueError("Tokenizer must be initialized to use chat templates.")
@@ -824,6 +825,7 @@ class RLCluster:
     if isinstance(outputs[0].logits, jnp.ndarray):
       logits = jnp.concatenate([out.logits for out in outputs], axis=0)
 
+    print(f"YY rollout generated texts: {texts}")
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,

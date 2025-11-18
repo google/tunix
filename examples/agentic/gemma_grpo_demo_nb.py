@@ -33,6 +33,7 @@ if ENV == 'oss':
   # In OSS, gfile and xprof_session are not available.
   gfile = None
   xprof_session = None
+  import transformers
 
 # %%
 import jax
@@ -61,6 +62,8 @@ with adhoc_context:
   from tunix.rl.agentic.parser.chat_template_parser import parser
   from tunix.generate import tokenizer_adapter as tokenizer_lib
   from tunix.models.gemma import model as gemma_lib
+  from tunix.models.llama3 import model as llama_lib
+  from tunix.models.qwen2 import model as qwen2_lib
   from tunix.sft import utils
   from tunix.utils import script_utils
   from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
@@ -84,11 +87,14 @@ if ENV == 'g3':
   # ====== Checkpoint saving ======
   run_name = f'grpo_demo_{int(time.time())}'
   CKPT_DIR = f'/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/grpo/demo/experiments/gemma2/training_runs/{run_name}'
+
+
+  MODEL_VERSION = '2b-it'
 else:  # oss
   # ====== Data ======
   # Data will be downloaded to these local directories.
-  TRAIN_DATA_PATH = './data/train'
-  TEST_DATA_PATH = './data/test'
+  TRAIN_DATA_PATH = 'gs://tunix/rl/grpo/data/gsm8k_train.json'
+  TEST_DATA_PATH = 'gs://tunix/rl/grpo/data/gsm8k_test.json'
   # ====== Base Model ======
   # Model will be downloaded from Kaggle and converted to an intermediate
   # format.
@@ -98,11 +104,16 @@ else:  # oss
   run_name = f'grpo_demo_{int(time.time())}'
   CKPT_DIR = f'/tmp/content/ckpts/{run_name}'
 
+  # vLLM Jax backend doesn't have Gemma implementation yet.
+  # MODEL_VERSION = 'meta-llama/Llama-3.2-1B-Instruct' # SGLang doesn't support
+  # MODEL_VERSION = 'meta-llama/Llama-3.2-3B-Instruct' # OOMs
+  MODEL_VERSION = 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B'  # cli doesn't support
+  # MODEL_VERSION = 'Qwen/Qwen2.5-1.5B-Instruct' # SGLang error
+
 # %%
 # --- Data & Model Configs ---
 TRAIN_FRACTION = 1.0
-MODEL_VERSION = '2b-it'
-
+MODEL_SOURCE = 'huggingface'  # 'kaggle' or 'huggingface'
 # %%
 # ====== Reproducibility ======
 SEED = 42
@@ -115,7 +126,11 @@ ALPHA = 64.0
 # %%
 # ====== Sharding ======
 # Defines how the model and data are distributed across the available devices.
-MESH = [(2, 4), ('fsdp', 'tp')]
+TOTAL_TPU_TO_USE = 4
+MESH = [(1, TOTAL_TPU_TO_USE), ('fsdp', 'tp')]
+ROLLOUT_MESH = [(1, TOTAL_TPU_TO_USE), ('fsdp', 'tp')]
+ROLLOUT_HBM_UTILIZATION = 0.2
+CLUSTER_SETUP = 'disaggregated'  # 'disaggregated' or 'colocated'
 
 # %%
 # ====== GRPO ======
@@ -144,6 +159,10 @@ BETA = 0.08
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 EPSILON = 0.2
+
+# %%
+# ====== Rollout ======
+ROLLOUT_ENGINE = 'sglang_jax'  # can be 'vllm' or 'vanilla', 'sglang_jax'
 
 # %%
 # ====== Training ======
@@ -290,14 +309,26 @@ for ele in train_dataset[:1]:
 MODEL_CONFIG = {
     '2b': gemma_lib.ModelConfig.gemma2_2b,
     '2b-it': gemma_lib.ModelConfig.gemma2_2b,
+    'meta-llama/Llama-3.2-1B-Instruct': llama_lib.ModelConfig.llama3_2_1b,
+    'meta-llama/Llama-3.2-3B-Instruct': llama_lib.ModelConfig.llama3_2_3b,
+    'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B': (
+      qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b
+    ),
+    'Qwen/Qwen2.5-1.5B-Instruct': (
+      qwen2_lib.ModelConfig.qwen2_5_1_5b
+    )
 }
 
+if 'llama' in MODEL_VERSION:
+  model_impl = llama_lib.Llama3
+elif 'Qwen' in MODEL_VERSION:
+  model_impl = qwen2_lib.Qwen2
+else:
+  model_impl = gemma_lib.Transformer
 
 def get_ref_model():
   """Loads the reference model, from CNS in g3 or Kaggle in OSS."""
-  mesh = jax.make_mesh(
-      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
-  )
+  mesh = jax.make_mesh(*MESH, devices=jax.devices()[:TOTAL_TPU_TO_USE],axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 
   if ENV == 'g3':
     model_config = MODEL_CONFIG[MODEL_VERSION]()
@@ -305,7 +336,7 @@ def get_ref_model():
     abs_gemma: nnx.Module = nnx.eval_shape(
         lambda: gemma_lib.Gemma(model_config, rngs=nnx.Rngs(params=0))
     )
-    abs_state = nnx.state(abs_gemma)
+    abs_state = nnx.state(abs_model)
     abs_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.float32, sharding=s),
         abs_state,
@@ -314,30 +345,48 @@ def get_ref_model():
     checkpointer = ocp.StandardCheckpointer()
     restored_params = checkpointer.restore(ckpt_path, target=abs_state)
 
-    graph_def, _ = nnx.split(abs_gemma)
-    gemma = nnx.merge(graph_def, restored_params)
-    return gemma, mesh, None
+    graph_def, _ = nnx.split(abs_model)
+    model = nnx.merge(graph_def, restored_params)
+    return model, mesh, None
   else:  # oss
-    model_name = f'gemma2-{MODEL_VERSION}'
+    if MODEL_SOURCE == 'kaggle':
+      MODEL_ID = f'google/gemma-2/flax/{model_name}'
+      model_name = f'gemma2-{MODEL_VERSION}'
+    elif MODEL_SOURCE == 'huggingface':
+      MODEL_ID = MODEL_VERSION
+      if MODEL_VERSION == 'meta-llama/Llama-3.2-1B-Instruct':
+        model_name = "llama3.2-1b"
+      elif MODEL_VERSION == 'meta-llama/Llama-3.2-3B-Instruct':
+        model_name = "llama3.2-3b"
+      elif MODEL_VERSION == "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B":
+        model_name = "deepseek-r1-distill-qwen-1.5b"
+      elif MODEL_VERSION == "Qwen/Qwen2.5-1.5B-Instruct":
+        model_name = "qwen2.5-1.5b"
+      else:
+        raise ValueError("Not supported model")
+
     model_config_dict = {
         'model_name': model_name,
-        'model_source': 'kaggle',
-        'model_id': f'google/gemma-2/flax/{model_name}',
+        'model_source': MODEL_SOURCE,
+        'model_id': MODEL_ID,
         'model_download_path': MODEL_DOWNLOAD_PATH,
         'intermediate_ckpt_dir': NNX_CKPT_DIR,
         'model_display': False,
     }
     tokenizer_config = {'tokenizer_path': None}
-    gemma, tokenizer_path = model_utils.create_model(
+    model, tokenizer_path = model_utils.create_model(
         model_config_dict, tokenizer_config, mesh
     )
-    return gemma, mesh, tokenizer_path
-
+    return model, mesh, tokenizer_path
 
 # %%
 # Load the reference model (the base Gemma 2 model).
-gemma, mesh, tokenizer_path = get_ref_model()
-nnx.display(gemma)
+model, mesh, tokenizer_path = get_ref_model()
+nnx.display(model)
+
+rollout_mesh = mesh
+if CLUSTER_SETUP == 'disaggregated':
+  rollout_mesh = jax.make_mesh(*ROLLOUT_MESH, devices=jax.devices()[TOTAL_TPU_TO_USE:],axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]))
 
 # %%
 # Create the policy model by applying LoRA to the reference model.
@@ -346,10 +395,10 @@ lora_config = {
     'rank': RANK,
     'alpha': ALPHA,
 }
-lora_gemma = model_utils.apply_lora_to_model(
-    gemma, mesh=mesh, lora_config=lora_config
+lora_model = model_utils.apply_lora_to_model(
+    model, mesh=mesh, lora_config=lora_config
 )
-nnx.display(lora_gemma)
+nnx.display(lora_model)
 
 # %%
 # Check memory usage after loading models.
@@ -540,13 +589,35 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
+vllm_args = {
+  "rollout_vllm_model_version": MODEL_VERSION,
+  "rollout_vllm_hbm_utilization": ROLLOUT_HBM_UTILIZATION,
+  "rollout_vllm_tpu_backend_type": "jax",
+  "rollout_vllm_server_mode": True,
+  "rollout_vllm_async_scheduling": False,
+}
+sglang_args = {
+  "rollout_sglang_jax_model_version": MODEL_VERSION,
+  "rollout_sglang_jax_context_length": MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+  "rollout_sglang_jax_mem_fraction_static": ROLLOUT_HBM_UTILIZATION,
+  "rollout_sglang_jax_init_with_random_weights": True,
+  "rollout_sglang_jax_disable_radix_cache": True,
+  "rollout_sglang_jax_enable_deterministic_sampling": False,
+}
+
+additional_rollout_engine_args = {}
+if ROLLOUT_ENGINE == 'vllm':
+  additional_rollout_engine_args = vllm_args
+elif ROLLOUT_ENGINE == 'sglang_jax':
+  additional_rollout_engine_args = sglang_args
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: mesh,
         rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
-    rollout_engine='vanilla',
+    rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
@@ -567,6 +638,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
+        data_parallel_size=ROLLOUT_MESH[0][0],
+        tensor_parallel_size=ROLLOUT_MESH[0][1],
+        **additional_rollout_engine_args,
     ),
 )
 
@@ -582,7 +656,8 @@ grpo_config = GRPOConfig(
 
 # %%
 if ENV == 'oss':
-  tokenizer = tokenizer_lib.Tokenizer(tokenizer_path=tokenizer_path)
+  # tokenizer = tokenizer_lib.Tokenizer(tokenizer_path=tokenizer_path)
+  tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_VERSION)
 else:
   tokenizer = tokenizer_lib.Tokenizer()
 chat_parser = parser.GemmaChatTemplateParser(tokenizer)
@@ -590,8 +665,8 @@ chat_parser = parser.GemmaChatTemplateParser(tokenizer)
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=lora_gemma,
-    reference=gemma,
+    actor=lora_model,
+    reference=model,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
@@ -615,6 +690,6 @@ grpo_trainer = GRPOLearner(
 # Section 7: Execute Training
 # ------------------------------------------------------------------------------
 with script_utils.profile_and_capture_log(
-    'gemma_benchmark', enable_profile=DO_MEM_PROFILING
+    'model_benchmark', enable_profile=DO_MEM_PROFILING
 ):
   grpo_trainer.train(train_dataset, eval_dataset=val_dataset)

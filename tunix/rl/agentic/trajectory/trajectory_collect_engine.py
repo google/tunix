@@ -60,7 +60,7 @@ class TrajectoryCollectEngine:
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
-      max_steps: int = 10,
+      max_steps: int = 1,
       gamma: float = 1.0,
       timeout: float = 30.0,
       tokenizer=None,

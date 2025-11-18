@@ -46,7 +46,6 @@ from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen2 import params as qwen2_params
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
@@ -232,7 +231,7 @@ parser.add_argument(
 parser.add_argument(
     "--data-source",
     type=str,
-    default="local",
+    default="tfds",
     required=False,
     help="Data source of dataset",
 )
@@ -243,7 +242,13 @@ parser.add_argument(
     required=False,
     help="Name of dataset, required when data_source is tfds",
 )
-
+parser.add_argument(
+    "--agentic-mode",
+    type=bool,
+    default=False,
+    required=False,
+    help="Enable agentic mode.",
+)
 
 # Parse arguments
 args = parser.parse_args()
@@ -551,6 +556,14 @@ def load_json_from_local(path):
 show_hbm_usage()
 
 model_tokenizer = transformers.AutoTokenizer.from_pretrained(VLLM_MODEL_VERSION)
+
+if args.agentic_mode:
+  from tunix.rl.agentic.parser.chat_template_parser import parser
+  from tunix.rl.experimental import agentic_grpo_learner as grpo_learner
+
+  chat_parser = parser.LlamaChatTemplateParser(model_tokenizer)
+else:
+  from tunix.rl.grpo import grpo_learner
 
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"
@@ -1099,14 +1112,6 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     rollout_config=get_rollout_config(args.rollout_engine),
 )
 
-grpo_config = grpo_learner.GRPOConfig(
-    num_generations=NUM_GENERATIONS,
-    num_iterations=NUM_ITERATIONS,
-    beta=BETA,
-    epsilon=EPSILON,
-)
-
-
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=training_model,
@@ -1116,16 +1121,45 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 # GRPO Trainer
-grpo_trainer = grpo_learner.GRPOLearner(
-    rl_cluster=rl_cluster,
-    reward_fns=[
-        match_format_exactly,
-        match_format_approximately,
-        check_answer,
-        check_numbers,
-    ],
-    algo_config=grpo_config,
-)
+if args.agentic_mode:
+  grpo_config = grpo_learner.GRPOConfig(
+      num_generations=NUM_GENERATIONS,
+      num_iterations=NUM_ITERATIONS,
+      beta=BETA,
+      epsilon=EPSILON,
+      max_concurrency=4,
+      off_policy_steps=1000,
+  )
+
+  grpo_trainer = grpo_learner.GRPOLearner(
+      rl_cluster=rl_cluster,
+      reward_fns=[
+          match_format_exactly,
+          match_format_approximately,
+          check_answer,
+          check_numbers,
+      ],
+      algo_config=grpo_config,
+      chat_parser=chat_parser
+  )
+else:
+  grpo_config = grpo_learner.GRPOConfig(
+      num_generations=NUM_GENERATIONS,
+      num_iterations=NUM_ITERATIONS,
+      beta=BETA,
+      epsilon=EPSILON,
+  )
+
+  grpo_trainer = grpo_learner.GRPOLearner(
+      rl_cluster=rl_cluster,
+      reward_fns=[
+          match_format_exactly,
+          match_format_approximately,
+          check_answer,
+          check_numbers,
+      ],
+      algo_config=grpo_config,
+  )
 
 show_hbm_usage("After creating the learner")
 
@@ -1160,7 +1194,10 @@ print(
 
 show_hbm_usage("Right before training")
 with training_mesh:
-  grpo_trainer.train(train_dataset, eval_ds=val_dataset)
+  if args.agentic_mode:
+     grpo_trainer.train(train_dataset)
+  else:
+    grpo_trainer.train(train_dataset, eval_ds=val_dataset)
 
 # Load checkpoint first.
 
