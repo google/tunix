@@ -90,6 +90,7 @@ max_target_length: 256
 num_train_epochs: 1
 train_fraction: 1.0
 num_test_batches: 100
+tfds_download: True
 
 ############################### Optimizer ###############################
 # Optimizer config
