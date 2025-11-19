@@ -12,12 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Performance tracer."""
+"""APIs of performance metrics for RL workflows.
+
+Collect API:
+
+  tracer = PerfTracer(devices, export_fn)
+
+  1. span group
+
+    with tracer.span_group("global_step"):
+      with tracer.span_group("mini_batch"):
+        with tracer.span_group("micro_batch"):
+          ...
+
+  2. thread span
+
+    with tracer.span("data_loading"):
+      ...
+
+  3. device span
+
+    with tracer.span("rollout", mesh.devices) as span:
+      ...
+      span.device_end(waitlist)
+"""
 
 from __future__ import annotations
 
 from concurrent import futures
 import contextlib
+import logging
 import threading
 import time
 from typing import Any, Callable
@@ -26,16 +50,21 @@ import jax
 import jaxtyping
 import numpy as np
 from tunix.perf import metrics
+from tunix.perf import span
 
 
 JaxDevice = Any
 MetricsT = metrics.MetricsT
-PerfMetricsApi = metrics.PerfMetricsApi
-PerfMetricsContext = metrics.PerfMetricsContext
-PerfMetricsQuery = metrics.PerfMetricsQuery
+PerfSpanQuery = metrics.PerfSpanQuery
+Span = span.Span
+SpanGroup = span.SpanGroup
 
 
-def create_timeline_id(id: str | JaxDevice) -> str:
+def create_thread_timeline_id() -> str:
+  return "thread-" + str(threading.get_ident())
+
+
+def create_device_timeline_id(id: str | JaxDevice) -> str:
   if isinstance(id, str):
     return id
   elif hasattr(id, "platform") and hasattr(id, "id"):
@@ -45,84 +74,68 @@ def create_timeline_id(id: str | JaxDevice) -> str:
     raise ValueError(f"Unsupport id type: {type(id)}")
 
 
+def create_device_timeline_ids(
+    devices: list[str | JaxDevice] | np.ndarray | None,
+) -> list[str]:
+  if devices is None:
+    return []
+  if isinstance(devices, np.ndarray):
+    devices = devices.flatten().tolist()
+  return [create_device_timeline_id(device) for device in devices]
+
+
 class NoopTracer:
   """An no-op tracer that does nothing."""
 
   def synchronize(self) -> None:
     pass
 
-  def dump(self) -> None:
+  def print(self) -> None:
     pass
 
-  def export(self) -> PerfMetricsApi:
-    return PerfMetricsApi({}, "")
+  def export(self) -> MetricsT:
+    return {}
 
   @property
-  def all(self) -> list[str]:
+  def all_devices(self) -> list[str | JaxDevice]:
     return []
 
   @contextlib.contextmanager
-  def interval(
-      self,
-      label: str,
-      devices: list[str | JaxDevice] | np.ndarray | None = None,
-  ):
-    try:
-      yield _DeviceWaitlist()
-    finally:
-      pass
+  def span_group(self, name: str):
+    yield
 
-  def end_epoch(self, context: PerfMetricsContext | None = None) -> MetricsT:
-    return {}
+  @contextlib.contextmanager
+  def span(
+      self, name: str, devices: list[str | JaxDevice] | np.ndarray | None = None
+  ):
+    yield _DeviceWaitlist()
 
 
 class PerfTracer(NoopTracer):
-  """Provides an API to collect events to construct thread and devices timelines.
-
-  Usage:
-    1. Collect intervals for thread and devices.
-
-      with tracer.interval("label")
-        ...
-
-      with tracer.interval("label", devices=tracer.all) as interval:
-        ...
-        interval.device_end(data)
-
-    2. Establish epoch boundaries.
-
-      tracer.end_epoch()
-
-    3. Access the collected events.
-
-      tracer.dump()
-      api = tracer.export()
-  """
+  """Provides an API to collect events to construct thread and devices timelines."""
 
   def __init__(
       self,
       devices: list[str | JaxDevice] | np.ndarray | None = None,
-      export_fn: (
-          Callable[[PerfMetricsQuery, PerfMetricsContext], MetricsT] | None
-      ) = None,
+      export_fn: Callable[[PerfSpanQuery], MetricsT] | None = None,
   ):
-    self._epoch = 0
     self._export_fn = export_fn
 
     # align all timelines with the same born time.
     self._born = time.perf_counter()
 
-    self._main_thread_id = str(threading.get_ident())
+    self._main_thread_id = create_thread_timeline_id()
 
-    self._thread_timelines: dict[str, ThreadTimeline] = {}
-    self._get_or_create_thread_timeline(self._main_thread_id)
+    self._thread_timelines: dict[str, ThreadTimeline] = {
+        self._main_thread_id: ThreadTimeline(self._main_thread_id, self._born)
+    }
     self._device_timelines: dict[str, DeviceTimeline] = {}
     if devices:
       for device in devices:
         self._get_or_create_device_timeline(device)
 
-  def _get_timelines(self) -> dict[str, BaseTimeline]:
-    timelines: dict[str, BaseTimeline] = {}
+  def _get_timelines(self) -> dict[str, Timeline]:
+    timelines: dict[str, Timeline] = {}
     for timeline in self._thread_timelines.values():
       timelines[timeline.id] = timeline
     for timeline in self._device_timelines.values():
@@ -131,214 +144,190 @@ class PerfTracer(NoopTracer):
 
   def _get_or_create_thread_timeline(self, id: str) -> ThreadTimeline:
     if id not in self._thread_timelines:
-      self._thread_timelines[id] = ThreadTimeline(id, self._born)
+      self._thread_timelines[id] = ThreadTimeline(
+          id,
+          self._born,
+          span.span_group_stack_clone(
+              self._thread_timelines[self._main_thread_id].stack
+          ),
+      )
     return self._thread_timelines[id]
 
   def _get_or_create_device_timeline(
       self, id: str | JaxDevice
   ) -> DeviceTimeline:
-    tid = create_timeline_id(id)
+    tid = create_device_timeline_id(id)
 
     if tid not in self._device_timelines:
       self._device_timelines[tid] = DeviceTimeline(tid, self._born)
     return self._device_timelines[tid]
 
   def _get_or_create_device_timelines(
-      self, ids: list[str | JaxDevice] | np.ndarray
+      self, ids: list[str | JaxDevice] | np.ndarray | None
   ) -> BatchDeviceTimeline:
-    if isinstance(ids, np.ndarray):
-      ids = ids.flatten().tolist()
-    return BatchDeviceTimeline(
-        [self._get_or_create_device_timeline(id) for id in ids]
-    )
+    return BatchDeviceTimeline([
+        self._get_or_create_device_timeline(id)
+        for id in create_device_timeline_ids(ids)
+    ])
 
   def synchronize(self) -> None:
     _synchronize_devices()
     for timeline in self._device_timelines.values():
-      timeline.wait_pending_intervals()
+      timeline.wait_pending_spans()
 
-  def dump(self) -> None:
+  def print(self) -> None:
     self.synchronize()
     for timeline in self._get_timelines().values():
-      print(timeline)
+      print(f"\n[{timeline.id}]")
+      span.span_group_print(timeline.root, self._born)
 
-  def export(self) -> PerfMetricsApi:
-    self.synchronize()
-    return PerfMetricsApi(self._get_timelines(), self._main_thread_id)
+  def export(self) -> MetricsT:
+    if self._export_fn is not None:
+      query = PerfSpanQuery(self._get_timelines(), self._main_thread_id)
+      return self._export_fn(query)
+    else:
+      return {}
 
   @property
-  def all(self) -> list[str]:
-    """Returns all device ids.
-
-    To be used to set `devices` in interval().
-    """
+  def all_devices(self) -> list[str | JaxDevice]:
     return list(self._device_timelines.keys())
 
   @contextlib.contextmanager
-  def interval(
-      self,
-      label: str,
-      devices: list[str | JaxDevice] | np.ndarray | None = None,
+  def span_group(self, name: str):
+    begin = time.perf_counter()
+    for timeline in self._get_timelines().values():
+      timeline.span_group_begin(name, begin)
+    try:
+      yield
+    finally:
+      end = time.perf_counter()
+      for timeline in self._get_timelines().values():
+        timeline.span_group_end(end)
+
+  @contextlib.contextmanager
+  def span(
+      self, name: str, devices: list[str | JaxDevice] | np.ndarray | None = None
   ):
-    """Collect an interval for thread and devices.
-
-    Thread interval will always be collected, device intervals will be collected
-    for devices listed in `devices`.
-
-    Usage:
-      1. Collect an interval for thread only. (thread defaults to "main")
-
-        with tracer.interval("label"):
-          ...
-
-        with tracer.interval("label", thread="my_thread"):
-          ...
-
-      2. Collect an interval for thread and devices.
-
-        with tracer.interval("label", devices=tracer.all) as interval:
-          ...
-          interval.device_end(data)
-
-    Args:
-      label: The label of the interval.
-      devices: The devices to collect the interval for.
-    """
-    thread = str(threading.get_ident())
-    thread_begin = self._get_or_create_thread_timeline(thread).begin(label)
+    begin = time.perf_counter()
+    thread_timeline = self._get_or_create_thread_timeline(
+        create_thread_timeline_id()
+    )
+    thread_timeline.span_begin(name, begin)
     device_waitlist = _DeviceWaitlist()
     try:
       yield device_waitlist
     finally:
-      self._thread_timelines[thread].end()
-      if devices is not None:
-        self._get_or_create_device_timelines(devices).interval(label, thread_begin, device_waitlist._data)  # pylint: disable=protected-access
-
-  def end_epoch(self, context: PerfMetricsContext | None = None) -> MetricsT:
-    # TODO(yangmu): revisit this, may not be needed.
-    now = time.perf_counter()
-    for thread_timeline in self._thread_timelines.values():
-      with thread_timeline.interval("end_epoch"):
-        pass
-    for device_timeline in self._device_timelines.values():
-      device_timeline.interval("end_epoch", now, [])
-
-    if context is None:
-      context = PerfMetricsContext()
-    context.epoch = self._epoch
-    self._epoch += 1
-
-    for timeline in self._get_timelines().values():
-      timeline.end_epoch()
-
-    if self._export_fn is not None:
-      query = PerfMetricsQuery(
-          self._get_timelines(), self._main_thread_id
-      ).epoch([context.epoch])
-      return self._export_fn(query, context)
-    else:
-      return {}
+      end = time.perf_counter()
+      thread_timeline.span_end(end)
+      self._get_or_create_device_timelines(devices).span(name, begin, device_waitlist._data)  # pylint: disable=protected-access
 
 
-class _DeviceWaitlist:
-  """Provides an interface to collect waitlist for PerfTracer interval()."""
-
-  def __init__(self):
-    self._data = []
-
-  def device_end(self, waitlist: jaxtyping.PyTree) -> None:
-    self._data.append(waitlist)
+Tracer = PerfTracer | NoopTracer
 
 
-class BaseTimeline:
-  """Base class for custom-annotated timelines."""
+class Timeline:
+  """Provides an API to collect events to construct a tree of spans and groups."""
 
   id: str
   born: float
-  intervals: list[tuple[float, float]]
-  labels: list[str]
-  epochs: list[int]
+  root: SpanGroup
+  stack: list[SpanGroup]
 
-  def __init__(self, id: str, born: float):
+  def __init__(
+      self, id: str, born: float, stack: list[SpanGroup] | None = None
+  ):
     self.id = id
     self.born = born
-    self.intervals = []
-    self.labels = []
-    self.epochs = []
+    if stack is None:
+      self.root = SpanGroup("root", None)
+      self.root.begin = born
+      self.stack = [self.root]
+    else:
+      self.root = stack[0]
+      self.stack = stack
 
-  def __eq__(self, other: object) -> bool:
-    return (
-        isinstance(other, BaseTimeline)
-        and self.id == other.id
-        and self.born == other.born
-        and self.intervals == other.intervals
-        and self.labels == other.labels
-        and self.epochs == other.epochs
-    )
+    self._last_span: Span | None = None
+    # TODO(yangmu): add lock to protect stack and _last_span.
 
-  def __repr__(self) -> str:
-    out = f"[{self.id}] "
-    epoch_begin = 0
-    for epoch_end in self.epochs + [len(self.intervals)]:
-      out += f"epoch:[{epoch_begin},{epoch_end}) "
-      for i in range(epoch_begin, epoch_end):
-        out += (
-            f"{self.labels[i]}:({self.intervals[i][0] - self.born:.6f},{self.intervals[i][1] - self.born:.6f}) "
-        )
-      epoch_begin = epoch_end
+  def _stack_debug(self) -> str:
+    out = f"{self.root.name}"
+    for group in self.stack[1:]:
+      out += f" -> {group.name}"
     return out
 
-  def __str__(self) -> str:
-    return repr(self)
+  def span_group_begin(self, name: str, begin: float) -> SpanGroup:
+    if self._last_span and not self._last_span.ended:
+      logging.warning(
+          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
+          f" group stack: {self._stack_debug()}"
+      )
+    inner = SpanGroup(name, self.stack[-1])
+    inner.begin = begin
+    self.stack.append(inner)
+    # print(f"{self.id}: begin {name}")
+    return inner
 
-  def end_epoch(self) -> None:
-    if len(self.epochs) == 0 or self.epochs[-1] != len(self.intervals):
-      self.epochs.append(len(self.intervals))
+  def span_group_end(self, end: float) -> None:
+    if len(self.stack) == 1:
+      raise ValueError(f"{self.id}: no more span groups to end.")
+    if self._last_span and not self._last_span.ended:
+      logging.warning(
+          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
+          f" group stack: {self._stack_debug()}"
+      )
+    inner = self.stack.pop()
+    inner.end = end
+    # print(f"{self.id}: end {inner.name}")
+
+  def device_span(self, name: str, thread_begin: float, end: float) -> None:
+    if self._last_span and not self._last_span.ended:
+      raise ValueError(
+          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
+          f" group stack: {self._stack_debug()}"
+      )
+
+    if self._last_span and self._last_span.end > thread_begin:
+      inner = Span(name, self._last_span.end)
+    else:
+      inner = Span(name, thread_begin)
+    inner.end = end
+    self.stack[-1].inner.append(inner)
+
+    self._last_span = inner
+
+  def thread_span_begin(self, name: str, begin: float) -> Span:
+    if self._last_span and not self._last_span.ended:
+      raise ValueError(
+          f"{self.id}: last span '{self._last_span.name}' is not ended. current"
+          f" group stack: {self._stack_debug()}"
+      )
+
+    inner = Span(name, begin)
+    self.stack[-1].inner.append(inner)
+
+    self._last_span = inner
+    return inner
+
+  def thread_span_end(self, end: float) -> None:
+    if self._last_span is None:
+      raise ValueError(f"{self.id}: no span to end.")
+    if self._last_span.ended:
+      raise ValueError(
+          f"{self.id}: span '{self._last_span.name}' is already ended."
+      )
+    self._last_span.end = end
 
 
-class ThreadTimeline(BaseTimeline):
-  """Manages a custom-annotated timeline for a thread."""
+class ThreadTimeline(Timeline):
 
-  def __init__(self, id: str, born: float):
-    super().__init__(id, born)
+  def span_begin(self, name: str, begin: float) -> None:
+    self.thread_span_begin(name, begin)
 
-    # detect nested call.
-    self._label: str | None = None
-    self._begin: float | None = None
-    self._lock = threading.Lock()
-
-  def begin(self, label: str) -> float:
-    begin = time.perf_counter()
-    with self._lock:
-      if self._label is not None:
-        raise ValueError(
-            f"{self.id}: interval '{label}' is nested in '{self._label}'."
-        )
-      self._label = label
-      self._begin = begin
-    return begin
-
-  def end(self) -> None:
-    end = time.perf_counter()
-    with self._lock:
-      if self._label is None:
-        raise ValueError(f"{self.id}: interval is not started.")
-      self.intervals.append((self._begin, end))  # type: ignore
-      self.labels.append(self._label)
-      self._label = None
-      self._begin = None
-    return
-
-  @contextlib.contextmanager
-  def interval(self, label: str):
-    begin = self.begin(label)
-    try:
-      yield begin
-    finally:
-      self.end()
+  def span_end(self, end: float) -> None:
+    self.thread_span_end(end)
 
 
-class DeviceTimeline(BaseTimeline):
+class DeviceTimeline(Timeline):
   """Manages a custom-annotated timeline for a device (e.g. TPU)."""
 
   def __init__(self, id: str, born: float):
@@ -347,32 +336,28 @@ class DeviceTimeline(BaseTimeline):
     # wait pending data.
     self._threads: list[threading.Thread] = []
 
-  def interval(
-      self, label: str, thread_begin: float, waitlist: jaxtyping.PyTree
+  def span(
+      self, name: str, thread_span_begin: float, waitlist: jaxtyping.PyTree
   ) -> None:
-    """Record a new interval for device (e.g. TPU).
+    """Record a new span for device (e.g. TPU).
 
-    The interval begin time is inferred from the thread begin time (i.e. thread
-    launches a computation on the device) and the end time of prevous interval
+    The span begin time is inferred from the thread span begin time (i.e. thread
+    launches a computation on the device) and the end time of prevous span
     on the same device, the late one is used.
 
-    The interval end time is determined when all JAX computations associated
-    with 'data' finish.
+    The span end time is determined when all JAX computations associated
+    with 'waitlist' finish.
 
     Args:
-      label: The label of the interval.
-      thread_begin: The begin time of the interval on the thread, used to infer
-        the begin time of the interval on the device.
+      name: The name of the span.
+      thread_span_begin: The begin time of the span on the thread, used to infer
+        the begin time of the span on the device.
       waitlist: The JAX computation to be tracked, used to infer the end time of
-        the interval on the device.
+        the span on the device.
     """
 
     def on_success():
-      begin = thread_begin
-      if len(self.intervals) > 0:
-        begin = max(begin, self.intervals[-1][1])
-      self.intervals.append((begin, time.perf_counter()))  # type: ignore
-      self.labels.append(label)
+      self.device_span(name, thread_span_begin, time.perf_counter())
 
     def on_failure(e: Exception):
       raise e
@@ -383,32 +368,38 @@ class DeviceTimeline(BaseTimeline):
       t = _async_wait(waitlist=waitlist, success=on_success, failure=on_failure)
       self._threads.append(t)
 
-  def wait_pending_intervals(self) -> None:
+  def wait_pending_spans(self) -> None:
     for t in self._threads:
       t.join()
 
 
 class BatchDeviceTimeline:
-  """Provides the same API as DeviceTimeline to operate on a batch of devices."""
 
   def __init__(self, timelines: list[DeviceTimeline]):
     self._timelines = timelines
 
-  def __str__(self) -> str:
-    out = ""
+  def span(
+      self, name: str, thread_span_begin: float, waitlist: jaxtyping.PyTree
+  ):
     for timeline in self._timelines:
-      out += str(timeline) + "\n"
-    return out
+      timeline.span(name, thread_span_begin, waitlist)
 
-  def interval(
-      self, label: str, thread_begin: float, data: jaxtyping.PyTree
-  ) -> None:
-    for timeline in self._timelines:
-      timeline.interval(label, thread_begin, data)
 
-  def end_epoch(self) -> None:
-    for timeline in self._timelines:
-      timeline.end_epoch()
+########################################################################
+#
+# internal only - utility classes and functions
+#
+########################################################################
+
+
+class _DeviceWaitlist:
+  """Provides an interface to collect waitlist for PerfTracer span()."""
+
+  def __init__(self):
+    self._data = []
+
+  def device_end(self, waitlist: jaxtyping.PyTree) -> None:
+    self._data.append(waitlist)
 
 
 # TODO(yangmu): maybe reuse `callback_on_ready` in tunix.rl.

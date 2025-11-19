@@ -228,7 +228,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if self.algo_config.beta != 0.0:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
       # TODO(yangmu): use function decorator to trace this part, same below.
-      with self.rl_cluster.perf.interval("ref_inference", devices) as interval:
+      with self.rl_cluster.perf.span("refer_inference", devices) as interval:
         ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=completion_ids,
@@ -244,7 +244,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       ref_per_token_logps = None
     if self.algo_config.num_iterations > 1:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
-      with self.rl_cluster.perf.interval(
+      with self.rl_cluster.perf.span(
           "old_actor_inference", devices
       ) as interval:
         old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
@@ -259,7 +259,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     else:
       old_per_token_logps = None
 
-    with self.rl_cluster.perf.interval("advantage_computation"):
+    with self.rl_cluster.perf.span("advantage_computation"):
       # Compute rewards and advantages
       rewards = self._compute_rewards(
           prompts=training_input["prompts"],
@@ -442,6 +442,7 @@ def grpo_loss_fn(
   )
 
   # TODO(yangmu): trace this part as "actor_inference_and_training".
+  # with perf_tracer.span("...", list(completion_ids.devices())):
   per_token_logps = common.compute_per_token_logps(
       model,
       prompt_tokens=train_example.prompt_ids,
