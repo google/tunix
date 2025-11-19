@@ -302,7 +302,7 @@ def get_logprobs_from_vllm_output(
     logprobs: List[Optional[Dict[int, Any]]],
 ) -> List[float]:
   """Extracts the log probs from the vLLM output."""
-  if logprobs is None or logprobs[0] is None:
+  if not logprobs or logprobs[0] is None:
     logging.debug('Logprobs are missing')
     return []
 

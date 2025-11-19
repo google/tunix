@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 from jax import sharding
 import jax.numpy as jnp
@@ -56,7 +56,7 @@ class Logprob:
     self.decoded_token = decoded_token
 
 
-class UtilsTest(absltest.TestCase):
+class UtilsTest(parameterized.TestCase):
 
   def test_compute_attention_mask(self):
     # Check that the input mask is correctly applied when total sampling steps
@@ -155,6 +155,17 @@ class UtilsTest(absltest.TestCase):
     logprobs = [{101: Logprob(-0.5)}, {200: Logprob(-1.2)}]
     with self.assertRaises(ValueError):
       utils.get_logprobs_from_vllm_output(token_ids, logprobs)
+
+  @parameterized.named_parameters(
+      ("none_logprobs", [], None),
+      ("empty_logprobs", [], []),
+      ("list_of_none_logprobs", [1], [None]),
+  )
+  def test_logprobs_empty_cases(self, token_ids, logprobs):
+    self.assertEqual(
+        utils.get_logprobs_from_vllm_output(token_ids, logprobs),
+        [],
+    )
 
   def test_transfer_state_with_mappings_tranpose_and_sharding_device(self):
     device_count = len(jax.devices())
