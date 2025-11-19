@@ -33,16 +33,18 @@ class MetricsLoggerOptions:
       return []
 
     # Case 1: Override. Use user-provided factories.
-    if self.backend_factories:
+    if self.backend_factories is not None:
       return [factory() for factory in self.backend_factories]
 
     # Case 2: Defaults.
-    active_backends = [
-        TensorboardBackend(
-            log_dir=self.log_dir,
-            flush_every_n_steps=self.flush_every_n_steps,
-        )
-    ]
+    active_backends = []
+
+    main_backend = TensorboardBackend(
+        log_dir=self.log_dir,
+        flush_every_n_steps=self.flush_every_n_steps,
+    )
+
+    active_backends.append(main_backend)
     try:
       active_backends.append(WandbBackend(project="tunix"))
     except ImportError:
@@ -64,7 +66,11 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
 
 
 class MetricsLogger:
-  """Simple Metrics logger."""
+  """Simple Metrics logger.
+
+  Log metrics to multiple backends. If no backends are specified, it will log to
+  tensorboardx(OSS)/clu(internal) and wandb by default.
+  """
 
   def __init__(
       self,
