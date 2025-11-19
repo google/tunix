@@ -107,12 +107,15 @@ class PerfSpanQuery:
     self._main_thread_id = main_thread_id
 
     self._select_timeline: str | None = None
-    self._select_group_names: list[str] = []
+
+    # (name, type, arg)
+    # type: 0 - first, 1 - last, 2 - nth, 3 - all
+    self._select_groups: list[tuple[str, int, int]] = []
 
   def __call__(self) -> PerfSpanQuery:
     query = PerfSpanQuery(self._timelines, self._main_thread_id)
     query._select_timeline = self._select_timeline
-    query._select_group_names = self._select_group_names.copy()
+    query._select_groups = self._select_groups.copy()
     return query
 
   def timeline(self, id: str) -> PerfSpanQuery:
@@ -123,18 +126,43 @@ class PerfSpanQuery:
     self._select_timeline = self._main_thread_id
     return self
 
-  def group(self, name: str) -> PerfSpanQuery:
-    self._select_group_names.append(name)
+  def first_group(self, name: str) -> PerfSpanQuery:
+    self._select_groups.append((name, 0, 0))
     return self
 
-  def get(self) -> SpanGroup | None:
+  def last_group(self, name: str) -> PerfSpanQuery:
+    self._select_groups.append((name, 1, 0))
+    return self
+
+  def nth_group(self, name: str, index: int) -> PerfSpanQuery:
+    self._select_groups.append((name, 2, index))
+    return self
+
+  def all_groups(self, name: str) -> PerfSpanQuery:
+    self._select_groups.append((name, 3, 0))
+    return self
+
+  def get(self) -> list[SpanGroup]:
+    """Returns SpanGroups gathered by the given selectors."""
+
     if self._select_timeline not in self._timelines:
       raise ValueError(f"timeline '{self._select_timeline}' not found.")
 
-    span_group = self._timelines[self._select_timeline].root
-    for name in self._select_group_names:
-      if isinstance(span_group, SpanGroup):
-        span_group = span_group.find_last_inner_group(name)
-      else:
-        return None
-    return span_group
+    curr_groups: list[SpanGroup] = [self._timelines[self._select_timeline].root]
+    next_groups: list[SpanGroup] = []
+    for name, type, index in self._select_groups:
+      assert 0 <= type <= 3, f"invalid query type: {type}"
+      match type:
+        case 0:  # first
+          next_groups = span.span_group_batch_query_first(curr_groups, name)
+        case 1:  # last
+          next_groups = span.span_group_batch_query_last(curr_groups, name)
+        case 2:  # nth
+          next_groups = span.span_group_batch_query_nth(
+              curr_groups, name, index
+          )
+        case 3:  # all
+          next_groups = span.span_group_batch_query_all(curr_groups, name)
+      curr_groups = next_groups
+      next_groups = []
+    return curr_groups

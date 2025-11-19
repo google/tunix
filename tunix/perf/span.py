@@ -72,11 +72,24 @@ class SpanGroup:
   def duration(self) -> float:
     return self.end - self.begin
 
+  def find_first_inner_group(self, name: str) -> SpanGroup | None:
+    for item in self.inner:
+      if isinstance(item, SpanGroup) and item.name == name:
+        return item
+    return None
+
   def find_last_inner_group(self, name: str) -> SpanGroup | None:
     for item in reversed(self.inner):
       if isinstance(item, SpanGroup) and item.name == name:
         return item
     return None
+
+  def find_all_inner_groups(self, name: str) -> list[SpanGroup]:
+    return [
+        item
+        for item in self.inner
+        if isinstance(item, SpanGroup) and item.name == name
+    ]
 
   def find_last_inner_span(self, name: str) -> Span | None:
     for item in reversed(self.inner):
@@ -126,3 +139,48 @@ def span_group_stack_clone(stack: list[SpanGroup]) -> list[SpanGroup]:
     stack_clone.append(inner)
     outer = inner
   return stack_clone
+
+
+# TODO(yangmu) create a new class SpanGroupBatch.
+
+
+def span_group_batch_query_first(
+    batch: list[SpanGroup], name: str
+) -> list[SpanGroup]:
+  out_batch = []
+  for group in batch:
+    inner = group.find_first_inner_group(name)
+    if inner is not None:
+      out_batch.append(inner)
+  return out_batch
+
+
+def span_group_batch_query_last(
+    batch: list[SpanGroup], name: str
+) -> list[SpanGroup]:
+  out_batch = []
+  for group in batch:
+    inner = group.find_last_inner_group(name)
+    if inner is not None:
+      out_batch.append(inner)
+  return out_batch
+
+
+def span_group_batch_query_nth(
+    batch: list[SpanGroup], name: str, index: int
+) -> list[SpanGroup]:
+  out_batch = []
+  for group in batch:
+    inners = group.find_all_inner_groups(name)
+    if 0 <= index < len(inners):
+      out_batch.append(inners[index])
+  return out_batch
+
+
+def span_group_batch_query_all(
+    batch: list[SpanGroup], name: str
+) -> list[SpanGroup]:
+  out_batch = []
+  for group in batch:
+    out_batch.extend(group.find_all_inner_groups(name))
+  return out_batch
