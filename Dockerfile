@@ -26,8 +26,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
-# RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
-RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
+RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
+# RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
 RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
