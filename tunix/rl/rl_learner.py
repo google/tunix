@@ -402,7 +402,7 @@ class RLLearner(ABC):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        with self.rl_cluster.perf.interval("data_loading"):
+        with self.rl_cluster.perf.span("data_loading"):
           # Fetch one training micro-batch
           example = next(iterator)
           cur_batch_size = len(example["prompts"])
@@ -588,32 +588,30 @@ class RLLearner(ABC):
       try:
         initial_steps = self._iter_steps
 
-        self._run_global_step(
-          full_batch_size,
-          mini_batch_size,
-          service_target_batch_size,
-          grad_acc_steps,
-          train_iterator,
-          eval_ds,
-          skip_jit,
-        )
-
-        if self.should_sync_weights:
-          with self.rl_cluster.perf.interval("weight_sync"):
-            with jax.profiler.StepTraceAnnotation(
-                "sync_sampler_weights", step_num=initial_steps
-            ):
-              self.rl_cluster.sync_weights()
-        else:
-          self.rl_cluster.global_steps += (
-              1  # manually increment the global steps.
+        with self.rl_cluster.perf.span_group("global_step"):
+          self._run_global_step(
+            full_batch_size,
+            mini_batch_size,
+            service_target_batch_size,
+            grad_acc_steps,
+            train_iterator,
+            eval_ds,
+            skip_jit,
           )
 
-        context = metrics_lib.PerfMetricsContext(
-            global_steps=self.rl_cluster.global_steps
-        )
+          if self.should_sync_weights:
+            with self.rl_cluster.perf.span("weight_sync", self.rl_cluster.perf.all_devices):
+              with jax.profiler.StepTraceAnnotation(
+                  "sync_sampler_weights", step_num=initial_steps
+              ):
+                self.rl_cluster.sync_weights()
+          else:
+            self.rl_cluster.global_steps += (
+                1  # manually increment the global steps.
+            )
+
         self.rl_cluster.buffer_metrics(
-            self.rl_cluster.perf.end_epoch(context),
+            self.rl_cluster.perf.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
 
@@ -637,14 +635,15 @@ class RLLearner(ABC):
     for _ in range(full_batch_size // mini_batch_size):
       initial_steps = self._iter_steps
 
-      self._run_mini_batch_step(
-        initial_steps,
-        service_target_batch_size,
-        grad_acc_steps,
-        train_iterator,
-        eval_ds,
-        skip_jit,
-      )
+      with self.rl_cluster.perf.span_group("mini_batch_step"):
+        self._run_mini_batch_step(
+          initial_steps,
+          service_target_batch_size,
+          grad_acc_steps,
+          train_iterator,
+          eval_ds,
+          skip_jit,
+        )
 
       # sync the iter steps with internel trainer, this is based on the
       # assumption that the trainer internally doesn't reset the iter steps.
@@ -658,14 +657,15 @@ class RLLearner(ABC):
                            train_iterator: Iterator[TrainingInputT],
                            eval_ds: Iterable[TrainingInputT] | None,
                            skip_jit: bool) -> None:
-    self._run_all_micro_batch_steps(
-        initial_steps,
-        service_target_batch_size,
-        grad_acc_steps,
-        train_iterator,
-        eval_ds,
-        skip_jit,
-    )
+    with self.rl_cluster.perf.span_group("micro_batch_steps"):
+      self._run_all_micro_batch_steps(
+          initial_steps,
+          service_target_batch_size,
+          grad_acc_steps,
+          train_iterator,
+          eval_ds,
+          skip_jit,
+      )
 
   def _run_all_micro_batch_steps(self,
                                  initial_steps: int,

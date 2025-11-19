@@ -28,13 +28,11 @@ Config API:
     # Let PerfMetricsExport create a metrics export function based on the mesh
     # topology in cluster config. See PerfMetricsExport for more details.
     perf_config.custom_export_fn = (
-      PerfMetricsExport.create_metrics_export_fn(cluster_config)
+      PerfMetricsExport.from_cluster_config(cluster_config)
     )
 
     # Write your own custom export function.
-    def my_custom_export_fn(
-        query: PerfMetricsQuery, context: PerfMetricsContext
-    ) -> MetricsT:
+    def my_custom_export_fn(query: PerfMetricsQuery) -> MetricsT:
       ...
     perf_config.custom_export_fn = my_custom_export_fn
 
@@ -46,19 +44,18 @@ Config API:
 from __future__ import annotations
 
 import dataclasses
-import itertools
 from typing import Any
 from typing import Callable, Dict, Tuple
 
 import jax
 from jax import typing
-import numpy as np
-from graphviz import Digraph
-from typing import Any
+from tunix.perf import span
 
 
 ArrayLike = typing.ArrayLike
-BaseTimeline = Any  # tunix.perf.trace.BaseTimeline
+Timeline = Any  # tunix.perf.span.Timeline
+Span = span.Span
+SpanGroup = span.SpanGroup
 
 MetricsT = Dict[
     str, Tuple[ArrayLike | str, Callable[[jax.Array], jax.Array] | None]
@@ -75,216 +72,97 @@ class MetricsBuffer:
   mode: str = "train"
 
 
-@dataclasses.dataclass
-class PerfMetricsContext:
-  epoch: int | None = None
-  global_steps: int | None = None
-
 class PerfMetricsConfig:
   # (query, epoch) -> metrics
-  custom_export_fn: (
-      Callable[[PerfMetricsQuery, PerfMetricsContext], MetricsT] | None
-  ) = None
+  custom_export_fn: Callable[[PerfSpanQuery], MetricsT] | None = None
 
 
-class PerfMetricsApi:
-
-  def __init__(self, timelines: dict[str, BaseTimeline], main_thread_id: str):
-    self._timelines: dict[str, BaseTimeline] = timelines
-    self._main_thread_id = main_thread_id
-
-    def dump(self) -> None:
-        for timeline in self._timelines.values():
-            print(timeline)
-
-  def query(self) -> PerfMetricsQuery:
-    return PerfMetricsQuery(self._timelines, self._main_thread_id)
-
-
-#
-# Query API
-#
-#   query.timeline("tpu0").epoch(*).idle().sum()
-#   query.timeline("tpu0").epoch(*).idle().mean()
-#   query.timeline("tpu0").epoch(*).idle().tolist()
-#   query.timeline("tpu0").epoch(*).idle().epoch_sum()
-#   query.timeline("tpu0").epoch(*).idle().epoch_mean()
-#   query.timeline("tpu0").epoch(*).idle().epoch_tolist()
-#
-#   query.timeline("tpu2").epoch(*).busy(*).sum()
-#   query.timeline("tpu2").epoch(*).busy(*).mean()
-#   query.timeline("tpu2").epoch(*).busy(*).tolist()
-#   query.timeline("tpu2").epoch(*).busy(*).epoch_sum()
-#   query.timeline("tpu2").epoch(*).busy(*).epoch_mean()
-#   query.timeline("tpu2").epoch(*).busy(*).epoch_tolist()
-#
-class PerfMetricsQuery:
+class PerfSpanQuery:
+  """Query API for PerfMetrics.
 
   Format:
-    query.<timeline_selector>.<epoch_selector>.<busy_or_idle>.<aggregation>()
+    query().<timeline_selector>.<group_selector>.get()
 
   Timeline selector (required):
     .main()
     .timeline(id)
 
-  Epoch selector (optional):
-    .epoch(epoch_ids)
-
-  Busy or idle (required):
-    .busy(labels)  # labels: list of interval labels to select
-    .idle()
-
-  Aggregation (required):
-    .sum()  # sum over all selected intervals
-    .mean()  # mean over all selected intervals
-    .tolist()  # list of all selected intervals
-    .epoch_sum()  # sum over all selected intervals, grouped by epochs
-    .epoch_mean()  # mean over all selected intervals, grouped by epochs
-    .epoch_tolist()  # list of all selected intervals, grouped by epochs
+  Group selector (optional):
+    .group(name)
+    .group(a).group(b).group(c) # nested groups
 
   Examples:
 
-    # Sum of idle time for main thread over all epochs.
-    query.main().idle().sum()
+    # Get the last SpanGroup with name "global_step" in the main thread
+    # timeline.
+    query.main().group("global_step").get()
 
-    # Sum of busy time for main thread over epoch 1.
-    query.main().epoch([1]).busy().sum()
-
-    # Sum of idle time for tpu0 timeline over all epochs.
-    query.timeline("tpu0").idle().tolist()
-
-    # Mean of task1 time for tpu2 timeline over all epochs, grouped by epochs.
-    query.timeline("tpu2").busy(["task1"]).epoch_mean()
+    # Get the last SpanGroup with name "global_step", then get the last
+    # SpanGroup with name "mini_batch" in the tpu0 timeline.
+    query.timeline("tpu0").group("global_step").group("mini_batch").get()
   """
 
-  def __init__(self, timelines: dict[str, BaseTimeline], main_thread_id: str):
-    self._timelines: dict[str, BaseTimeline] = timelines
+  def __init__(self, timelines: dict[str, Timeline], main_thread_id: str):
+    self._timelines: dict[str, Timeline] = timelines
     self._main_thread_id = main_thread_id
 
-    def timeline(self, id: str) -> PerfMetricsQuery:
-        self._select_timeline = id
-        return self
+    self._select_timeline: str | None = None
 
-    def epoch(self, epochs: list[int]) -> PerfMetricsQuery:
-        self._select_epochs = epochs
-        return self
+    # (name, type, arg)
+    # type: 0 - first, 1 - last, 2 - nth, 3 - all
+    self._select_groups: list[tuple[str, int, int]] = []
 
-    def idle(self) -> PerfMetricsQuery:
-        self._select_busy = False
-        return self
+  def __call__(self) -> PerfSpanQuery:
+    query = PerfSpanQuery(self._timelines, self._main_thread_id)
+    query._select_timeline = self._select_timeline
+    query._select_groups = self._select_groups.copy()
+    return query
 
-  def main(self) -> PerfMetricsQuery:
+  def timeline(self, id: str) -> PerfSpanQuery:
+    self._select_timeline = id
+    return self
+
+  def main(self) -> PerfSpanQuery:
     self._select_timeline = self._main_thread_id
     return self
 
-  def epoch(self, epochs: list[int]) -> PerfMetricsQuery:
-    self._select_epochs = epochs
+  def first_group(self, name: str) -> PerfSpanQuery:
+    self._select_groups.append((name, 0, 0))
     return self
 
-    def _gather(self) -> list[list[float]]:
-        if self._select_timeline is None:
-            raise ValueError("No timeline selected.")
-        if self._select_timeline not in self._timelines:
-            raise ValueError(f"Timeline '{self._select_timeline}' not found.")
-        timeline = self._timelines[self._select_timeline]
-
-  def busy(self, labels: list[str] | None = None) -> PerfMetricsQuery:
-    self._select_labels = labels
-    self._select_busy = True
+  def last_group(self, name: str) -> PerfSpanQuery:
+    self._select_groups.append((name, 1, 0))
     return self
 
-  def _gather_intervals(self) -> list[list[tuple[float, float]]]:
-    """Gathers the intervals from the selected timeline, grouped by epochs."""
-    if self._select_timeline is None:
-      raise ValueError("No timeline selected.")
+  def nth_group(self, name: str, index: int) -> PerfSpanQuery:
+    self._select_groups.append((name, 2, index))
+    return self
+
+  def all_groups(self, name: str) -> PerfSpanQuery:
+    self._select_groups.append((name, 3, 0))
+    return self
+
+  def get(self) -> list[SpanGroup]:
+    """Returns SpanGroups gathered by the given selectors."""
+
     if self._select_timeline not in self._timelines:
-      raise ValueError(f"Timeline '{self._select_timeline}' not found.")
-    timeline = self._timelines[self._select_timeline]
+      raise ValueError(f"timeline '{self._select_timeline}' not found.")
 
-    if self._select_epochs is not None:
-      for select_epoch in self._select_epochs:
-        if select_epoch >= len(timeline.epochs):
-          raise ValueError(
-              f"Epoch {select_epoch} exceeds max epoch"
-              f" {len(timeline.epochs) - 1}."
+    curr_groups: list[SpanGroup] = [self._timelines[self._select_timeline].root]
+    next_groups: list[SpanGroup] = []
+    for name, type, index in self._select_groups:
+      assert 0 <= type <= 3, f"invalid query type: {type}"
+      match type:
+        case 0:  # first
+          next_groups = span.span_group_batch_query_first(curr_groups, name)
+        case 1:  # last
+          next_groups = span.span_group_batch_query_last(curr_groups, name)
+        case 2:  # nth
+          next_groups = span.span_group_batch_query_nth(
+              curr_groups, name, index
           )
-      epochs = [timeline.epochs[i] for i in self._select_epochs]
-    else:
-      epochs = timeline.epochs
-
-    if self._select_busy is None:
-      raise ValueError("None of idle() or busy() is called.")
-
-    intervals_by_epochs: list[list[tuple[float, float]]] = []
-
-    epoch_begin = 0
-    interval_begin = timeline.born
-    for epoch_end in epochs:
-      intervals = []
-      for i in range(epoch_begin, epoch_end):
-        if self._select_busy:
-          if (
-              self._select_labels is None
-              or timeline.labels[i] in self._select_labels
-          ):
-            intervals.append(
-                (timeline.intervals[i][0], timeline.intervals[i][1])
-            )
-        else:
-          # Idle intervals are the gaps between busy intervals.
-          intervals.append((interval_begin, timeline.intervals[i][0]))
-          interval_begin = timeline.intervals[i][1]
-      intervals_by_epochs.append(intervals)
-      epoch_begin = epoch_end
-
-    return intervals_by_epochs
-
-  def _gather_deltas(self):
-    """Gathers the deltas from the selected timeline, grouped by epochs."""
-    intervals_by_epochs: list[list[tuple[float, float]]] = (
-        self._gather_intervals()
-    )
-
-    deltas_by_epochs: list[list[float]] = []
-    for intervals in intervals_by_epochs:
-      deltas = [interval[1] - interval[0] for interval in intervals]
-      deltas_by_epochs.append(deltas)
-
-    return deltas_by_epochs
-
-  def intervals(self) -> list[tuple[float, float]]:
-    return list(itertools.chain(*self._gather_intervals()))
-
-  def sum(self) -> float:
-    return np.sum(self.tolist()).item()
-
-        epoch_begin = 0
-        delta_begin = timeline.born
-        for epoch_end in epochs:
-            deltas = []
-            for i in range(epoch_begin, epoch_end):
-                if self._select_busy:
-                    if self._select_labels is None or timeline.labels[i] in self._select_labels:
-                        deltas.append(timeline.intervals[i][1] - timeline.intervals[i][0])
-                else:
-                    deltas.append(timeline.intervals[i][0] - delta_begin)
-                    delta_begin = timeline.intervals[i][1]
-            deltas_by_epochs.append(deltas)
-            epoch_begin = epoch_end
-
-  def tolist(self) -> list[float]:
-    return list(itertools.chain(*self._gather_deltas()))
-
-  def epoch_intervals(self) -> list[list[tuple[float, float]]]:
-    return self._gather_intervals()
-
-  def epoch_sum(self) -> list[float]:
-    deltas_by_epochs = self._gather_deltas()
-    return [np.sum(deltas).item() for deltas in deltas_by_epochs]
-
-  def epoch_mean(self) -> list[float]:
-    deltas_by_epochs = self._gather_deltas()
-    return [np.mean(deltas).item() for deltas in deltas_by_epochs]
-
-  def epoch_tolist(self) -> list[list[float]]:
-    return self._gather_deltas()
+        case 3:  # all
+          next_groups = span.span_group_batch_query_all(curr_groups, name)
+      curr_groups = next_groups
+      next_groups = []
+    return curr_groups

@@ -211,10 +211,11 @@ class RLCluster:
       )
 
     if reference:
-      if self.r2m[Role.REFERENCE] == self.r2m[Role.ACTOR]:
-        self.reference = self.train_actor
-      else:
-        self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
+      # if Role.REFERENCE in self._backbone_sharing_map[Role.ACTOR]:
+      #   self.reference = self.train_actor
+      # else:
+      #   self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
+      self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
       if Role.REFERENCE in self._backbone_sharing_map[Role.ACTOR]:
         if not rl_utils.is_sharing_backbone(self.reference, self.train_actor):
           logging.warning(
@@ -594,7 +595,7 @@ class RLCluster:
     return self._critic_trainer
 
   @property
-  def perf(self) -> perf_trace.NoopTracer | perf_trace.PerfTracer:
+  def perf(self) -> perf_trace.Tracer:
     return self._perf
 
   def close(self):
@@ -677,14 +678,14 @@ class RLCluster:
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[Role.ACTOR] as mesh:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      with self._perf.interval("actor_training", mesh.devices):
+      with self._perf.span("actor_training", mesh.devices):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[Role.CRITIC] as mesh:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      with self._perf.interval("critic_training", mesh.devices):
+      with self._perf.span("critic_training", mesh.devices):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
@@ -740,14 +741,14 @@ class RLCluster:
       else:
         rollout_config = self.cluster_config.rollout_config
 
-      with self._perf.interval("rollout", mesh.devices) as interval:
+      with self._perf.span("rollout", mesh.devices) as span:
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
             for s in rl_utils.chunk_slices_by_size(
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
-        interval.device_end(
+        span.device_end(
             [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
         )
 
