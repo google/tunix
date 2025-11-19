@@ -1,4 +1,4 @@
-# %%
+
 """Agentic GRPO training demo with async-rollout.
 
 This tutorial demonstrates training the Gemma 2 2B-IT model on the GSM8K math
@@ -9,7 +9,7 @@ coding problems, etc.
 We use v5e-8 for this experiment.
 """
 
-# %%
+
 # Imports
 import contextlib
 import os
@@ -17,7 +17,7 @@ from pprint import pprint
 import re
 import time
 
-# %%
+
 # Environment detection
 try:
   from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
@@ -27,20 +27,20 @@ try:
 except ImportError:
   ENV = 'oss'
 
-# %%
+
 # OSS-specific imports
 if ENV == 'oss':
   # In OSS, gfile and xprof_session are not available.
   gfile = None
   xprof_session = None
 
-# %%
+
 import jax
 from jax import numpy as jnp
 import optax
 from orbax import checkpoint as ocp
 
-# %%
+
 if ENV == 'g3':
   from etils import ecolab
 
@@ -53,7 +53,7 @@ if ENV == 'g3':
 else:  # oss
   adhoc_context = contextlib.nullcontext()
 
-# %%
+
 with adhoc_context:
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.rollout import base_rollout
@@ -67,10 +67,10 @@ with adhoc_context:
   from flax import nnx
   from tunix.cli.utils import model as model_utils
 
-# %%
+
 show_hbm_usage = utils.show_hbm_usage
 show_hbm_usage()
-# %%
+
 # ------------------------------------------------------------------------------
 # Section 1: Hyperparameters
 # ------------------------------------------------------------------------------
@@ -98,26 +98,26 @@ else:  # oss
   run_name = f'grpo_demo_{int(time.time())}'
   CKPT_DIR = f'/tmp/content/ckpts/{run_name}'
 
-# %%
+
 # --- Data & Model Configs ---
 TRAIN_FRACTION = 1.0
 MODEL_VERSION = '2b-it'
 
-# %%
+
 # ====== Reproducibility ======
 SEED = 42
 
-# %%
+
 # ====== LoRA ======
 RANK = 64
 ALPHA = 64.0
 
-# %%
+
 # ====== Sharding ======
 # Defines how the model and data are distributed across the available devices.
 MESH = [(2, 4), ('fsdp', 'tp')]
 
-# %%
+
 # ====== GRPO ======
 # --- Generation during GRPO training ---
 # === Generation during GRPO training ===
@@ -133,7 +133,7 @@ TOP_K = 50
 # paper. The "group" in GRPO comes from here.
 NUM_GENERATIONS = 4
 
-# %%
+
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
 NUM_ITERATIONS = 1
@@ -145,7 +145,7 @@ BETA = 0.08
 # stable updates.
 EPSILON = 0.2
 
-# %%
+
 # ====== Training ======
 BATCH_SIZE = 16
 NUM_BATCHES = 100
@@ -159,7 +159,7 @@ NUM_EPOCHS = 1  # can potentially train for more epochs
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
-# %%
+
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 3e-6
 B1 = 0.9  # Adam beta1
@@ -175,13 +175,13 @@ WARMUP_STEPS = 0.1 * MAX_STEPS
 # important to keep KL divergence in check.
 MAX_GRAD_NORM = 0.1
 
-# %%
+
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 500
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
-# %%
+
 # --- Inference & Sampling Configurations ---
 GENERATION_CONFIGS = {
     # greedy
@@ -193,15 +193,15 @@ GENERATION_CONFIGS = {
 }
 
 
-# %%
+
 # ------------------------------------------------------------------------------
 # Section 2: Utility Functions
 # ------------------------------------------------------------------------------
-# %%
+
 # Check initial memory usage
 show_hbm_usage()
 
-# %%
+
 # ------------------------------------------------------------------------------
 # Section 3: Data Preprocessing
 # ------------------------------------------------------------------------------
@@ -216,7 +216,7 @@ reasoning_end = '</reasoning>'
 solution_start = '<answer>'
 solution_end = '</answer>'
 
-# %%
+
 # Define the system prompt for the model's desired output format.
 SYSTEM_PROMPT = f"""You are given a problem. Think about the problem and \
 provide your reasoning. Place it between {reasoning_start} and \
@@ -228,14 +228,14 @@ value) between {solution_start} and {solution_end}."""
 # problems.
 
 
-# %%
+
 def extract_hash_answer(text: str) -> str | None:
   if '####' not in text:
     return None
   return text.split('####')[1].strip()
 
 
-# %%
+
 # Load and prepare the datasets.
 train_dataset, val_dataset = script_utils.get_train_and_eval_datasets(
     data_path=TRAIN_DATA_PATH,
@@ -257,7 +257,7 @@ test_dataset = script_utils.get_dataset(
     answer_extractor=extract_hash_answer,
 ).batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
-# %%
+
 
 print((
     len(train_dataset),
@@ -265,12 +265,12 @@ print((
     len(test_dataset),
 ))
 
-# %%
+
 # Let's see how one batch of the dataset looks like!
 for ele in train_dataset[:1]:
   pprint(ele)
 
-# %%
+
 # ------------------------------------------------------------------------------
 # Section 4: Model Loading
 # ------------------------------------------------------------------------------
@@ -332,12 +332,12 @@ def get_ref_model():
     return gemma, mesh, tokenizer_path
 
 
-# %%
+
 # Load the reference model (the base Gemma 2 model).
 gemma, mesh, tokenizer_path = get_ref_model()
 nnx.display(gemma)
 
-# %%
+
 # Create the policy model by applying LoRA to the reference model.
 lora_config = {
     'module_path': '.*attention',
@@ -349,10 +349,10 @@ lora_gemma = model_utils.apply_lora_to_model(
 )
 nnx.display(lora_gemma)
 
-# %%
+
 # Check memory usage after loading models.
 show_hbm_usage()
-# %%
+
 # ------------------------------------------------------------------------------
 # Section 5: Reward Functions
 # ------------------------------------------------------------------------------
@@ -375,7 +375,7 @@ print(
 )
 
 
-# %%
+
 # Give the model a reward of 3 points if the format matches exactly.
 def match_format_exactly(prompts, completions, **kargs):
   scores = []
@@ -453,7 +453,7 @@ match_numbers = re.compile(
     rf'{solution_start}.*?([\d\.]{{1,}})', flags=re.MULTILINE | re.DOTALL
 )
 
-# %%
+
 print(match_numbers.findall(f'{solution_start}  0.34  {solution_end}'))
 
 
@@ -488,35 +488,35 @@ def check_numbers(prompts, completions, answer, **kargs):
   return scores
 
 
-# %%
+
 # ------------------------------------------------------------------------------
 # Section 6: Training Setup
 # ------------------------------------------------------------------------------
 # Configure the trainer, optimizer, and other components for the GRPO run.
 
-# %%
+
 # The following is a notebook magic and will not work in a .py file.
 # It is kept here for reference.
 # %load_ext GOOGLE_INTERNAL_PACKAGE_PATH.learning.brain.tensorboard.notebook.extension
 
-# %%
+
 # Ckpt saving
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
 
-# %%
+
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir='/tmp/tensorboard/grpo', flush_every_n_steps=20
 )
 
-# %%
+
 # The following is a notebook magic and will not work in a .py file.
 # It is kept here for reference.
 # %tensorboard --logdir /tmp/tensorboard/grpo --port=0
 
-# %%
+
 # Optimizer, learning rate scheduler, gradient clipping
 optimizer = optax.adamw(
     learning_rate=optax.schedules.warmup_cosine_decay_schedule(
@@ -536,7 +536,7 @@ if MAX_GRAD_NORM is not None:
       optimizer,
   )
 
-# %%
+
 # Training config
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
@@ -568,7 +568,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     ),
 )
 
-# %%
+
 grpo_config = GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
@@ -578,14 +578,14 @@ grpo_config = GRPOConfig(
     max_concurrency=8,
 )
 
-# %%
+
 if ENV == 'oss':
   tokenizer = tokenizer_lib.Tokenizer(tokenizer_path=tokenizer_path)
 else:
   tokenizer = tokenizer_lib.Tokenizer()
 chat_parser = parser.GemmaChatTemplateParser(tokenizer)
 
-# %%
+
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=lora_gemma,
@@ -594,7 +594,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 
-# %%
+
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
@@ -608,7 +608,7 @@ grpo_trainer = GRPOLearner(
     chat_parser=chat_parser,
 )
 
-# %%
+
 # ------------------------------------------------------------------------------
 # Section 7: Execute Training
 # ------------------------------------------------------------------------------

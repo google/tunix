@@ -1,4 +1,4 @@
-# %%
+
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
 
 import contextlib
@@ -59,7 +59,7 @@ with cm:
   from tunix.sft import metrics_logger
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
-# %%
+
 # ====== Data ======
 TRAIN_FRACTION = 1.0
 
@@ -146,7 +146,7 @@ GENERATION_CONFIGS = {
 # ====== Rollout ======
 ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
 
-# %%
+
 try:
   from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
   file_open = gfile.Open
@@ -176,10 +176,10 @@ CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 
-# %%
+
 show_hbm_usage = sft_utils.show_hbm_usage
 
-# %%
+
 import pandas as pd
 import datasets as datasets_lib
 import transformers
@@ -230,7 +230,7 @@ def create_datasets(
   test_ds = grain.MapDataset.source(test_ds).map(process_item)
   return train_ds, test_ds
 
-# %%
+
 
 tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
 print(tokenizer_source)
@@ -238,7 +238,7 @@ tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
-# %%
+
 train_dataset, test_dataset = create_datasets()
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
@@ -259,10 +259,10 @@ for s in iter(test_dataset):
   print(s)
   break
 
-# %%
+
 show_hbm_usage()
 
-# %%
+
 mesh = jax.make_mesh(
     (1, 4),
     ("fsdp", "tp"),
@@ -273,16 +273,16 @@ print("model_path: ", MODEL_PATH)
 qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
 # nnx.display(model)
 
-# %%
+
 show_hbm_usage()
 
-# %%
+
 ModelAgent = model_agent.ModelAgent
 TaskEnvironment = task_environment.TaskEnvironment
 TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 is_two_reward = reward.is_two_reward
 
-# %%
+
 # Ckpt saving
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
@@ -293,7 +293,7 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
 )
 
-# %%
+
 # # Logs
 # if NOTEBOOK_ENV == "g3":
 #   %load_ext GOOGLE_INTERNAL_PACKAGE_PATH.learning.brain.tensorboard.notebook.extension
@@ -301,7 +301,7 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
 #   %load_ext tensorboard
 # %tensorboard --logdir /tmp/content/tmp/tensorboard/grpo --port=0
 
-# %%
+
 # Optimizer, learning rate scheduler, gradient clipping
 optimizer = optax.adamw(
     learning_rate=optax.schedules.warmup_cosine_decay_schedule(
@@ -321,7 +321,7 @@ if MAX_GRAD_NORM is not None:
       optimizer,
   )
 
-# %%
+
 # Training config
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
@@ -360,7 +360,7 @@ grpo_config = GRPOConfig(
     system_prompt="",
 )
 
-# %%
+
 # RL cluster
 with mesh:
   rl_cluster = rl_cluster_lib.RLCluster(
@@ -380,5 +380,5 @@ grpo_trainer = GRPOLearner(
     chat_parser=chat_parser,
 )
 
-# %%
+
 grpo_trainer.train(train_dataset)
