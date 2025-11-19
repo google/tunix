@@ -520,7 +520,7 @@ class DecoderLayer(nnx.Module):
     return cache, outputs
 
 
-class Llama3(BackendMappingMixin, nnx.Module):
+class Llama3(BackendMappingMixin, nnx.Module, pytree=False):
   """Llama3 model."""
 
   def __init__(
