@@ -871,7 +871,7 @@ grpo_trainer = grpo_learner.GRPOLearner(
         check_answer,
         check_numbers,
     ],
-    grpo_config=grpo_config,
+    algo_config=grpo_config,
 )
 
 show_hbm_usage("After creating the learner")
