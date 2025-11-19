@@ -231,7 +231,7 @@ class ORPOTrainerTest(parameterized.TestCase):
     np.random.seed(0)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     # Use negative log probs (as they should be in reality)
-    per_token_logps = -np.abs(np.random.normal(2, 1, size=(8, 4)))
+    per_token_logps = np.random.uniform(-5.0, -1.0, size=(8, 4))
     train_example = orpo_lib.TrainExample(
         input_ids=jnp.arange(0, 32).reshape(8, 4),
         positions=jnp.ones((8, 4)),

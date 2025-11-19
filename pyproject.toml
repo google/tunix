@@ -31,8 +31,8 @@ dependencies = [
   "omegaconf", # CLI config
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
-  "qwix<=0.1.1",  # Newer version of qwix depends on unreleased flax beyond 0.12.0
   "sentencepiece",
+  "qwix",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
