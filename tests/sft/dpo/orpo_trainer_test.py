@@ -21,7 +21,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from tunix.rl import common
 from tunix.sft.dpo import dpo_trainer as orpo_lib
 from tunix.tests import test_common as tc
 
@@ -231,21 +230,28 @@ class ORPOTrainerTest(parameterized.TestCase):
     np.random.seed(0)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     # Use negative log probs (as they should be in reality)
-    per_token_logps = -np.abs(np.random.normal(2, 1, size=(8, 4)))
+    per_token_logps = -np.abs(np.random.rand(8, 4))
+    completion_mask = np.ones((8, 4))
+    token_logps = (per_token_logps * completion_mask).sum(axis=-1)
+
+    batch_size = token_logps.shape[0]
+    chosen_logps = token_logps[: batch_size // 2]
+    rejected_logps = token_logps[batch_size // 2 :]
+
     train_example = orpo_lib.TrainExample(
         input_ids=jnp.arange(0, 32).reshape(8, 4),
         positions=jnp.ones((8, 4)),
         attention_mask=jnp.ones((8, 4, 4)),
         ref_chosen_logps=None,
         ref_rejected_logps=None,
-        completion_mask=jnp.ones((8, 4)),
+        completion_mask=completion_mask,
         logits_to_keep=4,
     )
 
     with mock.patch.object(
-        common,
-        "get_per_token_logps",
-        return_value=jnp.array(per_token_logps),
+        orpo_lib,
+        "compute_logps",
+        return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps)),
     ):
       loss, aux = orpo_lib.dpo_loss_fn(
           model,

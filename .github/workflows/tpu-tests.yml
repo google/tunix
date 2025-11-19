@@ -37,7 +37,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:jax0.7.1_rev1
+      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -221,8 +221,13 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          # Reinstall Tunix with prod dependencies
+          pip install -e .[prod] --force-reinstall
+
           # Loading tfds requires tensorflow.
           pip install tensorflow
+
+          export JAX_PLATFORMS=tpu,cpu
           ./tests/sft/sft_tpu_smoke_test.sh
       - name: Run tunix cli tests
         env:
