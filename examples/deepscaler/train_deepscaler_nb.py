@@ -253,7 +253,7 @@ show_hbm_usage("after model loading with fp32")
 
 DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
 
-os.environ["HF_TOKEN"] = "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"
+os.environ["HF_TOKEN"] = ""
 
 print("hf token: ", os.environ["HF_TOKEN"])
 def create_datasets(
