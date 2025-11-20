@@ -419,7 +419,6 @@ def create_model(
   elif model_source == 'huggingface':
     # for all other model
     oss_utils.hf_pipeline(model_config)
-
   else:
     logging.error(
         'Unsupported workflow: from %s to download %s.',
