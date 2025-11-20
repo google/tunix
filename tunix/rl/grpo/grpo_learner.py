@@ -156,12 +156,12 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    # Workaround for passing in importance_sampling_algo as jax transforms
-    # doesn't like partial functions with kwargs.
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
-
+    
+    # Workaround for passing in importance_sampling_algo as jax transforms
+    # doesn't like partial functions with kwargs.
     loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
         model,
         train_example,
@@ -498,6 +498,27 @@ def grpo_loss_fn(
   )
 
   return loss, aux
+
+
+@function_registry.register_advantage_estimator("grpo")
+def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
+  """Compute group relative advantages.
+
+  Args:
+    rewards: reward functions output.
+    num_generations: Number of generations.
+
+  Returns:
+    Group relative advantages.
+  """
+  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
+  std_grouped_rewards = rewards.reshape(-1, num_generations).std(
+      axis=-1, ddof=1
+  )
+
+  mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
+  std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
+  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
 
 GrpoConfig = GRPOConfig

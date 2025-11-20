@@ -33,7 +33,6 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import trace as trace_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.grpo import grpo_helpers
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
@@ -1145,6 +1144,21 @@ class GRPOLearnerTest(parameterized.TestCase):
         mode=rl_cluster_lib.Mode.TRAIN,
     )
     self.assertLen(rewards, len(prompts))
+
+  def test_compute_advantages(self):
+    prev_val = jax.config.jax_threefry_partitionable
+    self.addCleanup(jax.config.update, 'jax_threefry_partitionable', prev_val)
+    jax.config.update('jax_threefry_partitionable', False)
+    self.assertFalse(jax.config.jax_threefry_partitionable)
+
+    rng = jax.random.PRNGKey(0)
+    rewards = jax.random.uniform(rng, shape=(1, 6))
+    advantages = grpo_lib.compute_advantages(rewards, num_generations=3)
+    expected_value = jnp.array(
+        [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
+    )
+    np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
+
 
 
 if __name__ == '__main__':

@@ -52,7 +52,6 @@ from tunix.rl.agentic.environments import task_environment
 from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
-from tunix.rl.grpo import grpo_helpers  # pylint: disable=unused-import
 from tunix.rl.grpo import grpo_learner as grpo_learner_lib  # pylint: disable=unused-import
 from tunix.rl.queue import data_queue as queue_lib
 
