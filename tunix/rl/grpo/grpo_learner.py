@@ -131,8 +131,6 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         scalar reward for given prompts and completions. Each function should
         accept `prompts`, `completions` and optional keyword arguments, and
         return a list of float rewards.
-      grpo_config: An instance of `GRPOConfig` containing all GRPO specific
-        parameters.
       metric_fns: A sequence of callables that compute metrics for the
         completions. Each callable should accept ``prompts``, ``completions``,
         ``rewards``, ``advantages`` and optional keyword arguments, and return
