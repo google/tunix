@@ -498,64 +498,7 @@ class MLP(nnx.Module):
     return outputs
 
 
-class DecoderLayer(nnx.Module):
-  """DecoderLayer."""
-
-  def __init__(
-      self,
-      config: ModelConfig,
-      *,
-      rngs: nnx.Rngs,
-      einsum_cls: nnx.Module,
-  ):
-    self.input_layernorm = RMSNorm(
-        config.embed_dim,
-        norm_eps=config.norm_eps,
-        rngs=rngs,
-        shd_config=config.shd_config,
-    )
-    self.attn = Attention(
-        config=config,
-        rngs=rngs,
-        einsum_cls=einsum_cls,
-    )
-    self.post_attention_layernorm = RMSNorm(
-        config.embed_dim,
-        norm_eps=config.norm_eps,
-        rngs=rngs,
-        shd_config=config.shd_config,
-    )
-    self.mlp = MLP(
-        config=config,
-        rngs=rngs,
-    )
-
-  def __call__(
-      self,
-      x: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-      sin,
-      cos,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    inputs_normalized = self.input_layernorm(x)
-    cache, attn_output = self.attn(
-        inputs_normalized,
-        cache,
-        attn_mask,
-        sin,
-        cos,
-    )
-    attn_output += x
-    residual = attn_output
-    attn_output = self.post_attention_layernorm(attn_output)
-    outputs = self.mlp(attn_output)
-    outputs = residual + outputs
-    return cache, outputs
-
-
-# TODO(b/462143527): Migrate to Pytrees.
-class Qwen2(BackendMappingMixin, nnx.Module, pytree=False):
+class Qwen2(nnx.Module, pytree=False):
   """Qwen2.5 model."""
 
   class Einsum(nnx.Module):
@@ -614,6 +557,62 @@ class Qwen2(BackendMappingMixin, nnx.Module, pytree=False):
     def num_embed(self):
       return self.input_embedding.value.shape[0]
 
+
+  class DecoderLayer(nnx.Module, pytree=False):
+    """DecoderLayer."""
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        rngs: nnx.Rngs,
+        einsum_cls: nnx.Module,
+    ):
+      self.input_layernorm = RMSNorm(
+          config.embed_dim,
+          norm_eps=config.norm_eps,
+          rngs=rngs,
+          shd_config=config.shd_config,
+      )
+      self.attn = Attention(
+          config=config,
+          rngs=rngs,
+          einsum_cls=einsum_cls,
+      )
+      self.post_attention_layernorm = RMSNorm(
+          config.embed_dim,
+          norm_eps=config.norm_eps,
+          rngs=rngs,
+          shd_config=config.shd_config,
+      )
+      self.mlp = MLP(
+          config=config,
+          rngs=rngs,
+      )
+
+    def __call__(
+        self,
+        x: jaxtyping.Array,
+        cache: LayerCache | None,
+        attn_mask: jaxtyping.Array,
+        sin,
+        cos,
+    ) -> tuple[LayerCache | None, jaxtyping.Array]:
+      inputs_normalized = self.input_layernorm(x)
+      cache, attn_output = self.attn(
+          inputs_normalized,
+          cache,
+          attn_mask,
+          sin,
+          cos,
+      )
+      attn_output += x
+      residual = attn_output
+      attn_output = self.post_attention_layernorm(attn_output)
+      outputs = self.mlp(attn_output)
+      outputs = residual + outputs
+      return cache, outputs
+
   def __init__(
       self,
       config: ModelConfig,
@@ -629,7 +628,8 @@ class Qwen2(BackendMappingMixin, nnx.Module, pytree=False):
         shd_config=shd_config,
     )
     self.layers = compat.ModuleList([
-        DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
+        self.DecoderLayer(config=config, rngs=rngs, einsum_cls=self.Einsum)
+        for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(
         config.embed_dim,
