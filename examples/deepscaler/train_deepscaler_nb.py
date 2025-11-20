@@ -246,7 +246,7 @@ show_hbm_usage("Before model loading")
 
 # %%
 print("Loading model..., PATH: ", MODEL_PATH)
-mesh = jax.make_mesh(*MESH)
+mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
 print("model_path: ", MODEL_PATH)
 qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
