@@ -1,4 +1,4 @@
-
+# %%
 from pprint import pprint
 import datasets as datasets_lib
 import grain
@@ -39,7 +39,7 @@ with cm:
   from tunix.models.qwen2 import params as qwen2_params_lib
   from tunix.generate import sampler as sampler_lib
   from tunix.utils import math_utils
-
+# %%
 from typing import Any, Dict, Optional
 import jax
 from tqdm.auto import tqdm
@@ -110,7 +110,7 @@ def extract_answer_robust(passage: str) -> str:
     return answer.strip().rstrip(".,;:)")
 
   return ""
-
+# %%
 
 # only used for AIME-2024
 THOUGHT_DELIMITER_END = "</think>"
@@ -160,7 +160,7 @@ def evaluate_correctness(response: Any, ground_truths: Any) -> bool:
       return True
   print(f" {model_answer=} {ground_truths=} IS NOT CORRECT")
   return False
-
+# %%
 
 class Qwen25MathEvaluator:
 
@@ -517,7 +517,7 @@ class Qwen25MathEvaluator:
     }
 
     return eval_results
-
+# %%
 
 if NOTEBOOK_ENV == "g3":
     DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev"
@@ -544,7 +544,7 @@ MODEL_MAPPING = {
 }
 
 mesh_config = [[1, 4], ["fsdp", "tp"]]  # 4-way tensor parallelism
-
+# %%
 # MATH-500
 model_version = "Qwen/Qwen2.5-1.5B-Instruct"
 dataset = MATH_500_DATA_PATH
@@ -582,7 +582,7 @@ print(f"Dataset: {dataset}")
 print(f"Correct: {results['correct']}/{results['total']}")
 print(f"Accuracy: {results['accuracy']:.2f}%")
 print("=" * 60)
-
+# %%
 # AIME-2024
 model_version = "agentica-org/DeepScaleR-1.5B-Preview"
 dataset = AIME_2024_DATA_PATH
@@ -621,4 +621,4 @@ print(f"Dataset: {dataset}")
 print(f"Correct: {results['correct']}/{results['total']}")
 print(f"Accuracy: {results['accuracy']:.2f}%")
 print("=" * 60)
-
+# %%
