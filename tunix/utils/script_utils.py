@@ -6,6 +6,15 @@ import logging
 import os
 import grain
 
+
+DEBUG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "FATAL": logging.FATAL,
+}
+
 try:
   # This is a g3-only import.
   from GOOGLE_INTERNAL_PACKAGE_PATH.perftools.accelerators.xprof.api.python import xprof_session  # pytype: disable=import-error

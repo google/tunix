@@ -48,8 +48,8 @@ from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import utils
 from tunix.tests import test_common as tc
+from tunix.utils import script_utils
 
-logging.set_verbosity(logging.INFO)
 
 show_hbm_usage = utils.show_hbm_usage
 
@@ -147,10 +147,18 @@ parser.add_argument(
     required=False,
     help="Rollout engine data parallel size.",
 )
-
+parser.add_argument(
+    "--log-level",
+    type=str,
+    default="WARNING",
+    required=False,
+    help="Logging level.",
+)
 
 # Parse arguments
 args = parser.parse_args()
+
+logging.set_verbosity(script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING))
 
 # ====== Data ======
 # The data is not available in gcs bucket yet, please manually copy the
