@@ -6,7 +6,6 @@ import contextlib
 import os
 from pprint import pprint
 import re
-from time import sleep
 
 # from etils import ecolab
 from flax import nnx
@@ -25,10 +24,51 @@ from tqdm.auto import tqdm
 import optax
 from orbax import checkpoint as ocp
 
+
+import wandb
+
 import pathwaysutils
 pathwaysutils.initialize()
 
 print("jax devices: ", jax.devices())
+
+try:
+  wandb.login(key="")
+  print("linchai: logged in to W&B")
+except wandb.errors.UsageError as e:
+  print(f"Failed to log in to W&B: {e}")
+  # Handle the error, maybe disable W&B logging
+  wandb.init(mode="disabled")
+
+ # Ensure W&B is initialized for all logging paths (including trainer close hooks)
+wandb_initialized = False
+try:
+  if wandb.run is None:
+    # Generate timestamp-based run name
+    from datetime import datetime
+    run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb.init(
+        project="tunix",
+        name=run_name,
+        config=OmegaConf.to_container(cfg, resolve=True),
+        reinit=False,
+    )
+    print("W&B run URL:", wandb.run.url)
+    wandb_initialized = True
+  else:
+    wandb_initialized = True
+    print("W&B already initialized")
+except Exception as e:
+  print(f"Warning: Failed to initialize WandB: {e}")
+  print("Continuing without WandB logging...")
+  wandb_initialized = False
+
+# If WandB failed to initialize, disable it globally to prevent metrics logger from trying
+if not wandb_initialized:
+  import os
+
+  os.environ["WANDB_MODE"] = "disabled"
+  print("Disabled WandB globally to prevent metrics logger conflicts")
 
 try:
   from etils import ecolab
@@ -109,7 +149,8 @@ EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 100  # can potentially train for more epochs
 
 # Number of training steps.
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+# MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+MAX_STEPS = 100
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -196,6 +237,7 @@ import datasets as datasets_lib
 import transformers
 
 Dataset = datasets_lib.Dataset
+load_dataset = datasets_lib.load_dataset
 AutoTokenizer = transformers.AutoTokenizer
 
 
@@ -215,8 +257,11 @@ print("Model loaded.")
 # %%
 show_hbm_usage("after model loading with fp32")
 
-DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
-AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+# DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
+DEEPSCALER_DATA_PATH = os.path.join("gs://linchai-bucket-dev/rl/data/", "DeepScaleR-Preview-Dataset/deepscaler.json")
+# AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+
+os.environ["HF_TOKEN"] = "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"
 
 def create_datasets(
     train_ds_path: str = DEEPSCALER_DATA_PATH
@@ -227,10 +272,7 @@ def create_datasets(
         "ground_truth": example["answer"],
         "data_source": "math",
     }
-
-  # with file_open(train_ds_path) as train_f, file_open(test_ds_path, 'rb') as test_f:
-  with file_open(train_ds_path) as train_f:
-    train_df = pd.read_json(train_f)
+  train_df = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split="train")
 
   train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
   test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
@@ -260,14 +302,13 @@ def create_datasets(
 
 # %%
 
-tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
 
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
-train_dataset = create_datasets()
-print("Loaded train  datasets.")
+train_dataset = create_datasets()[:200]
+print("Loaded train  datasets with 100 items for debug.")
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
@@ -396,7 +437,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
+        # checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
@@ -462,3 +503,11 @@ show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
+
+# Finish WandB after all cleanup operations are complete
+if wandb_initialized:
+  try:
+    wandb.finish()
+    print("WandB session finished successfully")
+  except Exception as e:
+    print(f"Warning: Failed to finish WandB session: {e}")
