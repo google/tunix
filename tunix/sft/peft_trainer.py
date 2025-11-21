@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import time
+import threading
 from typing import Any, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
 
 from absl import logging
@@ -188,6 +189,7 @@ class PeftTrainer:
       metrics_logger: Optional[MetricsLogger] = None,
   ):
     self.model = model
+    self._model_lock = threading.Lock()
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     if training_config.gradient_accumulation_steps is not None:
