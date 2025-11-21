@@ -32,7 +32,7 @@ class InferenceWorker:
             " reference and reward."
         )
     self._models = models
-    self._model_lock = threading.lock()
+    self._model_lock = threading.Lock()
     # TODO(tsbao): support multiple reward models.
 
   def get_rewards(
@@ -58,7 +58,8 @@ class InferenceWorker:
       eos_id: int,
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    ref_model = self._models.get("reference")
+    with self._model_lock:
+      ref_model = self._models.get("reference")
     print("InferenceWorker: get_ref_per_token_logps called. ref_model has embedder:", hasattr(ref_model, 'embedder'))
     if ref_model is None:
       raise ValueError("Reference model is not available.")
@@ -81,7 +82,8 @@ class InferenceWorker:
       eos_id: int,
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    critic_model = self._models.get("critic")
+    with self._model_lock:
+      critic_model = self._models.get("critic")
     if critic_model is None:
       raise ValueError("Critic model is not available.")
     return common.compute_score(

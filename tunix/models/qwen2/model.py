@@ -205,64 +205,6 @@ def shard(x: jnp.ndarray, s: Tuple[str, ...]):
       x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
   )
 
-
-class Einsum(nnx.Module):
-  """Einsum is a convenience module for parameterized tensor multiplication."""
-
-  def __init__(
-      self,
-      einsum_str: str,
-      shape: flax.typing.Shape,
-      *,
-      rngs: nnx.Rngs,
-      sharding: Tuple[str | None, ...],
-  ):
-    self.einsum_str = einsum_str
-    self.shape = shape
-    self.w = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
-    )
-
-  @jax.named_scope('einsum')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
-
-
-class Embedder(nnx.Module):
-  """Embedder module."""
-
-  def __init__(
-      self,
-      vocab_size: int,
-      embed_dim: int,
-      *,
-      rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  ):
-    self.input_embedding = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
-        sharding=shd_config.emb_vd,
-    )
-    self.shd_config = shd_config
-
-  @jax.named_scope('embedder_encode')
-  def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    x = self.input_embedding[(x,)]
-    x = shard(x, self.shd_config.act_btd)
-    return x
-
-  @jax.named_scope('embedder_decode')
-  def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.dot(x, self.input_embedding.value.T)
-
-  @property
-  def embed_dim(self):
-    return self.input_embedding.value.shape[1]
-
-  @property
-  def num_embed(self):
-    return self.input_embedding.value.shape[0]
-
 def _generate_pos_embeddings(
     positions: jax.Array,
     features: int,
@@ -316,7 +258,6 @@ def apply_rotary_embedding(
   sin, cos = sin[:, :, None, :], cos[:, :, None, :]
   return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
 
-
 class RMSNorm(nnx.Module):
   """RMSNorm layer."""
 
@@ -352,28 +293,29 @@ class Attention(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
+      einsum_cls: nnx.Module,
   ):
     self.config = config
     self.shd_config = config.shd_config
-    self.q_proj = Einsum(
+    self.q_proj = einsum_cls(
         einsum_str='BTD,DNH->BTNH',
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.q_weight_dnh,
     )
-    self.k_proj = Einsum(
+    self.k_proj = einsum_cls(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
     )
-    self.v_proj = Einsum(
+    self.v_proj = einsum_cls(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
     )
-    self.o_proj = Einsum(
+    self.o_proj = einsum_cls(
         einsum_str='BTNH,NHD->BTD',
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
@@ -567,6 +509,7 @@ class DecoderLayer(nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
+      einsum_cls: nnx.Module,
   ):
     self.input_layernorm = RMSNorm(
         config.embed_dim,
@@ -577,6 +520,7 @@ class DecoderLayer(nnx.Module):
     self.attn = Attention(
         config=config,
         rngs=rngs,
+        einsum_cls=einsum_cls,
     )
     self.post_attention_layernorm = RMSNorm(
         config.embed_dim,
@@ -616,6 +560,62 @@ class DecoderLayer(nnx.Module):
 class Qwen2(BackendMappingMixin, nnx.Module):
   """Qwen2.5 model."""
 
+  class Einsum(nnx.Module):
+    """Einsum is a convenience module for parameterized tensor multiplication."""
+
+    def __init__(
+        self,
+        einsum_str: str,
+        shape: flax.typing.Shape,
+        *,
+        rngs: nnx.Rngs,
+        sharding: Tuple[str | None, ...],
+    ):
+      self.einsum_str = einsum_str
+      self.shape = shape
+      self.w = nnx.Param(
+          nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+      )
+
+    @jax.named_scope('einsum')
+    def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+      return jnp.einsum(self.einsum_str, x, self.w.value)
+
+  class Embedder(nnx.Module):
+    """Embedder module."""
+
+    def __init__(
+        self,
+        vocab_size: int,
+        embed_dim: int,
+        *,
+        rngs: nnx.Rngs,
+        shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+    ):
+      self.input_embedding = nnx.Param(
+          nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
+          sharding=shd_config.emb_vd,
+      )
+      self.shd_config = shd_config
+
+    @jax.named_scope('embedder_encode')
+    def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+      x = self.input_embedding[(x,)]
+      x = shard(x, self.shd_config.act_btd)
+      return x
+
+    @jax.named_scope('embedder_decode')
+    def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+      return jnp.dot(x, self.input_embedding.value.T)
+
+    @property
+    def embed_dim(self):
+      return self.input_embedding.value.shape[1]
+
+    @property
+    def num_embed(self):
+      return self.input_embedding.value.shape[0]
+
   def __init__(
       self,
       config: ModelConfig,
@@ -624,7 +624,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.config = config
-    self.embedder = Embedder(
+    self.embedder = self.Embedder(
         vocab_size=config.vocab_size,
         embed_dim=config.embed_dim,
         rngs=rngs,
@@ -640,7 +640,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
         shd_config=shd_config,
     )
     if not self.config.use_tied_embedding:
-      self.lm_head = Einsum(
+      self.lm_head = self.Einsum(
           einsum_str='BTD,DV->BTV',
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,
