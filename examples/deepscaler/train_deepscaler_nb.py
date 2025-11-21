@@ -4,6 +4,9 @@
 
 import contextlib
 import os
+from pprint import pprint
+import re
+from time import sleep
 
 # from etils import ecolab
 from flax import nnx
@@ -155,19 +158,19 @@ else:
   trainer_mesh = mesh
 
 # %%
-try:
-  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-  file_open = gfile.Open
+# try:
+  # from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+  # file_open = gfile.Open
 
-  NOTEBOOK_ENV = "g3"
-except Exception:
-  NOTEBOOK_ENV = "git"
+  # NOTEBOOK_ENV = "g3"
+# except Exception:
+NOTEBOOK_ENV = "git"
 
-  from google.cloud import storage
+  # from google.cloud import storage
 
-  import fsspec
+import fsspec
 
-  file_open = fsspec.open
+file_open = fsspec.open
 
 if NOTEBOOK_ENV == "g3":
   DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/data/"
@@ -196,12 +199,27 @@ Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
 
 
+# %%
+print("start loading model and trainer instances...")
+show_hbm_usage("Before model loading")
+
+# %%
+print("Loading model..., PATH: ", MODEL_PATH)
+mesh = jax.make_mesh(*MESH)
+config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
+print("model_path: ", MODEL_PATH)
+qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+# nnx.display(model)
+print("Model loaded.")
+
+# %%
+show_hbm_usage("after model loading with fp32")
+
 DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
 AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
 
 def create_datasets(
-    train_ds_path: str = DEEPSCALER_DATA_PATH,
-    test_ds_path: str = AIME_2024_DATA_PATH
+    train_ds_path: str = DEEPSCALER_DATA_PATH
 ):
   def preprocess_fn(example, index):
     return {
@@ -210,9 +228,9 @@ def create_datasets(
         "data_source": "math",
     }
 
-  with file_open(train_ds_path) as train_f, file_open(test_ds_path, 'rb') as test_f:
+  # with file_open(train_ds_path) as train_f, file_open(test_ds_path, 'rb') as test_f:
+  with file_open(train_ds_path) as train_f:
     train_df = pd.read_json(train_f)
-    test_df = pd.read_parquet(test_f)
 
   train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
   test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
@@ -236,8 +254,9 @@ def create_datasets(
     }
 
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
-  return train_ds, test_ds
+  print("process_item for train_ds done.")
+  return train_ds
+
 
 # %%
 
@@ -247,10 +266,12 @@ tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
-train_dataset, test_dataset = create_datasets()
+train_dataset = create_datasets()
+print("Loaded train  datasets.")
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
+  print("repeating full train dataset for NUM_EPOCHS: ", NUM_EPOCHS)
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
   val_dataset = None
 else:
@@ -427,25 +448,6 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 show_hbm_usage("after RLCluster creation")
-
-# %%
-import logging
-import sys
-# Get the logger for the current module
-logger = logging.getLogger(__name__)
-
-# --- Clear any existing handlers from THIS logger to avoid duplicates ---
-for handler in logger.handlers[:]:
-  logger.removeHandler(handler)
-
-# Configure the root logger
-logging.basicConfig(
-    stream=sys.stdout,  # Direct logs to standard output (notebook cell)
-    level=logging.INFO,  # Set the minimum level to INFO
-    format="%(asctime)s - %(levelname)s - %(message)s",  # Optional: customize the format
-    datefmt="%Y-%m-%d %H:%M:%S",  # Optional: customize the date format
-)
-# %%
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
