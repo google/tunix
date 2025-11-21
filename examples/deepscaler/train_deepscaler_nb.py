@@ -190,7 +190,7 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
+ROLLOUT_ENGINE = "vllm" # one of "vanilla", "vllm" or "sglang-jax"
 
 # %%
 # try:
@@ -225,7 +225,12 @@ MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
+<<<<<<< HEAD
 # %%
+=======
+
+
+>>>>>>> 95a40ab (debug attribute error)
 import pandas as pd
 import datasets as datasets_lib
 import transformers
@@ -244,6 +249,7 @@ print("Loading model..., PATH: ", MODEL_PATH)
 mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
 print("model_path: ", MODEL_PATH)
+qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.bfloat16)
 qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
 # nnx.display(model)
 print("Model loaded.")
@@ -438,12 +444,21 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+        # sglang-jax specific configs
         # rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
         # rollout_sglang_jax_context_length=2048 + 8192,
         # rollout_sglang_jax_mem_fraction_static=0.2,
         # rollout_sglang_jax_init_with_random_weights=True,
         # rollout_sglang_jax_disable_radix_cache=True,
         # rollout_sglang_jax_enable_deterministic_sampling=False,
+        # vllm-tpu specific configs
+        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_vllm_hbm_utilization=0.2,
+        # rollout_vllm_tpu_backend_type="jax",
+        # rollout_vllm_server_mode=True,
+        # rollout_vllm_async_scheduling=True,
+        # tensor_parallel_size=4,
+        # data_parallel_size=2,
     ),
 )
 
