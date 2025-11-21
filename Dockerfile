@@ -21,20 +21,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip
 
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
-<<<<<<< HEAD
 RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
-=======
-# RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
-RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
->>>>>>> f588ce1 (debug qwen2 attribute not found issue)
 RUN pip install gcsfs
 RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 RUN pip install --upgrade wandb
-<<<<<<< HEAD
-=======
 
 # Set a directory to clone sglang-jax into
 WORKDIR /usr/src
@@ -43,7 +36,6 @@ RUN git clone https://github.com/sgl-project/sglang-jax.git
 # Install the package in editable mode
 # The -e flag means the installation links to the source code in /usr/src/sglang-jax
 RUN cd sglang-jax/python && pip install --no-cache-dir -e .
->>>>>>> 9945e48 (try sglang-jax)
 
 # Set the working directory
 WORKDIR /app
