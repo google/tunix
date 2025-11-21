@@ -50,16 +50,15 @@ absl_logging.set_stderrthreshold("info")
 
 print("Logging configured at INFO level.")
 
+# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+# from etils import ecolab
+import optax
+from orbax import checkpoint as ocp
 
-try:
-  import pathwaysutils
-  pathwaysutils.initialize()
-except:
-  pass
+import pathwaysutils
+pathwaysutils.initialize()
 
 print("jax devices: ", jax.devices())
-# import os
-# os.environ["WANDB_MODE"] = "online"
 
 try:
   from etils import ecolab
