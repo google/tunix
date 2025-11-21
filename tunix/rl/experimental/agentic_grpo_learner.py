@@ -751,13 +751,14 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         "gradient_accumulation_steps", 1
     )
 
-    logging.info(  # pylint: disable=logging-fstring-interpolation
+    print(  # pylint: disable=logging-fstring-interpolation
         f"Training with {full_batch_size=}, {mini_batch_size=},"
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
         f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
     )
 
-    logging.info("Starting GRPOLearner training loop.")
+    print("Starting GRPOLearner training loop.")
+    full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
 
     all_eval_prompts = (
         list(self._create_micro_batch_iterator(iter(eval_dataset), 1))
@@ -830,7 +831,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
 
     for batch in loop_iterator:
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
-        logging.info(
+        print(
             "Reached max_steps: %d >= %d",
             self.rl_cluster.global_steps,
             self._training_config.max_steps,
@@ -848,6 +849,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       # between batches and ensures the orchestrator is configured with the
       # latest model parameters after any weight updates.
       orchestrator = self._build_orchestrator()
+      print("Starting producer for new batch.")
       producer_future = self.executor.submit(
           self._run_async,
           self._producer(orchestrator, prompt_queue, train_data_queue),
@@ -936,6 +938,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           self._eval_iter_steps += 1
 
         # --- Training Step ---
+        print("Updating actor for new micro-batch.")
+        print("global_step=", self.rl_cluster.global_steps)
         self.rl_cluster.update_actor(
             [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
@@ -946,7 +950,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
 
       # --- Weight Sync Logic ---
       if self.should_sync_weights:
-        logging.info("Syncing weights after processing full batch.")
+        print("Syncing weights after processing full batch.")
         self.rl_cluster.sync_weights()
       else:
         self.rl_cluster.global_steps += 1
