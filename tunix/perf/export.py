@@ -202,7 +202,7 @@ class PerfMetricsExport:
     ]
 
     first_micro_batch_rollout_time: float = (
-        rollout_spans[0].begin - global_step_group.begin
+        rollout_spans[0].end - global_step_group.begin
     )
 
     # append [0.0] to make size equal to micro batch
