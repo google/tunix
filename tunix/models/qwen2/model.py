@@ -205,6 +205,57 @@ def shard(x: jnp.ndarray, s: Tuple[str, ...]):
       x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
   )
 
+
+class Einsum(nnx.Module):
+  """Einsum is a convenience module for parameterized tensor multiplication."""
+
+  def __init__(
+      self,
+      einsum_str: str,
+      shape: flax.typing.Shape,
+      *,
+      rngs: nnx.Rngs,
+      sharding: Tuple[str | None, ...],
+  ):
+    self.einsum_str = einsum_str
+    self.shape = shape
+    self.w = nnx.Param(
+        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+    )
+
+  @jax.named_scope('einsum')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    return jnp.einsum(self.einsum_str, x, self.w.value)
+
+
+class Embedder(nnx.Module):
+  """Embedder module."""
+
+  def __init__(
+      self,
+      vocab_size: int,
+      embed_dim: int,
+      *,
+      rngs: nnx.Rngs,
+      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ):
+    self.input_embedding = nnx.Param(
+        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
+        sharding=shd_config.emb_vd,
+    )
+    self.shd_config = shd_config
+
+  @jax.named_scope('embedder_encode')
+  def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    x = self.input_embedding[(x,)]
+    x = shard(x, self.shd_config.act_btd)
+    return x
+
+  @jax.named_scope('embedder_decode')
+  def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    return jnp.dot(x, self.input_embedding.value.T)
+
+
 def _generate_pos_embeddings(
     positions: jax.Array,
     features: int,
@@ -560,359 +611,302 @@ class DecoderLayer(nnx.Module):
 class Qwen2(BackendMappingMixin, nnx.Module):
   """Qwen2.5 model."""
 
-  class Einsum(nnx.Module, pytree=False):
-    """Einsum is a convenience module for parameterized tensor multiplication."""
+  def __init__(
+      self,
+      dim: int,
+      *,
+      norm_eps: float = 1e-06,
+      rngs: nnx.Rngs,
+      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ):
+    self.w = nnx.Param(
+        nnx.initializers.ones_init()(rngs.params(), dim),
+        sharding=shd_config.rms_norm_weight,
+    )
+    self.norm_eps = norm_eps
 
-    def __init__(
-        self,
-        einsum_str: str,
-        shape: flax.typing.Shape,
-        *,
-        rngs: nnx.Rngs,
-        sharding: Tuple[str | None, ...],
-    ):
-      self.einsum_str = nnx.static(einsum_str)
-      self.shape = nnx.static(shape)
-      self.w = nnx.Param(
-          nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
-      )
-
-    @jax.named_scope('einsum')
-    def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-      return jnp.einsum(self.einsum_str, x, self.w.value)
-
-  class Embedder(nnx.Module, pytree=False):
-    """Embedder module."""
-
-    def __init__(
-        self,
-        vocab_size: int,
-        embed_dim: int,
-        *,
-        rngs: nnx.Rngs,
-        shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-    ):
-      self.input_embedding = nnx.Param(
-          nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
-          sharding=shd_config.emb_vd,
-      )
-      self.shd_config = nnx.static(shd_config)
-
-    @jax.named_scope('embedder_encode')
-    def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-      x = self.input_embedding[(x,)]
-      x = shard(x, self.shd_config.act_btd)
-      return x
-
-    @jax.named_scope('embedder_decode')
-    def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-      return jnp.dot(x, self.input_embedding.value.T)
-
-    @property
-    def embed_dim(self):
-      return self.input_embedding.value.shape[1]
-
-    @property
-    def num_embed(self):
-      return self.input_embedding.value.shape[0]
+  @jax.named_scope('rms_norm')
+  def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
+    dtype = x.dtype
+    rms = jnp.sqrt(
+        jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True)
+        + self.norm_eps
+    )
+    return self.w * jnp.astype(x / rms, dtype)
 
 
-  class DecoderLayer(nnx.Module, pytree=False):
-    """DecoderLayer."""
+class Attention(nnx.Module):
+  """Attention module."""
 
+  def __init__(
+      self,
+      config: ModelConfig,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.shd_config = config.shd_config
+    self.q_proj = Einsum(
+        einsum_str='BTD,DNH->BTNH',
+        shape=(config.embed_dim, config.num_heads, config.head_dim),
+        rngs=rngs,
+        sharding=self.shd_config.q_weight_ndh,
+    )
+    self.k_proj = Einsum(
+        einsum_str='BSD,DKH->BSKH',
+        shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
+        rngs=rngs,
+        sharding=self.shd_config.kv_weight_ndh,
+    )
+    self.v_proj = Einsum(
+        einsum_str='BSD,DKH->BSKH',
+        shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
+        rngs=rngs,
+        sharding=self.shd_config.kv_weight_ndh,
+    )
+    self.o_proj = Einsum(
+        einsum_str='BTNH,NHD->BTD',
+        shape=(config.num_heads, config.head_dim, config.embed_dim),
+        rngs=rngs,
+        sharding=self.shd_config.o_weight_nhd,
+    )
+    self.n_rep = config.num_heads // config.num_kv_heads
+    self.scale = self.head_dim**-0.5
+    self.q_bias = nnx.Param(
+        nnx.initializers.zeros_init()(
+            rngs.params(), config.num_heads * config.head_dim
+        ),
+        sharding=self.shd_config.qkv_bias,
+    )
+    self.k_bias = nnx.Param(
+        nnx.initializers.zeros_init()(
+            rngs.params(), config.num_kv_heads * config.head_dim
+        ),
+        sharding=self.shd_config.qkv_bias,
+    )
+    self.v_bias = nnx.Param(
+        nnx.initializers.zeros_init()(
+            rngs.params(), config.num_kv_heads * config.head_dim
+        ),
+        sharding=self.shd_config.qkv_bias,
+    )
 
-    class RMSNorm(nnx.Module, pytree=False):
-      """RMSNorm layer."""
+  def block(
+      self,
+      x: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array | None,
+      sin: jaxtyping.Array,
+      cos: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    """Attention block."""
+    seq_len = x.shape[1]
 
-      def __init__(
-          self,
-          dim: int,
-          *,
-          norm_eps: float = 1e-06,
-          rngs: nnx.Rngs,
-          shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-      ):
-        self.w = nnx.Param(
-            nnx.initializers.ones_init()(rngs.params(), dim),
-            sharding=shd_config.rms_norm_weight,
-        )
-        self.norm_eps = nnx.static(norm_eps)
+    query_proj = self.q_proj(x)
+    b, t, n, h = query_proj.shape
+    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias
+    query_proj = jnp.reshape(query_proj, (b, t, n, h))
+    key_proj = self.k_proj(x)
+    _, s, k, h = key_proj.shape
+    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias
+    key_proj = jnp.reshape(key_proj, (b, s, k, h))
+    value_proj = self.v_proj(x)
+    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias
+    value_proj = jnp.reshape(value_proj, (b, s, k, h))
 
-      @jax.named_scope('rms_norm')
-      def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
-        dtype = x.dtype
-        rms = jnp.sqrt(
-            jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True)
-            + self.norm_eps
-        )
-        return self.w * jnp.astype(x / rms, dtype)
+    query_proj = shard(query_proj, self.shd_config.act_btnh)
+    key_proj = shard(key_proj, self.shd_config.act_btnh)
+    value_proj = shard(value_proj, self.shd_config.act_btnh)
 
-
-    class Attention(nnx.Module, pytree=False):
-      """Attention module."""
-
-      def __init__(
-          self,
-          config: ModelConfig,
-          *,
-          rngs: nnx.Rngs,
-          einsum_cls: nnx.Module,
-      ):
-        self.config = nnx.static(config)
-        self.shd_config = nnx.static(config.shd_config)
-        self.q_proj = einsum_cls(
-            einsum_str='BTD,DNH->BTNH',
-            shape=(config.embed_dim, config.num_heads, config.head_dim),
-            rngs=rngs,
-            sharding=self.shd_config.q_weight_ndh,
-        )
-        self.k_proj = einsum_cls(
-            einsum_str='BSD,DKH->BSKH',
-            shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
-            rngs=rngs,
-            sharding=self.shd_config.kv_weight_ndh,
-        )
-        self.v_proj = einsum_cls(
-            einsum_str='BSD,DKH->BSKH',
-            shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
-            rngs=rngs,
-            sharding=self.shd_config.kv_weight_ndh,
-        )
-        self.o_proj = einsum_cls(
-            einsum_str='BTNH,NHD->BTD',
-            shape=(config.num_heads, config.head_dim, config.embed_dim),
-            rngs=rngs,
-            sharding=self.shd_config.o_weight_nhd,
-        )
-        self.n_rep = nnx.static(config.num_heads // config.num_kv_heads)
-        self.scale = nnx.static(self.head_dim**-0.5)
-        self.q_bias = nnx.Param(
-            nnx.initializers.zeros_init()(
-                rngs.params(), config.num_heads * config.head_dim
-            ),
-            sharding=self.shd_config.qkv_bias,
-        )
-        self.k_bias = nnx.Param(
-            nnx.initializers.zeros_init()(
-                rngs.params(), config.num_kv_heads * config.head_dim
-            ),
-            sharding=self.shd_config.qkv_bias,
-        )
-        self.v_bias = nnx.Param(
-            nnx.initializers.zeros_init()(
-                rngs.params(), config.num_kv_heads * config.head_dim
-            ),
-            sharding=self.shd_config.qkv_bias,
-        )
-
-      def block(
-          self,
-          x: jaxtyping.Array,
-          cache: LayerCache | None,
-          attn_mask: jaxtyping.Array | None,
-          sin: jaxtyping.Array,
-          cos: jaxtyping.Array,
-      ) -> tuple[LayerCache | None, jaxtyping.Array]:
-        """Attention block."""
-        seq_len = x.shape[1]
-
-        query_proj = self.q_proj(x)
-        b, t, n, h = query_proj.shape
-        query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias
-        query_proj = jnp.reshape(query_proj, (b, t, n, h))
-        key_proj = self.k_proj(x)
-        _, s, k, h = key_proj.shape
-        key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias
-        key_proj = jnp.reshape(key_proj, (b, s, k, h))
-        value_proj = self.v_proj(x)
-        value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias
-        value_proj = jnp.reshape(value_proj, (b, s, k, h))
-
-        query_proj = shard(query_proj, self.shd_config.act_btnh)
-        key_proj = shard(key_proj, self.shd_config.act_btnh)
-        value_proj = shard(value_proj, self.shd_config.act_btnh)
-
-        query_proj = apply_rotary_embedding(
-            query_proj,
-            sin,
-            cos,
-        )
-        key_proj = apply_rotary_embedding(
-            key_proj,
-            sin,
-            cos,
-        )
-
-        if cache is not None:
-          end_index = cache['end_index'][0]
-          slice_indices = (0, end_index % cache['v'].shape[1], 0, 0)
-          value_proj = jax.lax.dynamic_update_slice(
-              cache['v'],
-              value_proj,
-              slice_indices,
-          )
-          key_proj = jax.lax.dynamic_update_slice(
-              cache['k'], key_proj, slice_indices
-          )
-
-        b, t, qh, d = query_proj.shape
-        _, s, kh, _ = key_proj.shape
-
-        # GQA
-        query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-        attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-        attn = attn.reshape((b, qh, t, s))
-
-        if attn_mask is not None:
-          attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
-
-        attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-            key_proj.dtype
-        )
-
-        attn = attn.reshape((b, kh, qh // kh, t, s))
-        qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-        qkv = qkv.reshape((b, t, qh, d))
-
-        outputs = self.o_proj(qkv)
-        outputs = shard(outputs, self.shd_config.act_btd)
-
-        if cache is not None:
-          new_cache = {
-              'v': value_proj,
-              'k': key_proj,
-              'end_index': cache['end_index'] + seq_len,
-          }
-        else:
-          new_cache = None
-
-        return new_cache, outputs
-
-      @jax.named_scope('attention')
-      def __call__(
-          self,
-          x: jaxtyping.Array,
-          cache: LayerCache | None,
-          attn_mask: jaxtyping.Array | None,
-          sin: jaxtyping.Array,
-          cos: jaxtyping.Array,
-      ) -> tuple[LayerCache | None, jaxtyping.Array]:
-        if self.config.remat_config == RematConfig.BLOCK:
-          # nnx.remat needs to be applied to the unbound function and take self
-          # as the first argument.
-          return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
-        else:
-          return self.block(x, cache, attn_mask, sin, cos)
-
-      @property
-      def head_dim(self):
-        return self.o_proj.shape[1]
-
-      @property
-      def num_heads(self):
-        return self.q_proj.shape[0]
-
-      @property
-      def num_kv_heads(self):
-        return self.k_proj.shape[1]
-
-    class MLP(nnx.Module, pytree=False):
-      """MLP module."""
-
-      def __init__(
-          self,
-          config: ModelConfig,
-          *,
-          rngs: nnx.Rngs,
-      ):
-        self.shd_config = nnx.static(config.shd_config)
-        kernel_init_fn = nnx.initializers.zeros_init()
-        self.gate_proj = nnx.Linear(
-            in_features=config.embed_dim,
-            out_features=config.hidden_dim,
-            use_bias=False,
-            rngs=rngs,
-            kernel_init=nnx.with_partitioning(
-                kernel_init_fn, self.shd_config.ffw_weight_df
-            ),
-        )
-        self.up_proj = nnx.Linear(
-            in_features=config.embed_dim,
-            out_features=config.hidden_dim,
-            use_bias=False,
-            rngs=rngs,
-            kernel_init=nnx.with_partitioning(
-                kernel_init_fn, self.shd_config.ffw_weight_df
-            ),
-        )
-        self.down_proj = nnx.Linear(
-            in_features=config.hidden_dim,
-            out_features=config.embed_dim,
-            use_bias=False,
-            rngs=rngs,
-            kernel_init=nnx.with_partitioning(
-                kernel_init_fn, self.shd_config.ffw_weight_fd
-            ),
-        )
-
-      @jax.named_scope('feed_forward')
-      def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-        activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-        activations = shard(activations, self.shd_config.act_btf)
-        outputs = self.down_proj(activations)
-        return outputs
-
-    def __init__(
-        self,
-        config: ModelConfig,
-        *,
-        rngs: nnx.Rngs,
-        einsum_cls: nnx.Module,
-    ):
-      self.input_layernorm = self.RMSNorm(
-          config.embed_dim,
-          norm_eps=config.norm_eps,
-          rngs=rngs,
-          shd_config=config.shd_config,
-      )
-      self.attn = self.Attention(
-          config=config,
-          rngs=rngs,
-          einsum_cls=einsum_cls,
-      )
-      self.post_attention_layernorm = self.RMSNorm(
-          config.embed_dim,
-          norm_eps=config.norm_eps,
-          rngs=rngs,
-          shd_config=config.shd_config,
-      )
-      self.mlp = self.MLP(
-          config=config,
-          rngs=rngs,
-      )
-
-    def __call__(
-        self,
-        x: jaxtyping.Array,
-        cache: LayerCache | None,
-        attn_mask: jaxtyping.Array,
+    query_proj = apply_rotary_embedding(
+        query_proj,
         sin,
         cos,
-    ) -> tuple[LayerCache | None, jaxtyping.Array]:
-      inputs_normalized = self.input_layernorm(x)
-      cache, attn_output = self.attn(
-          inputs_normalized,
-          cache,
-          attn_mask,
-          sin,
-          cos,
+    )
+    key_proj = apply_rotary_embedding(
+        key_proj,
+        sin,
+        cos,
+    )
+
+    if cache is not None:
+      end_index = cache['end_index'][0]
+      slice_indices = (0, end_index % cache['v'].shape[1], 0, 0)
+      value_proj = jax.lax.dynamic_update_slice(
+          cache['v'],
+          value_proj,
+          slice_indices,
       )
-      attn_output += x
-      residual = attn_output
-      attn_output = self.post_attention_layernorm(attn_output)
-      outputs = self.mlp(attn_output)
-      outputs = residual + outputs
-      return cache, outputs
+      key_proj = jax.lax.dynamic_update_slice(
+          cache['k'], key_proj, slice_indices
+      )
+
+    b, t, qh, d = query_proj.shape
+    _, s, kh, _ = key_proj.shape
+
+    # GQA
+    query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
+    attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
+    attn = attn.reshape((b, qh, t, s))
+
+    if attn_mask is not None:
+      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
+
+    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
+        key_proj.dtype
+    )
+
+    attn = attn.reshape((b, kh, qh // kh, t, s))
+    qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
+    qkv = qkv.reshape((b, t, qh, d))
+
+    outputs = self.o_proj(qkv)
+    outputs = shard(outputs, self.shd_config.act_btd)
+
+    if cache is not None:
+      new_cache = {
+          'v': value_proj,
+          'k': key_proj,
+          'end_index': cache['end_index'] + seq_len,
+      }
+    else:
+      new_cache = None
+
+    return new_cache, outputs
+
+  @jax.named_scope('attention')
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array | None,
+      sin: jaxtyping.Array,
+      cos: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.config.remat_config == RematConfig.BLOCK:
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
+    else:
+      return self.block(x, cache, attn_mask, sin, cos)
+
+  @property
+  def head_dim(self):
+    return self.o_proj.shape[1]
+
+  @property
+  def num_heads(self):
+    return self.q_proj.shape[0]
+
+  @property
+  def num_kv_heads(self):
+    return self.k_proj.shape[1]
+
+
+class MLP(nnx.Module):
+  """MLP module."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.shd_config = config.shd_config
+    kernel_init_fn = nnx.initializers.zeros_init()
+    self.gate_proj = nnx.Linear(
+        in_features=config.embed_dim,
+        out_features=config.hidden_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            kernel_init_fn, self.shd_config.ffw_weight_df
+        ),
+    )
+    self.up_proj = nnx.Linear(
+        in_features=config.embed_dim,
+        out_features=config.hidden_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            kernel_init_fn, self.shd_config.ffw_weight_df
+        ),
+    )
+    self.down_proj = nnx.Linear(
+        in_features=config.hidden_dim,
+        out_features=config.embed_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            kernel_init_fn, self.shd_config.ffw_weight_fd
+        ),
+    )
+
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
+    activations = shard(activations, self.shd_config.act_btf)
+    outputs = self.down_proj(activations)
+    return outputs
+
+
+class DecoderLayer(nnx.Module):
+  """DecoderLayer."""
+
+  def __init__(
+      self,
+      config: ModelConfig,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.input_layernorm = RMSNorm(
+        config.embed_dim,
+        norm_eps=config.norm_eps,
+        rngs=rngs,
+        shd_config=config.shd_config,
+    )
+    self.attn = Attention(
+        config=config,
+        rngs=rngs,
+    )
+    self.post_attention_layernorm = RMSNorm(
+        config.embed_dim,
+        norm_eps=config.norm_eps,
+        rngs=rngs,
+        shd_config=config.shd_config,
+    )
+    self.mlp = MLP(
+        config=config,
+        rngs=rngs,
+    )
+
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      sin,
+      cos,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    inputs_normalized = self.input_layernorm(x)
+    cache, attn_output = self.attn(
+        inputs_normalized,
+        cache,
+        attn_mask,
+        sin,
+        cos,
+    )
+    attn_output += x
+    residual = attn_output
+    attn_output = self.post_attention_layernorm(attn_output)
+    outputs = self.mlp(attn_output)
+    outputs = residual + outputs
+    return cache, outputs
+
+
+# TODO(b/462143527): Migrate to Pytrees.
+class Qwen2(BackendMappingMixin, nnx.Module):
+  """Qwen2.5 model."""
 
   def __init__(
       self,
@@ -921,25 +915,24 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
-    self.config = nnx.static(config)
-    self.embedder = self.Embedder(
+    self.config = config
+    self.embedder = Embedder(
         vocab_size=config.vocab_size,
         embed_dim=config.embed_dim,
         rngs=rngs,
         shd_config=shd_config,
     )
     self.layers = compat.ModuleList([
-        self.DecoderLayer(config=config, rngs=rngs, einsum_cls=self.Einsum)
-        for _ in range(config.num_layers)
+        DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
     ])
-    self.final_norm = self.DecoderLayer.RMSNorm(
+    self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
         norm_eps=config.norm_eps,
         shd_config=shd_config,
     )
     if not self.config.use_tied_embedding:
-      self.lm_head = self.Einsum(
+      self.lm_head = Einsum(
           einsum_str='BTD,DV->BTV',
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,

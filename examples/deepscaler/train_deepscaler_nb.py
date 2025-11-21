@@ -230,7 +230,6 @@ MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
-# %%
 import pandas as pd
 import datasets as datasets_lib
 import transformers
@@ -249,6 +248,7 @@ print("Loading model..., PATH: ", MODEL_PATH)
 mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
 print("model_path: ", MODEL_PATH)
+qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.bfloat16)
 qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
 # nnx.display(model)
 print("Model loaded.")
