@@ -21,9 +21,14 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip
 
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
+<<<<<<< HEAD
 RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
+=======
+# RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
+RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
+>>>>>>> f588ce1 (debug qwen2 attribute not found issue)
 RUN pip install gcsfs
 RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 

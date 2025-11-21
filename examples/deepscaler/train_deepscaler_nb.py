@@ -24,6 +24,10 @@ import optax
 from orbax import checkpoint as ocp
 
 
+from tunix.models.qwen2 import params as params_lib
+from tunix.models.qwen2 import model as model_lib
+
+
 import wandb
 
 import pathwaysutils
@@ -82,8 +86,6 @@ except:
   cm = contextlib.nullcontext()
 
 with cm:
-  from tunix.models.qwen2 import params as params_lib
-  from tunix.models.qwen2 import model as model_lib
   from tunix.generate import sampler as sampler_lib
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.agents import model_agent
@@ -188,7 +190,7 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "sglang_jax" # one of "vanilla", "vllm" or "sglang-jax"
+ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
 
 # %%
 # try:
@@ -249,12 +251,11 @@ print("Model loaded.")
 # %%
 show_hbm_usage("after model loading with fp32")
 
-# DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
-DEEPSCALER_DATA_PATH = os.path.join("gs://linchai-bucket-dev/rl/data/", "DeepScaleR-Preview-Dataset/deepscaler.json")
-# AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
 
+os.environ["HF_TOKEN"] = "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"
 
-
+print("hf token: ", os.environ["HF_TOKEN"])
 def create_datasets(
     train_ds_path: str = DEEPSCALER_DATA_PATH
 ):
@@ -297,7 +298,7 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
 train_dataset = create_datasets()[:200]
-print("Loaded train  datasets with 100 items for debug.")
+print("Loaded train  datasets with 200 items for debug.")
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
@@ -428,7 +429,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
+        checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
@@ -439,12 +440,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
-        rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        rollout_sglang_jax_context_length=2048 + 8192,
-        rollout_sglang_jax_mem_fraction_static=0.2,
-        rollout_sglang_jax_init_with_random_weights=True,
-        rollout_sglang_jax_disable_radix_cache=True,
-        rollout_sglang_jax_enable_deterministic_sampling=False,
+        # rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_sglang_jax_context_length=2048 + 8192,
+        # rollout_sglang_jax_mem_fraction_static=0.2,
+        # rollout_sglang_jax_init_with_random_weights=True,
+        # rollout_sglang_jax_disable_radix_cache=True,
+        # rollout_sglang_jax_enable_deterministic_sampling=False,
     ),
 )
 
@@ -454,7 +455,11 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
+<<<<<<< HEAD
     max_concurrency=8,
+=======
+    max_concurrency=4,
+>>>>>>> f588ce1 (debug qwen2 attribute not found issue)
 )
 
 # %%
