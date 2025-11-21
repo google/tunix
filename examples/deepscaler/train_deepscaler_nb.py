@@ -6,6 +6,9 @@ import contextlib
 import functools
 import json
 import os
+from pprint import pprint
+import re
+from time import sleep
 
 # from etils import ecolab
 from flax import nnx
@@ -101,15 +104,15 @@ EPSILON = 0.2
 # ====== Training ======
 BATCH_SIZE = 164
 MINI_BATCH_SIZE = 32
-ROLLOUT_MICRO_BATCH_SIZE = 8
-LOGPS_MICRO_BATCH_SIZE = 8
+# ROLLOUT_MICRO_BATCH_SIZE = 8
+# LOGPS_MICRO_BATCH_SIZE = 8
 NUM_BATCHES = 30
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
 
 EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 100 # can potentially train for more epochs
+NUM_EPOCHS = 1 # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
@@ -147,19 +150,19 @@ GENERATION_CONFIGS = {
 ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
 
 # %%
-try:
-  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-  file_open = gfile.Open
+# try:
+  # from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+  # file_open = gfile.Open
 
-  NOTEBOOK_ENV = "g3"
-except Exception:
-  NOTEBOOK_ENV = "git"
+  # NOTEBOOK_ENV = "g3"
+# except Exception:
+NOTEBOOK_ENV = "git"
 
-  from google.cloud import storage
+  # from google.cloud import storage
 
-  import fsspec
+import fsspec
 
-  file_open = fsspec.open
+file_open = fsspec.open
 
 if NOTEBOOK_ENV == "g3":
   DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/data/"
@@ -188,12 +191,27 @@ Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
 
 
+# %%
+print("start loading model and trainer instances...")
+show_hbm_usage("Before model loading")
+
+# %%
+print("Loading model..., PATH: ", MODEL_PATH)
+mesh = jax.make_mesh(*MESH)
+config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
+print("model_path: ", MODEL_PATH)
+qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+# nnx.display(model)
+print("Model loaded.")
+
+# %%
+show_hbm_usage("after model loading with fp32")
+
 DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
 AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
 
 def create_datasets(
-    train_ds_path: str = DEEPSCALER_DATA_PATH,
-    test_ds_path: str = AIME_2024_DATA_PATH
+    train_ds_path: str = DEEPSCALER_DATA_PATH
 ):
   def preprocess_fn(example, index):
     return {
@@ -202,33 +220,33 @@ def create_datasets(
         "data_source": "math",
     }
 
-  with file_open(train_ds_path) as train_f, file_open(test_ds_path, 'rb') as test_f:
+  # with file_open(train_ds_path) as train_f, file_open(test_ds_path, 'rb') as test_f:
+  with file_open(train_ds_path) as train_f:
     train_df = pd.read_json(train_f)
-    test_df = pd.read_parquet(test_f)
 
   train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
-  test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
-
-
+  print("from pandas for train_ds done.")
+  sleep(5)
   def process_item(item):
-      question = item["question"]
-      answer = item["answer"]
+    question = item["question"]
+    answer = item["answer"]
 
-      instruction = "Let's think step by step, and put your final answer within \\boxed{}."
-      prompt = f"{question} {instruction}"
-      prompt = tokenizer.apply_chat_template(
-          [{"role": "user", "content": prompt}],
-          tokenize=False, add_generation_prompt=True)
+    instruction = "Let's think step by step, and put your final answer within \\boxed{}."
+    prompt = f"{question} {instruction}"
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False, add_generation_prompt=True)
 
-      return {
-          "prompts": prompt,
-          "question": question,
-          "answer": answer,
-      }
+    return {
+        "prompts": prompt,
+        "question": question,
+        "answer": answer,
+    }
 
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
-  return train_ds, test_ds
+  print("process_item for train_ds done.")
+  return train_ds
+
 
 # %%
 
@@ -239,25 +257,26 @@ tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
-train_dataset, test_dataset = create_datasets()
+train_dataset = create_datasets()
+print("Loaded train  datasets.")
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
+  print("repeating full train dataset for NUM_EPOCHS: ", NUM_EPOCHS)
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
   val_dataset = None
 else:
   train_dataset = train_dataset[: int(len(train_dataset) * TRAIN_FRACTION)]
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
   val_dataset = train_dataset[int(len(train_dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
-test_dataset = test_dataset.batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
-for s in iter(train_dataset):
-  print(s)
-  break
+# for s in iter(train_dataset):
+  # print(s)
+  # break
 
-for s in iter(test_dataset):
-  print(s)
-  break
+# for s in iter(test_dataset):
+  # print(s)
+  # break
 
 # %%
 show_hbm_usage()
@@ -310,7 +329,6 @@ show_hbm_usage()
 ModelAgent = model_agent.ModelAgent
 TaskEnvironment = task_environment.TaskEnvironment
 TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
-is_two_reward = reward.is_two_reward
 
 # %%
 # Ckpt saving
@@ -403,6 +421,8 @@ with compat.set_mesh(mesh):
       cluster_config=cluster_config,
   )
 
+show_hbm_usage("after RLCluster creation")
+
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
@@ -412,6 +432,7 @@ grpo_trainer = GRPOLearner(
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
+show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
