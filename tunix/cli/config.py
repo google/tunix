@@ -345,6 +345,7 @@ class HyperParameters:
           " https://optax.readthedocs.io/en/latest/api/optimizers.html#optimizers"
       ) from e
 
+    logging.info("[SHADI] optimizer_config: %s", optimizer_config)
     # Handle learning rate, potentially creating a schedule
     learning_rate_val = self._create_learning_rate(
         optimizer_config, config_path_info

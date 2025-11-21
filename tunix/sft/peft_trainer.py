@@ -194,6 +194,7 @@ class PeftTrainer:
       optimizer = optax.MultiSteps(
           optimizer, training_config.gradient_accumulation_steps
       )
+    logging.info("[SHADI] config in peft_trainer: %s", self.config)
     if self._lora_enabled:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:

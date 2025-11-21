@@ -79,6 +79,26 @@ from tunix.cli.utils import model
         model_name="gemma3-27b",
     ),
     dict(
+        testcase_name="gemma-3-270m",
+        model_name="gemma-3-270m",
+    ),
+    dict(
+        testcase_name="gemma-3-1b",
+        model_name="gemma-3-1b",
+    ),
+    dict(
+        testcase_name="gemma-3-4b",
+        model_name="gemma-3-4b",
+    ),
+    dict(
+        testcase_name="gemma-3-12b",
+        model_name="gemma-3-12b",
+    ),
+    dict(
+        testcase_name="gemma-3-27b",
+        model_name="gemma-3-27b",
+    ),
+    dict(
         testcase_name="llama3-70b",
         model_name="llama3-70b",
     ),
@@ -118,11 +138,10 @@ from tunix.cli.utils import model
         testcase_name="qwen2.5-math-1.5b",
         model_name="qwen2.5-math-1.5b",
     ),
-    # TODO(b/451662153): support deepseek model name parsing
-    # dict(
-    #     testcase_name="deepseek-r1-distill-qwen-1.5b",
-    #     model_name="deepseek-r1-distill-qwen-1.5b",
-    # ),
+    dict(
+        testcase_name="deepseek-r1-distill-qwen-1.5b",
+        model_name="deepseek-r1-distill-qwen-1.5b",
+    ),
     dict(
         testcase_name="qwen3-0.6b",
         model_name="qwen3-0.6b",
@@ -151,10 +170,15 @@ class ModelTest(parameterized.TestCase):
     model.obtain_model_params(model_name)
 
   def test_create_model_dynamically_routing(self, model_name: str):
-    model_module = model.get_model_module(model_name)
+    params_module = model.get_model_module(model_name, model.ModelModule.PARAMS)
     if not model_name.startswith("gemma"):
       # TODO(b/444572467)
-      getattr(model_module, "create_model_from_safe_tensors")
+      getattr(params_module, "create_model_from_safe_tensors")
+
+    model_lib_module = model.get_model_module(
+        model_name, model.ModelModule.MODEL
+    )
+    getattr(model_lib_module, "ModelConfig")
 
 
 if __name__ == "__main__":
