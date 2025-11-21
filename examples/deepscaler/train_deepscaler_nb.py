@@ -7,6 +7,7 @@ import functools
 import json
 import os
 
+# from etils import ecolab
 from flax import nnx
 import grain
 import jax
@@ -98,11 +99,11 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 32
+BATCH_SIZE = 164
 MINI_BATCH_SIZE = 32
-# ROLLOUT_MICRO_BATCH_SIZE = 8
-# LOGPS_MICRO_BATCH_SIZE = 8
-NUM_BATCHES = 100
+ROLLOUT_MICRO_BATCH_SIZE = 8
+LOGPS_MICRO_BATCH_SIZE = 8
+NUM_BATCHES = 30
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
