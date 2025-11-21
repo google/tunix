@@ -37,7 +37,9 @@ class SglangJaxRollout(base_rollout.BaseRollout):
   ):
     self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
-        mapping_obj=rollout_config.rollout_mapping_config, model=model, backend="sglang_jax",
+        mapping_obj=rollout_config.rollout_mapping_config,
+        model=model,
+        backend="sglang_jax",
     )
     self._sampler = sglang_jax_sampler.SglangJaxSampler(
         tokenizer=tokenizer,
