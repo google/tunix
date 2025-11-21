@@ -606,6 +606,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           )
 
           if self.should_sync_weights:
+            logging.debug(f"Syncing weights at global step {self.rl_cluster.global_steps} mini batch step {self._iter_steps}")
             with self.rl_cluster.perf.span(
                 "weight_sync", self.rl_cluster.perf.all_devices
             ):

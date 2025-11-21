@@ -69,6 +69,10 @@ class _FakeLLMEngine:
     with self._lock:
       return bool(self._pending)
 
+  def get_num_unfinished_requests(self) -> int:
+    with self._lock:
+      return len(self._pending)
+
   def step(self):
     with self._lock:
       if not self._completion_order or not self._pending:
