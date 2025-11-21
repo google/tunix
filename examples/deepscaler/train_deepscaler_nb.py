@@ -53,6 +53,16 @@ except wandb.errors.UsageError as e:
   wandb.init(mode="disabled")
 
 
+# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+# from etils import ecolab
+import optax
+from orbax import checkpoint as ocp
+
+import pathwaysutils
+pathwaysutils.initialize()
+
+print("jax devices: ", jax.devices())
+
 try:
   from etils import ecolab
   cm = ecolab.adhoc(
