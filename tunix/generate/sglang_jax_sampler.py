@@ -44,6 +44,7 @@ class SglangJaxConfig:
   mapping_config: mappings.MappingConfig
   # Note: use_sort_for_toppk_minp may be removed in the future. It depends on SGLang-Jax.
   use_sort_for_toppk_minp: bool = True
+  device_indexes: list[int] = None
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -113,6 +114,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["page_size"] = 64
     args["context_length"] = config.context_length
     args["tp_size"] = self._find_tp_size(config.mesh)
+    if config.device_indexes is not None:
+      args["device_indexes"] = config.device_indexes
     args["mem_fraction_static"] = config.mem_fraction_static
     args["enable_single_process"] = True
     if config.disable_radix_cache:

@@ -37,7 +37,9 @@ class SglangJaxRollout(base_rollout.BaseRollout):
   ):
     self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
-        mapping_obj=rollout_config.rollout_mapping_config, model=model, backend="sglang_jax",
+        mapping_obj=rollout_config.rollout_mapping_config,
+        model=model,
+        backend="sglang_jax",
     )
     self._sampler = sglang_jax_sampler.SglangJaxSampler(
         tokenizer=tokenizer,
@@ -49,6 +51,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             init_with_random_weights=rollout_config.rollout_sglang_jax_init_with_random_weights,
             disable_radix_cache=rollout_config.rollout_sglang_jax_disable_radix_cache,
             enable_deterministic_sampling=rollout_config.rollout_sglang_jax_enable_deterministic_sampling,
+            device_indexes=rollout_config.rollout_sglang_jax_device_indexes,
             mapping_config=mapping_config,
         ),
     )

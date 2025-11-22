@@ -405,7 +405,12 @@ def load_model(model_version: str, enable_lora: bool = False):
   if "Qwen" in model_version:
     mesh_shape = (1, 2)  # because the num_key_value_heads is 2
   axis_names = ("fsdp", "tp")
-  mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape))
+  mesh = jax.make_mesh(
+      mesh_shape,
+      axis_names,
+      devices=jax.devices(),
+      axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape),
+  )
   if "Llama-3" in model_version:
     model = llama3_params_lib.create_model_from_safe_tensors(
         model_path, model_config, mesh
@@ -421,7 +426,11 @@ print("before reference")
 ref_model, mesh, model_config = load_model(repo_id)
 show_hbm_usage()
 # Policy model
-
+device_indexes = None
+if repo_id == "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B":
+  if len(jax.devices()) > 2:
+    num_device = len(jax.devices())
+    device_indexes = [num_device - 2, num_device - 1]
 lora_policy = ref_model
 print("after lora_policy")
 show_hbm_usage()
@@ -702,6 +711,7 @@ sglang_jax_config = sampler_lib.SglangJaxConfig(
     init_with_random_weights=True,
     disable_radix_cache=True,
     enable_deterministic_sampling=False,
+    device_indexes=device_indexes,
     mapping_config=mapping_config,
 )
 
@@ -786,6 +796,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rollout_sglang_jax_init_with_random_weights=True,
         rollout_sglang_jax_disable_radix_cache=True,
         rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_device_indexes=device_indexes,
     ),
 )
 

@@ -153,6 +153,9 @@ class RolloutConfig:
   # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
   rollout_sglang_jax_enable_deterministic_sampling: bool = False
 
+  # Device indexes to build mesh for SG-Lang JAX rollout engine.
+  rollout_sglang_jax_device_indexes: list[int] = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""
