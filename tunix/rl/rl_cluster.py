@@ -24,7 +24,6 @@ import gc
 import itertools
 import operator
 import os
-import time
 from typing import Any, Callable, Dict, Tuple
 
 from absl import logging
@@ -618,7 +617,7 @@ class RLCluster:
         self._rl_metrics_logger.log(
             "global",
             metric_name,
-            op(value),
+            op(jnp.array(value)),
             metrics_buffer.mode,
             metrics_buffer.global_steps,
         )
@@ -663,6 +662,54 @@ class RLCluster:
           if self._buffered_eval_metrics
           else []
       ):
+        self._log_metrics(m)
+
+    cur_metrics = buffered_metrics[-1]
+    for metric_name, (value, op) in metrics.items():
+      if metric_name not in cur_metrics.metrics:
+        cur_metrics.metrics[metric_name] = (
+            [value],
+            op,
+        )
+      else:
+        cur_metrics.metrics[metric_name][0].append(value)
+
+  def buffer_metrics_async(
+      self,
+      metrics: MetricsT,
+      mode: Mode = Mode.TRAIN,
+      step: int = 0,
+  ) -> None:
+    """Buffers rl metrics to be logged for async training.
+
+    Actual logging will happen when global steps are incremented.
+
+    Args:
+      metrics: A dictionary mapping metric names to a tuple containing the
+        metric value and an optional aggregation function.
+      mode: The mode of the workload, either TRAIN or EVAL.
+      step: The step number for the metrics. Only used in TRAIN mode.
+    """
+    if mode == Mode.TRAIN:
+      buffered_metrics = self._buffered_train_metrics
+    else:
+      buffered_metrics = self._buffered_eval_metrics
+
+    if not buffered_metrics:
+      buffered_metrics.append(MetricsBuffer(self.global_steps, mode=str(mode)))
+    else:
+      if step != buffered_metrics[-1].global_steps:
+        buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
+
+    # Global steps are incremented, log the previous metrics.
+    if self._buffered_train_metrics[0].global_steps < self.global_steps:
+      for m in [self._buffered_train_metrics.pop(0)]:
+        self._log_metrics(m)
+    if (
+        self._buffered_eval_metrics
+        and self._buffered_eval_metrics[0].global_steps < self.global_steps
+    ):
+      for m in [self._buffered_eval_metrics.pop(0)]:
         self._log_metrics(m)
 
     cur_metrics = buffered_metrics[-1]
