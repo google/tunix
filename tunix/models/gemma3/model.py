@@ -27,6 +27,9 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 
+from tunix.utils import compat
+
+
 if hasattr(flax.config, 'flax_always_shard_variable'):
   flax.config.update('flax_always_shard_variable', False)
 
@@ -803,7 +806,7 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
-class Gemma3(nnx.Module, pytree=False):
+class Gemma3(nnx.Module):
   """Gemma transformer."""
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
@@ -815,7 +818,7 @@ class Gemma3(nnx.Module, pytree=False):
         shd_config=config.shd_config,
         param_dtype=config.param_dtype,
     )
-    self.layers = [
+    self.layers = compat.ModuleList([
         Block(
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
@@ -839,7 +842,7 @@ class Gemma3(nnx.Module, pytree=False):
         for _, attn_type in zip(
             range(config.num_layers), itertools.cycle(GEMMA3_ATTENTION_PATTERN)
         )
-    ]
+    ])
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,

@@ -603,8 +603,7 @@ class DecoderLayer(nnx.Module):
     return cache, outputs
 
 
-# TODO(b/462143527): Migrate to Pytrees.
-class Qwen2(BackendMappingMixin, nnx.Module, pytree=False):
+class Qwen2(BackendMappingMixin, nnx.Module):
   """Qwen2.5 model."""
 
   def __init__(

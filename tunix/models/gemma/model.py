@@ -27,6 +27,8 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 from tunix.models.gemma import params as params_lib
+from tunix.utils import compat
+
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -836,7 +838,7 @@ def _assign_linen_params_to_nnx_state(
   return state
 
 
-class Transformer(nnx.Module, pytree=False):
+class Transformer(nnx.Module):
   """Gemma transformer."""
 
   @classmethod
@@ -874,7 +876,7 @@ class Transformer(nnx.Module, pytree=False):
         rngs=rngs,
         shd_config=config.shd_config,
     )
-    self.layers = [
+    self.layers = compat.ModuleList([
         Block(
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
@@ -894,7 +896,7 @@ class Transformer(nnx.Module, pytree=False):
         for _, attn_type in zip(
             range(config.num_layers), config.attention_types
         )
-    ]
+    ])
     self.final_norm = RMSNorm(
         config.embed_dim, rngs=rngs, shd_config=config.shd_config
     )
