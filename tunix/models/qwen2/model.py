@@ -45,8 +45,8 @@ class ShardingConfig:
 
   emb_vd: Tuple[str | None, ...]
   emb_dv: Tuple[str | None, ...]
-  q_weight_ndh: Tuple[str | None, ...]
-  kv_weight_ndh: Tuple[str | None, ...]
+  q_weight_dnh: Tuple[str | None, ...]
+  kv_weight_dnh: Tuple[str | None, ...]
   o_weight_nhd: Tuple[str | None, ...]
   ffw_weight_df: Tuple[str | None, ...]
   ffw_weight_fd: Tuple[str | None, ...]
@@ -65,8 +65,8 @@ class ShardingConfig:
     return ShardingConfig(
         emb_vd=('tp', fsdp),
         emb_dv=(fsdp, 'tp'),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_ndh=('tp', fsdp, None),
+        q_weight_dnh=(fsdp, 'tp', None),
+        kv_weight_dnh=(fsdp, 'tp', None),
         o_weight_nhd=('tp', None, fsdp),
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
@@ -349,19 +349,19 @@ class Attention(nnx.Module):
         einsum_str='BTD,DNH->BTNH',
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.q_weight_ndh,
+        sharding=self.shd_config.q_weight_dnh,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_dnh,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_dnh,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
