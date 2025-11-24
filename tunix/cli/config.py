@@ -19,6 +19,7 @@ import copy
 import importlib
 import inspect
 import os
+from pathlib import Path
 import pathlib
 import shutil
 import stat
@@ -56,6 +57,25 @@ _yaml_types_to_parser = {
     omegaconf.dictconfig.DictConfig: dict,
     omegaconf.listconfig.ListConfig: list,
 }
+
+def get_project_root() -> Path:
+  """
+    Returns the project root folder.
+    It searches up from the current file until it finds a marker file
+    like '.git', 'pyproject.toml', or 'setup.py'.
+  """
+  current_path = Path(__file__).resolve().parent
+  # List of files that define the root of your project
+  root_markers = ['pyproject.toml',]
+
+  # Iterate up through parent directories
+  for parent in [current_path] + list(current_path.parents):
+      # Check if any marker exists in this parent directory
+      if any((parent / marker).exists() for marker in root_markers):
+          return parent
+
+  # Fallback: if no marker is found, return the current working directory
+  return Path.cwd()
 
 
 class HyperParameters:
@@ -684,15 +704,17 @@ class HyperParameters:
 
   def obtain_reward_fn(self) -> List[Callable[..., Any]]:
     """Obtain reward function from the config."""
+    project_root = get_project_root()
     reward_fns = []
     for reward_fn_path in self.config["reward_functions"]:
-      module_name = os.path.splitext(os.path.basename(reward_fn_path))[0]
+      full_path = str(project_root / reward_fn_path)
+      module_name = os.path.splitext(os.path.basename(full_path))[0]
       # load from source
-      loader = importlib.machinery.SourceFileLoader(module_name, reward_fn_path)
+      loader = importlib.machinery.SourceFileLoader(module_name, full_path)
       spec = importlib.util.spec_from_loader(module_name, loader)
 
       if spec is None:
-        raise ImportError(f"Cannot find spec for module at {reward_fn_path}")
+        raise ImportError(f"Cannot find spec for module at {full_path}")
       if spec.loader is None:
         raise ImportError(f"Spec for module {module_name} has no loader")
 
@@ -702,7 +724,7 @@ class HyperParameters:
         spec.loader.exec_module(module)
       except Exception as e:
         raise ImportError(
-            f"Failed to execute module {module_name} from {reward_fn_path}: {e}"
+            f"Failed to execute module {module_name} from {full_path}: {e}"
         )
 
       if self.config["verl_compatible"]:
@@ -751,7 +773,6 @@ class HyperParameters:
     except (ImportError, AttributeError, ValueError) as e:
       logging.warning("Error importing '%s': %s", path_str, e)
       return None
-
 
 def initialize(argv, **kwargs):
   return HyperParameters(argv, **kwargs)

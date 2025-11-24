@@ -33,7 +33,7 @@ max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epoc
 max_steps=$(printf "%.0f" "$max_steps_float")
 
 
-warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
+warmup_steps=$(awk "BEGIN {printf \"%.0f\", $w armup_ratio * $max_steps}")
 
 echo "Max steps: $max_steps"
 echo "Rounded warmup steps: $warmup_steps"
