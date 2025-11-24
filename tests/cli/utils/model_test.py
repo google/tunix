@@ -67,12 +67,24 @@ from tunix.cli.utils import model
         model_name="gemma3-1b",
     ),
     dict(
+        testcase_name="gemma3-1b-it",
+        model_name="gemma3-1b-it",
+    ),
+    dict(
         testcase_name="gemma3-4b",
         model_name="gemma3-4b",
     ),
     dict(
+        testcase_name="gemma3-4b-it",
+        model_name="gemma3-4b-it",
+    ),
+    dict(
         testcase_name="gemma3-12b",
         model_name="gemma3-12b",
+    ),
+    dict(
+        testcase_name="gemma3-12b-it",
+        model_name="gemma3-12b-it",
     ),
     dict(
         testcase_name="gemma3-27b",
