@@ -31,6 +31,7 @@ import re
 
 from absl import logging
 from flax import nnx
+import fsspec
 import grain
 import jax
 import optax
@@ -38,6 +39,7 @@ from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
 import transformers
+from tunix.examples.data import math_dataset
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
@@ -48,9 +50,10 @@ from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import utils
 from tunix.tests import test_common as tc
+from tunix.utils import script_utils
 
-logging.set_verbosity(logging.INFO)
 
+get_dataset = math_dataset.get_dataset
 show_hbm_usage = utils.show_hbm_usage
 
 print(
@@ -147,11 +150,23 @@ parser.add_argument(
     required=False,
     help="Rollout engine data parallel size.",
 )
-
+parser.add_argument(
+    "--log-level",
+    type=str,
+    default="WARNING",
+    required=False,
+    help="Logging level.",
+)
 
 # Parse arguments
 args = parser.parse_args()
 
+logging.set_verbosity(
+    script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING)
+)
+
+# ====== Data ======
+# The data is not available in gcs bucket yet, please manually copy the
 # ====== Data ======
 # The data is not available in gcs bucket yet, please manually copy the
 # following data to your local TRAIN_DATA_PATH (to avoid leakr error using *):
@@ -290,32 +305,6 @@ tc.download_from_huggingface(
 )
 
 
-def download_from_gcs(zip_gcs_path, target_path):
-  return f"""
-    echo "{write_download_from_gcs_sh(zip_gcs_path, target_path)}" > download_from_gcs.sh
-    bash download_from_gcs.sh
-  """
-
-
-def write_download_from_gcs_sh(zip_gcs_path, target_path):
-  # pylint: disable=anomalous-backslash-in-string
-  return f"""GCS_READ_SUCCESS=0
-while [ \$GCS_READ_SUCCESS -eq 0 ]
-do
-  {{ # try
-      gsutil cp {zip_gcs_path} {target_path} &&
-      echo 'Code download from GCS successful!' && GCS_READ_SUCCESS=1
-  }} || {{ # catch
-      echo 'Failed to read GCS via gsutil, trying again'
-      sleep 10
-  }}
-done"""
-
-
-# download_from_gcs(GCS_TRAIN_DATA_PATH, TRAIN_DATA_PATH)
-# download_from_gcs(GCS_TEST_DATA_PATH, TEST_DATA_PATH)
-
-
 def load_json_from_local(path):
   # with gfile.Open(path, "rb") as f:
   with open(path, "rb") as f:
@@ -344,43 +333,7 @@ def extract_hash_answer(text: str) -> str | None:
   return text.split("####")[1].strip()
 
 
-def get_dataset(path: str) -> grain.MapDataset:
-  """Loads a JSON dataset from a local path and converts it to a grain dataset.
-
-  Args:
-      path: The local path to the JSON file.
-
-  Returns:
-      A grain.MapDataset object.
-  """
-
-  data = load_json_from_local(path)
-
-  loaded_dataset = (
-      grain.MapDataset.source(data)
-      .shuffle(seed=SEED)
-      .map(
-          lambda x: {
-              # passed to model forward pass
-              "prompts": model_tokenizer.apply_chat_template(
-                  [
-                      {"role": "system", "content": SYSTEM_PROMPT},
-                      {"role": "user", "content": x["question"]},
-                  ],
-                  tokenize=False,
-                  add_generation_prompt=True,
-              ),
-              # passed to reward functions
-              "question": x["question"],
-              # passed to reward functions
-              "answer": extract_hash_answer(x["answer"]),
-          }
-      )
-  )
-  return loaded_dataset
-
-
-dataset = get_dataset(TRAIN_DATA_PATH).batch(args.global_batch_size)[
+dataset = get_dataset(GCS_TRAIN_DATA_PATH).batch(args.global_batch_size)[
     :NUM_BATCHES
 ]
 
@@ -393,7 +346,7 @@ else:
 
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
-test_dataset = get_dataset(TEST_DATA_PATH).batch(args.global_batch_size)[
+test_dataset = get_dataset(GCS_TEST_DATA_PATH).batch(args.global_batch_size)[
     :NUM_TEST_BATCHES
 ]
 
@@ -871,7 +824,7 @@ grpo_trainer = grpo_learner.GRPOLearner(
         check_answer,
         check_numbers,
     ],
-    grpo_config=grpo_config,
+    algo_config=grpo_config,
 )
 
 show_hbm_usage("After creating the learner")

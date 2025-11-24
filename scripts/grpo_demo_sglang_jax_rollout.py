@@ -812,7 +812,7 @@ grpo_trainer = GRPOLearner(
         check_answer,
         check_numbers,
     ],
-    grpo_config=grpo_config,
+    algo_config=grpo_config,
 )
 
 with mesh:

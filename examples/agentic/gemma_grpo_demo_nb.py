@@ -295,7 +295,9 @@ MODEL_CONFIG = {
 
 def get_ref_model():
   """Loads the reference model, from CNS in g3 or Kaggle in OSS."""
-  mesh = jax.make_mesh(*MESH)
+  mesh = jax.make_mesh(
+      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
+  )
 
   if ENV == 'g3':
     model_config = MODEL_CONFIG[MODEL_VERSION]()
@@ -604,7 +606,7 @@ grpo_trainer = GRPOLearner(
         check_answer,
         check_numbers,
     ],
-    grpo_config=grpo_config,
+    algo_config=grpo_config,
     chat_parser=chat_parser,
 )
 

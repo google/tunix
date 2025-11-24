@@ -1,27 +1,20 @@
 # %%
+
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
 
 import contextlib
 import functools
 import json
-import logging
 import os
-from pprint import pprint
-import re
 
-from etils import ecolab
 from flax import nnx
 import grain
-import humanize
 import jax
 from jax import numpy as jnp
 import optax
-from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
 
-from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-from etils import ecolab
 import optax
 from orbax import checkpoint as ocp
 
@@ -47,18 +40,16 @@ with cm:
   from tunix.rl.agentic.rewards import reward
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  from flax import nnx
   import jax
   import numpy as np
   from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
-  from tunix.models.qwen2 import params
-  from tunix.models.qwen2 import model
   from tunix.rl import rl_cluster as rl_cluster_lib
-  from tunix.sft import utils
   from tunix.rl.rollout import base_rollout
   from tunix.sft import metrics_logger
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
+  from tunix.utils import compat
+
 # %%
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -69,6 +60,7 @@ SEED = 42
 # ====== LoRA ======
 RANK = 64
 ALPHA = 64.0
+TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
@@ -85,7 +77,7 @@ TOP_K = 50
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
 # paper. The "group" in GRPO comes from here.
-NUM_GENERATIONS = 1
+NUM_GENERATIONS = 2
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -99,11 +91,11 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
-ROLLOUT_MICRO_BATCH_SIZE = 8
-LOGPS_MICRO_BATCH_SIZE = 8
-NUM_BATCHES = 30
+BATCH_SIZE = 32
+MINI_BATCH_SIZE = 32
+# ROLLOUT_MICRO_BATCH_SIZE = 8
+# LOGPS_MICRO_BATCH_SIZE = 8
+NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
@@ -264,14 +256,44 @@ show_hbm_usage()
 
 # %%
 mesh = jax.make_mesh(
-    (1, 4),
-    ("fsdp", "tp"),
+    *MESH,
     axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
 )
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
-print("model_path: ", MODEL_PATH)
-qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
-# nnx.display(model)
+print("MODEL_PATH: ", MODEL_PATH)
+qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+# nnx.display(qwen2_ref)
+
+
+# %%
+def get_lora_model(base_model, model_mesh):
+  lora_provider = qwix.LoraProvider(
+      module_path=(
+          ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
+          ".*attn_vec_einsum"
+      ),
+      rank=RANK,
+      alpha=ALPHA,
+  )
+
+  model_input = base_model.get_model_input()
+  lora_model = qwix.apply_lora_to_model(
+      base_model, lora_provider, **model_input
+  )
+
+  with compat.set_mesh(model_mesh):
+    state = nnx.state(lora_model)
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    nnx.update(lora_model, sharded_state)
+
+  return lora_model
+
+# %%
+if TRAIN_WITH_LORA:
+  qwen2_actor = get_lora_model(qwen2_ref, mesh)
+else:
+  qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
 
 # %%
 show_hbm_usage()
@@ -335,6 +357,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
+        mini_batch_size=MINI_BATCH_SIZE,
+        train_micro_batch_size = 1,  # larger than 1 will cause OOM on HBM
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -353,19 +377,20 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 )
 
 grpo_config = GRPOConfig(
-    num_generations=2,
+    num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
+    max_concurrency=8,
 )
 
 # %%
 # RL cluster
-with mesh:
+with compat.set_mesh(mesh):
   rl_cluster = rl_cluster_lib.RLCluster(
-      actor=qwen2,
-      reference=qwen2,
+      actor=qwen2_actor,
+      reference=qwen2_ref,
       tokenizer=tokenizer,
       cluster_config=cluster_config,
   )
@@ -373,8 +398,10 @@ with mesh:
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
-    reward_fns=[math_rewards.math_reward,],
-    grpo_config=grpo_config,
+    reward_fns=[
+        math_rewards.math_reward,
+    ],
+    algo_config=grpo_config,
     chat_parser=chat_parser,
 )
 

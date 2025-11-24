@@ -302,7 +302,7 @@ def get_logprobs_from_vllm_output(
     logprobs: List[Optional[Dict[int, Any]]],
 ) -> List[float]:
   """Extracts the log probs from the vLLM output."""
-  if logprobs is None or logprobs[0] is None:
+  if not logprobs or logprobs[0] is None:
     logging.debug('Logprobs are missing')
     return []
 
@@ -316,12 +316,10 @@ def get_logprobs_from_vllm_output(
     if tok_id in tok_logprobs:
       extracted.append(tok_logprobs[tok_id].logprob)
     else:
-      # TODO(b/459824938): Add back the value error after fixing the logprobs mismatch issue in vLLM
-      logging.warning(f"Token id {tok_id} not in the return log probs list {tok_logprobs}")
-      # raise ValueError(
-      #     f'The selected token id {tok_id} not in the return log probs list'
-      #     f' {tok_logprobs}'
-      # )
+      raise ValueError(
+          f'The selected token id {tok_id} not in the return log probs list'
+          f' {tok_logprobs}'
+      )
   return extracted
 
 

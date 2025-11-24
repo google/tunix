@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Utilities for creating and managing models in Tunix CLI."""
 
 import gc
 import importlib
@@ -31,7 +32,6 @@ from tunix.models.gemma3 import params as gemma3_params_lib
 from tunix.models.llama3 import model as llama3_lib
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen3 import model as qwen3_lib
-from tunix.oss import utils as oss_utils
 from tunix.rl import reshard
 
 
@@ -376,6 +376,7 @@ def create_model(
   # TODO(sizhi): Remove gemma conversion logic once load safetensors for
   # gemma is ready.
   elif model_name.startswith('gemma') and model_source == 'kaggle':
+    from tunix.oss import utils as oss_utils
 
     # Download model from Kaggle requires NNX conversion and can takes long
     # time. It is recommended to save the NNX converted model for later runs.
@@ -417,9 +418,9 @@ def create_model(
     tokenizer_path = os.path.join(ckpt_path, 'tokenizer.model')
 
   elif model_source == 'huggingface':
+    from tunix.oss import utils as oss_utils
     # for all other model
     oss_utils.hf_pipeline(model_config)
-
   else:
     logging.error(
         'Unsupported workflow: from %s to download %s.',

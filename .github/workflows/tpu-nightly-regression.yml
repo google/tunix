@@ -38,11 +38,11 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:jax0.7.1_rev1
+      image: vllm/vllm-tpu:nightly
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
-        JAX_PLATFORMS: tpu
+        JAX_PLATFORMS: tpu,cpu
     steps:
 
     # Cache Hugging Face hub
@@ -62,7 +62,7 @@ jobs:
     - name: Install tunix dependencies
       run: |
         pip install -e .[prod]
-        pip install pytest pytest-xdist
+        pip install pytest pytest-xdist gcsfs
 
     - name: Verify TPU availability
       run: |
@@ -86,13 +86,31 @@ jobs:
     - name: Run regression scripts
       id: regression_tests
       run: |
-        FAILED=0
-        echo "Running tunix/oss/examples/deepscaler/math_eval_nb.py..."
-        python tunix/oss/examples/deepscaler/math_eval_nb.py || FAILED=1
+        # Download GSM8K dataset
+        mkdir -p /tmp/grpo_test/rl/grpo/data
 
-        echo "Running tunix/oss/scripts/grpo_demo_llama3_qwen2.py..."
-        python tunix/oss/scripts/grpo_demo_llama3_qwen2.py || FAILED=1
-        
+        FAILED=0
+        echo "Running examples/deepscaler/math_eval_nb.py..."
+        python examples/deepscaler/math_eval_nb.py || FAILED=1
+
+        echo "Running scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test || FAILED=1
+
+        echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm || FAILED=1
+
+        echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm server mode..."
+        python scripts/grpo_demo_llama3_qwen2.py--root-dir=/tmp/grpo_test --rollout-engine=vllm --rollout-server-mode=True || FAILED=1
+
+        # SGLang Tests
+        unset JAX_PLATFORMS
+        pip list | egrep 'jax|flax|libtpu'
+        cd ..
+        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
+        pip install jax==0.8.0 flax==0.12.0 libtpu==0.0.24
+        pip list | egrep 'jax|flax|libtpu'
+        cd tunix && python scripts/grpo_demo_sglang_jax_rollout.py --root-dir=/tmp/grpo_test || FAILED=1
+
         if [ "$FAILED" -ne 0 ]; then
           echo "One or more scripts failed!"
           exit 1

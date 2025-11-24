@@ -14,6 +14,7 @@
 
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
+import atexit
 import dataclasses
 from itertools import count
 import math
@@ -111,6 +112,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if config.server_mode:
       self._driver = self._create_driver()
+      atexit.register(self.stop)
     else:
       self.llm = LLM(**self.args)
 
@@ -208,6 +210,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
 
   def stop(self):
+    logging.debug("Shutting down VLLMInProcessDriver.")
     if self._driver is not None:
       self._driver.shutdown()
       self._driver = None

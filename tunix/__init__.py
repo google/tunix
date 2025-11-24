@@ -31,9 +31,8 @@ from tunix.generate.sampler import CacheConfig
 from tunix.generate.sampler import Sampler
 from tunix.generate.tokenizer_adapter import TokenizerAdapter, Tokenizer
 from tunix.perf.export import PerfMetricsExport
-from tunix.perf.metrics import PerfMetricsApi
 from tunix.perf.metrics import PerfMetricsConfig
-from tunix.perf.metrics import PerfMetricsQuery
+from tunix.perf.metrics import PerfSpanQuery
 from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GrpoConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner
@@ -54,6 +53,10 @@ from tunix.sft.dpo.dpo_trainer import DPOTrainer
 from tunix.sft.dpo.dpo_trainer import DpoTrainer
 from tunix.sft.dpo.dpo_trainer import DPOTrainingConfig
 from tunix.sft.dpo.dpo_trainer import DpoTrainingConfig
+from tunix.sft.dpo.dpo_trainer import ORPOTrainer
+from tunix.sft.dpo.dpo_trainer import OrpoTrainer
+from tunix.sft.dpo.dpo_trainer import ORPOTrainingConfig
+from tunix.sft.dpo.dpo_trainer import OrpoTrainingConfig
 from tunix.sft.metrics_logger import MetricsLogger
 from tunix.sft.metrics_logger import MetricsLoggerOptions
 from tunix.sft.peft_trainer import PeftTrainer

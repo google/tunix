@@ -6,15 +6,19 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import optax
+from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
-
 
 class DummyModel(nnx.Module):
   pass
 
 
-class DummyLearner(rl_learner.RLLearner):
+class DummyConfig(algo_config_lib.AlgorithmConfig):
+  pass
+
+
+class DummyLearner(rl_learner.RLLearner[DummyConfig]):
 
   def _generate_and_compute_advantage(self, training_input, mode):
     pass
@@ -69,6 +73,7 @@ class RLLearnerTest(parameterized.TestCase):
 
     learner = DummyLearner(
         rl_cluster=mock_cluster,
+        algo_config=DummyConfig(),
         reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
     )
 

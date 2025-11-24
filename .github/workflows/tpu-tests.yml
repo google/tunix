@@ -37,7 +37,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:jax0.7.1_rev1
+      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -90,15 +90,11 @@ jobs:
     - name: Run tunix generation tests (PASSED only)
       run: |
         # tokenizer_adapter_test requires access to gated repo
-        # TODO(b/459824938) Add back test_logprobs_extraction_with_missing_token after fixing the issue
         python -m pytest tests/generate/ -v --tb=short \
           --ignore=tests/generate/vllm_sampler_test.py \
           --ignore=tests/generate/vllm_driver_test.py \
           --ignore=tests/generate/tokenizer_adapter_test.py \
-          --ignore=tests/generate/sglang_jax_sampler_test.py \
-          --ignore=tests/generate/utils_test.py
-
-        python -m pytest tests/generate/utils_test.py -k "not test_logprobs_extraction_with_missing_token"
+          --ignore=tests/generate/sglang_jax_sampler_test.py
 
     - name: Run tunix SFT tests
       run: |
@@ -130,7 +126,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly-88f2071263f19a2f7c2e812036fc93537dd7a621
+      image: vllm/vllm-tpu:nightly
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -221,8 +217,13 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          # Reinstall Tunix with prod dependencies
+          pip install -e .[prod] --force-reinstall
+
           # Loading tfds requires tensorflow.
           pip install tensorflow
+
+          export JAX_PLATFORMS=tpu,cpu
           ./tests/sft/sft_tpu_smoke_test.sh
       - name: Run tunix cli tests
         env:

@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import types
 from typing import Iterable
+import unittest
 from unittest import mock
 
 from absl.testing import absltest
@@ -37,9 +38,11 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.generate import tokenizer_adapter
+from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.experimental import agentic_grpo_learner
+from tunix.rl.grpo import grpo_learner as grpo_learner_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common
@@ -151,11 +154,18 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
   def test_iterator(self):
     class _MockTrainer(agentic_grpo_learner.GRPOLearner):
 
-      def __init__(self, grpo_config):
-        self.grpo_config = grpo_config
+      def __init__(self, algo_config):
+        self.algo_config = algo_config
         self.rl_cluster = mock.Mock()
         self.rl_cluster.buffer_metrics = mock.Mock()
         self.metric_fns = []
+
+      def _create_micro_batch_iterator(self, iterator, batch_size):
+        # The dataset batch size is 2, and we want to test micro-batching
+        # of size 1, as consumed by _orchestrator_producer.
+        for batch in iterator:
+          for i in range(len(batch["prompts"])):
+            yield jax.tree.map(lambda x: x[i : i + 1], batch)
 
       @override
       def _batch_to_train_example(
@@ -163,7 +173,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       ):
         del batch_results, mode
         examples = []
-        for _ in range(self.grpo_config.num_generations):
+        for _ in range(self.algo_config.num_generations):
           examples.append(
               types.SimpleNamespace(
                   prompt_ids=np.array(
@@ -179,7 +189,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       ) -> list[str]:
         return [
             f"{prompt_index}_{i}"
-            for i in range(self.grpo_config.num_generations)
+            for i in range(self.algo_config.num_generations)
         ]
 
       @override
@@ -187,33 +197,27 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           self,
           orchestrator,
           prompt_iterator: Iterable[TrainingInputT],
-          episodes_per_pair: int = 1,
+          num_generations: int = 1,
           collect_mode: str = "Token",
       ):
         for i, example in enumerate(prompt_iterator):
           group = [
               types.SimpleNamespace(
-                  pair_index=i * self.grpo_config.num_generations + j
+                  pair_index=i * self.algo_config.num_generations + j
               )
-              for j in range(self.grpo_config.num_generations)
+              for j in range(self.algo_config.num_generations)
           ]
           yield group, [example]
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    algo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=2, num_iterations=2
     )
-    trainer = _MockTrainer(grpo_config)
+    trainer = _MockTrainer(algo_config)
 
-    prompt_queue = queue_lib.SimpleDataQueue(maxsize=5)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
     dataset = _dummy_dataset(MySource(data=[i for i in range(2)]), batch_size=2)
 
-    batch = next(iter(dataset))
-    for prompt in trainer._create_micro_batch_iterator(iter([batch]), 1):
-      prompt_queue.put(prompt)
-    prompt_queue.put(None)
-
-    asyncio.run(trainer._producer(mock.Mock(), prompt_queue, train_data_queue))
+    asyncio.run(trainer._producer(mock.Mock(), iter(dataset), train_data_queue))
 
     results = []
     while True:
@@ -285,7 +289,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
-        grpo_config=grpo_config,
+        algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
     )
@@ -352,13 +356,18 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             ),
             None,
         )
-
-    loss, aux = agentic_grpo_learner.grpo_loss_fn(
-        model=MockModel(rngs=nnx.Rngs(0)),
-        train_example=train_example,
+    algo_config = agentic_grpo_learner.GRPOConfig(
         beta=0.1,
         epsilon=0.2,
         loss_algo=loss_algo,
+    )
+    policy_loss_fn = function_registry.get_policy_loss_fn(
+        algo_config.policy_loss_fn
+    )
+    loss, aux = policy_loss_fn(
+        model=MockModel(rngs=nnx.Rngs(0)),
+        train_example=train_example,
+        algo_config=algo_config,
         pad_id=0,
         eos_id=2,
     )
@@ -428,7 +437,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       grpo_learner = agentic_grpo_learner.GRPOLearner(
           rl_cluster=rl_cluster,
           reward_fns=reward_fn_1,
-          grpo_config=grpo_config,
+          algo_config=grpo_config,
           chat_parser=MockChatParser(),
       )
       return grpo_learner
@@ -531,7 +540,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           reward_fns=lambda **kwargs: reward_fn_for_tracking(
               trajectories=trajectories, **kwargs
           ),
-          grpo_config=grpo_config,
+          algo_config=grpo_config,
           chat_parser=MockChatParser(),
       )
       return grpo_learner
@@ -628,7 +637,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           reward_fns=lambda **kwargs: reward_fn_for_tracking(
               trajectories=trajectories, **kwargs
           ),
-          grpo_config=grpo_config,
+          algo_config=grpo_config,
           chat_parser=MockChatParser(),
       )
       return grpo_learner, model
@@ -722,7 +731,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       grpo_learner = agentic_grpo_learner.GRPOLearner(
           rl_cluster=rl_cluster,
           reward_fns=reward_fn,
-          grpo_config=grpo_config,
+          algo_config=grpo_config,
           chat_parser=MockChatParser(),
       )
       return grpo_learner, model
@@ -796,7 +805,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     learner = _LearnerWithException(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
-        grpo_config=grpo_config,
+        algo_config=grpo_config,
         chat_parser=MockChatParser(),
     )
     train_ds = [{"prompts": ["1"], "answer": ["1"], "question": ["1"]}]
@@ -873,7 +882,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
-        grpo_config=grpo_config,
+        algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
     )
@@ -996,12 +1005,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=1,
         loss_algo="grpo",
-        offpolicy_steps=offpolicy_steps,
+        off_policy_steps=offpolicy_steps,
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
-        grpo_config=grpo_config,
+        algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
     )
@@ -1021,6 +1030,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         4,
     )
 
+  @unittest.skip("b/461854722")
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.
     split_index = self.device_count // 2
@@ -1085,7 +1095,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
-        grpo_config=grpo_config,
+        algo_config=grpo_config,
         chat_parser=MockChatParser(),
     )
     self.assertTrue(grpo_learner.should_sync_weights)

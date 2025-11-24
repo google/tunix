@@ -270,10 +270,14 @@ class DPOTrainerTest(parameterized.TestCase):
     with mock.patch.object(
         common, "get_per_token_logps", return_value=jnp.array(per_token_logps)
     ):
-      loss, _ = dpo_lib.dpo_loss_fn(model, train_example, 0.1, 0)
+      loss, _ = dpo_lib.dpo_loss_fn(
+          model, train_example, beta=0.1, label_smoothing=0
+      )
       np.testing.assert_allclose(loss, 0.753059, atol=1e-5)
 
-      loss, _ = dpo_lib.dpo_loss_fn(model, train_example, 0.1, 0.3)
+      loss, _ = dpo_lib.dpo_loss_fn(
+          model, train_example, beta=0.1, label_smoothing=0.3
+      )
       np.testing.assert_allclose(loss, 0.925447, atol=1e-5)
 
   def test_dpo_prepare_inputs_for_strings(self):

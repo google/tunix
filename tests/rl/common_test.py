@@ -185,6 +185,99 @@ class CommonTest(parameterized.TestCase):
         padded_x, jnp.array([[0, 1, 1, 1, 1], [0, 1, 1, 1, 1]])
     )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="token_mean",
+          loss_agg_mode="token-mean",
+          per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+          completion_mask_list=[[1, 1, 0], [1, 1, 1]],
+          kwargs={},
+          expected_loss=(0.1 + 0.2 + 0.4 + 0.5 + 0.6) / 5.0,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_mean",
+          loss_agg_mode="sequence-mean-token-mean",
+          per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+          completion_mask_list=[[1, 1, 0], [1, 1, 1]],
+          kwargs={},
+          expected_loss=((0.1 + 0.2) / 2 + (0.4 + 0.5 + 0.6) / 3) / 2,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_sum_norm_default",
+          loss_agg_mode="sequence-mean-token-sum-norm",
+          per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+          completion_mask_list=[[1, 1, 0], [1, 1, 1]],
+          kwargs={},
+          expected_loss=(0.1 + 0.2 + 0.4 + 0.5 + 0.6) / 2.0,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_sum_norm_custom",
+          loss_agg_mode="sequence-mean-token-sum-norm",
+          per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+          completion_mask_list=[[1, 1, 0], [1, 1, 1]],
+          kwargs={"norm": 4.0},
+          expected_loss=(0.1 + 0.2 + 0.4 + 0.5 + 0.6) / 4.0,
+      ),
+      dict(
+          testcase_name="token_mean_zero_mask",
+          loss_agg_mode="token-mean",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[0, 0], [0, 0]],
+          kwargs={},
+          expected_loss=0.0,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_mean_zero_mask",
+          loss_agg_mode="sequence-mean-token-mean",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[0, 0], [0, 0]],
+          kwargs={},
+          expected_loss=0.0,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_sum_norm_zero_mask",
+          loss_agg_mode="sequence-mean-token-sum-norm",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[0, 0], [0, 0]],
+          kwargs={"norm": 4.0},
+          expected_loss=0.0,
+      ),
+  )
+  def test_aggregate_loss_values(
+      self,
+      loss_agg_mode,
+      per_token_loss_list,
+      completion_mask_list,
+      kwargs,
+      expected_loss,
+  ):
+    per_token_loss = jnp.array(per_token_loss_list)
+    completion_mask = jnp.array(completion_mask_list)
+    actual_loss = common.aggregate_loss(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+    np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-6, atol=1e-6)
+
+  def test_invalid_mode(self):
+    with self.assertRaisesRegex(
+        ValueError, "Unsupported loss aggregation mode"
+    ):
+      common.aggregate_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
+
+  @parameterized.named_parameters(
+      dict(testcase_name="norm_zero", norm_val=0),
+      dict(testcase_name="norm_negative", norm_val=-1.0),
+      dict(testcase_name="norm_string", norm_val="abc"),
+  )
+  def test_invalid_norm(self, norm_val):
+    with self.assertRaisesRegex(ValueError, "Invalid 'norm' value"):
+      common.aggregate_loss(
+          jnp.ones((2, 2)),
+          jnp.ones((2, 2)),
+          "sequence-mean-token-sum-norm",
+          norm=norm_val,
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

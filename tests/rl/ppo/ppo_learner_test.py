@@ -365,7 +365,7 @@ class PPOLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
     ppo_config = ppo_lib.PPOConfig(
-        num_ppo_epochs=1, epsilon_c=epsilon_c, entropy_coef=entropy_coef
+        num_iterations=1, epsilon_c=epsilon_c, entropy_coef=entropy_coef
     )
     ppo_learner = ppo_lib.PPOLearner(
         rl_cluster=rl_cluster,
@@ -450,7 +450,7 @@ class PPOLearnerTest(parameterized.TestCase):
       dict(
           testcase_name='multi_iter_without_gradient_accumulation',
           name='multi_iter_without_gradient_accumulation',
-          num_ppo_epochs=2,
+          num_iterations=2,
           beta=0.04,
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 2, 4, 6, 8],
@@ -460,7 +460,7 @@ class PPOLearnerTest(parameterized.TestCase):
       dict(
           testcase_name='multi_iter_with_gradient_accumulation',
           name='multi_iter_with_gradient_accumulation',
-          num_ppo_epochs=2,
+          num_iterations=2,
           beta=0.04,
           gradient_accumulation_steps=3,
           expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6, 12, 12],
@@ -488,7 +488,7 @@ class PPOLearnerTest(parameterized.TestCase):
       dict(
           testcase_name='single_iter_with_gradient_accumulation',
           name='single_iter_with_gradient_accumulation',
-          num_ppo_epochs=1,
+          num_iterations=1,
           beta=0.04,
           gradient_accumulation_steps=3,
           expected_gen_fn_call_at_step=[0, 0, 0, 3, 3, 3, 6, 6],
@@ -502,7 +502,7 @@ class PPOLearnerTest(parameterized.TestCase):
       dict(
           testcase_name='single_iter_without_gradient_accumulation',
           name='single_iter_without_gradient_accumulation',
-          num_ppo_epochs=1,
+          num_iterations=1,
           beta=0.04,
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 1, 2, 3, 4, 5, 6, 7],
@@ -516,7 +516,7 @@ class PPOLearnerTest(parameterized.TestCase):
       dict(
           testcase_name='single_iter_without_kl',
           name='single_iter_without_kl',
-          num_ppo_epochs=1,
+          num_iterations=1,
           beta=0.0,
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 1, 2, 3, 4, 5, 6, 7],
@@ -536,7 +536,7 @@ class PPOLearnerTest(parameterized.TestCase):
   def test_multi_iteration_training(
       self,
       name,
-      num_ppo_epochs,
+      num_iterations,
       beta,
       gradient_accumulation_steps,
       expected_gen_fn_call_at_step,
@@ -621,7 +621,7 @@ class PPOLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    ppo_config = ppo_lib.PPOConfig(num_ppo_epochs=num_ppo_epochs, beta=beta)
+    ppo_config = ppo_lib.PPOConfig(num_iterations=num_iterations, beta=beta)
     ppo_learner = ppo_lib.PPOLearner(
         rl_cluster=rl_cluster,
         ppo_config=ppo_config,

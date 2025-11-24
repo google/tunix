@@ -32,9 +32,9 @@ from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 
 
-BaseEnv = base_environment.BaseEnv
+BaseTaskEnv = base_environment.BaseTaskEnv
 Trajectory = base_agent.Trajectory
-LLMBaseAgent = base_agent.LLMBaseAgent
+ConversationAgentBase = base_agent.ConversationAgentBase
 logger = logging.getLogger(__name__)
 
 
@@ -53,23 +53,26 @@ class TrajectoryCollectEngine:
 
   def __init__(
       self,
-      agent: LLMBaseAgent,
-      env=None,
+      agent: ConversationAgentBase,
+      env: BaseTaskEnv,
       *,
-      model_call: Callable[[list[Dict[str, str]]], str],
-      final_reward_fn: Optional[Callable[[Dict[str, Any], str],
-                                         reward_types.RewardOutput]] = None,
+      model_call: Callable[..., str],
+      final_reward_fn: Optional[
+          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+      ] = None,
       max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,
       tokenizer=None,
       chat_parser=None,
+      model_call_kwargs: Optional[Dict[str, Any]] = None,
   ):
     """Initialize the trajectory collection engine.
 
     Args:
-        agent (LLMBaseAgent): The agent that will interact with the environment
-        env (BaseEnv): The environment providing tasks and feedback
+        agent (ConversationAgentBase): The agent that will interact with the
+          environment
+        env (BaseTaskEnv): The environment providing tasks and feedback
         model_call (Callable): Function that takes chat completions and returns
           model response string. Handles the actual LLM inference.
         final_reward_fn (Optional[Callable]): Optional function to compute
@@ -83,6 +86,7 @@ class TrajectoryCollectEngine:
           termination
         tokenizer: Optional tokenizer for converting messages to token IDs
         chat_parser: Optional chat parser for formatting messages
+        model_call_kwargs: Optional kwargs to pass to model_call.
     """
     self.agent = agent
     self.env = env
@@ -90,6 +94,7 @@ class TrajectoryCollectEngine:
     self.final_reward_fn = final_reward_fn or (
         lambda *_: reward_types.RewardOutput(reward=0.0)
     )
+    self.model_call_kwargs = model_call_kwargs or {}
     self.max_steps = max_steps
     self.gamma = gamma
     self.timeout = timeout
@@ -178,6 +183,9 @@ class TrajectoryCollectEngine:
           "conversation_tokens": conversation_tokens,
           "conversation_masks": conversation_masks,
           "trajectory_reward": self.agent.trajectory.reward,
+          "policy_version": self.env.task.get("policy_version"),
+          "original_input": self.env.task.get("original_input"),
+          "group_id": self.env.task.get("group_id"),
       }
     elif mode == "Conversation":
       # return raw conversation history
@@ -185,11 +193,12 @@ class TrajectoryCollectEngine:
 
   @staticmethod
   async def collect_multiple(
-      pairs: List[Tuple[LLMBaseAgent, BaseEnv]],
+      pairs: List[Tuple[ConversationAgentBase, BaseTaskEnv]],
       *,
-      model_call: Callable[[list[Dict[str, str]]], str],
-      final_reward_fn: Optional[Callable[[Dict[str, Any], str],
-                                         reward_types.RewardOutput]] = None,
+      model_call: Callable[..., str],
+      final_reward_fn: Optional[
+          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+      ] = None,
       max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,
@@ -202,8 +211,8 @@ class TrajectoryCollectEngine:
     results. Useful for distributed training or large-scale evaluation.
 
     Args:
-        pairs (List[Tuple[LLMBaseAgent, BaseEnv]]): List of (agent, environment)
-          pairs
+        pairs (List[Tuple[ConversationAgentBase, BaseTaskEnv]]): List of (agent,
+          environment) pairs
         model_call (Callable): Shared model inference function for all pairs
         final_reward_fn (Optional[Callable]): Shared final reward function
         max_steps (int): Maximum steps per episode
@@ -216,7 +225,7 @@ class TrajectoryCollectEngine:
           depends on the `mode` argument. See the `collect` method for details.
     """
 
-    async def _run_one(i: int, agent: LLMBaseAgent, env: BaseEnv):
+    async def _run_one(i: int, agent: ConversationAgentBase, env: BaseTaskEnv):
       """Execute a single agent-environment pair with the given configuration."""
       engine = TrajectoryCollectEngine(
           agent,
@@ -272,7 +281,11 @@ class TrajectoryCollectEngine:
           False otherwise.
     """
     resp = await asyncio.get_event_loop().run_in_executor(
-        None, self.model_call, [self.agent.chat_completions]
+        None,
+        self.model_call,
+        [self.agent.chat_completions],
+        self.env,
+        **self.model_call_kwargs,
     )
     action = self.agent.update_from_model(resp).action
 

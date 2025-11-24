@@ -20,7 +20,6 @@ from typing import Any
 
 from etils import epath
 import numpy as np
-import transformers
 
 import sentencepiece as spm
 
@@ -217,6 +216,8 @@ class Tokenizer(TokenizerAdapter):
 
     self.tokenizer_type = tokenizer_type
     if tokenizer_type == 'huggingface':
+      import transformers  # pylint: disable=g-import-not-at-top
+
       tokenizer = transformers.AutoTokenizer.from_pretrained(
           pretrained_model_name_or_path=tokenizer_path,
           add_bos_token=add_bos,

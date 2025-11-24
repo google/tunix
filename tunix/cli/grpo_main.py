@@ -107,7 +107,7 @@ class GrpoPipeline(config.HyperParameters):
     grpo_trainer = grpo_learner.GrpoLearner(
         rl_cluster=self.create_rl_cluster(),
         reward_fns=self.obtain_reward_fn(),
-        grpo_config=GrpoConfig(**self.config["grpo_config"]),
+        algo_config=GrpoConfig(**self.config["grpo_config"]),
     )
 
     if self.config["data_source"] == "local":

@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import threading
 from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
+from tunix.perf import span
 from tunix.perf import trace
 
-BaseTimeline = trace.BaseTimeline
+Timeline = trace.Timeline
 DeviceTimeline = trace.DeviceTimeline
 ThreadTimeline = trace.ThreadTimeline
 NoopTracer = trace.NoopTracer
@@ -36,182 +37,239 @@ def mock_array():
   return Mock(spec=JaxArray)
 
 
-def get_timelines(tracer: PerfTracer) -> list[BaseTimeline]:
-  return list(tracer._get_timelines().values())
+def timeline_tostring(timeline: Timeline) -> str:
+  # ignore thread id diffs.
+  timeline_id = (
+      timeline.id if not timeline.id.startswith("thread-") else "thread"
+  )
+  return (
+      f"{timeline_id}:"
+      + f" born={timeline.born:.6f} stack={timeline._stack_debug()}\n"
+      + span.span_group_tostring(timeline.root, timeline.born)
+  )
 
 
-def make_main_timeline(
-    born: float,
-    intervals: list[tuple[float, float]] | None = None,
-    labels: list[str] | None = None,
-    epochs: list[int] | None = None,
-) -> ThreadTimeline:
-  timeline = ThreadTimeline(str(threading.get_ident()), born)
-  timeline.intervals = intervals if intervals else []
-  timeline.labels = labels if labels else []
-  timeline.epochs = epochs if epochs else []
-  return timeline
-
-
-def make_device_timeline(
-    id: str,
-    born: float,
-    intervals: list[tuple[float, float]] | None = None,
-    labels: list[str] | None = None,
-    epochs: list[int] | None = None,
-) -> DeviceTimeline:
-  timeline = DeviceTimeline(id, born)
-  timeline.intervals = intervals if intervals else []
-  timeline.labels = labels if labels else []
-  timeline.epochs = epochs if epochs else []
-  return timeline
+def timelines_tostring(tracer: PerfTracer) -> list[str]:
+  return [
+      timeline_tostring(timeline)
+      for timeline in tracer._get_timelines().values()
+  ]
 
 
 class TracerTest(parameterized.TestCase):
 
-  # TODO(yangmu): Re-enable these tests after feature complete.
+  @patch("time.perf_counter")
+  def test_host_ok(self, mock_perf_counter):
+    mock_perf_counter.side_effect = [0.0, 2.0, 3.0]
 
-  # @patch("time.perf_counter")
-  # def test_host_ok(self, mock_perf_counter):
-  #   mock_perf_counter.side_effect = [0.0, 2.0, 3.0]
+    tracer = PerfTracer()
+    with tracer.span("x"):
+      pass
+    tracer.synchronize()
 
-  #   tracer = PerfTracer()
-  #   with tracer.interval("x"):
-  #     pass
-  #   tracer.end_epoch()
+    self.assertListEqual(
+        timelines_tostring(tracer),
+        [
+            "thread: born=0.000000 stack=root\n"
+            "- root (0.000000, inf)\n"
+            "  - x (2.000000, 3.000000)\n"
+        ],
+    )
 
-  #   tracer.synchronize()
+  @patch("time.perf_counter")
+  def test_device_ok(self, mock_perf_counter):
+    mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0]
+    waitlist = mock_array()
 
-  #   self.assertListEqual(
-  #       get_timelines(tracer),
-  #       [make_main_timeline(0.0, [(2.0, 3.0)], ["x"], [1])],
-  #   )
+    tracer = PerfTracer()
 
-  # @patch("time.perf_counter")
-  # def test_device_ok(self, mock_perf_counter):
-  #   mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0]
-  #   waitlist = mock_array()
+    with tracer.span("x", devices=["tpu0"]) as span:
+      span.device_end(waitlist)
 
-  #   tracer = PerfTracer()
+    tracer.synchronize()
 
-  #   with tracer.interval("x", devices=["tpu0"]) as interval:
-  #     interval.device_end(waitlist)
-  #   tracer.end_epoch()
+    waitlist.block_until_ready.assert_called_once()
+    self.assertListEqual(
+        timelines_tostring(tracer),
+        [
+            (
+                "thread: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - x (2.000000, 3.000000)\n"
+            ),
+            (
+                "tpu0: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - x (2.000000, 5.000000)\n"
+            ),
+        ],
+    )
 
-  #   tracer.synchronize()
+  @patch("time.perf_counter")
+  def test_device_multi_ok(self, mock_perf_counter):
+    mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0]
+    waitlist = mock_array()
 
-  #   waitlist.block_until_ready.assert_called_once()
-  #   self.assertListEqual(
-  #       get_timelines(tracer),
-  #       [
-  #           make_main_timeline(0.0, [(2.0, 3.0)], ["x"], [1]),
-  #           make_device_timeline("tpu0", 0.0, [(2.0, 5.0)], ["x"], [1]),
-  #       ],
-  #   )
+    tracer = PerfTracer(devices=["tpu0", "tpu1"])
 
-  # @patch("time.perf_counter")
-  # def test_device_multi_ok(self, mock_perf_counter):
-  #   mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0]
-  #   waitlist = mock_array()
+    with tracer.span("int", devices=["tpu0"]) as span:
+      span.device_end(waitlist)
 
-  #   tracer = PerfTracer(devices=["tpu0", "tpu1"])
+    tracer.synchronize()
 
-  #   with tracer.interval("int", devices=["tpu0"]) as interval:
-  #     interval.device_end(waitlist)
-  #   tracer.end_epoch()
+    waitlist.block_until_ready.assert_called_once()
+    self.assertListEqual(
+        timelines_tostring(tracer),
+        [
+            (
+                "thread: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - int (2.000000, 3.000000)\n"
+            ),
+            (
+                "tpu0: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - int (2.000000, 5.000000)\n"
+            ),
+            "tpu1: born=0.000000 stack=root\n- root (0.000000, inf)\n",
+        ],
+    )
 
-  #   tracer.synchronize()
+  @patch("time.perf_counter")
+  def test_device_span_begin_algorithm(self, mock_perf_counter):
+    mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0, 4.0, 6.0, 7.0]
+    waitlist = mock_array()
 
-  #   waitlist.block_until_ready.assert_called_once()
-  #   self.assertListEqual(
-  #       get_timelines(tracer),
-  #       [
-  #           make_main_timeline(0.0, [(2.0, 3.0)], ["int"], [1]),
-  #           make_device_timeline("tpu0", 0.0, [(2.0, 5.0)], ["int"], [1]),
-  #           make_device_timeline("tpu1", 0.0, [], [], [0]),
-  #       ],
-  #   )
+    tracer = PerfTracer()
 
-  # @patch("time.perf_counter")
-  # def test_device_interval_begin_algorithm(self, mock_perf_counter):
-  #   mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0, 4.0, 6.0, 7.0]
-  #   waitlist = mock_array()
+    with tracer.span("step1", devices=["tpu0"]) as span:
+      span.device_end(waitlist)
+    with tracer.span("step2", devices=["tpu0"]) as span:
+      span.device_end(waitlist)
 
-  #   tracer = PerfTracer()
+    tracer.synchronize()
 
-  #   with tracer.interval("step1", devices=["tpu0"]) as interval:
-  #     interval.device_end(waitlist)
+    self.assertEqual(waitlist.block_until_ready.call_count, 2)
+    self.assertListEqual(
+        timelines_tostring(tracer),
+        [
+            (
+                "thread: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - step1 (2.000000, 3.000000)\n"
+                "  - step2 (4.000000, 6.000000)\n"
+            ),
+            (
+                "tpu0: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - step1 (2.000000, 5.000000)\n"
+                "  - step2 (5.000000, 7.000000)\n"  # begin is 5, not 4
+            ),
+        ],
+    )
 
-  #   with tracer.interval("step2", devices=["tpu0"]) as interval:
-  #     interval.device_end(waitlist)
+  @patch("time.perf_counter")
+  def test_device_all_matcher(self, mock_perf_counter):
+    mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0, 5.0]
+    waitlist = mock_array()
 
-  #   tracer.end_epoch()
-  #   tracer.synchronize()
+    tracer = PerfTracer(devices=["tpu0", "tpu1"])
 
-  #   self.assertEqual(waitlist.block_until_ready.call_count, 2)
-  #   # "tpu0:step2:begin" is equal to
-  #   # max("host:step2:begin" 4.0, "tpu0:step1:end" 5.0)
-  #   self.assertListEqual(
-  #       get_timelines(tracer),
-  #       [
-  #           make_main_timeline(
-  #               0.0, [(2.0, 3.0), (4.0, 6.0)], ["step1", "step2"], [2]
-  #           ),
-  #           make_device_timeline(
-  #               "tpu0", 0.0, [(2.0, 5.0), (5.0, 7.0)], ["step1", "step2"], [2]
-  #           ),
-  #       ],
-  #   )
+    with tracer.span("x", devices=tracer.all_devices) as span:
+      span.device_end(waitlist)
 
-  # @patch("time.perf_counter")
-  # def test_device_all_matcher(self, mock_perf_counter):
-  #   mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0, 5.0]
-  #   waitlist = mock_array()
+    tracer.synchronize()
 
-  #   tracer = PerfTracer(devices=["tpu0", "tpu1"])
+    self.assertEqual(waitlist.block_until_ready.call_count, 2)
+    self.assertListEqual(
+        timelines_tostring(tracer),
+        [
+            (
+                "thread: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - x (2.000000, 3.000000)\n"
+            ),
+            (
+                "tpu0: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - x (2.000000, 5.000000)\n"
+            ),
+            (
+                "tpu1: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - x (2.000000, 5.000000)\n"
+            ),
+        ],
+    )
 
-  #   with tracer.interval("x", devices=tracer.all) as interval:
-  #     interval.device_end(waitlist)
+  @patch("time.perf_counter")
+  def test_span_group_ok(self, mock_perf_counter):
+    mock_perf_counter.side_effect = [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+    ]
+    waitlist = mock_array()
 
-  #   tracer.synchronize()
+    tracer = PerfTracer(["tpu0", "tpu1"])
 
-  #   self.assertEqual(waitlist.block_until_ready.call_count, 2)
-  #   self.assertListEqual(
-  #       get_timelines(tracer),
-  #       [
-  #           make_main_timeline(0.0, [(2.0, 3.0)], ["x"], []),
-  #           make_device_timeline("tpu0", 0.0, [(2.0, 5.0)], ["x"], []),
-  #           make_device_timeline("tpu1", 0.0, [(2.0, 5.0)], ["x"], []),
-  #       ],
-  #   )
+    with tracer.span_group("outer_loop"):
+      with tracer.span("step1", devices=["tpu0"]) as span:
+        span.device_end(waitlist)
+      with tracer.span_group("inner_loop"):
+        with tracer.span("step2", devices=["tpu1"]) as span:
+          span.device_end(waitlist)
+      with tracer.span("step3"):
+        pass
 
-  # def test_nested_interval_raise_exception(self):
-  #   tracer = PerfTracer()
-  #   with tracer.interval("outer"):
-  #     with self.assertRaises(ValueError):
-  #       with tracer.interval("inner"):
-  #         pass
+    tracer.synchronize()
 
-  # @patch("time.perf_counter")
-  # def test_end_epoch_is_idempotent(self, mock_perf_counter):
-  #   mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0, 7.0]
+    self.assertEqual(waitlist.block_until_ready.call_count, 2)
+    self.assertListEqual(
+        timelines_tostring(tracer),
+        [
+            (
+                "thread: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - outer_loop (1.000000, 13.000000)\n"
+                "    - step1 (2.000000, 3.000000)\n"
+                "    - inner_loop (6.000000, 10.000000)\n"
+                "      - step2 (7.000000, 8.000000)\n"
+                "    - step3 (11.000000, 12.000000)\n"
+            ),
+            (
+                "tpu0: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - outer_loop (1.000000, 13.000000)\n"
+                "    - step1 (2.000000, 5.000000)\n"
+                "    - inner_loop (6.000000, 10.000000)\n"
+            ),
+            (
+                "tpu1: born=0.000000 stack=root\n"
+                "- root (0.000000, inf)\n"
+                "  - outer_loop (1.000000, 13.000000)\n"
+                "    - inner_loop (6.000000, 10.000000)\n"
+                "      - step2 (7.000000, 9.000000)\n"
+            ),
+        ],
+    )
 
-  #   tracer = PerfTracer()
-  #   with tracer.interval("x"):
-  #     pass
-  #   tracer.end_epoch()
-  #   tracer.end_epoch()
-  #   with tracer.interval("y"):
-  #     pass
-  #   tracer.end_epoch()
-  #   tracer.end_epoch()
-
-  #   tracer.synchronize()
-
-  #   self.assertListEqual(
-  #       get_timelines(tracer),
-  #       [make_main_timeline(0.0, [(2.0, 3.0), (5.0, 7.0)], ["x", "y"], [1, 2])],
-  #   )
+  def test_nested_span_raise_exception(self):
+    tracer = PerfTracer()
+    with tracer.span("outer"):
+      with self.assertRaises(ValueError):
+        with tracer.span("inner"):
+          pass
 
   def test_noop_interface_is_same(self):
     noop_public_attrs = [

@@ -24,7 +24,6 @@ import gc
 import itertools
 import operator
 import os
-import time
 from typing import Any, Callable, Dict, Tuple
 
 from absl import logging
@@ -591,7 +590,7 @@ class RLCluster:
     return self._critic_trainer
 
   @property
-  def perf(self) -> perf_trace.NoopTracer | perf_trace.PerfTracer:
+  def perf(self) -> perf_trace.Tracer:
     return self._perf
 
   def close(self):
@@ -618,7 +617,7 @@ class RLCluster:
         self._rl_metrics_logger.log(
             "global",
             metric_name,
-            op(value),
+            op(jnp.array(value)),
             metrics_buffer.mode,
             metrics_buffer.global_steps,
         )
@@ -675,17 +674,65 @@ class RLCluster:
       else:
         cur_metrics.metrics[metric_name][0].append(value)
 
+  def buffer_metrics_async(
+      self,
+      metrics: MetricsT,
+      mode: Mode = Mode.TRAIN,
+      step: int = 0,
+  ) -> None:
+    """Buffers rl metrics to be logged for async training.
+
+    Actual logging will happen when global steps are incremented.
+
+    Args:
+      metrics: A dictionary mapping metric names to a tuple containing the
+        metric value and an optional aggregation function.
+      mode: The mode of the workload, either TRAIN or EVAL.
+      step: The step number for the metrics. Only used in TRAIN mode.
+    """
+    if mode == Mode.TRAIN:
+      buffered_metrics = self._buffered_train_metrics
+    else:
+      buffered_metrics = self._buffered_eval_metrics
+
+    if not buffered_metrics:
+      buffered_metrics.append(MetricsBuffer(self.global_steps, mode=str(mode)))
+    else:
+      if step != buffered_metrics[-1].global_steps:
+        buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
+
+    # Global steps are incremented, log the previous metrics.
+    if self._buffered_train_metrics[0].global_steps < self.global_steps:
+      for m in [self._buffered_train_metrics.pop(0)]:
+        self._log_metrics(m)
+    if (
+        self._buffered_eval_metrics
+        and self._buffered_eval_metrics[0].global_steps < self.global_steps
+    ):
+      for m in [self._buffered_eval_metrics.pop(0)]:
+        self._log_metrics(m)
+
+    cur_metrics = buffered_metrics[-1]
+    for metric_name, (value, op) in metrics.items():
+      if metric_name not in cur_metrics.metrics:
+        cur_metrics.metrics[metric_name] = (
+            [value],
+            op,
+        )
+      else:
+        cur_metrics.metrics[metric_name][0].append(value)
+
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[Role.ACTOR] as mesh:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      with self._perf.interval("actor_training", mesh.devices):
+      with self._perf.span("actor_training", mesh.devices):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[Role.CRITIC] as mesh:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      with self._perf.interval("critic_training", mesh.devices):
+      with self._perf.span("critic_training", mesh.devices):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
@@ -741,14 +788,14 @@ class RLCluster:
       else:
         rollout_config = self.cluster_config.rollout_config
 
-      with self._perf.interval("rollout", mesh.devices) as interval:
+      with self._perf.span("rollout", mesh.devices) as span:
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
             for s in rl_utils.chunk_slices_by_size(
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
-        interval.device_end(
+        span.device_end(
             [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
         )
 
