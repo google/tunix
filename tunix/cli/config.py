@@ -687,7 +687,9 @@ class HyperParameters:
     reward_fns = []
     for reward_fn_path in self.config["reward_functions"]:
       module_name = os.path.splitext(os.path.basename(reward_fn_path))[0]
-      spec = importlib.util.spec_from_file_location(module_name, reward_fn_path)
+      # load from source
+      loader = importlib.machinery.SourceFileLoader(module_name, reward_fn_path)
+      spec = importlib.util.spec_from_loader(module_name, loader)
 
       if spec is None:
         raise ImportError(f"Cannot find spec for module at {reward_fn_path}")

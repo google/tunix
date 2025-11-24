@@ -41,8 +41,8 @@ echo "Rounded warmup steps: $warmup_steps"
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
   reference_model_config.model_name="gemma3-12b-it" \
-  reference_model_config.model_id="google/gemma-3/flax/gemma3-12b-it" \
-  reference_model_config.model_source="kaggle" \
+  reference_model_config.model_id="gs://gemma-data/checkpoints/gemma3-12b-it" \
+  reference_model_config.model_source="gcs" \
   reference_model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma3_12b" \
   reference_model_config.mesh.shape="(2,4)" \
   reference_model_config.mesh.axis_names="('fsdp','tp')" \
