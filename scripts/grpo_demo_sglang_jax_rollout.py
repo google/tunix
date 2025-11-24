@@ -52,6 +52,15 @@ parser.add_argument(
     required=False,
     help="The model version to use.",
 )
+
+parser.add_argument(
+    "--rollout-data-parallel-size",
+    type=int,
+    default=1,
+    required=False,
+    help="Rollout engine data parallel size.",
+)
+
 args = parser.parse_args()
 
 # ====== Data ======
@@ -64,7 +73,19 @@ RANK = 64
 ALPHA = 64.0
 
 # ====== Sharding ======
-MESH = [(1, 4), ("fsdp", "tp")]
+
+if "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" in args.model_version:
+  TOTAL_TPU_TO_USE = 2
+else:
+  TOTAL_TPU_TO_USE = jax.device_count()
+
+MESH = [
+    (
+        args.rollout_data_parallel_size,
+        TOTAL_TPU_TO_USE // args.rollout_data_parallel_size,
+    ),
+    ("fsdp", "tp"),
+]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -401,11 +422,11 @@ def load_model(model_version: str, enable_lora: bool = False):
   ), f"Invalid model version: {model_version}"
   model_config = model_config[model_version]()
 
-  mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
-  if "Qwen" in model_version:
-    mesh_shape = (1, 2)  # because the num_key_value_heads is 2
-  axis_names = ("fsdp", "tp")
-  mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape))
+  mesh = jax.make_mesh(
+      *MESH,
+      devices=jax.devices()[:TOTAL_TPU_TO_USE],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]),
+  )
   if "Llama-3" in model_version:
     model = llama3_params_lib.create_model_from_safe_tensors(
         model_path, model_config, mesh
@@ -417,10 +438,20 @@ def load_model(model_version: str, enable_lora: bool = False):
   return model, mesh, model_config
 
 
+def get_rollout_mesh():
+  mesh = jax.make_mesh(
+      *MESH,
+      devices=jax.devices()[-TOTAL_TPU_TO_USE:],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]),
+  )
+  return mesh
+
+
 print("before reference")
 ref_model, mesh, model_config = load_model(repo_id)
 show_hbm_usage()
 # Policy model
+rollout_mesh = get_rollout_mesh()
 
 lora_policy = ref_model
 print("after lora_policy")
@@ -697,7 +728,7 @@ mapping_config = mappings.MappingConfig.build(
 sglang_jax_config = sampler_lib.SglangJaxConfig(
     model_version=model_path,
     context_length=2048,
-    mesh=mesh,
+    mesh=rollout_mesh,
     mem_fraction_static=0.3,
     init_with_random_weights=True,
     disable_radix_cache=True,
@@ -757,7 +788,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: mesh,
         rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine="sglang_jax",
     offload_to_cpu=False,
