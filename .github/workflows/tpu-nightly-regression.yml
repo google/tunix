@@ -62,7 +62,7 @@ jobs:
     - name: Install tunix dependencies
       run: |
         pip install -e .[prod]
-        pip install pytest pytest-xdist
+        pip install pytest pytest-xdist gcsfs
 
     - name: Verify TPU availability
       run: |
