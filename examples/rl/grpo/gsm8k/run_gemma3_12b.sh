@@ -54,7 +54,7 @@ python3 -m tunix.cli.grpo_main \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   rollout_model_config.mesh.shape="(2,4)" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
-  tokenizer_config.tokenizer_path="/tmp/models/gemma3-12b-it/models/google/gemma-3/flax/gemma3-12b-it/1/tokenizer.model" \
+  tokenizer_config.tokenizer_path="gs://gemma-data/tokenizers/tokenizer_gemma3.model" \
   tokenizer_config.tokenizer_type="sentencepiece" \
   tokenizer_config.add_bos=false \
   dataset_name="gsm8k" \
