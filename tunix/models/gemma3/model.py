@@ -132,6 +132,10 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma3_270m_it(cls, **kwargs):
+    return cls.gemma3_270m(**kwargs)
+
+  @classmethod
   def gemma3_1b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -149,6 +153,10 @@ class ModelConfig:
         global_base_frequency=1_000_000,
         shd_config=sharding_config,
     )
+
+  @classmethod
+  def gemma3_1b_it(cls, **kwargs):
+    return cls.gemma3_1b(**kwargs)
 
   @classmethod
   def gemma3_4b(
@@ -170,6 +178,10 @@ class ModelConfig:
         global_scale_factor=8.0,
         shd_config=sharding_config,
     )
+
+  @classmethod
+  def gemma3_4b_it(cls, **kwargs):
+    return cls.gemma3_4b(**kwargs)
 
   @classmethod
   def gemma3_12b(
@@ -194,6 +206,10 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma3_12b_it(cls, **kwargs):
+    return cls.gemma3_12b(**kwargs)
+
+  @classmethod
   def gemma3_27b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -214,6 +230,10 @@ class ModelConfig:
         global_scale_factor=8.0,
         shd_config=sharding_config,
     )
+
+  @classmethod
+  def gemma3_27b_it(cls, **kwargs):
+    return cls.gemma3_27b(**kwargs)
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
