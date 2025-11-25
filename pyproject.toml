@@ -36,7 +36,7 @@ dependencies = [
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
-  "transformers",
+  "transformers==4.57.1",
   "hf_transfer",  # Huggingface caching in CI
 ]
 
