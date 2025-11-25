@@ -100,7 +100,7 @@ jobs:
         python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm || FAILED=1
 
         echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm server mode..."
-        python scripts/grpo_demo_llama3_qwen2.py--root-dir=/tmp/grpo_test --rollout-engine=vllm --rollout-server-mode=True || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm --rollout-server-mode=True || FAILED=1
 
         # SGLang Tests
         unset JAX_PLATFORMS
@@ -109,7 +109,7 @@ jobs:
         git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
         pip install jax==0.8.0 flax==0.12.0 libtpu==0.0.24
         pip list | egrep 'jax|flax|libtpu'
-        cd tunix && python scripts/grpo_demo_sglang_jax_rollout.py --root-dir=/tmp/grpo_test || FAILED=1
+        cd tunix && python scripts/grpo_demo_sglang_jax_rollout.py || FAILED=1
 
         if [ "$FAILED" -ne 0 ]; then
           echo "One or more scripts failed!"
