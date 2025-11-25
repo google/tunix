@@ -696,7 +696,51 @@ class HyperParameters:
 
     path = pathlib.Path(__file__).parent / config_name
     try:
-      config_oconf = omegaconf.OmegaConf.load(path)
+      def load_config_with_inheritance(path):
+          if not os.path.exists(path):
+              raise FileNotFoundError(f"YAML file not found: {path}")
+
+          conf = omegaconf.OmegaConf.load(path)
+          
+          if conf is None:
+              conf = omegaconf.OmegaConf.create()
+
+          # Check for inheritance
+          if "_parent_" in conf:
+              current_dir = os.path.dirname(path)
+              parents = conf._parent_
+              
+              if isinstance(parents, str):
+                  parents = [parents]
+                  
+              base_conf =omegaconf.OmegaConf.create()
+              
+              for parent_rel_path in parents:
+                  # Try to resolve path relative to the current file (sibling)
+                  sibling_path = os.path.join(current_dir, parent_rel_path)
+                  
+                  if os.path.exists(sibling_path):
+                      final_parent_path = sibling_path
+                  else:
+                      # Fallback to pure path (e.g. relative to cwd)
+                      final_parent_path = parent_rel_path
+                  
+                  # RECURSIVE CALL
+                  parent_conf = load_config_with_inheritance(final_parent_path)
+                  
+
+                  base_conf = omegaconf.OmegaConf.merge(base_conf, parent_conf)
+                  
+              # Merge parent(s) with current
+              conf = omegaconf.OmegaConf.merge(base_conf, conf)
+              
+              # Cleanup
+              if "_parent_" in conf:
+                  del conf["_parent_"]
+              
+          return conf
+      config_oconf = load_config_with_inheritance(path)
+      
     except FileNotFoundError as e:
       raise ValueError(f"Config {config_name} not found.") from e
 
