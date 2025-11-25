@@ -163,7 +163,7 @@ def obtain_model_params(model_name: str) -> Any:
   logging.info('Routing %s using prefix %s', model_name, matched_prefix)
 
   family_snake = matched_prefix.replace('-', '_').replace('.', '_')
-  core_version = _get_version(model_name, matched_prefix).removesuffix("_it")
+  core_version = _get_version(model_name, matched_prefix)
 
   if not core_version:
     raise ValueError(
