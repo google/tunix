@@ -74,6 +74,8 @@ _MODEL_FAMILY_INFO_MAPPING = {
     'gemma': _ModelFamilyInfo(family='gemma', config_category='gemma'),
     'gemma1.1': _ModelFamilyInfo(family='gemma1_1', config_category='gemma'),
     'gemma2': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
+    # Support both gemma3 and gemma-3 as model prefixes.
+    'gemma3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
     'gemma-3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
     'llama3': _ModelFamilyInfo(family='llama3', config_category='llama3'),
     'llama3.1': _ModelFamilyInfo(family='llama3_1', config_category='llama3'),
