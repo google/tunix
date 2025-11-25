@@ -158,6 +158,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       prompts: List[str],
       completions: List[str],
       mode: rl_cluster_lib.Mode,
+      step: int | None = None,
       **kwargs,
   ) -> jax.Array:
     """Computes the rewards for completions using the provided reward functions.
@@ -166,6 +167,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       prompts: A list of input prompts.
       completions: A list of generated text completions.
       mode: The mode to use for logging metrics.
+      step: The current training step.
       **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
@@ -228,7 +230,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         metrics_to_log[metric_name] = (rewards[j, i], np.mean)
 
       # Log all metrics for this trajectory in one call
-      self.rl_cluster.buffer_metrics(metrics_to_log, mode=mode)
+      if step is not None:
+        self.rl_cluster.buffer_metrics_async(
+            metrics_to_log, mode=mode, step=step
+        )
+      else:
+        self.rl_cluster.buffer_metrics(metrics_to_log, mode=mode)
 
     return jnp.array(sum_rewards)
 

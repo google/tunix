@@ -63,6 +63,10 @@ from tunix.cli.utils import model
         model_name="gemma3-270m",
     ),
     dict(
+        testcase_name="gemma3-270m-it",
+        model_name="gemma3-270m-it",
+    ),
+    dict(
         testcase_name="gemma3-1b",
         model_name="gemma3-1b",
     ),
@@ -89,6 +93,10 @@ from tunix.cli.utils import model
     dict(
         testcase_name="gemma3-27b",
         model_name="gemma3-27b",
+    ),
+    dict(
+        testcase_name="gemma3-27b-it",
+        model_name="gemma3-27b-it",
     ),
     dict(
         testcase_name="llama3-70b",

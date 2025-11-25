@@ -110,7 +110,7 @@ class ModelConfig:
   vocab_size: int = 256
 
 
-class ToyTransformer(nnx.Module, pytree=False):
+class ToyTransformer(nnx.Module):
   """Toy transformer for testing."""
 
   def __init__(
@@ -121,7 +121,9 @@ class ToyTransformer(nnx.Module, pytree=False):
   ):
     self.config = config
     self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
-    self.layers = [Decoder(rngs=rngs) for _ in range(config.num_layers)]
+    self.layers = nnx.List(
+        [Decoder(rngs=rngs) for _ in range(config.num_layers)]
+    )
     self.lm_head = nnx.Linear(
         in_features=16, out_features=config.vocab_size, rngs=rngs
     )

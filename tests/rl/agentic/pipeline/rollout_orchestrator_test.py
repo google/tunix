@@ -1,34 +1,46 @@
 """Tests for rollout_orchestrator."""
 
 import asyncio
+from collections.abc import Mapping
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
-from absl.testing import parameterized
+from tunix.rl.agentic import utils
+from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.agents import base_agent
+from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.pipeline import rollout_orchestrator
-from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
 
 # Mock classes for dependencies
-class MockAgent(trajectory_collect_engine.LLMBaseAgent):
+class MockAgent(base_agent.ConversationAgentBase):
   """A mock agent."""
 
-  async def predict(self, *args, **kwargs):
-    return {'response': 'mock_response'}
+  def __init__(self):
+    super().__init__('')
+
+  def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
+    return agent_types.Action()
 
 
-class MockEnv(trajectory_collect_engine.BaseEnv):
+class MockEnv(base_environment.BaseTaskEnv):
   """A mock environment."""
 
-  def __init__(self, task: dict | None = None, env_id: int = 0):
-    self.task = task or {}
+  def __init__(self, task: Mapping[str, Any] | None = None, env_id: int = 0):
+    super().__init__(task=task)
     self.env_id = env_id
 
-  async def reset(self, *args, **kwargs):
+  def _initial_observation(self):
     return {'obs': f'initial_obs_{self.env_id}'}
 
-  async def step(self, action):
-    return {'obs': f'next_obs_{self.env_id}', 'reward': 1.0, 'done': False}
+  def _step_impl(self, action):
+    return base_environment.EnvStepResult(
+        observation={'obs': f'next_obs_{self.env_id}'},
+        reward=1.0,
+        done=False,
+        info={},
+    )
 
 
 def _group_by_pair_index(
@@ -37,172 +49,115 @@ def _group_by_pair_index(
   return pair_index
 
 
-class RolloutOrchestratorTest(parameterized.TestCase):
+class RolloutOrchestratorTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Using AsyncMock for async methods
     self.collect_patcher = mock.patch.object(
         rollout_orchestrator.RolloutOrchestrator,
         '_collect_trajectory',
         new_callable=mock.AsyncMock,
     )
     self.mock_collect = self.collect_patcher.start()
-
-    def _side_effect(*args, **kwargs):
-      # args are (self, agent, env, mode=)
-      env = args[2]
-      return {'trajectory': [f'traj_for_env_{env.env_id}']}
-
-    self.mock_collect.side_effect = _side_effect
     self.addCleanup(self.collect_patcher.stop)
 
-  async def test_run_and_yield_batches_drains_queue(self):
-    orchestrator = rollout_orchestrator.RolloutOrchestrator()
-    num_pairs = 4
-    episodes_per_pair = 3
-    pairs = [(MockAgent(), MockEnv(env_id=i)) for i in range(num_pairs)]
+  def test_streaming_successful_run(self):
+    asyncio.run(self._test_streaming_successful_run())
 
-    # Group size is larger than episodes_per_pair, so groups are formed at end.
-    group_size = 5
+  async def _test_streaming_successful_run(self):
+    orchestrator = rollout_orchestrator.RolloutOrchestrator(
+        max_concurrency=2,
+        rollout_sync_lock=utils.RolloutSyncLock(),
+    )
+    num_pairs = 3
+    num_episodes = 2
+    group_size = 2
     batch_size = 2
 
-    results = []
-    async for batch in orchestrator.run_and_yield_batches(
-        pairs=pairs,
-        group_size=group_size,
-        batch_size=batch_size,
-        group_key=_group_by_pair_index,
-        episodes_per_pair=episodes_per_pair,
-    ):
-      results.extend(batch)
-
-    self.assertLen(
-        results,
-        num_pairs * episodes_per_pair,
-        'Should collect all trajectories.',
-    )
-    self.assertEqual(
-        self.mock_collect.call_count, num_pairs * episodes_per_pair
-    )
-
-  async def test_streaming_producers_basic_functionality(self):
-    orchestrator = rollout_orchestrator.RolloutOrchestrator(max_concurrency=2)
-    num_pairs = 5
-    episodes_per_pair = 2
-
     def pair_generator():
       for i in range(num_pairs):
         yield MockAgent(), MockEnv(env_id=i)
 
+    async def side_effect_fn(*args, **kwargs):
+      env = args[1]
+      return {'trajectory': [f'traj_for_env_{env.env_id}']}
+
+    self.mock_collect.side_effect = side_effect_fn
+
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
-            group_size=episodes_per_pair,
+            group_size=group_size,
             group_key=_group_by_pair_index,
-            episodes_per_pair=episodes_per_pair,
+            num_episodes=num_episodes,
         )
     )
+    await asyncio.sleep(0)
 
-    results = []
-    async for batch in orchestrator.yield_batches(batch_size=3):
-      results.extend(batch)
-
+    batches = []
+    async for batch in orchestrator.yield_batches(batch_size=batch_size):
+      batches.append(batch)
     await producer_task
 
-    self.assertLen(
-        results,
-        num_pairs * episodes_per_pair,
-        'Should collect all trajectories.',
+    self.assertLen(batches, 3)
+    all_items = []
+    for batch in batches:
+      self.assertLen(batch, 2)
+      all_items.extend(batch)
+
+    self.assertLen(all_items, 6)
+
+    pair_indices = sorted([item.pair_index for item in all_items])
+    self.assertEqual(pair_indices, [0, 0, 1, 1, 2, 2])
+
+    episode_ids_per_pair = {}
+    for item in all_items:
+      self.assertEqual(
+          item.traj, {'trajectory': [f'traj_for_env_{item.pair_index}']}
+      )
+      self.assertEqual(item.group_id, item.pair_index)
+      self.assertEqual(item.episode_id, 0)
+      self.assertIn(item.metadata['generation_id'], [0, 1])
+      if item.pair_index not in episode_ids_per_pair:
+        episode_ids_per_pair[item.pair_index] = []
+      episode_ids_per_pair[item.pair_index].append(
+          item.metadata['generation_id']
+      )
+
+    for i in range(num_pairs):
+      self.assertCountEqual(episode_ids_per_pair[i], [0, 1])
+
+  def test_streaming_producer_runner_exception(self):
+    asyncio.run(self._test_streaming_producer_runner_exception())
+
+  async def _test_streaming_producer_runner_exception(self):
+    orchestrator = rollout_orchestrator.RolloutOrchestrator(
+        max_concurrency=2,
+        rollout_sync_lock=utils.RolloutSyncLock(),
     )
-    self.assertEqual(
-        self.mock_collect.call_count, num_pairs * episodes_per_pair
-    )
-
-    # Check if trajectories from all envs are present.
-    collected_envs = set()
-    for item in results:
-      traj_content = item.traj['trajectory'][0]
-      env_id = int(traj_content.split('_')[-1])
-      collected_envs.add(env_id)
-    self.assertSetEqual(collected_envs, set(range(num_pairs)))
-
-  async def test_streaming_consumer_stops_early(self):
-    orchestrator = rollout_orchestrator.RolloutOrchestrator(max_concurrency=2)
-    num_pairs = 10
-    episodes_per_pair = 5  # Set high to ensure it's still running
-
-    def pair_generator():
-      for i in range(num_pairs):
-        yield MockAgent(), MockEnv(env_id=i)
-
-    producer_task = asyncio.create_task(
-        orchestrator.run_producers_from_stream(
-            pairs_stream=pair_generator(),
-            group_size=2,
-            group_key=_group_by_pair_index,
-            episodes_per_pair=episodes_per_pair,
-        )
-    )
-
-    results = []
-    batches_to_take = 2
-    async for batch in orchestrator.yield_batches(batch_size=1):
-      results.extend(batch)
-      batches_to_take -= 1
-      if batches_to_take == 0:
-        break
-
-    # Consumer loop breaks, so producer should be cancelled.
-    # Give it a moment to process cancellation.
-    await asyncio.sleep(0.01)
-
-    self.assertTrue(producer_task.done())
-    # Depending on timing, it might be cancelled or finished gracefully if all
-    # tasks happened to finish before cancellation was processed. The key part
-    # is that it doesn't hang.
-    if not producer_task.cancelled():
-      # if not cancelled, check if any exception
-      exc = producer_task.exception()
-      self.assertIsNone(exc, f'Producer task failed with {exc}')
-
-    # Check that not all trajectories were collected
-    self.assertLess(self.mock_collect.call_count, num_pairs * episodes_per_pair)
-    # At least some should have been collected before stopping.
-    self.assertGreater(self.mock_collect.call_count, 0)
-
-  async def test_streaming_producer_runner_exception(self):
-    orchestrator = rollout_orchestrator.RolloutOrchestrator(max_concurrency=2)
     num_pairs = 5
-
     failing_pair_index = 2
 
-    # Mock collect to fail for a specific pair index
-    original_side_effect = self.mock_collect.side_effect
-
-    async def failing_side_effect(*args, **kwargs):
-      env = args[2]
-      if env.env_id == failing_pair_index:
-        raise ValueError('Collection failed!')
-      return await mock.AsyncMock(
-          return_value=original_side_effect(*args, **kwargs)
-      )()
-
-    self.mock_collect.side_effect = failing_side_effect
-
     def pair_generator():
       for i in range(num_pairs):
         yield MockAgent(), MockEnv(env_id=i)
+
+    async def failing_side_effect(*args, **kwargs):
+      env = args[1]
+      if env.env_id == failing_pair_index:
+        raise ValueError('Collection failed!')
+      return {'trajectory': [f'traj_for_env_{env.env_id}']}
+    self.mock_collect.side_effect = failing_side_effect
 
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
             group_size=1,
             group_key=_group_by_pair_index,
-            episodes_per_pair=1,
+            num_episodes=1,
         )
     )
-
+    await asyncio.sleep(0)
     with self.assertRaisesRegex(ValueError, 'Collection failed!'):
       # Consumer loop.
       async for _ in orchestrator.yield_batches(batch_size=1):
@@ -210,8 +165,14 @@ class RolloutOrchestratorTest(parameterized.TestCase):
       # Await producer to get the exception if not raised during consumption.
       await producer_task
 
-  async def test_streaming_generator_exception(self):
-    orchestrator = rollout_orchestrator.RolloutOrchestrator(max_concurrency=2)
+  def test_streaming_generator_exception(self):
+    asyncio.run(self._test_streaming_generator_exception())
+
+  async def _test_streaming_generator_exception(self):
+    orchestrator = rollout_orchestrator.RolloutOrchestrator(
+        max_concurrency=2,
+        rollout_sync_lock=utils.RolloutSyncLock(),
+    )
     failing_pair_index = 2
 
     def faulty_generator():
@@ -220,15 +181,19 @@ class RolloutOrchestratorTest(parameterized.TestCase):
           raise ValueError('Generator failed!')
         yield MockAgent(), MockEnv(env_id=i)
 
+    self.mock_collect.side_effect = None
+    self.mock_collect.return_value = {'trajectory': ['mock_traj']}
+
+    producer_task = asyncio.create_task(
+        orchestrator.run_producers_from_stream(
+            pairs_stream=faulty_generator(),
+            group_size=1,
+            group_key=_group_by_pair_index,
+            num_episodes=1,
+        )
+    )
+    await asyncio.sleep(0)
     with self.assertRaisesRegex(ValueError, 'Generator failed!'):
-      producer_task = asyncio.create_task(
-          orchestrator.run_producers_from_stream(
-              pairs_stream=faulty_generator(),
-              group_size=1,
-              group_key=_group_by_pair_index,
-              episodes_per_pair=1,
-          )
-      )
       async for _ in orchestrator.yield_batches(batch_size=1):
         pass
       await producer_task
