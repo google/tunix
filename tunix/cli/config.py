@@ -66,7 +66,7 @@ def get_project_root() -> Path:
   """
   current_path = Path(__file__).resolve().parent
   # List of files that define the root of your project
-  root_markers = ['pyproject.toml',]
+  root_markers = ['LICENSE',]
 
   # Iterate up through parent directories
   for parent in [current_path] + list(current_path.parents):
