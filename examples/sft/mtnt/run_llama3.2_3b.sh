@@ -27,7 +27,6 @@ python3 -m tunix.cli.peft_main \
   model_config.mesh.shape="(2,2)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   tokenizer_config.tokenizer_path="meta-llama/Llama-3.2-3B" \
-  tokenizer_config.tokenizer_type="huggingface" \
-  max_target_length=512 \
+  tokenizer_config.tokenizer_type="huggingface"
 
 

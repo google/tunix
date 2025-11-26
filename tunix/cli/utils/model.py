@@ -11,66 +11,54 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Utilities for creating and managing models in Tunix CLI."""
 
+import enum
 import gc
 import importlib
 import os
-import re
 from typing import Any, Tuple
 from absl import logging
+import flax
 from flax import nnx
 import jax
 import jax.numpy as jnp
 from orbax import checkpoint as ocp
 import qwix
 from tunix.generate import tokenizer_adapter as tokenizer_lib
-from tunix.models.gemma import model as gemma_lib
-from tunix.models.gemma import params as gemma_params_lib
-from tunix.models.gemma3 import model as gemma3_lib
-from tunix.models.gemma3 import params as gemma3_params_lib
-from tunix.models.llama3 import model as llama3_lib
-from tunix.models.qwen2 import model as qwen2_lib
-from tunix.models.qwen3 import model as qwen3_lib
-from tunix.oss import utils as oss_utils
+from tunix.models import naming
 from tunix.rl import reshard
 
 
-# Map prefixes to the target object containing the methods.
-CONFIG_MAP = {
-    'gemma': gemma_lib.ModelConfig,
-    'gemma1.1': gemma_lib.ModelConfig,
-    'gemma2': gemma_lib.ModelConfig,
-    'gemma3': gemma3_lib.ModelConfig,
-    'llama3': llama3_lib.ModelConfig,
-    'llama3.1': llama3_lib.ModelConfig,
-    'llama3.2': llama3_lib.ModelConfig,
-    'qwen2.5': qwen2_lib.ModelConfig,
-    'qwen3': qwen3_lib.ModelConfig,
-}
-
 _BASE_MODULE_PATH = 'tunix.models'  # pylint: disable=invalid-name
 
+# TODO(b/462808330): Handle shading overrides better.
+if hasattr(flax.config, 'flax_always_shard_variable'):
+  flax.config.update('flax_always_shard_variable', False)
 
-def get_model_module(model_name: str) -> Any:
-  """Dynamically imports the parameter module based on the model name."""
-  # Extract the base model type (e.g., "qwen2", "llama3")
-  match = re.match(r'^[a-zA-Z0-9]+', model_name)
-  if not match:
-    raise ValueError(f'Invalid model name format: {model_name}')
-  model_type = match.group(0)
-  # Construct the full module path, e.g.,.path.to.your.models.qwen2.params
-  if model_name.startswith('gemma1') or model_name.startswith('gemma2'):
-    model_type = 'gemma'
-  module_path = f'{_BASE_MODULE_PATH}.{model_type}.params'
+
+class ModelModule(enum.Enum):
+  """Specifies the type of model module to import."""
+
+  MODEL = 'model'
+  PARAMS = 'params'
+
+
+def get_model_module(model_name: str, module_type: ModelModule) -> Any:
+  """Dynamically imports a model module (e.g., 'model' or 'params')."""
+  model_config_category = naming.get_model_config_category(model_name)
+  module_path = (
+      f'{_BASE_MODULE_PATH}.{model_config_category}.{module_type.value}'
+  )
   try:
-    print(f'Attempting to import: {module_path}')
-    model_module = importlib.import_module(module_path)
-    return model_module
-  except ImportError as exc:  # Capture the original exeception as 'exc'
+    logging.info('Attempting to import: %s', module_path)
+    model_lib_module = importlib.import_module(module_path)
+    return model_lib_module
+  except ImportError as exc:
     raise ImportError(
-        f'Could not import module for model type: {model_type} '
-        f'at path: {module_path}. Please check BASE_MODULE_PATH '
-        'and ensure the module exists and is a dependency.'
+        'Could not import module for model config category: '
+        f'{model_config_category} at path: {module_path}. Please check '
+        'BASE_MODULE_PATH and ensure the module exists and is a dependency.'
     ) from exc
 
 
@@ -93,37 +81,20 @@ def create_model_dynamically(
       ImportError: If the required model module cannot be found.
       AttributeError: If create_model_from_safe_tensors is not in the module.
   """
-  model_module = get_model_module(model_name)
+  params_module = get_model_module(model_name, ModelModule.PARAMS)
 
   try:
-    create_fn = getattr(model_module, 'create_model_from_safe_tensors')
+    create_fn = getattr(params_module, 'create_model_from_safe_tensors')
   except AttributeError as exc:
     raise AttributeError(
         "'create_model_from_safe_tensors' not found in module "
-        f'{model_module.__name__} for model {model_name}'
+        f'{params_module.__name__} for model {model_name}'
     ) from exc
 
   logging.info(
-      'Calling %s.create_model_from_safe_tensors', model_module.__name__
+      'Calling %s.create_model_from_safe_tensors', params_module.__name__
   )
   return create_fn(file_dir=file_dir, config=model_config, mesh=mesh)
-
-
-def _get_version(model_name: str, matched_prefix: str) -> str:
-  """Extracts the version string from the model name."""
-  if not model_name.startswith(matched_prefix):
-    return ''
-
-  suffix = model_name[len(matched_prefix) :]
-
-  # Remove leading separator (- or .) if present
-  if suffix.startswith('-') or suffix.startswith('.'):
-    suffix = suffix[1:]
-
-  if not suffix:
-    return ''
-
-  return suffix.replace('.', '_').replace('-', '_')
 
 
 def obtain_model_params(model_name: str) -> Any:
@@ -147,50 +118,26 @@ def obtain_model_params(model_name: str) -> Any:
       object.
       TypeError: If the attribute found on the target object is not callable.
   """
-  target_obj = None
-  matched_prefix = ''
+  config_id = naming.get_model_config_id(model_name)
+  model_lib_module = get_model_module(model_name, ModelModule.MODEL)
+  target_obj = model_lib_module.ModelConfig
 
-  # Find the longest matching prefix
-  for prefix, obj in CONFIG_MAP.items():
-    if model_name.startswith(prefix):
-      if len(prefix) > len(matched_prefix):
-        matched_prefix = prefix
-        target_obj = obj
-
-  if not target_obj:
-    raise ValueError(f'Unsupported model string prefix for: {model_name}')
-
-  logging.info('Routing %s using prefix %s', model_name, matched_prefix)
-
-  family_snake = matched_prefix.replace('-', '_').replace('.', '_')
-  core_version = _get_version(model_name, matched_prefix).removesuffix("_it")
-
-  if not core_version:
-    raise ValueError(
-        f"Could not extract core version from '{model_name}' "
-        f"for prefix '{matched_prefix}'."
-    )
-
-  function_name = f'{family_snake}_{core_version}'
-  
-
-  if not hasattr(target_obj, function_name):
+  if not hasattr(target_obj, config_id):
     raise AttributeError(
-        f"Error: Function '{function_name}' not found on the target object "
-        f"for prefix '{matched_prefix}'. Target object type: {type(target_obj)}"
+        f"Error: Function '{config_id}' not found on the target object "
+        f"for model '{model_name}'. Target object type: {type(target_obj)}"
     )
 
-  method_to_call = getattr(target_obj, function_name)
+  method_to_call = getattr(target_obj, config_id)
 
   if not callable(method_to_call):
     raise TypeError(
-        f"Error: Attribute '{function_name}' on the target object is not"
-        ' callable.'
+        f"Error: Attribute '{config_id}' on the target object is not callable."
     )
 
   logging.info(
       'Attempting to call: %s() on object of type %s',
-      function_name,
+      config_id,
       type(target_obj),
   )
   return method_to_call()
@@ -199,8 +146,12 @@ def obtain_model_params(model_name: str) -> Any:
 def _get_base_model(model_config: dict[str, Any], mesh: jax.sharding.Mesh):
   """Get the base model from the intermediate checkpoint."""
   model_params = obtain_model_params(model_config['model_name'])
+  model_lib_module = get_model_module(
+      model_config['model_name'], ModelModule.MODEL
+  )
+  # TODO(noghabi): Refactor Transformer class name to Gemma in in gemma.py.
   abs_model: nnx.Module = nnx.eval_shape(
-      lambda: gemma_lib.Transformer(
+      lambda: model_lib_module.Transformer(
           model_params, rngs=nnx.Rngs(model_config.get('rng_seed', 0))
       )
   )
@@ -280,23 +231,23 @@ def _gemma_conversion(
   return _get_base_model(model_config, mesh)
 
 
-def _get_model_version_suffix(model_name: str) -> str:
-  """Extracts the version/variant suffix from a model name string.
-
-  The function is based on the following examples:
-  - "gemma2-2b-it" -> "2-2b-it"
-  - "gemma2-2b" -> "2-2b"
-  - "gemma-2b" -> "2b"
+# TODO(b/451662153): make gemma3 and gemma2 loading logic more consistent.
+# Currently, gemma2 uses _create_gemma_model_from_params while gemma3 uses
+# _create_gemma3_model_from_checkpoint.
+def _create_gemma3_model_from_checkpoint(
+    ckpt_path: str, model_name: str, mesh: jax.sharding.Mesh
+) -> Tuple[nnx.Module, Any]:
+  """Creates a Gemma3 model from a checkpoint.
 
   Args:
-      model_name: The full model name string.
+      ckpt_path: The path to the checkpoint.
+      model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama3.2-3b").
+      mesh: Mesh object for device layout.
 
   Returns:
-      The version/variant suffix string.
-
-  Raises:
-      ValueError: If the model_name does not match a known pattern or
-                  unsupported model family.
+      A tuple containing:
+          - model: The loaded and potentially LoRA-applied nnx.Module.
+          - model_params: The model parameters.
   """
   model_params = obtain_model_params(model_name)
   params_lib = get_model_module(model_name, ModelModule.PARAMS)
@@ -318,9 +269,8 @@ def _create_gemma_model_from_params(
   model_module_lib = get_model_module(model_name, ModelModule.MODEL)
   model_family, version = naming.split(model_name)
   # TODO(b/451662153): have gemma2 version handling done better in naming.py
-  # Temp fix, otherwise cli fails to load gemma2 model. For gemma2-2b-it,version become `-2b-it`. Could this be off by one?
   if model_family == 'gemma2':
-    version = f'2{version}' 
+    version = f'2-{version}'
   model = model_module_lib.Transformer.from_params(
       model_params, version=version
   )
@@ -377,19 +327,45 @@ def create_model(
   if model_name.startswith('gemma3') and model_source == 'gcs':
 
     ckpt_path = model_config['model_id']
-    model_params = obtain_model_params(model_name)
-    model = gemma3_params_lib.create_model_from_checkpoint(
-        ckpt_path, model_params, mesh
+    model, model_params = _create_gemma3_model_from_checkpoint(
+        ckpt_path, model_name, mesh
     )
     tokenizer_path = 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
 
   # TODO(sizhi): Remove gemma conversion logic once load safetensors for
   # gemma is ready.
   elif model_name.startswith('gemma') and model_source == 'kaggle':
+    from tunix.oss import utils as oss_utils
 
     # Download model from Kaggle requires NNX conversion and can takes long
     # time. It is recommended to save the NNX converted model for later runs.
     ckpt_path = oss_utils.kaggle_pipeline(model_config)
+    
+    # try:
+    #   import flax
+    #   from flax.training import checkpoints
+    #   # If using orbax/standard flax checkpoint loading
+    #   restored = checkpoints.restore_checkpoint(ckpt_path, target=None)
+      
+    #   # Flatten keys to see what we have
+    #   flat_params = flax.traverse_util.flatten_dict(restored, sep='/')
+      
+    #   print("\n--- CHECKING LAYER 0 STRUCTURE ---")
+    #   keys_found = [k for k in flat_params.keys() if "layer_0" in k or "layers_0" in k]
+      
+    #   has_pre_ffw = any("pre_ffw_norm" in k for k in keys_found)
+    #   has_post_ffw = any("post_ffw_norm" in k for k in keys_found)
+      
+    #   if has_pre_ffw:
+    #       print("❌ DETECTED: 'pre_ffw_norm' found in checkpoint.")
+    #       print("   -> This confirms this is a GEMMA 2 architecture (or modified V1).")
+    #       print("   -> You MUST use model_name='2-2b' to load this.")
+    #   else:
+    #       print("✅ CLEAN: No 'pre_ffw_norm' found. This looks like standard Gemma 1.")
+    # finally:
+    #   print("debug")
+    
+    
     intermediate_ckpt_dir = model_config['intermediate_ckpt_dir']
     skip_nnx_conversion: bool = os.path.exists(intermediate_ckpt_dir)
 
@@ -403,11 +379,8 @@ def create_model(
       else:  # gemma
         suffix = '-'.join(model_name.split('-')[1:])
         params_path = os.path.join(ckpt_path, suffix)
-
-      params = gemma_params_lib.load_and_format_params(params_path)
-      model = gemma_lib.Transformer.from_params(
-          params, version=_get_model_version_suffix(model_name)
-      )
+      
+      model, params = _create_gemma_model_from_params(params_path, model_name)
       return _gemma_conversion(model_config, model, params, mesh)
 
     if skip_nnx_conversion:
@@ -427,6 +400,7 @@ def create_model(
     tokenizer_path = os.path.join(ckpt_path, 'tokenizer.model')
 
   elif model_source == 'huggingface':
+    from tunix.oss import utils as oss_utils
     # for all other model
     oss_utils.hf_pipeline(model_config)
   else:

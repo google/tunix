@@ -28,7 +28,6 @@ python3 -m tunix.cli.peft_main \
   model_config.rng_seed=0 \
   model_config.model_download_path="/tmp/models" \
   tokenizer_config.tokenizer_path="Qwen/Qwen2.5-0.5B"\
-  tokenizer_config.tokenizer_type="huggingface" \
-  max_target_length=1024 \
+  tokenizer_config.tokenizer_type="huggingface"
 
 

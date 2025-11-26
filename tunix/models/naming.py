@@ -104,7 +104,7 @@ def split(model_name: str) -> tuple[str, str]:
     if model_name.startswith(family) and len(family) > len(matched_family):
       matched_family = family
   if matched_family:
-    return matched_family, model_name[len(matched_family) :]
+    return matched_family, model_name[len(matched_family)+1:]
   else:
     raise ValueError(
         f'Could not determine model family for: {model_name}. Not one of the'

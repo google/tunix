@@ -19,12 +19,12 @@ CONFIG="configs/sft.yaml"
 
 python3 -m tunix.cli.peft_main \
   $CONFIG \
-  model_config.model_name="gemma2-2b-it" \
-  model_config.model_id="google/gemma-2/flax/gemma2-2b-it" \
+  model_config.model_name="gemma2-2b" \
+  model_config.model_id="google/gemma-2/flax/gemma2-2b" \
   model_config.model_source="kaggle" \
-  model_config.model_download_path="/tmp/models/gemma-2b" \
-  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/" \
+  model_config.model_download_path="/tmp/models/gemma2-2b" \
+  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma2-2b" \
   model_config.mesh.shape="(2,2)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   tokenizer_config.tokenizer_path="/tmp/models/gemma-2b/models/google/gemma-2/flax/gemma2-2b-it/1/tokenizer.model" \
-  tokenizer_config.tokenizer_type="sentencepiece" \
+  tokenizer_config.tokenizer_type="sentencepiece"

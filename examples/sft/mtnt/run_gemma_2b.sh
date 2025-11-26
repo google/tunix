@@ -21,8 +21,8 @@ python3 -m tunix.cli.peft_main \
   model_config.model_name="gemma-2b" \
   model_config.model_id="google/gemma/flax/2b" \
   model_config.model_source="kaggle" \
-  model_config.model_download_path="/tmp/models" \
-  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/" \
+  model_config.model_download_path="/tmp/models/" \
+  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma-2b" \
   model_config.mesh.shape="(2,2)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.lora_config.rank=16 \
@@ -30,8 +30,8 @@ python3 -m tunix.cli.peft_main \
   model_config.lora_config.weight_qtype="nf4" \
   model_config.lora_config.tile_size=256 \
   model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj" \
-  tokenizer_config.tokenizer_path="/tmp/models/models/google/gemma/flax/2b/2/tokenizer.model" \
-  tokenizer_config.tokenizer_type="sentencepiece" \
+  tokenizer_config.tokenizer_path="/tmp/models/models/google/gemma/flax/2b/1/tokenizer.model" \
+  tokenizer_config.tokenizer_type="sentencepiece"
  
 
 

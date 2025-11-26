@@ -16,11 +16,14 @@ _parent_: "base_config.yaml"
 
 dataset_name: "mtnt/en-fr"
 optimizer_config:
-  opt_type:"adamw" 
-  learning_rate:1e-5
+  opt_type: "adamw" 
+  learning_rate: 1e-5
 training_config:
-  eval_every_n_steps:20
-  max_steps:100
+  eval_every_n_steps: 20
+  max_steps: 100
   metrics_logging_options:
-    log_dir:"/tmp/tensorboard/full"
-    flush_every_n_steps:20å
+    log_dir: "/tmp/tensorboard/full"
+    flush_every_n_steps: 20
+model_config:
+  rng_seed: 0
+max_target_length: 1024
