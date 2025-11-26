@@ -298,24 +298,33 @@ def _get_model_version_suffix(model_name: str) -> str:
       ValueError: If the model_name does not match a known pattern or
                   unsupported model family.
   """
-  if model_name.startswith('gemma'):
-    # Pattern 1: Matches names like "gemma2-2b-it", "gemma7b", etc.
-    # Captures the part starting with the first digit after "gemma".
-    match = re.match(r'^gemma(\d.*)$', model_name)
-    if match:
-      return match.group(1)
+  model_params = obtain_model_params(model_name)
+  params_lib = get_model_module(model_name, ModelModule.PARAMS)
+  model = params_lib.create_model_from_checkpoint(ckpt_path, model_params, mesh)
+  return model, model_params
 
-    # Pattern 2: Matches names like "gemma-2b", "gemma-7b-it", etc.
-    # Captures the part after "gemma-".
-    match = re.match(r'^gemma-(.+)$', model_name)
-    if match:
-      return match.group(1)
 
-    # If neither pattern matches
-    raise ValueError(f'Unrecognized gemma model format: {model_name}')
-  else:
-    # This part can be extended for other model families like "llama", etc.
-    raise ValueError(f'Unsupported model family for: {model_name}')
+def _create_gemma_model_from_params(
+    params_path: str, model_name: str
+) -> Tuple[nnx.Module, Any]:
+  """Loads Gemma params and creates a model.
+
+  This function is used to create a model from a params path. It is used for
+  models that have support for `from_params` in their Transformer module,
+  such as Gemma and Gemma2.
+  """
+  params_lib = get_model_module(model_name, ModelModule.PARAMS)
+  model_params = params_lib.load_and_format_params(params_path)
+  model_module_lib = get_model_module(model_name, ModelModule.MODEL)
+  model_family, version = naming.split(model_name)
+  # TODO(b/451662153): have gemma2 version handling done better in naming.py
+  # Temp fix, otherwise cli fails to load gemma2 model. For gemma2-2b-it,version become `-2b-it`. Could this be off by one?
+  if model_family == 'gemma2':
+    version = f'2{version}' 
+  model = model_module_lib.Transformer.from_params(
+      model_params, version=version
+  )
+  return model, model_params
 
 
 def create_tokenizer(tokenizer_config, tokenizer_path: str | None):
