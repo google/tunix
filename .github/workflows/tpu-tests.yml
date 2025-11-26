@@ -152,8 +152,9 @@ jobs:
           pwd
           pip install --upgrade pip setuptools wheel
 
-          # Install Tunix
+          # Install Tunix with dev dependencies without overwriting the vLLM dependencies.
           pip install -e .[dev]
+          pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
 
       - name: GRPO Integration Test
         env:
