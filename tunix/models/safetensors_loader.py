@@ -28,7 +28,6 @@ import ml_dtypes
 import numpy as np
 from tunix.oss import utils
 from tunix.utils import compat
-from tunix.utils import env_utils
 from tunix.utils import torch_utils
 
 load_file_from_gcs = utils.load_file_from_gcs
@@ -75,7 +74,7 @@ def load_safetensors_with_offsets(filepath):
       - mm: The mmap object used to read the file.
       - f: The file handle.
   """
-  with env_utils.fs_open(filepath, 'rb') as f:
+  with open(filepath, 'rb') as f:
     header_size_bytes = f.read(8)
     header_size = struct.unpack('<Q', header_size_bytes)[0]
     header_bytes = f.read(header_size)
@@ -116,7 +115,7 @@ def load_safetensors_with_offsets(filepath):
   data_size_bytes = file_size - data_block_start_offset_bytes
   total_elements = data_size_bytes // itemsize
 
-  f = env_utils.fs_open(filepath, 'rb')
+  f = open(filepath, 'rb')
 
   mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
   contiguous_array = np.frombuffer(
