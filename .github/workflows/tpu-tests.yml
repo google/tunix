@@ -126,7 +126,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly
+      image: vllm/vllm-tpu:nightly-a9f13e53dc3511599e873225f0e5adbda07f3993
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -152,8 +152,9 @@ jobs:
           pwd
           pip install --upgrade pip setuptools wheel
 
-          # Install Tunix
+          # Install Tunix with dev dependencies without overwriting the vLLM dependencies.
           pip install -e .[dev]
+          pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
 
       - name: GRPO Integration Test
         env:

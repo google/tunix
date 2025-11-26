@@ -98,7 +98,6 @@ class ModelConfig:
   num_kv_heads: int
   final_logit_softcap: float | None
   use_post_attn_norm: bool
-  use_pre_ffw_norm: bool
   use_post_ffw_norm: bool
   attention_types: Iterable[AttentionType]
   attn_logits_soft_cap: float | None = None
@@ -119,8 +118,7 @@ class ModelConfig:
         num_kv_heads=1,
         final_logit_softcap=None,
         attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=True,
-        use_pre_ffw_norm=False,
+        use_post_attn_norm=False,
         use_post_ffw_norm=False,
     )
 
@@ -145,8 +143,7 @@ class ModelConfig:
         num_kv_heads=16,
         final_logit_softcap=None,
         attention_types=(AttentionType.GLOBAL,) * num_layers,
-        use_post_attn_norm=True,
-        use_pre_ffw_norm=False,
+        use_post_attn_norm=False,
         use_post_ffw_norm=False,
     )
 
@@ -176,7 +173,6 @@ class ModelConfig:
         )
         * int(num_layers / 2),
         use_post_attn_norm=True,
-        use_pre_ffw_norm=True,
         use_post_ffw_norm=True,
         attn_logits_soft_cap=50.0,
         sliding_window_size=4096,
@@ -204,7 +200,6 @@ class ModelConfig:
         )
         * int(num_layers / 2),
         use_post_attn_norm=True,
-        use_pre_ffw_norm=True,
         use_post_ffw_norm=True,
         attn_logits_soft_cap=50.0,
         sliding_window_size=4096,
@@ -607,7 +602,6 @@ class Block(nnx.Module):
       embed_dim: int,
       head_dim: int,
       hidden_dim: int,
-      use_pre_ffw_norm: bool,
       use_post_attn_norm: bool,
       use_post_ffw_norm: bool,
       attn_type: AttentionType,
@@ -636,8 +630,7 @@ class Block(nnx.Module):
     if use_post_attn_norm:
       self.post_attn_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
 
-    if use_pre_ffw_norm:
-      self.pre_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
+    self.pre_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
     self.mlp = FeedForward(
         features=embed_dim,
         hidden_dim=hidden_dim,
@@ -667,10 +660,7 @@ class Block(nnx.Module):
 
     attn_output += x
 
-    if self.use_pre_ffw_norm:
-      outputs = self.pre_ffw_norm(attn_output)
-    else:
-      outputs = attn_output
+    outputs = self.pre_ffw_norm(attn_output)
     outputs = self.mlp(outputs)
 
     if self.use_post_ffw_norm:
@@ -686,10 +676,6 @@ class Block(nnx.Module):
   @property
   def use_post_ffw_norm(self):
     return hasattr(self, 'post_ffw_norm') and self.post_ffw_norm is not None
-
-  @property
-  def use_pre_ffw_norm(self):
-    return hasattr(self, 'pre_ffw_norm') and self.pre_ffw_norm is not None
 
 
 class RMSNorm(nnx.Module):
@@ -885,7 +871,6 @@ class Transformer(nnx.Module):
             hidden_dim=config.hidden_dim,
             sliding_window_size=config.sliding_window_size,
             use_post_attn_norm=config.use_post_attn_norm,
-            use_pre_ffw_norm=config.use_pre_ffw_norm,
             use_post_ffw_norm=config.use_post_ffw_norm,
             attn_logits_soft_cap=config.attn_logits_soft_cap,
             attn_type=attn_type,
