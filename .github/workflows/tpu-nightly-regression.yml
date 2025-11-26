@@ -84,6 +84,8 @@ jobs:
         "
 
     - name: Run regression scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       id: regression_tests
       run: |
         # Download GSM8K dataset
