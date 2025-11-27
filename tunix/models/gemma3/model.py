@@ -26,12 +26,11 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-
 from tunix.utils import compat
+from tunix.utils import env_utils
 
 
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
 
 
 LayerCache = dict[str, jaxtyping.Array]

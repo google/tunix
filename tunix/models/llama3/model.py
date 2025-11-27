@@ -27,6 +27,7 @@ import jax.sharding as shd
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
+from tunix.utils import env_utils
 
 K_MASK = -2.3819763e38
 
@@ -34,8 +35,7 @@ LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
 
 
 class RematConfig(enum.Enum):

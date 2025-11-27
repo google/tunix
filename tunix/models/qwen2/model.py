@@ -27,6 +27,9 @@ import jax.sharding as shd
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
+from tunix.utils import env_utils
+
+env_utils.setup_sharding_environment()
 
 K_MASK = -2.3819763e38
 

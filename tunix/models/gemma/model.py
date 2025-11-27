@@ -28,14 +28,14 @@ import jax.sharding as shd
 import jaxtyping
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
+from tunix.utils import env_utils
 
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
 
 
 class AttentionType(enum.Enum):

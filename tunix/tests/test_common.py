@@ -22,7 +22,6 @@ import shutil
 import sys
 from typing import Any, List, Tuple
 
-from flax import config as flax_config
 from flax import nnx
 import huggingface_hub
 import jax
@@ -30,11 +29,11 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 from tunix.rl import reshard
+from tunix.utils import env_utils
 
 import sentencepiece as spm
 
-if hasattr(flax_config, 'flax_always_shard_variable'):
-  flax_config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
 
 
 def _convert_to_nparray(arr):
