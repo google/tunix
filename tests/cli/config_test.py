@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import Counter
-from typing import Any, Dict, List
+import os
+from pathlib import Path
+import tempfile
+from typing import Any, Dict, List, cast
 import unittest
 from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -75,7 +79,9 @@ class ConfigTest(parameterized.TestCase):
         result_list.append(f"{path_str}={value}")
 
   def run_test_peft_trainer(self, hp):
-    rngs = nnx.Rngs(hp.config["model_config"]["rng_seed"])
+    """Helper to run a test PeftTrainer."""
+    config_dict = cast(Dict[str, Any], hp.config)
+    rngs = nnx.Rngs(config_dict["model_config"]["rng_seed"])
     model = tc.ToyTransformer(
         config=tc.ModelConfig(),
         rngs=rngs,
@@ -102,9 +108,12 @@ class ConfigTest(parameterized.TestCase):
         "training_config.eval_every_n_steps=10",
     ]
     hp = config.initialize(argv)
-    self.assertEqual(hp.config["training_config"]["max_steps"], 150)
+    
+    config_dict = cast(Dict[str, Any], hp.config)
+   
+    self.assertEqual(config_dict["training_config"]["max_steps"], 150)
     self.assertEqual(
-        hp.config["training_config"]["data_sharding_axis"], ["fsdp", "dp"]
+        config_dict["training_config"]["data_sharding_axis"], ["fsdp", "dp"]
     )
     self.run_test_peft_trainer(hp)
 
@@ -427,6 +436,36 @@ class ConfigTest(parameterized.TestCase):
     actual_names = [fn.__name__ for fn in reward_fns]
     self.assertEqual(Counter(actual_names), Counter(expected_reward_fn_names))
 
+  def test_obtain_reward_fn_relative_path(self):
+    hp = self.initialize_config([])
+
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+      root = Path(tmp_dir_str)
+
+    reward_dir = root / "tunix" / "cli" / "reward_fn"
+    reward_dir.mkdir(parents=True)
+    dummy_file = reward_dir / "dummy.py"
+
+    dummy_file.write_text("def reward_fn(x): return x")
+
+    run_dir = root / "examples" / "rl" / "grpo"
+    run_dir.mkdir(parents=True)
+
+    hp.config["reward_functions"] = ["tunix/cli/reward_fn/dummy.py"]
+
+    with mock.patch("tunix.cli.config.get_project_root", return_value=root):
+      original_cwd = os.getcwd()
+      try:
+        os.chdir(run_dir)
+        reward_fns = hp.obtain_reward_fn()
+        self.assertLen(reward_fns, 1)
+        self.assertEqual(reward_fns[0].__name__, "reward_fn")
+
+      finally:
+        os.chdir(original_cwd)
+
 
 if __name__ == "__main__":
+  if "HF_TOKEN" not in os.environ:
+    os.environ["HF_TOKEN"] = "TestToken"
   absltest.main()
