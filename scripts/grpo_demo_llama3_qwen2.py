@@ -173,20 +173,21 @@ logging.set_verbosity(
 # /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_train.json
 # /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_test.json
 
-GCS_BUCKET_PREFIX = "gcs://tunix/"
-TRAIN_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_train.json"
-TEST_DATA_PATH_SUBDIR = "rl/grpo/data/gsm8k_test.json"
+GCS_BUCKET_PREFIX = "gs://tunix/"
+DATA_SUBDIR = "rl/grpo/data/"
+TRAIN_DATA = "gsm8k_train.json"
+TEST_DATA = "gsm8k_test.json"
 HF_MODEL_VERSION = args.model_version
 
 
 TRAIN_FRACTION = 1.0
 
 # Derived Data Path
-GCS_TRAIN_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, TRAIN_DATA_PATH_SUBDIR)
-GCS_TEST_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, TEST_DATA_PATH_SUBDIR)
+GCS_TRAIN_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, DATA_SUBDIR, TRAIN_DATA)
+GCS_TEST_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, DATA_SUBDIR, TEST_DATA)
 
-TRAIN_DATA_PATH = os.path.join(args.root_dir, TRAIN_DATA_PATH_SUBDIR)
-TEST_DATA_PATH = os.path.join(args.root_dir, TEST_DATA_PATH_SUBDIR)
+LOCAL_TRAIN_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
+LOCAL_TEST_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
 
 VLLM_MODEL_SUBDIR = "rl/grpo/models/"
 VLLM_MODEL_VERSION = os.path.join(
@@ -333,7 +334,7 @@ def extract_hash_answer(text: str) -> str | None:
   return text.split("####")[1].strip()
 
 
-dataset = get_dataset(GCS_TRAIN_DATA_PATH).batch(args.global_batch_size)[
+dataset = get_dataset(LOCAL_TRAIN_DATA_DIR).batch(args.global_batch_size)[
     :NUM_BATCHES
 ]
 
@@ -346,7 +347,7 @@ else:
 
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
-test_dataset = get_dataset(GCS_TEST_DATA_PATH).batch(args.global_batch_size)[
+test_dataset = get_dataset(LOCAL_TEST_DATA_DIR).batch(args.global_batch_size)[
     :NUM_TEST_BATCHES
 ]
 

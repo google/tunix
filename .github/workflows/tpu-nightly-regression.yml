@@ -96,13 +96,14 @@ jobs:
         python examples/deepscaler/math_eval_nb.py || FAILED=1
 
         echo "Running scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=100|| FAILED=1
 
         echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=100 --rollout-engine=vllm || FAILED=1
 
-        echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm server mode..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm --rollout-server-mode=True || FAILED=1
+        # Server mode only makes sense with disaggregated mode.
+        # echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm server mode..."
+        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=100 --rollout-engine=vllm --rollout-server-mode=True || FAILED=1
 
         # SGLang Tests
         unset JAX_PLATFORMS
