@@ -83,7 +83,7 @@ class GrpoPipeline(config.HyperParameters):
         self.config["tokenizer_config"],
         self.create_mesh("reference_model_config"),
     )
-    if self.config["actor_model_config"]["lora_config"]:
+    if self.config["actor_model_config"].get("lora_config", None):
       actor_model = model_lib.apply_lora_to_model(
           reference_model,
           self.create_mesh("actor_model_config"),
