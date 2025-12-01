@@ -63,8 +63,10 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
     loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the paper.
       For GSPO, we use gspo-token loss which is more flexible.
-    References: - GRPO: https://arxiv.org/abs/2402.03300 - GSPO:
-      https://www.arxiv.org/pdf/2507.18071
+
+    References:
+      - GRPO: https://arxiv.org/abs/2402.03300
+      - GSPO: https://arxiv.org/abs/2507.18071
   """
 
   algo_variant: str = "grpo"
