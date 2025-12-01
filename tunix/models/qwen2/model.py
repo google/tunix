@@ -102,7 +102,7 @@ class ModelConfig:
 
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
-  def qwen2_5_0_5b(cls):  # qwen2.5-0.5B
+  def qwen2p5_0p5b(cls):  # qwen2.5-0.5B
     return cls(
         num_layers=24,
         vocab_size=151936,
@@ -118,7 +118,7 @@ class ModelConfig:
 
   # DeepSeek-R1-Distill-Qwen-1.5B
   @classmethod
-  def deepseek_r1_distill_qwen_1_5b(cls):
+  def deepseek_r1_distill_qwen_1p5b(cls):
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -133,7 +133,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen2_5_1_5b(cls):  # qwen2.5-1.5B
+  def qwen2p5_1p5b(cls):  # qwen2.5-1.5B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -148,7 +148,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen2_5_math_1_5b(cls):  # qwen2.5-math-1.5B
+  def qwen2p5_math_1p5b(cls):  # qwen2.5-math-1.5B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -164,7 +164,7 @@ class ModelConfig:
 
   # qwen2.5-coder-3B and qwen2.5-3B share the same config.
   @classmethod
-  def qwen2_5_3b(cls):
+  def qwen2p5_3b(cls):
     return cls(
         num_layers=36,
         vocab_size=151936,
@@ -180,7 +180,7 @@ class ModelConfig:
 
   # qwen2.5-7B and qwen2.5-coder-7B share the same config.
   @classmethod
-  def qwen2_5_7b(cls):
+  def qwen2p5_7b(cls):
     return cls(
         num_layers=28,
         vocab_size=152064,

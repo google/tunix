@@ -40,7 +40,7 @@ mesh = jax.make_mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
 )
 config = (
-    model.ModelConfig.llama3_2_1b()
+    model.ModelConfig.llama3p2_1b()
 )  # pick corresponding config based on model version
 llama3 = params.create_model_from_safe_tensors(MODEL_CP_PATH, config, mesh)
 nnx.display(llama3)

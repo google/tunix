@@ -101,7 +101,7 @@ class ModelConfig:
   remat_config: RematConfig = RematConfig.NONE
 
   @classmethod
-  def qwen3_0_6b(cls):  # qwen3-0.6B
+  def qwen3_0p6b(cls):  # qwen3-0.6B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -115,7 +115,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_1_7b(cls):  # qwen3-1.7B
+  def qwen3_1p7b(cls):  # qwen3-1.7B
     return cls(
         num_layers=28,
         vocab_size=151936,

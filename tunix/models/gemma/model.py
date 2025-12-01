@@ -127,7 +127,7 @@ class ModelConfig:
     return cls.gemma_2b()
 
   @classmethod
-  def gemma1_1_2b_it(cls):  # gemma1.1-2b-it
+  def gemma1p1_2b_it(cls):  # gemma1.1-2b-it
     return cls.gemma_2b()
 
   @classmethod
@@ -152,7 +152,7 @@ class ModelConfig:
     return cls.gemma_7b()
 
   @classmethod
-  def gemma1_1_7b_it(cls):  # gemma1.1-7b-it
+  def gemma1p1_7b_it(cls):  # gemma1.1-7b-it
     return cls.gemma_7b()
 
   @classmethod

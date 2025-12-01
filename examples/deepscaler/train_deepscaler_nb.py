@@ -259,7 +259,7 @@ mesh = jax.make_mesh(
     *MESH,
     axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
 )
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
+config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
 # nnx.display(qwen2_ref)

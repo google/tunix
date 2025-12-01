@@ -361,11 +361,11 @@ for ele in train_dataset[:1]:
   pprint.pprint(ele)
 
 MODEL_CONFIG = {
-    "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
-    "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
-    "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
-    "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2_5_0_5b,
-    "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2_5_7b,
+    "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
+    "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
+    "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
+    "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2p5_0p5b,
+    "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2p5_7b,
 }
 
 
