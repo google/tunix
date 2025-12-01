@@ -17,6 +17,7 @@
 
 import functools
 import gc
+import inspect
 import logging
 import math
 import re
@@ -387,6 +388,109 @@ def build_flat_dict(
   return new_flat_dict
 
 
+def build_flat_dict_interleaved(
+    flat_state: Iterator[tuple[tuple[str, ...], nnx.State]],
+    mappings: Dict[str, tuple[str, tuple[int, ...]]],
+):
+  """
+  MoE-Ready dictionary builder that supports complex Regex patterns.
+
+  Fixes the 're.escape' issue allows Modulo Interleaving patterns 
+  like 'layers.(0|2|4).' to match correctly.
+  """
+  new_flat_dict = {}
+
+  # Pre-compile regexes for performance and correctness
+  compiled_mappings = []
+  for src, (tgt, sharding) in mappings.items():
+    # If the target string contains special regex characters used for grouping/alternation,
+    # we treat it as a RAW REGEX. Otherwise, we fallback to the standard wildcard logic.
+    if any(char in tgt for char in ['|', '(', ')']):
+        # Raw Regex Mode (User provided explicit pattern)
+        # Ensure it anchors to start/end to avoid partial matches
+        pattern = '^' + tgt + '$'
+    else:
+        # Legacy Mode (Standard MaxText Wildcard)
+        # Escape dots, then convert '*' to capture group (\d+)
+        pattern = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
+
+    compiled_mappings.append((src, re.compile(pattern), tgt, sharding))
+
+  # Iterate through every parameter in the vLLM (Destination) model
+  for keys, v in flat_state:
+    path = '.'.join(str(key) for key in keys)
+    mapped = False
+
+    for src, regex, tgt_raw, sharding in compiled_mappings:
+      matched = regex.match(path)
+
+      if matched:
+        # 1. Handle Wildcard Replacement in Source Keys
+        # If source has '*', replace it with the captured group (layer number)
+        wildcards = matched.groups()
+        src_parts = []
+        wc_index = 0
+        # Handle tuple source keys (for Fusion: wi_0, wi_1)
+        src_key_list = [src] if isinstance(src, str) else src
+
+        final_src_keys = []
+        for s_key in src_key_list:
+          current_src_parts = []
+          for part in s_key.split('.'):
+            if part == '*':
+              if wc_index < len(wildcards):
+                current_src_parts.append(wildcards[wc_index])
+                # Only increment if we aren't reusing the same wildcard for multiple src keys
+                # (Simple logic: assuming 1 wildcard implies 1 layer idx)
+              else:
+                current_src_parts.append(part)
+            else:
+              current_src_parts.append(part)
+          final_src_keys.append('.'.join(current_src_parts))
+
+        # If originally a string, keep as string. If tuple, keep as tuple.
+        actual_src = final_src_keys[0] if isinstance(src, str) else tuple(final_src_keys)
+
+        # 2. Handle Scanned Layers vs Global Params
+        # If 'layer' is in the sharding spec, we group them by layer index
+        if sharding and 'layer' in sharding:
+          if actual_src not in new_flat_dict:
+              # Structure: (List of (LayerIdx, Value), List of (LayerIdx, Path), Sharding)
+              new_flat_dict[actual_src] = ([], [], sharding)
+
+          # Extract layer number from regex match. 
+          # Default to 0 if no capture group (global param mapped to layer)
+          layer_number = int(wildcards[0]) if wildcards else 0
+
+          new_flat_dict[actual_src][0].append((layer_number, v))
+          new_flat_dict[actual_src][1].append((layer_number, path))
+        else:
+            # Regular Parameter (1-to-1 or N-to-1)
+            new_flat_dict[actual_src] = v, path, sharding
+
+        mapped = True
+
+    if not mapped:
+      # Debug log for unmapped keys (ignoring RNGs)
+      if 'rng' not in path:
+        logging.debug('No mapping found for vLLM key: %s', path)
+
+  # 3. Sort Layers
+  # Ensure that when we slice the scanned tensor later, we do it in order (0, 1, 2...)
+  for key, (layers, paths, sharding) in new_flat_dict.items():
+    if isinstance(layers, list):
+      # Sort by the extracted layer number
+      layers.sort(key=lambda x: x[0])
+      paths.sort(key=lambda x: x[0])
+
+      # Flatten lists back to simple arrays
+      values = [v for _, v in layers]
+      paths = [p for _, p in paths]
+      new_flat_dict[key] = (values, paths, sharding)
+
+  return new_flat_dict
+
+
 class ShapeMismatchError(ValueError):
   """Raised when source and target shapes are incompatible."""
 
@@ -609,6 +713,23 @@ def _apply_dtype_cast(
   return val
 
 
+def _process_key_mapping(
+    key_mappings,
+) -> tuple[Dict[str, tuple[str, tuple[int, ...]]], bool]:
+  """Process key mappings and additional configs."""
+  # Check for additional configs that may require interleaved mapping, for MoE
+  # models like GPT_OSS
+  is_interleaved = False
+  if 'additional_config' in key_mappings:
+    additional_configs = key_mappings['additional_config']
+    logging.info('Additional configs: %s', additional_configs)
+    if additional_configs.get('layer_cycle_interval', 1) > 1:
+       is_interleaved = True
+    # remove additional_config from key_mappings
+    del key_mappings['additional_config']
+  return key_mappings, is_interleaved
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
@@ -650,7 +771,14 @@ def transfer_state_with_mappings(
     }
 
   # Build source-to-target mapping
-  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
+  key_mappings, is_interleaved = _process_key_mapping(key_mappings)
+  if is_interleaved:
+    logging.info('Using interleaved mapping')
+    src_to_tgt_map = build_flat_dict_interleaved(
+        tgt_flat_list, key_mappings
+    )
+  else:
+    src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
@@ -664,8 +792,17 @@ def transfer_state_with_mappings(
     val = _apply_transpose(val, flat_src_key, transpose_keys)
 
     # Apply optional hook function
-    if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
-      val = key_mapping_hook_fns[flat_src_key](val)
+    if key_mapping_hook_fns:
+      for pattern, hook_fn in key_mapping_hook_fns.items():
+        if re.match(pattern, flat_src_key):
+          # Edge Case: Check if hook accepts 1 or 2 arguments
+          sig = inspect.signature(hook_fn)
+          if len(sig.parameters) >= 2:
+            # Fusion Hook (Read-Modify-Write)
+            val = hook_fn(val, tgt_param)
+          else:
+            # Standard Hook (Transform)
+            val = hook_fn(val)
 
     # Align shapes (padding/repeating as needed)
     val = _align_shape(val, tgt_param.value.shape, flat_src_key)
