@@ -55,8 +55,8 @@ class SglangJaxSamplerTest(absltest.TestCase):
 
   def load_llama3_model(self, model_version: str):
     model_config = {
-        "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
-        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
+        "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
+        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }
     assert (
         model_version in model_config
