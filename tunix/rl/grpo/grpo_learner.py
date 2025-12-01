@@ -33,6 +33,7 @@ TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
 
+
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   pass
@@ -62,8 +63,10 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
     loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the paper.
       For GSPO, we use gspo-token loss which is more flexible.
-    References: - GRPO: https://arxiv.org/abs/2402.03300 - GSPO:
-      https://www.arxiv.org/pdf/2507.18071
+
+    References:
+      - GRPO: https://arxiv.org/abs/2402.03300
+      - GSPO: https://arxiv.org/abs/2507.18071
   """
 
   algo_variant: str = "grpo"
@@ -157,7 +160,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
-    
+
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
     loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
