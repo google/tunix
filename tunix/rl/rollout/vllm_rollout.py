@@ -55,6 +55,8 @@ class VllmRollout(base_rollout.BaseRollout):
             async_scheduling=rollout_config.rollout_vllm_async_scheduling,
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
+            hf_config_path=rollout_config.rollout_vllm_hf_config_path,
+            additional_config=rollout_config.rollout_vllm_additional_config,
         ),
     )
     state = nnx.state(model)
