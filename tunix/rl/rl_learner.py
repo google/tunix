@@ -20,8 +20,7 @@ import abc
 from concurrent import futures
 import itertools
 import math
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
-from typing import Generic, TypeVar
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
 import jax
