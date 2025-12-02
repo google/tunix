@@ -243,3 +243,10 @@ jobs:
           # Config tests that passed
           python -m pytest tests/cli/ -v --tb=short \
             --ignore=tests/cli/utils/model_test.py
+      - name: Run model alignment tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -m pip install torch
+          JAX_PLATFORMS=cpu python -m pytest tests/model_alignment/ -v --tb=short
+          unset JAX_PLATFORMS

@@ -52,7 +52,7 @@ class being defined under gemma/model.py."
 model_config_id:
 The model config ID is the standardized version of the model family and model
 version. It is used as the ID of the ModelConfig class. e.g., "gemma_2b_it" or
-"qwen2_5_0_5b".
+"qwen2p5_0p5b".
 """
 # TODO(b/451662153): add README on naming conventions and update naming
 # descriptions in //third_party/py/tunix/cli/base_config.yaml.
@@ -72,15 +72,15 @@ class _ModelFamilyInfo:
 # id and value is the internal model family and config_category.
 _MODEL_FAMILY_INFO_MAPPING = {
     'gemma': _ModelFamilyInfo(family='gemma', config_category='gemma'),
-    'gemma1.1': _ModelFamilyInfo(family='gemma1_1', config_category='gemma'),
+    'gemma1.1': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
     'gemma2': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
     # Support both gemma3 and gemma-3 as model prefixes.
     'gemma3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
     'gemma-3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
     'llama3': _ModelFamilyInfo(family='llama3', config_category='llama3'),
-    'llama3.1': _ModelFamilyInfo(family='llama3_1', config_category='llama3'),
-    'llama3.2': _ModelFamilyInfo(family='llama3_2', config_category='llama3'),
-    'qwen2.5': _ModelFamilyInfo(family='qwen2_5', config_category='qwen2'),
+    'llama3.1': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
+    'llama3.2': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
+    'qwen2.5': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
     'qwen3': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
     'deepseek-r1-distill-qwen': _ModelFamilyInfo(
         family='deepseek_r1_distill_qwen', config_category='qwen2'
@@ -133,8 +133,7 @@ def _standardize_model_version(raw_model_version: str) -> str:
   """
   if not raw_model_version:
     return ''
-  # TODO(b/451662153): replace dots with "p" and update all model configs.
-  model_version = raw_model_version.lower().replace('-', '_').replace('.', '_')
+  model_version = raw_model_version.lower().replace('-', '_').replace('.', 'p')
   if model_version.startswith('_'):
     model_version = model_version[1:]
 
@@ -165,7 +164,7 @@ def get_model_config_id(model_name: str) -> str:
   """Returns the model config ID from the model name."""
   model_family, model_version = get_model_family_and_version(model_name)
   config_id = f'{model_family}_{model_version}'
-  config_id = config_id.replace('.', '_').replace('-', '_')
+  config_id = config_id.replace('.', 'p').replace('-', '_')
   return config_id
 
 
