@@ -96,7 +96,11 @@ collections = {
 }
 
 
-suppress_warnings = ["misc.highlighting_failure"]
+suppress_warnings = [
+    "misc.highlighting_failure",
+    "docutils",
+    "toc.not_included",
+]
 
 
 # -- Options for the API reference
