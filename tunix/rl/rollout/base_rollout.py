@@ -157,7 +157,7 @@ class RolloutConfig:
   rollout_sglang_jax_use_sort_for_toppk_minp: bool = True
 
   # Whether to use lora
-  rollout_sglang_jax_enable_lora: bool = False
+  rollout_sglang_jax_enable_static_lora: bool = False
 
   # Whether to use single controller mode, single controller mode is required in pathways
   rollout_sglang_jax_enable_single_process: bool = True
@@ -167,6 +167,8 @@ class RolloutConfig:
 
   # Specify the lora RANK
   rollout_sglang_jax_max_lora_rank: Optional[int] = None
+
+  rollout_sglang_jax_lora_scaling: Optional[float] = None
 
   # Specify the paddings for batch_size
   rollout_sglang_jax_precompile_bs_paddings: Optional[List[int]] = None
@@ -218,4 +220,8 @@ class BaseRollout(ABC):
 
   @abstractmethod
   def model(self) -> Any:
+    """Returns the rollout model."""
+
+  @abstractmethod
+  def model_state(self) -> Any:
     """Returns the rollout model."""

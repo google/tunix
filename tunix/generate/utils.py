@@ -378,7 +378,7 @@ def build_flat_dict(
 
   # Sort layers
   for key, (layers, paths, sharding) in new_flat_dict.items():
-    print(f'[build_flat_dict][src] {key=}, [target]{paths=}')
+    print(f'[build_flat_dict][src] {key=}, [target] {paths=}')
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
       paths.sort(key=lambda x: x[0])
@@ -485,10 +485,10 @@ def _apply_transpose(
   return val
 
 
-def _reshape_attention(
+def _reshape_src_to_tgt(
     val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
 ) -> jnp.ndarray:
-  """Reshape attention tensors with special handling.
+  """Reshape attention and mlp with lora tensors with special handling.
 
   Args:
       val: Value to reshape.
@@ -501,6 +501,7 @@ def _reshape_attention(
   Raises:
       ShapeMismatchError: If reshaping is not possible.
   """
+  # Note: For ATTN , ATTN Bias and ATTN LoRA
   if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
     new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
     logging.debug(
@@ -521,6 +522,21 @@ def _reshape_attention(
         tgt_shape,
     )
     return jnp.reshape(val, tgt_shape)
+
+  # Note:
+  # 1. Only for MLP LoRA
+  # 2. Here exists tgt_shape is (1, 64, 3072, but the val.shape is (3072, 64)
+  if re.compile(r'layers\..*\.mlp\.(gate|up|down)_proj.kernel_lora_.').match(
+      src_key
+  ) and math.prod(tgt_shape) == math.prod(val.shape):
+    logging.debug(
+        'Reshaping attention proj lora on %s: %s -> %s',
+        src_key,
+        val.shape,
+        tgt_shape,
+    )
+    return jnp.reshape(val, tgt_shape)
+
   raise ShapeMismatchError(
       f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
   )
@@ -547,7 +563,7 @@ def _align_shape(
 
   # Handle rank mismatch
   if len(val.shape) != len(tgt_shape):
-    return _reshape_attention(val, tgt_shape, src_key)
+    return _reshape_src_to_tgt(val, tgt_shape, src_key)
 
   original_shape = val.shape
   # Check if this is an attention weight that can be padded/repeated
@@ -643,6 +659,10 @@ def transfer_state_with_mappings(
   tgt_flat_list = dst_state.flat_state()
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
+
+  for key, tgt_params in tgt_flat_list:
+    print(f'{key=}, {type(tgt_params)=}')
+
   if reshard_fn:
     sharding_dict = {
         key: (
@@ -651,6 +671,7 @@ def transfer_state_with_mappings(
             else tgt_params.sharding
         )
         for key, tgt_params in tgt_flat_list
+        if isinstance(tgt_params, (nnx.Param, jax.Array))
     }
 
   print(f'[src]{key_mappings=}')

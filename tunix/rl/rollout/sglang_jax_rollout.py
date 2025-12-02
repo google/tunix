@@ -53,10 +53,11 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             disable_radix_cache=rollout_config.rollout_sglang_jax_disable_radix_cache,
             enable_deterministic_sampling=rollout_config.rollout_sglang_jax_enable_deterministic_sampling,
             use_sort_for_toppk_minp=rollout_config.rollout_sglang_jax_use_sort_for_toppk_minp,
-            enable_lora=rollout_config.rollout_sglang_jax_enable_lora,
+            enable_static_lora=rollout_config.rollout_sglang_jax_enable_static_lora,
             enable_single_process=rollout_config.rollout_sglang_jax_enable_single_process,
             lora_target_modules=rollout_config.rollout_sglang_jax_lora_target_modules,
             max_lora_rank=rollout_config.rollout_sglang_jax_max_lora_rank,
+            lora_scaling=rollout_config.rollout_sglang_jax_lora_scaling,
             precompile_bs_paddings=rollout_config.rollout_sglang_jax_precompile_bs_paddings,
             precompile_token_paddings=rollout_config.rollout_sglang_jax_precompile_token_paddings,
         ),
@@ -122,3 +123,6 @@ class SglangJaxRollout(base_rollout.BaseRollout):
 
   def model(self) -> nnx.Module:
     return self._sampler.transformer
+
+  def model_state(self):
+    return self._sampler.transformer_state

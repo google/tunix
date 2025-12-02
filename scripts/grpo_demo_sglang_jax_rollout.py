@@ -165,9 +165,14 @@ def show_hbm_usage():
 
   for d in jax.local_devices():
     stats = d.memory_stats()
-    used = stats["bytes_in_use"]
-    limit = stats["bytes_limit"]
-    print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
+    if stats is not None:
+      used = stats["bytes_in_use"]
+      limit = stats["bytes_limit"]
+      print(
+          f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}"
+      )
+    else:
+      print(f"d.memoru_stats() = None")
 
 
 repo_id = args.model_version
@@ -410,7 +415,7 @@ download_from_huggingface(repo_id=repo_id, model_path=model_path)
 #   ref_model, mesh, model_config = get_gemma_ref_model(
 #       ckpt_path=os.path.join(INTERMEDIATE_CKPT_DIR, "state")
 #   )
-def load_model(model_version: str, enable_lora: bool = False):
+def load_model(model_version: str, enable_static_lora: bool = False):
   model_config = {
       "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
       "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
@@ -767,9 +772,10 @@ sglang_jax_config = sampler_lib.SglangJaxConfig(
     disable_radix_cache=True,
     enable_deterministic_sampling=False,
     mapping_config=mapping_config,
-    enable_lora=True,
+    enable_static_lora=True,
     lora_target_modules=["gate_proj"],
     max_lora_rank=RANK,
+    lora_scaling=0.5,
     precompile_bs_paddings=[2],
     precompile_token_paddings=[2048],
 )
@@ -857,10 +863,11 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rollout_sglang_jax_disable_radix_cache=True,
         rollout_sglang_jax_enable_deterministic_sampling=False,
         rollout_sglang_jax_use_sort_for_toppk_minp=True,
-        rollout_sglang_jax_enable_lora=True,
+        rollout_sglang_jax_enable_static_lora=True,
         rollout_sglang_jax_enable_single_process=True,
         rollout_sglang_jax_lora_target_modules=["gate_proj"],
         rollout_sglang_jax_max_lora_rank=RANK,
+        rollout_sglang_jax_lora_scaling=0.5,
         rollout_sglang_jax_precompile_bs_paddings=[8],
         rollout_sglang_jax_precompile_token_paddings=[2048],
     ),

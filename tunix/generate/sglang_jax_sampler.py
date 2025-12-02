@@ -47,14 +47,15 @@ class SglangJaxConfig:
   enable_deterministic_sampling: bool = False
   # Note: use_sort_for_toppk_minp may be removed in the future. It depends on SGLang-Jax.
   use_sort_for_toppk_minp: bool = True
-  enable_lora: bool = False
+  enable_static_lora: bool = False
   enable_single_process: bool = (
       True  # Note: this is required when you run it in pathways.
   )
 
-  # lora_config: Optional[Dict[str, Any]] = None
   lora_target_modules: Optional[List[str]] = None
   max_lora_rank: Optional[int] = None
+  lora_scaling: Optional[float] = None
+
   precompile_token_paddings: Optional[List[int]] = None
   precompile_bs_paddings: Optional[List[int]] = None
 
@@ -135,17 +136,19 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["disable_radix_cache"] = config.disable_radix_cache
     args["enable_deterministic_sampling"] = config.enable_deterministic_sampling
     args["use_sort_for_toppk_minp"] = config.use_sort_for_toppk_minp
-    args["enable_lora"] = config.enable_lora
+    args["enable_static_lora"] = config.enable_static_lora
     args["enable_single_process"] = config.enable_single_process
 
-    if config.enable_lora:
+    if config.enable_static_lora:
       assert (
           config.lora_target_modules is not None
           and config.max_lora_rank is not None
+          and config.lora_scaling is not None
       )
       args["lora_target_modules"] = config.lora_target_modules
       args["max_lora_rank"] = config.max_lora_rank
       args["max_loras_per_batch"] = 1
+      args["lora_scaling"] = config.lora_scaling
 
     if config.precompile_token_paddings is not None:
       assert isinstance(config.precompile_token_paddings, List)
