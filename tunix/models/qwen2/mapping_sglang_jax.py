@@ -70,7 +70,16 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
 
 def _lora_to_sglang_jax_mappings() -> Dict[str, MappingEntry] | None:
   """The lora parameter key mapping between Tunix vanilla model and Sglang-jax Jax backend"""
-  return None
+  return {
+      'layers.*.mlp.gate_proj.kernel_lora_a': (
+          'model.layers.*.mlp.gate_proj.A_buffer',
+          (None, 'model'),
+      ),
+      'layers.*.mlp.gate_proj.kernel_lora_b': (
+          'model.layers.*.mlp.gate_proj.B_buffer',
+          (None, 'model'),
+      ),
+  }
 
 
 def _to_sglang_jax_transpose_keys():

@@ -378,6 +378,7 @@ def build_flat_dict(
 
   # Sort layers
   for key, (layers, paths, sharding) in new_flat_dict.items():
+    print(f'[build_flat_dict][src] {key=}, [target]{paths=}')
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
       paths.sort(key=lambda x: x[0])
@@ -425,6 +426,8 @@ def _unroll_scanned_layers(
   """
 
   unscanned_flat = {}
+
+  # print(f"{src_to_tgt_map=}")
 
   for src_keys, src_val in src_state.flat_state():
     src_key = '.'.join(str(k) for k in src_keys)
@@ -649,6 +652,8 @@ def transfer_state_with_mappings(
         )
         for key, tgt_params in tgt_flat_list
     }
+
+  print(f'[src]{key_mappings=}')
 
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
