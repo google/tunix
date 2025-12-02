@@ -32,10 +32,6 @@ from tunix.rl import reshard
 
 _BASE_MODULE_PATH = 'tunix.models'  # pylint: disable=invalid-name
 
-# TODO(b/462808330): Handle shading overrides better.
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
-
 
 class ModelModule(enum.Enum):
   """Specifies the type of model module to import."""
