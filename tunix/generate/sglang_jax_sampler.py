@@ -151,12 +151,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         if (self.tokenizer.bos_id() and input_ids[0] != self.tokenizer.bos_id())
         else []
     )
-    eos_tok = (
-        [self.tokenizer.eos_id()]
-        if input_ids[-1] != self.tokenizer.eos_id()
-        else []
-    )
-    return bos_tok + input_ids + eos_tok
+    return bos_tok + input_ids
 
   def __call__(
       self,
