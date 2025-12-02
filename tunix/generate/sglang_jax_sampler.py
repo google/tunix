@@ -35,16 +35,28 @@ from tunix.rl import reshard
 
 @dataclasses.dataclass
 class SglangJaxConfig:
+  mesh: jax.sharding.Mesh
+  mapping_config: mappings.MappingConfig
+
   model_version: str
   context_length: int
-  mesh: jax.sharding.Mesh
-  mem_fraction_static: float
-  init_with_random_weights: bool
-  disable_radix_cache: bool
-  enable_deterministic_sampling: bool
-  mapping_config: mappings.MappingConfig
+
+  mem_fraction_static: float = 0.2
+  init_with_random_weights: bool = True
+  disable_radix_cache: bool = True
+  enable_deterministic_sampling: bool = False
   # Note: use_sort_for_toppk_minp may be removed in the future. It depends on SGLang-Jax.
   use_sort_for_toppk_minp: bool = True
+  enable_lora: bool = False
+  enable_single_process: bool = (
+      True  # Note: this is required when you run it in pathways.
+  )
+
+  # lora_config: Optional[Dict[str, Any]] = None
+  lora_target_modules: Optional[List[str]] = None
+  max_lora_rank: Optional[int] = None
+  precompile_token_paddings: Optional[List[int]] = None
+  precompile_bs_paddings: Optional[List[int]] = None
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -68,13 +80,19 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         tokenizer (Any): A tokenizer compatible with the model.
         config: The sglang-jax related configurations
     """
+    print(f"[SglangJaxSampler] {config=}")
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.args = self._sglang_jax_config(config)
     self.engine = Engine(**self.args)
 
-    self.mappings = config.mapping_config.to_hf_mappings
+    self.to_hf_key_mappings = config.mapping_config.to_hf_mappings
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
+
+    if config.mapping_config.lora_to_hf_mappings:
+      self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
+
+    print(f"[SglangJaxSampler initialization] {self.to_hf_key_mappings=}")
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -87,7 +105,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     new_state = utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
-        key_mappings=self.mappings,
+        key_mappings=self.to_hf_key_mappings,
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
     )
@@ -109,21 +127,38 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
   def _sglang_jax_config(self, config: SglangJaxConfig):
     args = {}
     args["model_path"] = config.model_version
-    args["precompile_bs_paddings"] = [1, 64]
-    args["precompile_token_paddings"] = [8192]
-    args["page_size"] = 64
     args["context_length"] = config.context_length
-    args["tp_size"] = self._find_tp_size(config.mesh)
-    args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
+
     args["mem_fraction_static"] = config.mem_fraction_static
-    args["enable_single_process"] = True
-    if config.disable_radix_cache:
-      args["disable_radix_cache"] = True
-    if config.enable_deterministic_sampling:
-      args["enable_deterministic_sampling"] = True
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
+    args["disable_radix_cache"] = config.disable_radix_cache
+    args["enable_deterministic_sampling"] = config.enable_deterministic_sampling
     args["use_sort_for_toppk_minp"] = config.use_sort_for_toppk_minp
+    args["enable_lora"] = config.enable_lora
+    args["enable_single_process"] = config.enable_single_process
+
+    if config.enable_lora:
+      assert (
+          config.lora_target_modules is not None
+          and config.max_lora_rank is not None
+      )
+      args["lora_target_modules"] = config.lora_target_modules
+      args["max_lora_rank"] = config.max_lora_rank
+      args["max_loras_per_batch"] = 1
+
+    if config.precompile_token_paddings is not None:
+      assert isinstance(config.precompile_token_paddings, List)
+      args["precompile_token_paddings"] = config.precompile_token_paddings
+    if config.precompile_bs_paddings is not None:
+      assert isinstance(config.precompile_bs_paddings, List)
+      args["precompile_bs_paddings"] = config.precompile_bs_paddings
+
+    # default arguments which is derived from known configuration or to tune.
+    args["page_size"] = 64
+    args["tp_size"] = self._find_tp_size(config.mesh)
+    args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
+
     return args
 
   @property

@@ -115,12 +115,13 @@ EPSILON = 0.2
 # ====== Training ======
 TRAIN_MICRO_BATCH_SIZE = 1
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
-NUM_BATCHES = 3738
+# NUM_BATCHES = 3738
+NUM_BATCHES = 10
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 2
 
-EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+EVAL_EVERY_N_STEPS = 5  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
 
 # Number of training steps.
@@ -386,22 +387,22 @@ download_from_huggingface(repo_id=repo_id, model_path=model_path)
 #
 
 
-def get_lora_model(base_model, mesh):
-  # lora_provider = qwix.LoraProvider(
-  #     module_path=(
-  #         ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
-  #         ".*attn_vec_einsum"
-  #     ),
-  #     rank=RANK,
-  #     alpha=ALPHA,
-  # )
-  #
-  # model_input = base_model.get_model_input()
-  # lora_model = qwix.apply_lora_to_model(
-  #     base_model, lora_provider, **model_input
-  # )
-  lora_model = base_model
-  return lora_model
+# def get_lora_model(base_model, mesh):
+#   # lora_provider = qwix.LoraProvider(
+#   #     module_path=(
+#   #         ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
+#   #         ".*attn_vec_einsum"
+#   #     ),
+#   #     rank=RANK,
+#   #     alpha=ALPHA,
+#   # )
+#   #
+#   # model_input = base_model.get_model_input()
+#   # lora_model = qwix.apply_lora_to_model(
+#   #     base_model, lora_provider, **model_input
+#   # )
+#   lora_model = base_model
+#   return lora_model
 
 
 # Reference model
@@ -453,7 +454,39 @@ show_hbm_usage()
 # Policy model
 rollout_mesh = get_rollout_mesh()
 
-lora_policy = ref_model
+
+def get_lora_model(base_model, model_mesh=None):
+  """Creates a LoRA model from a base model.
+
+  Args:
+    base_model: The base model to apply LoRA to.
+    model_mesh: The mesh to use for sharding the model.
+
+  Returns:
+    A LoRA model.
+  """
+  # if isinstance(base_model, llama_lib.Llama3):
+  #   module_path = (
+  #       ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
+  #   )
+  # else:
+  #   module_path = ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
+
+  lora_provider = qwix.LoraProvider(
+      module_path=".*gate_proj",
+      rank=RANK,
+      alpha=ALPHA,
+  )
+
+  model_input = base_model.get_model_input()
+  lora_model = qwix.apply_lora_to_model(
+      base_model, lora_provider, **model_input
+  )
+
+  return lora_model
+
+
+lora_policy = get_lora_model(ref_model, mesh)
 print("after lora_policy")
 show_hbm_usage()
 # nnx.display(lora_policy)
@@ -734,6 +767,11 @@ sglang_jax_config = sampler_lib.SglangJaxConfig(
     disable_radix_cache=True,
     enable_deterministic_sampling=False,
     mapping_config=mapping_config,
+    enable_lora=True,
+    lora_target_modules=["gate_proj"],
+    max_lora_rank=RANK,
+    precompile_bs_paddings=[2],
+    precompile_token_paddings=[2048],
 )
 
 # sampler = sampler_lib.SglangJaxSampler(
@@ -811,12 +849,20 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
+        rollout_mapping_config=mapping_config,
         rollout_sglang_jax_model_version=model_path,
         rollout_sglang_jax_context_length=2048,
         rollout_sglang_jax_mem_fraction_static=0.4,
         rollout_sglang_jax_init_with_random_weights=True,
         rollout_sglang_jax_disable_radix_cache=True,
         rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_use_sort_for_toppk_minp=True,
+        rollout_sglang_jax_enable_lora=True,
+        rollout_sglang_jax_enable_single_process=True,
+        rollout_sglang_jax_lora_target_modules=["gate_proj"],
+        rollout_sglang_jax_max_lora_rank=RANK,
+        rollout_sglang_jax_precompile_bs_paddings=[8],
+        rollout_sglang_jax_precompile_token_paddings=[2048],
     ),
 )
 
