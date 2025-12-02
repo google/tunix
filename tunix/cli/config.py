@@ -508,7 +508,7 @@ class HyperParameters:
 
     constructed_training_config = collections.defaultdict()
     for key, value in training_config.items():
-      if key == "checkpoint_options" and value:
+      if key == "checkpointing_options" and value:
         try:
           constructed_training_config[key] = ocp.CheckpointManagerOptions(
               **value
