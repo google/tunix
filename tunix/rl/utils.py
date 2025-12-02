@@ -258,3 +258,6 @@ def get_partition_spec(
     return sharding.spec
   else:
     return jax.sharding.PartitionSpec()
+
+
+VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"
