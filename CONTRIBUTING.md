@@ -9,7 +9,7 @@ We follow
 
 ## Contributing code
 
-### 1. Propose Changes in an Issue
+### Step 1. Propose Changes in an Issue
 
 Before starting on your contribution, please check for an existing issue.
 
@@ -24,11 +24,11 @@ All bug fixes must include a link to a
 [Colab](https://colab.research.google.com/) notebook that clearly reproduces the
 error.
 
-### 2. Make code changes
+### Step 2. Make code changes
 
 To begin coding, fork the repository and create a new branch from main.
 
-### 3. Create a pull request
+### Step 3. Create a pull request
 
 Once your changes are ready, open a pull request from your branch to the main
 branch of the upstream Tunix repository. Please provide a clear title and
