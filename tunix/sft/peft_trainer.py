@@ -415,13 +415,18 @@ class PeftTrainer:
 
     pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
 
+    def reshard_leaf(x):
+      target_sharding = sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec)
+      
+      if isinstance(x, jax.Array):
+        # Global or local JAX array - use device_put to reshard
+        return jax.device_put(x, target_sharding)
+      
+      # NumPy or other - use process-local path
+      return jax.make_array_from_process_local_data(target_sharding, x)
+
     with jax.transfer_guard("allow"):
-      return jax.tree.map(
-          lambda x: jax.make_array_from_process_local_data(
-              sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec), x
-          ),
-          input_data,
-      )
+      return jax.tree.map(reshard_leaf, input_data)
 
   def _prepare_inputs(self, input_data: Any) -> Any:
     """Override this function for additional input preparation."""
