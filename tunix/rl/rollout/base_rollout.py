@@ -176,6 +176,9 @@ class RolloutConfig:
   # Specify the paddings for tokens which is used in prefll
   rollout_sglang_jax_precompile_token_paddings: Optional[List[int]] = None
 
+  #
+  rollout_sglang_jax_chunked_prefill_size: Optional[int] = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""

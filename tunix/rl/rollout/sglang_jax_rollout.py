@@ -60,6 +60,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             lora_scaling=rollout_config.rollout_sglang_jax_lora_scaling,
             precompile_bs_paddings=rollout_config.rollout_sglang_jax_precompile_bs_paddings,
             precompile_token_paddings=rollout_config.rollout_sglang_jax_precompile_token_paddings,
+            chunked_prefill_size=rollout_config.rollout_sglang_jax_chunked_prefill_size,
         ),
     )
     state = nnx.state(model)

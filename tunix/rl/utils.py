@@ -270,3 +270,6 @@ def maybe_move(arr: jax.Array, mesh: jax.sharding.Mesh) -> jax.Array:
     )
     return jax.device_put(arr, dest_sharding)
   return arr
+
+
+VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"

@@ -604,10 +604,6 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         initial_steps = self._iter_steps
 
         with self.rl_cluster.perf.span_group("global_step"):
-          print(
-              f"{full_batch_size=}, {mini_batch_size=},"
-              f" {service_target_batch_size=}"
-          )
           self._run_global_step(
               full_batch_size,
               mini_batch_size,

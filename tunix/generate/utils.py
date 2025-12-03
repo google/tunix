@@ -343,6 +343,7 @@ def build_flat_dict(
   new_flat_dict = {}
   for keys, v in flat_state:
     path = '.'.join(str(key) for key in keys)
+    # print(f"[build_flat_dict before match] {path=}")
     mapped = False
     for src, (tgt, sharding) in mappings.items():
       regex = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
@@ -378,7 +379,7 @@ def build_flat_dict(
 
   # Sort layers
   for key, (layers, paths, sharding) in new_flat_dict.items():
-    print(f'[build_flat_dict][src] {key=}, [target] {paths=}')
+    # print(f'[build_flat_dict][src] {key=}, [target] {paths=}')
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
       paths.sort(key=lambda x: x[0])
@@ -525,7 +526,7 @@ def _reshape_src_to_tgt(
 
   # Note:
   # 1. Only for MLP LoRA
-  # 2. Here exists tgt_shape is (1, 64, 3072, but the val.shape is (3072, 64)
+  # 2. Here exists tgt_shape is (1, 64, 3072), but the val.shape is (3072, 64)
   if re.compile(r'layers\..*\.mlp\.(gate|up|down)_proj.kernel_lora_.').match(
       src_key
   ) and math.prod(tgt_shape) == math.prod(val.shape):
@@ -656,12 +657,16 @@ def transfer_state_with_mappings(
     The target state with the transferred values.
   """
   # Get flat target state
-  tgt_flat_list = dst_state.flat_state()
+  raw_tgt_flat_list = dst_state.flat_state()
+
+  # Note: Limiting the data type could avoid to match the unexpected field in state.
+  tgt_flat_list = []
+  for key, tgt_params in raw_tgt_flat_list:
+    if isinstance(tgt_params, (nnx.Param, jax.Array)):
+      tgt_flat_list.append((key, tgt_params))
+
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
-
-  for key, tgt_params in tgt_flat_list:
-    print(f'{key=}, {type(tgt_params)=}')
 
   if reshard_fn:
     sharding_dict = {
@@ -671,10 +676,7 @@ def transfer_state_with_mappings(
             else tgt_params.sharding
         )
         for key, tgt_params in tgt_flat_list
-        if isinstance(tgt_params, (nnx.Param, jax.Array))
     }
-
-  print(f'[src]{key_mappings=}')
 
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)

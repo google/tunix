@@ -15,6 +15,7 @@
 """Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
 
 import dataclasses
+import logging
 import math
 import os
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
@@ -26,11 +27,13 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 from sgl_jax.srt.entrypoints.engine import Engine
+from sgl_jax.srt.utils.common_utils import SUPPORTED_LORA_TARGET_MODULES
 from tunix.generate import base_sampler
 from tunix.generate import mappings
 from tunix.generate import utils
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
+from tunix.rl.utils import VERIFY_UPDATE_PARAMS_KEY
 
 
 @dataclasses.dataclass
@@ -58,6 +61,7 @@ class SglangJaxConfig:
 
   precompile_token_paddings: Optional[List[int]] = None
   precompile_bs_paddings: Optional[List[int]] = None
+  chunked_prefill_size: Optional[int] = 2048
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -81,19 +85,25 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         tokenizer (Any): A tokenizer compatible with the model.
         config: The sglang-jax related configurations
     """
-    print(f"[SglangJaxSampler] {config=}")
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.args = self._sglang_jax_config(config)
     self.engine = Engine(**self.args)
 
     self.to_hf_key_mappings = config.mapping_config.to_hf_mappings
+    self.to_hf_key_mappings = update_hf_key_mappings_with_lora(
+        self.to_hf_key_mappings,
+        self.args["enable_static_lora"],
+        self.args["lora_target_modules"],
+    )
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
 
     if config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
 
-    print(f"[SglangJaxSampler initialization] {self.to_hf_key_mappings=}")
+    self._logger = logging.getLogger(self.__class__.__name__)
+
+    self._logger.debug(f"{self.to_hf_key_mappings=}")
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -111,7 +121,62 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         reshard_fn=reshard.reshard_pytree,
     )
     nnx.update(self._model_runner.model, new_state)
+
     self._model_runner.initialize_jit()  ## need to run initialize_jit to make it effective
+
+    flatten_src_to_tgt_module_name = os.getenv(VERIFY_UPDATE_PARAMS_KEY, None)
+    if flatten_src_to_tgt_module_name is not None:
+      self.verify_update_params(
+          updated_weights,
+          self.transformer_state,
+          flatten_src_to_tgt_module_name,
+      )
+
+  def verify_update_params(
+      self,
+      src_state: nnx.State,
+      tgt_state: nnx.State,
+      flatten_src_to_tgt_module_name: str,
+  ):
+    self._logger.debug(
+        f"[verify_update_params] {flatten_src_to_tgt_module_name} is required"
+        " to verify"
+    )
+    src_tgt = flatten_src_to_tgt_module_name.split(",")
+    assert len(src_tgt) == 2
+    flatten_src_module_name = src_tgt[0]
+    flatten_tgt_module_name = src_tgt[1]
+    flatten_src_state_list = src_state.flat_state()
+    src_value = None
+    for keys, param in flatten_src_state_list:
+      path = ".".join(str(key) for key in keys)
+      if path == flatten_src_module_name:
+        src_value = param.value if hasattr(param, "value") else param
+    if src_value is None:
+      raise ValueError(
+          f"{flatten_src_module_name=} does not exist in src: {src_state=}"
+      )
+
+    src_shape = src_value.shape
+
+    flatten_tgt_state_list = tgt_state.flat_state()
+    tgt_value = None
+    for keys, param in flatten_tgt_state_list:
+      path = ".".join(str(key) for key in keys)
+      if path == flatten_tgt_module_name:
+        tgt_value = param.value if hasattr(param, "value") else param
+
+    if tgt_value is None:
+      raise ValueError(
+          f"{flatten_tgt_module_name=} does not exist in tgt: {tgt_state=}"
+      )
+
+    reshaped_tgt_value = jnp.reshape(tgt_value, src_shape)
+    src_value_np, reshaped_tgt_value_np = jax.device_get(
+        src_value
+    ), jax.device_get(reshaped_tgt_value)
+    if not np.array_equal(src_value_np, reshaped_tgt_value_np):
+      raise ValueError(f"{src_value_np=} is not equal to {reshaped_tgt_value=}")
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -145,6 +210,16 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           and config.max_lora_rank is not None
           and config.lora_scaling is not None
       )
+      # check whether the lora_target_modules are valid
+      if config.lora_target_modules == ["all"]:
+        config.lora_target_modules = SUPPORTED_LORA_TARGET_MODULES
+      else:
+        for module in config.lora_target_modules:
+          if module not in SUPPORTED_LORA_TARGET_MODULES:
+            raise ValueError(
+                f"{module} in lora_target_modules does not exist in"
+                f" {SUPPORTED_LORA_TARGET_MODULES}"
+            )
       args["lora_target_modules"] = config.lora_target_modules
       args["max_lora_rank"] = config.max_lora_rank
       args["max_loras_per_batch"] = 1
@@ -156,6 +231,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     if config.precompile_bs_paddings is not None:
       assert isinstance(config.precompile_bs_paddings, List)
       args["precompile_bs_paddings"] = config.precompile_bs_paddings
+    args["chunked_prefill_size"] = config.chunked_prefill_size
 
     # default arguments which is derived from known configuration or to tune.
     args["page_size"] = 64
@@ -281,3 +357,29 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         padded_prompt_tokens=all_input_ids,
         logprobs=None,
     )
+
+
+def update_hf_key_mappings_with_lora(
+    mappings: Optional[Dict[str, Any]] = None,
+    enable_static_lora: bool = False,
+    lora_target_modules: Optional[List] = None,
+):
+  if (
+      mappings is None
+      or not enable_static_lora
+      or lora_target_modules is None
+      or len(lora_target_modules) == 0
+  ):
+    return mappings
+
+  # Note: SGLangJax implements the LoRA through wraping the base_layer, so the value in mappings needs to be updated.
+  # From 'model.layers.*.mlp.gate_proj.weight' to 'model.layers.*.mlp.gate_proj.base_layer.weight'
+  for module in lora_target_modules:
+    for src_path, tgt_params in mappings.items():
+      if module in src_path:
+        tgt_path, sharding = tgt_params
+        keys = tgt_path.split(".")
+        new_tgt_path = ".".join(keys[:-1]) + ".base_layer." + keys[-1]
+        mappings[src_path] = (new_tgt_path, sharding)
+        break
+  return mappings

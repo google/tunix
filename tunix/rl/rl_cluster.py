@@ -912,10 +912,6 @@ class RLCluster:
       return per_token_logps
 
   def sync_weights(self):
-    print(
-        f"===================================coming into"
-        f" sync_weights======================"
-    )
     """Syncs the weights of between the sampler model and trainer model."""
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
       cm = contextlib.ExitStack()
@@ -931,12 +927,6 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
-
-      print(f"====================rollout has updated parameters==============")
-      updated_a_buffer = self.rollout.model_state["model"]["layers"][0]["mlp"][
-          "gate_proj"
-      ]["A_buffer"]
-      print(f"{updated_a_buffer=}")
 
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1
