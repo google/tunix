@@ -92,7 +92,8 @@ def split(model_name: str) -> tuple[str, str]:
   """Splits model name into model family and model version.
 
   Find the longest matching prefix of the model name in the
-  _MODEL_FAMILY_INFO_MAPPING.
+  _MODEL_FAMILY_INFO_MAPPING. Returns the remaining string as the model version,
+  stripping leading hyphens.
 
   Args:
     model_name: The model name, e.g., llama3.1-8b.
@@ -106,7 +107,7 @@ def split(model_name: str) -> tuple[str, str]:
     if model_name.startswith(family) and len(family) > len(matched_family):
       matched_family = family
   if matched_family:
-    return matched_family, model_name[len(matched_family) :]
+    return matched_family, model_name[len(matched_family) :].lstrip('-')
   else:
     raise ValueError(
         f'Could not determine model family for: {model_name}. Not one of the'
@@ -122,7 +123,6 @@ def _standardize_model_version(raw_model_version: str) -> str:
   - Lowercase
   - Replace hyphens with underscores
   - Replace dots with underscores
-  - Remove leading hyphen
   - Validate the model version starts with an alphanumeric character.
 
   Args:
@@ -134,8 +134,6 @@ def _standardize_model_version(raw_model_version: str) -> str:
   if not raw_model_version:
     return ''
   model_version = raw_model_version.lower().replace('-', '_').replace('.', 'p')
-  if model_version.startswith('_'):
-    model_version = model_version[1:]
 
   # Validate the model version starts with an alphanumeric character.
   if len(model_version) > 1 and not model_version[0].isalnum():
