@@ -176,7 +176,7 @@ class RolloutConfig:
   # Specify the paddings for tokens which is used in prefll
   rollout_sglang_jax_precompile_token_paddings: Optional[List[int]] = None
 
-  #
+  # Specify the the maximum number of tokens in a chunk for the chunked prefill
   rollout_sglang_jax_chunked_prefill_size: Optional[int] = None
 
 

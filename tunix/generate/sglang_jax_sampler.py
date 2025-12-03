@@ -20,7 +20,6 @@ import math
 import os
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
-from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp

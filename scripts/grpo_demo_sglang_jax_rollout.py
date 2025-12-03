@@ -781,7 +781,9 @@ common_sglang_jax_config = {
     "mapping_config": mapping_config,
     "enable_static_lora": True,
     "enable_single_process": True,
-    "lora_target_modules": ["all"],
+    "lora_target_modules": [
+        "all"
+    ],  # q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
     "max_lora_rank": RANK,
     "lora_scaling": 0.5,
     "precompile_bs_paddings": [8],
@@ -979,7 +981,7 @@ nnx.update(
     lora_policy,
     jax.tree.map(
         lambda a, b: b,
-        nnx.state(lora_policy, nnx.Param),
+        nnx.state(lora_policy, filter_type),
         trained_lora_params,
     ),
 )
