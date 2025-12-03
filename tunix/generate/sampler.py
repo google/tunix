@@ -740,7 +740,6 @@ class Sampler(base_sampler.BaseSampler):
     )
     token_buffers = sampling_state.token_buffer
     logits_buffers = sampling_state.logits_buffer
-
     if sampling_state.sampling_mode == 'beam_search':
       updated_args = beam_search_lib.finalize_beam_search_state(
           sampling_state.beam_search_sampling_state,
@@ -765,10 +764,17 @@ class Sampler(base_sampler.BaseSampler):
           max_prompt_length,
           max_len,
       )
-      out_tokens, lengths = jax.device_get(out_tokens), jax.device_get(lengths)
+      # Decode from local shards only (multi-controller safe)
+      if not out_tokens.is_fully_addressable:
+        tokens_host = np.concatenate([s.data for s in out_tokens.addressable_shards])
+        lengths_host = np.concatenate([s.data for s in lengths.addressable_shards])
+      else:
+        tokens_host = jax.device_get(out_tokens)
+        lengths_host = jax.device_get(lengths)
+      
       decoded_outputs = [
-          self.tokenizer.decode(tokens[:length].tolist())
-          for tokens, length in zip(out_tokens, lengths)
+          self.tokenizer.decode(tokens_host[i][:int(lengths_host[i])].tolist())
+          for i in range(len(tokens_host))
       ]
     else:
       out_tokens = []

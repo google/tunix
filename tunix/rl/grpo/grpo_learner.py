@@ -22,12 +22,14 @@ from typing import Iterable, List, Sequence, TypeVar
 import flax
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
+from tunix.sft import sharding_utils
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -214,6 +216,22 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     prompt_ids = rollout_output.left_padded_prompt_tokens
     completion_text = rollout_output.text
 
+    # Slice prompts and other inputs to match local completion count (multi-controller safe)
+    local_batch_size = len(completion_text)
+    if local_batch_size != len(training_input["prompts"]):
+      # In multi-controller: prompts are replicated but completions are local
+      # Determine which slice this process owns
+      global_batch_size = len(training_input["prompts"])
+      samples_per_process = global_batch_size // jax.process_count()
+      start_idx = jax.process_index() * samples_per_process
+      end_idx = start_idx + samples_per_process
+      local_training_input = {
+          k: v[start_idx:end_idx] if isinstance(v, (list, np.ndarray)) else v
+          for k, v in training_input.items()
+      }
+    else:
+      local_training_input = training_input
+
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
     completion_padding_mask = jnp.not_equal(completion_ids, pad_value)
@@ -258,13 +276,23 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       old_per_token_logps = None
 
     with self.rl_cluster.perf.span("advantage_computation"):
-      # Compute rewards and advantages
-      rewards = self._compute_rewards(
-          prompts=training_input["prompts"],
+      # Compute rewards locally on each process
+      rewards_local = self._compute_rewards(
+          prompts=local_training_input["prompts"],
           completions=completion_text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},
+          **{k: v for k, v in local_training_input.items() if k != "prompts"},
       )
+      
+      # Create globally sharded array from process-local rewards
+      mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
+      if not mesh.empty:
+        pspec = PartitionSpec(*self.rl_cluster.cluster_config.training_config.data_sharding_axis)
+        reward_sharding = sharding_utils.get_sharding(rewards_local, mesh, pspec)
+        rewards = jax.make_array_from_process_local_data(reward_sharding, rewards_local)
+      else:
+        rewards = jnp.array(rewards_local)
+      
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
       )
@@ -293,11 +321,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     )
     for m_fn in self.metric_fns:
       user_defined_metric = m_fn(
-          prompts=training_input["prompts"],
+          prompts=local_training_input["prompts"],
           completions=completion_text,
           advances=advantages,
           rewards=rewards,
-          **{k: v for k, v in training_input.items() if k != "prompts"},
+          **{k: v for k, v in local_training_input.items() if k != "prompts"},
       )
       self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
 
