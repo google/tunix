@@ -236,8 +236,8 @@ class MockVocab(spm.SentencePieceProcessor):
     ]
 
 
-class MockTransformerWithScoreHead(nnx.Module):
-  """Gemma transformer with a score head."""
+class ToyTransformerWithScoreHead(nnx.Module):
+  """Toy transformer with a score head."""
 
   def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
     """Initializes the transformer with a score head.

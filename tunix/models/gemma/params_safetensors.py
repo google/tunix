@@ -171,14 +171,14 @@ def create_model_from_safe_tensors(
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
-) -> model_lib.Transformer:
+) -> model_lib.Gemma:
   v_ckpt = _peek_vocab_size_from_safetensors(file_dir)
   if v_ckpt != config.num_embed:
     config = dataclasses.replace(config, num_embed=v_ckpt)
     print(f"[gemma2] override num_embed -> {v_ckpt} from checkpoint")
   return safetensors_loader.load_and_create_model(
       file_dir=file_dir,
-      model_class=model_lib.Transformer,
+      model_class=model_lib.Gemma,
       config=config,
       key_mapping=_get_key_and_transform_mapping,
       mesh=mesh,

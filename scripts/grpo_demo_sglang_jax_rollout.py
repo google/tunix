@@ -354,7 +354,7 @@ download_from_huggingface(repo_id=repo_id, model_path=model_path)
 #   params = params_lib.load_and_format_params(
 #       os.path.join(kaggle_ckpt_path, "gemma2-2b-it")
 #   )
-#   gemma = gemma_lib.Transformer.from_params(params, version="2-2b-it")
+#   gemma = gemma_lib.Gemma.from_params(params, version="2-2b-it")
 #   checkpointer = ocp.StandardCheckpointer()
 #   _, state = nnx.split(gemma)
 #   checkpointer.save(os.path.join(INTERMEDIATE_CKPT_DIR, "state"), state)
@@ -369,7 +369,7 @@ download_from_huggingface(repo_id=repo_id, model_path=model_path)
 #   mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 #   model_config = gemma_lib.ModelConfig.gemma2_2b()
 #   abs_gemma: nnx.Module = nnx.eval_shape(
-#       lambda: gemma_lib.Transformer(model_config, rngs=nnx.Rngs(params=0))
+#       lambda: gemma_lib.Gemma(model_config, rngs=nnx.Rngs(params=0))
 #   )
 #   abs_state = nnx.state(abs_gemma)
 #   abs_state = jax.tree.map(

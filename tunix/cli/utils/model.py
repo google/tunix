@@ -139,15 +139,16 @@ def obtain_model_params(model_name: str) -> Any:
   return method_to_call()
 
 
-def _get_base_model(model_config: dict[str, Any], mesh: jax.sharding.Mesh):
+def _get_gemma_base_model(
+    model_config: dict[str, Any], mesh: jax.sharding.Mesh
+):
   """Get the base model from the intermediate checkpoint."""
   model_params = obtain_model_params(model_config['model_name'])
   model_lib_module = get_model_module(
       model_config['model_name'], ModelModule.MODEL
   )
-  # TODO(noghabi): Refactor Transformer class name to Gemma in in gemma.py.
   abs_model: nnx.Module = nnx.eval_shape(
-      lambda: model_lib_module.Transformer(
+      lambda: model_lib_module.Gemma(
           model_params, rngs=nnx.Rngs(model_config.get('rng_seed', 0))
       )
   )
@@ -224,7 +225,7 @@ def _gemma_conversion(
   gc.collect()
 
   # Reload the model
-  return _get_base_model(model_config, mesh)
+  return _get_gemma_base_model(model_config, mesh)
 
 
 # TODO(b/451662153): make gemma3 and gemma2 loading logic more consistent.
@@ -254,12 +255,7 @@ def _create_gemma3_model_from_checkpoint(
 def _create_gemma_model_from_params(
     params_path: str, model_name: str
 ) -> Tuple[nnx.Module, Any]:
-  """Loads Gemma params and creates a model.
-
-  This function is used to create a model from a params path. It is used for
-  models that have support for `from_params` in their Transformer module,
-  such as Gemma and Gemma2.
-  """
+  """Loads Gemma params and creates a model."""
   params_lib = get_model_module(model_name, ModelModule.PARAMS)
   model_params = params_lib.load_and_format_params(params_path)
   model_module_lib = get_model_module(model_name, ModelModule.MODEL)
@@ -267,9 +263,7 @@ def _create_gemma_model_from_params(
   # TODO(b/451662153): have gemma2 version handling done better in naming.py
   if model_family == 'gemma2':
     version = f'2-{version}'
-  model = model_module_lib.Transformer.from_params(
-      model_params, version=version
-  )
+  model = model_module_lib.Gemma.from_params(model_params, version=version)
   return model, model_params
 
 
@@ -355,7 +349,7 @@ def create_model(
 
     if skip_nnx_conversion:
       try:
-        model, model_params = _get_base_model(model_config, mesh)
+        model, model_params = _get_gemma_base_model(model_config, mesh)
       except (FileNotFoundError, ValueError, RuntimeError) as e:
         logging.warning(
             'Failed to load from intermediate_ckpt_dir %s: %s. '

@@ -846,7 +846,7 @@ class RMSNorm(nnx.Module):
 
 
 class Gemma3(nnx.Module):
-  """Gemma transformer."""
+  """Gemma3 transformer."""
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
