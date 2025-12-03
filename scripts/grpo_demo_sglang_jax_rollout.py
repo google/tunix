@@ -784,7 +784,7 @@ common_sglang_jax_config = {
     "lora_target_modules": ["all"],
     "max_lora_rank": RANK,
     "lora_scaling": 0.5,
-    "precompile_bs_paddings": [2],
+    "precompile_bs_paddings": [8],
     "precompile_token_paddings": [2048],
 }
 

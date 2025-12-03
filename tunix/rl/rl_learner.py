@@ -110,8 +110,6 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         )
     )
 
-    print(f"{self.should_sync_weights=}")
-
     # Enable async rollout if trainer and rollout are not on the same mesh.
     # If they do, then doesn't make sense for the interleave because they will
     # have resource contention.
