@@ -117,13 +117,12 @@ EPSILON = 0.2
 # ====== Training ======
 TRAIN_MICRO_BATCH_SIZE = 1
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
-# NUM_BATCHES = 3738
-NUM_BATCHES = 2
+NUM_BATCHES = 3738
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 2
 
-EVAL_EVERY_N_STEPS = 5  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
 
 # Number of training steps.
@@ -167,14 +166,9 @@ def show_hbm_usage():
 
   for d in jax.local_devices():
     stats = d.memory_stats()
-    if stats is not None:
-      used = stats["bytes_in_use"]
-      limit = stats["bytes_limit"]
-      print(
-          f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}"
-      )
-    else:
-      print(f"d.memoru_stats() = None")
+    used = stats["bytes_in_use"]
+    limit = stats["bytes_limit"]
+    print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
 
 
 repo_id = args.model_version
@@ -394,30 +388,12 @@ download_from_huggingface(repo_id=repo_id, model_path=model_path)
 #
 
 
-# def get_lora_model(base_model, mesh):
-#   # lora_provider = qwix.LoraProvider(
-#   #     module_path=(
-#   #         ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
-#   #         ".*attn_vec_einsum"
-#   #     ),
-#   #     rank=RANK,
-#   #     alpha=ALPHA,
-#   # )
-#   #
-#   # model_input = base_model.get_model_input()
-#   # lora_model = qwix.apply_lora_to_model(
-#   #     base_model, lora_provider, **model_input
-#   # )
-#   lora_model = base_model
-#   return lora_model
-
-
 # Reference model
 # if model_family == "gemma2":
 #   ref_model, mesh, model_config = get_gemma_ref_model(
 #       ckpt_path=os.path.join(INTERMEDIATE_CKPT_DIR, "state")
 #   )
-def load_model(model_version: str, enable_static_lora: bool = False):
+def load_model(model_version: str, enable_lora: bool = False):
   model_config = {
       "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
       "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
