@@ -30,6 +30,7 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+import numpy as np
 from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
@@ -398,8 +399,8 @@ class Sampler(base_sampler.BaseSampler):
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
-    input_ids = jnp.array(
-      self.tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
+    input_ids = np.array(
+      self.tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=np.int32
     )
     return input_ids
 
@@ -764,6 +765,7 @@ class Sampler(base_sampler.BaseSampler):
           max_prompt_length,
           max_len,
       )
+      out_tokens, lengths = jax.device_get(out_tokens), jax.device_get(lengths)
       decoded_outputs = [
           self.tokenizer.decode(tokens[:length].tolist())
           for tokens, length in zip(out_tokens, lengths)
