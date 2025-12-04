@@ -205,7 +205,7 @@ class ModelTest(parameterized.TestCase):
     model._create_gemma_model_from_params("path", model_name)
 
     mock_params_lib.load_and_format_params.assert_called_once_with("path")
-    mock_model_lib.Transformer.from_params.assert_called_once_with(
+    mock_model_lib.Gemma.from_params.assert_called_once_with(
         mock_params_lib.load_and_format_params.return_value,
         version=expected_version,
     )
