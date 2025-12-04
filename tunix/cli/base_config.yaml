@@ -127,6 +127,8 @@ training_config: &base_training_config
     max_to_keep: 1
     save_interval_steps: 180
   metrics_logging_options:
+    project_name: "tunix"
+    run_name: ""
     log_dir: "/tmp/logging"
     flush_every_n_steps: 20
   profiler_options:

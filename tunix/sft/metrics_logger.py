@@ -25,6 +25,8 @@ class MetricsLoggerOptions:
   """Metrics Logger options."""
 
   log_dir: str
+  project_name: str = "tunix"
+  run_name: str = ""
   flush_every_n_steps: int = 100
   backend_factories: list[BackendFactory] | None = None
 
@@ -55,7 +57,7 @@ class MetricsLoggerOptions:
           )
       )
       try:
-        active_backends.append(WandbBackend(project="tunix"))
+        active_backends.append(WandbBackend(project=self.project_name, name=self.run_name))
       except ImportError:
         logging.info("WandbBackend skipped: 'wandb' library not installed.")
     return active_backends
