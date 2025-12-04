@@ -221,7 +221,7 @@ jobs:
           EOF
           apt-get update; apt-get install -y less
 
-          cd tunix && python tests/generate/sglang_jax_sampler_test.py
+          cd tunix && python tests/generate/sglang_jax_sampler_test.py && python tests/generate/sglang_jax_lora_test.py
       - name: Run tunix SFT integration tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

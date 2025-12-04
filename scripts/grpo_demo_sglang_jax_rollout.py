@@ -160,14 +160,6 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 
-VERIFY_UPDATE_PARAMS_VAL = (
-    "layers.0.mlp.gate_proj.kernel_lora_a,model.layers.0.mlp.gate_proj.A_buffer"
-)
-
-import os
-
-os.environ[VERIFY_UPDATE_PARAMS_KEY] = VERIFY_UPDATE_PARAMS_VAL
-
 
 def show_hbm_usage():
   """Displays memory usage per device."""
