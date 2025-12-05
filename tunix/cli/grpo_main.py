@@ -111,15 +111,20 @@ class GrpoPipeline(config.HyperParameters):
     )
 
     if self.config["data_source"] == "local":
-      dataset = data_lib.get_dataset_from_parquet(
-          self.config["data_directory"],
-          grpo_trainer.rl_cluster.tokenizer.tokenizer,
-      ).batch(self.config["batch_size"])
+      dataset = data_lib.create_dataset(
+          data_source=self.config["data_source"],
+          dataset=self.config["data_directory"],
+          batch_size=self.config["batch_size"],
+          num_batches=None,
+          tokenizer=grpo_trainer.rl_cluster.tokenizer.tokenizer,
+      )
     else:
       dataset = data_lib.create_dataset(
-          self.config["dataset_name"],
-          self.config["batch_size"],
-          self.config["num_batches"],
+          data_source="tfds",
+          dataset=self.config["dataset_name"],
+          batch_size=self.config["batch_size"],
+          num_batches=self.config["num_batches"],
+          tfds_download=self.config["tfds_download"],
       )
 
     mesh = self.create_mesh("actor_model_config")

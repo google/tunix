@@ -90,6 +90,9 @@ max_target_length: 256
 num_train_epochs: 1
 train_fraction: 1.0
 num_test_batches: 100
+# Controls the download flag only when using TFDS datasets. If false, the
+# data_dir used will be set to `None` and chosen by default by tfds.
+tfds_download: True
 
 ############################### Optimizer ###############################
 # Optimizer config
