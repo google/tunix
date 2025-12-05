@@ -20,6 +20,7 @@ from typing import List, Optional
 from flax import nnx
 from flax.nnx import statelib
 import jax
+import numpy as np
 
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
@@ -76,5 +77,5 @@ class BaseSampler(ABC):
     """Returns a list of generated samples for the input strings."""
 
   @abstractmethod
-  def tokenize(self, input_string: str) -> jax.Array | list[int]:
+  def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Returns the tokenized the input string."""
