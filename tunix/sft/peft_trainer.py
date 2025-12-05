@@ -236,9 +236,8 @@ class PeftTrainer:
     self._jitted_eval_step_fn = None
     max_step = None
     if self.config.max_steps is not None:
-      max_step = (
-          self.config.max_steps
-          * self.config.get_with_default("gradient_accumulation_steps", 1)
+      max_step = self.config.max_steps * self.config.get_with_default(
+          "gradient_accumulation_steps", 1
       )
     self._prof = profiler.Profiler(
         initial_step=self._iter_steps,
@@ -386,42 +385,6 @@ class PeftTrainer:
         )
         self._jitted_eval_step_fn = nnx.jit(eval_step)
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
-
-  def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
-    """Shards the input data across the available devices.
-
-    Args:
-      input_data: The input data to be sharded, expected to be a TrainingInput
-        dataclass.
-
-    Returns:
-      The sharded TrainingInput.
-    """
-    mesh = pxla.thread_resources.env.physical_mesh
-    if mesh.empty:
-      return input_data
-
-    # Check if the input is already sharded with the target mesh to avoid
-    # re-sharding.
-    is_sharded = jax.tree.map(
-        lambda x: isinstance(x, jax.Array)
-        and hasattr(x, "sharding")
-        and hasattr(x.sharding, "mesh")
-        and x.sharding.mesh == mesh,
-        input_data,
-    )
-    if all(jax.tree.leaves(is_sharded)):
-      return input_data
-
-    pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
-
-    with jax.transfer_guard("allow"):
-      return jax.tree.map(
-          lambda x: jax.make_array_from_process_local_data(
-              sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec), x
-          ),
-          input_data,
-      )
 
   def _prepare_inputs(self, input_data: Any) -> Any:
     """Override this function for additional input preparation."""
@@ -649,7 +612,9 @@ class PeftTrainer:
             break
 
           train_example = self._prepare_inputs(train_example)
-          train_example = self._shard_input(train_example)
+          train_example = sharding_utils.shard_input(
+              train_example, self.config.data_sharding_axis
+          )
 
           if not self._flops_measured and not skip_jit:
             self._flops_measured = True
@@ -780,7 +745,9 @@ class PeftTrainer:
         if eval_example is None:
           break
         eval_example = self._prepare_inputs(eval_example)
-        eval_example = self._shard_input(eval_example)
+        eval_example = sharding_utils.shard_input(
+            eval_example, self.config.data_sharding_axis
+        )
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
         loss, aux = eval_step_fn(self.model, eval_example)

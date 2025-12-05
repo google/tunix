@@ -542,6 +542,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           buffer[key] = buffer[key][micro_batch_size:]
 
         yield micro_batch
+
   def train(
       self,
       train_ds: Iterable[TrainingInputT],
@@ -613,7 +614,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           )
 
           if self.should_sync_weights:
-            logging.debug(f"Syncing weights at global step {self.rl_cluster.global_steps} mini batch step {self._iter_steps}")
+            logging.debug(
+                "Syncing weights at global step"
+                f" {self.rl_cluster.global_steps} mini batch step"
+                f" {self._iter_steps}"
+            )
             with self.rl_cluster.perf.span(
                 "weight_sync", self.rl_cluster.perf.all_devices
             ):

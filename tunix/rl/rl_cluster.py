@@ -48,6 +48,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
+from tunix.sft import sharding_utils
 from tunix.sft import utils as sft_utils
 
 ModelOrPath = nnx.Module | str
@@ -86,9 +87,9 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
     mini_batch_size: The mini-batch size used for policy weight updates. One
       mini-batch corresponds to one optimizer update. `mini_batch_size` must be
       divisible by the global batch size.
-    train_micro_batch_size: The micro-batch size used for gradient
-      accumulation at training time. `train_micro_batch_size` must be
-      divisible by `mini_batch_size`.
+    train_micro_batch_size: The micro-batch size used for gradient accumulation
+      at training time. `train_micro_batch_size` must be divisible by
+      `mini_batch_size`.
     rollout_micro_batch_size: The micro-batch size used for model rollouts.
     compute_logps_micro_batch_size: The micro-batch size used for computing log
       probabilities (e.g. for reference and old policy models).
@@ -143,8 +144,8 @@ class ClusterConfig:
     role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
       disaggregated setup.
     rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
-        Alternatively, if a subclass of `base_rollout.BaseRollout` is provided,
-        it will be used as the rollout engine.
+      Alternatively, if a subclass of `base_rollout.BaseRollout` is provided, it
+      will be used as the rollout engine.
     offload_to_cpu: Whether to offload models to CPU at each step..
     training_config: RL training config.
     rollout_config: Rollout config. It may be different for different modes,
@@ -421,9 +422,7 @@ class RLCluster:
             Mode.TRAIN
         ]
       else:
-        raise ValueError(
-            "Rollout sglang jax model config is missing!"
-        )
+        raise ValueError("Rollout sglang jax model config is missing!")
 
       self._rollout = sglang_jax_rollout.SglangJaxRollout(
           self.rollout_actor,
@@ -844,11 +843,17 @@ class RLCluster:
 
     reference_mesh = self.cluster_config.role_to_mesh[Role.REFERENCE]
 
-    dest_prompt_tokens = rl_utils.maybe_move(prompt_tokens, reference_mesh)
-    dest_completion_tokens = rl_utils.maybe_move(
-        completion_tokens, reference_mesh
-    )
     with reference_mesh:
+      # This assumes reference model shards same data sharding as actor, which
+      # should be true as ref model and policy model shares same architecture.
+      dest_prompt_tokens = sharding_utils.shard_input(
+          prompt_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion_tokens = sharding_utils.shard_input(
+          completion_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )

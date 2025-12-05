@@ -153,37 +153,6 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds)  # No eval dataset.
 
-  def test_shard_input_on_already_sharded_input_is_noop(self):
-    """Tests that _shard_input is a no-op if data is already sharded."""
-    devices = np.array(jax.local_devices()[:2])
-    mesh = shd.Mesh(devices, axis_names=('data',))
-    pspec = shd.PartitionSpec('data')
-
-    # Manually shard the input data onto the mesh
-    sharded_input = jax.tree.map(
-        lambda x: jax.device_put(x, shd.NamedSharding(mesh, pspec)),
-        self.train_ds,
-    )
-
-    config = peft_trainer.TrainingConfig(
-        eval_every_n_steps=1,
-        max_steps=100,
-        data_sharding_axis=('data',),
-    )
-    trainer = peft_trainer.PeftTrainer(
-        tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0)),
-        optax.sgd(1e-3),
-        config,
-    )
-
-    with compat.set_mesh(mesh):
-      processed_input = trainer._shard_input(sharded_input[0])
-
-    # Output objects are same as input objects if no new sharding operation was
-    # performed, as that would create new jax.Array objects.
-    self.assertIs(processed_input.input_tokens, sharded_input[0].input_tokens)
-    self.assertIs(processed_input.input_mask, sharded_input[0].input_mask)
-
   def test_basic_training_with_hooks(self):
     train_ds = dummy_datasets(batch_size=4, repeat=2)
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
