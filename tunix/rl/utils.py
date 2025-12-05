@@ -27,6 +27,7 @@ from jax import tree_util
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+from tunix.rl import reshard
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
@@ -215,7 +216,7 @@ def put_params_on_memory_kind(
       return x.with_memory_kind(memory_kind)
 
   new_shardings = jax.tree.map(_get_new_sharding, original_shardings)
-  params_on_memory_kind = jax.device_put(
+  params_on_memory_kind = reshard.reshard_pytree(
       params,
       new_shardings,
   )
