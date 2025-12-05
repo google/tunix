@@ -258,15 +258,3 @@ def get_partition_spec(
     return sharding.spec
   else:
     return jax.sharding.PartitionSpec()
-
-
-def maybe_move(arr: jax.Array, mesh: jax.sharding.Mesh) -> jax.Array:
-  """Replaces the array to the new mesh if it's not already there."""
-  if not mesh.devices.size or not mesh.devices.any():
-    return arr
-  if not arr.sharding.device_set.issubset(set(mesh.devices.flatten())):
-    dest_sharding = jax.sharding.NamedSharding(
-        mesh, get_partition_spec(arr.sharding)
-    )
-    return jax.device_put(arr, dest_sharding)
-  return arr
