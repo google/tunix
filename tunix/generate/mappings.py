@@ -17,6 +17,7 @@ class BackendMappingMixin:
     module = cls.__module__
     package_name = module.rsplit('.', 1)[0] if '.' in module else module
     package = importlib.import_module(package_name)
+    print(f'[_backend_registry] {package=}')
     return getattr(package, 'BACKEND_MAPPINGS', {})
 
   @classmethod

@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 from jax import numpy as jnp
@@ -153,6 +153,32 @@ class RolloutConfig:
   # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
   rollout_sglang_jax_enable_deterministic_sampling: bool = False
 
+  # Whether to use sort or mask implementation in sampler, sort has better evaluation result.
+  rollout_sglang_jax_use_sort_for_toppk_minp: bool = True
+
+  # Whether to use lora
+  rollout_sglang_jax_enable_static_lora: bool = False
+
+  # Whether to use single controller mode, single controller mode is required in pathways
+  rollout_sglang_jax_enable_single_process: bool = True
+
+  # Specify the modules which are required to use lora
+  rollout_sglang_jax_lora_target_modules: Optional[List[str]] = None
+
+  # Specify the lora RANK
+  rollout_sglang_jax_max_lora_rank: Optional[int] = None
+
+  rollout_sglang_jax_lora_scaling: Optional[float] = None
+
+  # Specify the paddings for batch_size
+  rollout_sglang_jax_precompile_bs_paddings: Optional[List[int]] = None
+
+  # Specify the paddings for tokens which is used in prefll
+  rollout_sglang_jax_precompile_token_paddings: Optional[List[int]] = None
+
+  # Specify the the maximum number of tokens in a chunk for the chunked prefill
+  rollout_sglang_jax_chunked_prefill_size: Optional[int] = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""
@@ -197,4 +223,8 @@ class BaseRollout(ABC):
 
   @abstractmethod
   def model(self) -> Any:
+    """Returns the rollout model."""
+
+  @abstractmethod
+  def model_state(self) -> Any:
     """Returns the rollout model."""

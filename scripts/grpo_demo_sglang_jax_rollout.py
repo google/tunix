@@ -41,6 +41,7 @@ from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import sglang_jax_rollout
+from tunix.rl.utils import VERIFY_UPDATE_PARAMS_KEY
 from tunix.sft import metrics_logger
 
 # Parse command line options
@@ -69,6 +70,7 @@ TEST_DATA_DIR = "./data/test"
 TRAIN_FRACTION = 1.0
 
 # ====== LoRA ======
+ENABLE_LORA = True
 RANK = 64
 ALPHA = 64.0
 
@@ -386,24 +388,6 @@ download_from_huggingface(repo_id=repo_id, model_path=model_path)
 #
 
 
-def get_lora_model(base_model, mesh):
-  # lora_provider = qwix.LoraProvider(
-  #     module_path=(
-  #         ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
-  #         ".*attn_vec_einsum"
-  #     ),
-  #     rank=RANK,
-  #     alpha=ALPHA,
-  # )
-  #
-  # model_input = base_model.get_model_input()
-  # lora_model = qwix.apply_lora_to_model(
-  #     base_model, lora_provider, **model_input
-  # )
-  lora_model = base_model
-  return lora_model
-
-
 # Reference model
 # if model_family == "gemma2":
 #   ref_model, mesh, model_config = get_gemma_ref_model(
@@ -453,7 +437,35 @@ show_hbm_usage()
 # Policy model
 rollout_mesh = get_rollout_mesh()
 
-lora_policy = ref_model
+
+def get_lora_model(base_model, model_mesh=None):
+  """Creates a LoRA model from a base model.
+
+  Args:
+    base_model: The base model to apply LoRA to.
+    model_mesh: The mesh to use for sharding the model.
+
+  Returns:
+    A LoRA model.
+  """
+  lora_provider = qwix.LoraProvider(
+      module_path=".*gate_proj",
+      rank=RANK,
+      alpha=ALPHA,
+  )
+
+  model_input = base_model.get_model_input()
+  lora_model = qwix.apply_lora_to_model(
+      base_model, lora_provider, **model_input
+  )
+
+  return lora_model
+
+
+lora_transformer = (
+    get_lora_model(ref_model, model_mesh=mesh) if ENABLE_LORA else ref_model
+)
+lora_policy = get_lora_model(ref_model, mesh)
 print("after lora_policy")
 show_hbm_usage()
 # nnx.display(lora_policy)
@@ -725,15 +737,48 @@ mapping_config = mappings.MappingConfig.build(
     model=ref_model, backend="sglang_jax"
 )
 
+common_sglang_jax_config = {
+    "model_version": model_path,
+    "context_length": 2048,
+    "mesh": rollout_mesh,
+    "mem_fraction_static": 0.3,
+    "init_with_random_weights": True,
+    "disable_radix_cache": True,
+    "enable_deterministic_sampling": False,
+    "use_sort_for_toppk_minp": True,
+    "mapping_config": mapping_config,
+    "enable_static_lora": True,
+    "enable_single_process": True,
+    "lora_target_modules": [
+        "all"
+    ],  # q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+    "max_lora_rank": RANK,
+    "lora_scaling": 0.5,
+    "precompile_bs_paddings": [8],
+    "precompile_token_paddings": [2048],
+}
+
 sglang_jax_config = sampler_lib.SglangJaxConfig(
-    model_version=model_path,
-    context_length=2048,
-    mesh=rollout_mesh,
-    mem_fraction_static=0.3,
-    init_with_random_weights=True,
-    disable_radix_cache=True,
-    enable_deterministic_sampling=False,
-    mapping_config=mapping_config,
+    model_version=common_sglang_jax_config["model_version"],
+    context_length=common_sglang_jax_config["context_length"],
+    mesh=common_sglang_jax_config["mesh"],
+    mem_fraction_static=common_sglang_jax_config["mem_fraction_static"],
+    init_with_random_weights=common_sglang_jax_config[
+        "init_with_random_weights"
+    ],
+    disable_radix_cache=common_sglang_jax_config["disable_radix_cache"],
+    enable_deterministic_sampling=common_sglang_jax_config[
+        "enable_deterministic_sampling"
+    ],
+    mapping_config=common_sglang_jax_config["mapping_config"],
+    enable_static_lora=common_sglang_jax_config["enable_static_lora"],
+    lora_target_modules=common_sglang_jax_config["lora_target_modules"],
+    max_lora_rank=common_sglang_jax_config["max_lora_rank"],
+    lora_scaling=common_sglang_jax_config["lora_scaling"],
+    precompile_bs_paddings=common_sglang_jax_config["precompile_bs_paddings"],
+    precompile_token_paddings=common_sglang_jax_config[
+        "precompile_token_paddings"
+    ],
 )
 
 # sampler = sampler_lib.SglangJaxSampler(
@@ -811,12 +856,49 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
-        rollout_sglang_jax_model_version=model_path,
-        rollout_sglang_jax_context_length=2048,
-        rollout_sglang_jax_mem_fraction_static=0.4,
-        rollout_sglang_jax_init_with_random_weights=True,
-        rollout_sglang_jax_disable_radix_cache=True,
-        rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_mapping_config=mapping_config,
+        rollout_sglang_jax_model_version=common_sglang_jax_config[
+            "model_version"
+        ],
+        rollout_sglang_jax_context_length=common_sglang_jax_config[
+            "context_length"
+        ],
+        rollout_sglang_jax_mem_fraction_static=common_sglang_jax_config[
+            "mem_fraction_static"
+        ],
+        rollout_sglang_jax_init_with_random_weights=common_sglang_jax_config[
+            "init_with_random_weights"
+        ],
+        rollout_sglang_jax_disable_radix_cache=common_sglang_jax_config[
+            "disable_radix_cache"
+        ],
+        rollout_sglang_jax_enable_deterministic_sampling=common_sglang_jax_config[
+            "enable_deterministic_sampling"
+        ],
+        rollout_sglang_jax_use_sort_for_toppk_minp=common_sglang_jax_config[
+            "use_sort_for_toppk_minp"
+        ],
+        rollout_sglang_jax_enable_static_lora=common_sglang_jax_config[
+            "enable_static_lora"
+        ],
+        rollout_sglang_jax_enable_single_process=common_sglang_jax_config[
+            "enable_single_process"
+        ],
+        rollout_sglang_jax_lora_target_modules=common_sglang_jax_config[
+            "lora_target_modules"
+        ],
+        rollout_sglang_jax_max_lora_rank=common_sglang_jax_config[
+            "max_lora_rank"
+        ],
+        rollout_sglang_jax_lora_scaling=common_sglang_jax_config[
+            "lora_scaling"
+        ],
+        rollout_sglang_jax_precompile_bs_paddings=common_sglang_jax_config[
+            "precompile_bs_paddings"
+        ],
+        rollout_sglang_jax_precompile_token_paddings=common_sglang_jax_config[
+            "precompile_token_paddings"
+        ],
     ),
 )
 
@@ -855,9 +937,10 @@ trained_ckpt_path = os.path.join(
     CKPT_DIR, "actor", str(MAX_STEPS), "model_params"
 )
 
+filter_type = nnx.LoRAParam if ENABLE_LORA else nnx.Param
 abs_params = jax.tree.map(
     lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
-    nnx.state(lora_policy, nnx.Param),
+    nnx.state(lora_policy, filter_type),
 )
 checkpointer = ocp.StandardCheckpointer()
 trained_lora_params = checkpointer.restore(trained_ckpt_path, target=abs_params)
@@ -866,7 +949,7 @@ nnx.update(
     lora_policy,
     jax.tree.map(
         lambda a, b: b,
-        nnx.state(lora_policy, nnx.Param),
+        nnx.state(lora_policy, filter_type),
         trained_lora_params,
     ),
 )

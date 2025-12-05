@@ -11,10 +11,10 @@ MappingEntry = Tuple[str, Sharding]
 
 def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
   return {
-      'lm_head.w': ('lm_head.embedding', (None, 'model')),
+      'lm_head.w': ('lm_head.embedding', (None, 'tensor')),
       'embedder.input_embedding': (
           'model.embed_tokens.embedding',
-          ('model', None),
+          ('tensor', None),
       ),
       'layers.*.input_layernorm.w': (
           'model.layers.*.input_layernorm.scale',
@@ -22,15 +22,15 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
       ),
       'layers.*.mlp.down_proj.kernel': (
           'model.layers.*.mlp.down_proj.weight',
-          ('model', None),
+          ('tensor', None),
       ),
       'layers.*.mlp.gate_proj.kernel': (
           'model.layers.*.mlp.gate_proj.weight',
-          (None, 'model'),
+          (None, 'tensor'),
       ),
       'layers.*.mlp.up_proj.kernel': (
           'model.layers.*.mlp.up_proj.weight',
-          (None, 'model'),
+          (None, 'tensor'),
       ),
       'layers.*.post_attention_layernorm.w': (
           'model.layers.*.post_attention_layernorm.scale',
@@ -38,7 +38,7 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
       ),
       'layers.*.attn.k_proj.w': (
           'model.layers.*.self_attn.k_proj.weight',
-          (None, 'model', None),
+          (None, 'tensor', None),
       ),
       'layers.*.attn.k_bias': (
           'model.layers.*.self_attn.k_proj.bias',
@@ -46,11 +46,11 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
       ),
       'layers.*.attn.o_proj.w': (
           'model.layers.*.self_attn.o_proj.weight',
-          ('model', None, None),
+          ('tensor', None, None),
       ),
       'layers.*.attn.q_proj.w': (
           'model.layers.*.self_attn.q_proj.weight',
-          (None, 'model', None),
+          (None, 'tensor', None),
       ),
       'layers.*.attn.q_bias': (
           'model.layers.*.self_attn.q_proj.bias',
@@ -58,7 +58,7 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
       ),
       'layers.*.attn.v_proj.w': (
           'model.layers.*.self_attn.v_proj.weight',
-          (None, 'model', None),
+          (None, 'tensor', None),
       ),
       'layers.*.attn.v_bias': (
           'model.layers.*.self_attn.v_proj.bias',
@@ -70,7 +70,64 @@ def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
 
 def _lora_to_sglang_jax_mappings() -> Dict[str, MappingEntry] | None:
   """The lora parameter key mapping between Tunix vanilla model and Sglang-jax Jax backend"""
-  return None
+  return {
+      'layers.*.mlp.gate_proj.kernel_lora_a': (
+          'model.layers.*.mlp.gate_proj.A_buffer',
+          (None, None, None),
+      ),
+      'layers.*.mlp.gate_proj.kernel_lora_b': (
+          'model.layers.*.mlp.gate_proj.B_buffer',
+          (None, 'tensor', None),
+      ),
+      'layers.*.mlp.up_proj.kernel_lora_a': (
+          'model.layers.*.mlp.gate_proj.A_buffer',
+          (None, None, None),
+      ),
+      'layers.*.mlp.up_proj.kernel_lora_b': (
+          'model.layers.*.mlp.gate_proj.B_buffer',
+          (None, 'tensor', None),
+      ),
+      'layers.*.mlp.down_proj.kernel_lora_a': (
+          'model.layers.*.mlp.gate_proj.A_buffer',
+          (None, None, 'tensor'),
+      ),
+      'layers.*.mlp.down_proj.kernel_lora_b': (
+          'model.layers.*.mlp.gate_proj.B_buffer',
+          (None, None, None),
+      ),
+      'layers.*.attn.q_proj.w_lora_a': (
+          'model.layers.*.self_attn.q_proj.A_buffer',
+          (None, None, None),
+      ),
+      'layers.*.attn.q_proj.w_lora_b': (
+          'model.layers.*.self_attn.q_proj.B_buffer',
+          (None, 'tensor', None),
+      ),
+      'layers.*.attn.k_proj.w_lora_a': (
+          'model.layers.*.self_attn.k_proj.A_buffer',
+          (None, None, None),
+      ),
+      'layers.*.attn.k_proj.w_lora_b': (
+          'model.layers.*.self_attn.k_proj.B_buffer',
+          (None, 'tensor', None),
+      ),
+      'layers.*.attn.v_proj.w_lora_a': (
+          'model.layers.*.self_attn.v_proj.A_buffer',
+          (None, None, None),
+      ),
+      'layers.*.attn.v_proj.w_lora_b': (
+          'model.layers.*.self_attn.v_proj.B_buffer',
+          (None, 'tensor', None),
+      ),
+      'layers.*.attn.o_proj.w_lora_a': (
+          'model.layers.*.self_attn.o_proj.A_buffer',
+          (None, None, 'tensor'),
+      ),
+      'layers.*.attn.o_proj.w_lora_b': (
+          'model.layers.*.self_attn.o_proj.B_buffer',
+          (None, None, None),
+      ),
+  }
 
 
 def _to_sglang_jax_transpose_keys():
