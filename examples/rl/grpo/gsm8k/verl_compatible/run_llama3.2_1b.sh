@@ -79,7 +79,6 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.metrics_logging_options.flush_every_n_steps=1 \
   rl_training_config.checkpointing_options.save_interval_steps=500 \
   rl_training_config.checkpointing_options.max_to_keep=4 \
-  rl_training_config.gradient_accumulation_steps=1 \
   rl_training_config.profiler_options={} \
   rollout_config.total_generation_steps=768 \
   rollout_config.max_prompt_length=256 \
@@ -93,4 +92,4 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
   reward_functions="['tunix/cli/reward_fn/gsm8k_verl.py']" \
-  verl_compatible=true \
+  verl_compatible=true
