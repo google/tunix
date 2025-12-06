@@ -356,14 +356,18 @@ def aggregate_loss(
         seq_mask, min=1
     )
     loss = seq_loss.mean()  # sequence_mean
-  elif loss_agg_mode == "sequence-mean-token-sum-norm":
-    # Get custom normalization factor from kwargs, default to batch size
-    norm = kwargs.get("norm", float(per_token_loss.shape[0]))
+  elif loss_agg_mode == "sequence-mean-token-scale":
+    # Look up custom normalization factor, default to max response length.
+    norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
 
-    if not isinstance(norm, (int, float)) or norm <= 0:
-      raise ValueError(
-          f"Invalid 'norm' value: {norm}. Must be a positive number."
-      )
+    # Scale by maximum response length instead of actual response length.
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+        norm, min=1e-6
+    )
+    loss = seq_loss.mean()
+  elif loss_agg_mode == "sequence-mean-token-sum-norm":
+    # Get custom normalization factor from kwargs, default to batch size.
+    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
 
     # Sum the per-sequence sums and normalize
     # TODO(sizhi): Experiment with loss in precision if loss is fp16.
@@ -374,3 +378,24 @@ def aggregate_loss(
         " 'token-mean', 'sequence-mean-token-mean'."
     )
   return loss
+
+
+def _check_get_norm(arguments: dict[str, Any], default: float | int) -> float:
+  """Get custom normalization factor from kwargs with a default value.
+
+  Args:
+      arguments: The arguments dictionary.
+      default: The default value to use if no 'norm' key is found.
+
+  Returns:
+      The normalization factor.
+
+  Raises:
+      ValueError: If the 'norm' key is present but has an invalid value or type.
+  """
+  norm = arguments.get("norm", float(default))
+  if not isinstance(norm, (int, float)) or norm <= 0:
+    raise ValueError(
+        f"Invalid 'norm' value: {norm}. Must be a positive number."
+    )
+  return norm
