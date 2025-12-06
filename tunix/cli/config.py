@@ -36,6 +36,12 @@ from tunix.sft import profiler
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
+_SUPPORTED_MODEL_SOURCES = [
+    "kaggle",
+    "huggingface",
+    "gcs",
+    "",
+]
 
 
 def yaml_key_to_env_key(s: str) -> str:
@@ -89,8 +95,26 @@ class HyperParameters:
 
     dotenv.load_dotenv()
     raw_keys = collections.OrderedDict()
-    config_name = argv[1]
-    raw_data_from_yaml = self._load_config_from_yaml(config_name)
+    config_files = []
+    overrides = []
+    for arg in argv[1:]:
+      if arg.startswith("config_file="):
+        config_files.append(arg.split("=", 1)[1])
+      else:
+        overrides.append(arg)
+
+    # TODO(noghabi): once all scripts are updated, we should raise an error
+    # instead if no config files are provided.
+    if not config_files:
+      config_files = [argv[1]]
+      overrides.pop(0)
+
+    raw_data_from_yaml = self._load_config_from_yaml(config_files[0])
+    for config_file in config_files[1:]:
+      next_conf = self._load_config_from_yaml(config_file)
+      raw_data_from_yaml = omegaconf.OmegaConf.merge(
+          raw_data_from_yaml, next_conf
+      )
     self._validate_env_variable(raw_data_from_yaml)
     self.replace_keys = {
         "lora_config",
@@ -100,7 +124,7 @@ class HyperParameters:
         "rl_training_config",
     }
     keys_from_env_and_command_line = self._update_from_env_and_command_line(
-        raw_keys, raw_data_from_yaml, argv, **kwargs
+        raw_keys, raw_data_from_yaml, overrides, **kwargs
     )
     logging.info(
         "Updating keys from env and command line: %s",
@@ -171,10 +195,10 @@ class HyperParameters:
     model_source = model_config.get("model_source")
     intermediate_ckpt = model_config.get("intermediate_ckpt_dir")
 
-    if model_source not in ["kaggle", "huggingface", "gcs", ""]:
+    if model_source not in _SUPPORTED_MODEL_SOURCES:
       raise ValueError(
-          f"Invalid model_source: {model_source}. Must be 'kaggle',"
-          " 'huggingface', 'gcs' or ''."
+          f"Invalid model_source: {model_source}. Must be one of"
+          f" {_SUPPORTED_MODEL_SOURCES}."
       )
 
     if model_source in ["kaggle", "huggingface"] and not intermediate_ckpt:
@@ -541,12 +565,12 @@ class HyperParameters:
       self,
       raw_keys: collections.OrderedDict[str, Any],
       raw_data_from_yaml: dict[str, Any],
-      argv: list[str],
+      overrides: list[str],
       **kwargs,
   ):
     """Update the configuration from command line."""
 
-    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
+    cli_cfg = omegaconf.OmegaConf.from_cli(overrides)
 
     raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(
         cli_cfg, resolve=True
@@ -697,9 +721,8 @@ class HyperParameters:
   def _load_config_from_yaml(self, config_name: str):
     """Try Loading and validate the configuration from the YAML file."""
 
-    path = pathlib.Path(__file__).parent / config_name
     try:
-      config_oconf = omegaconf.OmegaConf.load(path)
+      config_oconf = omegaconf.OmegaConf.load(config_name)
     except FileNotFoundError as e:
       raise ValueError(f"Config {config_name} not found.") from e
 

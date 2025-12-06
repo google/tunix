@@ -108,9 +108,9 @@ class ConfigTest(parameterized.TestCase):
         "training_config.eval_every_n_steps=10",
     ]
     hp = config.initialize(argv)
-    
+
     config_dict = cast(Dict[str, Any], hp.config)
-   
+
     self.assertEqual(config_dict["training_config"]["max_steps"], 150)
     self.assertEqual(
         config_dict["training_config"]["data_sharding_axis"], ["fsdp", "dp"]
@@ -463,6 +463,15 @@ class ConfigTest(parameterized.TestCase):
 
       finally:
         os.chdir(original_cwd)
+
+  def test_obtain_reward_fn_file_not_found(self):
+    hp = self.initialize_config(
+        ["reward_functions=['tunix/cli/reward_fn/non_existent.py']"]
+    )
+    with self.assertRaisesRegex(
+        ImportError, "Failed to execute module non_existent"
+    ):
+      hp.obtain_reward_fn()
 
 
 if __name__ == "__main__":
