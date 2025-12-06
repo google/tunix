@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from absl import logging
 import jax
 import jax.numpy as jnp
+from flax import nnx
 import jaxtyping
 import numpy as np
 from tunix.generate import base_sampler
@@ -68,6 +69,8 @@ class VllmConfig:
   async_scheduling: bool = False
   tensor_parallel_size: int = -1
   data_parallel_size: int = -1
+  hf_config_path: Optional[Dict[str, Any]] = None
+  additional_config: Optional[Dict[str, Any]] = None
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -135,14 +138,38 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
-    utils.transfer_state_with_mappings(
-        src_state=updated_weights,
-        dst_state=self.transformer_state,
-        key_mappings=self.to_hf_key_mappings,
-        key_mapping_hook_fns=self.to_hf_hook_fns,
-        transpose_keys=self.to_hf_transpose_keys,
-        reshard_fn=reshard.reshard_pytree,
-    )
+
+    if self.to_hf_key_mappings:
+      # Mapped Weight Sync (e.g. HF -> MaxText)
+      utils.transfer_state_with_mappings(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          key_mappings=self.to_hf_key_mappings,
+          key_mapping_hook_fns=self.to_hf_hook_fns,
+          transpose_keys=self.to_hf_transpose_keys,
+          reshard_fn=reshard.reshard_pytree,
+      )
+    else:
+      # Direct Weight Sync (e.g. MaxText -> MaxText)
+      logging.info(
+          "No key mappings configuration found. Proceeding with direct structural "
+          "weight synchronization (assuming matching source/target structures)."
+      )
+
+      additional_config = self.config.additional_config or {}
+      if 'maxtext_config' not in additional_config:
+        raise ValueError(
+            "Direct weight synchronization is currently supported only for "
+            "MaxText models. The required 'maxtext_config' key is missing "
+            "from 'additional_config'."
+        )
+
+      utils.transfer_state_directly(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          reshard_fn=reshard.reshard_pytree,
+      )
+
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -166,19 +193,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       tensor_parallel_size = total_mesh_devices
       data_parallel_size = 1
     elif config.tensor_parallel_size == -1:
-      tensor_parallel_size = (
-          total_mesh_devices // data_parallel_size
-      )
+      tensor_parallel_size = total_mesh_devices // data_parallel_size
     elif config.data_parallel_size == -1:
-      data_parallel_size = (
-          total_mesh_devices // tensor_parallel_size
-      )
+      data_parallel_size = total_mesh_devices // tensor_parallel_size
 
     args = {}
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on
     if config.init_with_random_weights:
-      args["load_format"]="dummy"
+      args["load_format"] = "dummy"
 
     args["model"] = config.model_version
     args["max_model_len"] = config.max_model_len
@@ -198,6 +221,16 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             "device_indexes": device_indexes,
         }
     }
+
+    # Add support for hf_config_path
+    if config.hf_config_path:
+      args["hf_config_path"] = config.hf_config_path
+
+    # Merge additional_config
+    args["additional_config"] = {}
+    if config.additional_config:
+      args["additional_config"].update(config.additional_config)
+
     return args
 
   def _build_engine_args(self) -> EngineArgs:
