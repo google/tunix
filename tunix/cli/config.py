@@ -36,6 +36,12 @@ from tunix.sft import profiler
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
+_SUPPORTED_MODEL_SOURCES = [
+    "kaggle",
+    "huggingface",
+    "gcs",
+    "",
+]
 
 
 def yaml_key_to_env_key(s: str) -> str:
@@ -171,10 +177,10 @@ class HyperParameters:
     model_source = model_config.get("model_source")
     intermediate_ckpt = model_config.get("intermediate_ckpt_dir")
 
-    if model_source not in ["kaggle", "huggingface", "gcs", ""]:
+    if model_source not in _SUPPORTED_MODEL_SOURCES:
       raise ValueError(
-          f"Invalid model_source: {model_source}. Must be 'kaggle',"
-          " 'huggingface', 'gcs' or ''."
+          f"Invalid model_source: {model_source}. Must be one of"
+          f" {_SUPPORTED_MODEL_SOURCES}."
       )
 
     if model_source in ["kaggle", "huggingface"] and not intermediate_ckpt:
