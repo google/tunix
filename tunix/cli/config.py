@@ -710,25 +710,34 @@ class HyperParameters:
     project_root = get_project_root()
     reward_fns = []
     for reward_fn_path in self.config["reward_functions"]:
-      full_path = str(project_root / reward_fn_path)
-      module_name = os.path.splitext(os.path.basename(full_path))[0]
-      # load from source
-      loader = importlib.machinery.SourceFileLoader(module_name, full_path)
-      spec = importlib.util.spec_from_loader(module_name, loader)
+      module = None
+      if '/' not in reward_fn_path:
+        try:
+          module = importlib.import_module(reward_fn_path)
+          module_name = module.__name__
+        except Exception as e:
+          logging.warning("'%s' import failed: %s", reward_fn_path, e)
+          module = None
+      if module is None:
+        full_path = str(project_root / reward_fn_path)
+        module_name = os.path.splitext(os.path.basename(full_path))[0]
+        # load from source
+        loader = importlib.machinery.SourceFileLoader(module_name, full_path)
+        spec = importlib.util.spec_from_loader(module_name, loader)
 
-      if spec is None:
-        raise ImportError(f"Cannot find spec for module at {full_path}")
-      if spec.loader is None:
-        raise ImportError(f"Spec for module {module_name} has no loader")
+        if spec is None:
+          raise ImportError(f"Cannot find spec for module at {full_path}")
+        if spec.loader is None:
+          raise ImportError(f"Spec for module {module_name} has no loader")
 
-      module = importlib.util.module_from_spec(spec)
+        module = importlib.util.module_from_spec(spec)
 
-      try:
-        spec.loader.exec_module(module)
-      except Exception as e:
-        raise ImportError(
-            f"Failed to execute module {module_name} from {full_path}: {e}"
-        )
+        try:
+          spec.loader.exec_module(module)
+        except Exception as e:
+          raise ImportError(
+              f"Failed to execute module {module_name} from {full_path}: {e}"
+          )
 
       if self.config["verl_compatible"]:
 
