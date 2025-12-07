@@ -129,8 +129,6 @@ def get_tfds_dataset(
 def create_dataset(
     data_source: str,
     dataset: str,
-    batch_size: int,
-    num_batches: int | None,
     tokenizer=None,
     tfds_download: bool = True,
 ):
@@ -143,9 +141,6 @@ def create_dataset(
     dataset: The name of the dataset to create. For 'tfds' data_source, the
       supported options are ['gsm8k']. For 'local' data_source, this is the path
       to a parquet file or directory.
-    batch_size: The desired batch size.
-    num_batches: The number of batches to include in the dataset. If None, the
-      entire dataset is used.
     tokenizer: The tokenizer to use for processing prompts. If no tokenizer is
       provided, the fixed template is used.
     tfds_download: the download flag when using TFDS datasets. If false, the
@@ -182,12 +177,4 @@ def create_dataset(
   else:
     logging.info("Applying fixed template to %s", dataset)
     ds = apply_fixed_template(ds, TEMPLATE)
-
-  # Batch the dataset.
-  ds = ds.batch(batch_size)
-  if num_batches is not None:
-    if isinstance(ds, grain.MapDataset):
-      ds = ds[:num_batches]
-    else:
-      ds = grain.experimental.LimitIterDataset(ds, count=num_batches)
   return ds
