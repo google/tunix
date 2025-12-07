@@ -283,16 +283,13 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           mode=mode,
           **{k: v for k, v in local_training_input.items() if k != "prompts"},
       )
-      
+
       # Create globally sharded array from process-local rewards
       mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
-      if not mesh.empty:
-        pspec = PartitionSpec(*self.rl_cluster.cluster_config.training_config.data_sharding_axis)
-        reward_sharding = sharding_utils.get_sharding(rewards_local, mesh, pspec)
-        rewards = jax.make_array_from_process_local_data(reward_sharding, rewards_local)
-      else:
-        rewards = jnp.array(rewards_local)
-      
+      pspec = PartitionSpec(*self.rl_cluster.cluster_config.training_config.data_sharding_axis)
+      reward_sharding = sharding_utils.get_sharding(rewards_local, mesh, pspec)
+      rewards = jax.make_array_from_process_local_data(reward_sharding, rewards_local)
+
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
       )
