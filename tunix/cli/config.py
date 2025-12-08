@@ -769,15 +769,26 @@ class HyperParameters:
               f"We received env {environment_var} but it isn't all uppercase."
           )
 
-  def _load_config_from_yaml(self, config_path: str):
+  def _load_config_from_yaml(self, config_name: str):
     """Try Loading and validate the configuration from the YAML file."""
 
+    primary_path = pathlib.Path(config_name)
     try:
-      config_oconf = omegaconf.OmegaConf.load(config_path)
-    except FileNotFoundError as e:
-      raise ValueError(f"Config {config_path} not found.") from e
-
-    return config_oconf
+      return omegaconf.OmegaConf.load(primary_path)
+    except OSError as primary_error:
+      fallback_path = pathlib.Path(__file__).parent / config_name
+      try:
+        return omegaconf.OmegaConf.load(fallback_path)
+      except OSError as fallback_error:
+        raise ValueError(
+            f"Config '{config_name}' not found at either '{primary_path}' or"
+            f" '{fallback_path}'. Primary error: {primary_error}"
+        ) from fallback_error
+    except Exception as e:
+      # Handle other potential error during OmegaConf.load.
+      raise ValueError(
+          f"Error loading config '{config_name}' from '{primary_path}': {e!r}"
+      ) from e
 
   def obtain_reward_fn(self) -> list[Callable[..., Any]]:
     """Obtain reward function from the config."""
