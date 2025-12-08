@@ -39,7 +39,7 @@ echo "Max steps: $max_steps"
 echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
-  base_config.yaml \
+  tunix/cli/base_config.yaml \
   reference_model_config.model_name="gemma2-2b-it" \
   reference_model_config.model_id="google/gemma-2/flax/gemma2-2b-it" \
   reference_model_config.model_source="kaggle" \
