@@ -95,6 +95,7 @@ class ModelConfig:
   num_kv_heads: int
   rope_theta: int
   norm_eps: float
+  use_tied_embedding: bool = False
   num_experts: int | None = None
   num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
@@ -126,6 +127,36 @@ class ModelConfig:
         num_kv_heads=8,
         norm_eps=1e-06,
         rope_theta=1_000_000,
+    )
+
+  @classmethod
+  def qwen3_4b(cls):  # qwen3-4B
+    return cls(
+        num_layers=36,
+        vocab_size=151936,
+        embed_dim=2560,
+        hidden_dim=9728,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        use_tied_embedding=True,
+    )
+
+  @classmethod
+  def qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
+    return cls(
+        num_layers=36,
+        vocab_size=151936,
+        embed_dim=2560,
+        hidden_dim=9728,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=5_000_000,
+        use_tied_embedding=True,
     )
 
   @classmethod
@@ -647,12 +678,13 @@ class Qwen3(nnx.Module):
         norm_eps=config.norm_eps,
         shd_config=shd_config,
     )
-    self.lm_head = Einsum(
-        einsum_str='BTD,DV->BTV',
-        shape=(config.embed_dim, config.vocab_size),
-        rngs=rngs,
-        sharding=shd_config.emb_dv,
-    )
+    if not config.use_tied_embedding:
+      self.lm_head = Einsum(
+          einsum_str='BTD,DV->BTV',
+          shape=(config.embed_dim, config.vocab_size),
+          rngs=rngs,
+          sharding=shd_config.emb_dv,
+      )
 
   def init_cache(
       self, batch_size: int, cache_size: int, dtype: jnp.dtype
@@ -710,7 +742,10 @@ class Qwen3(nnx.Module):
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
-    logits = self.lm_head(x)
+    if self.config.use_tied_embedding:
+      logits = self.embedder.decode(x)
+    else:
+      logits = self.lm_head(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
 
