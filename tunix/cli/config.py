@@ -697,7 +697,13 @@ class HyperParameters:
   def _load_config_from_yaml(self, config_name: str):
     """Try Loading and validate the configuration from the YAML file."""
 
-    path = pathlib.Path(__file__).parent / config_name
+    path = pathlib.Path(config_name)
+
+    if not path.exists():
+      fallback_path = pathlib.Path(__file__).parent / config_name
+      if fallback_path.exists():
+        path = fallback_path
+
     try:
       config_oconf = omegaconf.OmegaConf.load(path)
     except FileNotFoundError as e:
