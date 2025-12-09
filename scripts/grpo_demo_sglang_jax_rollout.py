@@ -124,12 +124,12 @@ EPSILON = 0.2
 # ====== Training ======
 TRAIN_MICRO_BATCH_SIZE = 1
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
-NUM_BATCHES = 3738
+NUM_BATCHES = 2
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 2
 
-EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+EVAL_EVERY_N_STEPS = 2  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
 
 # Number of training steps.
@@ -165,81 +165,6 @@ GENERATION_CONFIGS = {
     # liberal
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
-
-# GBYTES = 1024 * 1024 * 1024
-
-
-# def get_device_name(num_devices: int | None = None):
-#     kind = jax.devices()[0].device_kind
-#     if "TPU" not in kind:
-#         raise RuntimeError("Expected TPU devices")
-#     suffix = ""
-#     if kind.endswith(" lite"):
-#         kind = kind[: -len(" lite")]
-#         suffix = "e"
-#     elif kind.endswith("e"):
-#         kind = kind[:-1]
-#         suffix = "e"
-#     elif kind.endswith("p"):
-#         kind = kind[:-1]
-#         suffix = "p"
-#     elif kind == "TPU7x":
-#         kind = "TPU v7"
-#     assert kind[:-1] == "TPU v", kind
-#     kind += suffix
-#     if num_devices is not None:
-#         kind += f"-{num_devices}"
-#     return kind
-
-
-# def get_device_hbm_limit() -> int:
-#     device_kind = get_device_name()
-#     if device_kind == "TPU v5p" or device_kind == "TPU v5":
-#         return 95 * GBYTES
-#     elif device_kind == "TPU v5e":
-#         return 16 * GBYTES
-#     elif device_kind == "TPU v6e" or device_kind == "TPU v4":
-#         return 32 * GBYTES
-#     elif device_kind == "TPU v7":
-#         # 192 * GBYTES / 2 because each JAX device (v7x core) has
-#         # 1/2 of the total chip HBM
-#         return 96 * GBYTES
-#     else:
-#         raise ValueError(f"Unknown device kind: {device_kind}")
-
-# def pathways_hbm_usage_gb(live_arrays, devices: Any) -> list[tuple[float, float]]:
-#     hbm_used = defaultdict(int)
-#     hbm_limit = get_device_hbm_limit()
-#     for array in live_arrays:
-#         for buffer in array.addressable_shards:
-#             hbm_used[buffer.data.device] += buffer.data.nbytes
-#     return [(hbm_used[device], hbm_limit) for device in devices]
-
-# def show_hbm_usage():
-#   """Displays memory usage per device."""
-#   fmt_size = functools.partial(humanize.naturalsize, binary=True)
-
-#   def pathways_mode():
-#     devices = jax.devices()
-#     live_arrays = jax.live_arrays()
-#     pathways_hbm_used_mem = pathways_hbm_usage_gb(live_arrays, devices)
-#     for hbm_used, hbm_limit in pathways_hbm_used_mem:
-#       print(f"Using {fmt_size(hbm_used)} / {fmt_size(hbm_limit)} ({hbm_used/hbm_limit:%})")
-
-
-#   def mcjax_mode():
-#     for d in jax.local_devices():
-#       stats = d.memory_stats()
-#       used = stats["bytes_in_use"]
-#       limit = stats["bytes_limit"]
-#       print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
-
-
-#   if platform=='proxy':
-#     pathways_mode()
-#   else:
-#     mcjax_mode()
-
 
 show_hbm_usage = utils.show_hbm_usage
 
@@ -804,7 +729,7 @@ sglang_jax_config = sampler_lib.SglangJaxConfig(
     model_version=model_path,
     context_length=2048,
     mesh=rollout_mesh,
-    mem_fraction_static=0.3,
+    mem_fraction_static=0.5,
     init_with_random_weights=True,
     disable_radix_cache=True,
     enable_deterministic_sampling=False,
