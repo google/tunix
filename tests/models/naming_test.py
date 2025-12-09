@@ -231,6 +231,18 @@ _MODEL_INFO_MAP = {
         id='qwen3_1p7b',
         category='qwen3',
     ),
+    'qwen3-4b': ModelTestInfo(
+        family='qwen3',
+        version='4b',
+        id='qwen3_4b',
+        category='qwen3',
+    ),
+    'qwen3-4b-2507': ModelTestInfo(
+        family='qwen3',
+        version='4b_2507',
+        id='qwen3_4b_2507',
+        category='qwen3',
+    ),
     'qwen3-8b': ModelTestInfo(
         family='qwen3',
         version='8b',
