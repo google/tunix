@@ -43,6 +43,12 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import sglang_jax_rollout
 from tunix.sft import metrics_logger
 
+platform = os.getenv("JAX_PLATFORMS", None)
+if platform == "proxy":
+  import pathwaysutils
+
+  pathwaysutils.initialize()
+
 # Parse command line options
 parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
 parser.add_argument(
