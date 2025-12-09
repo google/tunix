@@ -959,6 +959,7 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      reward_model_name: str = "reward",
   ) -> jax.Array:
     with self.cluster_config.role_to_mesh[Role.REWARD]:
       return self.inference_worker.get_rewards(
@@ -966,4 +967,25 @@ class RLCluster:
           completion_tokens,
           pad_id,
           eos_id,
+          reward_model_name=reward_model_name,
       )
+
+  def get_all_rewards(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+  ) -> dict[str, jax.Array]:
+    """Get rewards from all available reward models."""
+    with self.cluster_config.role_to_mesh[Role.REWARD]:
+      return self.inference_worker.get_all_rewards(
+          prompt_tokens,
+          completion_tokens,
+          pad_id,
+          eos_id,
+      )
+
+  def get_available_reward_models(self) -> list[str]:
+    """Get the names of all available reward models."""
+    return self.inference_worker.get_available_reward_models()

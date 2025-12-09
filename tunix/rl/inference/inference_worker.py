@@ -25,13 +25,12 @@ class InferenceWorker:
 
   def __init__(self, models: dict[str, nnx.Module]):
     for k in models.keys():
-      if k not in ["critic", "reference", "reward"]:
+      if k not in ["critic", "reference"] and not k.startswith("reward"):
         raise ValueError(
             f"Model role {k} is not supported. Supported models are critic,"
-            " reference and reward."
+            " reference and reward (with optional suffix, e.g., reward_model1)."
         )
     self._models = models
-    # TODO(tsbao): support multiple reward models.
 
   def get_rewards(
       self,
@@ -39,13 +38,52 @@ class InferenceWorker:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
+      reward_model_name: str = "reward",
   ) -> jax.Array:
-    reward_model = self._models.get("reward")
+    reward_model = self._models.get(reward_model_name)
     if reward_model is None:
-      raise ValueError("Reward model is not available.")
+      # Try to find any reward model if the specified one doesn't exist
+      reward_models = {k: v for k, v in self._models.items() if k.startswith("reward")}
+      if not reward_models:
+        raise ValueError("No reward model is available.")
+      if len(reward_models) == 1:
+        reward_model = next(iter(reward_models.values()))
+      else:
+        available_models = ", ".join(reward_models.keys())
+        raise ValueError(
+            f"Reward model '{reward_model_name}' is not available. "
+            f"Available reward models: {available_models}"
+        )
     return common.compute_score(
         reward_model, prompt_tokens, completion_tokens, pad_id, eos_id
     )
+
+  def get_all_rewards(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+  ) -> dict[str, jax.Array]:
+    """Get rewards from all available reward models.
+    
+    Returns:
+      A dictionary mapping reward model names to their computed rewards.
+    """
+    reward_models = {k: v for k, v in self._models.items() if k.startswith("reward")}
+    if not reward_models:
+      raise ValueError("No reward models are available.")
+    
+    rewards = {}
+    for model_name, model in reward_models.items():
+      rewards[model_name] = common.compute_score(
+          model, prompt_tokens, completion_tokens, pad_id, eos_id
+      )
+    return rewards
+
+  def get_available_reward_models(self) -> list[str]:
+    """Get the names of all available reward models."""
+    return [k for k in self._models.keys() if k.startswith("reward")]
 
   def get_ref_per_token_logps(
       self,
