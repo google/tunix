@@ -6,6 +6,7 @@ training, evaluation, and inference. In addition, It is based on examples/grpo_d
 """
 
 import argparse
+from collections import defaultdict
 import csv
 import functools
 import gc
@@ -14,6 +15,7 @@ from pathlib import Path
 from pprint import pprint
 import re
 import shutil
+from typing import Any
 
 from flax import nnx
 import grain
@@ -42,6 +44,7 @@ from tunix.rl.grpo.grpo_learner import GRPOLearner
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import sglang_jax_rollout
 from tunix.sft import metrics_logger
+from tunix.sft import utils
 
 platform = os.getenv("JAX_PLATFORMS", None)
 if platform == "proxy":
@@ -163,16 +166,82 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 
+# GBYTES = 1024 * 1024 * 1024
 
-def show_hbm_usage():
-  """Displays memory usage per device."""
-  fmt_size = functools.partial(humanize.naturalsize, binary=True)
 
-  for d in jax.local_devices():
-    stats = d.memory_stats()
-    used = stats["bytes_in_use"]
-    limit = stats["bytes_limit"]
-    print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
+# def get_device_name(num_devices: int | None = None):
+#     kind = jax.devices()[0].device_kind
+#     if "TPU" not in kind:
+#         raise RuntimeError("Expected TPU devices")
+#     suffix = ""
+#     if kind.endswith(" lite"):
+#         kind = kind[: -len(" lite")]
+#         suffix = "e"
+#     elif kind.endswith("e"):
+#         kind = kind[:-1]
+#         suffix = "e"
+#     elif kind.endswith("p"):
+#         kind = kind[:-1]
+#         suffix = "p"
+#     elif kind == "TPU7x":
+#         kind = "TPU v7"
+#     assert kind[:-1] == "TPU v", kind
+#     kind += suffix
+#     if num_devices is not None:
+#         kind += f"-{num_devices}"
+#     return kind
+
+
+# def get_device_hbm_limit() -> int:
+#     device_kind = get_device_name()
+#     if device_kind == "TPU v5p" or device_kind == "TPU v5":
+#         return 95 * GBYTES
+#     elif device_kind == "TPU v5e":
+#         return 16 * GBYTES
+#     elif device_kind == "TPU v6e" or device_kind == "TPU v4":
+#         return 32 * GBYTES
+#     elif device_kind == "TPU v7":
+#         # 192 * GBYTES / 2 because each JAX device (v7x core) has
+#         # 1/2 of the total chip HBM
+#         return 96 * GBYTES
+#     else:
+#         raise ValueError(f"Unknown device kind: {device_kind}")
+
+# def pathways_hbm_usage_gb(live_arrays, devices: Any) -> list[tuple[float, float]]:
+#     hbm_used = defaultdict(int)
+#     hbm_limit = get_device_hbm_limit()
+#     for array in live_arrays:
+#         for buffer in array.addressable_shards:
+#             hbm_used[buffer.data.device] += buffer.data.nbytes
+#     return [(hbm_used[device], hbm_limit) for device in devices]
+
+# def show_hbm_usage():
+#   """Displays memory usage per device."""
+#   fmt_size = functools.partial(humanize.naturalsize, binary=True)
+
+#   def pathways_mode():
+#     devices = jax.devices()
+#     live_arrays = jax.live_arrays()
+#     pathways_hbm_used_mem = pathways_hbm_usage_gb(live_arrays, devices)
+#     for hbm_used, hbm_limit in pathways_hbm_used_mem:
+#       print(f"Using {fmt_size(hbm_used)} / {fmt_size(hbm_limit)} ({hbm_used/hbm_limit:%})")
+
+
+#   def mcjax_mode():
+#     for d in jax.local_devices():
+#       stats = d.memory_stats()
+#       used = stats["bytes_in_use"]
+#       limit = stats["bytes_limit"]
+#       print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
+
+
+#   if platform=='proxy':
+#     pathways_mode()
+#   else:
+#     mcjax_mode()
+
+
+show_hbm_usage = utils.show_hbm_usage
 
 
 repo_id = args.model_version
