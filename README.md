@@ -59,7 +59,7 @@ Tunix is still under development, here's a glimpse of the current features:
   - Multi-turn & multi-step support
   - Tool usage
 - **Advanced Algorithms:**
-  - Addtional state-of-the-art RL and distillation algorithms
+  - Additional state-of-the-art RL and distillation algorithms
 - **Scalability:**
   - Multi-host distributed training
   - Optimized rollout with vLLM or SGLang-Jax
@@ -160,7 +160,7 @@ check back for updates!
   title={Tunix},
   author={Bao, Tianshu and Wang, Lance and Sharma, Abheesht and Shin, Jiwon and
   Yan, Ann and Tan, Sizhi and Gao, Haoyu and Ha, Jen and Chai, Lin and
-  Liu, Dangyi and Iyer, Rakesh and Sahu, Mridul and others},
+  Liu, Dangyi and Iyer, Rakesh and Sahu, Mridul and et al.},
   year={2025},
   howpublished={\url{https://github.com/google/tunix}},
 }
