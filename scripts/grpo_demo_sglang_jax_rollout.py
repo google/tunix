@@ -6,6 +6,7 @@ training, evaluation, and inference. In addition, It is based on examples/grpo_d
 """
 
 import argparse
+from collections import defaultdict
 import csv
 import functools
 import gc
@@ -14,6 +15,7 @@ from pathlib import Path
 from pprint import pprint
 import re
 import shutil
+from typing import Any
 
 from flax import nnx
 import grain
@@ -42,6 +44,13 @@ from tunix.rl.grpo.grpo_learner import GRPOLearner
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import sglang_jax_rollout
 from tunix.sft import metrics_logger
+from tunix.sft import utils
+
+platform = os.getenv("JAX_PLATFORMS", None)
+if platform == "proxy":
+  import pathwaysutils
+
+  pathwaysutils.initialize()
 
 # Parse command line options
 parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
@@ -115,12 +124,12 @@ EPSILON = 0.2
 # ====== Training ======
 TRAIN_MICRO_BATCH_SIZE = 1
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
-NUM_BATCHES = 3738
+NUM_BATCHES = 2
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 2
 
-EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+EVAL_EVERY_N_STEPS = 2  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
 
 # Number of training steps.
@@ -157,16 +166,7 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 
-
-def show_hbm_usage():
-  """Displays memory usage per device."""
-  fmt_size = functools.partial(humanize.naturalsize, binary=True)
-
-  for d in jax.local_devices():
-    stats = d.memory_stats()
-    used = stats["bytes_in_use"]
-    limit = stats["bytes_limit"]
-    print(f"Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
+show_hbm_usage = utils.show_hbm_usage
 
 
 repo_id = args.model_version
@@ -729,7 +729,7 @@ sglang_jax_config = sampler_lib.SglangJaxConfig(
     model_version=model_path,
     context_length=2048,
     mesh=rollout_mesh,
-    mem_fraction_static=0.3,
+    mem_fraction_static=0.5,
     init_with_random_weights=True,
     disable_radix_cache=True,
     enable_deterministic_sampling=False,
