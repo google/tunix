@@ -61,13 +61,29 @@ parser.add_argument(
     required=False,
     help="The model version to use.",
 )
-
 parser.add_argument(
     "--rollout-data-parallel-size",
     type=int,
     default=1,
     required=False,
     help="Rollout engine data parallel size.",
+)
+parser.add_argument(
+    "--global-batch-size",
+    type=int,
+    default=4,
+    required=False,
+    help="Number of global batches for learning.",
+)
+parser.add_argument(
+    "--num-batches",
+    type=int,
+    default=1869,
+    required=False,
+    help=(
+        "Number of batches for training. Defaults to total number of samples //"
+        " global batch size."
+    ),
 )
 
 args = parser.parse_args()
@@ -122,12 +138,12 @@ BETA = 0.08
 EPSILON = 0.2
 
 # ====== Training ======
-TRAIN_MICRO_BATCH_SIZE = 1
+TRAIN_MICRO_BATCH_SIZE = 2
 # Increase `NUM_BATCHES` and `MAX_STEPS` for better results.
-NUM_BATCHES = 2
+NUM_BATCHES = min(args.num_batches, 7473 // args.global_batch_size)
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
-NUM_TEST_BATCHES = 2
+NUM_TEST_BATCHES = 20
 
 EVAL_EVERY_N_STEPS = 2  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 1  # can potentially train for more epochs
@@ -289,7 +305,7 @@ if source not in ("tfds", "kaggle"):
 print(f"Using data source: {source}")
 
 dataset = get_dataset(TRAIN_DATA_DIR, "train", source).batch(
-    TRAIN_MICRO_BATCH_SIZE
+    args.global_batch_size
 )[:NUM_BATCHES]
 
 if TRAIN_FRACTION == 1.0:
@@ -302,7 +318,7 @@ else:
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
 test_dataset = get_dataset(TEST_DATA_DIR, "test", source).batch(
-    TRAIN_MICRO_BATCH_SIZE
+    args.global_batch_size
 )[:NUM_TEST_BATCHES]
 
 dataset_lengths = (

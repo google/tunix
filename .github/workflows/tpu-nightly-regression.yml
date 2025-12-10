@@ -112,7 +112,7 @@ jobs:
         git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
         pip install jax==0.8.0 flax==0.12.0 libtpu==0.0.24
         pip list | egrep 'jax|flax|libtpu'
-        cd tunix && python scripts/grpo_demo_sglang_jax_rollout.py || FAILED=1
+        cd tunix && python scripts/grpo_demo_sglang_jax_rollout.py --num-batches=100 || FAILED=1
 
         if [ "$FAILED" -ne 0 ]; then
           echo "One or more scripts failed!"
