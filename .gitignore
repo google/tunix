@@ -17,7 +17,7 @@
 /include/
 /lib/
 /share/
-
+.venv/
 # Documentation
 /docs/_build/
 /docs/_collections/
