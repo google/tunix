@@ -23,7 +23,7 @@ import pathlib
 from pathlib import Path  # pylint: disable=g-importing-member
 import shutil
 import stat
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, Sequence
 from absl import logging
 import dotenv
 import jax
@@ -36,6 +36,13 @@ from tunix.sft import profiler
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
+_SUPPORTED_MODEL_SOURCES = (
+    "kaggle",
+    "huggingface",
+    "gcs",
+    "internal",
+    "",
+)
 
 
 def yaml_key_to_env_key(s: str) -> str:
@@ -171,10 +178,10 @@ class HyperParameters:
     model_source = model_config.get("model_source")
     intermediate_ckpt = model_config.get("intermediate_ckpt_dir")
 
-    if model_source not in ["kaggle", "huggingface", "gcs", ""]:
+    if model_source not in _SUPPORTED_MODEL_SOURCES:
       raise ValueError(
-          f"Invalid model_source: {model_source}. Must be 'kaggle',"
-          " 'huggingface', 'gcs' or ''."
+          f"Invalid model_source: {model_source!r}. Must be one of"
+          f" {_SUPPORTED_MODEL_SOURCES}."
       )
 
     if model_source in ["kaggle", "huggingface"] and not intermediate_ckpt:
@@ -192,10 +199,14 @@ class HyperParameters:
     model_config = self.config["model_config"]
     model_name = model_config["model_name"]
     model_source = model_config["model_source"]
-    supported_sources = collections.defaultdict(lambda: ["huggingface"])
-    supported_sources["gemma"] = ["kaggle"]
-    supported_sources["gemma2"] = ["kaggle"]
-    supported_sources["gemma3"] = ["gcs"]
+    supported_sources = collections.defaultdict(
+        lambda: ["huggingface", "internal"]
+    )
+    # TODO(b/467448875): Add support for other sources, such as kaggle for other
+    # models.
+    supported_sources["gemma"] = ["kaggle", "internal"]
+    supported_sources["gemma2"] = ["kaggle", "internal"]
+    supported_sources["gemma3"] = ["gcs", "internal"]
 
     if model_name.startswith("gemma3"):
       expected_sources = supported_sources["gemma3"]
@@ -705,7 +716,7 @@ class HyperParameters:
 
     return config_oconf
 
-  def obtain_reward_fn(self) -> List[Callable[..., Any]]:
+  def obtain_reward_fn(self) -> list[Callable[..., Any]]:
     """Obtain reward function from the config."""
     project_root = get_project_root()
     reward_fns = []

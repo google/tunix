@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from collections import Counter
 import os
 from pathlib import Path
 import tempfile
@@ -108,9 +107,9 @@ class ConfigTest(parameterized.TestCase):
         "training_config.eval_every_n_steps=10",
     ]
     hp = config.initialize(argv)
-    
+
     config_dict = cast(Dict[str, Any], hp.config)
-   
+
     self.assertEqual(config_dict["training_config"]["max_steps"], 150)
     self.assertEqual(
         config_dict["training_config"]["data_sharding_axis"], ["fsdp", "dp"]
@@ -434,7 +433,7 @@ class ConfigTest(parameterized.TestCase):
     reward_fns = hp.obtain_reward_fn()
     self.assertLen(reward_fns, expected_reward_fn_len)
     actual_names = [fn.__name__ for fn in reward_fns]
-    self.assertEqual(Counter(actual_names), Counter(expected_reward_fn_names))
+    self.assertCountEqual(actual_names, expected_reward_fn_names)
 
   def test_obtain_reward_fn_relative_path(self):
     hp = self.initialize_config([])
@@ -463,6 +462,15 @@ class ConfigTest(parameterized.TestCase):
 
       finally:
         os.chdir(original_cwd)
+
+  def test_obtain_reward_fn_file_not_found(self):
+    hp = self.initialize_config(
+        ["reward_functions=['tunix/cli/reward_fn/non_existent.py']"]
+    )
+    with self.assertRaisesRegex(
+        ImportError, "Failed to execute module non_existent"
+    ):
+      hp.obtain_reward_fn()
 
 
 if __name__ == "__main__":
