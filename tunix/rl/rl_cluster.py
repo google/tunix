@@ -203,7 +203,7 @@ class RLCluster:
 
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
-    else:
+    elif self.cluster_config.rollout_engine == "vanilla":
       rollout_data_type = (
           self.cluster_config.rollout_config[Mode.TRAIN].data_type
           if isinstance(self.cluster_config.rollout_config, dict)
@@ -214,6 +214,9 @@ class RLCluster:
           self.r2m[Role.ROLLOUT],
           rollout_data_type,
       )
+    else:
+      # Provide initial weights for non vanilla rollout engines.
+      self.rollout_actor = self.train_actor
 
     if reference:
       self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
@@ -457,7 +460,6 @@ class RLCluster:
       raise NotImplementedError(
           f"Rollout engine {self.cluster_config.rollout_engine} not supported"
       )
-    del self.rollout_actor
 
     # 2. Initialize inference worker.
     inference_models = {}
@@ -512,6 +514,7 @@ class RLCluster:
         },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
         metrics_logger=self._rl_metrics_logger,
     )
+    del self.rollout_actor
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
