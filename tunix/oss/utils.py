@@ -56,28 +56,29 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
     ) from e
 
 
-def kaggle_pipeline(model_config: dict[str, Any]):
+def kaggle_pipeline(model_id: str, model_download_path: str):
   """Download model from Kaggle."""
   if 'KAGGLE_USERNAME' not in os.environ or 'KAGGLE_KEY' not in os.environ:
     kagglehub.login()
-  os.environ['KAGGLEHUB_CACHE'] = model_config['model_download_path']
-  return kagglehub.model_download(model_config['model_id'])
+  os.environ['KAGGLEHUB_CACHE'] = model_download_path
+  return kagglehub.model_download(model_id)
 
 
-def hf_pipeline(model_config: dict[str, Any]):
+def hf_pipeline(model_id: str, model_download_path: str):
   """Download model from HuggingFace."""
   if 'HF_TOKEN' not in os.environ:
     hf.login()
-  all_files = hf.list_repo_files(model_config['model_id'])
+  all_files = hf.list_repo_files(model_id)
   filtered_files = [f for f in all_files if not f.startswith('original/')]
   for filename in filtered_files:
     hf.hf_hub_download(
-        repo_id=model_config['model_id'],
+        repo_id=model_id,
         filename=filename,
-        local_dir=model_config['model_download_path'],
+        local_dir=model_download_path,
     )
   logging.info(
       'Downloaded %s to: %s',
       filtered_files,
-      model_config['model_download_path'],
+      model_download_path,
   )
+  return model_download_path
