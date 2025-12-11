@@ -258,14 +258,6 @@ logging.set_verbosity(
     script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING)
 )
 
-# ====== Data ======
-# The data is not available in gcs bucket yet, please manually copy the
-# ====== Data ======
-# The data is not available in gcs bucket yet, please manually copy the
-# following data to your local TRAIN_DATA_PATH (to avoid leakr error using *):
-# /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_train.json
-# /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_test.json
-
 GCS_BUCKET_PREFIX = "gs://tunix/"
 PROFILER_SUBDIR = "rl/grpo/profiler/"
 DATA_SUBDIR = "rl/grpo/data/"
