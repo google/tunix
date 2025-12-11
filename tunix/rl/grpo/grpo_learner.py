@@ -208,29 +208,18 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     rollout_output = self.rl_cluster.generate(
         prompts=training_input["prompts"],
         mode=mode,
-        micro_batch_size=(
-            self._rollout_micro_batch_size * self.algo_config.num_generations
-        ),
+        micro_batch_size=(self.rollout_micro_batch_size * self.algo_config.num_generations),
     )
     completion_ids = rollout_output.tokens
     prompt_ids = rollout_output.left_padded_prompt_tokens
     completion_text = rollout_output.text
 
-    # Slice prompts and other inputs to match local completion count (multi-controller safe)
-    local_batch_size = len(completion_text)
-    if local_batch_size != len(training_input["prompts"]):
-      # In multi-controller: prompts are replicated but completions are local
-      # Determine which slice this process owns
-      global_batch_size = len(training_input["prompts"])
-      samples_per_process = global_batch_size // jax.process_count()
-      start_idx = jax.process_index() * samples_per_process
-      end_idx = start_idx + samples_per_process
-      local_training_input = {
-          k: v[start_idx:end_idx] if isinstance(v, (list, np.ndarray)) else v
-          for k, v in training_input.items()
-      }
-    else:
-      local_training_input = training_input
+    # Ensure local completions match local prompts.
+    assert len(completion_text) == len(training_input["prompts"]), (
+        "Mismatch between local completions and prompts; expected per-process "
+        "batching to align counts."
+    )
+    local_training_input = training_input
 
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
@@ -250,10 +239,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=(
-                self._compute_logps_micro_batch_size
-                * self.algo_config.num_generations
-            ),
+            micro_batch_size=(self.compute_logps_micro_batch_size * self.algo_config.num_generations),
         )
         interval.device_end([ref_per_token_logps])
     else:
@@ -266,10 +252,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=completion_ids,
-            micro_batch_size=(
-                self._compute_logps_micro_batch_size
-                * self.algo_config.num_generations
-            ),
+            micro_batch_size=(self.compute_logps_micro_batch_size * self.algo_config.num_generations),
         )
         interval.device_end([old_per_token_logps])
     else:
@@ -320,13 +303,15 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       user_defined_metric = m_fn(
           prompts=local_training_input["prompts"],
           completions=completion_text,
-          advances=advantages,
+          advantages=advantages,
           rewards=rewards,
           **{k: v for k, v in local_training_input.items() if k != "prompts"},
       )
       self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
 
-    return TrainExample(
+    # Shard TrainExample leaves along fsdp to align with data-parallel mental model.
+    return sharding_utils.shard_input(
+      TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
         completion_ids=completion_ids,
@@ -334,6 +319,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         old_per_token_logps=old_per_token_logps,
+      ),
+      self.rl_cluster.cluster_config.training_config.data_sharding_axis,
     )
 
   def _compute_trajectory_ids(
