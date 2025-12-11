@@ -199,7 +199,6 @@ class RLCluster:
     self._init_backbone_sharing_map(actor, reference)
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
-    print(f"[RLCluster] before load_model for actor", flush=True)
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
 
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
@@ -219,7 +218,6 @@ class RLCluster:
       # Provide initial weights for non vanilla rollout engines.
       self.rollout_actor = self.train_actor
 
-    print(f"[RLCluster] before load_model for ref", flush=True)
     if reference:
       self.reference = self._load_model(reference, self.r2m[Role.REFERENCE])
       if Role.REFERENCE in self._backbone_sharing_map[Role.ACTOR]:
@@ -231,14 +229,12 @@ class RLCluster:
           )
     else:
       self.reference = None
-    print(f"[RLCluster] before load_model for critic", flush=True)
     self.critic = (
         self._load_model(critic, self.r2m[Role.CRITIC]) if critic else None
     )
     if Role.CRITIC in self._backbone_sharing_map[Role.ACTOR]:
       critic_state = nnx.state(self.train_actor, filterlib.Not(nnx.LoRAParam))
       nnx.update(self.critic, critic_state)
-    print(f"[RLCluster] before load_model for reward", flush=True)
     self.reward = (
         self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
     )
@@ -438,7 +434,6 @@ class RLCluster:
       else:
         raise ValueError("Rollout sglang jax model config is missing!")
 
-      print(f"[RLCluster] before initialize rollout", flush=True)
       self._rollout = sglang_jax_rollout.SglangJaxRollout(
           self.rollout_actor,
           self.tokenizer,
@@ -467,7 +462,6 @@ class RLCluster:
       raise NotImplementedError(
           f"Rollout engine {self.cluster_config.rollout_engine} not supported"
       )
-    print(f"[RLCluster] after initialize rollout", flush=True)
 
     # 2. Initialize inference worker.
     inference_models = {}
@@ -482,7 +476,6 @@ class RLCluster:
     self._inference_worker = inference_worker.InferenceWorker(inference_models)
 
     # 3. Initialize trainer.
-    print(f"[RLCluster] before initialize critic trainer", flush=True)
     if (
         self.critic
         and Role.CRITIC not in self._backbone_sharing_map[Role.ACTOR]
@@ -505,8 +498,6 @@ class RLCluster:
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
-
-    print(f"[RLCluster] before initialize actor trainer", flush=True)
 
     self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
     actor_config = copy.deepcopy(self.cluster_config.training_config)

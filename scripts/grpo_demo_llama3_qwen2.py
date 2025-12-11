@@ -694,13 +694,6 @@ if DO_MODEL_DISPLAY:
 
 show_hbm_usage("After creating the reference lora model")
 
-# Rollout mesh
-# rollout_mesh = jax.make_mesh(
-#     *ROLLOUT_MESH,
-#     devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
-#     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-# )
-
 rollout_device_arrays = mesh_utils.create_device_mesh(
     ROLLOUT_MESH[0],
     devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
@@ -1004,19 +997,16 @@ def evaluate(
 show_hbm_usage("After creating a raw sampler")
 
 
-print(f"before initialize ckpt", flush=True)
 # Ckpt saving
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
-print(f"before initialize metrics_logger", flush=True)
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
 )
 
 
-print(f"before initialize optimizer", flush=True)
 show_hbm_usage("After creating a new rollout worker")
 # Optimizer, learning rate scheduler, gradient clipping
 optimizer = optax.adamw(
@@ -1117,7 +1107,6 @@ grpo_config = grpo_learner.GRPOConfig(
 )
 
 
-print(f"before initialize rlcluster", flush=True)
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=training_model,
@@ -1126,7 +1115,6 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 
-print(f"before initialize grpolearner", flush=True)
 # GRPO Trainer
 grpo_trainer = grpo_learner.GRPOLearner(
     rl_cluster=rl_cluster,
@@ -1141,7 +1129,6 @@ grpo_trainer = grpo_learner.GRPOLearner(
 
 show_hbm_usage("After creating the learner")
 
-print(f"before eval 1149", flush=True)
 
 rollout_sampler = rl_cluster._rollout._sampler  # pylint: disable=protected-access
 (eval_corr, eval_total, eval_accuracy, eval_partial_accuracy, eval_format_accuracy) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
@@ -1173,7 +1160,6 @@ print(
 
 show_hbm_usage("Right before training")
 with training_mesh:
-  print(f"before grpo_trainer.train", flush=True)
   grpo_trainer.train(train_dataset, eval_ds=val_dataset)
 
 # Load checkpoint first.
