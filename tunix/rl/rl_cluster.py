@@ -111,7 +111,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
     ]:
-      rl_utils.check_positive(getattr(self, name), name)
+      rl_utils.is_positive_integer(getattr(self, name), name)
 
     if self.gradient_accumulation_steps is not None:
       raise ValueError(
