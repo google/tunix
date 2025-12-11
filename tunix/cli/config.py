@@ -23,7 +23,7 @@ import pathlib
 from pathlib import Path  # pylint: disable=g-importing-member
 import shutil
 import stat
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Iterator, Sequence
 from absl import logging
 import dotenv
 import jax
@@ -88,17 +88,68 @@ def get_project_root() -> Path:
   return Path.cwd()
 
 
+def _dict_to_cli_args(
+    d: collections.abc.Mapping[str, Any], parent_key: str = "", sep: str = "."
+) -> Iterator[str]:
+  """Converts a dictionary to an Iterator string of CLI arguments."""
+  for k, v in d.items():
+    new_key = f"{parent_key}{sep}{k}" if parent_key else k
+    if isinstance(v, (collections.abc.Mapping, omegaconf.DictConfig)):
+      if v:
+        yield from _dict_to_cli_args(v, parent_key=new_key, sep=sep)
+      else:
+        yield f"{new_key}={{}}"
+    else:
+      yield f"{new_key}={v}"
+
+
 class HyperParameters:
-  """Loads, merges, overrides, validates, and prepares the configuration for pipeline execution."""
+  """Loads, merges, overrides, validates, and prepares the configuration for pipeline execution.
+
+  Configurations are merged from multiple sources. The following order of
+  precedence applies, with later sources overriding earlier ones:
+  1. Base Config File: The first positional argument, path to a YAML config
+  file.
+  2. Config File Override: An optional `override_config_file=/path/to/file.yaml`
+     argument. Values in this file override values in the base config file.
+  3. CLI Arguments: `key=value` pairs provided as arguments override values
+     from both the base config and the config file override.
+
+  Environment variables prefixed with `T_` can also be used to set parameters,
+  but it is an error to set a parameter via both an environment variable and
+  a command-line argument or override file.
+  """
 
   def __init__(self, argv: list[str], **kwargs):
     # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
 
     dotenv.load_dotenv()
     raw_keys = collections.OrderedDict()
-    config_name = argv[1]
-    raw_data_from_yaml = self._load_config_from_yaml(config_name)
+
+    if len(argv) < 2 or "=" in argv[1]:
+      raise ValueError(
+          "The first argument must be a path to a base config file."
+      )
+
+    # Handle relative paths used in example scripts as a special case.
+    # TODO(noghabi): Remove this once the example scripts are updated.
+    if argv[1] == "base_config.yaml":
+      base_config_file = pathlib.Path(__file__).parent / argv[1]
+    else:
+      base_config_file = argv[1]
+    raw_data_from_yaml = self._load_config_from_yaml(base_config_file)
     self._validate_env_variable(raw_data_from_yaml)
+
+    config_file_override = None
+    cli_overrides = []
+    for arg in argv[2:]:
+      if arg.startswith("override_config_file="):
+        if config_file_override is not None:
+          raise ValueError("Only one override_config_file argument is allowed.")
+        _, config_file_override = arg.split("=", 1)
+      else:
+        cli_overrides.append(arg)
+
     self.replace_keys = {
         "lora_config",
         "training_config",
@@ -106,8 +157,18 @@ class HyperParameters:
         "profiler_options",
         "rl_training_config",
     }
+
+    all_overrides = []
+    if config_file_override:
+      next_conf = self._load_config_from_yaml(config_file_override)
+      all_overrides.extend(_dict_to_cli_args(next_conf))
+
+    # First we apply the file overrides, then the overrides from the command
+    # line making the command line the highest priority.
+    all_overrides.extend(cli_overrides)
+
     keys_from_env_and_command_line = self._update_from_env_and_command_line(
-        raw_keys, raw_data_from_yaml, argv, **kwargs
+        raw_keys, raw_data_from_yaml, all_overrides, **kwargs
     )
     logging.info(
         "Updating keys from env and command line: %s",
@@ -552,12 +613,12 @@ class HyperParameters:
       self,
       raw_keys: collections.OrderedDict[str, Any],
       raw_data_from_yaml: dict[str, Any],
-      argv: list[str],
+      overrides: list[str],
       **kwargs,
   ):
     """Update the configuration from command line."""
 
-    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
+    cli_cfg = omegaconf.OmegaConf.from_cli(overrides)
 
     raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(
         cli_cfg, resolve=True
@@ -705,14 +766,13 @@ class HyperParameters:
               f"We received env {environment_var} but it isn't all uppercase."
           )
 
-  def _load_config_from_yaml(self, config_name: str):
+  def _load_config_from_yaml(self, config_path: str):
     """Try Loading and validate the configuration from the YAML file."""
 
-    path = pathlib.Path(__file__).parent / config_name
     try:
-      config_oconf = omegaconf.OmegaConf.load(path)
+      config_oconf = omegaconf.OmegaConf.load(config_path)
     except FileNotFoundError as e:
-      raise ValueError(f"Config {config_name} not found.") from e
+      raise ValueError(f"Config {config_path} not found.") from e
 
     return config_oconf
 

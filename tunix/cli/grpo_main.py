@@ -15,6 +15,7 @@
 """Main entry point for GRPO training."""
 from absl import app
 from absl import flags
+from absl import logging
 import jax
 from tunix.cli import config
 from tunix.cli.utils import model as model_lib
@@ -149,6 +150,11 @@ def main(argv, **kwargs):
   if _PATHWAYS_BNS.value:
     _setup_jax_pathways(_PATHWAYS_BNS.value)
   pipeline = GrpoPipeline(argv, **kwargs)
+  logging.info(
+      "--- Launching GRPO pipeline with following config ---\n"
+      "%r\n--------------------------",
+      pipeline.config,
+  )
   pipeline.run_grpo_trainer()
 
 

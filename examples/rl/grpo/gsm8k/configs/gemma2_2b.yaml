@@ -24,9 +24,8 @@ tokenizer_config:
 dataset_name: "gsm8k"
 batch_size: 1
 num_batches: 3738
-num_train_epochs: 1
-train_fraction: 1.0
 num_test_batches: 100
+num_train_epochs: 1
 rl_training_config:
   actor_optimizer_config:
     opt_type: "adamw"
@@ -34,21 +33,21 @@ rl_training_config:
     schedule_type: "warmup_cosine_decay_schedule"
     init_value: 0.0
     end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: 374
+    decay_steps: 3738
     b1: 0.9
     b2: 0.99
     weight_decay: 0.1
     max_grad_norm: 0.1
-    warmup_ratio: 0.1
-    warmup_steps: 374
-    decay_steps: 3738
   eval_every_n_steps: 10
+  max_steps: 3738
   metrics_logging_options:
     flush_every_n_steps: 20
   checkpointing_options:
     save_interval_steps: 500
     max_to_keep: 4
   profiler_options: {}
-  max_steps: 3738
 rollout_config:
   total_generation_steps: 768
   max_prompt_length: 256
