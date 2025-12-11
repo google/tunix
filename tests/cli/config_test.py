@@ -26,6 +26,7 @@ import optax
 from tunix.cli import config
 from tunix.sft import peft_trainer
 from tunix.tests import test_common as tc
+from tunix.utils import env_utils
 
 
 class ConfigTest(parameterized.TestCase):
