@@ -58,6 +58,7 @@ version. It is used as the ID of the ModelConfig class. e.g., "gemma_2b_it" or
 # descriptions in //third_party/py/tunix/cli/base_config.yaml.
 
 import dataclasses
+import immutabledict
 
 @dataclasses.dataclass(frozen=True)
 class _ModelFamilyInfo:
@@ -70,22 +71,26 @@ class _ModelFamilyInfo:
 # Mapping of all model families from the hugging face model id to the internal
 # model_family and config_category. Key is the prefix of the hugging face model
 # id and value is the internal model family and config_category.
-_MODEL_FAMILY_INFO_MAPPING = {
-    'gemma': _ModelFamilyInfo(family='gemma', config_category='gemma'),
-    'gemma1.1': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
-    'gemma2': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
-    # Support both gemma3 and gemma-3 as model prefixes.
-    'gemma3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
-    'gemma-3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
-    'llama3': _ModelFamilyInfo(family='llama3', config_category='llama3'),
-    'llama3.1': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
-    'llama3.2': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
-    'qwen2.5': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
-    'qwen3': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
-    'deepseek-r1-distill-qwen': _ModelFamilyInfo(
+_MODEL_FAMILY_INFO_MAPPING = immutabledict.immutabledict({
+    'gemma-': _ModelFamilyInfo(family='gemma', config_category='gemma'),
+    'gemma1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
+    'gemma-1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
+    'gemma2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
+    'gemma-2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
+    'gemma3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
+    'gemma-3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
+    'llama3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
+    'llama-3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
+    'llama3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
+    'llama-3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
+    'llama3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
+    'llama-3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
+    'qwen2.5-': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
+    'qwen3-': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
+    'deepseek-r1-distill-qwen-': _ModelFamilyInfo(
         family='deepseek_r1_distill_qwen', config_category='qwen2'
     ),
-}
+})
 
 
 def split(model_name: str) -> tuple[str, str]:
@@ -99,7 +104,7 @@ def split(model_name: str) -> tuple[str, str]:
     model_name: The model name, e.g., llama3.1-8b.
 
   Returns:
-    A tuple containing the un-standardized model_family andmodel_version.
+    A tuple containing the un-standardized model_family and model_version.
   """
   model_name = model_name.lower()
   matched_family = ''
