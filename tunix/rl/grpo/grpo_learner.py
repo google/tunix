@@ -157,7 +157,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
-    
+
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
     loss_fn = lambda model, train_example, algo_config: policy_loss_fn(

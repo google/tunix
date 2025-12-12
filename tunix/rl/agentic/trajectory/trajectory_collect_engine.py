@@ -25,7 +25,7 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
-import jax.numpy as jnp
+import numpy as np
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
@@ -365,8 +365,9 @@ class TrajectoryCollectEngine:
     trajectory = self.agent.trajectory
     if not trajectory:
       return None
-    trajectory_reward = jnp.sum(jnp.array([d.reward for d in trajectory.steps]))
-    trajectory.reward = float(trajectory_reward)
+    trajectory.reward = float(
+        np.sum(np.array([s.reward for s in trajectory.steps]))
+    )
     return trajectory
 
   def compute_mc_reward(self):
