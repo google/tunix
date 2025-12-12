@@ -25,9 +25,7 @@ Tunix is under active development. Our team is actively working on expanding its
 capabilities, usability and performance. Stay tuned for upcoming updates and new
 features!
 
-## Key Features & Highlights
-
-Tunix is still under development, here's a glimpse of the current features:
+## Key Features
 
 - **Supervised Fine-Tuning:**
   - Full Weights Fine-Tuning
@@ -46,14 +44,20 @@ Tunix is still under development, here's a glimpse of the current features:
   - Feature Pooling & Projection Strategies: General techniques for matching
     intermediate feature representations, even between models of different
     architectures.
+
+## Framework & Infra Highlights
+
 - **Modularity:**
   - Components are designed to be reusable and composable
   - Easy to customize and extend
-- **Efficiency:**
-  - Native support of common model sharding strategies such as DP, FSDP and TP
-  - Designed for distributed training on accelerators (TPU)
+- **Performance & Efficiency:**
+  - Native [vLLM](https://github.com/vllm-project/tpu-inference) and [SGLang](https://github.com/sgl-project/sglang-jax) on TPU integration for performant rollout
+  - Native [Maxtext](https://github.com/AI-Hypercomputer/maxtext) model integration for high performance kernels and model execution
+  - Micro-batching support for component level efficient execution
+- **Stability**
+  - Seamless multi-host distributed training with Pathways which can scale up to thousands of devices
 
-## Upcoming
+## Upcoming/Experimental Features
 
 - **Agentic RL Training:**
   - Async Rollout
@@ -61,9 +65,6 @@ Tunix is still under development, here's a glimpse of the current features:
   - Tool usage
 - **Advanced Algorithms:**
   - Additional state-of-the-art RL and distillation algorithms
-- **Scalability:**
-  - Multi-host distributed training
-  - Optimized rollout with vLLM or SGLang-Jax
 - **User Guides:**
   - More advanced RL recipe
 
