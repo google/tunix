@@ -20,7 +20,6 @@ import importlib
 import inspect
 import os
 import pathlib
-from pathlib import Path  # pylint: disable=g-importing-member
 import shutil
 import stat
 from typing import Any, Dict, Iterator, Sequence
@@ -66,13 +65,13 @@ _yaml_types_to_parser = {
 }
 
 
-def get_project_root() -> Path:
+def get_project_root() -> pathlib.Path:
   """Returns the project root folder.
 
   It searches up from the current file until it finds a marker file like '.git',
   'pyproject.toml', or 'setup.py'.
   """
-  current_path = Path(__file__).resolve().parent
+  current_path = pathlib.Path(__file__).resolve().parent
   # List of files that define the root of your project
   root_markers = [
       "LICENSE",
@@ -85,7 +84,7 @@ def get_project_root() -> Path:
       return parent
 
   # Fallback: if no marker is found, return the current working directory
-  return Path.cwd()
+  return pathlib.Path.cwd()
 
 
 def _dict_to_cli_args(
@@ -208,10 +207,12 @@ class HyperParameters:
           "model_download_path"
       )
     if not os.path.isdir(model_download_path):
-      logging.error(f"Error: '{model_download_path}' is not a valid directory.")
+      logging.error(
+          "Error: '%r' is not a valid directory.", model_download_path
+      )
       return
 
-    logging.info(f"Clearing contents of '{model_download_path}'...")
+    logging.info("Clearing contents of '%s'...", model_download_path)
     for item in os.listdir(model_download_path):
       item_path = os.path.join(model_download_path, item)
       try:
@@ -223,15 +224,17 @@ class HyperParameters:
           except OSError:
             pass  # Continue and let os.remove() raise the error if it fails
           os.remove(item_path)
-          logging.info(f"  Removed file/link: {item_path}")
+          logging.info("  Removed file/link: %s", item_path)
         elif os.path.isdir(item_path):
           # shutil.rmtree can also handle permission issues internally
           # by providing an onerror handler if needed.
           shutil.rmtree(item_path)
-          logging.info(f"  Removed directory: {item_path}")
-      except (OSError, shutil.Error) as e:
-        logging.info(f"  Failed to delete {item_path}. Reason: {e}")
-    logging.info(f"Finished clearing '{model_download_path}'.")
+          logging.info("  Removed directory: %s", item_path)
+      except (OSError, shutil.Error):
+        logging.warning(
+            "  Failed to delete %s.", item_path, exc_info=True
+        )
+    logging.info("Finished clearing '%r'.", model_download_path)
 
   def _validate_model_source(self, raw_keys: collections.OrderedDict[str, Any]):
     """Validate the checkpoint source and intermediate checkpoint."""
@@ -847,6 +850,7 @@ class HyperParameters:
     except (ImportError, AttributeError, ValueError) as e:
       logging.warning("Error importing '%s': %s", path_str, e)
       return None
+
 
 def initialize(argv, **kwargs):
   return HyperParameters(argv, **kwargs)
