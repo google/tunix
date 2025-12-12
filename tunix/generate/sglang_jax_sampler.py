@@ -45,6 +45,10 @@ class SglangJaxConfig:
   mapping_config: mappings.MappingConfig
   # Note: use_sort_for_toppk_minp may be removed in the future. It depends on SGLang-Jax.
   use_sort_for_toppk_minp: bool = True
+  precompile_bs_paddings: Optional[List] = None
+  precompile_token_paddings: Optional[List] = None
+  chunked_prefill_size: int = -1
+  page_size: int = 64
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -109,9 +113,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
   def _sglang_jax_config(self, config: SglangJaxConfig):
     args = {}
     args["model_path"] = config.model_version
-    args["precompile_bs_paddings"] = [1, 64]
-    args["precompile_token_paddings"] = [8192]
-    args["page_size"] = 64
     args["context_length"] = config.context_length
     args["tp_size"] = self._find_tp_size(config.mesh)
     args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
@@ -124,6 +125,10 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
     args["use_sort_for_toppk_minp"] = config.use_sort_for_toppk_minp
+    args["precompile_bs_paddings"] = config.precompile_bs_paddings
+    args["precompile_token_paddings"] = config.precompile_token_paddings
+    args["chunked_prefill_size"] = config.chunked_prefill_size
+    args["page_size"] = config.page_size
     return args
 
   @property
@@ -170,7 +175,10 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       pad_output: bool = False,
   ) -> base_sampler.SamplerOutput:
     # max_generation_steps: maximum number of tokens to generate
-    if max_generation_steps > self.args["context_length"]:
+    if (
+        self.args["context_length"] is not None
+        and max_generation_steps > self.args["context_length"]
+    ):
       raise ValueError(
           "`max_generation_steps` must be less than or equal to "
           "`context_length`. Received:  `max_generation_steps`="

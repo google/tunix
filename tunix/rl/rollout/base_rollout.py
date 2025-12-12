@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 from jax import numpy as jnp
@@ -139,7 +139,7 @@ class RolloutConfig:
   rollout_sglang_jax_model_version: str = ""
 
   # Context length for SG-Lang JAX rollout engine.
-  rollout_sglang_jax_context_length: int = 8192
+  rollout_sglang_jax_context_length: Optional[int] = None
 
   # Allocated HBM fraction for SG-Lang JAX rollout engine.
   rollout_sglang_jax_mem_fraction_static: float = 0.2
@@ -152,6 +152,19 @@ class RolloutConfig:
 
   # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
   rollout_sglang_jax_enable_deterministic_sampling: bool = False
+
+  # List of token buckets for jax jit
+  rollout_sglang_jax_precompile_token_paddings: Optional[List] = None
+
+  # List of batch sizes buckets for jax jit
+  rollout_sglang_jax_precompile_bs_paddings: Optional[List] = None
+
+  # The maximum number of tokens in a chunk for the chunked prefill.
+  # Setting this to -1 means disabling chunked prefill.
+  rollout_sglang_jax_chunked_prefill_size: int = -1
+
+  # The number of tokens in a page
+  rollout_sglang_jax_page_size: int = 64
 
 
 class BaseRollout(ABC):

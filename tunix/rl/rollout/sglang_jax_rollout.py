@@ -52,6 +52,10 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             disable_radix_cache=rollout_config.rollout_sglang_jax_disable_radix_cache,
             enable_deterministic_sampling=rollout_config.rollout_sglang_jax_enable_deterministic_sampling,
             mapping_config=mapping_config,
+            precompile_bs_paddings=rollout_config.rollout_sglang_jax_precompile_bs_paddings,
+            precompile_token_paddings=rollout_config.rollout_sglang_jax_precompile_token_paddings,
+            chunked_prefill_size=rollout_config.rollout_sglang_jax_chunked_prefill_size,
+            page_size=rollout_config.rollout_sglang_jax_page_size,
         ),
     )
     state = nnx.state(model)
