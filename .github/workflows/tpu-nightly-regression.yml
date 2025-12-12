@@ -82,6 +82,16 @@ jobs:
         else:
             print(f'SUCCESS: Found {len(devices)} TPU device(s)')
         "
+    - name: Run Smoke tests
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      id: smoke_tests
+      run: |
+
+        echo "Running Smoke tests..."
+        python -m pytest smoke_tests/model_creation_test.py -v --tb=short
 
     - name: Run regression scripts
       env:
@@ -194,5 +204,3 @@ jobs:
         fi
         echo "🎉 All RL scripts completed successfully."
 
-
-          
