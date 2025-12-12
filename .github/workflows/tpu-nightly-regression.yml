@@ -119,5 +119,80 @@ jobs:
           exit 1
         fi
 
+    - name: Run SFT shell scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        SCRIPT_DIR="./tunix/examples/sft/mtnt"
+        MAX_STEPS=1
+        EVAL_EVERY_N_STEPS=1
+
+        # Check if directory exists
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist"
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR"
+        for script in "$SCRIPT_DIR"/*.sh; do
+          if [ -f "$script" ]; then
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            if bash "$script" \
+                --training_config.max_steps "$MAX_STEPS" \
+                --training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              echo "✅ Successfully completed: $script"
+            else
+              exit_code=$?
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              exit "$exit_code"
+            fi
+          fi
+        done
+        echo "🎉 All SFT scripts completed successfully."
+
+    - name: Run RL shell scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        SCRIPT_DIR="./tunix/examples/rl/grpo/gsm8k"
+        EXCLUDE_DIR="verl_compatible"
+        MAX_STEPS=1
+        EVAL_EVERY_N_STEPS=1
+
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist" >&2
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
+        final_exit_code=0
+
+        while IFS= read -r script; do
+          if [ -f "$script" ]; then
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            if ! bash "$script" \
+                --rl_training_config.max_steps "$MAX_STEPS" \
+                --rl_training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              exit_code=$?
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              final_exit_code=$exit_code
+              # Stop processing further scripts after the first failure
+              break
+            else
+              echo "✅ Successfully completed: $script"
+            fi
+          fi
+        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/")
+
+        if [ "$final_exit_code" -ne 0 ]; then
+          echo "🚫 One or more RL scripts failed. Exiting with code $final_exit_code." >&2
+          exit "$final_exit_code"
+        fi
+        echo "🎉 All RL scripts completed successfully."
+
 
           
