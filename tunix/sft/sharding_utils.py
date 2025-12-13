@@ -40,27 +40,37 @@ def shard_input(
     return input_data
 
   pspec = shd.PartitionSpec(*data_sharding_axis)
-  # Check if the input is already sharded with the target mesh to avoid
-  # re-sharding.
-  is_sharded = jax.tree.map(
-      lambda x: isinstance(x, jax.Array)
-      and hasattr(x, "sharding")
-      and hasattr(x.sharding, "mesh")
-      and x.sharding.mesh == mesh
-      and hasattr(x.sharding, "spec")
-      and x.sharding.spec == pspec,
-      input_data,
-  )
-  if all(jax.tree.leaves(is_sharded)):
-    return input_data
-
-  with jax.transfer_guard("allow"):
-    return jax.tree.map(
-        lambda x: jax.make_array_from_process_local_data(
+  # Per-leaf sharding that is robust to existing global Arrays.
+  def _shard_leaf(x):
+    # Already a JAX Array
+    if isinstance(x, jax.Array):
+      sh = getattr(x, "sharding", None)
+      # No-op if already on the target mesh/spec
+      if (
+          hasattr(sh, "mesh")
+          and sh.mesh == mesh
+          and hasattr(sh, "spec")
+          and sh.spec == pspec
+      ):
+        return x
+      # Global but not fully addressable: annotate sharding and let JIT reshard
+      if not getattr(x, "is_fully_addressable", True):
+        return jax.lax.with_sharding_constraint(x, pspec)
+      # Fully addressable JAX Array (process-local): assemble a global Array
+      with jax.transfer_guard("allow"):
+        return jax.make_array_from_process_local_data(
+            get_sharding(x, mesh=mesh, pspec=pspec), jax.device_get(x)
+        )
+    # NumPy arrays (process-local): assemble a global Array
+    if isinstance(x, np.ndarray):
+      with jax.transfer_guard("allow"):
+        return jax.make_array_from_process_local_data(
             get_sharding(x, mesh=mesh, pspec=pspec), x
-        ),
-        input_data,
-    )
+        )
+    # Other leaves: return as-is
+    return x
+
+  return jax.tree.map(_shard_leaf, input_data)
 
 
 def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
