@@ -166,6 +166,10 @@ class RolloutConfig:
   # The number of tokens in a page
   rollout_sglang_jax_page_size: int = 64
 
+  # Configs for MaxText/Custom Model support in vLLM rollout engine.
+  rollout_vllm_hf_config_path: str | None = None
+  rollout_vllm_additional_config: dict[str, Any] | None = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""

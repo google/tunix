@@ -151,7 +151,7 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
     Selected log probabilities.
   """
   logps = jax.nn.log_softmax(logits, axis=-1)
-  per_token_logps = jnp.take_along_axis(logps, input_ids[..., None], axis=-1)
+  per_token_logps = jnp.take_along_axis(logps, input_ids.astype(jnp.int32)[..., None], axis=-1)
   return per_token_logps[..., 0]
 
 
