@@ -397,6 +397,7 @@ class RLCluster:
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
+
       loaded_vllm_config = None
       if isinstance(
           self.cluster_config.rollout_config, base_rollout.RolloutConfig
@@ -421,6 +422,7 @@ class RLCluster:
       )
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
+
       if isinstance(
           self.cluster_config.rollout_config, base_rollout.RolloutConfig
       ):
