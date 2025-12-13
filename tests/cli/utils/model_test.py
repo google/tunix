@@ -71,7 +71,7 @@ def _get_all_models_test_parameters():
       dict(testcase_name="qwen3-1.7b", model_name="qwen3-1.7b"),
       dict(testcase_name="qwen3-8b", model_name="qwen3-8b"),
       dict(testcase_name="qwen3-14b", model_name="qwen3-14b"),
-      dict(testcase_name="qwen3-30b", model_name="qwen3-30b"),
+      dict(testcase_name="qwen3-30b-a3b", model_name="qwen3-30b-a3b"),
   )
 
 

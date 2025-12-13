@@ -243,10 +243,10 @@ _MODEL_INFO_MAP = {
         id='qwen3_14b',
         category='qwen3',
     ),
-    'qwen3-30b': ModelTestInfo(
+    'qwen3-30b-a3b': ModelTestInfo(
         family='qwen3',
-        version='30b',
-        id='qwen3_30b',
+        version='30b_a3b',
+        id='qwen3_30b_a3b',
         category='qwen3',
     ),
 }

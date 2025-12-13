@@ -157,7 +157,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_30b(cls):  # qwen3-30B
+  def qwen3_30b_a3b(cls):  # qwen3-30B-a3b
     return cls(
         num_layers=48,
         vocab_size=151936,
