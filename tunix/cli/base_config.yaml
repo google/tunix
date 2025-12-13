@@ -83,6 +83,7 @@ tokenizer_config:
 # Math_dataset "gsm8k" for grpo 
 data_source: ""
 data_directory: ""
+data_module: ""
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 num_batches: 3738
