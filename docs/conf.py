@@ -4,6 +4,9 @@ For the full list of built-in configuration values, see the documentation:
 https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
 
+import logging
+from sphinx.util import logging as sphinx_logging
+
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
@@ -117,3 +120,29 @@ intersphinx_mapping = {
     "flax": ("https://flax.readthedocs.io/en/stable/", None),
     "jax": ("https://docs.jax.dev/en/latest/", None),
 }
+
+
+class FilterSphinxWarnings(logging.Filter):
+    """Filter autosummary 'duplicate object description' warnings.
+
+    These warnings are unnecessary as they do not cause missing documentation
+    or rendering issues, so it is safe to filter them out.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        super().__init__()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        filter_out = ("duplicate object description",)
+        return not msg.strip().startswith(filter_out)
+
+
+def setup(app):
+    """Set up custom logging filters."""
+    logger = logging.getLogger('sphinx')
+    warning_handler, *_ = [
+        h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)
+    ]
+    warning_handler.filters.insert(0, FilterSphinxWarnings(app))
