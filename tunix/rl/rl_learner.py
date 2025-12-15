@@ -27,6 +27,7 @@ from absl import logging
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
+from jax.experimental import multihost_utils as mhu
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
@@ -130,6 +131,28 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         self._training_config.compute_logps_micro_batch_size
     )
     sft_utils.show_hbm_usage(title="RLLearner init")
+
+    # per-process sizes to be populated in .train()
+    self._local_rollout_micro_batch_size: int | None = None
+    self._local_compute_logps_micro_batch_size: int | None = None
+
+  @property
+  def rollout_micro_batch_size(self) -> int:
+    if self._local_rollout_micro_batch_size is None:
+      raise RuntimeError(
+          "rollout_micro_batch_size is not initialized yet. It is set in "
+          "train() after local sizes are computed."
+      )
+    return self._local_rollout_micro_batch_size
+
+  @property
+  def compute_logps_micro_batch_size(self) -> int:
+    if self._local_compute_logps_micro_batch_size is None:
+      raise RuntimeError(
+          "compute_logps_micro_batch_size is not initialized yet. It is set in "
+          "train() after local sizes are computed."
+      )
+    return self._local_compute_logps_micro_batch_size
 
   @abstractmethod
   def _generate_and_compute_advantage(
@@ -550,52 +573,62 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main entry point for the training loop."""
-    full_batch_iterator = iter(train_ds)
-    first_item = next(full_batch_iterator)
-    full_batch_size = len(first_item["prompts"])
-    full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
+    batch_iterator = iter(train_ds)
+    first_item = next(batch_iterator)
+    local_batch_size = len(first_item["prompts"])  # per-process batch size
+    batch_iterator = itertools.chain([first_item], batch_iterator)
     # Initialize batch sizes.
-    mini_batch_size = self._training_config.mini_batch_size or full_batch_size
-    train_micro_batch_size = (
-        self._training_config.train_micro_batch_size or mini_batch_size
-    )
-    self._rollout_micro_batch_size = (
-        self._rollout_micro_batch_size or train_micro_batch_size
-    )
-    self._compute_logps_micro_batch_size = (
-        self._compute_logps_micro_batch_size or train_micro_batch_size
-    )
+    def divide_if_set(x, y):
+      if x is None:
+        return None
+      return x // y
+    local_mini_batch_size = divide_if_set(self._training_config.mini_batch_size, jax.process_count()) or local_batch_size
+    local_train_micro_batch_size = divide_if_set(self._training_config.train_micro_batch_size, jax.process_count()) or local_mini_batch_size
+    local_rollout_micro_batch_size = divide_if_set(self._rollout_micro_batch_size, jax.process_count()) or local_train_micro_batch_size
+    local_compute_logps_micro_batch_size = divide_if_set(self._compute_logps_micro_batch_size, jax.process_count()) or local_train_micro_batch_size
     for v, n in [
-        (self._rollout_micro_batch_size, f"{self._rollout_micro_batch_size=}"),
-        (
-            self._compute_logps_micro_batch_size,
-            f"{self._compute_logps_micro_batch_size=}",
-        ),
-        (mini_batch_size, f"{mini_batch_size=}"),
+        (local_rollout_micro_batch_size, f"{local_rollout_micro_batch_size=}"),
+        (local_compute_logps_micro_batch_size, f"{local_compute_logps_micro_batch_size=}"),
+        (local_mini_batch_size, f"{local_mini_batch_size=}"),
     ]:
-      rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
+      rl_utils.check_divisibility(v, local_batch_size, n, f"{local_batch_size=}")
+    # Persist effective per-process sizes for subclasses.
+    self._local_rollout_micro_batch_size = local_rollout_micro_batch_size
+    self._local_compute_logps_micro_batch_size = local_compute_logps_micro_batch_size
     grad_acc_steps = self._training_config.get_with_default(
         "gradient_accumulation_steps", 1
     )
 
     logging.info(  # pylint: disable=logging-fstring-interpolation
-        f"Training with {full_batch_size=}, {mini_batch_size=},"
-        f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+      f"Training with local "
+      f"batch: {local_batch_size=}, "
+      f"mini_batch: {local_mini_batch_size=}, "
+      f"micro_batch: {local_train_micro_batch_size=}, "
+      f"rollout_micro_batch: {local_rollout_micro_batch_size=}, "
+      f"compute_logps_micro_batch: {local_compute_logps_micro_batch_size=}, "
+      f"grad_acc_steps: {grad_acc_steps=}"
+    )
+    logging.info(  # pylint: disable=logging-fstring-interpolation
+      f"Training with global "
+      f"batch: {jnp.sum(mhu.process_allgather(local_batch_size)).item()=}, "
+      f"mini_batch: {jnp.sum(mhu.process_allgather(local_mini_batch_size)).item()=}, "
+      f"micro_batch: {jnp.sum(mhu.process_allgather(local_train_micro_batch_size)).item()=}, "
+      f"rollout_micro_batch: {jnp.sum(mhu.process_allgather(local_rollout_micro_batch_size)).item()=}, "
+      f"compute_logps_micro_batch: {jnp.sum(mhu.process_allgather(local_compute_logps_micro_batch_size)).item()=}"
     )
 
     service_target_batch_size = math.lcm(
-        self._rollout_micro_batch_size,
-        self._compute_logps_micro_batch_size,
+        local_rollout_micro_batch_size,
+        local_compute_logps_micro_batch_size,
     )
 
     # if the micro batch size is the same as the full batch size, we can use the
     # full batch iterator directly.
-    if train_micro_batch_size == full_batch_size:
-      train_iterator = full_batch_iterator
+    if local_train_micro_batch_size == local_mini_batch_size:
+      train_iterator = batch_iterator
     else:
       train_iterator = self._create_micro_batch_iterator(
-          full_batch_iterator, train_micro_batch_size
+          batch_iterator, local_train_micro_batch_size
       )
 
     while True:  # loop over M
@@ -604,8 +637,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
         with self.rl_cluster.perf.span_group("global_step"):
           self._run_global_step(
-              full_batch_size,
-              mini_batch_size,
+              local_batch_size,
+              local_mini_batch_size,
               service_target_batch_size,
               grad_acc_steps,
               train_iterator,
