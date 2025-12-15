@@ -151,15 +151,37 @@ class CommonTest(parameterized.TestCase):
     )
     np.testing.assert_equal(logits.shape, (3, 4, 256))
 
-  def test_make_completion_mask(self):
-    completion_ids = jnp.array([
-        [1, 2, 3, 4],
-        [1, 2, 3, 0],
-        [1, 2, 0, 0],
-        [1, 0, 0, 0],
+  def test_np_make_completion_mask(self):
+    completion_ids = np.array(
+        [
+            [1, 2, 3, 4],
+            [1, 2, 3, 0],
+            [1, 2, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=np.int32,
+    )
+    np_completion_mask = common.np_make_completion_mask(completion_ids)
+    expected_value = np.array([
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
+        [1, 1, 1, 0],
+        [1, 1, 0, 0],
     ])
+    np.testing.assert_allclose(np_completion_mask, expected_value)
+
+  def test_make_completion_mask(self):
+    completion_ids = jnp.array(
+        [
+            [1, 2, 3, 4],
+            [1, 2, 3, 0],
+            [1, 2, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=np.int32,
+    )
     completion_mask = common.make_completion_mask(completion_ids)
-    expected_value = jnp.array([
+    expected_value = np.array([
         [1, 1, 1, 1],
         [1, 1, 1, 1],
         [1, 1, 1, 0],

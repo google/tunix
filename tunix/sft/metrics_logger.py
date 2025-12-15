@@ -57,7 +57,9 @@ class MetricsLoggerOptions:
           )
       )
       try:
-        active_backends.append(WandbBackend(project=self.project_name, name=self.run_name))
+        active_backends.append(
+            WandbBackend(project=self.project_name, name=self.run_name)
+        )
       except ImportError:
         logging.info("WandbBackend skipped: 'wandb' library not installed.")
     return active_backends

@@ -21,6 +21,7 @@ from typing import Any, List, Optional, Tuple
 import jax
 from jax import numpy as jnp
 import jaxtyping
+import numpy as np
 from tunix.generate import mappings
 
 ABC = abc.ABC
@@ -45,15 +46,19 @@ class RolloutOutput:
   text: list[str]
 
   # Per-step logits used during sampling.
+  # TODO(tsbao): consider enforcing this to be np.ndarray as well,
+  # but let's solve it as part of the IS effort.
   logits: jax.Array
 
   # Tokens corresponding to the generated samples.
-  tokens: jax.Array
+  # Since tokens need to be transfered to RAM for decoding, we use numpy array
+  # here.
+  tokens: np.ndarray
 
   # Left padded prompt tokens.
   # TODO(tsbao): Reconcile with vLLM output and see if we should remove this
   # field, or add prompt + generated as extra.
-  left_padded_prompt_tokens: jax.Array
+  left_padded_prompt_tokens: np.ndarray
 
   # The log probs from sampler generations.
   logprobs: list[float] | None

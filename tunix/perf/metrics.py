@@ -47,7 +47,6 @@ import dataclasses
 from typing import Any
 from typing import Callable, Dict, Tuple
 
-import jax
 from jax import typing
 from tunix.perf import span
 
@@ -58,7 +57,7 @@ Span = span.Span
 SpanGroup = span.SpanGroup
 
 MetricsT = Dict[
-    str, Tuple[ArrayLike | str, Callable[[jax.Array], jax.Array] | None]
+    str, Tuple[ArrayLike | str, Callable[[ArrayLike], ArrayLike] | None]
 ]  # Metrics to be buffered: name -> (values, optional agg_fn)
 
 

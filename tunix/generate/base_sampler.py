@@ -37,10 +37,12 @@ class SamplerOutput:
   logits: Optional[list[jax.Array] | jax.Array]
 
   # Tokens corresponding to the generated samples.
-  tokens: list[jax.Array] | jax.Array
+  # Since tokens need to be transfered to RAM for decoding, we use numpy array
+  # here.
+  tokens: list[np.ndarray] | np.ndarray
 
   # Left padded prompt tokens.
-  padded_prompt_tokens: jax.Array
+  padded_prompt_tokens: np.ndarray
 
   logprobs: Optional[list[float]]
 

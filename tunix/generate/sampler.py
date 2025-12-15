@@ -699,7 +699,7 @@ class Sampler(base_sampler.BaseSampler):
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
 
-    all_input_ids = jnp.array([
+    all_input_ids = np.array([
         utils.pad_to_length(
             x,
             target_length=max_prompt_length,
@@ -721,7 +721,7 @@ class Sampler(base_sampler.BaseSampler):
     elif isinstance(seed, int):
       seed = jax.random.PRNGKey(seed)
     sampling_state = self.init_sample_state(
-        all_input_ids,
+        jnp.array(all_input_ids),
         include_logits=return_logits,
         total_sampling_steps=total_sampling_steps,
         forbidden_token_ids=forbidden_token_ids,
@@ -786,7 +786,7 @@ class Sampler(base_sampler.BaseSampler):
             )
             + max_prompt_length
         )
-        out_tokens.append(token_buffer[start_idx:end_idx])
+        out_tokens.append(jax.device_get(token_buffer[start_idx:end_idx]))
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
         lengths.append(end_idx - start_idx)

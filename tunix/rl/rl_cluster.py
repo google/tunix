@@ -36,6 +36,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
+import numpy as np
 import optax
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
@@ -614,22 +615,17 @@ class RLCluster:
     for metric_name, (value, op) in metrics_buffer.metrics.items():
       if isinstance(value[0], str):
         continue  # jax.monitoring does not support string values.
-      if op is None:
-        self._rl_metrics_logger.log(  # pytype: disable=wrong-arg-types
-            "global",
-            metric_name,
-            value,
-            metrics_buffer.mode,
-            metrics_buffer.global_steps,
-        )
-      else:
-        self._rl_metrics_logger.log(
-            "global",
-            metric_name,
-            op(jnp.array(value)),
-            metrics_buffer.mode,
-            metrics_buffer.global_steps,
-        )
+
+      agg_value = np.array(value)
+      if op is not None:
+        agg_value = op(agg_value)
+      self._rl_metrics_logger.log(
+          "global",
+          metric_name,
+          agg_value,
+          metrics_buffer.mode,
+          metrics_buffer.global_steps,
+      )
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
 
@@ -810,9 +806,7 @@ class RLCluster:
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
-        span.device_end(
-            [[o.logits, o.tokens, o.left_padded_prompt_tokens] for o in outputs]
-        )
+        span.device_end([o.logits for o in outputs])
 
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -833,8 +827,8 @@ class RLCluster:
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
-        tokens=jnp.concatenate([out.tokens for out in outputs], axis=0),
-        left_padded_prompt_tokens=jnp.concatenate(
+        tokens=np.concatenate([out.tokens for out in outputs], axis=0),
+        left_padded_prompt_tokens=np.concatenate(
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,

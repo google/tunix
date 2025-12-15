@@ -33,6 +33,7 @@ TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
 
+
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   pass
@@ -211,17 +212,21 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ),
     )
     completion_ids = rollout_output.tokens
-    prompt_ids = rollout_output.left_padded_prompt_tokens
+    prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
     completion_text = rollout_output.text
 
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
-    completion_padding_mask = jnp.not_equal(completion_ids, pad_value)
-    completion_mask = common.make_completion_mask(
+    completion_padding_mask = np.not_equal(completion_ids, pad_value)
+    completion_mask = common.np_make_completion_mask(
         completion_ids, eos_tok=eos_value
     )
     # Apply the padding mask to the completion mask.
     completion_mask = completion_mask * completion_padding_mask
+
+    # Convert completion_ids and completion_mask to jax arrays
+    jax_completion_ids = jnp.array(completion_ids)
+    jax_completion_mask = jnp.array(completion_mask)
 
     if self.algo_config.beta != 0.0:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
@@ -229,7 +234,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       with self.rl_cluster.perf.span("refer_inference", devices) as interval:
         ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
             prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
+            completion_tokens=jax_completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=(
@@ -247,7 +252,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       ) as interval:
         old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
             prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
+            completion_tokens=jax_completion_ids,
             micro_batch_size=(
                 self._compute_logps_micro_batch_size
                 * self.algo_config.num_generations
@@ -304,8 +309,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
-        completion_ids=completion_ids,
-        completion_mask=completion_mask,
+        completion_ids=jax_completion_ids,
+        completion_mask=jax_completion_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         old_per_token_logps=old_per_token_logps,

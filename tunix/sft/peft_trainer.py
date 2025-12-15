@@ -418,7 +418,7 @@ class PeftTrainer:
       additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
-    perplexity = np.exp(loss)
+    perplexity = np.exp(jax.device_get(loss))
     self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)
     self.metrics_logger.log(
         self.metrics_prefix, "perplexity", perplexity, self._mode, step

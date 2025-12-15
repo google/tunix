@@ -95,17 +95,17 @@ def pad_to_length(
     left=False,
     axis: int = 0,
 ) -> np.ndarray:
-  """Pads a JAX array to a specified target length along a given axis.
+  """Pads a numpy array to a specified target length along a given axis.
 
   Args:
-      x: The JAX array to pad.
+      x: The numpy array to pad.
       target_length: The desired length of the padded array.
       pad_value: The value to use for padding (default: 0).
       left: If True, add padding tokens to the left of the array.
       axis: The axis along which to pad (default: 0).
 
   Returns:
-      A new JAX array that is padded to the target length along the specified
+      A new numpy array that is padded to the target length along the specified
       axis. Returns original array if it is already longer than the target
       length.
   """
