@@ -5,6 +5,7 @@ https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
 
 import logging
+
 from sphinx.util import logging as sphinx_logging
 
 # -- Project information -----------------------------------------------------
@@ -111,7 +112,7 @@ napoleon_include_init_with_doc = False
 autodoc_default_options = {
     "members": True,
     "imported-members": True,
-    #   "undoc-members": True,
+    "undoc-members": True,
 }
 
 
@@ -123,26 +124,28 @@ intersphinx_mapping = {
 
 
 class FilterSphinxWarnings(logging.Filter):
-    """Filter autosummary 'duplicate object description' warnings.
+  """Filter autosummary 'duplicate object description' warnings.
 
-    These warnings are unnecessary as they do not cause missing documentation
-    or rendering issues, so it is safe to filter them out.
-    """
+  These warnings are unnecessary as they do not cause missing documentation
+  or rendering issues, so it is safe to filter them out.
+  """
 
-    def __init__(self, app):
-        self.app = app
-        super().__init__()
+  def __init__(self, app):
+    self.app = app
+    super().__init__()
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        filter_out = ("duplicate object description",)
-        return not msg.strip().startswith(filter_out)
+  def filter(self, record: logging.LogRecord) -> bool:
+    msg = record.getMessage()
+    filter_out = ("duplicate object description",)
+    return not msg.strip().startswith(filter_out)
 
 
 def setup(app):
-    """Set up custom logging filters."""
-    logger = logging.getLogger('sphinx')
-    warning_handler, *_ = [
-        h for h in logger.handlers if isinstance(h, sphinx_logging.WarningStreamHandler)
-    ]
-    warning_handler.filters.insert(0, FilterSphinxWarnings(app))
+  """Set up custom logging filters."""
+  logger = logging.getLogger("sphinx")
+  warning_handler, *_ = [
+      h
+      for h in logger.handlers
+      if isinstance(h, sphinx_logging.WarningStreamHandler)
+  ]
+  warning_handler.filters.insert(0, FilterSphinxWarnings(app))
