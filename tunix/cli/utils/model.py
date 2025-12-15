@@ -259,9 +259,9 @@ def _create_gemma_model_from_params(
   params_lib = get_model_module(model_name, ModelModule.PARAMS)
   model_params = params_lib.load_and_format_params(params_path)
   model_module_lib = get_model_module(model_name, ModelModule.MODEL)
-  model_family, version = naming.split(model_name)
+  family, version = naming.get_model_family_and_version(model_name)
   # TODO(b/451662153): have gemma2 version handling done better in naming.py
-  if model_family == 'gemma2':
+  if family == 'gemma2':
     version = f'2-{version}'
   model = model_module_lib.Gemma.from_params(model_params, version=version)
   return model, model_params

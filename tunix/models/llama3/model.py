@@ -156,7 +156,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def llama3_405b(cls):
+  def llama3p1_405b(cls):
     return cls(
         num_layers=126,
         vocab_size=128256,

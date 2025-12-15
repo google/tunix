@@ -26,28 +26,27 @@ that would be used to download the model from HF.
 
 model_name:
 The unique full name identifier of the model. This should be the full name and
-should match exactlywith the model name used in Hugging Face. e.g.,
-"gemma-2b","llama3.1-8b", "qwen2.5-0.5b". The model name is all lowercase and
-typically formatted as <model-family>-<model-version>
+should match exactly with the model name used in Hugging Face. e.g.,
+"gemma-2b","llama-3.1-8b", "qwen2.5-0.5b". The model name is all lowercase and
+typically formatted as <model-family>-<model-version>.
 
 model_family:
-The overall model family, e.g., "gemma", "gemma2", or "qwen2.5". Typically the
-first part of the model name. Internally, we use the standardized version of the
-model family, e.g., "qwen2.5" would be standardized to "qwen2_5".
+The overall model family, e.g., "gemma", "gemma2", or "qwen2.5". Internally, we
+use the standardized version of the model family, removing unnecessary '-',
+e.g., "gemma-2" would be standardized to "gemma2", replacing '-' with '_',  and
+replacing '.' with 'p',  e.g., "qwen2.5" would be standardized to "qwen2p5".
 
 model_version:
 The specific version of this model family. This would be the second portion of
 the model name. It usually includes the size information, but also can have
-other information, e.g., `it` representing instruction tuned. Internally, the
-model version is standardized by lowercasing, replacing hyphens and dots with
-underscores, and removing any leading underscore. e.g., "2b-it" would become
-"2b_it".
+other information, e.g., "it" representing instruction tuned. Internally, the
+model version is standardized by lowercasing, replacing '-' with '_',  and
+replacing '.' with 'p'. e.g., "2b-it" would be standardized to "2b_it".
 
 model_config_category:
 The model config category is the python class name of the ModelConfig class.
-e.g.,
-both gemma and gemma2 models  have the category "gemma" with the ModelConfig
-class being defined under gemma/model.py."
+e.g.,both gemma and gemma2 models  have the category "gemma" with the
+ModelConfig class being defined under gemma/model.py."
 
 model_config_id:
 The model config ID is the standardized version of the model family and model
@@ -58,6 +57,8 @@ version. It is used as the ID of the ModelConfig class. e.g., "gemma_2b_it" or
 # descriptions in //third_party/py/tunix/cli/base_config.yaml.
 
 import dataclasses
+import immutabledict
+
 
 @dataclasses.dataclass(frozen=True)
 class _ModelFamilyInfo:
@@ -70,22 +71,26 @@ class _ModelFamilyInfo:
 # Mapping of all model families from the hugging face model id to the internal
 # model_family and config_category. Key is the prefix of the hugging face model
 # id and value is the internal model family and config_category.
-_MODEL_FAMILY_INFO_MAPPING = {
-    'gemma': _ModelFamilyInfo(family='gemma', config_category='gemma'),
-    'gemma1.1': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
-    'gemma2': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
-    # Support both gemma3 and gemma-3 as model prefixes.
-    'gemma3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
-    'gemma-3': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
-    'llama3': _ModelFamilyInfo(family='llama3', config_category='llama3'),
-    'llama3.1': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
-    'llama3.2': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
-    'qwen2.5': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
-    'qwen3': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
-    'deepseek-r1-distill-qwen': _ModelFamilyInfo(
+_MODEL_FAMILY_INFO_MAPPING = immutabledict.immutabledict({
+    'gemma-': _ModelFamilyInfo(family='gemma', config_category='gemma'),
+    'gemma1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
+    'gemma-1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
+    'gemma2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
+    'gemma-2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
+    'gemma3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
+    'gemma-3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
+    'llama3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
+    'llama-3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
+    'llama3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
+    'llama-3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
+    'llama3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
+    'llama-3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
+    'qwen2.5-': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
+    'qwen3-': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
+    'deepseek-r1-distill-qwen-': _ModelFamilyInfo(
         family='deepseek_r1_distill_qwen', config_category='qwen2'
     ),
-}
+})
 
 
 def split(model_name: str) -> tuple[str, str]:
@@ -99,7 +104,7 @@ def split(model_name: str) -> tuple[str, str]:
     model_name: The model name, e.g., llama3.1-8b.
 
   Returns:
-    A tuple containing the un-standardized model_family andmodel_version.
+    A tuple containing the un-standardized model_family and model_version.
   """
   model_name = model_name.lower()
   matched_family = ''
