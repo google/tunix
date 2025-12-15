@@ -34,6 +34,7 @@ from flax import nnx
 import fsspec
 import grain
 import jax
+from jax._src import mesh_utils
 import optax
 from orbax import checkpoint as ocp
 import qwix
@@ -256,14 +257,6 @@ def validata_args():
 logging.set_verbosity(
     script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING)
 )
-
-# ====== Data ======
-# The data is not available in gcs bucket yet, please manually copy the
-# ====== Data ======
-# The data is not available in gcs bucket yet, please manually copy the
-# following data to your local TRAIN_DATA_PATH (to avoid leakr error using *):
-# /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_train.json
-# /***/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_test.json
 
 GCS_BUCKET_PREFIX = "gs://tunix/"
 PROFILER_SUBDIR = "rl/grpo/profiler/"
@@ -701,10 +694,15 @@ if DO_MODEL_DISPLAY:
 
 show_hbm_usage("After creating the reference lora model")
 
-# Rollout mesh
-rollout_mesh = jax.make_mesh(
-    *ROLLOUT_MESH,
+rollout_device_arrays = mesh_utils.create_device_mesh(
+    ROLLOUT_MESH[0],
     devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
+    allow_split_physical_axes=True,
+)
+
+rollout_mesh = jax.sharding.Mesh(
+    rollout_device_arrays,
+    ROLLOUT_MESH[1],
     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
 
@@ -998,11 +996,11 @@ def evaluate(
 
 show_hbm_usage("After creating a raw sampler")
 
+
 # Ckpt saving
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
-
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
@@ -1108,6 +1106,7 @@ grpo_config = grpo_learner.GRPOConfig(
     epsilon=EPSILON,
 )
 
+
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=training_model,
@@ -1129,6 +1128,7 @@ grpo_trainer = grpo_learner.GRPOLearner(
 )
 
 show_hbm_usage("After creating the learner")
+
 
 rollout_sampler = rl_cluster._rollout._sampler  # pylint: disable=protected-access
 (eval_corr, eval_total, eval_accuracy, eval_partial_accuracy, eval_format_accuracy) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
