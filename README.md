@@ -123,8 +123,8 @@ To get started, we have a bunch of detailed examples and tutorials.
 To setup Jupyter notebook on single host GCP TPU VM, please refer to the
 [setup script](https://github.com/google/tunix/blob/main/scripts/setup_notebook_tpu_single_host.sh).
 
-We plan to provide clear, concise documentation and more examples in the near
-future.
+For the AI-powered interactive documentation, please check out [Tunix on Google 
+CodeWiki](https://codewiki.google/github.com/google/tunix).
 
 ## Contributing and Feedbacks
 
