@@ -784,33 +784,52 @@ class HyperParameters:
     project_root = get_project_root()
     reward_fns = []
     for reward_fn_path in self.config["reward_functions"]:
-      full_path = str(project_root / reward_fn_path)
-      module_name = os.path.splitext(os.path.basename(full_path))[0]
-      # load from source
-      loader = importlib.machinery.SourceFileLoader(module_name, full_path)
-      spec = importlib.util.spec_from_loader(module_name, loader)
 
-      if spec is None:
-        raise ImportError(f"Cannot find spec for module at {full_path}")
-      if spec.loader is None:
-        raise ImportError(f"Spec for module {module_name} has no loader")
+      module = None
+      # If the path is relative, try importing the module directly.
+      if "/" not in reward_fn_path:
+        try:
+          module = importlib.import_module(reward_fn_path)
+          module_name = module.__name__
+        except Exception as e:
+          logging.warning(
+              "'%s' import failed: %s", reward_fn_path, e, exc_info=True
+          )
+          module = None
 
-      module = importlib.util.module_from_spec(spec)
+      # Try importing the module from the project root.
+      if module is None:
+        full_path = str(project_root / reward_fn_path)
+        module_name = os.path.splitext(os.path.basename(full_path))[0]
+        # load from source
+        loader = importlib.machinery.SourceFileLoader(module_name, full_path)
+        spec = importlib.util.spec_from_loader(module_name, loader)
 
-      try:
-        spec.loader.exec_module(module)
-      except Exception as e:
-        raise ImportError(
-            f"Failed to execute module {module_name} from {full_path}: {e}"
+        if spec is None:
+          raise ImportError(f"Cannot find spec for module at {full_path}")
+        if spec.loader is None:
+          raise ImportError(f"Spec for module {module_name} has no loader")
+
+        module = importlib.util.module_from_spec(spec)
+
+        try:
+          spec.loader.exec_module(module)
+        except Exception as e:
+          raise ImportError(
+              f"Failed to execute module {module_name} from {full_path}"
+          ) from e
+      if module is None:
+        raise RuntimeError(
+            f"Module from path '{reward_fn_path}' failed to load."
         )
 
+      loaded_module = module
       if self.config["verl_compatible"]:
-
         def reward_fn(prompts, completions, reward_model, **kwargs):
           del prompts, kwargs
           ground_truths = reward_model["ground_truth"]
           return [
-              module.compute_score(c, gt)
+              loaded_module.compute_score(c, gt)
               for c, gt in zip(completions, ground_truths)
           ]
 

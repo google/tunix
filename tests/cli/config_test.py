@@ -473,6 +473,30 @@ class ConfigTest(parameterized.TestCase):
     ):
       hp.obtain_reward_fn()
 
+  def test_obtain_reward_fn_absolute_path_outside_project(self):
+    """Tests loading a reward function from an absolute FILE path outside the project root."""
+    hp = self.initialize_config([])
+    tmp_dir = self.create_tempdir()
+    tmp_dir_str = tmp_dir.full_path
+    external_root = Path(tmp_dir_str) / "some_other_project"
+    external_root.mkdir()
+    external_module_file = external_root / "external_reward.py"
+    module_content = "def external_reward_func(val): return val * 10"
+    external_module_file.write_text(module_content)
+    abs_path = str(external_module_file.resolve())
+    hp.config["reward_functions"] = [abs_path]
+    hp.config["verl_compatible"] = False
+
+    with mock.patch.object(
+        config,
+        "get_project_root",
+        return_value=Path("/irrelevant/tunix/project"),
+    ):
+      reward_fns = hp.obtain_reward_fn()
+      self.assertLen(reward_fns, 1)
+      self.assertEqual(reward_fns[0].__name__, "external_reward_func")
+      self.assertEqual(reward_fns[0](5), 50)
+
 
 if __name__ == "__main__":
   if "HF_TOKEN" not in os.environ:
