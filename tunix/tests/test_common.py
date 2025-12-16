@@ -147,6 +147,9 @@ class ToyTransformer(nnx.Module):
   def num_embed(self) -> int:
     return self.emb.num_embeddings
 
+  def get_model_input(self):
+    return get_dummy_inputs_for_lora_toy_transformer_tests()
+
 
 def get_dummy_inputs_for_lora_toy_transformer_tests():
   return {
