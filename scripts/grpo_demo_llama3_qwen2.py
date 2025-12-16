@@ -59,7 +59,7 @@ if os.getenv("JAX_PLATFORMS", None) == "proxy":
 
   pathwaysutils.initialize()
 
-get_dataset = math_dataset.create_dataset
+create_dataset = math_dataset.create_dataset
 show_hbm_usage = utils.show_hbm_usage
 
 print("This script is still WIP and try at your own discretion")
@@ -232,7 +232,7 @@ parser.add_argument(
 parser.add_argument(
     "--data-source",
     type=str,
-    default="local",
+    default="tfds",
     required=False,
     help="Data source of dataset",
 )
@@ -570,12 +570,12 @@ def extract_hash_answer(text: str) -> str | None:
   return text.split("####")[1].strip()
 
 
-dataset = get_dataset(
+dataset = create_dataset(
     args.data_source,
     args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
-    # LOCAL_TRAIN_DATA_DIR,
     args.global_batch_size,
     NUM_BATCHES,
+    tfds_download=True,
 )
 
 if TRAIN_FRACTION == 1.0:
@@ -587,11 +587,12 @@ else:
 
   val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 
-test_dataset = get_dataset(
+test_dataset = create_dataset(
     args.data_source,
     args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
     args.global_batch_size,
     NUM_TEST_BATCHES,
+    tfds_download=True,
 )
 
 print(

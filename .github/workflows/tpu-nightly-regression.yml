@@ -92,28 +92,52 @@ jobs:
         mkdir -p /tmp/grpo_test/rl/grpo/data
 
         FAILED=0
-        echo "Running examples/deepscaler/math_eval_nb.py..."
+        echo "📦 Executing: examples/deepscaler/math_eval_nb.py..."
         python examples/deepscaler/math_eval_nb.py || FAILED=1
 
-        echo "Running scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=100|| FAILED=1
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 || FAILED=1
 
-        echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=100 --rollout-engine=vllm || FAILED=1
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way || FAILED=1
 
-        # Server mode only makes sense with disaggregated mode.
-        # echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm server mode..."
-        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=100 --rollout-engine=vllm --rollout-server-mode=True || FAILED=1
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way || FAILED=1
 
         # SGLang Tests
         unset JAX_PLATFORMS
         pip list | egrep 'jax|flax|libtpu'
         cd ..
         git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
-        pip install jax==0.8.0 flax==0.12.0 libtpu==0.0.24
+        pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24
         pip list | egrep 'jax|flax|libtpu'
-        cd tunix && python scripts/grpo_demo_sglang_jax_rollout.py --num-batches=100 || FAILED=1
+        cd tunix
+        
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax || FAILED=1
 
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way || FAILED=1
+
+    
         if [ "$FAILED" -ne 0 ]; then
           echo "One or more scripts failed!"
           exit 1
@@ -124,7 +148,7 @@ jobs:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         SCRIPT_DIR="./tunix/examples/sft/mtnt"
-        MAX_STEPS=1
+        MAX_STEPS=5
         EVAL_EVERY_N_STEPS=1
 
         # Check if directory exists
@@ -158,7 +182,7 @@ jobs:
       run: |
         SCRIPT_DIR="./tunix/examples/rl/grpo/gsm8k"
         EXCLUDE_DIR="verl_compatible"
-        MAX_STEPS=1
+        MAX_STEPS=5
         EVAL_EVERY_N_STEPS=1
 
         if [ ! -d "$SCRIPT_DIR" ]; then
