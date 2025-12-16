@@ -476,8 +476,10 @@ class ConfigTest(parameterized.TestCase):
   def test_obtain_reward_fn_absolute_path_outside_project(self):
     """Tests loading a reward function from an absolute FILE path outside the project root."""
     hp = self.initialize_config([])
-    tmp_dir = self.create_tempdir()
-    tmp_dir_str = tmp_dir.full_path
+    try:
+      tmp_dir_str = self.create_tempdir().full_path
+    except Exception:  # pylint: disable=broad-except
+      tmp_dir_str = tempfile.TemporaryDirectory().name
     external_root = Path(tmp_dir_str) / "some_other_project"
     external_root.mkdir()
     external_module_file = external_root / "external_reward.py"
