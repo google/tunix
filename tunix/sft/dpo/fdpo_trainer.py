@@ -248,7 +248,7 @@ class FDPOTrainer(peft_trainer.PeftTrainer):
   separate description (answer) and reasoning segments.
 
   References:
-  - Based on fDPO concepts for segment-level preference optimization
+  https://plan-lab.github.io/projects/spatialreasoner/
   """
 
   def __init__(
