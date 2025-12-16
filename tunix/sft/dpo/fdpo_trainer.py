@@ -248,7 +248,10 @@ class FDPOTrainer(peft_trainer.PeftTrainer):
   separate description (answer) and reasoning segments.
 
   References:
-  https://plan-lab.github.io/projects/spatialreasoner/
+  Yifan Shen, Yuanzhe Liu, Jingyuan Zhu, Xu Cao, Xiaofeng Zhang, Yixiao He, Wenming Ye, James Matthew Rehg, and Ismini Lourentzou, 
+  Fine-Grained Preference Optimization Improves Spatial Reasoning in VLMs, 
+  In Proceedings of the Conference on Neural Information Processing Systems (NeurIPS) 2025
+  https://plan-lab.github.io/
   """
 
   def __init__(
