@@ -22,6 +22,12 @@ on:
     secrets:
       HF_TOKEN:
         description: 'HuggingFace token for model downloads'
+      KAGGLE_USERNAME:
+        description: 'Kaggle Username'
+        required: true
+      KAGGLE_KEY:
+        description: 'Kaggle API Key'
+        required: true    
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
