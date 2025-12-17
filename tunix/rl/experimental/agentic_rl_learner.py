@@ -84,7 +84,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       rl_cluster: rl_cluster_lib.RLCluster,
       algo_config: TConfig,
       reward_fns: RewardFn | List[RewardFn],
-      chat_parser: Any,
+      chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
   ):
