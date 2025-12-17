@@ -324,6 +324,7 @@ class AutoModel:
       mesh: jax.sharding.Mesh,
       *,
       model_source: ModelSource = ModelSource.HUGGINGFACE,
+      model_path: str | None = None,
       model_download_path: str | None = None,
       **kwargs,
   ) -> tuple[nnx.Module, str | None]:
@@ -342,17 +343,19 @@ class AutoModel:
         mesh: The JAX sharding Mesh object.
         model_source: The source of the model (e.g., Kaggle, HuggingFace, GCS).
           Default is HuggingFace.
+        model_path: The path to the model. This is particularly used for sources
+          with paths that cannot be inferred from the model id, e.g., GCS and
+          INTERNAL.
         model_download_path: The local directory where the model should be
           downloaded. The corresponding model_source will handle `None` cases
           differently.
         **kwargs: Additional keyword arguments passed to the underlying model
           creation functions. - For ModelSource.KAGGLE, Gemma models:
-          `intermediate_ckpt_dir` , `rng_seed` - For ModelSource.INTERNAL, all
-          models, `model_path` (required): The path to the model checkpoint
+          `intermediate_ckpt_dir` , `rng_seed`
 
     Returns:
         The loaded nnx.Module model.
-        The model_path: The path where the model was downloaded.
+        The path where the model was downloaded to.
     """
 
     model: nnx.Module = None
@@ -360,23 +363,24 @@ class AutoModel:
     model_name = naming.get_model_name_from_model_id(model_id)
 
     # Download the model
-    if model_source == ModelSource.INTERNAL:
-      model_id_or_path = kwargs.get('model_path')
+    if model_source in (ModelSource.INTERNAL, ModelSource.GCS):
+      if model_path is None:
+        raise ValueError(
+            'model_path is required for model_source: '
+            f'{model_source}. Please provide a valid model_path.'
+        )
+      model_id_or_path = model_path
     else:
       model_id_or_path = model_id
-    model_path = download_model(
+    resolved_model_path = download_model(
         model_id_or_path, model_download_path, model_source
     )
 
     # Case 1: Special handling cases for Gemma models
     if model_name.startswith(('gemma3', 'gemma-3')):
-      if model_source == ModelSource.GCS:
+      if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         model, model_params = create_gemma3_model_from_checkpoint(
-            ckpt_path=model_id, model_name=model_name, mesh=mesh
-        )
-      elif model_source == ModelSource.INTERNAL:
-        model, model_params = create_gemma3_model_from_checkpoint(
-            ckpt_path=model_path, model_name=model_name, mesh=mesh
+            ckpt_path=resolved_model_path, model_name=model_name, mesh=mesh
         )
       else:
         raise NotImplementedError(
@@ -396,14 +400,14 @@ class AutoModel:
         rng_seed = kwargs.get('rng_seed', 0)
         model, model_params = create_gemma_model_with_nnx_conversion(
             model_name=model_name,
-            ckpt_path=model_path,
+            ckpt_path=resolved_model_path,
             intermediate_ckpt_dir=intermediate_ckpt_dir,
             rng_seed=rng_seed,
             mesh=mesh,
         )
       elif model_source == ModelSource.INTERNAL:
         model, model_params = create_gemma_model_from_params(
-            params_path=model_path, model_name=model_name
+            params_path=resolved_model_path, model_name=model_name
         )
       else:
         raise NotImplementedError(
@@ -426,9 +430,9 @@ class AutoModel:
       with mesh:
         model = create_model_from_safe_tensors(
             model_name,
-            model_path,
+            resolved_model_path,
             model_params,
             mesh,
         )
 
-    return model, model_path
+    return model, resolved_model_path

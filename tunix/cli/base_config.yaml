@@ -20,8 +20,12 @@ model_config: &base_model_config
   # Chagne model source to your downloading model workflow. Example: "kaggle" | "huggingface" | "gcs" | ""
   model_source: "huggingface"
 
-  # Replace it with your own model checkpoint directory.
+  # Full model identifier, either from huggingface or kaggle, e.g., "meta-llama/Llama-3.1-8B"
   model_id: "meta-llama/Llama-3.1-8B"
+
+  # For models from GCS or internal sources, specify the path to the model files.
+  model_path: ""
+
   ################################## Checkpoint ##################################
   # for model downloaded from huggingface or kaggle, copy model to local directory.
   model_download_path: "/tmp/models"
