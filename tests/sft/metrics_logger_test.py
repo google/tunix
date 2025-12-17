@@ -6,6 +6,7 @@ import tempfile
 from unittest import mock
 
 from absl.testing import absltest
+import jax
 import metrax.logging as metrax_logging
 from tunix.sft import metrics_logger
 from tunix.utils import env_utils
@@ -21,21 +22,23 @@ class MetricLoggerTest(absltest.TestCase):
 
     if env_utils.is_internal_env():
       self.mock_backends.append(
-          self.enter_context(mock.patch("tunix.sft.metrics_logger.CluBackend"))
+          self.enter_context(
+              mock.patch.object(metrics_logger, "CluBackend")
+          )
       )
     else:
       self.mock_backends.append(
           self.enter_context(
-              mock.patch("tunix.sft.metrics_logger.TensorboardBackend")
+              mock.patch.object(metrics_logger, "TensorboardBackend")
           )
       )
       self.mock_backends.append(
           self.enter_context(
-              mock.patch("tunix.sft.metrics_logger.WandbBackend")
+              mock.patch.object(metrics_logger, "WandbBackend")
           )
       )
 
-  @mock.patch("jax.monitoring.register_scalar_listener")
+  @mock.patch.object(jax.monitoring, "register_scalar_listener")
   def test_custom_backends_override_defaults(self, mock_register):
     """Tests that providing a 'backends' list overrides the defaults."""
     mock_backend_instance = mock.Mock(spec=metrax_logging.LoggingBackend)
@@ -55,7 +58,7 @@ class MetricLoggerTest(absltest.TestCase):
     logger.close()
     mock_backend_instance.close.assert_called_once()
 
-  @mock.patch("jax.monitoring.register_scalar_listener")
+  @mock.patch.object(jax.monitoring, "register_scalar_listener")
   def test_defaults_are_used_when_no_backends_provided(self, mock_register):
     """Tests that defaults are created when 'backends' is None."""
     options = metrics_logger.MetricsLoggerOptions(log_dir=self.log_dir)
@@ -73,7 +76,7 @@ class MetricLoggerTest(absltest.TestCase):
     for backend_mock in self.mock_backends:
       backend_mock.return_value.close.assert_called_once()
 
-  @mock.patch("jax.monitoring.register_scalar_listener")
+  @mock.patch.object(jax.monitoring, "register_scalar_listener")
   def test_logger_handles_missing_wandb_gracefully(self, mock_register):
     """Tests that the logger doesn't crash if wandb is not installed."""
     # wandb is not supported in internal environment.
@@ -118,7 +121,7 @@ class MetricLoggerTest(absltest.TestCase):
     logger1.close()
     logger2.close()
 
-  @mock.patch("jax.monitoring.record_scalar")
+  @mock.patch.object(jax.monitoring, "record_scalar")
   def test_log_metrics(self, mock_record_scalar):
     options = metrics_logger.MetricsLoggerOptions(
         log_dir=self.log_dir, backend_factories=[]
@@ -139,7 +142,7 @@ class MetricLoggerTest(absltest.TestCase):
     self.assertAlmostEqual(history[0], 0.1)
     self.assertAlmostEqual(history[1], 0.05)
 
-  @mock.patch("jax.monitoring.record_scalar")
+  @mock.patch.object(jax.monitoring, "record_scalar")
   def test_log_perplexity(self, mock_record_scalar):
     options = metrics_logger.MetricsLoggerOptions(
         log_dir=self.log_dir, backend_factories=[]
@@ -156,8 +159,8 @@ class MetricLoggerTest(absltest.TestCase):
         logger.get_metric("test_prefix", "perplexity", "eval"), 31.6227766
     )
 
-  @mock.patch("jax.process_index", return_value=1)
-  @mock.patch("jax.monitoring.register_scalar_listener")
+  @mock.patch.object(jax, "process_index", return_value=1)
+  @mock.patch.object(jax.monitoring, "register_scalar_listener")
   def test_no_backends_on_secondary_process(
       self,
       mock_register,
@@ -172,13 +175,13 @@ class MetricLoggerTest(absltest.TestCase):
     mock_register.assert_not_called()
     logger.close()
 
-  @mock.patch("tunix.utils.env_utils.is_internal_env", return_value=True)
+  @mock.patch.object(env_utils, "is_internal_env", return_value=True)
   def test_raises_when_clu_backend_missing_in_internal_env(
       self, mock_is_internal_env
   ):
     del mock_is_internal_env
     # We need to patch CluBackend to be None in the module.
-    with mock.patch("tunix.sft.metrics_logger.CluBackend", new=None):
+    with mock.patch.object(metrics_logger, "CluBackend", new=None):
       options = metrics_logger.MetricsLoggerOptions(log_dir=self.log_dir)
       with self.assertRaisesRegex(
           ImportError,

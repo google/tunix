@@ -300,7 +300,7 @@ class ConfigTest(parameterized.TestCase):
           expected=((2, 2), ("x", "y")),
       ),
   )
-  @mock.patch("jax.device_count")
+  @mock.patch.object(jax, 'device_count')
   def test_create_mesh_valid(
       self, mock_device_count_fn, raw_keys, mock_num_devices, expected
   ):
@@ -386,7 +386,7 @@ class ConfigTest(parameterized.TestCase):
           error_regex="requires 6 devices, but found 5",
       ),
   )
-  @mock.patch("jax.device_count")
+  @mock.patch.object(jax, 'device_count')
   def test_create_mesh_invalid(
       self,
       mock_device_count_fn,
@@ -453,7 +453,7 @@ class ConfigTest(parameterized.TestCase):
 
     hp.config["reward_functions"] = ["tunix/cli/reward_fn/dummy.py"]
 
-    with mock.patch("tunix.cli.config.get_project_root", return_value=root):
+    with mock.patch.object(config, 'get_project_root', return_value=root):
       original_cwd = os.getcwd()
       try:
         os.chdir(run_dir)

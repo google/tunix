@@ -22,6 +22,7 @@ from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
+from tunix.rl.agentic import utils
 
 
 class TrajectoryCollectEngineTest(absltest.TestCase):
@@ -146,7 +147,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ]
     self.assertEqual(conversation, expected_conversation)
 
-  @mock.patch('tunix.rl.agentic.utils.tokenize_and_generate_masks')
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_with_tokenization(self, mock_convert):
     mock_convert.side_effect = [
         ([101], [1]),  # prompt tokens
@@ -219,7 +220,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         mock_convert.call_args_list[4].kwargs['contains_generation_msg']
     )
 
-  @mock.patch('tunix.rl.agentic.utils.tokenize_and_generate_masks')
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_with_incomplete_tokenizer_config_skips_tokenization(
       self, mock_tokenize
   ):

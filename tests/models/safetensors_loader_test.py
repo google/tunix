@@ -137,8 +137,8 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     filename = os.path.join(st_dir_abs, 'model.safetensors')
     stnp.save_file(self.tensors, filename)
 
-    with mock.patch(
-        'tunix.models.safetensors_loader.load_file_from_gcs'
+    with mock.patch.object(
+        safetensors_loader, 'load_file_from_gcs'
     ) as mock_load:
       mock_load.return_value = st_dir_abs
       loaded_model = safetensors_loader.load_and_create_model(
