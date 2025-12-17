@@ -33,8 +33,8 @@ NamedSharding = jax.sharding.NamedSharding
 
 
 def is_positive_integer(value: int | None, name: str):
-  """Checks if the value is positive."""
-  if value is not None and (not value.is_integer() or value <= 0):
+  """Checks if the value is a positive integer."""
+  if value is not None and value <= 0:
     raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 
