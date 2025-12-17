@@ -22,6 +22,10 @@ on:
     secrets:
       HF_TOKEN:
         description: 'HuggingFace token for model downloads'
+      KAGGLE_USERNAME:
+        description: 'Kaggle Username'
+      KAGGLE_KEY:
+        description: 'Kaggle API Key'
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
@@ -113,7 +117,7 @@ jobs:
     - name: Run tunix tests not covered by the above categories
       run: |
         # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
-        python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ || code=$?
+        python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ || code=$?
         if [ "${code:-0}" = "5" ]; then
           echo "No tests collected (expected)."
           exit 0
@@ -234,6 +238,17 @@ jobs:
 
           export JAX_PLATFORMS=tpu,cpu
           ./tests/sft/sft_tpu_smoke_test.sh
+      - name: Run Smoke tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          echo "Running Smoke tests..."
+          echo HF_TOKEN: ${HF_TOKEN}
+          echo KAGGLE_USERNAME: ${KAGGLE_USERNAME}
+          echo KAGGLE_KEY: ${KAGGLE_KEY}
+          python -m pytest tests/smoke_tests/model_creation_test.py -v --tb=short
       - name: Run tunix cli tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
