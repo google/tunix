@@ -160,7 +160,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       mode: rl_cluster_lib.Mode,
       step: int | None = None,
       **kwargs,
-  ) -> jax.Array:
+  ) -> np.ndarray:
     """Computes the rewards for completions using the provided reward functions.
 
     Args:
@@ -171,10 +171,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
-      A JAX array (shape `[num_prompts]`) of scalar rewards for
+      A numpy array (shape `[B]`) of scalar rewards for
       each prompt-completion pair. The rewards are the sum across all the
-      provided
-      reward functions.
+      provided reward functions.
 
     Raises:
         RuntimeError: If 'r' reward is None, indicating a failure to obtain the
@@ -237,7 +236,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       else:
         self.rl_cluster.buffer_metrics(metrics_to_log, mode=mode)
 
-    return jnp.array(sum_rewards)
+    return sum_rewards
 
   def _process_accumulated_batches(
       self,

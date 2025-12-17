@@ -315,7 +315,8 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
           eos_id=eos_value,
       )[:, -logits_to_keep:]
       # We use the score corresponding to the last non-padding token.
-      last_token_scores = scores[jnp.arange(batch_size), eos_idx]
+      jax_last_token_scores = scores[jnp.arange(batch_size), eos_idx]
+      last_token_scores = jax.device_get(jax_last_token_scores)
     else:
       last_token_scores = self._compute_rewards(
           prompts=training_input["prompts"],
@@ -323,6 +324,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
+      jax_last_token_scores = jax.device_put(last_token_scores)
 
     # Reward computation is in accordance with other RL libraries
     # batch reward manager (token-level rewards).
@@ -331,7 +333,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # to the tensor of zeros.
     # 3. Subtract KL divergence from the reward tensor.
     rewards = jnp.zeros_like(jax_completion_ids)
-    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(last_token_scores)
+    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(
+        jax_last_token_scores
+    )
     if self.algo_config.beta != 0.0:
       # TODO(abheesht): Add a toggle - KL can either be added directly to
       # rewards or computed in the loss function.

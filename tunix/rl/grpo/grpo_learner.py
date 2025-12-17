@@ -312,7 +312,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         completion_ids=jax_completion_ids,
         completion_mask=jax_completion_mask,
         ref_per_token_logps=ref_per_token_logps,
-        advantages=advantages,
+        advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
     )
 
@@ -504,7 +504,7 @@ def grpo_loss_fn(
 
 
 @function_registry.register_advantage_estimator("grpo")
-def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
+def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   """Compute group relative advantages.
 
   Args:
