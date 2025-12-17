@@ -145,7 +145,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
+  def _qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
     return cls(
         num_layers=36,
         vocab_size=151936,
@@ -158,6 +158,14 @@ class ModelConfig:
         rope_theta=5_000_000,
         use_tied_embedding=True,
     )
+
+  @classmethod
+  def qwen3_4b_instruct_2507(cls):  # Qwen3-4B-Instruct-2507
+    return cls._qwen3_4b_2507()
+
+  @classmethod
+  def qwen3_4b_thinking_2507(cls):  # Qwen3-4B-Thinking-2507
+    return cls._qwen3_4b_2507()
 
   @classmethod
   def qwen3_8b(cls):  # qwen3-8B

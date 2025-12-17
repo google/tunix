@@ -66,7 +66,14 @@ def _get_all_models_test_parameters():
       dict(testcase_name="qwen3-0.6b", model_name="qwen3-0.6b"),
       dict(testcase_name="qwen3-1.7b", model_name="qwen3-1.7b"),
       dict(testcase_name="qwen3-4b", model_name="qwen3-4b"),
-      dict(testcase_name="qwen3-4b-2507", model_name="qwen3-4b-2507"),
+      dict(
+          testcase_name="qwen3-4b-instruct-2507",
+          model_name="qwen3-4b-instruct-2507",
+      ),
+      dict(
+          testcase_name="qwen3-4b-thinking-2507",
+          model_name="qwen3-4b-thinking-2507",
+      ),
       dict(testcase_name="qwen3-8b", model_name="qwen3-8b"),
       dict(testcase_name="qwen3-14b", model_name="qwen3-14b"),
       dict(testcase_name="qwen3-30b-a3b", model_name="qwen3-30b-a3b"),

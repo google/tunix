@@ -308,11 +308,19 @@ _TEST_MODEL_INFOS = (
         category='qwen3',
     ),
     ModelTestInfo(
-        id='Qwen/Qwen3-4B-2507',  #  Only superstring of the id exists on HF.
-        name='qwen3-4b-2507',
+        id='Qwen/Qwen3-4B-Instruct-2507',
+        name='qwen3-4b-instruct-2507',
         family='qwen3',
-        version='4b_2507',
-        config_id='qwen3_4b_2507',
+        version='4b_instruct_2507',
+        config_id='qwen3_4b_instruct_2507',
+        category='qwen3',
+    ),
+    ModelTestInfo(
+        id='Qwen/Qwen3-4B-Thinking-2507',
+        name='qwen3-4b-thinking-2507',
+        family='qwen3',
+        version='4b_thinking_2507',
+        config_id='qwen3_4b_thinking_2507',
         category='qwen3',
     ),
     ModelTestInfo(
