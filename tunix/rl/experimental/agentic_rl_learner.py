@@ -679,7 +679,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       train_micro_batch = filtered_train_micro_batch
 
       merged_train_micro_batch = jax.tree.map(
-          lambda *xs: np.concatenate(xs, axis=0), *train_micro_batch
+          lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
 
       # --- Evaluation Logic ---
