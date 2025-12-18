@@ -56,7 +56,6 @@ class ShardingConfig:
   ffw_weight_fd: Tuple[str | None, ...]
   rms_norm_weight: Tuple[str | None, ...]
   act_btd: Tuple[str | None, ...]
-  act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
   exp_weight_cdf: Tuple[str | None, ...]
   exp_weight_cfd: Tuple[str | None, ...]
@@ -75,7 +74,6 @@ class ShardingConfig:
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, None),
         act_btnh=('fsdp', None, 'tp', None),
         exp_weight_cdf=('fsdp', None, 'tp'),
         exp_weight_cfd=('fsdp', 'tp', None),
@@ -539,8 +537,8 @@ class MoELayer(nnx.Module):
       activations = nnx.silu(
           jnp.einsum('BTD,DF->BTF', expert_input, self.gate_proj[i])
       ) * jnp.einsum('BTD,DF->BTF', expert_input, self.up_proj[i])
-      activations = shard(activations, self.shd_config.act_btf)
       expert_output = jnp.einsum('BTF,FD->BTD', activations, self.down_proj[i])
+      expert_output = shard(expert_output, self.shd_config.act_btd)
       expert_outputs.append(expert_output)
 
     stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
@@ -595,8 +593,8 @@ class MLP(nnx.Module):
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
+    outputs = shard(outputs, self.shd_config.act_btd)
     return outputs
 
 

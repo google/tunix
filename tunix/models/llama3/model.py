@@ -56,7 +56,6 @@ class ShardingConfig:
   ffw_weight_fd: Tuple[str | None, ...]
   rms_norm_weight: Tuple[str | None, ...]
   act_btd: Tuple[str | None, ...]
-  act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
 
   @staticmethod
@@ -464,8 +463,8 @@ class MLP(nnx.Module):
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
+    outputs = shard(outputs, self.shd_config.act_btd)
     return outputs
 
 
