@@ -66,6 +66,8 @@ jobs:
     uses: ./.github/workflows/tpu-tests.yml
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
