@@ -95,8 +95,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
     )
-    nnx.update(self._model_runner.model, new_state)
-    self._model_runner.initialize_jit()  ## need to run initialize_jit to make it effective
+    new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
+    self._model_runner.model_state_leaves = new_model_state_leaves
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
