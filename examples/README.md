@@ -27,7 +27,7 @@ Examples for loading models from different formats:
 ### `rl/`
 Reinforcement learning examples and hardware resource requirements:
 - `grpo/gsm8k/` - GRPO implementation scripts for GSM8K mathematical reasoning tasks
-  - Launch scripts for various models (Gemma 7b, Gemma2 2b, Llama3.2 1b/8b)
+  - Launch scripts for various models (Gemma 7b, Gemma2 2b, Llama3.1 8b, Llama3.2 1b)
 - `README.md` - Detailed hardware resource requirements and configuration recommendations for RL training
 
 ### `sft/`
