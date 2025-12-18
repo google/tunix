@@ -75,7 +75,7 @@ class ShardingConfig:
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
+        act_btf=('fsdp', None, None),
         act_btnh=('fsdp', None, 'tp', None),
         exp_weight_cdf=('fsdp', None, 'tp'),
         exp_weight_cfd=('fsdp', 'tp', None),
