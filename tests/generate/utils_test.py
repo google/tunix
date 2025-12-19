@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from absl.testing import parameterized
+from flax import nnx
 import jax
 from jax import sharding
 import jax.numpy as jnp
@@ -684,3 +685,198 @@ class UtilsTest(parameterized.TestCase):
       # Should not raise an error
       result = utils.transfer_state_with_mappings(src, dst, mappings)
       self.assertEqual(result.params[key].shape, (4, 128))
+
+  def test_transfer_state_directly_simple_transfer(self):
+    """Tests direct state transfer with matching structures."""
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([1.0, 2.0]))))
+    )
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([0.0, 0.0]))))
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['weight'][...],
+        jnp.array([1.0, 2.0]),
+    )
+
+  def test_transfer_state_directly_unwraps_base_and_model(self):
+    """Tests unwrapping of 'base' from src and 'model' from dst."""
+    # Source has 'base' wrapper
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))))
+        )
+    )
+    # Dest has 'model' wrapper
+    dst_state = nnx.Dict(
+        model=nnx.Dict(
+            decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0))))
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['model']['decoder']['layer0']['weight'][...],
+        jnp.array(1.0),
+    )
+
+  def test_transfer_state_directly_intersects_keys(self):
+    """Tests that only common keys are transferred; extras are ignored."""
+    mock_reshard = lambda source, target: source
+
+    # Scenario 1: Source has more keys than destination, with no unique keys in destination
+    src_state_more_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(2.0))),
+            layer2=nnx.Dict(weight=nnx.Param(jnp.array(3.0))),  # Extra in src
+        )
+    )
+    dst_state_fewer_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(0.0))),
+        )
+    )
+
+    utils.transfer_state_directly(
+        src_state_more_keys, dst_state_fewer_keys, reshard_fn=mock_reshard
+    )
+
+    np.testing.assert_array_equal(
+        dst_state_fewer_keys['decoder']['layer0']['weight'][...],
+        jnp.array(1.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state_fewer_keys['decoder']['layer1']['weight'][...],
+        jnp.array(2.0),
+    )
+    self.assertFalse(hasattr(dst_state_fewer_keys['decoder'], 'layer2'))
+
+    # Scenario 2: Destination has more keys than source, with no unique keys in source
+    src_state_fewer_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(10.0))),
+        )
+    )
+    dst_state_more_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(20.0))),  # Extra in dst
+            layer2=nnx.Dict(weight=nnx.Param(jnp.array(30.0))),  # Extra in dst
+        )
+    )
+
+    utils.transfer_state_directly(
+        src_state_fewer_keys, dst_state_more_keys, reshard_fn=mock_reshard
+    )
+
+    np.testing.assert_array_equal(
+        dst_state_more_keys['decoder']['layer0']['weight'][...],
+        jnp.array(10.0),
+    )
+    # Extra keys in dst should be preserved
+    np.testing.assert_array_equal(
+        dst_state_more_keys['decoder']['layer1']['weight'][...],
+        jnp.array(20.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state_more_keys['decoder']['layer2']['weight'][...],
+        jnp.array(30.0),
+    )
+
+    # Original test case: Mixed extras in src and dst
+    src_state_mixed = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(2.0))),  # Extra in src
+        ),
+        rngs=nnx.Dict(),  # Extra in src
+    )
+    dst_state_mixed = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+        kv_cache=nnx.Dict(),  # Extra in dst
+    )
+
+    utils.transfer_state_directly(
+        src_state_mixed, dst_state_mixed, reshard_fn=mock_reshard
+    )
+
+    # Common key should be updated
+    np.testing.assert_array_equal(
+        dst_state_mixed['decoder']['layer0']['weight'][...], jnp.array(1.0)
+    )
+    # Extra key in dst should be preserved
+    self.assertIn('kv_cache', dst_state_mixed)
+    # Extra key in src ('layer1') should NOT be added to dst.
+    self.assertFalse(hasattr(dst_state_mixed['decoder'], 'layer1'))
+
+  def test_transfer_state_directly_with_plain_dicts(self):
+    """Tests transfer with plain dicts, nnx.State, and various variables."""
+    src_state = {
+        'decoder': {
+            'layer0':
+                nnx.State({
+                    'weight': nnx.Param(jnp.array(1.0)),
+                    'some_variable': nnx.Variable(jnp.array([1, 2])),
+                }),
+            'extra_layer': {
+                'sub': {
+                    'value': nnx.Param(jnp.array(3.0))
+                }
+            },
+        },
+        'some_other_variable': nnx.Variable(jnp.array(42)),
+    }
+    dst_state = {
+        'decoder': {
+            'layer0':
+                nnx.State({
+                    'weight': nnx.Param(jnp.array(0.0)),
+                    'some_variable': nnx.Variable(jnp.array([0, 0])),
+                }),
+            'layer1': {
+                'weight': nnx.Param(jnp.array(0.0))
+            },  # untouched
+            'extra_layer': {
+                'sub': {
+                    'value': nnx.Param(jnp.array(0.0))
+                }
+            },
+        },
+        'some_other_variable': nnx.Variable(jnp.array(0)),
+        'untouched_variable': nnx.Variable(jnp.array(-1)),  # untouched
+    }
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['weight'][...], jnp.array(1.0)
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['some_variable'][...], jnp.array([1, 2])
+    )
+
+    np.testing.assert_array_equal(
+        dst_state['decoder']['extra_layer']['sub']['value'][...],
+        jnp.array(3.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state['some_other_variable'][...], jnp.array(42)
+    )
+
+    # Check that layer1 was not touched
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer1']['weight'][...], jnp.array(0.0)
+    )
+    # Check that untouched_variable was not touched
+    np.testing.assert_array_equal(
+        dst_state['untouched_variable'][...], jnp.array(-1)
+    )
