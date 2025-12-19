@@ -182,9 +182,12 @@ def get_model_name_from_model_id(model_id: str) -> str:
     The model_name string.
   """
   if '/' in model_id:
-    return model_id.split('/')[-1].lower()
+    model_name = model_id.split('/')[-1].lower()
+    if model_name.startswith('meta-llama-'):
+      return model_name.replace('meta-llama-', 'llama-', 1)
+    return model_name
   else:
     raise ValueError(
-        f'Invalid model ID format: {model_id}. Model ID should be in the format'
-        ' of <parent-dir>/<model-name>'
+        f'Invalid model ID format: {model_id!r}. Model ID should be in the'
+        ' format of <parent-dir>/<model-name>'
     )

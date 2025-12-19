@@ -46,6 +46,8 @@ def _get_all_models_test_parameters():
       dict(testcase_name="gemma-3-27b-it", model_name="gemma-3-27b-it"),
       dict(testcase_name="llama3-70b", model_name="llama3-70b"),
       dict(testcase_name="llama-3-70b", model_name="llama-3-70b"),
+      dict(testcase_name="llama3.1-70b", model_name="llama3.1-70b"),
+      dict(testcase_name="llama-3.1-70b", model_name="llama-3.1-70b"),
       dict(testcase_name="llama3.1-405b", model_name="llama3.1-405b"),
       dict(testcase_name="llama-3.1-405b", model_name="llama-3.1-405b"),
       dict(testcase_name="llama3.1-8b", model_name="llama3.1-8b"),

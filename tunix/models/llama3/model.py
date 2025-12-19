@@ -156,6 +156,10 @@ class ModelConfig:
     )
 
   @classmethod
+  def llama3p1_70b(cls):
+    return cls.llama3_70b()
+
+  @classmethod
   def llama3p1_405b(cls):
     return cls(
         num_layers=126,

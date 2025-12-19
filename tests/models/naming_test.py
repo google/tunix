@@ -16,12 +16,14 @@ import dataclasses
 import inspect
 from absl.testing import absltest
 from absl.testing import parameterized
+import requests
 from tunix.models import naming
 from tunix.models.gemma import model as gemma_model
 from tunix.models.gemma3 import model as gemma3_model
 from tunix.models.llama3 import model as llama3_model
 from tunix.models.qwen2 import model as qwen2_model
 from tunix.models.qwen3 import model as qwen3_model
+from tunix.utils import env_utils
 
 
 @dataclasses.dataclass(frozen=True)
@@ -33,7 +35,7 @@ class ModelTestInfo:
   config_id: str
   category: str
 
-
+# TODO(b/451662153): Create a model catalog and move these info to the catalog.
 _TEST_MODEL_INFOS = (
     ModelTestInfo(
         id='google/gemma-2b',
@@ -196,7 +198,10 @@ _TEST_MODEL_INFOS = (
         category='gemma3',
     ),
     ModelTestInfo(
-        id='meta-llama/Llama-3-70B',
+        # This is a corner case where the model name in model id
+        # "Meta-Llama-3-70B" has an extra "Meta" at the beginning. This is
+        # removed by naming.py when extracting the model name from the model id.
+        id='meta-llama/Meta-Llama-3-70B',
         name='llama-3-70b',
         family='llama3',
         version='70b',
@@ -217,6 +222,14 @@ _TEST_MODEL_INFOS = (
         family='llama3p1',
         version='8b',
         config_id='llama3p1_8b',
+        category='llama3',
+    ),
+    ModelTestInfo(
+        id='meta-llama/Llama-3.1-70B',
+        name='llama-3.1-70b',
+        family='llama3p1',
+        version='70b',
+        config_id='llama3p1_70b',
         category='llama3',
     ),
     ModelTestInfo(
@@ -358,7 +371,7 @@ _ALL_MODEL_MODULES = [
 ]
 
 
-def _validate_full_model_coverage():
+def _validate_full_model_coverage() -> None:
   config_ids = []
   all_model_config_ids = {k.config_id for k in _TEST_MODEL_INFOS}
   # Check that all model configs in ModelConfig class are in _MODEL_INFOS.
@@ -390,7 +403,7 @@ def _validate_full_model_coverage():
       )
 
 
-def _get_test_cases_for_get_model_config_id():
+def _get_test_cases_for_get_model_config_id() -> list[dict[str, str]]:
   test_cases = []
   _validate_full_model_coverage()
   for model_info in _TEST_MODEL_INFOS:
@@ -402,7 +415,7 @@ def _get_test_cases_for_get_model_config_id():
   return test_cases
 
 
-def _get_test_cases_for_get_model_family_and_version():
+def _get_test_cases_for_get_model_family_and_version() -> list[dict[str, str]]:
   test_cases = []
   _validate_full_model_coverage()
   for model_info in _TEST_MODEL_INFOS:
@@ -415,7 +428,7 @@ def _get_test_cases_for_get_model_family_and_version():
   return test_cases
 
 
-def _get_test_cases_for_get_model_config_category():
+def _get_test_cases_for_get_model_config_category() -> list[dict[str, str]]:
   test_cases_dict = {}
   _validate_full_model_coverage()
   for model_info in _TEST_MODEL_INFOS:
@@ -428,7 +441,7 @@ def _get_test_cases_for_get_model_config_category():
   return list(test_cases_dict.values())
 
 
-def _get_test_cases_for_get_model_name_from_model_id():
+def _get_test_cases_for_get_model_name_from_model_id() -> list[dict[str, str]]:
   test_cases = []
   _validate_full_model_coverage()
   for model_info in _TEST_MODEL_INFOS:
@@ -440,12 +453,25 @@ def _get_test_cases_for_get_model_name_from_model_id():
   return test_cases
 
 
+def _get_test_cases_for_model_id_exists() -> list[dict[str, str]]:
+  _validate_full_model_coverage()
+  return [
+      {
+          'testcase_name': model_info.config_id,
+          'model_id': model_info.id,
+      }
+      for model_info in _TEST_MODEL_INFOS
+  ]
+
+
 class TestNaming(parameterized.TestCase):
 
   @parameterized.named_parameters(
       _get_test_cases_for_get_model_name_from_model_id()
   )
-  def test_get_model_name_from_model_id(self, model_id, expected_name):
+  def test_get_model_name_from_model_id(
+      self, model_id: str, expected_name: str
+  ):
     self.assertEqual(
         naming.get_model_name_from_model_id(model_id),
         expected_name,
@@ -455,11 +481,31 @@ class TestNaming(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, 'Invalid model ID format'):
       naming.get_model_name_from_model_id('Llama-3.1-8B')
 
+  def test_get_model_name_from_model_id_nested_path(self):
+    self.assertEqual(
+        naming.get_model_name_from_model_id('google/gemma-2/flax/gemma2-2b-it'),
+        'gemma2-2b-it',
+    )
+
+  @parameterized.named_parameters(_get_test_cases_for_model_id_exists())
+  def test_model_id_exists_on_huggingface(self, model_id: str):
+    if env_utils.is_internal_env():
+      self.skipTest('Skipping Hugging Face check in internal environment')
+
+    with requests.head(f'https://huggingface.co/{model_id}') as response:
+      self.assertEqual(
+          response.status_code,
+          200,
+          f'Model {model_id!r} not found on Hugging Face (status code:'
+          f' {response.status_code}). Please ensure that the model config added'
+          ' matches exaclty to a valid model id on Hugging Face.',
+      )
+
   @parameterized.named_parameters(
       _get_test_cases_for_get_model_family_and_version()
   )
   def test_get_model_family_and_version(
-      self, model_name, expected_family, expected_version
+      self, model_name: str, expected_family: str, expected_version: str
   ):
     self.assertEqual(
         naming.get_model_family_and_version(model_name),
@@ -481,16 +527,19 @@ class TestNaming(parameterized.TestCase):
     self.assertEqual(naming.split('gemma-1.1-7b'), ('gemma-1.1-', '7b'))
 
   @parameterized.named_parameters(_get_test_cases_for_get_model_config_id())
-  def test_get_model_config_id(self, model_name, expected_config_id):
+  def test_get_model_config_id(self, model_name: str, expected_config_id: str):
     self.assertEqual(naming.get_model_config_id(model_name), expected_config_id)
 
   @parameterized.named_parameters(
       _get_test_cases_for_get_model_config_category()
   )
-  def test_get_model_config_category(self, model_name, expected_category):
+  def test_get_model_config_category(
+      self, model_name: str, expected_category: str
+  ):
     self.assertEqual(
         naming.get_model_config_category(model_name), expected_category
     )
+
 
 if __name__ == '__main__':
   absltest.main()
