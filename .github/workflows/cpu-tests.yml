@@ -45,7 +45,8 @@ jobs:
       - name: Install the tunix wheel
         run: |
           python -m pip install --upgrade pip
-          python -m pip install google_tunix-*-py3-none-any.whl
+          WHEEL=$(ls -1 google_tunix-*-py3-none-any.whl | head -n1)
+          python -m pip install "${WHEEL}[prod]"
           python -m pip install pytest
 
       - name: Verify Tunix imports from installed package

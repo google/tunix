@@ -215,6 +215,8 @@ jobs:
           pip list | egrep 'jax|flax|libtpu'
           cd ..
           git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . --force-reinstall && cd ../..
+          # TODO(b/470113586): Remove this test once the bug is fixed.
+          pip install jax[tpu]==0.8.1 --force-reinstall
           pip list | egrep 'jax|flax|libtpu'
 
           # Install bookworm, vllm container defaults to bullseye causes segfault for sglang-jax.
