@@ -132,11 +132,11 @@ _TEST_MODEL_INFOS = (
         category='gemma3',
     ),
     ModelTestInfo(
-        id='google/gemma-3-1b',  #  Only superstring of the id exists on HF.
-        name='gemma-3-1b',
+        id='google/gemma-3-1b-pt',
+        name='gemma-3-1b-pt',
         family='gemma3',
-        version='1b',
-        config_id='gemma3_1b',
+        version='1b_pt',
+        config_id='gemma3_1b_pt',
         category='gemma3',
     ),
     ModelTestInfo(
@@ -148,11 +148,11 @@ _TEST_MODEL_INFOS = (
         category='gemma3',
     ),
     ModelTestInfo(
-        id='google/gemma-3-4b',  #  Only superstring of the id exists on HF.
-        name='gemma-3-4b',
+        id='google/gemma-3-4b-pt',
+        name='gemma-3-4b-pt',
         family='gemma3',
-        version='4b',
-        config_id='gemma3_4b',
+        version='4b_pt',
+        config_id='gemma3_4b_pt',
         category='gemma3',
     ),
     ModelTestInfo(
@@ -164,11 +164,11 @@ _TEST_MODEL_INFOS = (
         category='gemma3',
     ),
     ModelTestInfo(
-        id='google/gemma-3-12b',  #  Only superstring of the id exists on HF.
-        name='gemma-3-12b',
+        id='google/gemma-3-12b-pt',
+        name='gemma-3-12b-pt',
         family='gemma3',
-        version='12b',
-        config_id='gemma3_12b',
+        version='12b_pt',
+        config_id='gemma3_12b_pt',
         category='gemma3',
     ),
     ModelTestInfo(
@@ -180,11 +180,11 @@ _TEST_MODEL_INFOS = (
         category='gemma3',
     ),
     ModelTestInfo(
-        id='google/gemma-3-27b',  #  Only superstring of the id exists on HF.
-        name='gemma-3-27b',
+        id='google/gemma-3-27b-pt',
+        name='gemma-3-27b-pt',
         family='gemma3',
-        version='27b',
-        config_id='gemma3_27b',
+        version='27b_pt',
+        config_id='gemma3_27b_pt',
         category='gemma3',
     ),
     ModelTestInfo(

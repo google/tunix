@@ -146,7 +146,7 @@ class ConfigTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="gcs_ckpt_source",
-          overrides=["model_name=gemma3-1b", "model_source=gcs"],
+          overrides=["model_name=gemma3-1b-pt", "model_source=gcs"],
       ),
   )
   def test_valid_configs(self, overrides):

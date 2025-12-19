@@ -17,8 +17,8 @@ set -x # Enable xtrace
 
 python3 -m tunix.cli.peft_main \
   base_config.yaml \
-  model_name="gemma-3-4b" \
-  model_id="google/gemma-3-4b" \
+  model_name="gemma-3-4b-pt" \
+  model_id="google/gemma-3-4b-pt" \
   model_path="gs://gemma-data/checkpoints/gemma3-4b-pt" \
   model_source="gcs" \
   tokenizer_path="gs://gemma-data/tokenizers/tokenizer_gemma3.model" \
