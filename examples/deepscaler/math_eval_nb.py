@@ -533,11 +533,11 @@ MODEL_MAPPING = {
         qwen2_lib.ModelConfig.qwen2p5_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it"),
     ),
-    "DeepSeek-R1-Distill-Qwen-1.5B": (
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": (
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B"),
     ),
-    "DeepScaleR-1.5B-Preview": (
+    "agentica-org/DeepScaleR-1.5B-Preview": (
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
