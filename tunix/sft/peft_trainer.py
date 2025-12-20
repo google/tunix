@@ -31,6 +31,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import trace as perf_trace
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
@@ -186,6 +187,7 @@ class PeftTrainer:
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
       metrics_logger: Optional[MetricsLogger] = None,
+      perf_tracer: Optional[perf_trace.Tracer] = None,
   ):
     self.model = model
     self.config = training_config
@@ -212,6 +214,9 @@ class PeftTrainer:
           self.config.metrics_logging_options,
       )
     self.is_managed_externally = False
+    self._perf_tracer = (
+        perf_tracer if perf_tracer is not None else perf_trace.NoopTracer()
+    )
 
     self._train_steps = 0  # represent # of times model has been updated
     self._iter_steps = 0  # represent # of times trainer has looped
@@ -637,9 +642,14 @@ class PeftTrainer:
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
-          train_loss, aux = train_step(
-              self.model, self.optimizer, train_example
-          )
+
+          with self._perf_tracer.span(
+              "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
+          ) as span:
+            train_loss, aux = train_step(
+                self.model, self.optimizer, train_example
+            )
+            span.device_end([train_loss])
 
           current_time = time.perf_counter()
           step_time_delta = current_time - last_step_completion_time

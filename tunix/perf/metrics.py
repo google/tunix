@@ -108,7 +108,7 @@ class PerfSpanQuery:
     self._select_timeline: str | None = None
 
     # (name, type, arg)
-    # type: 0 - first, 1 - last, 2 - nth, 3 - all
+    # type is 0 - first, 1 - last, 2 - nth, 3 - all
     self._select_groups: list[tuple[str, int, int]] = []
 
   def __call__(self) -> PerfSpanQuery:

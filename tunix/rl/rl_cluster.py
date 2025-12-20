@@ -247,14 +247,6 @@ class RLCluster:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
-    self._init_cluster()
-    gc.collect()
-
-    # NB: global steps should be adjusted properly based on the actual RL
-    # algorithm. E.g. when loading from a checkpoint with additional inner loops
-    # that update the model, we should properly update the global steps.
-    self.global_steps = 0
-
     if perf_config is None:
       self._perf = perf_trace.NoopTracer()
     else:
@@ -262,6 +254,14 @@ class RLCluster:
       for mesh in cluster_config.role_to_mesh.values():
         devices.extend(mesh.devices.flatten().tolist())
       self._perf = perf_trace.PerfTracer(devices, perf_config.custom_export_fn)
+
+    self._init_cluster()
+    gc.collect()
+
+    # NB: global steps should be adjusted properly based on the actual RL
+    # algorithm. E.g. when loading from a checkpoint with additional inner loops
+    # that update the model, we should properly update the global steps.
+    self.global_steps = 0
 
   def _init_backbone_sharing_map(
       self,
@@ -496,6 +496,7 @@ class RLCluster:
               "global_step": self.global_steps + 1
           },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
           metrics_logger=self._rl_metrics_logger,
+          perf_tracer=self._perf,
       )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
@@ -516,6 +517,7 @@ class RLCluster:
             "global_step": self.global_steps + 1
         },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
         metrics_logger=self._rl_metrics_logger,
+        perf_tracer=self._perf,
     )
     del self.rollout_actor
     del self.train_actor
@@ -730,18 +732,18 @@ class RLCluster:
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[
         Role.ACTOR
-    ] as mesh, self._get_logical_axis_rules_cm(Role.ACTOR):
+    ] as _, self._get_logical_axis_rules_cm(Role.ACTOR):
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      with self._perf.span("actor_training", mesh.devices):
+      with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[
         Role.CRITIC
-    ] as mesh, self._get_logical_axis_rules_cm(Role.CRITIC):
+    ] as _, self._get_logical_axis_rules_cm(Role.CRITIC):
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
-      with self._perf.span("critic_training", mesh.devices):
+      with self._perf.span_group("critic_training"):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
