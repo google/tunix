@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
 import qwix
+import orbax.checkpoint as ocp
 from tunix.sft import checkpoint_manager
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
@@ -251,6 +252,67 @@ class CheckpointManagerTest(parameterized.TestCase):
     restored_step, restored_metadata = ckpt_manager.maybe_restore(model)
     self.assertEqual(restored_step, 1)
     self.assertEqual(restored_metadata, custom_metadata)
+
+  def test_save_with_metrics(self):
+    options = ocp.CheckpointManagerOptions(
+        best_fn=lambda x: x['accuracy'],
+        best_mode='max',
+    )
+    ckpt_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path, options=options
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    metrics = {'accuracy': 0.9}
+    self.assertTrue(ckpt_manager.save(1, model, metrics=metrics))
+    ckpt_manager._checkpoint_manager.wait_until_finished()
+    self.assertEqual(ckpt_manager.latest_step(), 1)
+    self.assertEqual(
+        ckpt_manager._checkpoint_manager.metadata(1).metrics, metrics
+    )
+
+    metrics_low = {'accuracy': 0.8}
+    self.assertTrue(ckpt_manager.save(2, model, metrics=metrics_low))
+    ckpt_manager._checkpoint_manager.wait_until_finished()
+    self.assertEqual(ckpt_manager.latest_step(), 2)
+    self.assertEqual(
+        ckpt_manager._checkpoint_manager.metadata(2).metrics, metrics_low
+    )
+
+  def test_best_checkpoint(self):
+    options = ocp.CheckpointManagerOptions(
+        max_to_keep=2,
+        best_fn=lambda x: x['accuracy'],
+        best_mode='max',
+    )
+    ckpt_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path, options=options
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+
+    # Save step 1, accuracy 0.5.
+    ckpt_manager.save(1, model, metrics={'accuracy': 0.5})
+    ckpt_manager._checkpoint_manager.wait_until_finished()
+
+    # Save step 2, accuracy 0.9. Best.
+    ckpt_manager.save(2, model, metrics={'accuracy': 0.9})
+    ckpt_manager._checkpoint_manager.wait_until_finished()
+
+    # Save step 3, accuracy 0.1. Worst.
+    ckpt_manager.save(3, model, metrics={'accuracy': 0.1})
+    ckpt_manager._checkpoint_manager.wait_until_finished()
+
+    # Save step 4, accuracy 0.8. Second Best.
+    ckpt_manager.save(4, model, metrics={'accuracy': 0.8})
+    ckpt_manager._checkpoint_manager.wait_until_finished()
+
+    self.assertEqual(ckpt_manager._checkpoint_manager.best_step(), 2)
+
+    # With max_to_keep=2, we expect step 2 (0.9) and step 4 (0.8) to be kept.
+    # Step 1 (0.5) and Step 3 (0.1) should be deleted.
+    self.assertTrue((epath.Path(self.temp_path) / '2').exists())
+    self.assertTrue((epath.Path(self.temp_path) / '4').exists())
+    self.assertFalse((epath.Path(self.temp_path) / '1').exists())
+    self.assertFalse((epath.Path(self.temp_path) / '3').exists())
 
   @parameterized.parameters(['test_data/checkpoints'])
   def test_restore_with_backward_compatibility(self, ckpt_path):

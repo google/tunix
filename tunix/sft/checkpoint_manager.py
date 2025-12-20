@@ -82,6 +82,7 @@ class CheckpointManager:
       save_only_lora_params: bool = False,
       force: bool = False,
       custom_metadata: dict[str, Any] | None = None,
+      metrics: dict[str, Any] | None = None,
   ) -> bool:
     """Saves the params for the given step.
 
@@ -92,6 +93,7 @@ class CheckpointManager:
       force: Whether to save the checkpoint regardless of the save decision
         policy.
       custom_metadata: Custom metadata to save with the checkpoint.
+      metrics: Metrics to save with the checkpoint.
 
     Returns:
       Whether the checkpoint was saved.
@@ -113,6 +115,7 @@ class CheckpointManager:
             model_params=checkpoint_args,
         ),
         custom_metadata=custom_metadata or {},
+        metrics=metrics,
         force=force,
     )
 

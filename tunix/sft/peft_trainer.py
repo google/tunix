@@ -663,6 +663,16 @@ class PeftTrainer:
           ):
             self._train_steps += 1
             self._write_train_metrics()
+            train_metrics = self.metrics_logger.get_latest_metrics(
+                self.metrics_prefix, sft_metrics_logger.Mode.TRAIN
+            )
+
+            eval_metrics = {}
+            if (
+                eval_ds
+                and self._train_steps % self.config.eval_every_n_steps == 0
+            ):
+              eval_metrics = self._run_eval(eval_ds, eval_step)
 
             # Checkpoint frequency is configured by checkpointing_options.
             self.checkpoint_manager.save(
@@ -670,13 +680,8 @@ class PeftTrainer:
                 self.model,
                 save_only_lora_params=self._lora_enabled,
                 custom_metadata=self.custom_checkpoint_metadata(),
+                metrics={**train_metrics, **eval_metrics},
             )
-
-            if (
-                eval_ds
-                and self._train_steps % self.config.eval_every_n_steps == 0
-            ):
-              self._run_eval(eval_ds, eval_step)
 
         self._prof.maybe_deactivate(self._iter_steps)
 
@@ -728,7 +733,7 @@ class PeftTrainer:
       self,
       eval_ds: Iterable[Any],
       eval_step_fn: Callable[..., Any],
-  ) -> None:
+  ) -> dict[str, Any]:
     """Runs evaluation loop."""
     logging.info("Running evaluation on train step %d.", self._train_steps)
     eval_iterator = iter(eval_ds)
@@ -765,20 +770,27 @@ class PeftTrainer:
         logging.warning(
             "No eval examples found. Skipping eval metrics logging."
         )
-        return
+        return {}
 
       self._write_metrics(self._buffered_eval_metrics)
+      metrics = self.metrics_logger.get_latest_metrics(
+          self.metrics_prefix, sft_metrics_logger.Mode.EVAL
+      )
       logging.info(
           "Train step %d eval loss: %f - eval perplexity: %f",
           self._train_steps,
-          self.metrics_logger.get_metric(self.metrics_prefix, "loss", "eval"),
-          self.metrics_logger.get_metric(
-              self.metrics_prefix, "perplexity", "eval"
+          metrics.get(
+              f"{self.metrics_prefix}/{sft_metrics_logger.Mode.EVAL}/loss", 0.0
+          ),
+          metrics.get(
+              f"{self.metrics_prefix}/{sft_metrics_logger.Mode.EVAL}/perplexity",
+              0.0,
           ),
       )
       self._buffered_eval_metrics = None
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
+      return metrics
 
 
 def _default_loss_fn(

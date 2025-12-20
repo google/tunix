@@ -476,7 +476,11 @@ class PeftTrainerTest(parameterized.TestCase):
             mock.call.maybe_restore(mock.ANY, restore_only_lora_params=True),
             *[
                 mock.call.save(
-                    i, mock.ANY, save_only_lora_params=True, custom_metadata={}
+                    i,
+                    mock.ANY,
+                    save_only_lora_params=True,
+                    custom_metadata={},
+                    metrics=mock.ANY,
                 )
                 for i in expected_save_steps
             ],
