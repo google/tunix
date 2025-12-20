@@ -22,9 +22,7 @@ class MetricLoggerTest(absltest.TestCase):
 
     if env_utils.is_internal_env():
       self.mock_backends.append(
-          self.enter_context(
-              mock.patch.object(metrics_logger, "CluBackend")
-          )
+          self.enter_context(mock.patch.object(metrics_logger, "CluBackend"))
       )
     else:
       self.mock_backends.append(
@@ -33,9 +31,7 @@ class MetricLoggerTest(absltest.TestCase):
           )
       )
       self.mock_backends.append(
-          self.enter_context(
-              mock.patch.object(metrics_logger, "WandbBackend")
-          )
+          self.enter_context(mock.patch.object(metrics_logger, "WandbBackend"))
       )
 
   @mock.patch.object(jax.monitoring, "register_scalar_listener")
@@ -158,6 +154,31 @@ class MetricLoggerTest(absltest.TestCase):
     self.assertAlmostEqual(
         logger.get_metric("test_prefix", "perplexity", "eval"), 31.6227766
     )
+
+  @mock.patch.object(jax.monitoring, "record_scalar")
+  def test_get_latest_metrics(self, mock_record_scalar):
+    options = metrics_logger.MetricsLoggerOptions(
+        log_dir=self.log_dir, backend_factories=[]
+    )
+    logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
+    logger.log("test_prefix", "loss", 0.1, metrics_logger.Mode.TRAIN, 1)
+    logger.log("test_prefix", "loss", 0.05, metrics_logger.Mode.TRAIN, 2)
+    logger.log("test_prefix", "accuracy", 0.9, metrics_logger.Mode.TRAIN, 2)
+
+    latest_metrics = logger.get_latest_metrics(
+        "test_prefix", metrics_logger.Mode.TRAIN
+    )
+    self.assertEqual(
+        latest_metrics,
+        {
+            "test_prefix/train/loss": 0.05,
+            "test_prefix/train/accuracy": 0.9,
+        },
+    )
+
+    # Test with non-existent mode/prefix
+    self.assertEqual(logger.get_latest_metrics("test_prefix", "eval"), {})
+    self.assertEqual(logger.get_latest_metrics("wrong_prefix", "train"), {})
 
   @mock.patch.object(jax, "process_index", return_value=1)
   @mock.patch.object(jax.monitoring, "register_scalar_listener")

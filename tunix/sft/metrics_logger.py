@@ -151,6 +151,24 @@ class MetricsLogger:
       )
     return np.stack(self._metrics[metrics_prefix][mode][metric_name])
 
+  def get_latest_metrics(
+      self, metrics_prefix: str, mode: Mode | str
+  ) -> dict[str, float]:
+    """Returns the latest metrics for the given mode."""
+    if metrics_prefix not in self._metrics:
+      return {}
+    if mode not in self._metrics[metrics_prefix]:
+      return {}
+
+    metrics = {}
+    for metric_name in self._metrics[metrics_prefix][mode]:
+      values = self._metrics[metrics_prefix][mode][metric_name]
+      if values:
+        metrics[f"{metrics_prefix}/{mode}/{metric_name}"] = np.array(
+            values[-1]
+        ).item()
+    return metrics
+
   def close(self):
     """Closes all registered logging backends."""
     for backend in self._backends:
