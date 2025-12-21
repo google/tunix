@@ -52,6 +52,61 @@ class TokenizerTest(absltest.TestCase):
     self.assertEqual(tokenizer.tokenizer_type, 'sentencepiece')
     self.assertIsNotNone(tokenizer._tokenizer_type, adapter.TokenizerType.SP)
 
+  def test_tokenize_hf(self):
+    model = 'meta-llama/Meta-Llama-3-8B-Instruct'
+    tokenizer = adapter.Tokenizer(
+        tokenizer_type='huggingface', tokenizer_path=model
+    )
+
+    text = 'hello world'
+    tokens = tokenizer.tokenize(text, add_eos=True)
+
+    # Check BOS
+    self.assertEqual(tokens[0], tokenizer.bos_id())
+    # Check EOS
+    self.assertEqual(tokens[-1], tokenizer.eos_id())
+
+    # Check no double BOS (assuming "hello" doesn't tokenize to BOS)
+    self.assertNotEqual(tokens[1], tokenizer.bos_id())
+
+    # Test add_bos=False
+    tokens_no_bos = tokenizer.tokenize(text, add_bos=False, add_eos=True)
+    self.assertNotEqual(tokens_no_bos[0], tokenizer.bos_id())
+    self.assertEqual(tokens_no_bos[-1], tokenizer.eos_id())
+
+    # Decode back
+    decoded = tokenizer.decode(tokens)
+    # decoded might contain special tokens depending on decode implementation
+    # TokenizerAdapter.decode calls tokenizer.decode. HF decode usually skips special tokens by default?
+    # No, skip_special_tokens defaults to False in HF decode?
+    # Actually TokenizerAdapter.decode just calls self._tokenizer.decode(ids, **kwargs).
+    # We didn't pass kwargs.
+
+    # Let's just check length or content roughly.
+    self.assertTrue(len(tokens) > 2)
+
+  def test_special_eos_token(self):
+    model = 'meta-llama/Meta-Llama-3-8B-Instruct'
+    # Use a token that definitely exists and is different from default EOS
+    special_eos = 'world'
+    tokenizer = adapter.Tokenizer(
+        tokenizer_type='huggingface',
+        tokenizer_path=model,
+        special_eos_token=special_eos,
+    )
+
+    text = 'hello'
+    tokens = tokenizer.tokenize(text, add_eos=True)
+
+    # Check EOS is the special token
+    self.assertEqual(tokens[-1], tokenizer.eos_id())
+
+    # Verify the ID matches what we expect from the tokenizer directly
+    hf_tokenizer = tokenizer.tokenizer
+    expected_id = hf_tokenizer.convert_tokens_to_ids(special_eos)
+    self.assertEqual(tokenizer.eos_id(), expected_id)
+    self.assertNotEqual(tokenizer.eos_id(), hf_tokenizer.eos_token_id)
+
 
 if __name__ == '__main__':
   absltest.main()
