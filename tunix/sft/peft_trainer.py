@@ -200,15 +200,18 @@ class PeftTrainer:
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
+    self._is_weighted_opt = False
     if training_config.gradient_accumulation_steps is not None:
       if self.config.use_weighted_gradient_accumulation:
         optimizer = weighted_opt.WeightedMultiSteps(
             optimizer, training_config.gradient_accumulation_steps
         )
+        self._is_weighted_opt = True
       else:
         optimizer = optax.MultiSteps(
             optimizer, training_config.gradient_accumulation_steps
         )
+        self._is_weighted_opt = False
     if self._lora_enabled:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
@@ -350,11 +353,7 @@ class PeftTrainer:
       loss, aux = out
       # If using weighted accumulation, we expect aux to be/contain token_count
       # We check the optimizer type to decide if we need to pass the tuple
-      is_weighted_opt = False
-      if isinstance(self.optimizer.opt, weighted_opt.WeightedMultiSteps):
-          is_weighted_opt = True
-      
-      if is_weighted_opt:
+      if self._is_weighted_opt:
           # Pass token_count as a keyword argument
           # aux is assumed to be token_count
           optimizer.update(model, grads, token_count=aux)
