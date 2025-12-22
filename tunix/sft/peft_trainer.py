@@ -41,6 +41,8 @@ from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import system_metrics_calculator
 from tunix.sft import utils
+from tunix.sft import cce
+from tunix.sft import weighted_opt
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
@@ -55,6 +57,12 @@ class TrainingConfig:
   eval_every_n_steps: int
   max_steps: int | None = None
   gradient_accumulation_steps: int | None = None
+  
+  # If True, gradient accumulation typically averages gradients by the total number of
+  # tokens seen across all accumulation steps (True Average), rather than averaging
+  # the per-batch averages. This requires the loss function to return token counts.
+  # Defaults to False for backward compatibility.
+  use_weighted_gradient_accumulation: bool = False
 
   # If set, the checkpoints will be saved to this path. Checkpoints
   # contains the model params and the train data iterator state.
@@ -193,15 +201,21 @@ class PeftTrainer:
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(
-          optimizer, training_config.gradient_accumulation_steps
-      )
+      if self.config.use_weighted_gradient_accumulation:
+        optimizer = weighted_opt.WeightedMultiSteps(
+            optimizer, training_config.gradient_accumulation_steps
+        )
+      else:
+        optimizer = optax.MultiSteps(
+            optimizer, training_config.gradient_accumulation_steps
+        )
     if self._lora_enabled:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
+    self._has_aux = True
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
@@ -224,7 +238,6 @@ class PeftTrainer:
         max_inflight=training_config.max_inflight_computations
     )
     self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
-    self._has_aux = False
     self._pbar = None
     self._flops_measured: bool = False
 
@@ -281,6 +294,15 @@ class PeftTrainer:
     self.loss_fn = loss_fn
     self.eval_loss_fn = loss_fn
     self._has_aux = has_aux
+
+    return self
+
+  def with_cce_loss(self):
+    """Sets the loss function to Cross Cut Entropy (CCE)."""
+    self.clear_jit_cache()
+    self.loss_fn = cce.cce_loss_fn
+    self.eval_loss_fn = cce.cce_loss_fn
+    self._has_aux = True
     return self
 
   def with_gen_model_input_fn(
@@ -323,11 +345,25 @@ class PeftTrainer:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
-    optimizer.update(model, grads)
+    
     if self._has_aux:
       loss, aux = out
+      # If using weighted accumulation, we expect aux to be/contain token_count
+      # We check the optimizer type to decide if we need to pass the tuple
+      is_weighted_opt = False
+      if isinstance(self.optimizer.opt, weighted_opt.WeightedMultiSteps):
+          is_weighted_opt = True
+      
+      if is_weighted_opt:
+          # Pass token_count as a keyword argument
+          # aux is assumed to be token_count
+          optimizer.update(model, grads, token_count=aux)
+      else:
+          optimizer.update(model, grads)
+          
       return loss, aux
     else:
+      optimizer.update(model, grads)
       return out, None
 
   def _eval_step(
@@ -816,5 +852,8 @@ def _default_loss_fn(
   norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
 
   # Return the negative log likelihood (NLL) loss.
-  # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
-  return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+  # equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
+  loss = -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
+  
+  token_count = jnp.sum(target_mask)
+  return loss, token_count

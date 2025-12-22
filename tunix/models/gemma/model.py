@@ -892,6 +892,7 @@ class Gemma(nnx.Module):
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
       output_hidden_states: bool = False,
+      return_embeddings: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Transformer forward pass.
 
@@ -928,6 +929,10 @@ class Gemma(nnx.Module):
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
+      
+    if return_embeddings:
+      return x, new_cache
+      
     logits = self.embedder.decode(x)
 
     if self.final_logits_softcap is not None:
