@@ -16,17 +16,18 @@ from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from tunix.sft import utils
 import orbax.checkpoint as ocp
+import jax.numpy as jnp
 
 # Model
 MODEL_ID = "google/gemma-2-2b"
 GEMMA_TOKENIZER_PATH = "gs://gemma-data/tokenizers/tokenizer_gemma2.model"
 
 LEARNING_RATE = 5e-6
-GLOBAL_BATCH_SIZE = 8
-MAX_TARGET_LENGTH = 1024
+GLOBAL_BATCH_SIZE = 64
+MAX_TARGET_LENGTH = 4096
 NUM_ROWS = 100000
-GRADIENT_ACCUMULATION_STEPS = 100
-WARMUP_STEPS = 100
+GRADIENT_ACCUMULATION_STEPS = 25
+WARMUP_STEPS = 50
 
 def create_train_dataset(
     tokenizer: Any,
@@ -74,7 +75,7 @@ def create_train_dataset(
 devices = jax.devices()
 num_devices = len(devices)
 
-tp_size = 4
+tp_size = 1
 fsdp_size = num_devices // tp_size
 
 mesh = jax.sharding.Mesh(
@@ -91,7 +92,9 @@ local_model_path = snapshot_download(
 )
 print(f"Model downloaded to: {local_model_path}")
 
+
 model_config = gemma_lib.ModelConfig.gemma2_2b()
+model_config.remat_config = gemma_lib.RematConfig.BLOCK
 
 print("Loading model from safetensors...")
 with mesh:
@@ -99,6 +102,7 @@ with mesh:
         file_dir=local_model_path,
         config=model_config,
         mesh=mesh,
+        dtype=jnp.bfloat16,
     )
 
 nnx.display(model)
