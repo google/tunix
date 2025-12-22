@@ -77,6 +77,11 @@ def linear_cross_entropy(
         new_sum = running_sum * exp_scale + chunk_exp
         return (new_max, new_sum), None
 
+    # Apply gradient checkpointing (remat) to scan_body.
+    # This ensures that intermediate logits are not stored for the backward pass,
+    # preventing OOMs by re-computing them on demand.
+    scan_body = jax.checkpoint(scan_body)
+
     (final_max, final_sum), _ = jax.lax.scan(
         scan_body, init_val, jnp.arange(num_full_chunks)
     )
@@ -146,6 +151,11 @@ def cce_loss_fn(
 
   # Access shared embedding weights
   classifier = model.embedder.input_embedding.value
+  
+  # Explicitly stop gradients on the classifier weights. 
+  # This prevents JAX from allocating a massive buffer to accumulate 
+  # weight gradients inside the scan loop.
+  classifier = jax.lax.stop_gradient(classifier)
   
   # CCE targets
   cce_targets = jnp.where(target_mask > 0, target_tokens, -100)
