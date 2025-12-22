@@ -1,11 +1,11 @@
 """Utilities for handling and loading datasets in tunix CLI."""
+
 import ast
 import functools
 import importlib
 import os
 from typing import Any
 
-import grain
 from tunix.generate import tokenizer_adapter
 
 Tokenizer = tokenizer_adapter.Tokenizer
@@ -138,6 +138,8 @@ def post_init_dataset(
     batch_size: int,
     num_batches: int | None,
     max_prompt_length: int | None,
+    fraction: float = 1.0,
+    num_epochs: int = 1,
 ):
   """Applies post-initialization transformations to a dataset.
 
@@ -151,7 +153,9 @@ def post_init_dataset(
     num_batches: If not None, the maximum number of batches to yield.
     max_prompt_length: If not None and greater than 0, prompts longer than this
       will be filtered out.
-
+    fraction: Fraction of the dataset to use (between 0.0 and 1.0), commonly
+      used for splitting training and validation sets.
+    num_epochs: Number of times to repeat the dataset.
   Returns:
     The processed dataset.
   """
@@ -161,11 +165,30 @@ def post_init_dataset(
       tokens = tokenizer.tokenize(x["prompts"])
       return len(tokens) <= max_prompt_length
 
-    dataset = dataset.filter(prompt_length_filter).to_iter_dataset()
-  dataset = dataset.batch(batch_size)
+    dataset = dataset.filter(prompt_length_filter)
+
   if num_batches is not None:
-    if isinstance(dataset, grain.MapDataset):
-      dataset = dataset[:num_batches]
-    else:
-      dataset = grain.experimental.LimitIterDataset(dataset, count=num_batches)
-  return dataset
+    target_size = min(num_batches * batch_size, len(dataset))
+    dataset = dataset[:target_size]
+
+  if fraction < 1.0 and fraction > 0.0:
+    first_segment_size = int(len(dataset) * fraction)
+    first_segment_dataset = dataset[:first_segment_size]
+    second_segment_dataset = dataset[first_segment_size:]
+  else:
+    first_segment_dataset = dataset
+    second_segment_dataset = None
+
+  first_segment_dataset = (
+      first_segment_dataset.repeat(num_epochs)
+      .to_iter_dataset()
+      .batch(batch_size)
+  )
+  if second_segment_dataset is not None:
+    second_segment_dataset = (
+        second_segment_dataset.repeat(num_epochs)
+        .to_iter_dataset()
+        .batch(batch_size)
+    )
+
+  return first_segment_dataset, second_segment_dataset

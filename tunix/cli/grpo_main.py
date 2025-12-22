@@ -137,7 +137,7 @@ class GrpoPipeline(config.HyperParameters):
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
       )
-    dataset = data_lib.post_init_dataset(
+    dataset, _ = data_lib.post_init_dataset(
         dataset,
         tokenizer,
         batch_size=self.config["batch_size"],

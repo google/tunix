@@ -40,6 +40,7 @@ from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
 import transformers
+from tunix.cli.utils import data as data_lib
 from tunix.examples.data import math_dataset
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
@@ -573,36 +574,36 @@ def extract_hash_answer(text: str) -> str | None:
 dataset = create_dataset(
     args.data_source,
     args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
-    args.global_batch_size,
-    NUM_BATCHES,
+    tokenizer=model_tokenizer,
     tfds_download=True,
+    split="train",
 )
 
-if TRAIN_FRACTION == 1.0:
-  train_dataset = dataset.repeat(NUM_EPOCHS)
-  val_dataset = None
-else:
-  train_dataset = dataset[: int(len(dataset) * TRAIN_FRACTION)]
-  train_dataset = train_dataset.repeat(NUM_EPOCHS)
-
-  val_dataset = dataset[int(len(dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
+train_dataset, val_dataset = data_lib.post_init_dataset(
+    dataset,
+    model_tokenizer,
+    batch_size=args.global_batch_size,
+    num_batches=NUM_BATCHES,
+    max_prompt_length=MAX_PROMPT_LENGTH,
+    fraction=TRAIN_FRACTION,
+    num_epochs=NUM_EPOCHS,
+)
 
 test_dataset = create_dataset(
     args.data_source,
     args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
-    args.global_batch_size,
-    NUM_TEST_BATCHES,
+    tokenizer=model_tokenizer,
     tfds_download=True,
+    split="test",
 )
 
-print(
-    f"train_dataset size: {len(train_dataset)}, val_dataset size:"
-    f"{len(val_dataset) if val_dataset is not None else 0},"
-    f"test_dataset size: {len(test_dataset)}"
+test_dataset, _ = data_lib.post_init_dataset(
+    test_dataset,
+    model_tokenizer,
+    batch_size=args.global_batch_size,
+    num_batches=NUM_TEST_BATCHES,
+    max_prompt_length=MAX_PROMPT_LENGTH,
 )
-
-for ele in train_dataset[:1]:
-  pprint.pprint(ele)
 
 MODEL_CONFIG = {
     "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
@@ -774,8 +775,7 @@ def check_answer(prompts, completions, answer, **kargs):  # pylint: disable=unus
   responses = completions
 
   extracted_responses = [
-      guess.group(1) if (guess := match_format.search(r)) is not None else None
-      for r in responses
+      (m[-1] if (m := match_numbers.findall(r)) else None) for r in responses
   ]
 
   scores = []
@@ -808,7 +808,8 @@ def check_answer(prompts, completions, answer, **kargs):  # pylint: disable=unus
 
 
 match_numbers = re.compile(
-    rf"{solution_start}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
+    rf"{solution_start}.*?([+-]?(?:\d[\d,]*)(?:\.\d+)?|[+-]?\.\d+)",
+    flags=re.MULTILINE | re.DOTALL,
 )
 match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
 
@@ -829,8 +830,7 @@ def check_numbers(prompts, completions, answer, **kargs):  # pylint: disable=unu
   responses = completions
 
   extracted_responses = [
-      guess.group(1) if (guess := match_numbers.search(r)) is not None else None
-      for r in responses
+      (m[-1] if (m := match_numbers.findall(r)) else None) for r in responses
   ]
 
   scores = []
@@ -846,8 +846,8 @@ def check_numbers(prompts, completions, answer, **kargs):  # pylint: disable=unu
       continue
     # Convert to numbers
     try:
-      true_answer = float(true_answer.strip())
-      guess = float(guess.strip())
+      true_answer = float(true_answer.replace(",", "").strip())
+      guess = float(guess.replace(",", "").strip())
       scores.append(1.5 if guess == true_answer else 0.0)
     except Exception:  # pylint: disable=broad-except
       scores.append(0)
@@ -938,20 +938,20 @@ def evaluate(
       partially_corr_per_question = 0
       corr_format_per_question = 0
       for response in multiple_call_response:
-        extracted_response = (
-            guess.group(1)
-            if (guess := match_numbers.search(response)) is not None
-            else "-1000000"
-        )
+        # Grab the last matched number from this response (not a generator)
+        matches = match_numbers.findall(response)
+        extracted_response = matches[-1] if matches else "-1000000"
         try:
-          if float(extracted_response.strip()) == float(answer.strip()):
+          response_num = float(extracted_response.replace(",", "").strip())
+          answer_num = float(answer.replace(",", "").strip())
+          if response_num == answer_num:
             corr_ctr_per_question += 1
 
-          ratio = float(extracted_response.strip()) / float(answer.strip())
+          ratio = response_num / answer_num
           if ratio >= 0.9 and ratio <= 1.1:
             partially_corr_per_question += 1
-        except (ValueError, ZeroDivisionError):
-          print("SKIPPED")
+        except (ValueError, ZeroDivisionError) as e:
+          print(f"SKIPPED: {e}")
 
         # check format
         if match_format.search(response) is not None:
