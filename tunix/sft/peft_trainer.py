@@ -555,6 +555,8 @@ class PeftTrainer:
       train_ds: Iterable[Any],
       eval_ds: Iterable[Any] | None = None,
       skip_jit: bool = False,
+      *,
+      cache_nnx_graph: bool = False,
   ) -> None:
     """Training loop."""
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
@@ -564,9 +566,23 @@ class PeftTrainer:
           pxla.thread_resources.env.physical_mesh,
           train_step.jitted_fn._cache_size(),  # pytype: disable=attribute-error,protected-access
       )
+    if cache_nnx_graph:
+      # For performance, cache the nnx graph traversals. However, the training
+      # loop must _not_ modify the model or optimizer graph in this case.  For
+      # example, the distillation trainer mutates the model graph by adding the
+      # distillation loss.
+      partial_train_step = nnx.cached_partial(
+          train_step, self.model, self.optimizer
+      )
+      partial_eval_step = nnx.cached_partial(eval_step, self.model)
+    else:
+      partial_train_step = lambda inputs: train_step(
+          self.model, self.optimizer, inputs
+      )
+      partial_eval_step = lambda inputs: eval_step(self.model, inputs)
 
     if eval_ds:
-      self._run_eval(eval_ds, eval_step)
+      self._run_eval(eval_ds, partial_eval_step)
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
@@ -646,9 +662,7 @@ class PeftTrainer:
           with self._perf_tracer.span(
               "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
           ) as span:
-            train_loss, aux = train_step(
-                self.model, self.optimizer, train_example
-            )
+            train_loss, aux = partial_train_step(train_example)
             span.device_end([train_loss])
 
           current_time = time.perf_counter()
@@ -686,7 +700,7 @@ class PeftTrainer:
                 eval_ds
                 and self._train_steps % self.config.eval_every_n_steps == 0
             ):
-              self._run_eval(eval_ds, eval_step)
+              self._run_eval(eval_ds, partial_eval_step)
 
         self._prof.maybe_deactivate(self._iter_steps)
 
@@ -760,7 +774,7 @@ class PeftTrainer:
         )
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
-        loss, aux = eval_step_fn(self.model, eval_example)
+        loss, aux = eval_step_fn(eval_example)
         loss = jax.lax.stop_gradient(loss)
         self._buffered_eval_metrics = self._buffer_metrics(
             self._buffered_eval_metrics,

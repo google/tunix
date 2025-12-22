@@ -118,7 +118,11 @@ class PeftTrainerTest(parameterized.TestCase):
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
 
-  def test_basic_training(self):
+  @parameterized.named_parameters(
+      ('cache_nnx_graph', True),
+      ('no_cache_nnx_graph', False),
+  )
+  def test_basic_training(self, cache_nnx_graph: bool):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     rngs = nnx.Rngs(0)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
@@ -129,7 +133,7 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer.PeftTrainer(model, optimizer, config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    trainer.train(self.train_ds, self.eval_ds)
+    trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=cache_nnx_graph)
     variables = nnx.state(model, nnx.Param)
 
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
