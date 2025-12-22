@@ -625,7 +625,7 @@ class Block(nnx.Module):
         sliding_window_size=sliding_window_size,
         rngs=rngs,
         shd_config=shd_config,
-        remat_config=remat_config,
+        remat_config=RematConfig.NONE,
     )
     if use_post_attn_norm:
       self.post_attn_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
