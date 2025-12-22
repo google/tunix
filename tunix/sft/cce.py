@@ -9,7 +9,7 @@ def linear_cross_entropy(
     classifier: jax.Array,
     targets: jax.Array,
     shift: bool = False,
-    chunk_size: int = 4096,
+    chunk_size: int = 8192,
     return_lse: bool = False,
     ignore_index: int = -100,
     reduction: str = 'mean',
@@ -80,7 +80,7 @@ def linear_cross_entropy(
     # Apply gradient checkpointing (remat) to scan_body.
     # This ensures that intermediate logits are not stored for the backward pass,
     # preventing OOMs by re-computing them on demand.
-    scan_body = jax.checkpoint(scan_body)
+    #scan_body = jax.checkpoint(scan_body)
 
     (final_max, final_sum), _ = jax.lax.scan(
         scan_body, init_val, jnp.arange(num_full_chunks)
@@ -130,7 +130,6 @@ def linear_cross_entropy(
     if return_lse:
         return final_loss, lse
     return final_loss
-
 
 def cce_loss_fn(
     model: nnx.Module,

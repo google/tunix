@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TODO: Do not perform optimizer every step, use jax.lax.cond
 """Weighted Multi-Step Accumulation Optimizer."""
 
 from typing import Any, Callable, NamedTuple, Optional, Union
