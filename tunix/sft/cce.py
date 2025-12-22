@@ -169,7 +169,7 @@ def cce_loss_fn(
       classifier, 
       cce_targets, 
       reduction='sum',
-      chunk_size=4096,
+      chunk_size=8192,
       softcap=softcap
   )
   
