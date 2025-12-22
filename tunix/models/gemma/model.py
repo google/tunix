@@ -642,6 +642,11 @@ class Block(nnx.Module):
     
     self.remat_config = remat_config
 
+    if self.remat_config == RematConfig.BLOCK:
+        self.block_call = nnx.remat(Block._block_impl)
+    else:
+        self.block_call = Block._block_impl
+
 
 
   def _block_impl(
@@ -680,11 +685,7 @@ class Block(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.remat_config == RematConfig.BLOCK:
-      return nnx.remat(Block._block_impl)(
-          self, x, segment_pos, cache, attn_mask
-      )
-    return self._block_impl(x, segment_pos, cache, attn_mask)
+    return self.block_call(self, x, segment_pos, cache, attn_mask)
 
   @property
   def use_post_attn_norm(self):
