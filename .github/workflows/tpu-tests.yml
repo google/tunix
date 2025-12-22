@@ -190,12 +190,14 @@ jobs:
 
           # TODO(lancewang): Re-enable this test once the segfault is fixed.
           # Run GRPO demo script with minimal configuration
-          # python3 scripts/grpo_demo_llama3_qwen2.py \
-          #   --root-dir=/tmp/grpo_test \
-          #   --model-version=Qwen/Qwen2.5-0.5B-Instruct \
-          #   --num-batches=1 \
-          #   --num-test-batches=1 \
-          #   --rollout-engine=vanilla
+          python3 scripts/grpo_demo_llama3_qwen2.py \
+            --root-dir=/tmp/grpo_test \
+            --num-batches=2 \
+            --num-test-batches=1 \
+            --train-global-batch-size=2 \
+            --train-mini-batch-size=2 \
+            --train-micro-batch-size=2 \
+            --rollout-engine=vanilla
       - name: Run vllm tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

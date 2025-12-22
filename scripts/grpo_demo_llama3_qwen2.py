@@ -40,6 +40,7 @@ from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
 import transformers
+from tunix.cli.utils import data as data_lib
 from tunix.examples.data import math_dataset
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
@@ -53,6 +54,7 @@ from tunix.sft import profiler
 from tunix.sft import utils
 from tunix.tests import test_common as tc
 from tunix.utils import script_utils
+
 
 if os.getenv("JAX_PLATFORMS", None) == "proxy":
   import pathwaysutils
@@ -573,9 +575,16 @@ def extract_hash_answer(text: str) -> str | None:
 dataset = create_dataset(
     args.data_source,
     args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
-    args.global_batch_size,
-    NUM_BATCHES,
+    tokenizer=model_tokenizer,
     tfds_download=True,
+)
+
+dataset = data_lib.post_init_dataset(
+    dataset,
+    model_tokenizer,
+    batch_size=args.global_batch_size,
+    num_batches=NUM_BATCHES,
+    max_prompt_length=MAX_PROMPT_LENGTH,
 )
 
 if TRAIN_FRACTION == 1.0:
@@ -590,9 +599,16 @@ else:
 test_dataset = create_dataset(
     args.data_source,
     args.dataset if args.data_source == "tfds" else LOCAL_TRAIN_DATA_DIR,
-    args.global_batch_size,
-    NUM_TEST_BATCHES,
+    tokenizer=model_tokenizer,
     tfds_download=True,
+)
+
+test_dataset = data_lib.post_init_dataset(
+    test_dataset,
+    model_tokenizer,
+    batch_size=args.global_batch_size,
+    num_batches=NUM_TEST_BATCHES,
+    max_prompt_length=MAX_PROMPT_LENGTH,
 )
 
 print(
