@@ -150,12 +150,7 @@ def cce_loss_fn(
 
   # Access shared embedding weights
   classifier = model.embedder.input_embedding.value
-  
-  # Explicitly stop gradients on the classifier weights. 
-  # This prevents JAX from allocating a massive buffer to accumulate 
-  # weight gradients inside the scan loop.
-  #classifier = jax.lax.stop_gradient(classifier)
-  
+
   # CCE targets
   cce_targets = jnp.where(target_mask > 0, target_tokens, -100)
 
