@@ -9,7 +9,7 @@ def linear_cross_entropy(
     classifier: jax.Array,
     targets: jax.Array,
     shift: bool = False,
-    chunk_size: int = 4096,
+    chunk_size: int = 16384,
     return_lse: bool = False,
     ignore_index: int = -100,
     reduction: str = 'mean',
@@ -169,7 +169,7 @@ def cce_loss_fn(
       classifier, 
       cce_targets, 
       reduction='sum',
-      chunk_size=8192,
+      chunk_size=16384,
       softcap=softcap
   )
   
