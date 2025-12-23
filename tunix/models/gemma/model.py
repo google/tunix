@@ -1031,8 +1031,8 @@ class Gemma(nnx.Module):
     states_global = [nnx.split(l)[1] for l in layers_list[1::2]]
 
     # Stack states
-    stacked_local = jax.tree_map(lambda *args: jnp.stack(args), *states_local)
-    stacked_global = jax.tree_map(lambda *args: jnp.stack(args), *states_global)
+    stacked_local = jax.tree.map(lambda *args: jnp.stack(args), *states_local)
+    stacked_global = jax.tree.map(lambda *args: jnp.stack(args), *states_global)
 
     def scan_body(carry, params_pair):
       x = carry
