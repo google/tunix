@@ -288,6 +288,10 @@ class PerfMetricsExport:
         span.duration for span in actor_train_step_spans
     ]
 
+    first_micro_batch_rollout_time: float = (
+        rollout_spans[0].end - global_step_group.begin
+    )
+
     # append [0.0] to make size equal to micro batch
     actor_gap_time: list[float] = [
         b.end - a.begin
@@ -299,6 +303,7 @@ class PerfMetricsExport:
         "perf/global_step_time": (global_step_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
         "perf/rollout_idle_time": (rollout_idle_time, None),
+        "perf/first_micro_batch_rollout_time": (first_micro_batch_rollout_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
         "perf/sum/refer_inference_time": (np.sum(refer_inference_time), None),
         "perf/sum/refer_gap_time": (np.sum(refer_gap_time), None),

@@ -260,6 +260,7 @@ class ExportTest(absltest.TestCase):
         "perf/global_step_time": 1.3,
         "perf/weight_sync_time": 0.1,
         "perf/rollout_idle_time": 0.69,
+        "perf/first_micro_batch_rollout_time": 0.41,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
         "perf/sum/actor_train_time": 0.11,
