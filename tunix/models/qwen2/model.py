@@ -55,7 +55,6 @@ class ShardingConfig:
   ffw_weight_fd: Tuple[str | None, ...]
   rms_norm_weight: Tuple[str | None, ...]
   act_btd: Tuple[str | None, ...]
-  act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
   exp_weight_cdf: Tuple[str | None, ...]
   exp_weight_cfd: Tuple[str | None, ...]
@@ -75,7 +74,6 @@ class ShardingConfig:
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, None),
         act_btnh=('fsdp', None, 'tp', None),
         exp_weight_cdf=('fsdp', None, 'tp'),
         exp_weight_cfd=('fsdp', 'tp', None),
@@ -547,8 +545,8 @@ class MLP(nnx.Module):
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
+    outputs = shard(outputs, self.shd_config.act_btd)
     return outputs
 
 
