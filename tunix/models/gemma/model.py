@@ -28,8 +28,11 @@ import jax.sharding as shd
 import jaxtyping
 from tunix.models.gemma import params as params_lib
 from tunix.models.gemma.flashattention import flash_attention, SegmentIds
+from tunix.models.gemma.flashattention import flash_attention, SegmentIds
 from tunix.utils import compat
 from tunix.utils import env_utils
+from jax.experimental.shard_map import shard_map
+from jax.sharding import PartitionSpec as P
 
 
 LayerCache = dict[str, jaxtyping.Array]
@@ -487,13 +490,31 @@ class Attention(nnx.Module):
         mask_int = mask_reduced.astype(jnp.int32)
         segment_ids = SegmentIds(q=mask_int, kv=mask_int)
 
-        attn_output = flash_attention(
-            q_flash, k_flash, v_flash,
-            causal=True,
-            sm_scale=1.0,
-            attn_logits_soft_cap=self.attn_logits_soft_cap,
-            segment_ids=segment_ids
-        )
+        # Flash Attention using shard_map to handle partitioning
+        mesh = pxla.thread_resources.env.physical_mesh
+
+        def shard_map_inner(q, k, v, seg_q, seg_kv):
+             return flash_attention(
+                 q, k, v,
+                 causal=True,
+                 sm_scale=1.0,
+                 attn_logits_soft_cap=self.attn_logits_soft_cap,
+                 segment_ids=SegmentIds(q=seg_q, kv=seg_kv)
+             )
+
+        attn_output = shard_map(
+             shard_map_inner,
+             mesh=mesh,
+             in_specs=(
+                 P('fsdp', 'tp', None, None), # q [B, N, T, D]
+                 P('fsdp', 'tp', None, None), # k [B, N, S, D]
+                 P('fsdp', 'tp', None, None), # v [B, N, S, D]
+                 P('fsdp', None),             # seg_q [B, T]
+                 P('fsdp', None)              # seg_kv [B, S]
+             ),
+             out_specs=P('fsdp', 'tp', None, None),
+             check_rep=False
+        )(q_flash, k_flash, v_flash, segment_ids.q, segment_ids.kv)
         
         # Output is [B, H, T, D]. We need [B, T, H, D] then flatten to [B, T, D] in einsum
         # Wait, self.attn_vec_einsum expects 'BTNH' (encoded)? 
