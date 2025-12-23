@@ -802,18 +802,7 @@ def _flash_attention_impl(
               "arbitrary",
           )
       ),
-      cost_estimate=_fwd_cost_estimate(
-          q,
-          k,
-          v,
-          ab,
-          segment_ids,
-          causal=causal,
-          sm_scale=sm_scale,
-          attn_logits_soft_cap=attn_logits_soft_cap,
-          kernel_inputs_specs=(q, k, v, ab, q_segment_ids, kv_segment_ids),
-          kernel_outputs_specs=out_shape,
-      ),
+      out_shape=out_shape,
   )(q, k, v, ab, q_segment_ids, kv_segment_ids)
   if save_residuals:
     l, m = (v[..., 0] for v in aux[-2:])
