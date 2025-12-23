@@ -802,14 +802,12 @@ def _flash_attention_impl(
               "arbitrary",
           )
       ),
-      out_shape=out_shape,
   )(q, k, v, ab, q_segment_ids, kv_segment_ids)
   if save_residuals:
     l, m = (v[..., 0] for v in aux[-2:])
     return (o, l, m)
   else:
     return o
-
 
 def _flash_attention_dkv_kernel(
     q_tile_ref,
