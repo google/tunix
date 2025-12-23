@@ -24,7 +24,7 @@ GEMMA_TOKENIZER_PATH = "gs://gemma-data/tokenizers/tokenizer_gemma2.model"
 
 LEARNING_RATE = 5e-6
 GLOBAL_BATCH_SIZE = 64
-MAX_TARGET_LENGTH = 3072
+MAX_TARGET_LENGTH = 2048
 NUM_ROWS = 100000
 GRADIENT_ACCUMULATION_STEPS = 12
 WARMUP_STEPS = 50
@@ -94,7 +94,7 @@ print(f"Model downloaded to: {local_model_path}")
 
 
 model_config = gemma_lib.ModelConfig.gemma2_2b()
-model_config.remat_config = gemma_lib.RematConfig.MLP_ONLY
+model_config.remat_config = gemma_lib.RematConfig.NONE  # Remat is handled at loss level
 
 print("Loading model from safetensors...")
 with mesh:

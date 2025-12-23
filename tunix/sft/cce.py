@@ -140,8 +140,14 @@ def cce_loss_fn(
 ) -> ArrayLike:
   """CCE loss function for PEFT training on TPU."""
   
-  # Get embeddings
-  embeddings, _ = model(input_tokens, positions, None, attention_mask, return_embeddings=True)
+  # Get embeddings - wrap in checkpoint for memory efficiency
+  # This is a single remat point for the entire forward pass
+  @jax.checkpoint
+  def forward_with_checkpoint(tokens, pos, mask):
+    emb, _ = model(tokens, pos, None, mask, return_embeddings=True)
+    return emb
+  
+  embeddings = forward_with_checkpoint(input_tokens, positions, attention_mask)
   
   # Manual Shifting (Correct)
   embeddings = embeddings[:, :-1, :]
