@@ -50,7 +50,6 @@ class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
   LAYER = enum.auto()  # Remat the entire layer (scan).
-  MLP = enum.auto()  # Remat only the MLP block.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -646,10 +645,8 @@ class FeedForward(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-      remat_config: RematConfig = RematConfig.MLP,
   ):
     self.shd_config = shd_config
-    self.remat_config = remat_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=features,
@@ -679,7 +676,8 @@ class FeedForward(nnx.Module):
         ),
     )
 
-  def _call_impl(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
@@ -689,12 +687,6 @@ class FeedForward(nnx.Module):
 
     outputs = self.down_proj(activations)
     return outputs
-
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.remat_config == RematConfig.MLP:
-      return nnx.remat(self._call_impl.__func__)(self, x)
-    return self._call_impl(x)
 
 
 class Block(nnx.Module):
@@ -741,7 +733,6 @@ class Block(nnx.Module):
         hidden_dim=hidden_dim,
         rngs=rngs,
         shd_config=shd_config,
-        remat_config=remat_config,
     )
     if use_post_ffw_norm:
       self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
@@ -755,10 +746,8 @@ class Block(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.remat_config == RematConfig.LAYER:
-      return nnx.remat(self._call_impl.__func__)(
-          self, x, segment_pos, cache, attn_mask
-      )
+    # Note: When RematConfig.LAYER is used, remat is applied at the scan level
+    # in _scan_forward, not here. This avoids double rematerialization.
     return self._call_impl(x, segment_pos, cache, attn_mask)
 
   def _call_impl(
@@ -1153,9 +1142,14 @@ class Gemma(nnx.Module):
       
       return x, None
 
-    # Scan
+    # Wrap scan_body with remat for layer-level checkpointing.
+    # This ensures activations are recomputed during backward pass,
+    # reducing peak memory usage.
+    rematted_scan_body = nnx.remat(scan_body)
+
+    # Scan with rematerialized body
     x, _ = jax.lax.scan(
-        scan_body,
+        rematted_scan_body,
         x,
         (stacked_local, stacked_global)
     )
