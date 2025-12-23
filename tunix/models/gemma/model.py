@@ -50,6 +50,7 @@ class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
   LAYER = enum.auto()  # Remat the entire layer (scan).
+  MLP = enum.auto()  # Remat the MLP block.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -645,8 +646,10 @@ class FeedForward(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      remat_config: RematConfig = RematConfig.NONE,
   ):
     self.shd_config = shd_config
+    self.remat_config = remat_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=features,
@@ -678,6 +681,11 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.remat_config == RematConfig.MLP:
+      return nnx.remat(self._call_impl.__func__)(self, x)
+    return self._call_impl(x)
+
+  def _call_impl(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
@@ -733,6 +741,7 @@ class Block(nnx.Module):
         hidden_dim=hidden_dim,
         rngs=rngs,
         shd_config=shd_config,
+        remat_config=remat_config,
     )
     if use_post_ffw_norm:
       self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
@@ -1026,7 +1035,8 @@ class Gemma(nnx.Module):
     x = self.embedder.encode(last_tokens)
 
     if (
-        self.config.remat_config == RematConfig.LAYER
+        self.config.remat_config
+        in (RematConfig.LAYER, RematConfig.BLOCK, RematConfig.MLP)
         and cache is None
         and self.config.num_layers % 2 == 0
     ):
@@ -1145,7 +1155,10 @@ class Gemma(nnx.Module):
     # Wrap scan_body with remat for layer-level checkpointing.
     # This ensures activations are recomputed during backward pass,
     # reducing peak memory usage.
-    rematted_scan_body = nnx.remat(scan_body)
+    if self.config.remat_config == RematConfig.LAYER:
+      rematted_scan_body = nnx.remat(scan_body)
+    else:
+      rematted_scan_body = scan_body
 
     # Scan with rematerialized body
     x, _ = jax.lax.scan(

@@ -1,4 +1,5 @@
 # TAKEN FROM https://github.com/jax-ml/jax/blob/940747949e3b8ddf60cf82480ba681cd8c11e129/jax/experimental/pallas/ops/tpu/flash_attention.py
+# (The PR appears dead: https://github.com/jax-ml/jax/pull/28099)
 
 # Copyright 2023 The JAX Authors.
 #

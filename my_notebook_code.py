@@ -94,7 +94,7 @@ print(f"Model downloaded to: {local_model_path}")
 
 
 model_config = gemma_lib.ModelConfig.gemma2_2b()
-model_config.remat_config = gemma_lib.RematConfig.MLP
+model_config.remat_config = gemma_lib.RematConfig.LAYER
 
 print("Loading model from safetensors...")
 with mesh:
