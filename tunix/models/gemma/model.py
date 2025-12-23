@@ -45,8 +45,8 @@ class AttentionType(enum.Enum):
 
 class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
-  BLOCK = enum.auto()  # Remat the entire attn block (attention only).
-  MLP_ONLY = enum.auto()  # Remat only MLP (saves most memory, attention stored).
+  BLOCK = enum.auto()  # Remat the entire attn block.
+  LAYER = enum.auto()  # Remat the entire layer (scan).
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -549,10 +549,8 @@ class FeedForward(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-      remat_config: RematConfig = RematConfig.BLOCK,
   ):
     self.shd_config = shd_config
-    self.remat_config = remat_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=features,
@@ -582,8 +580,8 @@ class FeedForward(nnx.Module):
         ),
     )
 
-  def block(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    """Core feed-forward computation. Separated for rematerialization."""
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
@@ -593,15 +591,6 @@ class FeedForward(nnx.Module):
 
     outputs = self.down_proj(activations)
     return outputs
-
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.remat_config == RematConfig.MLP_ONLY:
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__)(self, x)
-    else:
-      return self.block(x)
 
 
 class Block(nnx.Module):
@@ -648,12 +637,26 @@ class Block(nnx.Module):
         hidden_dim=hidden_dim,
         rngs=rngs,
         shd_config=shd_config,
-        remat_config=remat_config,
     )
     if use_post_ffw_norm:
       self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
 
+    self.remat_config = remat_config
+
   def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.remat_config == RematConfig.LAYER:
+      return nnx.remat(self._call_impl.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
+    return self._call_impl(x, segment_pos, cache, attn_mask)
+
+  def _call_impl(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -927,17 +930,25 @@ class Gemma(nnx.Module):
     """
     new_cache = None if cache is None else {}
     x = self.embedder.encode(last_tokens)
-    for i, layer in enumerate(self.layers):
-      layer_name = f'layer_{i}'
-      layer_cache = cache[layer_name] if cache else None
-      layer_cache, x = layer(
-          x,
-          positions,
-          layer_cache,
-          attention_mask,
-      )
-      if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+
+    if (
+        self.config.remat_config == RematConfig.LAYER
+        and cache is None
+        and self.config.num_layers % 2 == 0
+    ):
+      x = self._scan_forward(x, positions, attention_mask)
+    else:
+      for i, layer in enumerate(self.layers):
+        layer_name = f'layer_{i}'
+        layer_cache = cache[layer_name] if cache else None
+        layer_cache, x = layer(
+            x,
+            positions,
+            layer_cache,
+            attention_mask,
+        )
+        if cache is not None:
+          new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
     if output_hidden_states:
@@ -1001,6 +1012,51 @@ class Gemma(nnx.Module):
         ),
     }
 
+  def _scan_forward(
+      self,
+      x: jaxtyping.Array,
+      positions: jaxtyping.Array,
+      attention_mask: jaxtyping.Array,
+  ) -> jaxtyping.Array:
+    # Assume alternating Local/Global layers.
+    # Stack even layers and odd layers.
+    graph_def_local, _ = nnx.split(self.layers[0])
+    graph_def_global, _ = nnx.split(self.layers[1])
+
+    state = nnx.state(self.layers)
+    # layers is a list of blocks. state is keys by index '0', '1', ...
+    
+    # We need to sort keys to ensure order, although nnx List should handle it.
+    # We can trust that '0', '1' indicate the order.
+    
+    states_local = [state[str(i)] for i in range(0, self.config.num_layers, 2)]
+    states_global = [state[str(i)] for i in range(1, self.config.num_layers, 2)]
+
+    # Stack states
+    stacked_local = jax.tree_map(lambda *args: jnp.stack(args), *states_local)
+    stacked_global = jax.tree_map(lambda *args: jnp.stack(args), *states_global)
+
+    def scan_body(carry, params_pair):
+      x = carry
+      params_local, params_global = params_pair
+      
+      # Execute Local Layer
+      layer_local = nnx.merge(graph_def_local, params_local)
+      _, x = layer_local(x, positions, None, attention_mask)
+      
+      # Execute Global Layer
+      layer_global = nnx.merge(graph_def_global, params_global)
+      _, x = layer_global(x, positions, None, attention_mask)
+      
+      return x, None
+
+    # Scan
+    x, _ = jax.lax.scan(
+        scan_body,
+        x,
+        (stacked_local, stacked_global)
+    )
+    return x
 
 class GemmaWithScoreHead(nnx.Module):
   """Gemma transformer with a score head."""
