@@ -21,6 +21,8 @@ import dataclasses
 import functools
 import math
 from typing import Any, NamedTuple
+import jax._src.tpu_custom_call
+jax._src.tpu_custom_call.get_ir_version = lambda ctx: 7
 
 import jax
 from jax import lax
@@ -795,7 +797,6 @@ def _flash_attention_impl(
       out_shape=out_shape,
       debug=debug,
       compiler_params=pltpu.CompilerParams(
-          mosaic_version=7,
           dimension_semantics=(
               "parallel",
               "parallel",
@@ -1158,7 +1159,6 @@ def _flash_attention_bwd_dkv(
         out_shape=out_shapes,
         debug=debug,
         compiler_params=pltpu.CompilerParams(
-                mosaic_version=7,
                 dimension_semantics=(
                     "parallel",
                     "parallel",
@@ -1504,7 +1504,6 @@ def _flash_attention_bwd_dq(
         out_shape=out_shapes,
         debug=debug,
         compiler_params=pltpu.CompilerParams(
-                mosaic_version=7,
                 dimension_semantics=(
                     "parallel",
                     "parallel",
