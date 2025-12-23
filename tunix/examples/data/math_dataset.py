@@ -14,6 +14,7 @@
 
 import logging
 import os
+
 import grain
 import tensorflow_datasets as tfds
 # For OSS usage
@@ -40,11 +41,11 @@ TEMPLATE = """<start_of_turn>user
 def extract_hash_answer(text: str) -> str | None:
   if "####" not in text:
     return None
-  return text.split("####")[1].strip()
+  return text.split("####")[1].strip().replace(",", "")
 
 
 # TODO(noghabi): Move these common dataset functions to a separate module.
-def apply_template_with_tokenizer(
+def apply_template(
     dataset,
     tokenizer,
     tokenize=False,
@@ -52,6 +53,23 @@ def apply_template_with_tokenizer(
 ):
   """Applies chat template with tokenizer to dataset."""
 
+  _apply_template = None
+  if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+    logging.info("Applying chat template with tokenizer to dataset")
+    _apply_template = lambda question: tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": question},
+        ],
+        tokenize=tokenize,
+        add_generation_prompt=add_generation_prompt,
+    )
+  else:
+    logging.info("Applying custom template to dataset")
+    _apply_template = lambda question: TEMPLATE.format(
+        system_prompt=SYSTEM_PROMPT, question=question
+    )
+
   def _process_element(x):
     item = dict(x)
     for key, value in item.items():
@@ -59,34 +77,8 @@ def apply_template_with_tokenizer(
         item[key] = value.decode("utf-8")
 
     return {
-        "prompts": tokenizer.apply_chat_template(
-            item["prompt"],
-            tokenize=tokenize,
-            add_generation_prompt=add_generation_prompt,
-        ),
-        **{k: v for k, v in item.items() if k != "prompt"},
-    }
-
-  return dataset.map(_process_element)
-
-
-def apply_fixed_template(dataset, template):
-  """Applies fixed template to dataset."""
-
-  def _process_element(x):
-    item = dict(x)
-    for key, value in item.items():
-      if isinstance(value, bytes):
-        item[key] = value.decode("utf-8")
-    return {
-        # passed to model forward pass
-        "prompts": template.format(
-            system_prompt=SYSTEM_PROMPT,
-            question=item["question"],
-        ),
-        # passed to reward functions
+        "prompts": _apply_template(item["question"]),
         "question": item["question"],
-        # passed to reward functions
         "answer": extract_hash_answer(item["answer"]),
     }
 
@@ -132,6 +124,7 @@ def create_dataset(
     dataset: str,
     tokenizer=None,
     tfds_download: bool = True,
+    split: str = "train",
 ):
   """Creates a dataset based on the given name.
 
@@ -146,6 +139,7 @@ def create_dataset(
       provided, the fixed template is used.
     tfds_download: the download flag when using TFDS datasets. If false, the
       data_dir used will be set to `None` and chosen by default by tfds.
+    split: The dataset split to use (e.g., "train", "test").
 
   Returns:
     A batched grain.MapDataset or grain.experimental.ParquetIterDataset.
@@ -158,12 +152,12 @@ def create_dataset(
     ds = grain.experimental.ParquetIterDataset(dataset)
   # tfds dataset
   elif data_source == "tfds" and dataset in ["gsm8k"]:
-    data_dir = "./data/train" if tfds_download else None
+    data_dir = os.path.join("./data", split) if tfds_download else None
     ds = get_tfds_dataset(
         dataset_name=dataset,
         data_dir=data_dir,
         download=tfds_download,
-        split="train",
+        split=split,
     )
   else:
     raise ValueError(
@@ -172,10 +166,6 @@ def create_dataset(
     )
 
   # Apply template
-  if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-    logging.info("Applying chat template with tokenizer to %s", dataset)
-    ds = apply_template_with_tokenizer(ds, tokenizer)
-  else:
-    logging.info("Applying fixed template to %s", dataset)
-    ds = apply_fixed_template(ds, TEMPLATE)
+  ds = apply_template(ds, tokenizer, tokenize=False)
+
   return ds
