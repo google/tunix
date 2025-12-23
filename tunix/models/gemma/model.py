@@ -45,7 +45,8 @@ class AttentionType(enum.Enum):
 
 class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
-  BLOCK = enum.auto()  # Remat the entire attn block.
+  BLOCK = enum.auto()  # Remat the entire attn block (attention only).
+  MLP_ONLY = enum.auto()  # Remat only MLP (saves most memory, attention stored).
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -582,6 +583,7 @@ class FeedForward(nnx.Module):
     )
 
   def block(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    """Core feed-forward computation. Separated for rematerialization."""
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
@@ -594,9 +596,12 @@ class FeedForward(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.remat_config == RematConfig.BLOCK:
+    if self.remat_config == RematConfig.MLP_ONLY:
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
       return nnx.remat(self.block.__func__)(self, x)
-    return self.block(x)
+    else:
+      return self.block(x)
 
 
 class Block(nnx.Module):
