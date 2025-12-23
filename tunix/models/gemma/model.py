@@ -640,7 +640,7 @@ class Block(nnx.Module):
     if use_post_ffw_norm:
       self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
 
-  def __call__(
+  def _block_impl(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -668,6 +668,20 @@ class Block(nnx.Module):
 
     outputs += attn_output
     return cache, outputs
+
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self._block_impl.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
+    else:
+      return self._block_impl(x, segment_pos, cache, attn_mask)
 
   @property
   def use_post_attn_norm(self):
