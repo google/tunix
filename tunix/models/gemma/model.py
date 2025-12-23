@@ -27,7 +27,7 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 from tunix.models.gemma import params as params_lib
-from tunix.models.gemma.flashattention import flash_attention
+from tunix.models.gemma.flashattention import flash_attention, SegmentIds
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -472,11 +472,27 @@ class Attention(nnx.Module):
              k_flash = jnp.repeat(k_flash, n_rep, axis=1)
              v_flash = jnp.repeat(v_flash, n_rep, axis=1)
 
+        # Use attn_mask (0 for pad, 1 for data) as SegmentIds
+        # attn_mask shape can be [B, 1, S], [B, S, S], etc.
+        # We need to reduce it to [B, S] for SegmentIds.
+        # We assume padding tokens are 0 explicitly in all views (columns are 0).
+        # We take 'any' along inputs to find valid Key positions.
+        reduce_axes = tuple(range(1, attn_mask.ndim - 1))
+        if reduce_axes:
+            mask_reduced = attn_mask.any(axis=reduce_axes)
+        else:
+            mask_reduced = attn_mask
+
+        # Cast to int32 (1 for data, 0 for pad)
+        mask_int = mask_reduced.astype(jnp.int32)
+        segment_ids = SegmentIds(q=mask_int, kv=mask_int)
+
         attn_output = flash_attention(
             q_flash, k_flash, v_flash,
             causal=True,
             sm_scale=1.0,
-            attn_logits_soft_cap=self.attn_logits_soft_cap
+            attn_logits_soft_cap=self.attn_logits_soft_cap,
+            segment_ids=segment_ids
         )
         
         # Output is [B, H, T, D]. We need [B, T, H, D] then flatten to [B, T, D] in einsum
