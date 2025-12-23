@@ -612,6 +612,7 @@ class Block(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
       remat_config: RematConfig = RematConfig.BLOCK,
   ):
+    self.remat_config = remat_config
     self.pre_attention_norm = RMSNorm(
         embed_dim, rngs=rngs, shd_config=shd_config
     )
