@@ -27,6 +27,7 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 from tunix.models.gemma import params as params_lib
+from tunix.models.gemma.flashattention import flash_attention
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -47,6 +48,7 @@ class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
   LAYER = enum.auto()  # Remat the entire layer (scan).
+  MLP = enum.auto()  # Remat only the MLP block.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -436,6 +438,65 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
+    # Use Flash Attention for Global Attention during training (no cache)
+    # Also use it for LOCAL_SLIDING if the sequence length fits within the sliding window (effectively Global)
+    use_flash = False
+    if cache is None:
+        if self.attn_type == AttentionType.GLOBAL:
+            use_flash = True
+        elif self.attn_type == AttentionType.LOCAL_SLIDING and self.sliding_window_size is not None:
+             if x.shape[1] <= self.sliding_window_size:
+                 use_flash = True
+
+    if use_flash:
+        # Prepare Q, K, V for Flash Attention
+        # Current shapes:
+        # q: [Batch, Seq, NumHeads, HeadDim]
+        # k, v: [Batch, Seq, NumKVHeads, HeadDim]
+        # FlashAttn expects: [Batch, NumHeads, Seq, HeadDim]
+
+        # 1. Scaling: Gemma 2 requires Scaling -> SoftCap.
+        # The kernel applies SoftCap -> sm_scale.
+        # Therefore, we MUST provide pre-scaled Q (query_scaled) and set sm_scale=1.0
+        
+        q_flash = query_scaled.transpose(0, 2, 1, 3) # [B, H, T, D]
+        
+        k_flash = key_proj.transpose(0, 2, 1, 3)   # [B, K, S, D]
+        v_flash = value_proj.transpose(0, 2, 1, 3) # [B, K, S, D]
+
+        # Handle GQA: Repeat K/V heads to match Q heads
+        if self.num_kv_heads != self.num_heads:
+             # Repeat factor
+             n_rep = self.num_heads // self.num_kv_heads
+             # k_flash: [B, K, S, D] -> [B, K, n_rep, S, D] -> [B, K*n_rep, S, D]
+             k_flash = jnp.repeat(k_flash, n_rep, axis=1)
+             v_flash = jnp.repeat(v_flash, n_rep, axis=1)
+
+        attn_output = flash_attention(
+            q_flash, k_flash, v_flash,
+            causal=True,
+            sm_scale=1.0,
+            attn_logits_soft_cap=self.attn_logits_soft_cap
+        )
+        
+        # Output is [B, H, T, D]. We need [B, T, H, D] then flatten to [B, T, D] in einsum
+        # Wait, self.attn_vec_einsum expects 'BTNH' (encoded)? 
+        # Actually existing code:
+        # encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
+        # attn_output = self.attn_vec_einsum(encoded)
+        # 'encoded' is [B, T, H, D] (BTNH)
+        
+        attn_output = attn_output.transpose(0, 2, 1, 3) # [B, T, H, D]
+        
+        # Continue with projection
+        attn_output = self.attn_vec_einsum(attn_output)
+        attn_output = shard(attn_output, self.shd_config.act_btd)
+        
+        # No cache update needed as cache is None
+        new_cache = None
+        return new_cache, attn_output
+
+
     if self.use_gqa:
       # Reshape matrices to enable einsums over groups.
       b, t, kg, h = query_scaled.shape
@@ -549,8 +610,10 @@ class FeedForward(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      remat_config: RematConfig = RematConfig.MLP,
   ):
     self.shd_config = shd_config
+    self.remat_config = remat_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=features,
@@ -580,8 +643,7 @@ class FeedForward(nnx.Module):
         ),
     )
 
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def _call_impl(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
@@ -591,6 +653,12 @@ class FeedForward(nnx.Module):
 
     outputs = self.down_proj(activations)
     return outputs
+
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.remat_config == RematConfig.MLP:
+      return nnx.remat(self._call_impl)(x)
+    return self._call_impl(x)
 
 
 class Block(nnx.Module):
@@ -637,6 +705,7 @@ class Block(nnx.Module):
         hidden_dim=hidden_dim,
         rngs=rngs,
         shd_config=shd_config,
+        remat_config=remat_config,
     )
     if use_post_ffw_norm:
       self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
