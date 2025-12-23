@@ -3,6 +3,13 @@ from typing import Any, Iterator
 from absl import logging
 import datasets
 import jax
+# Monkey-patch Pallas to bypass libtpu version check
+try:
+  from jax._src.pallas.mosaic import lowering
+  lowering.is_cloud_tpu_older_than = lambda *args, **kwargs: False
+except ImportError:
+  pass
+
 from flax import nnx
 from huggingface_hub import snapshot_download, HfApi, create_repo
 import numpy as np
