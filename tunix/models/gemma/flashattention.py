@@ -22,7 +22,7 @@ import functools
 import math
 from typing import Any, NamedTuple
 import jax._src.tpu_custom_call
-jax._src.tpu_custom_call.get_ir_version = lambda ctx: 7
+jax._src.tpu_custom_call.get_ir_version = lambda ctx: 4
 
 import jax
 from jax import lax
