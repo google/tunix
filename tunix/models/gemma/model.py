@@ -673,7 +673,7 @@ class FeedForward(nnx.Module):
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     if self.remat_config == RematConfig.MLP:
-      return nnx.remat(self._call_impl)(x)
+      return nnx.remat(self._call_impl.__func__)(self, x)
     return self._call_impl(x)
 
 
