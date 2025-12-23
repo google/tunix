@@ -25,6 +25,3 @@
 /docs/sg_execution_times.rst
 /docs/generated
 build/*
-
-# User notebook code
-my_notebook_code.py

@@ -548,8 +548,10 @@ class FeedForward(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      remat_config: RematConfig = RematConfig.BLOCK,
   ):
     self.shd_config = shd_config
+    self.remat_config = remat_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=features,
@@ -579,8 +581,7 @@ class FeedForward(nnx.Module):
         ),
     )
 
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def block(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
@@ -590,6 +591,12 @@ class FeedForward(nnx.Module):
 
     outputs = self.down_proj(activations)
     return outputs
+
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block.__func__)(self, x)
+    return self.block(x)
 
 
 class Block(nnx.Module):
@@ -612,7 +619,6 @@ class Block(nnx.Module):
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
       remat_config: RematConfig = RematConfig.BLOCK,
   ):
-    self.remat_config = remat_config
     self.pre_attention_norm = RMSNorm(
         embed_dim, rngs=rngs, shd_config=shd_config
     )
@@ -637,11 +643,12 @@ class Block(nnx.Module):
         hidden_dim=hidden_dim,
         rngs=rngs,
         shd_config=shd_config,
+        remat_config=remat_config,
     )
     if use_post_ffw_norm:
       self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
 
-  def _block_impl(
+  def __call__(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -669,20 +676,6 @@ class Block(nnx.Module):
 
     outputs += attn_output
     return cache, outputs
-
-  def __call__(
-      self,
-      x: jaxtyping.Array,
-      segment_pos: jaxtyping.Array,
-      cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.remat_config == RematConfig.BLOCK:
-      return nnx.remat(self._block_impl.__func__)(
-          self, x, segment_pos, cache, attn_mask
-      )
-    else:
-      return self._block_impl(x, segment_pos, cache, attn_mask)
 
   @property
   def use_post_attn_norm(self):
