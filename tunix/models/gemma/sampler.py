@@ -19,7 +19,6 @@ from tunix.sft import utils
 # Keep the import below for google internal lint.
 import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
 
-
 def _sample_top_p(
     probs: jnp.ndarray, p: float, key: jax.Array, k: Optional[int] = None
 ) -> jnp.ndarray:

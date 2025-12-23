@@ -28,7 +28,6 @@ import jax.sharding as shd
 import jaxtyping
 from tunix.models.gemma import params as params_lib
 from tunix.models.gemma.flashattention import flash_attention, SegmentIds
-from tunix.models.gemma.flashattention import flash_attention, SegmentIds
 from tunix.utils import compat
 from tunix.utils import env_utils
 from jax.experimental.shard_map import shard_map
