@@ -1023,14 +1023,12 @@ class Gemma(nnx.Module):
     graph_def_local, _ = nnx.split(self.layers[0])
     graph_def_global, _ = nnx.split(self.layers[1])
 
-    state = nnx.state(self.layers)
-    # layers is a list of blocks. state is keys by index '0', '1', ...
+    # Robustly extract states for even and odd layers.
+    # self.layers is populated with params (merged) in this context.
+    layers_list = list(self.layers)
     
-    # We need to sort keys to ensure order, although nnx List should handle it.
-    # We can trust that '0', '1' indicate the order.
-    
-    states_local = [state[str(i)] for i in range(0, self.config.num_layers, 2)]
-    states_global = [state[str(i)] for i in range(1, self.config.num_layers, 2)]
+    states_local = [nnx.split(l)[1] for l in layers_list[0::2]]
+    states_global = [nnx.split(l)[1] for l in layers_list[1::2]]
 
     # Stack states
     stacked_local = jax.tree_map(lambda *args: jnp.stack(args), *states_local)
