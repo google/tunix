@@ -241,11 +241,27 @@ _TEST_MODEL_INFOS = (
         category='llama3',
     ),
     ModelTestInfo(
+        id='meta-llama/Llama-3.2-1B-Instruct',
+        name='llama-3.2-1b-instruct',
+        family='llama3p2',
+        version='1b_instruct',
+        config_id='llama3p2_1b_instruct',
+        category='llama3',
+    ),
+    ModelTestInfo(
         id='meta-llama/Llama-3.2-3B',
         name='llama-3.2-3b',
         family='llama3p2',
         version='3b',
         config_id='llama3p2_3b',
+        category='llama3',
+    ),
+    ModelTestInfo(
+        id='meta-llama/Llama-3.2-3B-Instruct',
+        name='llama-3.2-3b-instruct',
+        family='llama3p2',
+        version='3b_instruct',
+        config_id='llama3p2_3b_instruct',
         category='llama3',
     ),
     ModelTestInfo(
