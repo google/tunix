@@ -12,6 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+################################# LoRa #################################
+_lora_config: &base_lora_config
+  module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
+  rank: 16
+  alpha: 2.0
+  weight_qtype: "nf4"
+  tile_size: 256
+
+################################## MESH ##################################
+_mesh: &base_mesh
+  shape: "(2,2)"
+  # "('fsdp',)"
+  axis_names: "('fsdp','tp')"
+
+
 ################################## LOAD MODEL ##################################
 model_config: &base_model_config
   # Specify model name in style of {model_version}-{model size}, this will use to invoke model config
@@ -45,28 +61,26 @@ model_config: &base_model_config
 
   # Directory used for NNX conversion if downloaded Gemma/Gemma2 from Kaggle source. 
   intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
-  ################################# LoRa #################################
-  lora_config:
-    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
-    rank: 16
-    alpha: 2.0
-    weight_qtype: "nf4"
-    tile_size: 256
 
-  ################################## MESH ##################################
+  lora_config:
+    <<: *base_lora_config
   mesh:
-    shape: "(2,2)"
-    # "('fsdp',)"
-    axis_names: "('fsdp','tp')"
+    <<: *base_mesh
+
 
 actor_model_config:
-  <<: *base_model_config
+  lora_config:
+    <<: *base_lora_config
+  mesh:
+    <<: *base_mesh
 
 reference_model_config:
  <<: *base_model_config
 
 rollout_model_config:
- <<: *base_model_config
+  mesh:
+    <<: *base_mesh
+
 
 ################################## Tokenizer ##################################
 tokenizer_config:

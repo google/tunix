@@ -174,6 +174,25 @@ class HyperParameters:
         keys_from_env_and_command_line,
     )
     self.config = raw_keys
+
+    # If no model_config related thing is overwritten, clone reference_model_config to model_config
+    model_config_overwritten = any(
+        k == "model_config" or k.startswith("model_config.")
+        for k in keys_from_env_and_command_line
+    )
+    if (
+        not model_config_overwritten
+        and "reference_model_config" in self.config
+        and self.config.get("reference_model_config")
+    ):
+      logging.info(
+          "No model_config overrides detected, cloning reference_model_config"
+          " to model_config"
+      )
+      self.config["model_config"] = copy.deepcopy(
+          self.config["reference_model_config"]
+      )
+
     self._validate_tokenizer()
     self._validate_model_source(raw_keys)
     self.check_supported_workflow()
@@ -776,6 +795,9 @@ class HyperParameters:
       config_oconf = omegaconf.OmegaConf.load(config_path)
     except FileNotFoundError as e:
       raise ValueError(f"Config {config_path} not found.") from e
+    for key in list(config_oconf.keys()):
+      if key.startswith("_"):
+        del config_oconf[key]
 
     return config_oconf
 
