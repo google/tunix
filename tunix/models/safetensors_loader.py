@@ -192,86 +192,11 @@ def load_and_create_model(
     mmaps.append(mm)
     file_handles.append(fh)
 
-<<<<<<< HEAD
-      def process_key(k_name, f, sf_file, file_loaded_tensors):
-        try:
-          with file_lock:
-            v = sf_file.get_tensor(k_name)  # get_tensor is not thread-safe
-          jax_key_mapped, transform = torch_key_to_jax_key(key_map, k_name)
-
-          if transform is not None:
-            permute, reshape = transform
-            if permute:
-              v = v.transpose(permute)
-            if reshape:
-              v = v.reshape(reshape)
-
-          current_arr = jnp.array(v)
-          if dtype and current_arr.dtype != dtype:
-            current_arr = current_arr.astype(dtype)
-
-          if jax_key_mapped in file_loaded_tensors:
-            raise ValueError(
-                f"Duplicate key {jax_key_mapped} found within file {f.name}."
-            )
-          file_loaded_tensors[jax_key_mapped] = current_arr
-
-        except Exception as e:
-          raise RuntimeError(
-              f"Failed to load tensor {k_name} from file {f.name}: {e}"
-          ) from e
-
-      with concurrent.futures.ThreadPoolExecutor(
-          max_workers=os.cpu_count()
-      ) as executor:
-        print(f"Loading tensors from file: {f.name} with {len(keys)} keys.")
-        futures = [
-            executor.submit(process_key, key, f, sf, file_loaded_tensors)
-            for key in keys
-        ]
-
-      for future in concurrent.futures.as_completed(futures):
-        if future.exception():
-          raise future.exception()
-
-    # Apply preprocessing if provided (e.g., for MoE expert stacking)
-    if preprocess_fn is not None:
-      file_loaded_tensors = preprocess_fn(file_loaded_tensors)
-
-    def make_update_tensor_fn(current_file_tensors):
-      def update_tensor(path, param, shard=None):
-        current_path_key = path_to_key(path)
-        if current_path_key in current_file_tensors:
-          loaded_arr = current_file_tensors[current_path_key]
-          if loaded_arr.shape != param.shape:
-            raise ValueError(
-                f"Shape mismatch for {current_path_key}: got"
-                f" {loaded_arr.shape}, expected {param.shape}"
-            )
-          if shard is not None:
-            return jax.device_put(loaded_arr, shard)
-          else:
-            return jax.device_put(loaded_arr, jax.devices()[0])
-        return param
-
-      return update_tensor
-
-    current_file_update_tensor = make_update_tensor_fn(file_loaded_tensors)
-
-    if sharding_dict is not None:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict, sharding_dict
-      )
-    else:
-      state_dict = jax.tree.map_with_path(
-          current_file_update_tensor, state_dict
-=======
   state_dict = {}
   for array, metadata_list in arrays:
     for metadata in metadata_list:
       jax_key_mapped, transform = torch_key_to_jax_key(
           key_map, metadata['name']
->>>>>>> origin/main
       )
       parameter = array[
           metadata['offset_elements'] : metadata['offset_elements']
