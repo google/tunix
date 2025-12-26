@@ -30,6 +30,7 @@ from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 import jaxtyping
+import numpy as np
 from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
@@ -394,11 +395,13 @@ class Sampler(base_sampler.BaseSampler):
         beam_search_sampling_state=None,
     )
 
-  def tokenize(self, input_string: str) -> jax.Array | list[int]:
+  def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
     bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
-    input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
+    input_ids = np.array(
+        self.tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=np.int32
+    )
     return input_ids
 
   def _sample(
@@ -696,7 +699,7 @@ class Sampler(base_sampler.BaseSampler):
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
 
-    all_input_ids = jnp.array([
+    all_input_ids = np.array([
         utils.pad_to_length(
             x,
             target_length=max_prompt_length,
@@ -718,7 +721,7 @@ class Sampler(base_sampler.BaseSampler):
     elif isinstance(seed, int):
       seed = jax.random.PRNGKey(seed)
     sampling_state = self.init_sample_state(
-        all_input_ids,
+        jnp.array(all_input_ids),
         include_logits=return_logits,
         total_sampling_steps=total_sampling_steps,
         forbidden_token_ids=forbidden_token_ids,
@@ -762,6 +765,7 @@ class Sampler(base_sampler.BaseSampler):
           max_prompt_length,
           max_len,
       )
+      out_tokens, lengths = jax.device_get(out_tokens), jax.device_get(lengths)
       decoded_outputs = [
           self.tokenizer.decode(tokens[:length].tolist())
           for tokens, length in zip(out_tokens, lengths)
@@ -782,7 +786,7 @@ class Sampler(base_sampler.BaseSampler):
             )
             + max_prompt_length
         )
-        out_tokens.append(token_buffer[start_idx:end_idx])
+        out_tokens.append(jax.device_get(token_buffer[start_idx:end_idx]))
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
         lengths.append(end_idx - start_idx)

@@ -33,7 +33,7 @@ class ExportTest(absltest.TestCase):
   @patch("time.perf_counter")
   def test_export_grpo_metrics_colocated(self, mock_perf_counter):
     # tpu0 span end times
-    mock_perf_counter.side_effect = [0.41, 0.61, 0.81, 1.21]
+    mock_perf_counter.side_effect = [0.41, 0.61, 1.21]
 
     export_fn = PerfMetricsExport.from_role_to_devices({
         "rollout": ["tpu0"],
@@ -64,9 +64,14 @@ class ExportTest(absltest.TestCase):
     tpu0_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
 
-    host_timeline.span_begin("actor_training", 0.7)
-    tpu0_timeline.span("actor_training", 0.7, [])  # end 0.81
-    host_timeline.span_end(0.8)
+    host_timeline.span_group_begin("actor_training", 0.7)
+    tpu0_timeline.span_group_begin("actor_training", 0.7)
+    host_timeline.span_begin("peft_train_step", 0.70)
+    host_timeline.span_end(0.75)
+    host_timeline.span_begin("peft_train_step", 0.76)
+    host_timeline.span_end(0.81)
+    tpu0_timeline.span_group_end(0.81)
+    host_timeline.span_group_end(0.81)
 
     for timeline in timelines.values():
       timeline.span_group_end(0.9)  # micro_batch_steps
@@ -88,10 +93,12 @@ class ExportTest(absltest.TestCase):
         "perf/weight_sync_time": 0.1,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_grad_time": 0.11,
+        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_step_time": 0.1,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_grad_time": 0.11,
+        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_step_time": 0.05,
     }
     actual_metrics = {}
     for k, v in export_fn(PerfSpanQuery(timelines, "host")).items():
@@ -103,7 +110,7 @@ class ExportTest(absltest.TestCase):
   def test_export_grpo_metrics_rollout_1_actor_2_reference_2(
       self, mock_perf_counter
   ):
-    mock_perf_counter.side_effect = [0.41, 0.61, 0.81, 1.21, 1.21]
+    mock_perf_counter.side_effect = [0.41, 0.61, 1.21, 1.21]
 
     export_fn = PerfMetricsExport.from_role_to_devices({
         "rollout": ["tpu0"],
@@ -136,9 +143,14 @@ class ExportTest(absltest.TestCase):
     tpu1_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
 
-    host_timeline.span_begin("actor_training", 0.7)
-    tpu1_timeline.span("actor_training", 0.7, [])  # end 0.81
-    host_timeline.span_end(0.8)
+    host_timeline.span_group_begin("actor_training", 0.7)
+    tpu1_timeline.span_group_begin("actor_training", 0.7)
+    host_timeline.span_begin("peft_train_step", 0.70)
+    host_timeline.span_end(0.75)
+    host_timeline.span_begin("peft_train_step", 0.76)
+    host_timeline.span_end(0.81)
+    tpu1_timeline.span_group_end(0.81)
+    host_timeline.span_group_end(0.81)
 
     for timeline in timelines.values():
       timeline.span_group_end(0.9)  # micro_batch_steps
@@ -164,11 +176,13 @@ class ExportTest(absltest.TestCase):
         "perf/first_micro_batch_rollout_time": 0.41,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_grad_time": 0.11,
+        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_step_time": 0.1,
         "perf/sum/between_micro_batch_gap_time": 0.0,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_grad_time": 0.11,
+        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_step_time": 0.05,
         "perf/mean/between_micro_batch_gap_time": 0.0,
     }
     actual_metrics = {}
@@ -179,7 +193,7 @@ class ExportTest(absltest.TestCase):
 
   @patch("time.perf_counter")
   def test_export_grpo_metrics_fully_disaggregated(self, mock_perf_counter):
-    mock_perf_counter.side_effect = [0.41, 0.61, 0.81, 1.21, 1.21, 1.21]
+    mock_perf_counter.side_effect = [0.41, 0.61, 1.21, 1.21, 1.21]
 
     export_fn = PerfMetricsExport.from_role_to_devices({
         "rollout": ["tpu0"],
@@ -214,9 +228,14 @@ class ExportTest(absltest.TestCase):
     tpu1_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
 
-    host_timeline.span_begin("actor_training", 0.7)
-    tpu2_timeline.span("actor_training", 0.7, [])  # end 0.81
-    host_timeline.span_end(0.8)
+    host_timeline.span_group_begin("actor_training", 0.7)
+    tpu2_timeline.span_group_begin("actor_training", 0.7)
+    host_timeline.span_begin("peft_train_step", 0.70)
+    host_timeline.span_end(0.75)
+    host_timeline.span_begin("peft_train_step", 0.76)
+    host_timeline.span_end(0.81)
+    tpu2_timeline.span_group_end(0.81)
+    host_timeline.span_group_end(0.81)
 
     for timeline in timelines.values():
       timeline.span_group_end(0.9)  # micro_batch_steps
@@ -241,14 +260,17 @@ class ExportTest(absltest.TestCase):
         "perf/global_step_time": 1.3,
         "perf/weight_sync_time": 0.1,
         "perf/rollout_idle_time": 0.69,
+        "perf/first_micro_batch_rollout_time": 0.41,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_grad_time": 0.11,
+        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_step_time": 0.1,
         "perf/sum/refer_gap_time": 0.0,
         "perf/sum/actor_gap_time": 0.0,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_grad_time": 0.11,
+        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_step_time": 0.05,
         "perf/mean/refer_gap_time": 0.0,
         "perf/mean/actor_gap_time": 0.0,
     }

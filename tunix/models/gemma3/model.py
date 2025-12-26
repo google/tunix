@@ -26,9 +26,11 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.utils import compat
+from tunix.utils import env_utils
 
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
+
+env_utils.setup_sharding_environment()
 
 
 LayerCache = dict[str, jaxtyping.Array]
@@ -129,7 +131,15 @@ class ModelConfig:
     )
 
   @classmethod
-  def gemma3_1b(
+  def gemma3_270m_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-270M instruction-tuned text-only config."""
+    return cls.gemma3_270m(sharding_config=sharding_config)
+
+  @classmethod
+  def _gemma3_1b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ) -> 'ModelConfig':
@@ -148,7 +158,23 @@ class ModelConfig:
     )
 
   @classmethod
-  def gemma3_4b(
+  def gemma3_1b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-1B instruction-tuned text-only config."""
+    return cls._gemma3_1b(sharding_config=sharding_config)
+
+  @classmethod
+  def gemma3_1b_pt(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-1B text-only config."""
+    return cls._gemma3_1b(sharding_config=sharding_config)
+
+  @classmethod
+  def _gemma3_4b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ) -> 'ModelConfig':
@@ -169,7 +195,23 @@ class ModelConfig:
     )
 
   @classmethod
-  def gemma3_12b(
+  def gemma3_4b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-4B instruction-tuned text-only config."""
+    return cls._gemma3_4b(sharding_config=sharding_config)
+
+  @classmethod
+  def gemma3_4b_pt(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-4B text-only config."""
+    return cls._gemma3_4b(sharding_config=sharding_config)
+
+  @classmethod
+  def _gemma3_12b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ) -> 'ModelConfig':
@@ -191,7 +233,23 @@ class ModelConfig:
     )
 
   @classmethod
-  def gemma3_27b(
+  def gemma3_12b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-12B instruction-tuned text-only config."""
+    return cls._gemma3_12b(sharding_config=sharding_config)
+
+  @classmethod
+  def gemma3_12b_pt(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-12B text-only config."""
+    return cls._gemma3_12b(sharding_config=sharding_config)
+
+  @classmethod
+  def _gemma3_27b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ) -> 'ModelConfig':
@@ -211,6 +269,22 @@ class ModelConfig:
         global_scale_factor=8.0,
         shd_config=sharding_config,
     )
+
+  @classmethod
+  def gemma3_27b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-27B instruction-tuned text-only config."""
+    return cls._gemma3_27b(sharding_config=sharding_config)
+
+  @classmethod
+  def gemma3_27b_pt(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    """Gemma3-27B text-only config."""
+    return cls._gemma3_27b(sharding_config=sharding_config)
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
@@ -803,8 +877,8 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
-class Gemma3(nnx.Module, pytree=False):
-  """Gemma transformer."""
+class Gemma3(nnx.Module):
+  """Gemma3 transformer."""
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
@@ -815,7 +889,7 @@ class Gemma3(nnx.Module, pytree=False):
         shd_config=config.shd_config,
         param_dtype=config.param_dtype,
     )
-    self.layers = [
+    self.layers = compat.ModuleList([
         Block(
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
@@ -839,7 +913,7 @@ class Gemma3(nnx.Module, pytree=False):
         for _, attn_type in zip(
             range(config.num_layers), itertools.cycle(GEMMA3_ATTENTION_PATTERN)
         )
-    ]
+    ])
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,

@@ -21,6 +21,7 @@
 # Documentation
 /docs/_build/
 /docs/_collections/
+/docs/jupyter_execute
 /docs/sg_execution_times.rst
 /docs/generated
 build/*

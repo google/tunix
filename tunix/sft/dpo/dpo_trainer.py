@@ -485,7 +485,9 @@ def _tokenize(input_string: str, tokenizer: Any) -> jax.Array:
   """Tokenizes the input string."""
   input_ids = tokenizer.encode(input_string)
   bos_tok = [tokenizer.bos_id()] if tokenizer.bos_id() else []
-  input_ids = jnp.array(bos_tok + input_ids, dtype=jnp.int32)
+  input_ids = jnp.array(
+    tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
+  )
   return input_ids
 
 

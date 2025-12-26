@@ -146,7 +146,7 @@ class Sampler:
 
   def __init__(
       self,
-      transformer: gemma_lib.Transformer,
+      transformer: gemma_lib.Gemma,
       vocab: spm.SentencePieceProcessor,
       cache_size: int = 1024,
   ):
@@ -172,7 +172,7 @@ class Sampler:
     self._compiled_prefill_fn = jax.jit(self._prefill_fn)
 
   @property
-  def transformer(self) -> gemma_lib.Transformer:
+  def transformer(self) -> gemma_lib.Gemma:
     return nnx.merge(
         self._transformer_graphdef, self._flattened_transformer_state
     )

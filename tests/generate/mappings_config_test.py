@@ -11,7 +11,7 @@ class MappingConfigTest(absltest.TestCase):
   @classmethod
   def setUpClass(cls):
     rng = nnx.Rngs(params=0)
-    cls.model = model_lib.Llama3(model_lib.ModelConfig.llama3_2_1b(), rngs=rng)
+    cls.model = model_lib.Llama3(model_lib.ModelConfig.llama3p2_1b(), rngs=rng)
 
   def test_from_object_with_none_errors_out(self):
     with self.assertRaisesRegex(
@@ -65,7 +65,6 @@ class MappingConfigTest(absltest.TestCase):
     )
 
     self.assertEqual(cfg.to_hf_transpose_keys, {'embedding': (1, 0)},)
-
 
   def test_build_mapping_config_with_overrides(self):
     override = {'embedder.input_embedding': (

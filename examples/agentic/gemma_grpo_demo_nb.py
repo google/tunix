@@ -295,13 +295,15 @@ MODEL_CONFIG = {
 
 def get_ref_model():
   """Loads the reference model, from CNS in g3 or Kaggle in OSS."""
-  mesh = jax.make_mesh(*MESH)
+  mesh = jax.make_mesh(
+      *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
+  )
 
   if ENV == 'g3':
     model_config = MODEL_CONFIG[MODEL_VERSION]()
     ckpt_path = os.path.join(NNX_CKPT_DIR, MODEL_VERSION)
     abs_gemma: nnx.Module = nnx.eval_shape(
-        lambda: gemma_lib.Transformer(model_config, rngs=nnx.Rngs(params=0))
+        lambda: gemma_lib.Gemma(model_config, rngs=nnx.Rngs(params=0))
     )
     abs_state = nnx.state(abs_gemma)
     abs_state = jax.tree.map(

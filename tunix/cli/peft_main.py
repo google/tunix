@@ -74,6 +74,7 @@ class PeftPipeline(config.HyperParameters):
         max_target_length=self.config['max_target_length'],
         num_train_epochs=self.config['num_train_epochs'],
         tokenizer=tokenizer,
+        tfds_download=self.config['tfds_download'],
     )
 
     with mesh:

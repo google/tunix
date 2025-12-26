@@ -151,15 +151,37 @@ class CommonTest(parameterized.TestCase):
     )
     np.testing.assert_equal(logits.shape, (3, 4, 256))
 
-  def test_make_completion_mask(self):
-    completion_ids = jnp.array([
-        [1, 2, 3, 4],
-        [1, 2, 3, 0],
-        [1, 2, 0, 0],
-        [1, 0, 0, 0],
+  def test_np_make_completion_mask(self):
+    completion_ids = np.array(
+        [
+            [1, 2, 3, 4],
+            [1, 2, 3, 0],
+            [1, 2, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=np.int32,
+    )
+    np_completion_mask = common.np_make_completion_mask(completion_ids)
+    expected_value = np.array([
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
+        [1, 1, 1, 0],
+        [1, 1, 0, 0],
     ])
+    np.testing.assert_allclose(np_completion_mask, expected_value)
+
+  def test_make_completion_mask(self):
+    completion_ids = jnp.array(
+        [
+            [1, 2, 3, 4],
+            [1, 2, 3, 0],
+            [1, 2, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=np.int32,
+    )
     completion_mask = common.make_completion_mask(completion_ids)
-    expected_value = jnp.array([
+    expected_value = np.array([
         [1, 1, 1, 1],
         [1, 1, 1, 1],
         [1, 1, 1, 0],
@@ -201,6 +223,22 @@ class CommonTest(parameterized.TestCase):
           completion_mask_list=[[1, 1, 0], [1, 1, 1]],
           kwargs={},
           expected_loss=((0.1 + 0.2) / 2 + (0.4 + 0.5 + 0.6) / 3) / 2,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_scale",
+          loss_agg_mode="sequence-mean-token-scale",
+          per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+          completion_mask_list=[[1, 1, 0], [1, 1, 1]],
+          kwargs={},
+          expected_loss=((0.1 + 0.2) / 3 + (0.4 + 0.5 + 0.6) / 3) / 2,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_scale_custom",
+          loss_agg_mode="sequence-mean-token-scale",
+          per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+          completion_mask_list=[[1, 1, 0], [1, 1, 1]],
+          kwargs={"norm": 3.14},
+          expected_loss=((0.1 + 0.2) / 3.14 + (0.4 + 0.5 + 0.6) / 3.14) / 2,
       ),
       dict(
           testcase_name="sequence_mean_token_sum_norm_default",
@@ -265,16 +303,43 @@ class CommonTest(parameterized.TestCase):
       common.aggregate_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
 
   @parameterized.named_parameters(
-      dict(testcase_name="norm_zero", norm_val=0),
-      dict(testcase_name="norm_negative", norm_val=-1.0),
-      dict(testcase_name="norm_string", norm_val="abc"),
+      dict(
+          testcase_name="norm_zero_token_sum_norm",
+          norm_val=0,
+          loss_agg_mode="sequence-mean-token-sum-norm",
+      ),
+      dict(
+          testcase_name="norm_negative_token_sum_norm",
+          norm_val=-1.0,
+          loss_agg_mode="sequence-mean-token-sum-norm",
+      ),
+      dict(
+          testcase_name="norm_string_token_sum_norm",
+          norm_val="abc",
+          loss_agg_mode="sequence-mean-token-sum-norm",
+      ),
+      dict(
+          testcase_name="norm_zero_token_scale",
+          norm_val=0,
+          loss_agg_mode="sequence-mean-token-scale",
+      ),
+      dict(
+          testcase_name="norm_negative_token_scale",
+          norm_val=-1.0,
+          loss_agg_mode="sequence-mean-token-scale",
+      ),
+      dict(
+          testcase_name="norm_string_token_scale",
+          norm_val="abc",
+          loss_agg_mode="sequence-mean-token-scale",
+      ),
   )
-  def test_invalid_norm(self, norm_val):
+  def test_invalid_norm(self, norm_val, loss_agg_mode):
     with self.assertRaisesRegex(ValueError, "Invalid 'norm' value"):
       common.aggregate_loss(
           jnp.ones((2, 2)),
           jnp.ones((2, 2)),
-          "sequence-mean-token-sum-norm",
+          loss_agg_mode,
           norm=norm_val,
       )
 

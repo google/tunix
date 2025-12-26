@@ -23,8 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from absl import logging
 import jax
-import jax.numpy as jnp
 import jaxtyping
+import numpy as np
 from tunix.generate import base_sampler
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils
@@ -37,6 +37,7 @@ from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sampling_params import SamplingParams
+
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -66,6 +67,8 @@ class VllmConfig:
   async_scheduling: bool = False
   tensor_parallel_size: int = -1
   data_parallel_size: int = -1
+  hf_config_path: Optional[Dict[str, Any]] = None
+  additional_config: Optional[Dict[str, Any]] = None
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -96,12 +99,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     # vLLM DP only works with the new model design
     if config.data_parallel_size > 1:
-      os.environ["NEW_MODEL_DESIGN"] = "True"
+      os.environ["NEW_MODEL_DESIGN"] = "1"
 
     # tpu-inference backend recently removed this environment variable, however
     # still set it here for backward compatibility.
     if config.init_with_random_weights:
-      os.environ["JAX_RANDOM_WEIGHTS"] = "True"
+      os.environ["JAX_RANDOM_WEIGHTS"] = "1"
 
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
@@ -133,14 +136,38 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
-    utils.transfer_state_with_mappings(
-        src_state=updated_weights,
-        dst_state=self.transformer_state,
-        key_mappings=self.to_hf_key_mappings,
-        key_mapping_hook_fns=self.to_hf_hook_fns,
-        transpose_keys=self.to_hf_transpose_keys,
-        reshard_fn=reshard.reshard_pytree,
-    )
+
+    if self.to_hf_key_mappings:
+      # Mapped Weight Sync (e.g. Vanilla -> vLLM)
+      utils.transfer_state_with_mappings(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          key_mappings=self.to_hf_key_mappings,
+          key_mapping_hook_fns=self.to_hf_hook_fns,
+          transpose_keys=self.to_hf_transpose_keys,
+          reshard_fn=reshard.reshard_pytree,
+      )
+    else:
+      # Direct Weight Sync (e.g. MaxText -> MaxText)
+      logging.debug(
+          "No key mappings configuration found. Proceeding with direct structural "
+          "weight synchronization (assuming matching source/target structures)."
+      )
+
+      additional_config = self.config.additional_config or {}
+      if 'maxtext_config' not in additional_config:
+        raise ValueError(
+            "Direct weight synchronization is currently supported only for "
+            "MaxText models. The required 'maxtext_config' key is missing "
+            "from 'additional_config'."
+        )
+
+      utils.transfer_state_directly(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          reshard_fn=reshard.reshard_pytree,
+      )
+
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -164,19 +191,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       tensor_parallel_size = total_mesh_devices
       data_parallel_size = 1
     elif config.tensor_parallel_size == -1:
-      tensor_parallel_size = (
-          total_mesh_devices // data_parallel_size
-      )
+      tensor_parallel_size = total_mesh_devices // data_parallel_size
     elif config.data_parallel_size == -1:
-      data_parallel_size = (
-          total_mesh_devices // tensor_parallel_size
-      )
+      data_parallel_size = total_mesh_devices // tensor_parallel_size
 
     args = {}
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on
     if config.init_with_random_weights:
-      args["load_format"]="dummy"
+      args["load_format"] = "dummy"
 
     args["model"] = config.model_version
     args["max_model_len"] = config.max_model_len
@@ -196,6 +219,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             "device_indexes": device_indexes,
         }
     }
+
+    # Add support for "hf_config_path" and "additional_config" which are
+    # directly passed to vLLM engine and part of the vLLM config contract.
+    if config.hf_config_path:
+      args["hf_config_path"] = config.hf_config_path
+
+    if config.additional_config:
+      args["additional_config"].update(config.additional_config)
+
     return args
 
   def _build_engine_args(self) -> EngineArgs:
@@ -392,25 +424,24 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
     all_input_ids = [
         utils.pad_to_length(
-            jnp.array(x),
+            np.array(x, dtype=np.int32),
             target_length=max_prompt_length,
             pad_value=self.tokenizer.pad_id(),
             left=True,
         )
         for x in prompt_ids
     ]
-    all_input_ids = jnp.array(all_input_ids)
+    all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
     all_output_ids = [
         utils.pad_to_length(
-            jnp.array(x),
+            np.array(x, dtype=np.int32),
             target_length=max_generation_steps,
             pad_value=self.tokenizer.pad_id(),
             left=False,
         )
         for x in out_tokens[0]
     ]
-    all_output_ids = jnp.array(all_output_ids)
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],

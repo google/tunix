@@ -62,8 +62,8 @@ class VllmSamplerTest(absltest.TestCase):
 
   def load_llama3_model(self, model_version: str, enable_lora: bool = False):
     model_config = {
-        "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
-        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
+        "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
+        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }
     assert (
         model_version in model_config

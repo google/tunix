@@ -4,15 +4,16 @@ from collections.abc import Callable
 import json
 import logging
 import os
+from absl import logging as absl_logging
 import grain
 
 
 DEBUG_LEVELS = {
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": logging.WARNING,
-    "ERROR": logging.ERROR,
-    "FATAL": logging.FATAL,
+    'DEBUG': absl_logging.DEBUG,
+    'INFO': absl_logging.INFO,
+    'WARNING': absl_logging.WARNING,
+    'ERROR': absl_logging.ERROR,
+    'FATAL': absl_logging.FATAL,
 }
 
 try:

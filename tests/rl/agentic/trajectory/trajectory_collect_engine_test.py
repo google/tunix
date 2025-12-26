@@ -17,10 +17,12 @@ import time
 from unittest import mock
 
 from absl.testing import absltest
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
+from tunix.rl.agentic import utils
 
 
 class TrajectoryCollectEngineTest(absltest.TestCase):
@@ -28,10 +30,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     self.mock_agent = mock.create_autospec(
-        base_agent.LLMBaseAgent, instance=True
+        base_agent.ConversationAgentBase, instance=True
     )
     self.mock_env = mock.create_autospec(
-        base_environment.BaseEnv, instance=True
+        base_environment.BaseTaskEnv, instance=True
     )
     self.mock_model_call = mock.Mock()
     self.mock_final_reward_fn = mock.Mock(
@@ -41,14 +43,14 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_chat_parser = mock.Mock()
 
     # Configure mock agent
-    self.trajectory = base_agent.Trajectory()
+    self.trajectory = agent_types.Trajectory()
     self.mock_agent.trajectory = self.trajectory
     self.mock_agent.chat_completions = []
     self.current_step = None
 
     def _update_from_model(resp):
-      self.current_step = base_agent.Step(
-          model_response=resp, action=['action']
+      self.current_step = agent_types.Step(
+          model_response=resp, action=agent_types.Action(action=['action'])
       )
       self.trajectory.steps.append(self.current_step)
       self.mock_agent.chat_completions.append(
@@ -145,7 +147,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ]
     self.assertEqual(conversation, expected_conversation)
 
-  @mock.patch('tunix.rl.agentic.utils.tokenize_and_generate_masks')
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_with_tokenization(self, mock_convert):
     mock_convert.side_effect = [
         ([101], [1]),  # prompt tokens
@@ -175,6 +177,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'conversation_tokens': [201, 202, 301, 302, 203, 204, 303, 304],
         'conversation_masks': [1, 1, 1, 1, 1, 1, 1, 1],
         'trajectory_reward': 3.0,  # 1.0 + 2.0
+        'policy_version': None,
+        'original_input': None,
+        'group_id': None,
     }
     self.assertEqual(token_data, expected_tokens)
 
@@ -215,7 +220,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         mock_convert.call_args_list[4].kwargs['contains_generation_msg']
     )
 
-  @mock.patch('tunix.rl.agentic.utils.tokenize_and_generate_masks')
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_with_incomplete_tokenizer_config_skips_tokenization(
       self, mock_tokenize
   ):
@@ -263,7 +268,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       )
       result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
 
-    # Should run for two steps, with the second one timing out and marked as done
+    # Should run for two steps, with the second one timing out and marked as
+    # done
     self.assertLen(result_traj.steps, 2)
     self.assertFalse(result_traj.steps[0].done)
     self.assertTrue(result_traj.steps[1].done)
@@ -283,14 +289,18 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
   def test_collect_multiple(self):
     # Helper to configure a new mock agent
     def configure_mock_agent(initial_obs):
-      agent = mock.create_autospec(base_agent.LLMBaseAgent, instance=True)
-      traj = base_agent.Trajectory()
+      agent = mock.create_autospec(
+          base_agent.ConversationAgentBase, instance=True
+      )
+      traj = agent_types.Trajectory()
       agent.trajectory = traj
       agent.chat_completions = []
       current_step = [None]
 
       def _update_from_model(resp):
-        step = base_agent.Step(model_response=resp, action=['action'])
+        step = agent_types.Step(
+            model_response=resp, action=agent_types.Action(action=['action'])
+        )
         traj.steps.append(step)
         current_step[0] = step
         agent.chat_completions.append({'role': 'assistant', 'content': resp})
@@ -316,13 +326,13 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       return agent
 
     agent1 = configure_mock_agent('initial1')
-    env1 = mock.create_autospec(base_environment.BaseEnv, instance=True)
+    env1 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
     env1.reset.return_value = ('initial1', {})
     env1.step.return_value = ('obs1', 1.0, True, {})
     env1.task = {}
 
     agent2 = configure_mock_agent('initial2')
-    env2 = mock.create_autospec(base_environment.BaseEnv, instance=True)
+    env2 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
     env2.reset.return_value = ('initial2', {})
     env2.step.side_effect = [
         ('obs2a', 2.0, False, {}),

@@ -36,7 +36,7 @@ dependencies = [
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
-  "transformers",
+  "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
   "hf_transfer",  # Huggingface caching in CI
 ]
 
@@ -53,7 +53,7 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
+  "jax[tpu]>=0.6.0,!=0.7.2, <=0.8.1", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2

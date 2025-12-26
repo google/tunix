@@ -36,6 +36,7 @@ RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
 registry = function_registry.default_registry
 
+
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   returns: jax.Array
@@ -251,16 +252,21 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         micro_batch_size=self._rollout_micro_batch_size,
     )
     completion_ids = completion_output.tokens
-    prompt_ids = completion_output.left_padded_prompt_tokens
+    prompt_ids = jnp.array(completion_output.left_padded_prompt_tokens)
 
     batch_size = completion_ids.shape[0]
     logits_to_keep = completion_ids.shape[1]
     prompt_mask = (prompt_ids != pad_value).astype("int32")
-    completion_mask = common.make_completion_mask(
+    completion_mask = common.np_make_completion_mask(
         completion_ids, eos_tok=eos_value
     )
+
+    # Convert completion_ids and completion_mask to jax arrays
+    jax_completion_ids = jnp.array(completion_ids)
+    jax_completion_mask = jnp.array(completion_mask)
+
     eos_idx = jnp.max(
-        common.build_positions_from_mask(completion_mask),
+        common.build_positions_from_mask(jax_completion_mask),
         axis=-1,
     )
 
@@ -269,7 +275,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     if self.algo_config.beta != 0.0:
       ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
+          completion_tokens=jax_completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=self._compute_logps_micro_batch_size,
@@ -283,7 +289,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # see this condition in other RL libraries.
     old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
         prompt_tokens=prompt_ids,
-        completion_tokens=completion_ids,
+        completion_tokens=jax_completion_ids,
         micro_batch_size=self._compute_logps_micro_batch_size,
     )
 
@@ -291,25 +297,26 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # Get values from the value model before model weights are updated.
     values = self.rl_cluster.get_values(
         prompt_tokens=prompt_ids,
-        completion_tokens=completion_ids,
+        completion_tokens=jax_completion_ids,
         pad_id=pad_value,
         eos_id=eos_value,
     )
     # `values` start from the last *prompt* token. Shape: `[B, T]`.
     values = values[:, -logits_to_keep - 1 : -1]
-    values = values * completion_mask
+    values = values * jax_completion_mask
 
     # ===== Reward computation ======
     # Get rewards from the reward model. Eventual shape: `[B, T]`.
     if self._use_reward_model:
       scores = self.rl_cluster.get_rewards(
           prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
+          completion_tokens=jax_completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
       )[:, -logits_to_keep:]
       # We use the score corresponding to the last non-padding token.
-      last_token_scores = scores[jnp.arange(batch_size), eos_idx]
+      jax_last_token_scores = scores[jnp.arange(batch_size), eos_idx]
+      last_token_scores = jax.device_get(jax_last_token_scores)
     else:
       last_token_scores = self._compute_rewards(
           prompts=training_input["prompts"],
@@ -317,6 +324,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
+      jax_last_token_scores = jax.device_put(last_token_scores)
 
     # Reward computation is in accordance with other RL libraries
     # batch reward manager (token-level rewards).
@@ -324,8 +332,10 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # 2. A positive reward is given only at the final timestep, so we add that
     # to the tensor of zeros.
     # 3. Subtract KL divergence from the reward tensor.
-    rewards = jnp.zeros_like(completion_ids)
-    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(last_token_scores)
+    rewards = jnp.zeros_like(jax_completion_ids)
+    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(
+        jax_last_token_scores
+    )
     if self.algo_config.beta != 0.0:
       # TODO(abheesht): Add a toggle - KL can either be added directly to
       # rewards or computed in the loss function.
@@ -334,7 +344,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
           ref_per_token_logps,
           method=self.algo_config.kl_method,
       )
-      kl = kl * completion_mask
+      kl = kl * jax_completion_mask
       rewards = rewards - self.algo_config.beta * kl
 
     # ===== Compute advantages using Generalised Advantage Estimation ======
@@ -344,7 +354,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     advantages, returns = advantage_estimator(
         rewards=rewards,
         values=values,
-        completion_mask=completion_mask,
+        completion_mask=jax_completion_mask,
         gamma=self.algo_config.gamma,
         gae_lambda=self.algo_config.gae_lambda,
     )
@@ -361,7 +371,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     )
 
     # Log final rewards (scores + KL penalty)
-    sequence_rewards = rewards.sum(-1)
+    sequence_rewards = jax.device_get(rewards.sum(-1))
     self.rl_cluster.buffer_metrics(
         {
             "reward/mean": (np.mean(sequence_rewards), np.mean),
@@ -373,12 +383,12 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     if self.algo_config.beta != 0.0:
       # Average of the per-sequence mean KL
       per_sequence_mean_kl = ppo_helpers.masked_mean(
-          kl, completion_mask, axis=-1  # pylint: disable=undefined-variable
+          kl, jax_completion_mask, axis=-1  # pylint: disable=undefined-variable
       )
       self.rl_cluster.buffer_metrics(
           {
               "reward_kl_penalty": (
-                  per_sequence_mean_kl.mean(),
+                  jax.device_get(per_sequence_mean_kl.mean()),
                   np.mean,
               ),
           },
@@ -447,8 +457,8 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
-        completion_ids=completion_ids,
-        completion_mask=completion_mask,
+        completion_ids=jax_completion_ids,
+        completion_mask=jax_completion_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         returns=returns,
