@@ -35,33 +35,51 @@ def linear_cross_entropy(
     chunk_size = min(chunk_size, vocab_size)
     
     valid_mask = (y != ignore_index)
-    safe_y = jnp.where(valid_mask, y, 0)
-    target_w = classifier[safe_y]
-    
-    logits_correct = jnp.sum(x.astype(jnp.float32) * target_w.astype(jnp.float32), axis=-1)
-
-    if softcap is not None:
-        logits_correct = jnp.tanh(logits_correct / softcap) * softcap
 
     num_full_chunks = vocab_size // chunk_size
     
+    # Init: (running_max, running_sum, running_correct)
     init_val = (
         jnp.full((x.shape[0],), -jnp.inf, dtype=jnp.float32),
+        jnp.zeros((x.shape[0],), dtype=jnp.float32),
         jnp.zeros((x.shape[0],), dtype=jnp.float32)
     )
 
     def scan_body(carry, chunk_idx):
-        running_max, running_sum = carry
+        running_max, running_sum, running_correct = carry
         start = chunk_idx * chunk_size
+        end = start + chunk_size
         
         w_chunk = jax.lax.dynamic_slice(
             classifier, (start, 0), (chunk_size, hidden_dim)
         )
         
+        # [Batch, Chunk]
         chunk_logits = jnp.dot(x, w_chunk.T)
 
         if softcap is not None:
             chunk_logits = jnp.tanh(chunk_logits / softcap) * softcap
+
+        # --- Fused Logits Correct Calculation ---
+        # Identify targets belonging to this chunk
+        # y is [Batch]
+        chunk_mask = (y >= start) & (y < end) & valid_mask
+        
+        # Local index within chunk
+        local_y = y - start
+        # Clamp to avoid OOB gather (masked out later anyway)
+        safe_local_y = jnp.clip(local_y, 0, chunk_size - 1)
+        
+        # Gather predicted logits for true classes in this chunk
+        # [Batch, 1] -> [Batch]
+        # We use take_along_axis for safety and efficiency on TPU
+        found_logits = jnp.take_along_axis(
+            chunk_logits, safe_local_y[:, None], axis=1
+        ).squeeze(1)
+        
+        # Accumulate only where valid
+        running_correct = running_correct + jnp.where(chunk_mask, found_logits.astype(jnp.float32), 0.0)
+        # ----------------------------------------
 
         chunk_max = jnp.max(chunk_logits, axis=1).astype(jnp.float32)
         new_max = jnp.maximum(running_max, chunk_max)
@@ -75,20 +93,20 @@ def linear_cross_entropy(
         )
         
         new_sum = running_sum * exp_scale + chunk_exp
-        return (new_max, new_sum), None
+        return (new_max, new_sum, running_correct), None
 
     # Apply gradient checkpointing (remat) to scan_body.
-    # This ensures that intermediate logits are not stored for the backward pass,
-    # preventing OOMs by re-computing them on demand.
     scan_body = jax.checkpoint(scan_body)
 
-    (final_max, final_sum), _ = jax.lax.scan(
+    (final_max, final_sum, final_correct), _ = jax.lax.scan(
         scan_body, init_val, jnp.arange(num_full_chunks)
     )
 
     remainder = vocab_size % chunk_size
     if remainder > 0:
         start = num_full_chunks * chunk_size
+        end = vocab_size
+        
         w_rem = jax.lax.dynamic_slice(
             classifier, (start, 0), (remainder, hidden_dim)
         )
@@ -97,6 +115,16 @@ def linear_cross_entropy(
 
         if softcap is not None:
             logits_rem = jnp.tanh(logits_rem / softcap) * softcap
+
+        # --- Remainder Logits Correct ---
+        chunk_mask = (y >= start) & (y < end) & valid_mask
+        local_y = y - start
+        safe_local_y = jnp.clip(local_y, 0, remainder - 1)
+        found_logits = jnp.take_along_axis(
+            logits_rem, safe_local_y[:, None], axis=1
+        ).squeeze(1)
+        final_correct = final_correct + jnp.where(chunk_mask, found_logits.astype(jnp.float32), 0.0)
+        # -------------------------------
 
         rem_max = jnp.max(logits_rem, axis=1).astype(jnp.float32)
         new_global_max = jnp.maximum(final_max, rem_max)
@@ -114,7 +142,7 @@ def linear_cross_entropy(
 
     lse = final_max + jnp.log(final_sum)
 
-    loss = lse - logits_correct
+    loss = lse - final_correct
     loss = jnp.where(valid_mask, loss, 0.0)
     
     if reduction == 'mean':

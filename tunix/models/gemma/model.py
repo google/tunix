@@ -474,20 +474,26 @@ class Attention(nnx.Module):
              k_flash = jnp.repeat(k_flash, n_rep, axis=1)
              v_flash = jnp.repeat(v_flash, n_rep, axis=1)
 
-        # Use attn_mask (0 for pad, 1 for data) as SegmentIds
-        # attn_mask shape can be [B, 1, S], [B, S, S], etc.
-        # We need to reduce it to [B, S] for SegmentIds.
-        # We assume padding tokens are 0 explicitly in all views (columns are 0).
-        # We take 'any' along inputs to find valid Key positions.
+        # Handle segment IDs for Flash Attention.
+        # attn_mask can be:
+        #   1. A binary mask [B, S], [B, 1, S], or [B, S, S] with values 0/1
+        #   2. Segment IDs [B, S] with values 0, 1, 2, 3, ... for packed sequences
+        # For packed sequences, segment IDs enable proper attention isolation.
+        
+        # First, reduce to [B, S] if needed
         reduce_axes = tuple(range(1, attn_mask.ndim - 1))
         if reduce_axes:
-            mask_reduced = attn_mask.any(axis=reduce_axes)
+            # For multi-dimensional masks, take max to preserve segment IDs
+            # (using max instead of any to preserve integer segment values)
+            mask_reduced = jnp.max(attn_mask, axis=reduce_axes)
         else:
             mask_reduced = attn_mask
 
-        # Cast to int32 (1 for data, 0 for pad)
-        mask_int = mask_reduced.astype(jnp.int32)
-        segment_ids = SegmentIds(q=mask_int, kv=mask_int)
+        # Cast to int32 for segment IDs
+        # If mask contains segment IDs (values > 1), they're preserved.
+        # If it's binary (0/1), it still works as single-segment + padding.
+        segment_ids_array = mask_reduced.astype(jnp.int32)
+        segment_ids = SegmentIds(q=segment_ids_array, kv=segment_ids_array)
 
         # Flash Attention using shard_map to handle partitioning
         mesh = pxla.thread_resources.env.physical_mesh
