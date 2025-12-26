@@ -36,7 +36,7 @@ pathwaysutils.initialize()
 print("jax devices: ", jax.devices())
 
 try:
-  wandb.login(key="")
+  wandb.login(key="e27080071466d108dc7c16fc6ff885b296d8b608")
   print("linchai: logged in to W&B")
 except wandb.errors.UsageError as e:
   print(f"Failed to log in to W&B: {e}")
@@ -190,7 +190,7 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "vllm" # one of "vanilla", "vllm" or "sglang-jax"
+ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
 
 # %%
 # try:
@@ -225,12 +225,7 @@ MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
-<<<<<<< HEAD
 # %%
-=======
-
-
->>>>>>> 95a40ab (debug attribute error)
 import pandas as pd
 import datasets as datasets_lib
 import transformers
