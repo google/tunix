@@ -25,4 +25,5 @@
 /docs/sg_execution_times.rst
 /docs/generated
 build/*
+convert_orbax.py
 my_notebook_code.py
