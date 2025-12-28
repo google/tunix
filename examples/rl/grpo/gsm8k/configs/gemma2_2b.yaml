@@ -1,0 +1,65 @@
+reference_model_config:
+  model_name: "gemma2-2b-it"
+  model_id: "google/gemma-2/flax/gemma2-2b-it"
+  model_source: "kaggle"
+  mesh:
+    shape: "(2,4)"
+    axis_names: "('fsdp','tp')"
+  rng_seed: 42
+actor_model_config:
+  lora_config:
+    rank: 64
+    alpha: 64.0
+    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
+  mesh:
+    shape: "(2,4)"
+    axis_names: "('fsdp','tp')"
+rollout_model_config:
+  mesh:
+    shape: "(2,4)"
+    axis_names: "('fsdp','tp')"
+tokenizer_config:
+  tokenizer_type: "sentencepiece"
+  add_bos: False
+dataset_name: "gsm8k"
+batch_size: 1
+num_batches: 3738
+num_test_batches: 100
+num_train_epochs: 1
+rl_training_config:
+  actor_optimizer_config:
+    opt_type: "adamw"
+    peak_value: 3e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: 374
+    decay_steps: 3738
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.1
+    max_grad_norm: 0.1
+  eval_every_n_steps: 10
+  max_steps: 3738
+  metrics_logging_options:
+    flush_every_n_steps: 20
+  checkpointing_options:
+    save_interval_steps: 500
+    max_to_keep: 4
+  profiler_options: {}
+rollout_config:
+  total_generation_steps: 768
+  max_prompt_length: 256
+  temperature: 0.9
+  top_p: 1.0
+  top_k: 50
+rollout_engine: "vanilla"
+offload_to_cpu: False
+grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.08
+  epsilon: 0.2
+reward_functions:
+  - "tunix/cli/reward_fn/gsm8k.py"

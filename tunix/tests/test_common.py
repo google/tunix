@@ -22,7 +22,6 @@ import shutil
 import sys
 from typing import Any, List, Tuple
 
-from flax import config as flax_config
 from flax import nnx
 import huggingface_hub
 import jax
@@ -30,11 +29,11 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 from tunix.rl import reshard
+from tunix.utils import env_utils
 
 import sentencepiece as spm
 
-if hasattr(flax_config, 'flax_always_shard_variable'):
-  flax_config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
 
 
 def _convert_to_nparray(arr):
@@ -148,6 +147,9 @@ class ToyTransformer(nnx.Module):
   def num_embed(self) -> int:
     return self.emb.num_embeddings
 
+  def get_model_input(self):
+    return get_dummy_inputs_for_lora_toy_transformer_tests()
+
 
 def get_dummy_inputs_for_lora_toy_transformer_tests():
   return {
@@ -237,8 +239,8 @@ class MockVocab(spm.SentencePieceProcessor):
     ]
 
 
-class MockTransformerWithScoreHead(nnx.Module):
-  """Gemma transformer with a score head."""
+class ToyTransformerWithScoreHead(nnx.Module):
+  """Toy transformer with a score head."""
 
   def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
     """Initializes the transformer with a score head.

@@ -101,6 +101,13 @@ class TokenizerAdapter:
     else:
       return self._tokenizer.pad_id()
 
+  def dedup_bos_ids(self, ids: list[int]) -> list[int]:
+    """Deduplicates the bos_id at the beginning of the list."""
+    i = 0
+    while i < len(ids) - 1 and ids[i] == ids[i + 1] == self.bos_id():
+      i += 1
+    return ids[i:]
+
   def _missing_methods(self) -> list[str]:
     """Checks if the tokenizer has any missing methods."""
     required_methods = ['encode', 'decode', 'bos_id', 'eos_id', 'pad_id']

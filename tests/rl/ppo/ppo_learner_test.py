@@ -316,7 +316,7 @@ class PPOLearnerTest(parameterized.TestCase):
           config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
           rngs=nnx.Rngs(2),
       )
-      reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
+      reward_model = tc.ToyTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
     mesh = pxla.thread_resources.env.physical_mesh
     default_rollout_config = base_rollout.RolloutConfig(
@@ -586,7 +586,7 @@ class PPOLearnerTest(parameterized.TestCase):
     reward_model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(2)
     )
-    reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
+    reward_model = tc.ToyTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
     mesh = pxla.thread_resources.env.physical_mesh
     cluster_config = rl_cluster_lib.ClusterConfig(

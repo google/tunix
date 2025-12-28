@@ -27,6 +27,7 @@ import jax.sharding as shd
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
+from tunix.utils import env_utils
 
 K_MASK = -2.3819763e38
 
@@ -34,8 +35,7 @@ LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
 
 
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
 
 
 class RematConfig(enum.Enum):
@@ -96,7 +96,7 @@ class ModelConfig:
   remat_config: RematConfig = RematConfig.NONE
 
   @classmethod
-  def llama3_2_1b(cls):
+  def llama3p2_1b(cls):
     return cls(
         num_layers=16,
         vocab_size=128256,
@@ -112,7 +112,7 @@ class ModelConfig:
 
   # Llama3.2 3B
   @classmethod
-  def llama3_2_3b(cls):
+  def llama3p2_3b(cls):
     return cls(
         num_layers=28,  # ← from num_hidden_layers
         vocab_size=128256,  # ← from vocab_size
@@ -127,7 +127,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def llama3_1_8b(cls):
+  def llama3p1_8b(cls):
     return cls(
         num_layers=32,
         vocab_size=128256,
@@ -156,7 +156,11 @@ class ModelConfig:
     )
 
   @classmethod
-  def llama3_405b(cls):
+  def llama3p1_70b(cls):
+    return cls.llama3_70b()
+
+  @classmethod
+  def llama3p1_405b(cls):
     return cls(
         num_layers=126,
         vocab_size=128256,

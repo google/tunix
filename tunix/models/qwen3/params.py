@@ -19,6 +19,7 @@ import re
 import jax
 import jax.numpy as jnp
 from tunix.models import safetensors_loader
+from tunix.models import safetensors_saver
 from tunix.models.qwen3 import model as model_lib
 
 
@@ -125,4 +126,51 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=_stack_experts,
       dtype=dtype,
+  )
+
+
+def _qwen3_state_key_to_safetensors_key(lora_name: str) -> str:
+  """Transform Qwen3 layer path to safetensors state dict key.
+
+  Args:
+    lora_name: Internal layer path (e.g., 'layers.0.attn.q_proj').
+
+  Returns:
+    Safetensors state dict key (e.g., 'model.layers.0.self_attn.q_proj.weight').
+  """
+  return f"model.{lora_name}.weight".replace(".attn.", ".self_attn.")
+
+
+def save_lora_merged_model_as_safetensors(
+    local_model_path: str,
+    output_dir: str,
+    lora_model: model_lib.Qwen3,
+    rank: int,
+    alpha: float,
+):
+  """Saves a Qwen3 model with LoRA weights merged in safetensors format.
+
+  Args:
+    local_model_path: Path to the base model safetensors checkpoint directory.
+    output_dir: Directory where the merged model will be saved.
+    lora_model: Qwen3 model instance with LoRA weights.
+    rank: LoRA rank used during training.
+    alpha: LoRA alpha used during training.
+  """
+  safetensors_saver.save_lora_merged_model_as_safetensors(
+      local_model_path=local_model_path,
+      output_dir=output_dir,
+      lora_model=lora_model,
+      rank=rank,
+      alpha=alpha,
+      state_key_transform_fn=_qwen3_state_key_to_safetensors_key,
+      field_patterns=(
+          "q_proj",
+          "k_proj",
+          "v_proj",
+          "o_proj",
+          "gate_proj",
+          "up_proj",
+          "down_proj",
+      ),
   )

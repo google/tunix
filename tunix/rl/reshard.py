@@ -257,9 +257,9 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
       for path, intermediate_sharding in intermediate_sharding_leaves_with_path
   }
 
-  to_split_src_pytree_leaves = []
-  to_split_src_pytree_leaves_indexes = []
-  to_split_intermediate_sharding_leaves = []
+  to_split_src_pytree_leaves = {}
+  to_split_src_pytree_leaves_indexes = {}
+  to_split_intermediate_sharding_leaves = {}
 
   intermediate_mesh = None
   to_update_src_pytree_leaves = []
@@ -271,11 +271,10 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
     ):
       # The to_split_axis should always be the same along all the intermediate
       # shardings.
-      if intermediate_mesh is None:
-        intermediate_mesh = intermediate_sharding.mesh
-      to_split_src_pytree_leaves.append(src)
-      to_split_src_pytree_leaves_indexes.append(i)
-      to_split_intermediate_sharding_leaves.append(intermediate_sharding)
+      intermediate_mesh = intermediate_sharding.mesh
+      to_split_src_pytree_leaves.setdefault(intermediate_mesh, []).append(src)
+      to_split_src_pytree_leaves_indexes.setdefault(intermediate_mesh, []).append(i)
+      to_split_intermediate_sharding_leaves.setdefault(intermediate_mesh, []).append(intermediate_sharding)
 
   if intermediate_mesh is None:
     # No pre-resharding is needed.
@@ -290,18 +289,20 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
       to_split_axis is not None
   ), f'No replica axis found in the intermediate mesh {intermediate_mesh}.'
 
-  temp_source = jax.jit(
-      _identity,
-      out_shardings=to_split_intermediate_sharding_leaves,
-  )(to_split_src_pytree_leaves)
+  for key in to_split_src_pytree_leaves.keys():
+    temp_source = jax.jit(
+        _identity,
+        out_shardings=to_split_intermediate_sharding_leaves[key],
+    )(to_split_src_pytree_leaves[key])
 
   # Update the to_split_src_pytree_leaves with the new splitted array.
-  to_split_src_pytree_leaves, *_ = splitfn(temp_source, to_split_axis)
+    updated_to_split_src_pytree_leaves, *_ = splitfn(temp_source, to_split_axis)
 
-  for i in range(len(to_split_src_pytree_leaves_indexes)):
-    to_update_src_pytree_leaves[to_split_src_pytree_leaves_indexes[i]] = (
-        to_split_src_pytree_leaves[i]
-    )
+    for i in range(len(to_split_src_pytree_leaves_indexes[key])):
+      to_update_src_pytree_leaves[to_split_src_pytree_leaves_indexes[key][i]] = (
+          updated_to_split_src_pytree_leaves[i]
+      )
+
   updated_src_pytree = jax.tree_util.tree_unflatten(
       src_treedef, to_update_src_pytree_leaves
   )

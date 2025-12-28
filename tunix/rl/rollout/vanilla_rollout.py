@@ -21,7 +21,6 @@ from typing import Any, Optional, Tuple
 
 from flax import nnx
 import jax
-import jax.numpy as jnp
 import jaxtyping
 from tunix.generate import sampler
 from tunix.rl import common

@@ -1,4 +1,4 @@
-# Tunix: A JAX-native LLM Post-Training Library
+# Tunix: A lightweight LLM Post-Training Library
 
 <div align="left">
 
@@ -10,6 +10,7 @@
 post-training of Large Language Models. It provides efficient and scalable
 supports for:
 
+- **SOTA Training performance on TPUs**
 - **Supervised Fine-Tuning**
 - **Reinforcement Learning (RL)**
 - **Knowledge Distillation**
@@ -18,15 +19,13 @@ Tunix leverages the power of JAX for accelerated computation and seamless
 integration with JAX-based modeling framework
 [Flax NNX](https://flax.readthedocs.io/en/latest/nnx_basics.html).
 
-**Current Status: Early Development**
+**Current Status: Alpha Release**
 
-Tunix is in early development. We're actively working to expand its
-capabilities, usability and improve its performance. Stay tuned for upcoming
-updates and new features!
+Tunix is under active development. Our team is actively working on expanding its
+capabilities, usability and performance. Stay tuned for upcoming updates and new
+features!
 
-## Key Features & Highlights
-
-Tunix is still under development, here's a glimpse of the current features:
+## Key Features
 
 - **Supervised Fine-Tuning:**
   - Full Weights Fine-Tuning
@@ -45,14 +44,20 @@ Tunix is still under development, here's a glimpse of the current features:
   - Feature Pooling & Projection Strategies: General techniques for matching
     intermediate feature representations, even between models of different
     architectures.
+
+## Framework & Infra Highlights
+
 - **Modularity:**
   - Components are designed to be reusable and composable
   - Easy to customize and extend
-- **Efficiency:**
-  - Native support of common model sharding strategies such as DP, FSDP and TP
-  - Designed for distributed training on accelerators (TPU)
+- **Performance & Efficiency:**
+  - Native [vLLM](https://github.com/vllm-project/tpu-inference) and [SGLang](https://github.com/sgl-project/sglang-jax) on TPU integration for performant rollout
+  - Native [Maxtext](https://github.com/AI-Hypercomputer/maxtext) model integration for high performance kernels and model execution
+  - Micro-batching support for component level efficient execution
+- **Stability**
+  - Seamless multi-host distributed training with Pathways which can scale up to thousands of devices
 
-## Upcoming
+## Upcoming/Experimental Features
 
 - **Agentic RL Training:**
   - Async Rollout
@@ -60,9 +65,6 @@ Tunix is still under development, here's a glimpse of the current features:
   - Tool usage
 - **Advanced Algorithms:**
   - Additional state-of-the-art RL and distillation algorithms
-- **Scalability:**
-  - Multi-host distributed training
-  - Optimized rollout with vLLM or SGLang-Jax
 - **User Guides:**
   - More advanced RL recipe
 
@@ -121,8 +123,8 @@ To get started, we have a bunch of detailed examples and tutorials.
 To setup Jupyter notebook on single host GCP TPU VM, please refer to the
 [setup script](https://github.com/google/tunix/blob/main/scripts/setup_notebook_tpu_single_host.sh).
 
-We plan to provide clear, concise documentation and more examples in the near
-future.
+For the AI-powered interactive documentation, please check out [Tunix on Google 
+CodeWiki](https://codewiki.google/github.com/google/tunix).
 
 ## Contributing and Feedback
 
@@ -160,7 +162,7 @@ check back for updates!
   title={Tunix},
   author={Bao, Tianshu and Wang, Lance and Sharma, Abheesht and Shin, Jiwon and
   Yan, Ann and Tan, Sizhi and Gao, Haoyu and Ha, Jen and Chai, Lin and
-  Liu, Dangyi and Iyer, Rakesh and Sahu, Mridul and others},
+  Liu, Dangyi and Iyer, Rakesh and Sahu, Mridul and et al.},
   year={2025},
   howpublished={\url{https://github.com/google/tunix}},
 }

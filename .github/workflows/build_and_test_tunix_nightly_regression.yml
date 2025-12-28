@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
   schedule:
     # Run the job every day at 2am
-    - cron:  '0 2 * * *'
+    - cron:  '0 10 * * *' # 10:00 AM UTC, 2:00 AM PST
 
 concurrency:
   # Dedup scheduled runs but nothing else

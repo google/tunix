@@ -327,7 +327,7 @@ class Qwen25MathEvaluator:
       top_k: int = 50,
       top_p: float = 0.95,
       seed: int | None = None,
-  ) -> str:
+  ) -> list[str]:
     if self.tokenizer is None:
       raise RuntimeError(
           "Model components not loaded. Call load_model() first."
@@ -372,7 +372,7 @@ class Qwen25MathEvaluator:
       )
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
-    return out_data.text[0]
+    return out_data.text
 
   def evaluate(
       self,
@@ -526,24 +526,24 @@ else:
     DATA_PATH_PREFIX = "gs://tunix/data"
     MODEL_PATH_PREFIX = "gs://tunix/models"
 
-MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "rl/data/MATH-500/test.jsonl")
-AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "rl/data/HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "MATH-500/test.jsonl")
+AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
 MODEL_MAPPING = {
     "Qwen/Qwen2.5-1.5B-Instruct": (
-        qwen2_lib.ModelConfig.qwen2_5_1_5b(),
+        qwen2_lib.ModelConfig.qwen2p5_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it"),
     ),
-    "DeepSeek-R1-Distill-Qwen-1.5B": (
-        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b(),
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": (
+        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B"),
     ),
-    "DeepScaleR-1.5B-Preview": (
-        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b(),
+    "agentica-org/DeepScaleR-1.5B-Preview": (
+        qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
 }
 
-mesh_config = [[1, 4], ["fsdp", "tp"]]  # 4-way tensor parallelism
+mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
 model_version = "Qwen/Qwen2.5-1.5B-Instruct"

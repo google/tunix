@@ -20,12 +20,13 @@ import gc
 import logging
 import math
 import re
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from flax import nnx
 import jax
 from jax import lax
 import jax.numpy as jnp
+import numpy as np
 
 
 def compute_attention_masks(
@@ -88,23 +89,23 @@ def next_power_of_2(x: int) -> int:
 
 
 def pad_to_length(
-    x: jax.Array,
+    x: np.ndarray,
     target_length: int,
     pad_value: int = 0,
     left=False,
     axis: int = 0,
-) -> jax.Array:
-  """Pads a JAX array to a specified target length along a given axis.
+) -> np.ndarray:
+  """Pads a numpy array to a specified target length along a given axis.
 
   Args:
-      x: The JAX array to pad.
+      x: The numpy array to pad.
       target_length: The desired length of the padded array.
       pad_value: The value to use for padding (default: 0).
       left: If True, add padding tokens to the left of the array.
       axis: The axis along which to pad (default: 0).
 
   Returns:
-      A new JAX array that is padded to the target length along the specified
+      A new numpy array that is padded to the target length along the specified
       axis. Returns original array if it is already longer than the target
       length.
   """
@@ -114,12 +115,12 @@ def pad_to_length(
 
   padding_shape = list(x.shape)
   padding_shape[axis] = target_length - length
-  padding = jnp.full(padding_shape, pad_value, dtype=x.dtype)
+  padding = np.full(padding_shape, pad_value, dtype=x.dtype)
 
   if left:
-    return jnp.concatenate([padding, x], axis=axis)
+    return np.concatenate([padding, x], axis=axis)
   else:
-    return jnp.concatenate([x, padding], axis=axis)
+    return np.concatenate([x, padding], axis=axis)
 
 
 def find_first_non_pad_idx(ids, pad_id):
@@ -698,6 +699,108 @@ def transfer_state_with_mappings(
         tgt_param = resharded_values_flat_dict[tgt_key]
 
   return dst_state.from_flat_path(tgt_flat_list)
+
+
+def transfer_state_directly(
+    src_state: Mapping[str, Any],
+    dst_state: Mapping[str, Any],
+    reshard_fn: Callable[..., Mapping[str, Any]],
+) -> None:
+  """Transfers state directly by matching structure, stripping wrappers.
+
+  This handles the logic for syncing weights where no explicit mapping is provided,
+  common in MaxText -> MaxText workflows. This method should work for all MaxText models.
+  It automatically unwraps common containers present in MaxText models like 'base'
+  (MaxText TrainState) and nested 'model' keys (vLLM wrappers). Additionally, it handles
+  multiple mapping types including dicts, nnx.State, and nnx.Dict. Mismatches in keys are
+  logged for debugging and handled by intersecting the source and target trees.
+
+  Args:
+    src_state: The source state to transfer from.
+    dst_state: The destination state to transfer to.
+    reshard_fn: A function to shard the values.
+  """
+  def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
+    if isinstance(obj, dict):
+      return key in obj
+
+    return hasattr(obj, key)
+
+  # Unwrap Source (Remove 'base' wrapper from MaxText)
+  if isinstance(src_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(src_state, 'base'):
+    logging.info("Unwrapping 'base' key from source state.")
+    src_state = src_state['base']
+
+  # Unwrap Target (Remove nested 'model' wrappers from vLLM)
+  while isinstance(dst_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(dst_state, 'model'):
+    logging.info("Unwrapping nested 'model' key from target state.")
+    dst_state = dst_state['model']
+
+  # Helper: Convert Target Spec to Pure Dict (Strip NNX Params)
+  # JAX needs a spec tree of pure NamedShardings, not Param(NamedSharding).
+  def to_pure_spec(node: Any) -> Any:
+    # Unwrap NNX containers
+    if hasattr(node, 'to_pure_dict'):
+      node = node.to_pure_dict()
+    elif isinstance(node, (nnx.Dict, nnx.State)):
+      node = dict(node)
+
+    # Recurse into dicts
+    if isinstance(node, dict):
+      return {k: to_pure_spec(v) for k, v in node.items()}
+
+    # Unwrap Variables
+    if isinstance(node, nnx.Variable):
+      return to_pure_spec(node[...])
+    if hasattr(node, 'value'):
+      return node.value
+
+    return node
+
+  # Helper: Intersect Trees (Handle KVCache/RNG mismatches)
+  def intersect_trees(src: Any, tgt_spec: Any, path: str = "") -> Tuple[Any, Any]:
+    # Stop recursion if we hit a leaf (non-dict)
+    if not isinstance(src, dict) or not isinstance(tgt_spec, dict):
+      return src, tgt_spec
+
+    src_keys = set(src.keys())
+    tgt_keys = set(tgt_spec.keys())
+    common_keys = src_keys & tgt_keys
+
+    # Debug Logging for dropped keys
+    if src_keys - tgt_keys:
+      logging.debug(
+          "Ignored checkpoint keys at '%s': %s", path, src_keys - tgt_keys
+      )
+    if tgt_keys - src_keys:
+      logging.debug(
+          "Unmatched model keys at '%s': %s", path, tgt_keys - src_keys
+      )
+
+    filtered_src = {}
+    filtered_tgt = {}
+
+    for k in common_keys:
+      new_path = f"{path}/{k}" if path else k
+      s_val, t_val = intersect_trees(src[k], tgt_spec[k], new_path)
+      filtered_src[k] = s_val
+      filtered_tgt[k] = t_val
+
+    return filtered_src, filtered_tgt
+
+  # Prepare clean source and target specs
+  full_source_dict = to_pure_spec(src_state)
+  full_target_spec = to_pure_spec(dst_state)
+
+  # Filter both to their intersection
+  final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
+
+  # Reshard and Update
+  resharded_weights = reshard_fn(
+      source=final_source,
+      target=final_spec,
+  )
+  nnx.update(dst_state, resharded_weights)
 
 
 def verify_state_closeness(golden_state, state, atol=1e-2):

@@ -9,10 +9,12 @@ from typing import Callable
 import jax
 from metrax import logging as metrax_logging
 import numpy as np
+from tunix.utils import env_utils
 
 LoggingBackend = metrax_logging.LoggingBackend
 TensorboardBackend = metrax_logging.TensorboardBackend
 WandbBackend = metrax_logging.WandbBackend
+CluBackend = getattr(metrax_logging, "CluBackend", None)
 
 # User backends MUST be factories (callables) to keep Options pure and copyable.
 BackendFactory = Callable[[], LoggingBackend]
@@ -23,6 +25,8 @@ class MetricsLoggerOptions:
   """Metrics Logger options."""
 
   log_dir: str
+  project_name: str = "tunix"
+  run_name: str = ""
   flush_every_n_steps: int = 100
   backend_factories: list[BackendFactory] | None = None
 
@@ -33,20 +37,31 @@ class MetricsLoggerOptions:
       return []
 
     # Case 1: Override. Use user-provided factories.
-    if self.backend_factories:
+    if self.backend_factories is not None:
       return [factory() for factory in self.backend_factories]
 
     # Case 2: Defaults.
-    active_backends = [
-        TensorboardBackend(
-            log_dir=self.log_dir,
-            flush_every_n_steps=self.flush_every_n_steps,
+    active_backends = []
+
+    if env_utils.is_internal_env():
+      if CluBackend is None:
+        raise ImportError(
+            "Internal environment detected, but CluBackend not available."
         )
-    ]
-    try:
-      active_backends.append(WandbBackend(project="tunix"))
-    except ImportError:
-      logging.info("WandbBackend skipped: 'wandb' library not installed.")
+      active_backends.append(CluBackend(log_dir=self.log_dir))
+    else:
+      active_backends.append(
+          TensorboardBackend(
+              log_dir=self.log_dir,
+              flush_every_n_steps=self.flush_every_n_steps,
+          )
+      )
+      try:
+        active_backends.append(
+            WandbBackend(project=self.project_name, name=self.run_name)
+        )
+      except ImportError:
+        logging.info("WandbBackend skipped: 'wandb' library not installed.")
     return active_backends
 
 
@@ -64,7 +79,11 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
 
 
 class MetricsLogger:
-  """Simple Metrics logger."""
+  """Simple Metrics logger.
+
+  Log metrics to multiple backends. If no backends are specified, it will log to
+  the default backends.
+  """
 
   def __init__(
       self,

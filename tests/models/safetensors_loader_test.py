@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -119,6 +120,36 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         key_mapping,
         dtype=jnp.float32,
     )
+    loaded_state = nnx.state(loaded_model)
+    jax.tree.map(
+        np.testing.assert_array_equal,
+        self.state,
+        loaded_state,
+    )
+
+  def test_load_and_create_model_from_gcs(self):
+    try:
+      st_dir_abs = self.create_tempdir().full_path
+    except Exception:  # pylint: disable=broad-except
+      st_dir_abs = tempfile.TemporaryDirectory().name
+      os.makedirs(st_dir_abs, exist_ok=True)
+
+    filename = os.path.join(st_dir_abs, 'model.safetensors')
+    stnp.save_file(self.tensors, filename)
+
+    with mock.patch.object(
+        safetensors_loader, 'load_file_from_gcs'
+    ) as mock_load:
+      mock_load.return_value = st_dir_abs
+      loaded_model = safetensors_loader.load_and_create_model(
+          'gs://bucket/model',
+          test_common.ToyTransformer,
+          self.model.config,
+          key_mapping,
+          dtype=jnp.float32,
+      )
+      mock_load.assert_called_once_with('gs://bucket/model')
+
     loaded_state = nnx.state(loaded_model)
     jax.tree.map(
         np.testing.assert_array_equal,

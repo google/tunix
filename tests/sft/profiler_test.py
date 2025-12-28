@@ -18,6 +18,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import jax
 from tunix.sft import profiler
 import tempfile
 
@@ -33,9 +34,9 @@ class ProfilerTest(parameterized.TestCase):
     # Reset class variable state to ensure test isolation.
     profiler.Profiler._is_active = False
 
-  @mock.patch('jax.process_index', return_value=0)
-  @mock.patch('jax.profiler.start_trace')
-  @mock.patch('jax.profiler.stop_trace')
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'start_trace')
+  @mock.patch.object(jax.profiler, 'stop_trace')
   def test_profiler_active_with_options_process_0(
       self, mock_stop_trace, mock_start_trace, _
   ):
@@ -59,9 +60,9 @@ class ProfilerTest(parameterized.TestCase):
     p.maybe_deactivate(15)  # Deactivate at the correct step
     mock_stop_trace.assert_called_once()
 
-  @mock.patch('jax.process_index', return_value=1)
-  @mock.patch('jax.profiler.start_trace')
-  @mock.patch('jax.profiler.stop_trace')
+  @mock.patch.object(jax, 'process_index', return_value=1)
+  @mock.patch.object(jax.profiler, 'start_trace')
+  @mock.patch.object(jax.profiler, 'stop_trace')
   def test_profiler_inactive_for_non_zero_process(
       self, mock_stop_trace, mock_start_trace, _
   ):
@@ -82,9 +83,9 @@ class ProfilerTest(parameterized.TestCase):
     p.maybe_deactivate(15)  # Call with an arbitrary step, should not deactivate
     mock_stop_trace.assert_not_called()
 
-  @mock.patch('jax.process_index', return_value=0)
-  @mock.patch('jax.profiler.start_trace')
-  @mock.patch('jax.profiler.stop_trace')
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'start_trace')
+  @mock.patch.object(jax.profiler, 'stop_trace')
   def test_profiler_inactive_without_options(
       self, mock_stop_trace, mock_start_trace, _
   ):
@@ -131,8 +132,8 @@ class ProfilerTest(parameterized.TestCase):
           expect_start_called=False,
       ),
   )
-  @mock.patch('jax.process_index', return_value=0)
-  @mock.patch('jax.profiler.start_trace')
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'start_trace')
   def test_maybe_activate(
       self,
       mock_start_trace,
@@ -190,9 +191,9 @@ class ProfilerTest(parameterized.TestCase):
           expect_stop_called=False,
       ),
   )
-  @mock.patch('jax.process_index', return_value=0)
-  @mock.patch('jax.profiler.stop_trace')
-  @mock.patch('jax.profiler.start_trace')
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'stop_trace')
+  @mock.patch.object(jax.profiler, 'start_trace')
   def test_maybe_deactivate(
       self,
       mock_start_trace,
@@ -226,9 +227,9 @@ class ProfilerTest(parameterized.TestCase):
     else:
       mock_stop_trace.assert_not_called()
 
-  @mock.patch('jax.process_index', return_value=0)
-  @mock.patch('jax.profiler.stop_trace')
-  @mock.patch('jax.profiler.start_trace')
+  @mock.patch.object(jax, 'process_index', return_value=0)
+  @mock.patch.object(jax.profiler, 'stop_trace')
+  @mock.patch.object(jax.profiler, 'start_trace')
   def test_multiple_profiler_instances(
       self, mock_start_trace, mock_stop_trace, _
   ):

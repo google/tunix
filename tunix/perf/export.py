@@ -119,7 +119,8 @@ class PerfMetricsExport:
         global_step_group,
         rollout_spans,
         refer_inference_spans,
-        actor_training_spans,
+        actor_train_groups,
+        actor_train_step_spans,
     ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
     if not ok:
       return {}
@@ -142,9 +143,12 @@ class PerfMetricsExport:
         span.duration for span in refer_inference_spans
     ]
 
-    # training includes gradient update
-    actor_train_grad_time: list[float] = [
-        span.duration for span in actor_training_spans
+    # train time includes gradient update and eval
+    actor_train_time: list[float] = [
+        group.duration for group in actor_train_groups
+    ]
+    actor_train_step_time: list[float] = [
+        span.duration for span in actor_train_step_spans
     ]
 
     # pyformat: disable
@@ -153,10 +157,12 @@ class PerfMetricsExport:
         "perf/weight_sync_time": (weight_sync_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
         "perf/sum/refer_inference_time": (np.sum(refer_inference_time), None),
-        "perf/sum/actor_train_grad_time": (np.sum(actor_train_grad_time), None),
+        "perf/sum/actor_train_time": (np.sum(actor_train_time), None),
+        "perf/sum/actor_train_step_time": (np.sum(actor_train_step_time), None),
         "perf/mean/rollout_time": (np.mean(rollout_time), None),
         "perf/mean/refer_inference_time": (np.mean(refer_inference_time), None),
-        "perf/mean/actor_train_grad_time": (np.mean(actor_train_grad_time), None),
+        "perf/mean/actor_train_time": (np.mean(actor_train_time), None),
+        "perf/mean/actor_train_step_time": (np.mean(actor_train_step_time), None),
     }
     # pyformat: enable
 
@@ -172,7 +178,8 @@ class PerfMetricsExport:
         global_step_group,
         rollout_spans,
         refer_inference_spans,
-        actor_training_spans,
+        actor_train_groups,
+        actor_train_step_spans,
     ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
     if not ok:
       return {}
@@ -196,9 +203,12 @@ class PerfMetricsExport:
         span.duration for span in refer_inference_spans
     ]
 
-    # training includes gradient update
-    actor_train_grad_time: list[float] = [
-        span.duration for span in actor_training_spans
+    # train time includes gradient update and eval
+    actor_train_time: list[float] = [
+        group.duration for group in actor_train_groups
+    ]
+    actor_train_step_time: list[float] = [
+        span.duration for span in actor_train_step_spans
     ]
 
     first_micro_batch_rollout_time: float = (
@@ -208,7 +218,7 @@ class PerfMetricsExport:
     # append [0.0] to make size equal to micro batch
     between_micro_batch_gap_time: list[float] = [
         b.begin - a.end
-        for a, b in zip(actor_training_spans[:-1], refer_inference_spans[1:])
+        for a, b in zip(actor_train_groups[:-1], refer_inference_spans[1:])
     ] + [0.0]
 
     # pyformat: disable
@@ -219,11 +229,13 @@ class PerfMetricsExport:
         "perf/first_micro_batch_rollout_time": (first_micro_batch_rollout_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
         "perf/sum/refer_inference_time": (np.sum(refer_inference_time), None),
-        "perf/sum/actor_train_grad_time": (np.sum(actor_train_grad_time), None),
+        "perf/sum/actor_train_time": (np.sum(actor_train_time), None),
+        "perf/sum/actor_train_step_time": (np.sum(actor_train_step_time), None),
         "perf/sum/between_micro_batch_gap_time": (np.sum(between_micro_batch_gap_time), None),
         "perf/mean/rollout_time": (np.mean(rollout_time), None),
         "perf/mean/refer_inference_time": (np.mean(refer_inference_time), None),
-        "perf/mean/actor_train_grad_time": (np.mean(actor_train_grad_time), None),
+        "perf/mean/actor_train_time": (np.mean(actor_train_time), None),
+        "perf/mean/actor_train_step_time": (np.mean(actor_train_step_time), None),
         "perf/mean/between_micro_batch_gap_time": (np.mean(between_micro_batch_gap_time), None),
     }
     # pyformat: enable
@@ -240,7 +252,8 @@ class PerfMetricsExport:
         global_step_group,
         rollout_spans,
         refer_inference_spans,
-        actor_training_spans,
+        actor_train_groups,
+        actor_train_step_spans,
     ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
     if not ok:
       return {}
@@ -267,14 +280,22 @@ class PerfMetricsExport:
         for a, b in zip(refer_inference_spans[:-1], refer_inference_spans[1:])
     ] + [0.0]
 
-    # training includes gradient update
-    actor_train_grad_time: list[float] = [
-        span.duration for span in actor_training_spans
+    # train time includes gradient update and eval
+    actor_train_time: list[float] = [
+        group.duration for group in actor_train_groups
     ]
+    actor_train_step_time: list[float] = [
+        span.duration for span in actor_train_step_spans
+    ]
+
+    first_micro_batch_rollout_time: float = (
+        rollout_spans[0].end - global_step_group.begin
+    )
+
     # append [0.0] to make size equal to micro batch
     actor_gap_time: list[float] = [
         b.end - a.begin
-        for a, b in zip(actor_training_spans[:-1], actor_training_spans[1:])
+        for a, b in zip(actor_train_groups[:-1], actor_train_groups[1:])
     ] + [0.0]
 
     # pyformat: disable
@@ -282,15 +303,18 @@ class PerfMetricsExport:
         "perf/global_step_time": (global_step_time, None),
         "perf/weight_sync_time": (weight_sync_time, None),
         "perf/rollout_idle_time": (rollout_idle_time, None),
+        "perf/first_micro_batch_rollout_time": (first_micro_batch_rollout_time, None),
         "perf/sum/rollout_time": (np.sum(rollout_time), None),
         "perf/sum/refer_inference_time": (np.sum(refer_inference_time), None),
         "perf/sum/refer_gap_time": (np.sum(refer_gap_time), None),
-        "perf/sum/actor_train_grad_time": (np.sum(actor_train_grad_time), None),
+        "perf/sum/actor_train_time": (np.sum(actor_train_time), None),
+        "perf/sum/actor_train_step_time": (np.sum(actor_train_step_time), None),
         "perf/sum/actor_gap_time": (np.sum(actor_gap_time), None),
         "perf/mean/rollout_time": (np.mean(rollout_time), None),
         "perf/mean/refer_inference_time": (np.mean(refer_inference_time), None),
         "perf/mean/refer_gap_time": (np.mean(refer_gap_time), None),
-        "perf/mean/actor_train_grad_time": (np.mean(actor_train_grad_time), None),
+        "perf/mean/actor_train_time": (np.mean(actor_train_time), None),
+        "perf/mean/actor_train_step_time": (np.mean(actor_train_step_time), None),
         "perf/mean/actor_gap_time": (np.mean(actor_gap_time), None),
     }
     # pyformat: enable
@@ -298,7 +322,9 @@ class PerfMetricsExport:
   @staticmethod
   def _grpo_extract_spans_and_groups(
       role_to_devices: dict[str, list[str]], query: PerfSpanQuery
-  ) -> tuple[bool, SpanGroup, list[Span], list[Span], list[Span]]:
+  ) -> tuple[
+      bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
+  ]:
     """Extracts spans and span groups of the last global step for GRPO workflow."""
 
     global_steps: list[SpanGroup] = (
@@ -306,7 +332,7 @@ class PerfMetricsExport:
     )
     if not global_steps:
       logging.warning("global_step is None")
-      return (False, SpanGroup(""), [], [], [])
+      return (False, SpanGroup(""), [], [], [], [])
 
     global_step_group: SpanGroup = global_steps[0]
 
@@ -316,29 +342,39 @@ class PerfMetricsExport:
         .all_groups("mini_batch_step")
         .all_groups("micro_batch_steps")
     )
+    main_groups = micro_batch.main().get()
     rollout_groups = micro_batch.timeline(role_to_devices["rollout"][0]).get()
     refer_groups = micro_batch.timeline(role_to_devices["refer"][0]).get()
     actor_groups = micro_batch.timeline(role_to_devices["actor"][0]).get()
 
     if not rollout_groups or not refer_groups or not actor_groups:
       logging.warning("rollout_group or refer_group or actor_group is None")
-      return (False, SpanGroup(""), [], [], [])
+      return (False, SpanGroup(""), [], [], [], [])
 
     rollout_span: list[Span] = []
     refer_inference_span: list[Span] = []
-    actor_training_span: list[Span] = []
+    actor_train_groups: list[SpanGroup] = []
+    actor_train_step_span: list[Span] = []
 
     for group in rollout_groups:
       rollout_span.extend(group.find_all_inner_spans("rollout"))
     for group in refer_groups:
       refer_inference_span.extend(group.find_all_inner_spans("refer_inference"))
     for group in actor_groups:
-      actor_training_span.extend(group.find_all_inner_spans("actor_training"))
+      actor_train_groups.extend(group.find_all_inner_groups("actor_training"))
+    # TODO(yangmu) rewrite this after peft_train_step is attached to device
+    # timeline. Note that peft_train_step records the correct device timespan.
+    for group in main_groups:
+      for actor_train_group in group.find_all_inner_groups("actor_training"):
+        actor_train_step_span.extend(
+            actor_train_group.find_all_inner_spans("peft_train_step")
+        )
 
     return (
         True,
         global_step_group,
         rollout_span,
         refer_inference_span,
-        actor_training_span,
+        actor_train_groups,
+        actor_train_step_span,
     )

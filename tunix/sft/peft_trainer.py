@@ -31,6 +31,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import trace as perf_trace
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
@@ -186,6 +187,7 @@ class PeftTrainer:
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
       metrics_logger: Optional[MetricsLogger] = None,
+      perf_tracer: Optional[perf_trace.Tracer] = None,
   ):
     self.model = model
     self.config = training_config
@@ -212,6 +214,9 @@ class PeftTrainer:
           self.config.metrics_logging_options,
       )
     self.is_managed_externally = False
+    self._perf_tracer = (
+        perf_tracer if perf_tracer is not None else perf_trace.NoopTracer()
+    )
 
     self._train_steps = 0  # represent # of times model has been updated
     self._iter_steps = 0  # represent # of times trainer has looped
@@ -236,9 +241,8 @@ class PeftTrainer:
     self._jitted_eval_step_fn = None
     max_step = None
     if self.config.max_steps is not None:
-      max_step = (
-          self.config.max_steps
-          * self.config.get_with_default("gradient_accumulation_steps", 1)
+      max_step = self.config.max_steps * self.config.get_with_default(
+          "gradient_accumulation_steps", 1
       )
     self._prof = profiler.Profiler(
         initial_step=self._iter_steps,
@@ -387,42 +391,6 @@ class PeftTrainer:
         self._jitted_eval_step_fn = nnx.jit(eval_step)
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
-  def _shard_input(self, input_data: TrainingInput) -> TrainingInput:
-    """Shards the input data across the available devices.
-
-    Args:
-      input_data: The input data to be sharded, expected to be a TrainingInput
-        dataclass.
-
-    Returns:
-      The sharded TrainingInput.
-    """
-    mesh = pxla.thread_resources.env.physical_mesh
-    if mesh.empty:
-      return input_data
-
-    # Check if the input is already sharded with the target mesh to avoid
-    # re-sharding.
-    is_sharded = jax.tree.map(
-        lambda x: isinstance(x, jax.Array)
-        and hasattr(x, "sharding")
-        and hasattr(x.sharding, "mesh")
-        and x.sharding.mesh == mesh,
-        input_data,
-    )
-    if all(jax.tree.leaves(is_sharded)):
-      return input_data
-
-    pspec = shd.PartitionSpec(*self.config.data_sharding_axis)
-
-    with jax.transfer_guard("allow"):
-      return jax.tree.map(
-          lambda x: jax.make_array_from_process_local_data(
-              sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec), x
-          ),
-          input_data,
-      )
-
   def _prepare_inputs(self, input_data: Any) -> Any:
     """Override this function for additional input preparation."""
     return input_data
@@ -455,7 +423,7 @@ class PeftTrainer:
       additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
-    perplexity = np.exp(loss)
+    perplexity = np.exp(jax.device_get(loss))
     self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)
     self.metrics_logger.log(
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
@@ -587,6 +555,8 @@ class PeftTrainer:
       train_ds: Iterable[Any],
       eval_ds: Iterable[Any] | None = None,
       skip_jit: bool = False,
+      *,
+      cache_nnx_graph: bool = False,
   ) -> None:
     """Training loop."""
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
@@ -596,9 +566,23 @@ class PeftTrainer:
           pxla.thread_resources.env.physical_mesh,
           train_step.jitted_fn._cache_size(),  # pytype: disable=attribute-error,protected-access
       )
+    if cache_nnx_graph:
+      # For performance, cache the nnx graph traversals. However, the training
+      # loop must _not_ modify the model or optimizer graph in this case.  For
+      # example, the distillation trainer mutates the model graph by adding the
+      # distillation loss.
+      partial_train_step = nnx.cached_partial(
+          train_step, self.model, self.optimizer
+      )
+      partial_eval_step = nnx.cached_partial(eval_step, self.model)
+    else:
+      partial_train_step = lambda inputs: train_step(
+          self.model, self.optimizer, inputs
+      )
+      partial_eval_step = lambda inputs: eval_step(self.model, inputs)
 
     if eval_ds:
-      self._run_eval(eval_ds, eval_step)
+      self._run_eval(eval_ds, partial_eval_step)
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
@@ -649,7 +633,9 @@ class PeftTrainer:
             break
 
           train_example = self._prepare_inputs(train_example)
-          train_example = self._shard_input(train_example)
+          train_example = sharding_utils.shard_input(
+              train_example, self.config.data_sharding_axis
+          )
 
           if not self._flops_measured and not skip_jit:
             self._flops_measured = True
@@ -672,9 +658,12 @@ class PeftTrainer:
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
-          train_loss, aux = train_step(
-              self.model, self.optimizer, train_example
-          )
+
+          with self._perf_tracer.span(
+              "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
+          ) as span:
+            train_loss, aux = partial_train_step(train_example)
+            span.device_end([train_loss])
 
           current_time = time.perf_counter()
           step_time_delta = current_time - last_step_completion_time
@@ -711,7 +700,7 @@ class PeftTrainer:
                 eval_ds
                 and self._train_steps % self.config.eval_every_n_steps == 0
             ):
-              self._run_eval(eval_ds, eval_step)
+              self._run_eval(eval_ds, partial_eval_step)
 
         self._prof.maybe_deactivate(self._iter_steps)
 
@@ -780,10 +769,12 @@ class PeftTrainer:
         if eval_example is None:
           break
         eval_example = self._prepare_inputs(eval_example)
-        eval_example = self._shard_input(eval_example)
+        eval_example = sharding_utils.shard_input(
+            eval_example, self.config.data_sharding_axis
+        )
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
-        loss, aux = eval_step_fn(self.model, eval_example)
+        loss, aux = eval_step_fn(eval_example)
         loss = jax.lax.stop_gradient(loss)
         self._buffered_eval_metrics = self._buffer_metrics(
             self._buffered_eval_metrics,

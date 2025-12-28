@@ -84,37 +84,137 @@ jobs:
         "
 
     - name: Run regression scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       id: regression_tests
       run: |
         # Download GSM8K dataset
         mkdir -p /tmp/grpo_test/rl/grpo/data
 
         FAILED=0
-        echo "Running examples/deepscaler/math_eval_nb.py..."
+        echo "📦 Executing: examples/deepscaler/math_eval_nb.py..."
         python examples/deepscaler/math_eval_nb.py || FAILED=1
 
-        echo "Running scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test || FAILED=1
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 || FAILED=1
 
-        echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm || FAILED=1
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way || FAILED=1
 
-        echo "Running scripts/grpo_demo_llama3_qwen2.py with vllm server mode..."
-        python scripts/grpo_demo_llama3_qwen2.py--root-dir=/tmp/grpo_test --rollout-engine=vllm --rollout-server-mode=True || FAILED=1
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way || FAILED=1
 
         # SGLang Tests
         unset JAX_PLATFORMS
         pip list | egrep 'jax|flax|libtpu'
         cd ..
         git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
-        pip install jax==0.8.0 flax==0.12.0 libtpu==0.0.24
+        pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24
         pip list | egrep 'jax|flax|libtpu'
-        cd tunix && python scripts/grpo_demo_sglang_jax_rollout.py --root-dir=/tmp/grpo_test || FAILED=1
+        cd tunix
+        
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax || FAILED=1
 
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way || FAILED=1
+
+    
         if [ "$FAILED" -ne 0 ]; then
           echo "One or more scripts failed!"
           exit 1
         fi
 
+    - name: Run SFT shell scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        SCRIPT_DIR="./tunix/examples/sft/mtnt"
+        MAX_STEPS=5
+        EVAL_EVERY_N_STEPS=1
 
-          
+        # Check if directory exists
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist"
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR"
+        for script in "$SCRIPT_DIR"/*.sh; do
+          if [ -f "$script" ]; then
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            if bash "$script" \
+                --training_config.max_steps "$MAX_STEPS" \
+                --training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              echo "✅ Successfully completed: $script"
+            else
+              exit_code=$?
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              exit "$exit_code"
+            fi
+          fi
+        done
+        echo "🎉 All SFT scripts completed successfully."
+
+    - name: Run RL shell scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        SCRIPT_DIR="./tunix/examples/rl/grpo/gsm8k"
+        EXCLUDE_DIR="verl_compatible"
+        MAX_STEPS=5
+        EVAL_EVERY_N_STEPS=1
+
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist" >&2
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
+        final_exit_code=0
+
+        while IFS= read -r script; do
+          if [ -f "$script" ]; then
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            if ! bash "$script" \
+                --rl_training_config.max_steps "$MAX_STEPS" \
+                --rl_training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              exit_code=$?
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              final_exit_code=$exit_code
+              # Stop processing further scripts after the first failure
+              break
+            else
+              echo "✅ Successfully completed: $script"
+            fi
+          fi
+        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/")
+
+        if [ "$final_exit_code" -ne 0 ]; then
+          echo "🚫 One or more RL scripts failed. Exiting with code $final_exit_code." >&2
+          exit "$final_exit_code"
+        fi
+        echo "🎉 All RL scripts completed successfully."
+

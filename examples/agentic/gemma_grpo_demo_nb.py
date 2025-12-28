@@ -303,7 +303,7 @@ def get_ref_model():
     model_config = MODEL_CONFIG[MODEL_VERSION]()
     ckpt_path = os.path.join(NNX_CKPT_DIR, MODEL_VERSION)
     abs_gemma: nnx.Module = nnx.eval_shape(
-        lambda: gemma_lib.Transformer(model_config, rngs=nnx.Rngs(params=0))
+        lambda: gemma_lib.Gemma(model_config, rngs=nnx.Rngs(params=0))
     )
     abs_state = nnx.state(abs_gemma)
     abs_state = jax.tree.map(

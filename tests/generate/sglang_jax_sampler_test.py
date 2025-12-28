@@ -39,7 +39,12 @@ class SglangJaxSamplerTest(absltest.TestCase):
     super().setUpClass()
     mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
     axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
+    cls.mesh = jax.make_mesh(
+        mesh_shape,
+        axis_names,
+        devices=jax.devices(),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
+    )
 
     cls.repo_id = (  ## use smaller models to prevent OOM in v5e
         "meta-llama/Llama-3.2-3B-Instruct"
@@ -50,8 +55,8 @@ class SglangJaxSamplerTest(absltest.TestCase):
 
   def load_llama3_model(self, model_version: str):
     model_config = {
-        "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3_2_3b,
-        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
+        "meta-llama/Llama-3.2-3B-Instruct": llama_lib.ModelConfig.llama3p2_3b,
+        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }
     assert (
         model_version in model_config
@@ -121,16 +126,16 @@ class SglangJaxSamplerTest(absltest.TestCase):
         mapping_config=mapping_config,
     )
 
-    vl_sampler = sglang_jax_sampler.SglangJaxSampler(
+    sgl_sampler = sglang_jax_sampler.SglangJaxSampler(
         tokenizer=model_tokenizer,
         config=sglang_jax_config,
     )
     state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
+    sgl_sampler.load_checkpoint(state)
 
     base_utils.show_hbm_usage("After loading sglang jax sampler")
 
-    sglang_jax_output = vl_sampler(
+    sgl_output = sgl_sampler(
         input_strings=inputs,
         max_generation_steps=128,
         max_prompt_length=None,  # Use default max prompt length
@@ -154,11 +159,11 @@ class SglangJaxSamplerTest(absltest.TestCase):
     tc.validate_llm_outputs(expected_output_pattern, vanilla_output.text)
 
     print("-" * 50)
-    print(f"sglang jax Generated text: {sglang_jax_output.text}")
-    tc.validate_llm_outputs(expected_output_pattern, sglang_jax_output.text)
+    print(f"sglang jax Generated text: {sgl_output.text}")
+    tc.validate_llm_outputs(expected_output_pattern, sgl_output.text)
 
     _, tunix_state = nnx.split(tunix_model)
-    _, sglangjax_state = nnx.split(vl_sampler._model_runner.model)
+    _, sglangjax_state = nnx.split(sgl_sampler._model_runner.model)
     self.assertTrue(
         np.allclose(
             tunix_state["embedder"]["input_embedding"].value,

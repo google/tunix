@@ -40,8 +40,8 @@ echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
-  reference_model_config.model_name="llama3.2-8b" \
-  reference_model_config.model_id="meta-llama/Llama-3.2-8B" \
+  reference_model_config.model_name="llama-3.1-8b" \
+  reference_model_config.model_id="meta-llama/Llama-3.1-8B" \
   reference_model_config.model_source="huggingface" \
   reference_model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
   reference_model_config.mesh.shape="(2,4)" \
@@ -54,7 +54,7 @@ python3 -m tunix.cli.grpo_main \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   rollout_model_config.mesh.shape="(2,4)" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
-  tokenizer_config.tokenizer_path="meta-llama/Llama-3.2-8B" \
+  tokenizer_config.tokenizer_path="meta-llama/Llama-3.1-8B" \
   tokenizer_config.tokenizer_type="huggingface" \
   tokenizer_config.add_bos=false \
   dataset_name="gsm8k" \

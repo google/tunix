@@ -23,7 +23,7 @@
   .. image:: _static/img/sphx_glr_local_module_thumb.png
      :alt: GRPO Demo.
 
-  :doc:`_collections/examples/grpo_demo`
+  :doc:`_collections/examples/grpo_gemma`
 
 .. raw:: html
 
@@ -57,7 +57,7 @@
   .. image:: _static/img/sphx_glr_local_module_thumb.png
     :alt: QLoRA Demo
 
-  :doc:`_collections/examples/qlora_demo`
+  :doc:`_collections/examples/qlora_gemma`
 
 .. raw:: html
 
@@ -73,7 +73,7 @@
   .. image:: _static/img/sphx_glr_local_module_thumb.png
     :alt: DPO Demo
 
-  :doc:`_collections/examples/dpo_demo_gemma3`
+  :doc:`_collections/examples/dpo_gemma`
 
 .. raw:: html
 
