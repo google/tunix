@@ -126,7 +126,7 @@ To setup Jupyter notebook on single host GCP TPU VM, please refer to the
 For the AI-powered interactive documentation, please check out [Tunix on Google 
 CodeWiki](https://codewiki.google/github.com/google/tunix).
 
-## Contributing and Feedbacks
+## Contributing and Feedback
 
 We welcome contributions! As Tunix is in early development, the contribution
 process is still being formalized. A rough draft of the contribution process is
