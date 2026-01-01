@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import Counter
+import contextlib
 import os
 import pathlib
 import tempfile
@@ -27,6 +29,17 @@ from tunix.cli import config
 from tunix.sft import peft_trainer
 from tunix.tests import test_common as tc
 from tunix.utils import env_utils
+
+
+@contextlib.contextmanager
+def change_directory(path):
+  """Context manager to temporarily change the current working directory."""
+  original_cwd = os.getcwd()
+  try:
+    os.chdir(path)
+    yield
+  finally:
+    os.chdir(original_cwd)
 
 
 class ConfigTest(parameterized.TestCase):
@@ -463,6 +476,22 @@ class ConfigTest(parameterized.TestCase):
 
       finally:
         os.chdir(original_cwd)
+
+  def test_load_config_fallback_path(self):
+    """Tests that the loader falls back to the module directory if file not in CWD."""
+    temp_dir = self.create_tempdir()
+    temp_dir_path = temp_dir.full_path
+    with change_directory(temp_dir_path):
+      hp = self.initialize_config([])
+      self.assertIsNotNone(hp)
+      # Assert that a key from the base_config.yaml is loaded,
+      # indicating the fallback worked.
+      self.assertIn("model_config", hp.config)
+      self.assertIn("optimizer_config", hp.config)
+      self.assertIn("training_config", hp.config)
+
+    self.assertNotEqual(os.getcwd(), temp_dir_path)
+
 
   def test_obtain_reward_fn_file_not_found(self):
     hp = self.initialize_config(
