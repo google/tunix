@@ -81,7 +81,8 @@ def create_train_dataset(
     total_tokens = 0
     
     # tqdm is for visual feedback, using a large number as proxy
-    for i, batch in tqdm(enumerate(batch_iterator), desc="Streaming Batches"):
+    # tqdm is for visual feedback, using a large number as proxy
+    for i, batch in enumerate(batch_iterator):
         tokens = np.array(batch['text_tokenized'], dtype=np.int32)
 
         if tokens.shape[1] > max_length:
@@ -174,8 +175,10 @@ training_config = peft_trainer.TrainingConfig(
     ),
 )
 
-trainer = peft_trainer.PeftTrainer(model, optimizer, training_config)
-trainer = trainer.with_cce_loss()
+# Initialize trainer within mesh context to ensure correct optimizer state placement
+with mesh:
+    trainer = peft_trainer.PeftTrainer(model, optimizer, training_config)
+    trainer = trainer.with_cce_loss()
 
 def gen_model_input_fn(x: peft_trainer.TrainingInput):
     input_tokens = x.input_tokens

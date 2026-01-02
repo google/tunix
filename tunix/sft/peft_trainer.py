@@ -387,21 +387,48 @@ class PeftTrainer:
     return self._eval_step
 
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
-    """Optimizer states should be sharded before calling the jit function.
-
-    If not, the _train_step will be compiled 2 times.
-
-    Args:
-      mesh: The mesh used for sharding.
-    """
+    """Shard/replicate optimizer state so jitted train step sees the expected placement."""
     if mesh.empty:
       return
+
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
+    # Ensure devices is a flat list of Device objects, even if mesh is multidimensional
+    devices = mesh.devices.flatten().tolist()
 
-    optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state, optimizer_pspecs
-    )
+    def _put_to_mesh(leaf, pspec):
+      # If pspec is None or leaf is None, just replicate it across devices.
+      if pspec is None or leaf is None:
+        try:
+          return jax.device_put_replicated(leaf, devices)
+        except Exception:
+          return leaf  # best-effort fallback
+
+      # Try to build a NamedSharding from the mesh + pspec and put the leaf there.
+      try:
+        named_sharding = jax.sharding.NamedSharding(mesh, pspec)
+        # If leaf is a Python scalar or not an array, convert to an array first.
+        if not isinstance(leaf, (jax.Array, jnp.ndarray, np.ndarray)):
+          leaf_arr = jnp.asarray(leaf)
+        else:
+          leaf_arr = leaf
+        return jax.device_put(leaf_arr, named_sharding)
+      except Exception as e:
+        # Fallback: replicate the leaf across devices (safer for scalars / small objects).
+        logging.warning(
+            "Could not place leaf with pspec %s using NamedSharding: %s. Falling back to replication.",
+            pspec, e
+        )
+        try:
+          return jax.device_put_replicated(leaf, devices)
+        except Exception as e2:
+          logging.warning("Replication also failed: %s. Returning original leaf.", e2)
+          return leaf
+
+    # Use jax.tree_map (or jax.tree_util.tree_map) to apply.
+    optimizer_sharded_state = jax.tree_util.tree_map(_put_to_mesh, optimizer_state, optimizer_pspecs)
+
+    # Now update optimizer state with the placed/replicated state.
     nnx.update(self.optimizer, optimizer_sharded_state)
 
   def jit_train_and_eval_step(self, skip_jit: bool = False):
