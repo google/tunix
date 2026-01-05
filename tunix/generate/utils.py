@@ -507,7 +507,8 @@ def _reshape_attention(
         new_shape,
     )
     return jnp.reshape(val, new_shape)
-  ## here exists tgt_shape is (4096, 1024), but the val shape is (4096, 8, 128) case, so needs reshape
+  # Handle cases like tgt_shape (4096, 1024) and val shape (4096, 8, 128),
+  # which require reshaping.
   if re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(
       src_key
   ) and math.prod(tgt_shape) == math.prod(val.shape):
@@ -548,7 +549,11 @@ def _align_shape(
 
   original_shape = val.shape
   # Check if this is an attention weight that can be padded/repeated
-  attention_patterns = [r'.*(q|k|v|o)_proj.*', r'.*(key|query|value|output).*']
+  attention_patterns = [
+      r'.*(q|k|v|o)_proj.*',
+      r'.*(q|k|v|o)_bias.*',
+      r'.*(key|query|value|output).*',
+  ]
   if not any(re.match(pattern, src_key) for pattern in attention_patterns):
     raise ShapeMismatchError(
         f'Shape mismatch for non-attention weight {src_key}: '
