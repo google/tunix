@@ -146,9 +146,7 @@ class GrpoPipeline(config.HyperParameters):
             "max_prompt_length", None
         ),
     )
-    mesh = self.create_mesh("actor_model_config")
-    with mesh:
-      grpo_trainer.train(dataset)
+    grpo_trainer.train(dataset)
 
 
 def _setup_jax_pathways(pathways_bns: str):
