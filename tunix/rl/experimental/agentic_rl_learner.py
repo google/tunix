@@ -633,6 +633,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
         f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
     )
+    print(  # pylint: disable=logging-fstring-interpolation
+        f"Training with {full_batch_size=}, {mini_batch_size=},"
+        f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
+        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+    )
 
     logging.info("Starting AgenticRLLearner training loop.")
     full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)

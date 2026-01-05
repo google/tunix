@@ -116,7 +116,7 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-MESH = [(2, 4), ("fsdp", "tp")]
+MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -190,7 +190,7 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
+ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang_jax"
 
 # %%
 # try:
@@ -242,7 +242,7 @@ show_hbm_usage("Before model loading")
 # %%
 print("Loading model..., PATH: ", MODEL_PATH)
 mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1_5b()
+config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 print("model_path: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.bfloat16)
 qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
@@ -319,7 +319,7 @@ print ("Done with loading datasets")
   # break
 
 # %%
-show_hbm_usage()
+show_hbm_usage("Done with loading datasets")
 
 # %%
 mesh = jax.make_mesh(
@@ -363,7 +363,7 @@ else:
   qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
 
 # %%
-show_hbm_usage()
+show_hbm_usage("after loading qwen2_actor")
 
 # %%
 ModelAgent = model_agent.ModelAgent
@@ -411,11 +411,16 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
+if ROLLOUT_ENGINE == "sglang_jax":
+  rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:2].reshape(1, 2), ('fsdp', 'tp'))
+else:
+  rollout_mesh = mesh
+print("Rollout mesh: ", rollout_mesh)
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: mesh,
         rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
@@ -440,12 +445,15 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
         # sglang-jax specific configs
-        # rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        # rollout_sglang_jax_context_length=2048 + 8192,
-        # rollout_sglang_jax_mem_fraction_static=0.2,
-        # rollout_sglang_jax_init_with_random_weights=True,
-        # rollout_sglang_jax_disable_radix_cache=True,
-        # rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        rollout_sglang_jax_mem_fraction_static=0.2,
+        rollout_sglang_jax_init_with_random_weights=True,
+        rollout_sglang_jax_disable_radix_cache=True,
+        rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_precompile_bs_paddings=[1, 2],
+        rollout_sglang_jax_precompile_token_paddings=[2048, 4096, 8192],
+        rollout_sglang_jax_chunked_prefill_size=2048,
+        rollout_sglang_jax_page_size=64,
         # vllm-tpu specific configs
         # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
         # rollout_vllm_hbm_utilization=0.2,
@@ -468,13 +476,12 @@ grpo_config = GRPOConfig(
 
 # %%
 # RL cluster
-with compat.set_mesh(mesh):
-  rl_cluster = rl_cluster_lib.RLCluster(
-      actor=qwen2_actor,
-      reference=qwen2_ref,
-      tokenizer=tokenizer,
-      cluster_config=cluster_config,
-  )
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=qwen2_actor,
+    reference=qwen2_ref,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
 
 show_hbm_usage("after RLCluster creation")
 

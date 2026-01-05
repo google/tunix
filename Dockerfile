@@ -29,8 +29,8 @@ RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_r
 
 RUN pip install --upgrade wandb
 
-# Install vllm
-RUN pip install vllm-tpu
+# # Install vllm
+# RUN pip install vllm-tpu
 
 
 # Set a directory to clone sglang-jax into
