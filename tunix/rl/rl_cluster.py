@@ -435,6 +435,7 @@ class RLCluster:
       else:
         raise ValueError("Rollout sglang jax model config is missing!")
 
+      print("Initializing sglang-jax rollout engine...")
       self._rollout = sglang_jax_rollout.SglangJaxRollout(
           self.rollout_actor,
           self.tokenizer,
