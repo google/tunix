@@ -1160,8 +1160,7 @@ print(
 
 
 show_hbm_usage("Right before training")
-with training_mesh:
-  grpo_trainer.train(train_dataset, eval_ds=val_dataset)
+grpo_trainer.train(train_dataset, eval_ds=val_dataset)
 
 # Load checkpoint first.
 
