@@ -35,6 +35,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
       mesh: jax.sharding.Mesh,
       rollout_config: base_rollout.RolloutConfig,
   ):
+    print("Initializing SglangJaxRollout with mesh: ", mesh)
     self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,

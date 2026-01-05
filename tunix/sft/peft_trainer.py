@@ -561,6 +561,7 @@ class PeftTrainer:
       cache_nnx_graph: bool = False,
   ) -> None:
     """Training loop."""
+    cache_nnx_graph = False
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
     if not skip_jit:
       logging.info(

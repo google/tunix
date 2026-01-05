@@ -548,7 +548,7 @@ def _align_shape(
 
   original_shape = val.shape
   # Check if this is an attention weight that can be padded/repeated
-  attention_patterns = [r'.*(q|k|v|o)_proj.*', r'.*(key|query|value|output).*']
+  attention_patterns = [r'.*(q|k|v|o)_proj.*',r'.*(q|k|v|o)_bias.*', r'.*(key|query|value|output).*']
   if not any(re.match(pattern, src_key) for pattern in attention_patterns):
     raise ShapeMismatchError(
         f'Shape mismatch for non-attention weight {src_key}: '
@@ -636,8 +636,12 @@ def transfer_state_with_mappings(
   Returns:
     The target state with the transferred values.
   """
+  print("key_mappings:", key_mappings)
+  if key_mapping_hook_fns:
+    print("key_mapping_hook_fns:", key_mapping_hook_fns.keys())
   # Get flat target state
   tgt_flat_list = dst_state.flat_state()
+  print("tgt_flat_list:", tgt_flat_list)
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
   if reshard_fn:
@@ -652,9 +656,11 @@ def transfer_state_with_mappings(
 
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
+  print("src_to_tgt_map:", src_to_tgt_map)
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  print("unscanned_src_to_tgt_flat:", unscanned_src_to_tgt_flat)
 
   # Transfer values with transformations
   for (flat_src_key, tgt_key), (

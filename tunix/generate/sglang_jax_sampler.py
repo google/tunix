@@ -116,6 +116,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["context_length"] = config.context_length
     args["tp_size"] = self._find_tp_size(config.mesh)
     args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
+    print("Device indexes: ", args["device_indexes"])
     args["mem_fraction_static"] = config.mem_fraction_static
     args["enable_single_process"] = True
     if config.disable_radix_cache:
