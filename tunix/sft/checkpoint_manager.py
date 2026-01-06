@@ -56,11 +56,16 @@ class CheckpointManager:
                 use_ocdbt=False,
                 use_zarr3=False,
             ),
+            'optimizer_state': ocp.PyTreeCheckpointHandler(
+                use_ocdbt=False,
+                use_zarr3=False,
+            ),
         }
         logging.info('Using persistence APIs for checkpointing with Pathways.')
       else:
         item_handlers = {
             'model_params': ocp.PyTreeCheckpointHandler(),
+            'optimizer_state': ocp.PyTreeCheckpointHandler(),
         }
       item_handlers['custom_metadata'] = ocp.JsonCheckpointHandler()
       self._checkpoint_manager = ocp.CheckpointManager(
@@ -79,6 +84,7 @@ class CheckpointManager:
       self,
       step: int,
       model: nnx.Module,
+      optimizer: nnx.Optimizer | None = None,
       save_only_lora_params: bool = False,
       force: bool = False,
       custom_metadata: dict[str, Any] | None = None,
@@ -88,6 +94,8 @@ class CheckpointManager:
     Args:
       step: The step to save the params for.
       model: The model to save the params for.
+      optimizer: The optimizer to save the params for. If None, the optimizer
+        will not be saved.
       save_only_lora_params: Whether to save only the LoRA params.
       force: Whether to save the checkpoint regardless of the save decision
         policy.
@@ -104,14 +112,24 @@ class CheckpointManager:
       params = nnx.state(model, nnx.LoRAParam)
     else:
       params = nnx.state(model)
-    checkpoint_args = ocp.args.PyTreeSave(
+
+    model_cp_args = ocp.args.PyTreeSave(
         item=params, save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params)
     )
+
+    cp_save_args = {
+        'model_params': model_cp_args,
+    }
+    if optimizer is not None:
+      optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      optimizer_cp_args = ocp.args.PyTreeSave(
+          item=optimizer_state,
+          save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
+      )
+      cp_save_args['optimizer_state'] = optimizer_cp_args
     return self._checkpoint_manager.save(
         step,
-        args=ocp.args.Composite(
-            model_params=checkpoint_args,
-        ),
+        args=ocp.args.Composite(**cp_save_args),
         custom_metadata=custom_metadata or {},
         force=force,
     )
@@ -119,6 +137,7 @@ class CheckpointManager:
   def maybe_restore(
       self,
       model: nnx.Module,
+      optimizer: nnx.Optimizer | None = None,
       step: int | None = None,
       restore_only_lora_params: bool = False,
   ) -> Tuple[int, dict[str, Any]]:
@@ -126,6 +145,9 @@ class CheckpointManager:
 
     Args:
       model: The model to restore the params for.
+      optimizer: The optimizer to restore the params for. If None or if
+        optimizer state is not found in the checkpoint, the optimizer will not
+        be restored.
       step: The step to restore the params from. If None, the latest step will
         be used.
       restore_only_lora_params: Whether to restore only the LoRA params.
@@ -144,6 +166,9 @@ class CheckpointManager:
       # If no checkpoint is available, return 0.
       if step is None:
         return 0, {}
+
+    metadata = self._checkpoint_manager.metadata(step)
+
     # Load the params from the checkpoint.
     if restore_only_lora_params:
       abstract_params = nnx.state(model, nnx.LoRAParam)
@@ -153,17 +178,32 @@ class CheckpointManager:
     def map_to_pspec(data):
       return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
 
-    restore_args_dict = jax.tree_util.tree_map(map_to_pspec, abstract_params)
-    checkpoint_args = ocp.args.PyTreeRestore(
-        item=abstract_params, restore_args=restore_args_dict
+    model_cp_args = ocp.args.PyTreeRestore(
+        item=abstract_params,
+        restore_args=jax.tree_util.tree_map(map_to_pspec, abstract_params),
     )
 
-    ckpt = self._checkpoint_manager.restore(
-        step,
-        args=ocp.args.Composite(
-            model_params=checkpoint_args,
-        ),
-    )
+    if optimizer is not None and 'optimizer_state' in metadata.item_metadata:
+      optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      optimizer_cp_args = ocp.args.PyTreeRestore(
+          item=optimizer_state,
+          restore_args=jax.tree_util.tree_map(map_to_pspec, optimizer_state),
+      )
+      ckpt = self._checkpoint_manager.restore(
+          step,
+          args=ocp.args.Composite(
+              model_params=model_cp_args,
+              optimizer_state=optimizer_cp_args,
+          ),
+      )
+      nnx.update(optimizer, ckpt.optimizer_state)
+    else:
+      ckpt = self._checkpoint_manager.restore(
+          step,
+          args=ocp.args.Composite(
+              model_params=model_cp_args,
+          ),
+      )
     # Update the model state with params from the restored checkpoint.
     nnx.update(model, ckpt.model_params)
     logging.info(
@@ -171,7 +211,6 @@ class CheckpointManager:
         step,
         time.time() - restore_start,
     )
-    metadata = self._checkpoint_manager.metadata(step)
     custom_metadata = metadata.custom_metadata if metadata else {}
     return step, custom_metadata
 
