@@ -13,8 +13,10 @@
 # limitations under the License.
 
 """Peft trainer unittest."""
+
 import functools
 import os
+import tempfile
 from typing import Any, Tuple
 from unittest import mock
 from absl.testing import absltest
@@ -83,6 +85,11 @@ class PeftTrainerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
+    try:
+      self.temp_path = self.create_tempdir().full_path
+    except Exception:
+      self.temp_path = tempfile.TemporaryDirectory().name
+
     # CPU env setup to simulate multi device env. Won't affect TPU env. But
     # need to be careful not to use self.num_cpus in TPU env.
     self.num_cpus = 4
@@ -156,6 +163,65 @@ class PeftTrainerTest(parameterized.TestCase):
     )
 
     trainer.train(self.train_ds)  # No eval dataset.
+
+  @parameterized.named_parameters(
+      ('lora_disabled', False),
+      ('lora_enabled', True),
+  )
+  def test_checkpoint_save_and_restore(self, enable_lora: bool):
+    def create_model_and_optimizer():
+      rngs = nnx.Rngs(0)
+      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+      if enable_lora:
+        model = tc.get_lora_model(model)
+
+      optimizer = optax.inject_hyperparams(optax.adamw)(
+          learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+      )
+      return model, optimizer
+
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory=f'{self.temp_path}/{self.id()}/checkpoints',
+    )
+
+    model, optimizer = create_model_and_optimizer()
+    original_model_state = jax.tree.map(
+        jnp.copy, nnx.state(model, nnx.LoRAParam if enable_lora else nnx.Param)
+    )
+
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
+    trained_model_state = nnx.state(
+        model, nnx.LoRAParam if enable_lora else nnx.Param
+    )
+    trained_opt_state = nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_model_state, trained_model_state
+    )
+
+    # Resume from checkpoint with a new model and optimizer, and check that
+    # the model and optimizer states are the same as the trained ones.
+    new_model, new_optimizer = create_model_and_optimizer()
+
+    resumed_trainer = peft_trainer.PeftTrainer(new_model, new_optimizer, config)
+    resumed_model_state = nnx.state(
+        resumed_trainer.model, nnx.LoRAParam if enable_lora else nnx.Param
+    )
+    resumed_opt_state = nnx.state(
+        resumed_trainer.optimizer, nnx.optimizer.OptState
+    )
+
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_model_state, resumed_model_state
+    )
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_opt_state, resumed_opt_state
+    )
 
   def test_basic_training_with_hooks(self):
     train_ds = dummy_datasets(batch_size=4, repeat=2)
@@ -392,7 +458,7 @@ class PeftTrainerTest(parameterized.TestCase):
         gradient_accumulation_steps=None,
         learning_rate_schedule=learning_rate_schedule,
     )
-    (params_with_grad_accumulation, grad_accu_trainer) = train(
+    params_with_grad_accumulation, grad_accu_trainer = train(
         dummy_datasets(batch_size=2, repeat=4),
         gradient_accumulation_steps=2,
         learning_rate_schedule=learning_rate_schedule,
@@ -477,16 +543,23 @@ class PeftTrainerTest(parameterized.TestCase):
     # and does not have any unexpected calls.
     mock_checkpoint_manager.assert_has_calls(
         [
-            mock.call.maybe_restore(mock.ANY, restore_only_lora_params=True),
+            mock.call.maybe_restore(
+                mock.ANY, mock.ANY, restore_only_lora_params=True
+            ),
             *[
                 mock.call.save(
-                    i, mock.ANY, save_only_lora_params=True, custom_metadata={}
+                    i,
+                    mock.ANY,
+                    mock.ANY,
+                    save_only_lora_params=True,
+                    custom_metadata={},
                 )
                 for i in expected_save_steps
             ],
             mock.call.latest_step(),
             mock.call.save(
                 expected_save_steps[-1],
+                mock.ANY,
                 mock.ANY,
                 save_only_lora_params=True,
                 force=True,

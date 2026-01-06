@@ -232,7 +232,9 @@ class PeftTrainer:
 
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
-            self.model, restore_only_lora_params=self._lora_enabled
+            self.model,
+            self.optimizer,
+            restore_only_lora_params=self._lora_enabled,
         )
     )
     self._iter_steps = self._train_steps * self.config.get_with_default(
@@ -695,6 +697,7 @@ class PeftTrainer:
             self.checkpoint_manager.save(
                 self._train_steps,
                 self.model,
+                self.optimizer,
                 save_only_lora_params=self._lora_enabled,
                 custom_metadata=self.custom_checkpoint_metadata(),
             )
@@ -719,6 +722,7 @@ class PeftTrainer:
       self.checkpoint_manager.save(
           self._train_steps,
           self.model,
+          self.optimizer,
           save_only_lora_params=self._lora_enabled,
           force=True,
       )

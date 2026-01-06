@@ -25,7 +25,7 @@ import asyncio
 from collections.abc import Hashable
 import copy
 import logging
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type
+from typing import Any, AsyncIterable, Callable, Dict, Iterable, List, Optional, Tuple, Type
 
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
@@ -202,7 +202,8 @@ class RolloutOrchestrator:
 
   async def run_producers_from_stream(
       self,
-      pairs_stream: Iterable[Tuple[ConversationAgentBase, BaseTaskEnv]],
+      pairs_stream: Iterable[Tuple[ConversationAgentBase, BaseTaskEnv]]
+      | AsyncIterable[Tuple[ConversationAgentBase, BaseTaskEnv]],
       *,
       group_size: int,
       group_key: Callable[
@@ -261,7 +262,11 @@ class RolloutOrchestrator:
     self._stop.clear()
     self._tasks.clear()
 
-    pairs_iterator = iter(pairs_stream)
+    is_async_stream = hasattr(pairs_stream, "__aiter__")
+    if is_async_stream:
+      pairs_iterator = aiter(pairs_stream)  # pytype: disable=wrong-arg-types
+    else:
+      pairs_iterator = iter(pairs_stream)
     active_tasks: set[asyncio.Task] = set()
     next_pair_index = 0
     stream_exhausted = False
@@ -282,7 +287,10 @@ class RolloutOrchestrator:
         ):
           try:
             self._logger.debug("Getting one pair: %d", next_pair_index)
-            agent, env = next(pairs_iterator)
+            if is_async_stream:
+              agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
+            else:
+              agent, env = next(pairs_iterator)
             task = asyncio.create_task(
                 self._runner(
                     i=next_pair_index,
@@ -298,7 +306,7 @@ class RolloutOrchestrator:
             active_tasks.add(task)
             self._tasks.append(task)
             next_pair_index += 1
-          except StopIteration:
+          except (StopIteration, StopAsyncIteration):
             self._logger.debug("Pairs stream exhausted.")
             stream_exhausted = True
             break
