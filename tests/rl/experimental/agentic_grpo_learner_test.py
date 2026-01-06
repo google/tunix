@@ -16,11 +16,12 @@
 
 import asyncio
 import os
+import queue
 import random
 import shutil
 import tempfile
 import types
-from typing import Iterable
+from typing import AsyncIterable, Iterable
 import unittest
 from unittest import mock
 
@@ -163,7 +164,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         # of size 1, as consumed by _orchestrator_producer.
         for batch in iterator:
           for i in range(len(batch["prompts"])):
-            yield jax.tree.map(lambda x: x[i : i + 1], batch)
+            yield jax.tree.map(lambda x, index=i: x[index : index + 1], batch)
 
       @override
       def _batch_to_train_example(
@@ -194,18 +195,32 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       async def _orchestrator_producer(
           self,
           orchestrator,
-          prompt_iterator: Iterable[TrainingInputT],
+          prompt_iterator: Iterable[TrainingInputT]
+          | AsyncIterable[TrainingInputT],
           num_generations: int = 1,
           collect_mode: str = "Token",
       ):
-        for i, example in enumerate(prompt_iterator):
-          group = [
-              types.SimpleNamespace(
-                  pair_index=i * self.algo_config.num_generations + j
-              )
-              for j in range(self.algo_config.num_generations)
-          ]
-          yield group, [example]
+        i = 0
+        if hasattr(prompt_iterator, "__aiter__"):
+          async for example in prompt_iterator:
+            group = [
+                types.SimpleNamespace(
+                    pair_index=i * self.algo_config.num_generations + j
+                )
+                for j in range(self.algo_config.num_generations)
+            ]
+            yield group, [example]
+            i += 1
+        else:
+          for example in prompt_iterator:
+            group = [
+                types.SimpleNamespace(
+                    pair_index=i * self.algo_config.num_generations + j
+                )
+                for j in range(self.algo_config.num_generations)
+            ]
+            yield group, [example]
+            i += 1
 
     algo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=2, num_iterations=2
@@ -214,8 +229,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
     dataset = _dummy_dataset(MySource(data=[i for i in range(2)]), batch_size=2)
+    prompt_queue = queue.Queue()
+    for item in iter(dataset):
+      prompt_queue.put(item)
+    prompt_queue.put(None)
 
-    asyncio.run(trainer._producer(mock.Mock(), iter(dataset), train_data_queue))
+    asyncio.run(trainer._producer(mock.Mock(), prompt_queue, train_data_queue))
 
     results = []
     while True:

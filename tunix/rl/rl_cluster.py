@@ -708,17 +708,6 @@ class RLCluster:
       if step != buffered_metrics[-1].global_steps:
         buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
 
-    # Global steps are incremented, log the previous metrics.
-    if self._buffered_train_metrics[0].global_steps < self.global_steps:
-      for m in [self._buffered_train_metrics.pop(0)]:
-        self._log_metrics(m)
-    if (
-        self._buffered_eval_metrics
-        and self._buffered_eval_metrics[0].global_steps < self.global_steps
-    ):
-      for m in [self._buffered_eval_metrics.pop(0)]:
-        self._log_metrics(m)
-
     cur_metrics = buffered_metrics[-1]
     for metric_name, (value, op) in metrics.items():
       if metric_name not in cur_metrics.metrics:
@@ -728,6 +717,20 @@ class RLCluster:
         )
       else:
         cur_metrics.metrics[metric_name][0].append(value)
+
+    # Global steps are incremented, log the previous metrics.
+    if (
+        self._buffered_train_metrics
+        and self._buffered_train_metrics[0].global_steps < self.global_steps
+    ):
+      for m in [self._buffered_train_metrics.pop(0)]:
+        self._log_metrics(m)
+    if (
+        self._buffered_eval_metrics
+        and self._buffered_eval_metrics[0].global_steps < self.global_steps
+    ):
+      for m in [self._buffered_eval_metrics.pop(0)]:
+        self._log_metrics(m)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[
