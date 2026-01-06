@@ -166,13 +166,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
-    logging.info(
-        "algo_config.policy_loss_fn: %s", self.algo_config.policy_loss_fn
-    )
-    logging.info("type(policy_loss_fn): %s", type(policy_loss_fn))
-
-    # Log the string representation of the callable
-    logging.info("repr(policy_loss_fn): %r", policy_loss_fn)
     loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
         model,
         train_example,

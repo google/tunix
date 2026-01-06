@@ -28,12 +28,14 @@ class AlgorithmConfig:
   algo_variant: str = "grpo"
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
+  reward_manager: str = "sequence-level"
 
   def __post_init__(self):
     valid_algo_variants = [
         "grpo",
         "gspo",
         "ppo",
+        "dapo",
     ]
     valid_advantage_estimators = ["grpo", "gae"]
     valid_policy_loss_fns = ["grpo", "ppo"]
