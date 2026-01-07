@@ -31,7 +31,6 @@ from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 
-
 BaseTaskEnv = base_environment.BaseTaskEnv
 Trajectory = base_agent.Trajectory
 ConversationAgentBase = base_agent.ConversationAgentBase
@@ -121,6 +120,7 @@ class TrajectoryCollectEngine:
         Trajectory | dict | list: Depending on mode.
     """
     await self._reset()
+    # print(f"[async_collect] {self.max_steps=}", flush=True)
     for _ in range(self.max_steps):
       done = await self._one_step()
       if done:
@@ -148,14 +148,12 @@ class TrajectoryCollectEngine:
               "assistant_masks": getattr(step, "assistant_masks", []),
               "env_tokens": getattr(step, "env_tokens", []),
               "env_masks": getattr(step, "env_masks", []),
-              "conversation_tokens": (
-                  getattr(step, "assistant_tokens", [])
-                  + getattr(step, "env_tokens", [])
-              ),
-              "conversation_masks": (
-                  getattr(step, "assistant_masks", [])
-                  + getattr(step, "env_masks", [])
-              ),
+              "conversation_tokens": getattr(
+                  step, "assistant_tokens", []
+              ) + getattr(step, "env_tokens", []),
+              "conversation_masks": getattr(
+                  step, "assistant_masks", []
+              ) + getattr(step, "env_masks", []),
               "reward": step.reward,
               "mc_return": step.mc_return,
           }
@@ -280,12 +278,24 @@ class TrajectoryCollectEngine:
         bool: True if the episode is done (either by environment or timeout),
           False otherwise.
     """
+    import datetime
+
+    print(
+        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [TrajectoryCollectEngine_one_step]"
+        " before run model_call",
+        flush=True,
+    )
     resp = await asyncio.get_event_loop().run_in_executor(
         None,
         self.model_call,
         [self.agent.chat_completions],
         self.env,
         **self.model_call_kwargs,
+    )
+    print(
+        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [TrajectoryCollectEngine_one_step]"
+        " after run model_call",
+        flush=True,
     )
     action = self.agent.update_from_model(resp).action
 
@@ -332,7 +342,6 @@ class TrajectoryCollectEngine:
           )
           cur_step.env_tokens = env_tokens
           cur_step.env_masks = env_masks
-
     if time.time() - self._start_ts > self.timeout:
       self.agent.get_current_state().done = True
       return True
