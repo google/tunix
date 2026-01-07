@@ -163,7 +163,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             rl_cluster_lib.Role.ROLLOUT
         ]
     )
-    self.executor = futures.ThreadPoolExecutor(max_workers=3)
+    self.executor = futures.ThreadPoolExecutor(max_workers=3,thread_name_prefix="agentic_rl")
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
     self._rollout_micro_batch_size = (
@@ -355,7 +355,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         apply_chat_template=True,
         mode=rl_cluster_lib.Mode.TRAIN,
     )
-    return result.text[0]
+
+    text = result.text[0]
+    import datetime
+
+    print(
+        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [AgenticRLLearner]"
+        " after rl_cluster.generate",
+        flush=True,
+    )
+    return text
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
@@ -554,9 +563,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     except RuntimeError:
       # asyncio.get_running_loop() raises RuntimeError if no loop is running.
       # If no loop is running, start a new one using asyncio.run().
+      print(f"[_run_async] using asyncio.run", flush=True)
       return asyncio.run(coro)
     else:
       # If a loop is already running, use it to run the coroutine.
+      print(f"[_run_async] using exsiting running {loop=}", flush=True)
       return loop.run_until_complete(coro)
 
   async def _producer(

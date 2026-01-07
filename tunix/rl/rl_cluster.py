@@ -812,13 +812,32 @@ class RLCluster:
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
+        import datetime
+
+        print(
+            f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [RLCluster_generate]"
+            f" after rollout generation: {len(string_prompts)}",
+            flush=True,
+        )
         span.device_end([o.logits for o in outputs])
 
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
 
+    print(
+        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [RLCluster_generate]"
+        " out of with self.cluster_config.role_to_mesh",
+        flush=True,
+    )
+
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
+
+    print(
+        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [RLCluster_generate]"
+        " after iterate out.text",
+        flush=True,
+    )
 
     logprobs = None
     if outputs[0].logprobs is not None:
@@ -826,9 +845,21 @@ class RLCluster:
           itertools.chain.from_iterable(out.logprobs for out in outputs)
       )
 
+    print(
+        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [RLCluster_generate]"
+        " after iterate out.logprobs",
+        flush=True,
+    )
+
     logits = None
     if isinstance(outputs[0].logits, jnp.ndarray):
       logits = jnp.concatenate([out.logits for out in outputs], axis=0)
+
+    print(
+        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [RLCluster_generate]"
+        " after concat out.logits",
+        flush=True,
+    )
 
     print(f"YY rollout generated texts: {texts}")
     return base_rollout.RolloutOutput(

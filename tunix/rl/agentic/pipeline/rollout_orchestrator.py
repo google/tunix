@@ -34,7 +34,6 @@ from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.queue_manager import group_queue_manager
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
-
 Trajectory = agent_types.Trajectory
 ConversationAgentBase = base_agent.ConversationAgentBase
 BaseTaskEnv = base_environment.BaseTaskEnv
@@ -164,6 +163,7 @@ class RolloutOrchestrator:
     self._logger.debug(
         "Starting generating trajectories(_runner) for pair %d", i
     )
+    import datetime
 
     try:
       # Parallel execution for the group

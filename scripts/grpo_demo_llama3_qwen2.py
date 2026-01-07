@@ -1066,9 +1066,10 @@ def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
         rollout_sglang_jax_disable_radix_cache=True,
         rollout_sglang_jax_enable_deterministic_sampling=False,
         rollout_sglang_jax_precompile_bs_paddings=[8],
-        rollout_sglang_jax_precompile_token_paddings=[2048],
-        rollout_sglang_jax_chunked_prefill_size=2048,
+        rollout_sglang_jax_precompile_token_paddings=[512],
+        rollout_sglang_jax_chunked_prefill_size=512,
         rollout_sglang_jax_page_size=64,
+        rollout_sglang_jax_max_running_requests=8,
     )
 
   return base_rollout.RolloutConfig(
@@ -1141,7 +1142,7 @@ if args.agentic_mode:
           check_numbers,
       ],
       algo_config=grpo_config,
-      chat_parser=chat_parser
+      chat_parser=chat_parser,
   )
 else:
   grpo_config = grpo_learner.GRPOConfig(

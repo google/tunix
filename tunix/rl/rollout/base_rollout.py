@@ -175,6 +175,8 @@ class RolloutConfig:
   # The number of tokens in a page
   rollout_sglang_jax_page_size: int = 64
 
+  rollout_sglang_jax_max_running_requests: Optional[int] = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""

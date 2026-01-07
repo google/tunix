@@ -14,6 +14,7 @@
 
 """Utility functions for agentic models."""
 
+import datetime
 import threading
 from typing import Any, Optional
 
@@ -56,7 +57,7 @@ def pad_prompt_and_completion(
 
 
 def get_recent_assistant_user_messages(
-    chat_completions_messages: list[dict[str, Any]]
+    chat_completions_messages: list[dict[str, Any]],
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
   """Extracts the most recent assistant message and environment messages (user/tool) from a chat completions list.
 
@@ -196,6 +197,12 @@ class RolloutSyncLock:
   def acquire_rollout(self):
     """Acquire a rollout lock."""
     with self._mutex:
+      print(
+          "[acquire_rollout after]"
+          f" {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {self._rollouts=},"
+          f" {self._weight_syncs=}, {self._weight_syncs_waiting=}",
+          flush=True,
+      )
       while self._weight_syncs > 0 or self._weight_syncs_waiting > 0:
         self._can_rollout.wait()
       self._rollouts += 1
@@ -203,6 +210,12 @@ class RolloutSyncLock:
   def release_rollout(self):
     """Release a rollout lock."""
     with self._mutex:
+      print(
+          "[release_rollout after]"
+          f" {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {self._rollouts=},"
+          f" {self._weight_syncs=}, {self._weight_syncs_waiting=}",
+          flush=True,
+      )
       self._rollouts -= 1
       if self._rollouts == 0 and self._weight_syncs_waiting > 0:
         self._can_weight_sync.notify()
@@ -210,6 +223,12 @@ class RolloutSyncLock:
   def acquire_weight_sync(self):
     """Acquire a weight sync lock."""
     with self._mutex:
+      print(
+          "[acquire_weight_sync after]"
+          f" {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {self._rollouts=},"
+          f" {self._weight_syncs=}, {self._weight_syncs_waiting=}",
+          flush=True,
+      )
       while self._rollouts > 0 or self._weight_syncs > 0:
         self._weight_syncs_waiting += 1
         self._can_weight_sync.wait()
@@ -219,6 +238,12 @@ class RolloutSyncLock:
   def release_weight_sync(self):
     """Release a weight sync lock."""
     with self._mutex:
+      print(
+          "[release_weight_sync after]"
+          f" {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {self._rollouts=},"
+          f" {self._weight_syncs=}, {self._weight_syncs_waiting=}",
+          flush=True,
+      )
       self._weight_syncs -= 1
       # Notify waiting sync first, then all rollouts
       self._can_weight_sync.notify()

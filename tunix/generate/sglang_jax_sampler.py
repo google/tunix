@@ -25,6 +25,7 @@ to re-enter the running loop.
 """
 
 import asyncio
+import concurrent
 import dataclasses
 import math
 import os
@@ -60,6 +61,7 @@ class SglangJaxConfig:
   precompile_token_paddings: Optional[List] = None
   chunked_prefill_size: int = -1
   page_size: int = 64
+  max_running_requests: int = None
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -140,6 +142,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["precompile_token_paddings"] = config.precompile_token_paddings
     args["chunked_prefill_size"] = config.chunked_prefill_size
     args["page_size"] = config.page_size
+    args["max_running_requests"] = config.max_running_requests
+    args["enable_engine_loop_run_forever_daemon"] = True
     return args
 
   @property
@@ -283,25 +287,32 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     ``run_coroutine_threadsafe``. When the loop is not running we fall back to
     the original synchronous call for minimal overhead.
     """
-
-    # If the engine loop is alive and already running, we must not re-enter it
-    # with ``run_until_complete`` or ``run_forever``.
-    if getattr(self.engine, "loop", None) is not None:
-      loop = self.engine.loop
-      if loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(
-            self.engine.async_generate(
-                input_ids=input_ids,
-                sampling_params=sampling_params,
-                stream=False,
-            ),
-            loop,
-        )
-        return future.result()
-
-    # Default path: the engine loop is not running yet; reuse the synchronous
-    # API which will create/run the loop internally.
-    return self.engine.generate(
+    coro = self.engine.async_generate(
         input_ids=input_ids,
         sampling_params=sampling_params,
+        stream=False,
     )
+
+    loop = get_or_create_event_loop()
+
+    if not loop.is_running():
+      res = loop.run_until_complete(coro)
+      return res
+
+    def wrap_generate():
+      loop = get_or_create_event_loop()
+      return loop.run_until_complete(coro)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+      future = executor.submit(wrap_generate)
+      return future.result()
+
+
+def get_or_create_event_loop():
+  try:
+    loop = asyncio.get_running_loop()
+  except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+  finally:
+    return loop
