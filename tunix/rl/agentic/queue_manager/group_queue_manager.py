@@ -22,7 +22,6 @@ import dataclasses
 from typing import Deque, Dict, List, Optional, Tuple
 from tunix.rl.agentic.agents import agent_types
 
-Trajectory = agent_types.Trajectory
 TrajectoryItem = agent_types.TrajectoryItem
 field = dataclasses.field
 dataclass = dataclasses.dataclass

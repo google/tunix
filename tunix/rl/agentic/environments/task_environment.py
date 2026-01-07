@@ -22,13 +22,7 @@ from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward
 
 
-BaseTaskEnv = base_environment.BaseTaskEnv
-EnvStepResult = base_environment.EnvStepResult
-Action = agent_types.Action
-dummy_reward = reward.dummy_reward
-
-
-class TaskEnvironment(BaseTaskEnv):
+class TaskEnvironment(base_environment.BaseTaskEnv):
   """Reinforcement learning environment for single-turn agent interactions.
 
   This environment is designed for tasks where the agent receives an
@@ -60,7 +54,7 @@ class TaskEnvironment(BaseTaskEnv):
     """
     if reward_fn is None:
       logging.warning("No reward_fn provided, defaulting to dummy_reward().")
-      reward_fn = dummy_reward
+      reward_fn = reward.dummy_reward
 
     # Single-turn environment: max_steps is 1 by default.
     max_steps = kwargs.pop("max_steps", 1)
@@ -72,7 +66,7 @@ class TaskEnvironment(BaseTaskEnv):
     """Reset the environment and return the task as the initial observation."""
     return self.task
 
-  def _step_impl(self, action: Any) -> EnvStepResult:
+  def _step_impl(self, action: Any) -> base_environment.EnvStepResult:
     """Process the agent's action, calculate reward, and terminate.
 
     In a single-turn environment, any action terminates the episode. We assume
@@ -85,10 +79,10 @@ class TaskEnvironment(BaseTaskEnv):
       An `EnvStepResult` containing an empty observation, the calculated reward,
       done=True, and info including the agent's response and reward metadata.
     """
-    if isinstance(action, Action):
+    if isinstance(action, agent_types.Action):
       action = action.action
     r_out = self.reward_fn(task=self.task, action=action)
-    return EnvStepResult(
+    return base_environment.EnvStepResult(
         observation={},
         reward=r_out.reward,
         done=True,
