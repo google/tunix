@@ -23,12 +23,8 @@ from collections.abc import Hashable
 import dataclasses
 from typing import Any, Dict, Optional
 
-field = dataclasses.field
-dataclass = dataclasses.dataclass
-asdict = dataclasses.asdict
 
-
-@dataclass
+@dataclasses.dataclass(kw_only=True)
 class Action:
   """Container for structured actions that can be executed by an environment.
 
@@ -43,7 +39,7 @@ class Action:
   action: Any = None
 
 
-@dataclass
+@dataclasses.dataclass(kw_only=True)
 class Step:
   """Represents a single interaction step in an agent-environment conversation.
 
@@ -63,18 +59,20 @@ class Step:
     mc_return: Monte Carlo return from this step to episode end.
   """
 
-  chat_completions: list[dict[str, str]] = field(default_factory=list)
+  chat_completions: list[dict[str, str]] = dataclasses.field(
+      default_factory=list
+  )
   thought: str = ""
   action: Optional[Action] = None
   observation: Any = None
   model_response: str = ""
-  info: dict[str, Any] = field(default_factory=dict)
+  info: dict[str, Any] = dataclasses.field(default_factory=dict)
   reward: float = 0.0
   done: bool = False
   mc_return: float = 0.0
 
 
-@dataclass
+@dataclasses.dataclass(kw_only=True)
 class Trajectory:
   """Represents a complete episode or task execution trace.
 
@@ -89,7 +87,7 @@ class Trajectory:
   """
 
   task: Any = None
-  steps: list[Step] = field(default_factory=list)
+  steps: list[Step] = dataclasses.field(default_factory=list)
   reward: float = 0.0
 
   def to_dict(self) -> dict[str, Any]:
@@ -103,12 +101,12 @@ class Trajectory:
     """
     return {
         "task": self.task,
-        "steps": [asdict(step) for step in self.steps],
+        "steps": [dataclasses.asdict(step) for step in self.steps],
         "reward": float(self.reward),
     }
 
 
-@dataclass
+@dataclasses.dataclass(kw_only=True)
 class TrajectoryItem:
   """Represents an item within a Trajectory, potentially for pairing or grouping.
 
@@ -126,4 +124,4 @@ class TrajectoryItem:
   episode_id: int
   start_step: int
   traj: Trajectory
-  metadata: Dict[str, Any] = field(default_factory=dict)
+  metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)
