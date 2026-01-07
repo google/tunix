@@ -96,9 +96,9 @@ class ModelTest(parameterized.TestCase):
       dict(
           testcase_name='no_lora_default_tokenizer',
           model_config={
-              'model_name': 'other_model',
-              'model_source': 'gcs',
-              'model_id': 'model1',
+              'model_name': 'llama-3.1-8b',
+              'model_source': 'huggingface',
+              'model_id': 'meta-llama/Llama-3.1-8B',
               'model_display': False,
           },
           tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
@@ -109,7 +109,7 @@ class ModelTest(parameterized.TestCase):
       dict(
           testcase_name='no_lora_gemma3_gcs_tokenizer',
           model_config={
-              'model_name': 'gemma3-x',
+              'model_name': 'gemma-3-1b-it',
               'model_source': 'gcs',
               'model_id': 'model1',
               'model_display': False,
@@ -124,9 +124,9 @@ class ModelTest(parameterized.TestCase):
       dict(
           testcase_name='no_lora_gemma_kaggle_tokenizer',
           model_config={
-              'model_name': 'gemma-x',
+              'model_name': 'gemma-2b',
               'model_source': 'kaggle',
-              'model_id': 'model1',
+              'model_id': 'google/gemma-2/flax/gemma2-2b',
               'model_display': False,
           },
           tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
@@ -139,9 +139,9 @@ class ModelTest(parameterized.TestCase):
       dict(
           testcase_name='with_lora',
           model_config={
-              'model_name': 'other_model',
+              'model_name': 'llama-3.1-8b',
               'model_source': 'huggingface',
-              'model_id': 'model1',
+              'model_id': 'meta-llama/Llama-3.1-8B',
               'model_display': False,
               'lora_config': {'rank': 1},
           },
@@ -153,9 +153,9 @@ class ModelTest(parameterized.TestCase):
       dict(
           testcase_name='model_display',
           model_config={
-              'model_name': 'other_model',
-              'model_source': 'gcs',
-              'model_id': 'model1',
+              'model_name': 'llama-3.1-8b',
+              'model_source': 'huggingface',
+              'model_id': 'meta-llama/Llama-3.1-8B',
               'model_display': True,
           },
           tokenizer_config={'tokenizer_path': model._DEFAULT_TOKENIZER_PATH},
