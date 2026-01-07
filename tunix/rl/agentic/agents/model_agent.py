@@ -44,7 +44,6 @@ class ModelAgent(base_agent.ConversationAgentBase):
     step = agent_types.Step(
         chat_completions=copy.deepcopy(self.chat_completions),
         action=agent_types.Action(action=response),
-        observation=self._obs_cache,
         model_response=response,
     )
     self.trajectory.steps.append(step)

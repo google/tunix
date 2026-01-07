@@ -132,7 +132,6 @@ class ConversationAgentBase(LLMBaseAgent):
     self.system_prompt = system_prompt
     self._trajectory = agent_types.Trajectory()
     self._messages: list[dict[str, Any]] = []
-    self._obs_cache: Any = None
     self._init_messages(system_prompt)
 
   # ---------- Internal helpers ----------
@@ -196,9 +195,6 @@ class ConversationAgentBase(LLMBaseAgent):
       step.done = done
       step.info = info or {}
 
-    # Cache observation for use when constructing the next Step.
-    self._obs_cache = observation
-
     # Let subclass / default handler convert observation into messages.
     if observation is not None:
       self._observation_to_messages(observation)
@@ -206,5 +202,4 @@ class ConversationAgentBase(LLMBaseAgent):
   def reset(self) -> None:
     """Reset trajectory, cache, and conversation history."""
     self._trajectory = agent_types.Trajectory()
-    self._obs_cache = None
     self._init_messages(self.system_prompt)

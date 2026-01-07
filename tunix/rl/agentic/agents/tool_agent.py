@@ -149,7 +149,6 @@ class ToolAgent(base_agent.ConversationAgentBase):
     step = agent_types.Step(
         chat_completions=copy.deepcopy(self._messages),
         action=agent_types.Action(action=tool_calls_dict),
-        observation=self._obs_cache,
         model_response=response,
     )
     self._trajectory.steps.append(step)
