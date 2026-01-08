@@ -31,7 +31,6 @@ from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 
-
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
 logger = logging.getLogger(__name__)
@@ -147,14 +146,12 @@ class TrajectoryCollectEngine:
               "assistant_masks": getattr(step, "assistant_masks", []),
               "env_tokens": getattr(step, "env_tokens", []),
               "env_masks": getattr(step, "env_masks", []),
-              "conversation_tokens": (
-                  getattr(step, "assistant_tokens", [])
-                  + getattr(step, "env_tokens", [])
-              ),
-              "conversation_masks": (
-                  getattr(step, "assistant_masks", [])
-                  + getattr(step, "env_masks", [])
-              ),
+              "conversation_tokens": getattr(
+                  step, "assistant_tokens", []
+              ) + getattr(step, "env_tokens", []),
+              "conversation_masks": getattr(
+                  step, "assistant_masks", []
+              ) + getattr(step, "env_masks", []),
               "reward": step.reward,
               "mc_return": step.mc_return,
           }
