@@ -462,9 +462,12 @@ class HyperParameters:
     opt_kwargs = self._extract_kwargs(
         opt_func, optimizer_config, config_path_info, learning_rate_val
     )
+    # Wrap the optimizer function with inject_hyperparams so that
+    # the learning rate can be tracked and logged during training.
+    injected_opt_func = optax.inject_hyperparams(opt_func)
     # Call the optimizer function with the extracted kwargs
     try:
-      return opt_func(**opt_kwargs)
+      return injected_opt_func(**opt_kwargs)
     except TypeError as e:
       raise TypeError(
           f"Error calling {opt_type} with arguments {opt_kwargs}. "
