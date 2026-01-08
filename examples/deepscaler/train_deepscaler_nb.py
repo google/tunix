@@ -116,7 +116,8 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-MESH = [(4, 2), ("fsdp", "tp")]
+# MESH = [(4, 2), ("fsdp", "tp")]
+MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -476,12 +477,13 @@ grpo_config = GRPOConfig(
 
 # %%
 # RL cluster
-rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen2_actor,
-    reference=qwen2_ref,
-    tokenizer=tokenizer,
-    cluster_config=cluster_config,
-)
+with compat.set_mesh(mesh):
+  rl_cluster = rl_cluster_lib.RLCluster(
+      actor=qwen2_actor,
+      reference=qwen2_ref,
+      tokenizer=tokenizer,
+      cluster_config=cluster_config,
+  )
 
 show_hbm_usage("after RLCluster creation")
 

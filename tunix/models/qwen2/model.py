@@ -48,8 +48,8 @@ class ShardingConfig:
 
   emb_vd: Tuple[str | None, ...]
   emb_dv: Tuple[str | None, ...]
-  q_weight_dnh: Tuple[str | None, ...]
-  kv_weight_dnh: Tuple[str | None, ...]
+  q_weight_ndh: Tuple[str | None, ...]
+  kv_weight_ndh: Tuple[str | None, ...]
   o_weight_nhd: Tuple[str | None, ...]
   ffw_weight_df: Tuple[str | None, ...]
   ffw_weight_fd: Tuple[str | None, ...]
@@ -68,8 +68,8 @@ class ShardingConfig:
     return ShardingConfig(
         emb_vd=('tp', fsdp),
         emb_dv=(fsdp, 'tp'),
-        q_weight_dnh=(fsdp, 'tp', None),
-        kv_weight_dnh=(fsdp, 'tp', None),
+        q_weight_ndh=('tp', fsdp, None),
+        kv_weight_ndh=('tp', fsdp, None),
         o_weight_nhd=('tp', None, fsdp),
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
