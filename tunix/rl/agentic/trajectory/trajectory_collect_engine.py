@@ -146,14 +146,12 @@ class TrajectoryCollectEngine:
               "assistant_masks": getattr(step, "assistant_masks", []),
               "env_tokens": getattr(step, "env_tokens", []),
               "env_masks": getattr(step, "env_masks", []),
-              "conversation_tokens": (
-                  getattr(step, "assistant_tokens", [])
-                  + getattr(step, "env_tokens", [])
-              ),
-              "conversation_masks": (
-                  getattr(step, "assistant_masks", [])
-                  + getattr(step, "env_masks", [])
-              ),
+              "conversation_tokens": getattr(
+                  step, "assistant_tokens", []
+              ) + getattr(step, "env_tokens", []),
+              "conversation_masks": getattr(
+                  step, "assistant_masks", []
+              ) + getattr(step, "env_masks", []),
               "reward": step.reward,
               "mc_return": step.mc_return,
           }
