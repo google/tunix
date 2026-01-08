@@ -62,14 +62,14 @@ class RolloutOrchestrator:
   ):
     """Initializes the RolloutOrchestrator.
 
-    The orchestrator manages a pool of trajectory collection engines, each 
-    running an agent-environment interaction to collect a trajectory. 
+    The orchestrator manages a pool of trajectory collection engines, each
+    running an agent-environment interaction to collect a trajectory.
     Each output trajectory is considered an "episode".
 
     Args:
-      rollout_sync_lock: A lock to synchronize the very start of
-        multiple parallel rollout operations, ensuring they don't all start at
-        the exact same moment, potentially overwhelming resources.
+      rollout_sync_lock: A lock to synchronize the very start of multiple
+        parallel rollout operations, ensuring they don't all start at the exact
+        same moment, potentially overwhelming resources.
       engine_cls: The class used to instantiate trajectory collection engines.
         Each engine is responsible for running a single episode of interaction
         between an agent and an environment.
@@ -161,10 +161,6 @@ class RolloutOrchestrator:
       collect_mode: An optional string to select the collection mode.
     """
     episode_count = 0
-    if num_episodes <= 0:
-      raise ValueError(
-          f"num_episodes must be a positive integer, got {num_episodes}"
-      )
     self._logger.debug(
         "Starting generating trajectories(_runner) for pair %d", i
     )
@@ -174,27 +170,30 @@ class RolloutOrchestrator:
       self._rollout_sync_lock.acquire_rollout()
       try:
         tasks = []
-        for ep_id in range(num_episodes):
-          # TODO(b/462779884): Replace deepcopy with a factory pattern.
-          tasks.append(
-              self._run_and_queue_one_episode(
-                  pair_idx=i,
-                  episode_idx=ep_id,
-                  agent=copy.deepcopy(agent),
-                  env=copy.deepcopy(env),
-                  manager=manager,
-                  group_key=group_key,
-                  start_step_fn=start_step_fn,
-                  collect_mode=collect_mode,
-              )
-          )
-        results = await asyncio.gather(*tasks)
+        async with asyncio.TaskGroup() as tg:
+          for ep_id in range(num_episodes):
+            # TODO(b/462779884): Replace deepcopy with a factory pattern.
+            task = tg.create_task(
+                self._run_and_queue_one_episode(
+                    pair_idx=i,
+                    episode_idx=ep_id,
+                    agent=copy.deepcopy(agent),
+                    env=copy.deepcopy(env),
+                    manager=manager,
+                    group_key=group_key,
+                    start_step_fn=start_step_fn,
+                    collect_mode=collect_mode,
+                )
+            )
+            tasks.append(task)
+        results = [task.result() for task in tasks]
         episode_count = sum(results)
       finally:
         self._rollout_sync_lock.release_rollout()
-    except Exception as e:
-      self._logger.error("Fatal error in runner for pair %d: %s", i, e)
-      raise
+    except ExceptionGroup as eg:
+      for e in eg.exceptions:
+        self._logger.error("Fatal error in runner for pair %d: %s", i, e)
+      raise eg.exceptions[0]
     finally:
       self._logger.debug(
           "Runner for pair %d completed with %d episodes", i, episode_count
@@ -202,8 +201,10 @@ class RolloutOrchestrator:
 
   async def run_producers_from_stream(
       self,
-      pairs_stream: Iterable[Tuple[ConversationAgentBase, BaseTaskEnv]]
-      | AsyncIterable[Tuple[ConversationAgentBase, BaseTaskEnv]],
+      pairs_stream: (
+          Iterable[Tuple[ConversationAgentBase, BaseTaskEnv]]
+          | AsyncIterable[Tuple[ConversationAgentBase, BaseTaskEnv]]
+      ),
       *,
       group_size: int,
       group_key: Callable[
@@ -243,9 +244,14 @@ class RolloutOrchestrator:
         trajectory item.
 
     Raises:
+      ValueError: If `num_episodes` is not a positive integer.
       ValueError: If `max_concurrency` is not set.
       RuntimeError: If the orchestrator is already running.
     """
+    if num_episodes <= 0:
+      raise ValueError(
+          f"num_episodes must be a positive integer, got {num_episodes}"
+      )
     self._logger.info(
         "Starting run_producers_from_stream with %d concurrency",
         self.max_concurrency,

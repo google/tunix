@@ -25,7 +25,6 @@ from typing import Generic, TypeVar
 
 from absl import logging
 import jax
-import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
