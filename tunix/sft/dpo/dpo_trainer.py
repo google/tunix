@@ -614,7 +614,6 @@ def _generate_ids_and_masks(
     input_strings: list[str],
     tokenizer: Any,
     max_length: int,
-    max_length: int,
     left_pad: bool = True,
     add_bos: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
