@@ -46,7 +46,6 @@ from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
-
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
@@ -329,6 +328,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         apply_chat_template=True,
         mode=rl_cluster_lib.Mode.TRAIN,
     )
+
     return result.text[0]
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
