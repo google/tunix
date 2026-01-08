@@ -107,7 +107,7 @@ def create_simpo_dataset(
         split="train",
         streaming=True,
     )
-    
+    ds = ds.shuffle(seed=42, buffer_size=10000)
     # Calculate steps (approximate since we are streaming)
     total_steps = SIMPO_NUM_ROWS // batch_size
     
@@ -372,6 +372,10 @@ simpo_config = dpo_trainer.SimPOTrainingConfig(
     eval_every_n_steps=100,
     max_steps=None,
     checkpoint_root_directory="/tmp/checkpoints_simpo",
+    checkpointing_options=ocp.CheckpointManagerOptions(
+        max_to_keep=1,
+        save_interval_steps=10000,
+    ),
     use_weighted_gradient_accumulation=False,
     gradient_accumulation_steps=SIMPO_GRADIENT_ACCUMULATION_STEPS,
     metrics_logging_options=metrics_logger.MetricsLoggerOptions(
