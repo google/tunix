@@ -1,4 +1,3 @@
-
 import gc
 from typing import Any, Iterator
 import time
@@ -216,8 +215,7 @@ simpo_config = dpo_trainer.SimPOTrainingConfig(
     eval_every_n_steps=100,
     max_steps=None,
     checkpoint_root_directory="/tmp/checkpoints_simpo",
-    use_weighted_gradient_accumulation=True,
-    gradient_accumulation_steps=SIMPO_GRADIENT_ACCUMULATION_STEPS,
+    use_weighted_gradient_accumulation=False,
     metrics_logging_options=metrics_logger.MetricsLoggerOptions(
         log_dir="/kaggle/working/tensorboard_simpo",
         flush_every_n_steps=10,

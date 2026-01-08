@@ -614,10 +614,12 @@ def _generate_ids_and_masks(
     input_strings: list[str],
     tokenizer: Any,
     max_length: int,
+    max_length: int,
     left_pad: bool = True,
+    add_bos: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
   """Generates ids and masks for a list of strings."""
-  tokens = [_tokenize(x, tokenizer) for x in input_strings]
+  tokens = [_tokenize(x, tokenizer, add_bos=add_bos) for x in input_strings]
   all_input_ids = jnp.array([
       common.pad_to_length(
           x[:max_length],
@@ -633,13 +635,18 @@ def _generate_ids_and_masks(
   return all_input_ids, all_input_mask
 
 
-def _tokenize(input_string: str, tokenizer: Any) -> jax.Array:
+def _tokenize(
+    input_string: str, tokenizer: Any, add_bos: bool = True
+) -> jax.Array:
   """Tokenizes the input string."""
   input_ids = tokenizer.encode(input_string)
-  bos_tok = [tokenizer.bos_id()] if tokenizer.bos_id() else []
-  input_ids = jnp.array(
-    tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
-  )
+  if add_bos and tokenizer.bos_id():
+    bos_tok = [tokenizer.bos_id()]
+    input_ids = jnp.array(
+        tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
+    )
+  else:
+    input_ids = jnp.array(input_ids, dtype=jnp.int32)
   return input_ids
 
 
@@ -721,12 +728,21 @@ def process_dpo_record(
       tokenizer,
       max_prompt_length,
       left_pad=True,
+      add_bos=True,
   )
   chosen_ids, chosen_mask = _generate_ids_and_masks(
-      chosen_responses, tokenizer, max_response_length, left_pad=False
+      chosen_responses,
+      tokenizer,
+      max_response_length,
+      left_pad=False,
+      add_bos=False,
   )
   rejected_ids, rejected_mask = _generate_ids_and_masks(
-      rejected_responses, tokenizer, max_response_length, left_pad=False
+      rejected_responses,
+      tokenizer,
+      max_response_length,
+      left_pad=False,
+      add_bos=False,
   )
 
   if unbatched:
