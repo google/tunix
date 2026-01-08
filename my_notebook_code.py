@@ -36,11 +36,11 @@ def create_train_dataset(
     batch_size: int,
     max_length: int,
 ) -> Iterator[peft_trainer.TrainingInput]:
-    """Creates a streaming iterator over G-reen/medium_set efficiently."""
+    """Creates a streaming iterator over G-reen/instruct-set-longer-fixed efficiently."""
     
-    logging.info("Loading G-reen/medium_set (streaming)...")
+    logging.info("Loading G-reen/instruct-set-longer-fixed (streaming)...")
     ds = datasets.load_dataset(
-        "G-reen/medium_set",
+        "G-reen/instruct-set-longer-fixed",
         split="train",
         streaming=True,
     )

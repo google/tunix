@@ -28,6 +28,7 @@ import optax
 # TODO(abheesht): We should move TokenizerAdapter outside `generate`.
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common
+from tunix.sft import cce
 from tunix.sft import peft_trainer
 from typing_extensions import override
 
@@ -91,11 +92,12 @@ class TrainExample:
 class DPOTrainingConfig(peft_trainer.TrainingConfig):
   """DPO/ORPO Training Config."""
 
-  algorithm: str = "dpo"  # "dpo" or "orpo"
+  algorithm: str = "dpo"  # "dpo", "orpo" or "simpo"
   beta: float = (
       0.1  # 𝛽 for KL penalty (DPO only) https://arxiv.org/pdf/2305.18290
   )
   lambda_orpo: float = 0.1  # Weight for preference loss (ORPO only)
+  gamma: float = 1.0  # Target reward margin (SimPO only)
   label_smoothing: float = 0.0
 
   # Should be specified only if your input has strings instead of tokenized IDs.
@@ -128,8 +130,76 @@ def compute_logps(
   return chosen_logps, rejected_logps
 
 
+@nnx.jit
+def compute_simpo_logps_cce(
+    model,
+    input_ids,
+    positions,
+    attention_mask,
+    completion_mask,
+):
+  """Computes log probabilities for SimPO using CCE."""
+  # Get embeddings
+  embeddings, _ = model(
+      input_ids, positions, None, attention_mask, return_embeddings=True
+  )
+
+  # Determine dimensions
+  # input_ids: [Batch, Seq]
+  # completion_mask: [Batch, RespLen]
+  seq_len = input_ids.shape[1]
+  resp_len = completion_mask.shape[1]
+  prompt_len = seq_len - resp_len
+
+  # We want to predict the response tokens.
+  # Targets are input_ids[:, prompt_len:]
+  # Embeddings used for prediction are input_ids[:, prompt_len-1 : -1]
+
+  # Slice embeddings and targets
+  # Note: embeddings is [Batch, Seq, Hidden]
+  x = embeddings[:, prompt_len - 1 : -1, :]
+  y = input_ids[:, prompt_len:]
+
+  # Classifier weights
+  classifier = model.embedder.input_embedding.value
+
+  # Softcap
+  softcap = getattr(model.config, 'final_logit_softcap', None)
+
+  # Compute CCE loss (negative log likelihood)
+  # reduction='none' returns flattened loss [Batch * RespLen]
+  loss = cce.linear_cross_entropy(
+      x,
+      classifier,
+      y,
+      shift=False,  # We already shifted/aligned
+      chunk_size=2048,
+      reduction='none',
+      softcap=softcap,
+  )
+
+  # Reshape loss to [Batch, RespLen]
+  loss = loss.reshape(x.shape[0], x.shape[1])
+
+  # Mask padding
+  loss = loss * completion_mask
+
+  # Sum loss per sequence
+  seq_loss = loss.sum(axis=-1)
+
+  # Convert to log probability
+  log_probs = -seq_loss
+
+  # Split into chosen and rejected
+  batch_size = log_probs.shape[0]
+  chosen_logps = log_probs[: batch_size // 2]
+  rejected_logps = log_probs[batch_size // 2 :]
+
+  return chosen_logps, rejected_logps
+
+
 class DPOTrainer(peft_trainer.PeftTrainer):
-  """Direct Preference Optimization (DPO) and ORPO trainer.
+  """Direct Preference Optimization (DPO), ORPO and SimPO trainer.
 
   DPO is a preference tuning method for aligning large language models with
   human or AI preferences. It is a more efficient, performant alternative
@@ -145,9 +215,15 @@ class DPOTrainer(peft_trainer.PeftTrainer):
   combines supervised fine-tuning with preference alignment without requiring
   a separate reference model, making it approximately 50% more memory-efficient.
 
+  SimPO (Simple Preference Optimization) is another reference-free preference
+  optimization method. It aligns the reward with the generation metric
+  (average log-likelihood) and enforces a target margin between winning and
+  losing responses.
+
   References:
   - DPO: https://arxiv.org/abs/2305.18290
   - ORPO: https://arxiv.org/abs/2403.07691
+  - SimPO: https://arxiv.org/abs/2405.14734
   """
 
   def __init__(
@@ -168,8 +244,8 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         be None. If `ref_model` is None for DPO, we don't use it in the loss
         term.
       optimizer: The optimizer used for training the policy model.
-      training_config: A `DPOTrainingConfig` object containing DPO/ORPO-specific
-        hyperparameters like `beta`, `lambda_orpo`, and `label_smoothing`.
+      training_config: A `DPOTrainingConfig` object containing DPO/ORPO/SimPO-specific
+        hyperparameters like `beta`, `lambda_orpo`, `gamma` and `label_smoothing`.
       tokenizer: An optional tokenizer. If provided, the trainer can accept
         string inputs and tokenize them internally.
     """
@@ -200,6 +276,23 @@ class DPOTrainer(peft_trainer.PeftTrainer):
           "train_example": x,
           "algorithm": "orpo",
           "lambda_orpo": self.dpo_config.lambda_orpo,
+          "label_smoothing": self.dpo_config.label_smoothing,
+      }
+    elif self.algorithm == "simpo":
+      self.with_gen_model_input_fn(
+          lambda x: {
+              "train_example": x,
+              "algorithm": "simpo",
+              "beta": self.dpo_config.beta,
+              "gamma": self.dpo_config.gamma,
+              "label_smoothing": self.dpo_config.label_smoothing,
+          }
+      )
+      self.gen_model_input_fn = lambda x: {
+          "train_example": x,
+          "algorithm": "simpo",
+          "beta": self.dpo_config.beta,
+          "gamma": self.dpo_config.gamma,
           "label_smoothing": self.dpo_config.label_smoothing,
       }
     else:
@@ -307,6 +400,12 @@ class DPOTrainer(peft_trainer.PeftTrainer):
           logits_to_keep,
           completion_mask,
       )
+    
+    # For SimPO, we don't need the reference model forward pass.
+    if self.algorithm == "simpo":
+      ref_chosen_logps = None
+      ref_rejected_logps = None
+
     return TrainExample(
         input_ids=input_ids,
         positions=positions,
@@ -352,6 +451,7 @@ def dpo_loss_fn(
     algorithm: str = "dpo",
     beta: float = 0.1,
     lambda_orpo: float = 0.1,
+    gamma: float = 1.0,
     label_smoothing: float = 0.0,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
   """DPO/ORPO loss function.
@@ -359,22 +459,32 @@ def dpo_loss_fn(
   Args:
     model: The model to compute loss for.
     train_example: Training example containing input_ids, masks, etc.
-    algorithm: "dpo" or "orpo".
-    beta: Weight for KL penalty (DPO only).
+    algorithm: "dpo", "orpo" or "simpo".
+    beta: Weight for KL penalty (DPO only) or scaling factor (SimPO only).
     lambda_orpo: Weight for preference loss (ORPO only).
+    gamma: Target reward margin (SimPO only).
     label_smoothing: Label smoothing factor.
 
   Returns:
     A tuple of (loss, auxiliary_metrics_dict).
   """
-  chosen_logps, rejected_logps = compute_logps(
-      model,
-      train_example.input_ids,
-      train_example.positions,
-      train_example.attention_mask,
-      train_example.logits_to_keep,
-      train_example.completion_mask,
-  )
+  if algorithm == "simpo":
+    chosen_logps, rejected_logps = compute_simpo_logps_cce(
+        model,
+        train_example.input_ids,
+        train_example.positions,
+        train_example.attention_mask,
+        train_example.completion_mask,
+    )
+  else:
+    chosen_logps, rejected_logps = compute_logps(
+        model,
+        train_example.input_ids,
+        train_example.positions,
+        train_example.attention_mask,
+        train_example.logits_to_keep,
+        train_example.completion_mask,
+    )
 
   if algorithm == "orpo":
     # ORPO loss = L_SFT + λ * L_OR
@@ -428,6 +538,48 @@ def dpo_loss_fn(
     }
 
     return total_loss.mean(), aux
+  elif algorithm == "simpo":
+    # SimPO loss
+    # Paper: https://arxiv.org/abs/2405.14734
+    
+    # Calculate lengths of chosen and rejected responses
+    batch_size = train_example.completion_mask.shape[0] // 2
+    chosen_mask = train_example.completion_mask[:batch_size]
+    rejected_mask = train_example.completion_mask[batch_size:]
+    
+    chosen_lengths = chosen_mask.sum(axis=-1)
+    rejected_lengths = rejected_mask.sum(axis=-1)
+    
+    # Avoid division by zero
+    chosen_lengths = jnp.maximum(chosen_lengths, 1.0)
+    rejected_lengths = jnp.maximum(rejected_lengths, 1.0)
+    
+    # Calculate Average Log-Likelihood (Length-Normalized Reward)
+    # r(x,y) = (beta / |y|) * log pi(y|x)
+    reward_w = (beta / chosen_lengths) * chosen_logps
+    reward_l = (beta / rejected_lengths) * rejected_logps
+    
+    # Calculate the margin term
+    # margin = reward_w - reward_l - gamma
+    logits = reward_w - reward_l - gamma
+    
+    # Compute loss using Log Sigmoid
+    # The objective is -E[log sigma(logits)]
+    losses = -(
+        jax.nn.log_sigmoid(logits) * (1 - label_smoothing)
+        + jax.nn.log_sigmoid(-logits) * label_smoothing
+    )
+    
+    aux = {
+        "rewards/chosen": reward_w.mean(),
+        "rewards/rejected": reward_l.mean(),
+        "rewards/margin": (reward_w - reward_l).mean(),
+        "rewards/accuracy": (reward_w > reward_l).mean(),
+        "log_probs/chosen": chosen_logps.mean(),
+        "log_probs/rejected": rejected_logps.mean(),
+    }
+    
+    return losses.mean(), aux
   else:
     # DPO loss
     chosen_log_ratio = chosen_logps
@@ -603,3 +755,9 @@ ORPOTrainingConfig = DPOTrainingConfig
 ORPOTrainer = DPOTrainer
 OrpoTrainingConfig = DPOTrainingConfig
 OrpoTrainer = DPOTrainer
+
+# SimPO aliases
+SimPOTrainingConfig = DPOTrainingConfig
+SimPOTrainer = DPOTrainer
+SimpoTrainingConfig = DPOTrainingConfig
+SimpoTrainer = DPOTrainer
