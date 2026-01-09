@@ -21,6 +21,8 @@ dependencies = [
   "datasets",
   "flax>=0.11.1",
   "fsspec",  # notebook dependency
+  "gcsfs",  # Required for accessing gs:// URIs via fsspec
+  "google-cloud-storage",  # Required for GCS file operations in OSS environment
   "google-metrax>=0.2.3",
   "grain",
   "huggingface_hub",
