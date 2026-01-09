@@ -121,8 +121,8 @@ MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 8192
+MAX_PROMPT_LENGTH = 256 # 2048
+TOTAL_GENERATION_STEPS = 512 # 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -191,7 +191,7 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang_jax"
+ROLLOUT_ENGINE = "vllm" # one of "vanilla", "vllm" or "sglang_jax"
 
 # %%
 # try:
@@ -456,13 +456,13 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # rollout_sglang_jax_chunked_prefill_size=2048,
         # rollout_sglang_jax_page_size=64,
         # vllm-tpu specific configs
-        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        # rollout_vllm_hbm_utilization=0.2,
-        # rollout_vllm_tpu_backend_type="jax",
-        # rollout_vllm_server_mode=True,
-        # rollout_vllm_async_scheduling=True,
-        # tensor_parallel_size=4,
-        # data_parallel_size=2,
+        rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        rollout_vllm_hbm_utilization=0.2,
+        rollout_vllm_tpu_backend_type="jax",
+        rollout_vllm_server_mode=True,
+        rollout_vllm_async_scheduling=True,
+        tensor_parallel_size=4,
+        data_parallel_size=2,
     ),
 )
 
@@ -477,13 +477,13 @@ grpo_config = GRPOConfig(
 
 # %%
 # RL cluster
-with compat.set_mesh(mesh):
-  rl_cluster = rl_cluster_lib.RLCluster(
-      actor=qwen2_actor,
-      reference=qwen2_ref,
-      tokenizer=tokenizer,
-      cluster_config=cluster_config,
-  )
+# with compat.set_mesh(mesh):
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=qwen2_actor,
+    reference=qwen2_ref,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
 
 show_hbm_usage("after RLCluster creation")
 
