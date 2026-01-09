@@ -1,47 +1,26 @@
-
-import gc
-from typing import Any, Iterator
-import time
-
-from absl import logging
-import datasets
-import jax
-from flax import nnx
-from huggingface_hub import snapshot_download, HfApi, create_repo
-import numpy as np
-import optax
-from tqdm import tqdm
-import os
-import shutil
-import safetensors.numpy as safe_np
-import transformers
-
-from tunix.models.gemma import model as gemma_lib
-from tunix.models.gemma import params_safetensors as params_safetensors_lib
-from tunix.sft import metrics_logger
-from tunix.sft import peft_trainer
-from tunix.sft import utils
-from tunix.sft.dpo import dpo_trainer
-import orbax.checkpoint as ocp
-import jax.numpy as jnp
-
-# --- Common Params ---
+# Generic Parameters
 MODEL_ID = "google/gemma-2-2b-it"
 MAX_TARGET_LENGTH = 4096
 
+# FFT Parameters
 FFT_LEARNING_RATE = 2e-5
-FFT_NUM_ROWS = 100000
+FFT_NUM_EPOCHS = 2
 FFT_BATCH_SIZE = 64
 FFT_GRADIENT_ACCUMULATION_STEPS = 5
 WARMUP_STEPS = 20
 
-SIMPO_LEARNING_RATE = 8e-7
-SIMPO_NUM_ROWS = 24000
-SIMPO_BATCH_SIZE = 32
-SIMPO_GRADIENT_ACCUMULATION_STEPS = 2
+# DO NOT CHANGE BELOW
 
-# --- Prompt Wrapper ---
-PROMPT_WRAPPER = """You are a helpful reasoning assistant that always begins your response with <reasoning>, followed by a chain of thought that plans out your response, then </reasoning> and your actual response in <answer> </answer>. 
+# Use these standard output tags so that your model's output follow this format in plain text (no JSON/XML):
+# <reasoning>model_reasoning_trace</reasoning>
+# <answer>model_final_answer</answer>
+
+REASONING_START = "<reasoning>"
+REASONING_END = "</reasoning>"
+SOLUTION_START = "<answer>"
+SOLUTION_END = "</answer>"
+
+PROMPT_TEMPLATE = """You are a helpful reasoning assistant that always begins your response with <reasoning>, followed by a chain of thought that plans out your response, then </reasoning> and your actual response in <answer> </answer>. 
 For example:
 <reasoning>I need to measure exactly 2 liters of milk using a 5-liter container and a 9-liter container. I start with both containers empty, and I have a milk tank to fill from. The goal is to get 2 liters in one of the containers.
 
@@ -56,86 +35,114 @@ Here is the prompt you should respond to:
 {question}
 Begin your response with <reasoning>."""
 
+# WARNING: I HAVE MODIFIED THESE FOR MY MODEL (which thinks for 4096 tokens and should have a nonzero temp). IF I AM NOT ALLOWED TO PLEASE REVERT THEM.
+# Use these parameters for greedy decoding; used in competition evaluation
+INF_TEMPERATURE=0.6
+INF_TOP_K=20
+INF_TOP_P=0.95
+SEED=42
+MAX_GENERATION_STEPS=4096
+
+import os
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1" # This is required to fix a tqdm error
+
+from typing import Any, Iterator
+from absl import logging
+import datasets
+import jax
+from flax import nnx
+from huggingface_hub import snapshot_download, HfApi, create_repo
+import numpy as np
+import optax
+from tqdm import tqdm
+import shutil
+import safetensors.numpy as safe_np
+from tunix.models.gemma import model as gemma_lib
+from tunix.models.gemma import params_safetensors as params_safetensors_lib
+from tunix.sft import metrics_logger
+from tunix.sft import peft_trainer
+import orbax.checkpoint as ocp
+import jax.numpy as jnp
+
 def create_fft_dataset(
     batch_size: int,
     max_length: int,
+    num_epochs: int,
 ) -> Iterator[peft_trainer.TrainingInput]:
-    """Creates a streaming iterator over G-reen/instruct-set-longer-fixed efficiently."""
+    """Creates a streaming iterator over the dataset for Full Fine-Tuning.
+
+    This function loads the 'G-reen/instruct-set-longer-fixed' dataset in streaming mode.
+    This dataset has been pre-packed, meaning each row in 'text_tokenized'
+    already contains multiple concatenated examples up to the context length.
+
+    It iterates through the dataset for the specified number of epochs and yields batches
+    of training inputs, handling minor padding/truncation if the pre-packed length
+    doesn't perfectly match `max_length`.
+
+    Args:
+        batch_size: The number of samples per batch.
+        max_length: The maximum sequence length for tokens. Sequences longer than this
+            will be truncated, and shorter ones will be padded.
+        num_epochs: The number of times to iterate over the entire dataset.
+
+    Yields:
+        peft_trainer.TrainingInput: A dataclass containing:
+            - input_tokens: Batch of tokenized input sequences (padded/truncated).
+            - input_mask: Binary mask indicating valid tokens (1) vs padding (0).
+    
+    Note:
+        The dataset is expected to have a 'text_tokenized' column containing pre-packed sequences.
+    """
     
     logging.info("Loading G-reen/instruct-set-longer-fixed (streaming)...")
-    ds = datasets.load_dataset(
-        "G-reen/instruct-set-longer-fixed",
-        split="train",
-        streaming=True,
-    )
     
-    total_steps = FFT_NUM_ROWS // batch_size
-    
-    batch_iterator = ds.iter(batch_size=batch_size)
+    # This size is approximate for tqdm display
+    estimated_size = 110000 
+    steps_per_epoch = estimated_size // batch_size
     
     total_tokens = 0
     
-    for i, batch in tqdm(enumerate(batch_iterator), total=total_steps, desc="FFT Training Steps"):
-        if i >= total_steps:
-            break
-        tokens = np.array(batch['text_tokenized'], dtype=np.int32)
-
-        if tokens.shape[1] > max_length:
-            tokens = tokens[:, :max_length]
-        elif tokens.shape[1] < max_length:
-             tokens = np.pad(tokens, ((0,0), (0, max_length - tokens.shape[1])), constant_values=0)
-        
-        mask = (tokens != 0).astype(np.int32)
-        total_tokens += np.sum(mask)
-        
-        yield peft_trainer.TrainingInput(
-            input_tokens=tokens,
-            input_mask=mask,
+    for epoch in range(num_epochs):
+        ds = datasets.load_dataset(
+            "G-reen/instruct-set-longer-fixed",
+            split="train",
+            streaming=True,
         )
+        
+        batch_iterator = ds.iter(batch_size=batch_size, drop_last_batch=True)
+        
+        for i, batch in tqdm(enumerate(batch_iterator), total=steps_per_epoch, desc=f"FFT Training Epoch {epoch+1}/{num_epochs}"):
+            tokens = np.array(batch['text_tokenized'], dtype=np.int32)
+
+            if tokens.shape[1] > max_length:
+                tokens = tokens[:, :max_length]
+            elif tokens.shape[1] < max_length:
+                 tokens = np.pad(tokens, ((0,0), (0, max_length - tokens.shape[1])), constant_values=0)
+            
+            mask = (tokens != 0).astype(np.int32)
+            total_tokens += np.sum(mask)
+            
+            yield peft_trainer.TrainingInput(
+                input_tokens=tokens,
+                input_mask=mask,
+            )
     
     print(f"Total tokens trained on: {total_tokens:,}")
 
-def create_simpo_dataset(
-    batch_size: int,
-    tokenizer: Any,
-) -> Iterator[dpo_trainer.DataInput]:
-    """Creates a streaming iterator over G-reen/sumthink_fixed_cleaned."""
-    
-    logging.info("Loading G-reen/sumthink_fixed_cleaned (streaming)...")
-    ds = datasets.load_dataset(
-        "G-reen/sumthink_fixed_cleaned",
-        split="train",
-        streaming=True,
-    )
-    ds = ds.shuffle(seed=42, buffer_size=10000)
-    # Calculate steps (approximate since we are streaming)
-    total_steps = SIMPO_NUM_ROWS // batch_size
-    
-    batch_iterator = ds.iter(batch_size=batch_size)
-    
-    for i, batch in tqdm(enumerate(batch_iterator), total=total_steps, desc="SimPO Training Steps"):
-        # Apply wrapper
-        wrapped_prompts = [PROMPT_WRAPPER.replace("{question}", p) for p in batch['prompt']]
-        
-        # Apply chat template
-        formatted_prompts = []
-        for p in wrapped_prompts:
-            messages = [{"role": "user", "content": p}]
-            # Ensure we get a string back, not tokens, since DataInput expects strings
-            formatted_p = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            formatted_prompts.append(formatted_p)
-            
-        chosen = batch['chosen']
-        rejected = batch['rejected']
-        
-        yield dpo_trainer.DataInput(
-            prompts=formatted_prompts,
-            chosen_responses=chosen,
-            rejected_responses=rejected,
-        )
+def save_model_as_safetensors(model: Any, local_model_path: str, output_dir: str):
+    """Saves the JAX/Flax model in Hugging Face Safetensors format.
 
-def save_model_as_safetensors(model, local_model_path, output_dir):
-    """Saves the model in standard Hugging Face safetensors format."""
+    This function extracts weights from the Flax model, converts them to numpy arrays,
+    maps them to the standard Hugging Face naming convention, and saves them as a
+    .safetensors file. It also copies necessary config and tokenizer files from the
+    original model directory.
+
+    Args:
+        model: The Flax/NNX model instance to save.
+        local_model_path: The local path to the original model directory (used to
+            copy config and tokenizer files).
+        output_dir: The directory where the converted model and config files will be saved.
+    """
     print(f"Saving model to {output_dir}...")
     
     if os.path.exists(output_dir):
@@ -192,6 +199,65 @@ def save_model_as_safetensors(model, local_model_path, output_dir):
                      shutil.copy(src, os.path.join(output_dir, file))
     print("Save complete.")
 
+def gen_model_input_fn(x: peft_trainer.TrainingInput) -> dict[str, Any]:
+    """Prepares model inputs for training with Cross-Entropy Loss (CCE) and packed sequences.
+
+    This function processes a batch of input tokens to generate the necessary components
+    for the model's forward pass and loss calculation, specifically handling packed
+    sequences where multiple examples are concatenated in a single row.
+
+    It calculates:
+    - Position IDs: Resets position indices at the start of each new example (indicated by BOS tokens).
+    - Attention Mask: Ensures tokens only attend to other tokens within the same example (segment).
+    - Input Mask: Masks out padding tokens for loss calculation.
+
+    Args:
+        x: A TrainingInput object containing the raw 'input_tokens' and 'input_mask'.
+
+    Returns:
+        dict[str, Any]: A dictionary containing:
+            - 'input_tokens': The input token IDs.
+            - 'input_mask': Mask for loss calculation (1 for valid tokens, 0 for padding/BOS).
+            - 'positions': Position IDs for the tokens, resetting at BOS.
+            - 'attention_mask': Segment IDs used to mask attention between packed examples.
+    """
+    input_tokens = x.input_tokens
+    batch_size, seq_len = input_tokens.shape
+    bos_id = 2 
+    pad_id = 0
+    token_ids = jnp.arange(seq_len)[None, :]
+    
+    # Identify BOS tokens to reset position IDs
+    is_bos = (input_tokens == bos_id)
+    bos_indices = jnp.where(is_bos, token_ids, 0)
+    last_bos_idx = jax.lax.cummax(bos_indices, axis=1)
+    
+    # Calculate positions relative to the last BOS token
+    positions = (token_ids - last_bos_idx).astype(jnp.int32)
+    
+    # Create segment IDs for attention masking
+    is_bos_int = is_bos.astype(jnp.int32)
+    segment_ids = jnp.cumsum(is_bos_int, axis=1) + 1
+    
+    # Create attention mask (allow attention only within the same segment)
+    valid_mask = (input_tokens != pad_id).astype(jnp.int32)
+    attention_mask = segment_ids * valid_mask
+    
+    # Input mask for loss calculation (ignore BOS tokens)
+    input_mask = valid_mask * (1 - is_bos_int)
+    
+    return {
+        'input_tokens': input_tokens,
+        'input_mask': input_mask,
+        'positions': positions,
+        'attention_mask': attention_mask,
+    }
+
+# ==========================================
+# Model/TPU Setup
+# ==========================================
+# Initialize JAX devices and setup the mesh for distributed training (FSDP).
+# We use a 1D mesh here where all devices are used for FSDP (Fully Sharded Data Parallel).
 devices = jax.devices()
 num_devices = len(devices)
 
@@ -213,10 +279,13 @@ local_model_path = snapshot_download(
 print(f"Model downloaded to: {local_model_path}")
 
 # ==========================================
-# PHASE 1: Full Fine-Tuning (FFT)
+# Full Fine-Tuning (FFT)
 # ==========================================
-print("\n=== Starting Phase 1: Full Fine-Tuning (FFT) ===")
+# To maximize training performance, we perform full-finetuning on the dataset instead of LoRA.
+print("\n=== Starting Full Fine-Tuning (FFT) ===")
 
+# Layer-level rematerialization (gradient checkpointing) 
+# This increases compute usage, but allows a bigger bsz (64) which maximizes TPU utilization.
 model_config = gemma_lib.ModelConfig.gemma2_2b()
 model_config.remat_config = gemma_lib.RematConfig.LAYER
 
@@ -231,7 +300,11 @@ with mesh:
 
 nnx.display(model)
 
-TOTAL_UPDATES = (FFT_NUM_ROWS // FFT_BATCH_SIZE) // FFT_GRADIENT_ACCUMULATION_STEPS
+# Calculate (estimated) total training steps for the learning rate scheduler.
+ESTIMATED_DATASET_SIZE = 110000
+TOTAL_UPDATES = (ESTIMATED_DATASET_SIZE * FFT_NUM_EPOCHS // FFT_BATCH_SIZE) // FFT_GRADIENT_ACCUMULATION_STEPS
+
+# Setup the optimizer and scheduler.
 schedule = optax.warmup_cosine_decay_schedule(
     init_value=0.0,
     peak_value=FFT_LEARNING_RATE,
@@ -240,11 +313,13 @@ schedule = optax.warmup_cosine_decay_schedule(
 )
 optimizer = optax.adamw(learning_rate=schedule)
 
+# We don't really need extra checkpoints so we disable them and prevent possible storage issues.
 checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=1000000, # Disable intermediate checkpoints
+    save_interval_steps=1000000,
     max_to_keep=1,
 )
 
+# Configure the training loop.
 training_config = peft_trainer.TrainingConfig(
     eval_every_n_steps=100,
     max_steps=None,
@@ -253,170 +328,52 @@ training_config = peft_trainer.TrainingConfig(
     gradient_accumulation_steps=FFT_GRADIENT_ACCUMULATION_STEPS,
     checkpointing_options=checkpointing_options,
     metrics_logging_options=metrics_logger.MetricsLoggerOptions(
-        log_dir="/kaggle/working/tensorboard_fft",
+        log_dir="tensorboard_fft",
         flush_every_n_steps=10,
     ),
 )
 
+# Note: Although named 'PeftTrainer', it supports full fine-tuning when not using LoRA.
 trainer = peft_trainer.PeftTrainer(model, optimizer, training_config)
+# CCE saves >10gb memory per device. FA (not shown, comes bundled with model.py) saves another chunk, just enough for training to fit.
 trainer = trainer.with_cce_loss()
 
-# Custom input function for FFT
-def gen_model_input_fn(x: peft_trainer.TrainingInput):
-    input_tokens = x.input_tokens
-    batch_size, seq_len = input_tokens.shape
-    bos_id = 2 
-    pad_id = 0
-    token_ids = jnp.arange(seq_len)[None, :]
-    is_bos = (input_tokens == bos_id)
-    bos_indices = jnp.where(is_bos, token_ids, 0)
-    last_bos_idx = jax.lax.cummax(bos_indices, axis=1)
-    positions = (token_ids - last_bos_idx).astype(jnp.int32)
-    is_bos_int = is_bos.astype(jnp.int32)
-    segment_ids = jnp.cumsum(is_bos_int, axis=1) + 1
-    valid_mask = (input_tokens != pad_id).astype(jnp.int32)
-    attention_mask = segment_ids * valid_mask
-    input_mask = valid_mask * (1 - is_bos_int)
-    return {
-        'input_tokens': input_tokens,
-        'input_mask': input_mask,
-        'positions': positions,
-        'attention_mask': attention_mask,
-    }
-
 trainer = trainer.with_gen_model_input_fn(gen_model_input_fn)
-
-train_ds = create_fft_dataset(FFT_BATCH_SIZE, MAX_TARGET_LENGTH)
+train_ds = create_fft_dataset(FFT_BATCH_SIZE, MAX_TARGET_LENGTH, FFT_NUM_EPOCHS)
 
 print("Starting FFT training...")
 with mesh:
     trainer.train(train_ds, None)
 
-    print("FFT Training complete!")
+print("FFT Training complete!")
 
-    # Upload Orbax checkpoint
-    HF_REPO_ID_FFT_ORBAX = "G-reen/gemma-2-2b-fft-orbax"
-    print(f"Pushing FFT Orbax checkpoint to {HF_REPO_ID_FFT_ORBAX}...")
-    api = HfApi()
-    create_repo(HF_REPO_ID_FFT_ORBAX, private=False, exist_ok=True)
-    api.upload_folder(
-        folder_path="/tmp/checkpoints_fft",
-        repo_id=HF_REPO_ID_FFT_ORBAX,
-        commit_message="Upload FFT Orbax checkpoint",
-    )
-    print("Upload complete.")
+# ==========================================
+# Model Export & Upload
+# ==========================================
+# Upload the raw Orbax checkpoint to hf
+HF_REPO_ID_FFT_ORBAX = "G-reen/gemma-2-2b-fft-orbax"
+print(f"Pushing FFT Orbax checkpoint to {HF_REPO_ID_FFT_ORBAX}...")
+api = HfApi()
+create_repo(HF_REPO_ID_FFT_ORBAX, private=False, exist_ok=True)
+api.upload_folder(
+    folder_path="/tmp/checkpoints_fft",
+    repo_id=HF_REPO_ID_FFT_ORBAX,
+    commit_message="Upload FFT Orbax checkpoint",
+)
+print("Upload complete.")
 
-    # Cleanup Orbax checkpoints to save space (trainer.close() saves one at the end)
-    print("Cleaning up FFT Orbax checkpoints...")
-    if os.path.exists("/tmp/checkpoints_fft"):
-        shutil.rmtree("/tmp/checkpoints_fft")
-
+# Convert and save the model in Hugging Face Safetensors format for broader compatibility.
 FFT_MODEL_DIR = "/tmp/fft_model"
 save_model_as_safetensors(trainer.model, local_model_path, FFT_MODEL_DIR)
+HF_REPO_ID_FFT_FINAL = "G-reen/gemma-2-2b-fft-2epoch"
 
-# ==========================================
-# CLEANUP PHASE
-# ==========================================
-print("\n=== Cleaning up FFT resources ===")
-del model
-del trainer
-del optimizer
-del train_ds
-del schedule
-
-# Force garbage collection and clear JAX caches
-gc.collect()
-jax.clear_caches()
-time.sleep(5) # Give it a moment
-
-print("Cleanup complete. Memory should be freed.")
-
-# ==========================================
-# PHASE 2: SimPO Alignment
-# ==========================================
-print("\n=== Starting Phase 2: SimPO Alignment ===")
-
-# Load Tokenizer
-print("Loading Tokenizer...")
-tokenizer = transformers.AutoTokenizer.from_pretrained(local_model_path)
-
-# Reload Model from FFT Checkpoint
-print(f"Reloading model from {FFT_MODEL_DIR}...")
-with mesh:
-    model = params_safetensors_lib.create_model_from_safe_tensors(
-        file_dir=FFT_MODEL_DIR,
-        config=model_config,
-        mesh=mesh,
-        dtype=jnp.bfloat16,
-    )
-
-# SimPO Scheduler & Optimizer
-SIMPO_TOTAL_UPDATES = (SIMPO_NUM_ROWS // SIMPO_BATCH_SIZE) // SIMPO_GRADIENT_ACCUMULATION_STEPS
-simpo_warmup_steps = int(0.1 * SIMPO_TOTAL_UPDATES)
-
-simpo_schedule = optax.warmup_cosine_decay_schedule(
-    init_value=0.0,
-    peak_value=SIMPO_LEARNING_RATE,
-    warmup_steps=simpo_warmup_steps,
-    decay_steps=SIMPO_TOTAL_UPDATES,
-)
-optimizer = optax.adamw(learning_rate=simpo_schedule)
-
-# SimPO Config
-simpo_config = dpo_trainer.SimPOTrainingConfig(
-    algorithm="simpo",
-    beta=2.0, # Typical for SimPO
-    gamma=1.0, # Target reward margin
-    max_prompt_length=1536,
-    max_response_length=2560,
-    eval_every_n_steps=100,
-    max_steps=None,
-    checkpoint_root_directory="/tmp/checkpoints_simpo",
-    checkpointing_options=ocp.CheckpointManagerOptions(
-        max_to_keep=1,
-        save_interval_steps=10000,
-    ),
-    use_weighted_gradient_accumulation=False,
-    gradient_accumulation_steps=SIMPO_GRADIENT_ACCUMULATION_STEPS,
-    metrics_logging_options=metrics_logger.MetricsLoggerOptions(
-        log_dir="/kaggle/working/tensorboard_simpo",
-        flush_every_n_steps=10,
-    ),
-)
-
-# Initialize SimPO Trainer
-# Note: SimPO is reference-free, so ref_model is None
-trainer = dpo_trainer.SimPOTrainer(
-    model=model,
-    ref_model=None, 
-    optimizer=optimizer,
-    training_config=simpo_config,
-    tokenizer=tokenizer,
-)
-
-simpo_ds = create_simpo_dataset(SIMPO_BATCH_SIZE, tokenizer)
-
-print("Starting SimPO training...")
-with mesh:
-    trainer.train(simpo_ds, None)
-    
-print("SimPO Training complete!")
-
-FINAL_SIMPO_DIR = "/tmp/final_simpo_model"
-save_model_as_safetensors(trainer.model, local_model_path, FINAL_SIMPO_DIR)
-
-# ==========================================
-# UPLOAD PHASE
-# ==========================================
-HF_REPO_ID_SIMPO = "G-reen/gemma-2-2b-simpo-aligned"
-
-print(f"Pushing Final SimPO model to {HF_REPO_ID_SIMPO}...")
+print(f"Pushing Final FFT model to {HF_REPO_ID_FFT_FINAL}...")
 api = HfApi()
-create_repo(HF_REPO_ID_SIMPO, private=False, exist_ok=True)
+create_repo(HF_REPO_ID_FFT_FINAL, private=False, exist_ok=True)
 api.upload_folder(
-    folder_path=FINAL_SIMPO_DIR,
-    repo_id=HF_REPO_ID_SIMPO,
-    commit_message="Upload Gemma-2-2B FFT+SimPO Aligned",
+    folder_path=FFT_MODEL_DIR,
+    repo_id=HF_REPO_ID_FFT_FINAL,
+    commit_message="Upload Gemma-2-2B FFT 2 Epochs",
 )
 
-print(f"Model pushed to: https://huggingface.co/{HF_REPO_ID_SIMPO}")
+print(f"Model pushed to: https://huggingface.co/{HF_REPO_ID_FFT_FINAL}")

@@ -68,7 +68,7 @@ def create_simpo_dataset(
     # Calculate steps (approximate since we are streaming)
     total_steps = SIMPO_NUM_ROWS // batch_size
     
-    batch_iterator = ds.iter(batch_size=batch_size)
+    batch_iterator = ds.iter(batch_size=batch_size, drop_last_batch=True)
     
     for i, batch in tqdm(enumerate(batch_iterator), total=total_steps, desc="SimPO Training Steps"):
         # Apply wrapper
