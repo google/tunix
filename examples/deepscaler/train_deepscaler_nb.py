@@ -114,8 +114,8 @@ MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 8192
+MAX_PROMPT_LENGTH = 256 # 2048
+TOTAL_GENERATION_STEPS = 512 # 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -457,13 +457,13 @@ grpo_config = GRPOConfig(
 
 # %%
 # RL cluster
-with compat.set_mesh(mesh):
-  rl_cluster = rl_cluster_lib.RLCluster(
-      actor=qwen2_actor,
-      reference=qwen2_ref,
-      tokenizer=tokenizer,
-      cluster_config=cluster_config,
-  )
+# with compat.set_mesh(mesh):
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=qwen2_actor,
+    reference=qwen2_ref,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
 
 show_hbm_usage("after RLCluster creation")
 
