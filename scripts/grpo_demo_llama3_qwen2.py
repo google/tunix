@@ -1129,7 +1129,7 @@ if args.agentic_mode:
       num_iterations=NUM_ITERATIONS,
       beta=BETA,
       epsilon=EPSILON,
-      max_concurrency=4,
+      max_concurrency=2,
       off_policy_steps=1000,
   )
 
@@ -1195,7 +1195,10 @@ print(
 
 
 show_hbm_usage("Right before training")
-grpo_trainer.train(train_dataset, eval_ds=val_dataset)
+if args.agentic_mode:
+  grpo_trainer.train(train_dataset)
+else:
+  grpo_trainer.train(train_dataset, eval_ds=val_dataset)
 
 # Load checkpoint first.
 
