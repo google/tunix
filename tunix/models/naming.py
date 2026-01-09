@@ -19,8 +19,6 @@ This module provides utility functions to parse and handle model names and
 convert them to internal model naming structures.
 """
 
-# TODO(b/451662153): add README on naming conventions and update naming
-# descriptions in //third_party/py/tunix/cli/base_config.yaml.
 
 import dataclasses
 import immutabledict
