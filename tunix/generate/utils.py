@@ -464,6 +464,7 @@ def _apply_transpose(
     val: jnp.ndarray,
     src_key: str,
     transpose_keys: Optional[Dict[str, Tuple[int, ...]]],
+    rollout_engine: Optional[str],
 ) -> jnp.ndarray:
   """Apply transpose operation if configured for this key."""
   if not transpose_keys:
@@ -479,6 +480,16 @@ def _apply_transpose(
   if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
     return jnp.transpose(val, transpose_keys[target_key])
+
+  # For LoRA
+  # Note: The following codes takes effect in SGLangJAx rollout, and may not take effect in other rollout engine.
+
+  if rollout_engine == 'sglang_jax' and 'lora' in all_key:
+    for r_key in transpose_keys:
+      if re.compile(rf'{r_key}').match(all_key):
+        logging.debug('Applying LoRA transpose on %s', src_key)
+        return jnp.transpose(val[None, :, :], transpose_keys[r_key])
+
   return val
 
 
@@ -603,7 +614,6 @@ def _align_shape(
 def _apply_dtype_cast(
     val: jnp.ndarray, tgt_dtype: jnp.dtype, src_key: str
 ) -> jnp.ndarray:
-
   if val.dtype != tgt_dtype:
     logging.warning(
         'Type mismatch on %s: %s -> %s',
@@ -622,6 +632,7 @@ def transfer_state_with_mappings(
     key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
+    rollout_engine=None,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
 
@@ -643,8 +654,10 @@ def transfer_state_with_mappings(
   """
   # Get flat target state
   tgt_flat_list = dst_state.flat_state()
+
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
+
   if reshard_fn:
     sharding_dict = {
         key: (
@@ -667,7 +680,7 @@ def transfer_state_with_mappings(
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
     # Apply transpose if configured
-    val = _apply_transpose(val, flat_src_key, transpose_keys)
+    val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
@@ -725,6 +738,7 @@ def transfer_state_directly(
     dst_state: The destination state to transfer to.
     reshard_fn: A function to shard the values.
   """
+
   def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
     if isinstance(obj, dict):
       return key in obj
@@ -732,12 +746,16 @@ def transfer_state_directly(
     return hasattr(obj, key)
 
   # Unwrap Source (Remove 'base' wrapper from MaxText)
-  if isinstance(src_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(src_state, 'base'):
+  if isinstance(src_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
+      src_state, 'base'
+  ):
     logging.info("Unwrapping 'base' key from source state.")
     src_state = src_state['base']
 
   # Unwrap Target (Remove nested 'model' wrappers from vLLM)
-  while isinstance(dst_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(dst_state, 'model'):
+  while isinstance(dst_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
+      dst_state, 'model'
+  ):
     logging.info("Unwrapping nested 'model' key from target state.")
     dst_state = dst_state['model']
 
@@ -763,7 +781,9 @@ def transfer_state_directly(
     return node
 
   # Helper: Intersect Trees (Handle KVCache/RNG mismatches)
-  def intersect_trees(src: Any, tgt_spec: Any, path: str = "") -> Tuple[Any, Any]:
+  def intersect_trees(
+      src: Any, tgt_spec: Any, path: str = ''
+  ) -> Tuple[Any, Any]:
     # Stop recursion if we hit a leaf (non-dict)
     if not isinstance(src, dict) or not isinstance(tgt_spec, dict):
       return src, tgt_spec
@@ -786,7 +806,7 @@ def transfer_state_directly(
     filtered_tgt = {}
 
     for k in common_keys:
-      new_path = f"{path}/{k}" if path else k
+      new_path = f'{path}/{k}' if path else k
       s_val, t_val = intersect_trees(src[k], tgt_spec[k], new_path)
       filtered_src[k] = s_val
       filtered_tgt[k] = t_val
