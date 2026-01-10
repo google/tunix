@@ -19,13 +19,13 @@ batch_size=${batch_size:-8}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
-train_fraction=${train_fraction:-1.0} 
+train_fraction=${train_fraction:-1.0}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
 echo "  Num Batches: $num_batches"
 echo "  Num Epochs: $num_train_epochs"
-echo "  Warmup Ratio: $warmup_ratio" 
+echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
 
@@ -41,14 +41,14 @@ echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
-  reference_model_config.model_name="gemma-7b-it" \
-  reference_model_config.model_id="google/gemma/flax/7b-it" \
-  reference_model_config.model_source="kaggle" \
-  reference_model_config.model_download_path="/tmp/models/gemma-7b" \
-  reference_model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
-  reference_model_config.mesh.shape="(2,4)" \
-  reference_model_config.mesh.axis_names="('fsdp','tp')" \
-  reference_model_config.rng_seed=42 \
+  model_config.model_name="gemma-7b-it" \
+  model_config.model_id="google/gemma/flax/7b-it" \
+  model_config.model_source="kaggle" \
+  model_config.model_download_path="/tmp/models/gemma-7b" \
+  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
+  model_config.mesh.shape="(2,4)" \
+  model_config.mesh.axis_names="('fsdp','tp')" \
+  model_config.rng_seed=42 \
   actor_model_config.lora_config.rank=64 \
   actor_model_config.lora_config.alpha=64.0 \
   actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \

@@ -19,13 +19,13 @@ batch_size=${batch_size:-12}
 num_batches=${num_batches:-8192}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
-train_fraction=${train_fraction:-1.0} 
+train_fraction=${train_fraction:-1.0}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
 echo "  Num Batches: $num_batches"
 echo "  Num Epochs: $num_train_epochs"
-echo "  Warmup Ratio: $warmup_ratio" 
+echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
 max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
@@ -40,13 +40,13 @@ echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
-  reference_model_config.model_name="llama3.2-1b" \
-  reference_model_config.model_id="meta-llama/Llama-3.2-1B-Instruct" \
-  reference_model_config.model_source="huggingface" \
-  reference_model_config.intermediate_ckpt_dir="/tmp/tunix/experiments/grpo/llama3p2_1b_gsm8k" \
-  reference_model_config.mesh.shape="(4,1)" \
-  reference_model_config.mesh.axis_names="('fsdp','tp')" \
-  reference_model_config.rng_seed=42 \
+  model_config.model_name="llama3.2-1b" \
+  model_config.model_id="meta-llama/Llama-3.2-1B-Instruct" \
+  model_config.model_source="huggingface" \
+  model_config.intermediate_ckpt_dir="/tmp/tunix/experiments/grpo/llama3p2_1b_gsm8k" \
+  model_config.mesh.shape="(4,1)" \
+  model_config.mesh.axis_names="('fsdp','tp')" \
+  model_config.rng_seed=42 \
   actor_model_config.mesh.shape="(4,1)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   actor_model_config.lora_config={} \
