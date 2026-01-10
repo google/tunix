@@ -4,23 +4,19 @@ MAX_TARGET_LENGTH = 4096
 
 # FFT Parameters
 FFT_LEARNING_RATE = 2e-5
-FFT_NUM_EPOCHS = 2
+FFT_NUM_EPOCHS = 1
 FFT_BATCH_SIZE = 64
 FFT_GRADIENT_ACCUMULATION_STEPS = 5
 WARMUP_STEPS = 20
 
-# DO NOT CHANGE BELOW
+# SimPO Parameters
+SIMPO_LEARNING_RATE = 8e-7
+SIMPO_NUM_ROWS = 24000
+SIMPO_BATCH_SIZE = 32
+SIMPO_GRADIENT_ACCUMULATION_STEPS = 2
 
-# Use these standard output tags so that your model's output follow this format in plain text (no JSON/XML):
-# <reasoning>model_reasoning_trace</reasoning>
-# <answer>model_final_answer</answer>
-
-REASONING_START = "<reasoning>"
-REASONING_END = "</reasoning>"
-SOLUTION_START = "<answer>"
-SOLUTION_END = "</answer>"
-
-PROMPT_TEMPLATE = """You are a helpful reasoning assistant that always begins your response with <reasoning>, followed by a chain of thought that plans out your response, then </reasoning> and your actual response in <answer> </answer>. 
+# Prompt format for Simpo
+PROMPT_FORMAT = """You are a helpful reasoning assistant that always begins your response with <reasoning>, followed by a chain of thought that plans out your response, then </reasoning> and your actual response in <answer> </answer>. 
 For example:
 <reasoning>I need to measure exactly 2 liters of milk using a 5-liter container and a 9-liter container. I start with both containers empty, and I have a milk tank to fill from. The goal is to get 2 liters in one of the containers.
 
@@ -35,13 +31,47 @@ Here is the prompt you should respond to:
 {question}
 Begin your response with <reasoning>."""
 
-# WARNING: I HAVE MODIFIED THESE FOR MY MODEL (which thinks for 4096 tokens and should have a nonzero temp). IF I AM NOT ALLOWED TO PLEASE REVERT THEM.
+# Debugging Parameters (Set to None to disable)
+debugging_max_steps_fft = 21
+debugging_max_steps_simpo = 20
+
+# DO NOT CHANGE BELOW
+
+# Use these standard output tags so that your model's output follow this format in plain text (no JSON/XML):
+# <reasoning>model_reasoning_trace</reasoning>
+# <answer>model_final_answer</answer>
+
+REASONING_START = "<reasoning>"
+REASONING_END = "</reasoning>"
+SOLUTION_START = "<answer>"
+SOLUTION_END = "</answer>"
+
+# This prompt template includes the gemma2 2b it prompt format and BOS. Please do not double apply the prompt format and BOS! 
+# Also note that the single \ is intentional, due to a formatting issue with the dataset that baked it into the model. 
+PROMPT_TEMPLATE = """<bos><start_of_turn>user
+You are a helpful reasoning assistant that always begins your response with <reasoning>, followed by a chain of thought that plans out your response, then </reasoning> and your actual response in <answer> </answer>. 
+For example:
+<reasoning>I need to measure exactly 2 liters of milk using a 5-liter container and a 9-liter container. I start with both containers empty, and I have a milk tank to fill from. The goal is to get 2 liters in one of the containers.
+
+This is a classic water jug problem... (continued)</reasoning>
+<answer>Mr. Fat can measure exactly 2 liters of milk using the 5-liter and 9-liter containers with the following steps... (continued) ...are poured, leaving 2 liters in the 5-liter container).  
+
+After step 10, the 5-liter container holds exactly 2 liters of milk.
+
+\boxed{2}</answer>
+
+Here is the prompt you should respond to:
+{question}
+Begin your response with <reasoning>.<end_of_turn>
+<start_of_turn>model
+"""
+
 # Use these parameters for greedy decoding; used in competition evaluation
-INF_TEMPERATURE=0.6
-INF_TOP_K=20
-INF_TOP_P=0.95
+INF_TEMPERATURE=None
+INF_TOP_K=1
+INF_TOP_P=None
 SEED=42
-MAX_GENERATION_STEPS=4096
+MAX_GENERATION_STEPS=4096 # Changed to fit my model which reasons at 4096 ctx
 
 import os
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1" # This is required to fix a tqdm error
@@ -56,6 +86,7 @@ import numpy as np
 import optax
 from tqdm import tqdm
 import shutil
+import wandb
 import safetensors.numpy as safe_np
 from tunix.models.gemma import model as gemma_lib
 from tunix.models.gemma import params_safetensors as params_safetensors_lib
@@ -63,6 +94,9 @@ from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 import orbax.checkpoint as ocp
 import jax.numpy as jnp
+import gc
+import transformers
+from tunix.sft.dpo import dpo_trainer
 
 def create_fft_dataset(
     batch_size: int,
@@ -97,7 +131,7 @@ def create_fft_dataset(
     logging.info("Loading G-reen/instruct-set-longer-fixed (streaming)...")
     
     # This size is approximate for tqdm display
-    estimated_size = 110000 
+    estimated_size = 151000 
     steps_per_epoch = estimated_size // batch_size
     
     total_tokens = 0
@@ -128,6 +162,65 @@ def create_fft_dataset(
             )
     
     print(f"Total tokens trained on: {total_tokens:,}")
+
+def create_simpo_dataset(
+    batch_size: int,
+    tokenizer: Any,
+) -> Iterator[dpo_trainer.DataInput]:
+    """Creates a streaming iterator for SimPO training using the 'sumthink' dataset.
+
+    This function loads the 'G-reen/sumthink_fixed_cleaned' dataset in streaming mode,
+    which contains preference pairs (chosen/rejected) for alignment training.
+
+    It performs the following processing steps:
+    1. Shuffles the dataset with a buffer.
+    2. Wraps each prompt using the global `PROMPT_TEMPLATE` to enforce a specific reasoning format.
+    3. Applies the tokenizer's chat template to format the prompt for the model.
+    4. Yields batches of `dpo_trainer.DataInput` containing the processed prompts and responses.
+
+    Args:
+        batch_size: The number of samples per batch.
+        tokenizer: The tokenizer used to apply the chat template.
+
+    Yields:
+        dpo_trainer.DataInput: A dataclass containing:
+            - prompts: List of formatted prompt strings.
+            - chosen_responses: List of preferred response strings.
+            - rejected_responses: List of rejected response strings.
+    """
+    
+    logging.info("Loading G-reen/sumthink_fixed_cleaned (streaming)...")
+    ds = datasets.load_dataset(
+        "G-reen/sumthink_fixed_cleaned",
+        split="train",
+        streaming=True,
+    )
+    ds = ds.shuffle(seed=42, buffer_size=10000)
+    # Calculate steps (approximate since we are streaming)
+    total_steps = SIMPO_NUM_ROWS // batch_size
+    
+    batch_iterator = ds.iter(batch_size=batch_size, drop_last_batch=True)
+    
+    for i, batch in tqdm(enumerate(batch_iterator), total=total_steps, desc="SimPO Training Steps"):
+        # Apply wrapper
+        wrapped_prompts = [PROMPT_TEMPLATE.replace("{question}", p) for p in batch['prompt']]
+        
+        # Apply chat template
+        formatted_prompts = []
+        for p in wrapped_prompts:
+            messages = [{"role": "user", "content": p}]
+            # Ensure we get a string back, not tokens, since DataInput expects strings
+            formatted_p = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            formatted_prompts.append(formatted_p)
+            
+        chosen = batch['chosen']
+        rejected = batch['rejected']
+        
+        yield dpo_trainer.DataInput(
+            prompts=formatted_prompts,
+            chosen_responses=chosen,
+            rejected_responses=rejected,
+        )
 
 def save_model_as_safetensors(model: Any, local_model_path: str, output_dir: str):
     """Saves the JAX/Flax model in Hugging Face Safetensors format.
@@ -301,7 +394,7 @@ with mesh:
 nnx.display(model)
 
 # Calculate (estimated) total training steps for the learning rate scheduler.
-ESTIMATED_DATASET_SIZE = 110000
+ESTIMATED_DATASET_SIZE = 151000
 TOTAL_UPDATES = (ESTIMATED_DATASET_SIZE * FFT_NUM_EPOCHS // FFT_BATCH_SIZE) // FFT_GRADIENT_ACCUMULATION_STEPS
 
 # Setup the optimizer and scheduler.
@@ -322,8 +415,8 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 # Configure the training loop.
 training_config = peft_trainer.TrainingConfig(
     eval_every_n_steps=100,
-    max_steps=None,
-    checkpoint_root_directory="/tmp/checkpoints_fft",
+    max_steps=debugging_max_steps_fft,
+    checkpoint_root_directory=None, # Disable intermediate checkpoints to prevent freezing
     use_weighted_gradient_accumulation=True,
     gradient_accumulation_steps=FFT_GRADIENT_ACCUMULATION_STEPS,
     checkpointing_options=checkpointing_options,
@@ -348,32 +441,138 @@ with mesh:
 print("FFT Training complete!")
 
 # ==========================================
-# Model Export & Upload
+# Transition to SimPO
 # ==========================================
-# Upload the raw Orbax checkpoint to hf
-HF_REPO_ID_FFT_ORBAX = "G-reen/gemma-2-2b-fft-orbax"
-print(f"Pushing FFT Orbax checkpoint to {HF_REPO_ID_FFT_ORBAX}...")
-api = HfApi()
-create_repo(HF_REPO_ID_FFT_ORBAX, private=False, exist_ok=True)
-api.upload_folder(
-    folder_path="/tmp/checkpoints_fft",
-    repo_id=HF_REPO_ID_FFT_ORBAX,
-    commit_message="Upload FFT Orbax checkpoint",
-)
-print("Upload complete.")
-
-# Convert and save the model in Hugging Face Safetensors format for broader compatibility.
+# 1. Save the FFT model to a temporary location so we can reload it fresh.
 FFT_MODEL_DIR = "/tmp/fft_model"
 save_model_as_safetensors(trainer.model, local_model_path, FFT_MODEL_DIR)
-HF_REPO_ID_FFT_FINAL = "G-reen/gemma-2-2b-fft-2epoch"
 
-print(f"Pushing Final FFT model to {HF_REPO_ID_FFT_FINAL}...")
-api = HfApi()
-create_repo(HF_REPO_ID_FFT_FINAL, private=False, exist_ok=True)
-api.upload_folder(
-    folder_path=FFT_MODEL_DIR,
-    repo_id=HF_REPO_ID_FFT_FINAL,
-    commit_message="Upload Gemma-2-2B FFT 2 Epochs",
+# 2. Cleanup Memory & Storage
+print("Cleaning up FFT resources...")
+# Delete the trainer and model to free up JAX memory
+del trainer
+del model
+del optimizer
+del train_ds
+gc.collect()
+
+# Clear JAX caches if possible
+jax.clear_caches()
+
+# Explicitly clear any monitoring listeners (e.g. wandb) from the previous phase
+# This prevents "wandb: You must call wandb.init()" errors if JAX ops trigger callbacks
+try:
+    jax.monitoring.clear_event_listeners()
+except Exception:
+    pass
+
+# Delete the FFT checkpoints to save disk space (we only need the safetensors now)
+if os.path.exists("/tmp/checkpoints_fft"):
+    shutil.rmtree("/tmp/checkpoints_fft")
+print("FFT resources cleaned up.")
+
+# ==========================================
+# SimPO Alignment
+# ==========================================
+print("\n=== Starting SimPO Alignment ===")
+
+# Ensure wandb is initialized for SimPO phase to catch any early logs
+if wandb.run is None:
+    wandb.init(project="tunix", name="simpo_alignment", resume="allow")
+
+# Load Tokenizer
+print("Loading Tokenizer...")
+tokenizer = transformers.AutoTokenizer.from_pretrained(local_model_path)
+
+# Load Model from the FFT result
+print(f"Loading model from {FFT_MODEL_DIR}...")
+with mesh:
+    model = params_safetensors_lib.create_model_from_safe_tensors(
+        file_dir=FFT_MODEL_DIR,
+        config=model_config, # Re-use the config from earlier
+        mesh=mesh,
+        dtype=jnp.bfloat16,
+    )
+
+nnx.display(model)
+
+# SimPO Scheduler & Optimizer
+SIMPO_TOTAL_UPDATES = (SIMPO_NUM_ROWS // SIMPO_BATCH_SIZE) // SIMPO_GRADIENT_ACCUMULATION_STEPS
+simpo_warmup_steps = int(0.1 * SIMPO_TOTAL_UPDATES)
+
+simpo_schedule = optax.warmup_cosine_decay_schedule(
+    init_value=0.0,
+    peak_value=SIMPO_LEARNING_RATE,
+    warmup_steps=simpo_warmup_steps,
+    decay_steps=SIMPO_TOTAL_UPDATES,
+)
+optimizer = optax.adamw(learning_rate=simpo_schedule)
+
+# SimPO Config
+simpo_config = dpo_trainer.SimPOTrainingConfig(
+    algorithm="simpo",
+    beta=2.0, # Typical for SimPO
+    gamma=1.0, # Target reward margin
+    max_prompt_length=1536,
+    max_response_length=2560,
+    eval_every_n_steps=100,
+    max_steps=debugging_max_steps_simpo,
+    checkpoint_root_directory=None, # Disable intermediate checkpoints to prevent freezing
+    checkpointing_options=ocp.CheckpointManagerOptions(
+        max_to_keep=1,
+        save_interval_steps=10000,
+    ),
+    use_weighted_gradient_accumulation=False,
+    metrics_logging_options=metrics_logger.MetricsLoggerOptions(
+        log_dir="tensorboard_simpo",
+        flush_every_n_steps=10,
+    ),
 )
 
-print(f"Model pushed to: https://huggingface.co/{HF_REPO_ID_FFT_FINAL}")
+# Initialize SimPO Trainer
+# Note: SimPO is reference-free, so ref_model is None
+trainer = dpo_trainer.SimPOTrainer(
+    model=model,
+    ref_model=None, 
+    optimizer=optimizer,
+    training_config=simpo_config,
+    tokenizer=tokenizer,
+)
+
+simpo_ds = create_simpo_dataset(SIMPO_BATCH_SIZE, tokenizer)
+
+print("Starting SimPO training...")
+with mesh:
+    trainer.train(simpo_ds, None)
+    
+print("SimPO Training complete!")
+
+FINAL_SIMPO_DIR = "/tmp/final_simpo_model"
+save_model_as_safetensors(trainer.model, local_model_path, FINAL_SIMPO_DIR)
+
+# ==========================================
+# UPLOAD PHASE
+# ==========================================
+api = HfApi()
+
+# 1. Upload SimPO Orbax Checkpoint
+HF_REPO_ID_SIMPO_ORBAX = "G-reen/gemma-2-2b-simpo-orbax"
+print(f"Pushing SimPO Orbax checkpoint to {HF_REPO_ID_SIMPO_ORBAX}...")
+create_repo(HF_REPO_ID_SIMPO_ORBAX, private=False, exist_ok=True)
+api.upload_folder(
+    folder_path="/tmp/checkpoints_simpo",
+    repo_id=HF_REPO_ID_SIMPO_ORBAX,
+    commit_message="Upload SimPO Orbax checkpoint",
+)
+
+# 2. Upload Final SimPO Safetensors
+HF_REPO_ID_SIMPO_FINAL = "G-reen/gemma-2-2b-it-fft-simpo-tpu"
+print(f"Pushing Final SimPO model to {HF_REPO_ID_SIMPO_FINAL}...")
+create_repo(HF_REPO_ID_SIMPO_FINAL, private=False, exist_ok=True)
+api.upload_folder(
+    folder_path=FINAL_SIMPO_DIR,
+    repo_id=HF_REPO_ID_SIMPO_FINAL,
+    commit_message="Upload Gemma-2-2B FFT+SimPO Aligned",
+)
+
+print(f"Model pushed to: https://huggingface.co/{HF_REPO_ID_SIMPO_FINAL}")
