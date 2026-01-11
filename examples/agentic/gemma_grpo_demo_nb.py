@@ -63,7 +63,8 @@ with adhoc_context:
   from tunix.models.gemma import model as gemma_lib
   from tunix.sft import utils
   from tunix.utils import script_utils
-  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
+  from tunix.rl.agentic import AgenticGRPOConfig as GRPOConfig
+  from tunix.rl.agentic import AgenticGRPOLearner as GRPOLearner
   from flax import nnx
   from tunix.cli.utils import model as model_utils
 
