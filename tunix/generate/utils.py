@@ -94,6 +94,7 @@ def pad_to_length(
     pad_value: int = 0,
     left=False,
     axis: int = 0,
+    truncate: bool = False,
 ) -> np.ndarray:
   """Pads a numpy array to a specified target length along a given axis.
 
@@ -103,14 +104,30 @@ def pad_to_length(
       pad_value: The value to use for padding (default: 0).
       left: If True, add padding tokens to the left of the array.
       axis: The axis along which to pad (default: 0).
+      truncate: If True, truncate x if it's longer than target_length.
+        When left=True, keeps the last target_length elements (left truncation).
+        When left=False, keeps the first target_length elements (right truncation).
 
   Returns:
-      A new numpy array that is padded to the target length along the specified
-      axis. Returns original array if it is already longer than the target
-      length.
+      A new numpy array that is padded/truncated to the target length along
+      the specified axis. If truncate=False and x is longer than target_length,
+      returns x unchanged.
   """
   length = x.shape[axis]
   if length >= target_length:
+    if truncate:
+      # Truncate to target_length
+      if left:
+        # Keep the last target_length elements (for prompts, keep the end)
+        start_idx = length - target_length
+        indices = [slice(None)] * x.ndim
+        indices[axis] = slice(start_idx, None)
+        return x[tuple(indices)]
+      else:
+        # Keep the first target_length elements
+        indices = [slice(None)] * x.ndim
+        indices[axis] = slice(0, target_length)
+        return x[tuple(indices)]
     return x
 
   padding_shape = list(x.shape)
