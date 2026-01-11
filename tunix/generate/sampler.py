@@ -379,7 +379,7 @@ class Sampler(base_sampler.BaseSampler):
     logging.debug('Using sampling mode: %s', sampling_mode[0])
 
     return _SamplingState(
-        decoding_step=num_input_tokens - 1,
+        decoding_step=jnp.int32(num_input_tokens - 1),
         num_input_tokens=jnp.array(num_input_tokens, dtype=jnp.int32),
         token_buffer=token_buffer,
         positions=positions,
@@ -414,7 +414,8 @@ class Sampler(base_sampler.BaseSampler):
     """Samples a token from the logits."""
 
     logits = logits[:, -1][:, None, :]  # B, 1, V
-    decoding_step = sampler_state.decoding_step
+    # Ensure decoding_step is a JAX array for consistent tracing behavior
+    decoding_step = jnp.asarray(sampler_state.decoding_step, dtype=jnp.int32)
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
     logits_buffer = sampler_state.logits_buffer
@@ -588,7 +589,10 @@ class Sampler(base_sampler.BaseSampler):
   ) -> _SamplingState:
     """Performs a single sampling step."""
     batch_size = sampler_state.token_buffer.shape[0]
-    decoding_step = sampler_state.decoding_step
+    # Explicitly convert to JAX array to ensure consistent tracing behavior
+    # in while_loop, especially for batch_size=1. See:
+    # https://github.com/google/tunix/issues/809
+    decoding_step = jnp.asarray(sampler_state.decoding_step, dtype=jnp.int32)
 
     last_token = sampler_state.token_buffer[:, decoding_step]
     last_token = last_token.reshape((batch_size, 1))
