@@ -107,7 +107,7 @@ class ExpressionCalculatorToolManagerTest(absltest.TestCase):
         "calculator": expression_calculator_tool.ExpressionCalculatorTool
     }
     manager = tool_manager.ToolManager(tool_map)
-    
+
     result = manager.run("calculator", expression="3 + 4 * 5")
     self.assertIsNone(result.error)
     self.assertEqual(result.output, "23")
@@ -118,7 +118,7 @@ class ExpressionCalculatorToolManagerTest(absltest.TestCase):
         "calculator": expression_calculator_tool.ExpressionCalculatorTool
     }
     manager = tool_manager.ToolManager(tool_map)
-    
+
     schemas = manager.get_json_schema()
     self.assertLen(schemas, 1)
     self.assertEqual(schemas[0]["function"]["name"], "calculator")

@@ -38,6 +38,10 @@ Example usage:
   ```
 """
 
+from tunix.rl.agentic.tools import base_tool
+from tunix.rl.agentic.tools import calculator_tool
+from tunix.rl.agentic.tools import expression_calculator_tool
+from tunix.rl.agentic.tools import tool_manager
 from tunix.rl.agentic.tools.base_tool import BaseTool
 from tunix.rl.agentic.tools.base_tool import ToolCall
 from tunix.rl.agentic.tools.base_tool import ToolOutput
