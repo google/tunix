@@ -97,7 +97,6 @@ import jax.numpy as jnp
 import gc
 import transformers
 from tunix.sft.dpo import dpo_trainer
-import kagglehub
 
 def create_fft_dataset(
     batch_size: int,
@@ -643,6 +642,7 @@ with mesh:
 # ==========================================
 # UNRESTRICTED MODEL INFERENCE (KAGGLE)
 # ==========================================
+import kagglehub
 print("\n=== Starting Unrestricted Model Inference ===")
 
 # 1. Cleanup Memory from previous step
