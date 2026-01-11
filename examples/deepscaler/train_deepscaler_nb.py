@@ -42,7 +42,8 @@ with cm:
   from tunix.rl.agentic.parser.chat_template_parser import parser
   import jax
   import numpy as np
-  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
+  from tunix.rl.agentic import AgenticGRPOConfig as GRPOConfig
+  from tunix.rl.agentic import AgenticGRPOLearner as GRPOLearner
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import metrics_logger

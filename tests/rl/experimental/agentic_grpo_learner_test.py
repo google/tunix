@@ -12,9 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for agentic_grpo_learner."""
+"""Tests for agentic_grpo_learner.
+
+Note: This tests the deprecated experimental module. New tests should use
+tunix.rl.agentic instead. See tests/rl/agentic/agentic_grpo_learner_test.py
+"""
 
 import asyncio
+import warnings
+
+# Suppress expected deprecation warnings from the experimental module
+warnings.filterwarnings(
+    "ignore",
+    message=".*deprecated.*",
+    category=DeprecationWarning,
+    module="tunix.rl.experimental.agentic_grpo_learner",
+)
 import os
 import queue
 import random
