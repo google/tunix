@@ -32,8 +32,8 @@ Here is the prompt you should respond to:
 Begin your response with <reasoning>."""
 
 # Debugging Parameters (Set to None to disable)
-debugging_max_steps_fft = 21
-debugging_max_steps_simpo = 20
+debugging_max_steps_fft = None
+debugging_max_steps_simpo = None
 
 # DO NOT CHANGE BELOW
 
@@ -97,6 +97,7 @@ import jax.numpy as jnp
 import gc
 import transformers
 from tunix.sft.dpo import dpo_trainer
+import kagglehub
 
 def create_fft_dataset(
     batch_size: int,
@@ -162,65 +163,6 @@ def create_fft_dataset(
             )
     
     print(f"Total tokens trained on: {total_tokens:,}")
-
-def create_simpo_dataset(
-    batch_size: int,
-    tokenizer: Any,
-) -> Iterator[dpo_trainer.DataInput]:
-    """Creates a streaming iterator for SimPO training using the 'sumthink' dataset.
-
-    This function loads the 'G-reen/sumthink_fixed_cleaned' dataset in streaming mode,
-    which contains preference pairs (chosen/rejected) for alignment training.
-
-    It performs the following processing steps:
-    1. Shuffles the dataset with a buffer.
-    2. Wraps each prompt using the global `PROMPT_TEMPLATE` to enforce a specific reasoning format.
-    3. Applies the tokenizer's chat template to format the prompt for the model.
-    4. Yields batches of `dpo_trainer.DataInput` containing the processed prompts and responses.
-
-    Args:
-        batch_size: The number of samples per batch.
-        tokenizer: The tokenizer used to apply the chat template.
-
-    Yields:
-        dpo_trainer.DataInput: A dataclass containing:
-            - prompts: List of formatted prompt strings.
-            - chosen_responses: List of preferred response strings.
-            - rejected_responses: List of rejected response strings.
-    """
-    
-    logging.info("Loading G-reen/sumthink_fixed_cleaned (streaming)...")
-    ds = datasets.load_dataset(
-        "G-reen/sumthink_fixed_cleaned",
-        split="train",
-        streaming=True,
-    )
-    ds = ds.shuffle(seed=42, buffer_size=10000)
-    # Calculate steps (approximate since we are streaming)
-    total_steps = SIMPO_NUM_ROWS // batch_size
-    
-    batch_iterator = ds.iter(batch_size=batch_size, drop_last_batch=True)
-    
-    for i, batch in tqdm(enumerate(batch_iterator), total=total_steps, desc="SimPO Training Steps"):
-        # Apply wrapper
-        wrapped_prompts = [PROMPT_TEMPLATE.replace("{question}", p) for p in batch['prompt']]
-        
-        # Apply chat template
-        formatted_prompts = []
-        for p in wrapped_prompts:
-            messages = [{"role": "user", "content": p}]
-            # Ensure we get a string back, not tokens, since DataInput expects strings
-            formatted_p = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            formatted_prompts.append(formatted_p)
-            
-        chosen = batch['chosen']
-        rejected = batch['rejected']
-        
-        yield dpo_trainer.DataInput(
-            prompts=formatted_prompts,
-            chosen_responses=chosen,
-            rejected_responses=rejected,
-        )
 
 def save_model_as_safetensors(model: Any, local_model_path: str, output_dir: str):
     """Saves the JAX/Flax model in Hugging Face Safetensors format.
@@ -440,6 +382,8 @@ with mesh:
 
 print("FFT Training complete!")
 
+
+
 # ==========================================
 # Transition to SimPO
 # ==========================================
@@ -471,9 +415,70 @@ if os.path.exists("/tmp/checkpoints_fft"):
     shutil.rmtree("/tmp/checkpoints_fft")
 print("FFT resources cleaned up.")
 
+
+
 # ==========================================
 # SimPO Alignment
 # ==========================================
+def create_simpo_dataset(
+    batch_size: int,
+    tokenizer: Any,
+) -> Iterator[dpo_trainer.DataInput]:
+    """Creates a streaming iterator for SimPO training using the 'sumthink' dataset.
+
+    This function loads the 'G-reen/sumthink_fixed_cleaned' dataset in streaming mode,
+    which contains preference pairs (chosen/rejected) for alignment training.
+
+    It performs the following processing steps:
+    1. Shuffles the dataset with a buffer.
+    2. Wraps each prompt using the global `PROMPT_TEMPLATE` to enforce a specific reasoning format.
+    3. Applies the tokenizer's chat template to format the prompt for the model.
+    4. Yields batches of `dpo_trainer.DataInput` containing the processed prompts and responses.
+
+    Args:
+        batch_size: The number of samples per batch.
+        tokenizer: The tokenizer used to apply the chat template.
+
+    Yields:
+        dpo_trainer.DataInput: A dataclass containing:
+            - prompts: List of formatted prompt strings.
+            - chosen_responses: List of preferred response strings.
+            - rejected_responses: List of rejected response strings.
+    """
+    
+    logging.info("Loading G-reen/sumthink_fixed_cleaned (streaming)...")
+    ds = datasets.load_dataset(
+        "G-reen/sumthink_fixed_cleaned",
+        split="train",
+        streaming=True,
+    )
+    ds = ds.shuffle(seed=42, buffer_size=10000)
+    # Calculate steps (approximate since we are streaming)
+    total_steps = SIMPO_NUM_ROWS // batch_size
+    
+    batch_iterator = ds.iter(batch_size=batch_size, drop_last_batch=True)
+    
+    for i, batch in tqdm(enumerate(batch_iterator), total=total_steps, desc="SimPO Training Steps"):
+        # Apply wrapper
+        wrapped_prompts = [PROMPT_TEMPLATE.replace("{question}", p) for p in batch['prompt']]
+        
+        # Apply chat template
+        formatted_prompts = []
+        for p in wrapped_prompts:
+            messages = [{"role": "user", "content": p}]
+            # Ensure we get a string back, not tokens, since DataInput expects strings
+            formatted_p = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            formatted_prompts.append(formatted_p)
+            
+        chosen = batch['chosen']
+        rejected = batch['rejected']
+        
+        yield dpo_trainer.DataInput(
+            prompts=formatted_prompts,
+            chosen_responses=chosen,
+            rejected_responses=rejected,
+        )
+
 print("\n=== Starting SimPO Alignment ===")
 
 # Ensure wandb is initialized for SimPO phase to catch any early logs
@@ -550,22 +555,10 @@ print("SimPO Training complete!")
 FINAL_SIMPO_DIR = "/tmp/final_simpo_model"
 save_model_as_safetensors(trainer.model, local_model_path, FINAL_SIMPO_DIR)
 
-# ==========================================
-# UPLOAD PHASE
-# ==========================================
+# NOTE TO JUDGES: 
+# Since this notebook requires a tunix fork, it may be more stable to upload the model to HF, then eval in a seperate notebook with a standard tunix env that downloads the model from HF.
+"""
 api = HfApi()
-
-# 1. Upload SimPO Orbax Checkpoint
-HF_REPO_ID_SIMPO_ORBAX = "G-reen/gemma-2-2b-simpo-orbax"
-print(f"Pushing SimPO Orbax checkpoint to {HF_REPO_ID_SIMPO_ORBAX}...")
-create_repo(HF_REPO_ID_SIMPO_ORBAX, private=False, exist_ok=True)
-api.upload_folder(
-    folder_path="/tmp/checkpoints_simpo",
-    repo_id=HF_REPO_ID_SIMPO_ORBAX,
-    commit_message="Upload SimPO Orbax checkpoint",
-)
-
-# 2. Upload Final SimPO Safetensors
 HF_REPO_ID_SIMPO_FINAL = "G-reen/gemma-2-2b-it-fft-simpo-tpu"
 print(f"Pushing Final SimPO model to {HF_REPO_ID_SIMPO_FINAL}...")
 create_repo(HF_REPO_ID_SIMPO_FINAL, private=False, exist_ok=True)
@@ -576,3 +569,136 @@ api.upload_folder(
 )
 
 print(f"Model pushed to: https://huggingface.co/{HF_REPO_ID_SIMPO_FINAL}")
+"""
+
+# ==========================================
+# INFERENCE VERIFICATION
+# ==========================================
+# Cleanup SimPO Memory
+print("Cleaning up SimPO resources...")
+del trainer
+del model
+del optimizer
+del simpo_ds
+gc.collect()
+jax.clear_caches()
+try:
+    jax.monitoring.clear_event_listeners()
+except Exception:
+    pass
+print("SimPO resources cleaned up.")
+
+CKPT_DIR = '/tmp/final_simpo_model'
+
+from tunix.generate import sampler as sampler_lib
+
+print("\n=== Starting Inference Verification ===")
+
+print(f"Loading model from {CKPT_DIR}...")
+with mesh:
+    # Load model for inference
+    inference_model = params_safetensors_lib.create_model_from_safe_tensors(
+        file_dir=CKPT_DIR,
+        config=model_config,
+        mesh=mesh,
+        dtype=jnp.bfloat16,
+    )
+    
+    # Create Sampler
+    MAX_PROMPT_LENGTH = 1024 
+
+    sampler = sampler_lib.Sampler(
+        transformer=inference_model,
+        tokenizer=tokenizer,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=MAX_PROMPT_LENGTH + MAX_GENERATION_STEPS + 256,
+            num_layers=model_config.num_layers,
+            num_kv_heads=model_config.num_kv_heads,
+            head_dim=model_config.head_dim,
+        ),
+    )
+
+    # Prepare Prompt
+    inference_question = "Write a heartbreaking story about a dog."
+    # Create the prompt using the template, replacing {question}
+    prompt = PROMPT_TEMPLATE.replace("{question}", inference_question)
+
+    print(f"Prompting model with: '{inference_question}'")
+
+    # Run Inference
+    output = sampler(
+        input_strings=[prompt],
+        max_generation_steps=MAX_GENERATION_STEPS,
+        max_prompt_length=MAX_PROMPT_LENGTH,
+        temperature=INF_TEMPERATURE if INF_TEMPERATURE is not None else 0.0,
+        top_k=INF_TOP_K,
+        top_p=INF_TOP_P,
+        seed=SEED
+    )
+
+    print("\n=== Model Output ===")
+    print(output.text[0])
+    print("====================")
+
+# ==========================================
+# UNRESTRICTED MODEL INFERENCE (KAGGLE)
+# ==========================================
+print("\n=== Starting Unrestricted Model Inference ===")
+
+# 1. Cleanup Memory from previous step
+print("Cleaning up previous inference resources...")
+try:
+    del inference_model
+    del sampler
+except NameError:
+    pass
+gc.collect()
+jax.clear_caches()
+print("Resources cleaned up.")
+
+KAGGLE_MODEL_HANDLE = "green000/gemma-2-2b-it-fft-3epoch-simpo-adj"
+print(f"Downloading model {KAGGLE_MODEL_HANDLE} from Kaggle...")
+unrestricted_model_path = kagglehub.model_download(KAGGLE_MODEL_HANDLE)
+print(f"Model downloaded to: {unrestricted_model_path}")
+
+print("Loading unrestricted model...")
+with mesh:
+    # Load model
+    unrestricted_model = params_safetensors_lib.create_model_from_safe_tensors(
+        file_dir=unrestricted_model_path,
+        config=model_config, # Re-use global config
+        mesh=mesh,
+        dtype=jnp.bfloat16,
+    )
+    
+    # Create Sampler
+    unrestricted_sampler = sampler_lib.Sampler(
+        transformer=unrestricted_model,
+        tokenizer=tokenizer,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=MAX_PROMPT_LENGTH + MAX_GENERATION_STEPS + 256,
+            num_layers=model_config.num_layers,
+            num_kv_heads=model_config.num_kv_heads,
+            head_dim=model_config.head_dim,
+        ),
+    )
+
+    # Use same prompt as before
+    inference_question = "Write a heartbreaking story about a dog."
+    prompt = PROMPT_TEMPLATE.replace("{question}", inference_question)
+    print(f"Prompting unrestricted model with: '{inference_question}'")
+
+    # Run Inference
+    output = unrestricted_sampler(
+        input_strings=[prompt],
+        max_generation_steps=MAX_GENERATION_STEPS,
+        max_prompt_length=MAX_PROMPT_LENGTH,
+        temperature=INF_TEMPERATURE if INF_TEMPERATURE is not None else 0.0,
+        top_k=INF_TOP_K,
+        top_p=INF_TOP_P,
+        seed=SEED
+    )
+
+    print("\n=== Unrestricted Model Output ===")
+    print(output.text[0])
+    print("====================")
