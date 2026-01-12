@@ -1,4 +1,4 @@
-reference_model_config:
+model_config:
   model_name: "gemma2-2b-it"
   model_id: "google/gemma-2/flax/gemma2-2b-it"
   model_source: "kaggle"

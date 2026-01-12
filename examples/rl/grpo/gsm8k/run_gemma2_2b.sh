@@ -19,13 +19,13 @@ batch_size=${batch_size:-1}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
-train_fraction=${train_fraction:-1.0} 
+train_fraction=${train_fraction:-1.0}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
 echo "  Num Batches: $num_batches"
 echo "  Num Epochs: $num_train_epochs"
-echo "  Warmup Ratio: $warmup_ratio" 
+echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 
 max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
@@ -41,8 +41,8 @@ echo "Rounded warmup steps: $warmup_steps"
 python3 -m tunix.cli.grpo_main \
   tunix/cli/base_config.yaml \
   override_config_file=examples/rl/grpo/gsm8k/configs/gemma2_2b.yaml \
-  reference_model_config.model_download_path="/tmp/models/gemma2-2b" \
-  reference_model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
+  model_config.model_download_path="/tmp/models/gemma2-2b" \
+  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
   tokenizer_config.tokenizer_path="/tmp/models/gemma2-2b/models/google/gemma-2/flax/gemma2-2b-it/1/tokenizer.model" \
   batch_size=$batch_size \
   num_batches=$num_batches \
