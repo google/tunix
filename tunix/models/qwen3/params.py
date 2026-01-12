@@ -164,13 +164,4 @@ def save_lora_merged_model_as_safetensors(
       rank=rank,
       alpha=alpha,
       state_key_transform_fn=_qwen3_state_key_to_safetensors_key,
-      field_patterns=(
-          "q_proj",
-          "k_proj",
-          "v_proj",
-          "o_proj",
-          "gate_proj",
-          "up_proj",
-          "down_proj",
-      ),
   )
