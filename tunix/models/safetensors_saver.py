@@ -17,6 +17,7 @@
 import os
 import shutil
 from typing import Any, Callable
+from etils import epath
 from flax import nnx
 import jax.numpy as jnp
 import safetensors.numpy as safe_np
@@ -80,7 +81,14 @@ def save_lora_merged_model_as_safetensors(
     lora_layers = custom_layer_extractor_fn(lora_layers)
 
   # Load base model state
-  base_state = safe_np.load_file(local_model_path + '/model.safetensors')
+  files = list(epath.Path(local_model_path).expanduser().glob('*.safetensors'))
+
+  if not files:
+    raise ValueError(f'No safetensors found in {local_model_path}')
+
+  base_state = {}
+  for f in files:
+    base_state.update(safe_np.load_file(f))
 
   # Apply LoRA deltas
   for path, (lora_a, lora_b) in lora_layers.items():
