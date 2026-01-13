@@ -25,5 +25,8 @@ echo "Installing JAX for GPU..."
 # explicitly (e.g., jax[cuda12]) if this default does not match your driver.
 pip install jax[gpu]
 
+echo "Installing gcsfs..."
+pip install gcsfs
+
 echo "=== GPU Setup Complete ==="
 echo "To activate this environment in the future, run: source .venv/bin/activate"

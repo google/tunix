@@ -20,5 +20,8 @@ echo "Installing Tunix with TPU dependencies (prod)..."
 # The [prod] extra includes specific versions of JAX for TPU
 pip install -e .[prod]
 
+echo "Installing gcsfs..."
+pip install gcsfs
+
 echo "=== TPU Setup Complete ==="
 echo "To activate this environment in the future, run: source .venv/bin/activate"
