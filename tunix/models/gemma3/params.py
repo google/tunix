@@ -28,11 +28,9 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
+import sentencepiece as spm
 from tunix.models import safetensors_saver
 from tunix.models.gemma3 import model as model_lib
-
-import sentencepiece as spm
-
 
 # Pretrained
 GEMMA3_270M_PT = 'gs://gemma-data/checkpoints/gemma3-270m-pt'
@@ -188,6 +186,17 @@ def _gemma3_state_key_to_safetensors_key(lora_name: str) -> str:
   )
 
 
+_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES = {
+    'q_proj': (1, 0),
+    'k_proj': (1, 0),
+    'v_proj': (1, 0),
+    'o_proj': (1, 0),
+    'up_proj': (1, 0),
+    'down_proj': (1, 0),
+    'gate_proj': (1, 0),
+}
+
+
 def save_lora_merged_model_as_safetensors(
     local_model_path: str,
     output_dir: str,
@@ -212,4 +221,5 @@ def save_lora_merged_model_as_safetensors(
       alpha=alpha,
       state_key_transform_fn=_gemma3_state_key_to_safetensors_key,
       custom_layer_extractor_fn=_extract_gemma3_lora_layers,
+      transpose_rules=_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES,
   )
