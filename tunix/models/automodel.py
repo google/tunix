@@ -206,7 +206,9 @@ def create_gemma_model_from_params(
   # TODO(b/451662153): have gemma2 version handling done better in naming.py
   naming_info = naming.ModelNaming(model_name=model_name)
   version = naming_info.model_version
-  if naming_info.model_family == 'gemma2':
+  if naming_info.model_family == 'gemma1p1':
+    version = f'1.1-{version}'
+  elif naming_info.model_family == 'gemma2':
     version = f'2-{version}'
   model = model_module_lib.Gemma.from_params(model_params, version=version)
   return model, model_params

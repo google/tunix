@@ -192,6 +192,11 @@ class AutoModelTest(parameterized.TestCase):
           model_name="gemma-2-2b-it",
           expected_version="2-2b_it",
       ),
+      dict(
+          testcase_name="gemma1.1-2b-it",
+          model_name="gemma1.1-2b-it",
+          expected_version="1.1-2b_it",
+      ),
   )
   @mock.patch.object(automodel, "get_model_module", autospec=True)
   def test_create_gemma_model_from_params(

@@ -830,7 +830,9 @@ class Gemma(nnx.Module):
   @classmethod
   def from_params(cls, params: params_lib.Params, version: str) -> 'Gemma':
 
-    if version.startswith('2-'):
+    if version.startswith('1.1-'):
+      config_id = version.replace('1.1-', 'gemma1p1_')
+    elif version.startswith('2-'):
       config_id = version.replace('2-', 'gemma2_')
     else:
       config_id = 'gemma_' + version
