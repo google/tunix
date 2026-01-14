@@ -14,6 +14,7 @@
 
 """Math utils for evaluating on Math Dataset like Math500 and AIME2024."""
 import re
+from absl import logging
 from pylatexenc import latex2text
 import sympy
 from sympy.parsing import sympy_parser
@@ -343,7 +344,7 @@ def count_unknown_letters_in_expr(expr: str):
 
 
 def should_allow_eval(expr: str):
-  # we don't want to try parsing unknown text or functions of more than two variables
+  # Avoid parsing unknown text or functions of more than two variables.
   if count_unknown_letters_in_expr(expr) > 2:
     return False
 
@@ -374,6 +375,7 @@ def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
 
 def split_tuple(expr: str):
   """Split the elements in a tuple/interval, while handling well-formatted commas in large numbers"""
+
   expr = _strip_properly_formatted_commas(expr)
   if len(expr) == 0:
     return []
@@ -423,7 +425,7 @@ def remove_boxed(s):
     assert s[: len(left)] == left
     assert s[-1] == "}"
     return s[len(left) : -1]
-  except Exception:
+  except AssertionError:
     return None
 
 
@@ -431,11 +433,13 @@ def extract_boxed_answer(solution: str):
   """Extract the answer from inside a LaTeX \\boxed{} command"""
   solution = last_boxed_only_string(solution)
   solution = remove_boxed(solution)
-  print(f"{solution=} in extracted_boxed_answer")
+  logging.vlog(4, f"{solution=} in extracted_boxed_answer")
   return solution
 
 
 def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:
+  """Grades a given answer against a ground truth using sympy for evaluation.
+  """
   ground_truth_normalized = _normalize(ground_truth)
   given_normalized = _normalize(given_answer)
 
