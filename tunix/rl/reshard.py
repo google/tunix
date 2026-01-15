@@ -354,7 +354,7 @@ def _get_reshard_fn_pathwaysutils(
       if use_experimental_pre_reshard:
         try:
           # This will raise an ImportError if the API is not available.
-          pw_jax.jaxlib_pathways._split_by_mesh_axis  # pylint: disable=protected-access
+          pw_jax.split_by_mesh_axis
         except ImportError:
           logging.debug(
               'split_by_mesh_axis is not available until JAX 0.8.0. Skipping'
