@@ -17,6 +17,7 @@
 import os
 import shutil
 from typing import Any, Callable
+
 from flax import nnx
 import jax.numpy as jnp
 import safetensors.numpy as safe_np
@@ -36,6 +37,7 @@ def save_lora_merged_model_as_safetensors(
     custom_layer_extractor_fn: (
         Callable[[dict[str, list[Any]]], dict[str, list[Any]]] | None
     ) = None,
+    transpose_rules: dict[str, tuple[int, ...]] | None = None,
 ):
   """Saves a model with LoRA weights merged in safetensors format.
 
@@ -103,7 +105,13 @@ def save_lora_merged_model_as_safetensors(
 
     # Compute and apply LoRA delta
     combined_lora = (lora_a_val @ lora_b_val) * (alpha / rank)
-    base_state[state_key] += combined_lora.T.astype(base_state[state_key].dtype)
+    if transpose_rules:
+      for t_key, rule in transpose_rules.items():
+        if t_key in state_key:
+          combined_lora = combined_lora.transpose(rule)
+          break
+
+    base_state[state_key] += combined_lora.astype(base_state[state_key].dtype)
 
   # Save merged model
   safetensors_path = os.path.join(output_dir, 'model.safetensors')
