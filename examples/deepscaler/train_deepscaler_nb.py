@@ -121,8 +121,8 @@ MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 256 # 2048
-TOTAL_GENERATION_STEPS = 512 # 8192
+MAX_PROMPT_LENGTH = 512 # 2048
+TOTAL_GENERATION_STEPS = 1024 # 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -147,7 +147,9 @@ EPSILON = 0.2
 # ====== Training ======
 BATCH_SIZE = 32
 MINI_BATCH_SIZE = 32
+# agentic hardcoded to 1
 # ROLLOUT_MICRO_BATCH_SIZE = 8
+# agentic hardcoded to 1
 # LOGPS_MICRO_BATCH_SIZE = 8
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
@@ -414,13 +416,16 @@ if MAX_GRAD_NORM is not None:
 # Training config
 if ROLLOUT_ENGINE == "sglang_jax":
   rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:2].reshape(1, 2), ('fsdp', 'tp'))
+  trainer_mesh = jax.sharding.Mesh(np.array(jax.devices())[4:].reshape(2, 2), ('fsdp', 'tp'))
 else:
   rollout_mesh = mesh
+  trainer_mesh = mesh
 print("Rollout mesh: ", rollout_mesh)
+print("Trainer mesh: ", trainer_mesh)
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.REFERENCE: mesh,
+        rl_cluster_lib.Role.ACTOR: trainer_mesh,
+        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
@@ -434,8 +439,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -446,23 +451,23 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
         # sglang-jax specific configs
-        # rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        # rollout_sglang_jax_mem_fraction_static=0.2,
-        # rollout_sglang_jax_init_with_random_weights=True,
-        # rollout_sglang_jax_disable_radix_cache=True,
-        # rollout_sglang_jax_enable_deterministic_sampling=False,
-        # rollout_sglang_jax_precompile_bs_paddings=[1, 2],
-        # rollout_sglang_jax_precompile_token_paddings=[2048, 4096, 8192],
-        # rollout_sglang_jax_chunked_prefill_size=2048,
-        # rollout_sglang_jax_page_size=64,
+        rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        rollout_sglang_jax_mem_fraction_static=0.2,
+        rollout_sglang_jax_init_with_random_weights=True,
+        rollout_sglang_jax_disable_radix_cache=True,
+        rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_precompile_bs_paddings=[1, 2],
+        rollout_sglang_jax_precompile_token_paddings=[2048, 4096, 8192],
+        rollout_sglang_jax_chunked_prefill_size=2048,
+        rollout_sglang_jax_page_size=64,
         # vllm-tpu specific configs
-        rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        rollout_vllm_hbm_utilization=0.2,
-        rollout_vllm_tpu_backend_type="jax",
-        rollout_vllm_server_mode=True,
-        rollout_vllm_async_scheduling=True,
-        tensor_parallel_size=4,
-        data_parallel_size=2,
+        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_vllm_hbm_utilization=0.2,
+        # rollout_vllm_tpu_backend_type="jax",
+        # rollout_vllm_server_mode=True,
+        # rollout_vllm_async_scheduling=True,
+        # tensor_parallel_size=4,
+        # data_parallel_size=2,
     ),
 )
 
@@ -472,7 +477,7 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=8,
+    max_concurrency=1,
 )
 
 # %%

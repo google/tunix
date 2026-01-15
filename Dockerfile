@@ -36,10 +36,11 @@ RUN pip install --upgrade wandb
 # Set a directory to clone sglang-jax into
 WORKDIR /usr/src
 # Clone the repository using HTTPS
-RUN git clone https://github.com/sgl-project/sglang-jax.git
+RUN rm -rf sglang-jax && git clone https://github.com/sgl-project/sglang-jax.git 
+WORKDIR /usr/src
 # Install the package in editable mode
 # The -e flag means the installation links to the source code in /usr/src/sglang-jax
-RUN cd sglang-jax/python && pip install --no-cache-dir -e .
+RUN cd sglang-jax/python && pip install --force-reinstall --no-cache-dir  .
 
 
 # Set the working directory
