@@ -116,6 +116,7 @@ class PerfMetricsExport:
 
     (
         ok,
+        global_step_index,
         global_step_group,
         rollout_spans,
         refer_inference_spans,
@@ -147,6 +148,9 @@ class PerfMetricsExport:
     actor_train_time: list[float] = [
         group.duration for group in actor_train_groups
     ]
+    logging.info(f"global step [{global_step_index}]")
+    for i, time in enumerate(actor_train_time):
+      logging.info(f"actor train time [{i}] = {time}")
     actor_train_step_time: list[float] = [
         span.duration for span in actor_train_step_spans
     ]
@@ -175,6 +179,7 @@ class PerfMetricsExport:
 
     (
         ok,
+        global_step_index,
         global_step_group,
         rollout_spans,
         refer_inference_spans,
@@ -207,6 +212,9 @@ class PerfMetricsExport:
     actor_train_time: list[float] = [
         group.duration for group in actor_train_groups
     ]
+    logging.info(f"global step [{global_step_index}]")
+    for i, time in enumerate(actor_train_time):
+      logging.info(f"actor train time [{i}] = {time}")
     actor_train_step_time: list[float] = [
         span.duration for span in actor_train_step_spans
     ]
@@ -249,6 +257,7 @@ class PerfMetricsExport:
 
     (
         ok,
+        global_step_index,
         global_step_group,
         rollout_spans,
         refer_inference_spans,
@@ -284,6 +293,9 @@ class PerfMetricsExport:
     actor_train_time: list[float] = [
         group.duration for group in actor_train_groups
     ]
+    logging.info(f"global step [{global_step_index}]")
+    for i, time in enumerate(actor_train_time):
+      logging.info(f"actor train time [{i}] = {time}")
     actor_train_step_time: list[float] = [
         span.duration for span in actor_train_step_spans
     ]
@@ -323,7 +335,7 @@ class PerfMetricsExport:
   def _grpo_extract_spans_and_groups(
       role_to_devices: dict[str, list[str]], query: PerfSpanQuery
   ) -> tuple[
-      bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
+      bool, int, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
   ]:
     """Extracts spans and span groups of the last global step for GRPO workflow."""
 
@@ -332,9 +344,10 @@ class PerfMetricsExport:
     )
     if not global_steps:
       logging.warning("global_step is None")
-      return (False, SpanGroup(""), [], [], [], [])
+      return (False, 0, SpanGroup(""), [], [], [], [])
 
     global_step_group: SpanGroup = global_steps[0]
+    global_step_index: int = len(query().main().all_groups("global_step").get())
 
     micro_batch: PerfSpanQuery = (
         query()
@@ -349,7 +362,7 @@ class PerfMetricsExport:
 
     if not rollout_groups or not refer_groups or not actor_groups:
       logging.warning("rollout_group or refer_group or actor_group is None")
-      return (False, SpanGroup(""), [], [], [], [])
+      return (False, 0, SpanGroup(""), [], [], [], [])
 
     rollout_span: list[Span] = []
     refer_inference_span: list[Span] = []
@@ -372,6 +385,7 @@ class PerfMetricsExport:
 
     return (
         True,
+        global_step_index,
         global_step_group,
         rollout_span,
         refer_inference_span,
