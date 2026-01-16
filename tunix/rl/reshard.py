@@ -280,28 +280,28 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
     # No pre-resharding is needed.
     return src_pytree
 
-  to_split_axis = None
-  for axis_name in intermediate_mesh.axis_names:
-    if axis_name.endswith(INTERMEDIATE_REPLICA_SUFFIX):
-      to_split_axis = axis_name
-      break
-  assert (
-      to_split_axis is not None
-  ), f'No replica axis found in the intermediate mesh {intermediate_mesh}.'
+  for _intermediate_mesh in to_split_src_pytree_leaves.keys():
+    to_split_axis = None
+    for axis_name in _intermediate_mesh.axis_names:
+      if axis_name.endswith(INTERMEDIATE_REPLICA_SUFFIX):
+        to_split_axis = axis_name
+        break
+    assert (
+        to_split_axis is not None
+    ), f'No replica axis found in the intermediate mesh {_intermediate_mesh}.'
 
-  for key in to_split_src_pytree_leaves.keys():
     temp_source = jax.jit(
         _identity,
-        out_shardings=to_split_intermediate_sharding_leaves[key],
-    )(to_split_src_pytree_leaves[key])
+        out_shardings=to_split_intermediate_sharding_leaves[_intermediate_mesh],
+    )(to_split_src_pytree_leaves[_intermediate_mesh])
 
-  # Update the to_split_src_pytree_leaves with the new splitted array.
+    # Update the to_split_src_pytree_leaves with the new splitted array.
     updated_to_split_src_pytree_leaves, *_ = splitfn(temp_source, to_split_axis)
 
-    for i in range(len(to_split_src_pytree_leaves_indexes[key])):
-      to_update_src_pytree_leaves[to_split_src_pytree_leaves_indexes[key][i]] = (
-          updated_to_split_src_pytree_leaves[i]
-      )
+    for i in range(len(to_split_src_pytree_leaves_indexes[_intermediate_mesh])):
+      to_update_src_pytree_leaves[
+          to_split_src_pytree_leaves_indexes[_intermediate_mesh][i]
+      ] = updated_to_split_src_pytree_leaves[i]
 
   updated_src_pytree = jax.tree_util.tree_unflatten(
       src_treedef, to_update_src_pytree_leaves
