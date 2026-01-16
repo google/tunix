@@ -52,6 +52,7 @@ from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from tunix.sft import sharding_utils
 from tunix.sft import utils as sft_utils
+from tunix.utils import log_utils
 
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
@@ -614,9 +615,17 @@ class RLCluster:
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
+
+    non_jax_metrics: dict[str, list[str | int]] = collections.defaultdict(list)
     for metric_name, (value, op) in metrics_buffer.metrics.items():
+      # jax.monitoring does not support string values.
+      # Tunix defaults to absl.logging for strings. If there is external metrics
+      # logger supporting strings, we can log it there.
+      # Currently, only support metrics without custom ops.
       if isinstance(value[0], str):
-        continue  # jax.monitoring does not support string values.
+        non_jax_metrics[metric_name] = value
+        logging.info("Logging non-jax metric: %s, %s", metric_name, value)
+        continue
 
       agg_value = np.array(value)
       if op is not None:
@@ -628,8 +637,39 @@ class RLCluster:
           metrics_buffer.mode,
           metrics_buffer.global_steps,
       )
+
+    non_jax_metrics["global_steps"] = [metrics_buffer.global_steps]
+    if non_jax_metrics:
+      self._log_trajectory_data(non_jax_metrics)
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
+
+  def _log_trajectory_data(
+      self, non_jax_metrics: dict[str, list[str | int]]
+  ) -> None:
+    """Log non jax metrics."""
+
+    for prompt, completion, trajectory_id in zip(
+        non_jax_metrics["prompts"],
+        non_jax_metrics["completions"],
+        non_jax_metrics["trajectory_ids"],
+    ):
+      if prompt is None or completion is None or trajectory_id is None:
+        continue
+      log_path = (
+          self.cluster_config.training_config.metrics_logging_options.log_dir
+          if self.cluster_config.training_config.metrics_logging_options
+          else None
+      )
+      log_utils.log_item(
+          log_path,
+          log_utils.TrajectoryData(
+              prompt=prompt,
+              completion=completion,
+              trajectory_id=trajectory_id,
+              global_step=non_jax_metrics["global_steps"][0],
+          ),
+      )
 
   def with_external_metrics_logger(
       self, external_metrics_logger: Callable[[MetricsBuffer], None]
