@@ -48,6 +48,10 @@ class PPOConfig(algo_config_lib.AlgorithmConfig):
   """Configuration for PPO learner.
 
   Attributes:
+    algo_variant: The algorithm variant to use. Default: `ppo`.
+    advantage_estimator: The advantage estimator to use. Default: `gae`.
+    policy_loss_fn: The policy loss function to use. Default: `ppo`.
+    reward_manager: The reward manager to use. Default: `sequence-level`.
     num_iterations: The number of optimization epochs per batch of rollouts.
       This corresponds to the number of times the policy updates its weights for
       a given batch of rollouts.
@@ -75,6 +79,7 @@ class PPOConfig(algo_config_lib.AlgorithmConfig):
   algo_variant: str = "ppo"
   advantage_estimator: str = "gae"
   policy_loss_fn: str = "ppo"
+  reward_manager: str = "sequence-level"
   num_iterations: int = 1
 
   # PPO loss and advantage computation configs.
