@@ -194,16 +194,11 @@ GENERATION_CONFIGS = {
 
 
 # %%
-# ------------------------------------------------------------------------------
-# Section 2: Utility Functions
-# ------------------------------------------------------------------------------
-# %%
 # Check initial memory usage
 show_hbm_usage()
-
 # %%
 # ------------------------------------------------------------------------------
-# Section 3: Data Preprocessing
+# Section 2: Data Preprocessing
 # ------------------------------------------------------------------------------
 # Data preprocessing
 #
@@ -272,7 +267,7 @@ for ele in train_dataset[:1]:
 
 # %%
 # ------------------------------------------------------------------------------
-# Section 4: Model Loading
+# Section 3: Model Loading
 # ------------------------------------------------------------------------------
 # Load policy model and reference model
 #
@@ -356,7 +351,7 @@ nnx.display(lora_gemma)
 show_hbm_usage()
 # %%
 # ------------------------------------------------------------------------------
-# Section 5: Reward Functions
+# Section 4: Reward Functions
 # ------------------------------------------------------------------------------
 # This section defines the reward functions used to score the model's generated
 # responses. First, we define a RegEx to check if the output format is correct.
@@ -492,7 +487,7 @@ def check_numbers(prompts, completions, answer, **kargs):
 
 # %%
 # ------------------------------------------------------------------------------
-# Section 6: Training Setup
+# Section 5: Training Setup
 # ------------------------------------------------------------------------------
 # Configure the trainer, optimizer, and other components for the GRPO run.
 
@@ -612,7 +607,7 @@ grpo_trainer = GRPOLearner(
 
 # %%
 # ------------------------------------------------------------------------------
-# Section 7: Execute Training
+# Section 6: Execute Training
 # ------------------------------------------------------------------------------
 with script_utils.profile_and_capture_log(
     'gemma_benchmark', enable_profile=DO_MEM_PROFILING
