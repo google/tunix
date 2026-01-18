@@ -28,9 +28,10 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
-import sentencepiece as spm
 from tunix.models import safetensors_saver
 from tunix.models.gemma3 import model as model_lib
+
+import sentencepiece as spm
 
 # Pretrained
 GEMMA3_270M_PT = 'gs://gemma-data/checkpoints/gemma3-270m-pt'
@@ -126,25 +127,107 @@ def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
   for key_path, value in flax.traverse_util.flatten_dict(params).items():
     module_path, param_name = key_path
     module_path = module_path.split('/')[1:]  # Remove the leading 'transformer'
-    if module_path[0] == 'siglip_encoder':
-      continue  # We don't support MM input yet.
-    if module_path[0] == 'embedder':
-      if len(module_path) > 1 and module_path[1].startswith('mm_'):
-        continue  # We don't support MM input yet.
-    if module_path[0] in ('embedder', 'final_norm'):
-      new_params[(module_path[0], param_name)] = value
+
+    # Handle Vision Encoder (SigLIP)
+    # Handle Vision Encoder (SigLIP)
+    if 'siglip_encoder' in module_path:
+      # Normalize to 'vision_encoder/siglip_encoder/...'
+      # GDM params might be 'transformer/vision_encoder/siglip_encoder/...' or 'transformer/siglip_encoder/...'
+      # We start mapping from inside 'siglip_encoder'.
+      try:
+        start_idx = module_path.index('siglip_encoder') + 1
+      except ValueError:
+        continue
+
+      relative_path = list(module_path[start_idx:])
+      if not relative_path:
+        continue
+
+      # Global renames
+      if relative_path[0] == 'Transformer':
+        relative_path[0] = 'transformer'
+
+      # Iterative replacements for flexible depth
+      final_relative_path = []
+      for p in relative_path:
+        if p.startswith('encoderblock_'):
+          final_relative_path.append('blocks')
+          final_relative_path.append(int(p.split('_')[1]))
+        elif p == 'LayerNorm_0':
+          final_relative_path.append('ln1')
+        elif p == 'LayerNorm_1':
+          final_relative_path.append('ln2')
+        elif p.startswith('MultiHeadDotProductAttention'):
+          final_relative_path.append('attn')
+        elif p.startswith('MlpBlock'):
+          final_relative_path.append('mlp')
+        elif p == 'Dense_0':
+          final_relative_path.append('fc1')
+        elif p == 'Dense_1':
+          final_relative_path.append('fc2')
+        elif p == 'query':
+          final_relative_path.append('query_proj')
+        elif p == 'key':
+          final_relative_path.append('key_proj')
+        elif p == 'value':
+          final_relative_path.append('value_proj')
+        elif p == 'out':
+          final_relative_path.append('out_proj')
+        else:
+          final_relative_path.append(p)
+
+      new_params[
+          tuple(
+              ['vision_encoder', 'siglip_encoder']
+              + final_relative_path
+              + [param_name]
+          )
+      ] = value
       continue
+
+    # Existing Logic for Text Model
+    if module_path[0] == 'embedder':
+      # Remove skip for MM
+      # if len(module_path) > 1 and module_path[1].startswith('mm_'):
+      #   continue  # We don't support MM input yet.
+
+      # Just map everything in embedder 1:1, as Tunix Embedder matches naming for mm_ parts too?
+      # Tunix Embedder (model.py):
+      # self.input_embedding
+      # self.mm_soft_embedding_norm (RMSNorm) -> scale
+      # self.mm_input_projection (Einsum) -> w
+
+      # Upstream:
+      # embedder/input_embedding
+      # embedder/mm_soft_embedding_norm/scale
+      # embedder/mm_input_projection/w
+
+      # It seems Tunix Embedder matches exactly structure-wise if we just copy attributes.
+      # input_embedding is skipped here and handled uniquely? No, earlier code says:
+      # if module_path[0] in ('embedder', 'final_norm'):
+      #   new_params[(module_path[0], param_name)] = value
+      #   continue
+      pass  # Will be handled by next if block
+
+    if module_path[0] in ('embedder', 'final_norm'):
+      new_params[(module_path[0], *module_path[1:], param_name)] = value
+      continue
+
     # module_path should now look like ('layer_0', 'attn', '_key_norm')
-    layer_idx = ('layers', int(module_path[0].removeprefix('layer_')))
-    if module_path[1:] == ['mlp', 'gating_einsum']:
-      new_params[(*layer_idx, 'mlp', 'gate_proj', 'kernel')] = value[0].T
-      new_params[(*layer_idx, 'mlp', 'up_proj', 'kernel')] = value[1].T
-    elif module_path[1:] == ['mlp', 'linear']:
-      new_params[(*layer_idx, 'mlp', 'down_proj', 'kernel')] = value
-    elif module_path[1:] == ['post_attention_norm'] and model_type != 'gemma3':
-      new_params[(*layer_idx, 'post_attn_norm', 'scale')] = value
-    else:
-      new_params[(*layer_idx, *module_path[1:], param_name)] = value
+    # Text model layers
+    if module_path[0].startswith('layer_'):
+      layer_idx = ('layers', int(module_path[0].removeprefix('layer_')))
+      if module_path[1:] == ['mlp', 'gating_einsum']:
+        new_params[(*layer_idx, 'mlp', 'gate_proj', 'kernel')] = value[0].T
+        new_params[(*layer_idx, 'mlp', 'up_proj', 'kernel')] = value[1].T
+      elif module_path[1:] == ['mlp', 'linear']:
+        new_params[(*layer_idx, 'mlp', 'down_proj', 'kernel')] = value
+      elif (
+          module_path[1:] == ['post_attention_norm'] and model_type != 'gemma3'
+      ):
+        new_params[(*layer_idx, 'post_attn_norm', 'scale')] = value
+      else:
+        new_params[(*layer_idx, *module_path[1:], param_name)] = value
   return flax.traverse_util.unflatten_dict(new_params)
 
 
