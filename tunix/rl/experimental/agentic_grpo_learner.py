@@ -166,13 +166,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
-    logging.info(
-        "algo_config.policy_loss_fn: %s", self.algo_config.policy_loss_fn
-    )
-    logging.info("type(policy_loss_fn): %s", type(policy_loss_fn))
-
-    # Log the string representation of the callable
-    logging.info("repr(policy_loss_fn): %r", policy_loss_fn)
     loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
         model,
         train_example,
@@ -201,7 +194,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       results: List[Any],
       training_input: TrainingInputT,
       mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
-      step: int | None = None,
+      expected_step: int | None = None,
   ) -> List[TrainExample]:
     """Processes generation results, computes rewards and advantages.
 
@@ -219,7 +212,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       results: A list of trajectory results for a single GRPO group.
       training_input: The merged training input for the group.
       mode: The current mode (TRAIN or EVAL).
-      step: The current training step.
+      expected_step: The expected training step.
 
     Returns:
       A list of `TrainExample` instances containing all data needed for the
@@ -325,7 +318,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completions=completion_texts,
         mode=mode,
         **reward_kwargs,
-        step=step,
+        expected_step=expected_step,
     )
 
     advantage_estimator = function_registry.get_advantage_estimator(
@@ -355,7 +348,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             ),
         },
         mode=mode,
-        step=step,
+        step=expected_step,
     )
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
@@ -370,7 +363,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           },
       )
       self.rl_cluster.buffer_metrics_async(
-          user_defined_metric, mode=mode, step=step
+          user_defined_metric, mode=mode, step=expected_step
       )
 
     logging.debug("Advantages computed: %s", advantages)

@@ -17,47 +17,77 @@
 
 This module provides utility functions to parse and handle model names and
 convert them to internal model naming structures.
-
-model_id:
-The full model name identifier, as it appears on huggingface, including the
-parent directory. E.g., meta-llama/Llama-3.1-8B or Qwen/Qwen2.5-0.5B . This
-model ID is case sensitive and should match exactly with HF. This is the path
-that would be used to download the model from HF.
-
-model_name:
-The unique full name identifier of the model. This should be the full name and
-should match exactly with the model name used in Hugging Face. e.g.,
-"gemma-2b","llama-3.1-8b", "qwen2.5-0.5b". The model name is all lowercase and
-typically formatted as <model-family>-<model-version>.
-
-model_family:
-The overall model family, e.g., "gemma", "gemma2", or "qwen2.5". Internally, we
-use the standardized version of the model family, removing unnecessary '-',
-e.g., "gemma-2" would be standardized to "gemma2", replacing '-' with '_',  and
-replacing '.' with 'p',  e.g., "qwen2.5" would be standardized to "qwen2p5".
-
-model_version:
-The specific version of this model family. This would be the second portion of
-the model name. It usually includes the size information, but also can have
-other information, e.g., "it" representing instruction tuned. Internally, the
-model version is standardized by lowercasing, replacing '-' with '_',  and
-replacing '.' with 'p'. e.g., "2b-it" would be standardized to "2b_it".
-
-model_config_category:
-The model config category is the python class name of the ModelConfig class.
-e.g.,both gemma and gemma2 models  have the category "gemma" with the
-ModelConfig class being defined under gemma/model.py."
-
-model_config_id:
-The model config ID is the standardized version of the model family and model
-version. It is used as the ID of the ModelConfig class. e.g., "gemma_2b_it" or
-"qwen2p5_0p5b".
 """
-# TODO(b/451662153): add README on naming conventions and update naming
-# descriptions in //third_party/py/tunix/cli/base_config.yaml.
+
 
 import dataclasses
 import immutabledict
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelNaming:
+  """Model naming information.
+
+  Attributes:
+    model_id: The full model name identifier (case sensitive), as it appears on
+      Huggingface, or Kaggle, including the parent directory. E.g.,
+      "meta-llama/Llama-3.1-8B" or "google/gemma-2/flax/gemma2-2b-it".
+    model_name: The unique full name identifier of the model. This should be the
+      full name and should match exactly with the model name used in Hugging
+      Face. e.g., "gemma-2b","llama-3.1-8b" or Kaggle, e.g., "gemma2-2b-it". The
+      model name is all lowercase and typically formatted as
+      <model-family>-<model-version>.
+    model_family: The standardized model family, e.g., "gemma", "gemma2", or
+      "qwen2p5". The model is standerdardized by removing unnecessary '-', e.g.,
+      "gemma-2" --> "gemma2", replacing '-' with '_',  and replacing '.' with
+      'p',  e.g., "qwen2.5" would be standardized to "qwen2p5".
+    model_version: The standardized version of this model family. This would be
+      the second portion of the model name. It includes additional information
+      such as size, whether it is instruction tuned ("it'), etc. The model
+      version is standardized by lowercasing, replacing '-' with '_', and
+      replacing '.' with 'p'. e.g., "2b-it" would be standardized to "2b_it".
+    model_config_category: The model config category is the python class name of
+      the ModelConfig class. e.g., both gemma and gemma2 models have the
+      category "gemma" with the ModelConfig class being defined under
+      gemma/model.py.
+    model_config_id: The standardized config id composed of the model family and
+      model version, used in the ModelConfig class. e.g., "gemma_2b_it" or
+      "qwen2p5_0p5b".
+  """
+
+  model_id: str | None = None
+  model_name: str | None = None
+  model_family: str = dataclasses.field(init=False)
+  model_version: str = dataclasses.field(init=False)
+  model_config_category: str = dataclasses.field(init=False)
+  model_config_id: str = dataclasses.field(init=False)
+
+  def __post_init__(self):
+    if self.model_id:
+      # We infer model_name from model_id.
+      model_name = get_model_name_from_model_id(self.model_id)
+      if self.model_name and self.model_name != model_name:
+        raise ValueError(
+            'model_name set in ModelNaming and one inferred from model_id do'
+            f' not match. model_name: {self.model_name} and model_id:'
+            f' {self.model_id}, model_name inferred from model_id:'
+            f' {model_name}.'
+        )
+    else:
+      # If no model_id is provided, we use the model_name.
+      model_name = self.model_name
+    if not model_name:
+      raise ValueError('Either model_name or model_id must be provided.')
+    object.__setattr__(self, 'model_name', model_name)
+
+    family, version = get_model_family_and_version(model_name)
+    object.__setattr__(self, 'model_family', family)
+    object.__setattr__(self, 'model_version', version)
+
+    object.__setattr__(
+        self, 'model_config_category', get_model_config_category(model_name)
+    )
+    object.__setattr__(self, 'model_config_id', get_model_config_id(model_name))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,6 +213,10 @@ def get_model_name_from_model_id(model_id: str) -> str:
   """
   if '/' in model_id:
     model_name = model_id.split('/')[-1].lower()
+    if not model_name:
+      raise ValueError(
+          f'Invalid model ID format: {model_id!r}. Model name cannot be empty.'
+      )
     if model_name.startswith('meta-llama-'):
       return model_name.replace('meta-llama-', 'llama-', 1)
     return model_name

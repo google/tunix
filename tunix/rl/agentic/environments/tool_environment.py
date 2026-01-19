@@ -32,16 +32,7 @@ from tunix.rl.agentic.tools import base_tool
 from tunix.rl.agentic.tools import tool_manager
 
 
-BaseTaskEnv = base_environment.BaseTaskEnv
-EnvStepResult = base_environment.EnvStepResult
-BaseTool = base_tool.BaseTool
-ToolManager = tool_manager.ToolManager
-ToolCall = base_tool.ToolCall
-Action = agent_types.Action
-dummy_reward = reward.dummy_reward
-
-
-class ToolEnvironment(BaseTaskEnv):
+class ToolEnvironment(base_environment.BaseTaskEnv):
   """Reinforcement learning environment for tool-based agent interactions.
 
   This environment enables agents to execute external tools and receive
@@ -59,7 +50,7 @@ class ToolEnvironment(BaseTaskEnv):
       self,
       task: Dict[str, Any] | None = None,
       *,
-      tool_map: Dict[str, type[BaseTool]],
+      tool_map: Dict[str, type[base_tool.BaseTool]],
       reward_fn=None,
       max_steps: int = 10,
       **kwargs,
@@ -81,7 +72,7 @@ class ToolEnvironment(BaseTaskEnv):
     """
     if reward_fn is None:
       logging.warning("No reward_fn provided, defaulting to dummy_reward().")
-      reward_fn = dummy_reward
+      reward_fn = reward.dummy_reward
 
     # Let BaseTaskEnv handle task, reward_fn, step_count, and max_steps.
     super().__init__(
@@ -92,7 +83,7 @@ class ToolEnvironment(BaseTaskEnv):
     )
 
     # Tool execution system for managing available tools and their invocation.
-    self.tool_manager = ToolManager(tool_map)
+    self.tool_manager = tool_manager.ToolManager(tool_map)
 
   def _initial_observation(self) -> Dict[str, Any]:
     """Reset the environment to initial state for a new episode.
@@ -106,7 +97,7 @@ class ToolEnvironment(BaseTaskEnv):
     """
     return self.task
 
-  def _step_impl(self, action: Any) -> EnvStepResult:
+  def _step_impl(self, action: Any) -> base_environment.EnvStepResult:
     """Execute one logical step of tool interaction based on agent's action.
 
     Processes the agent's action which can be a string response (indicating
@@ -121,7 +112,7 @@ class ToolEnvironment(BaseTaskEnv):
     Returns:
       EnvStepResult: The outcome of this logical step.
     """
-    if isinstance(action, Action):
+    if isinstance(action, agent_types.Action):
       action = action.action
 
     # Handle None action as empty action list.
@@ -146,7 +137,7 @@ class ToolEnvironment(BaseTaskEnv):
     if done:
       llm_answer = self._extract_llm_answer(action)
       r_out = self.reward_fn(task=self.task, action=llm_answer)
-      return EnvStepResult(
+      return base_environment.EnvStepResult(
           observation={},
           reward=r_out.reward,
           done=True,
@@ -156,7 +147,7 @@ class ToolEnvironment(BaseTaskEnv):
     # Handle continuing episode: execute tools and return intermediate results.
     tool_outputs = self._execute_tool_calls(action)
     obs = {"tool_outputs": tool_outputs}
-    return EnvStepResult(
+    return base_environment.EnvStepResult(
         observation=obs,
         reward=0.0,
         done=False,
@@ -211,7 +202,7 @@ class ToolEnvironment(BaseTaskEnv):
       call_id = tc.get("id") or str(uuid.uuid4())
 
       # Create ToolCall object and attach ID for result tracking.
-      call_obj = ToolCall(name=name, arguments=args)
+      call_obj = base_tool.ToolCall(name=name, arguments=args)
       setattr(call_obj, "id", call_id)
       call_objs.append(call_obj)
 

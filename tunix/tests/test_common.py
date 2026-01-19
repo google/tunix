@@ -41,6 +41,7 @@ def _convert_to_nparray(arr):
     return np.asarray(arr)
   return arr
 
+
 def assert_equal(path, x, y):
   np.testing.assert_array_equal(
       _convert_to_nparray(x),

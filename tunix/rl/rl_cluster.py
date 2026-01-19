@@ -615,12 +615,38 @@ class RLCluster:
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
     for metric_name, (value, op) in metrics_buffer.metrics.items():
-      if isinstance(value[0], str):
-        continue  # jax.monitoring does not support string values.
+      # Convert to numpy array immediately.
+      # This handles nested lists, mixed types, and JAX arrays automatically.
+      try:
+        agg_value = np.array(value)
+      except Exception:
+        logging.warning(
+            "Skipping metric %s: Could not convert to numpy array.", metric_name
+        )
+        continue
 
-      agg_value = np.array(value)
+      if agg_value.dtype.kind in {"U", "S"}:
+        logging.info(
+            "Skipping logging metric %s (dtype: %s)",
+            metric_name,
+            agg_value.dtype,
+        )
+        continue
+
+      if agg_value.dtype.kind == "O":
+        # Try to infer if it contains strings by checking the first flattened element
+        if agg_value.size > 0 and isinstance(
+            agg_value.ravel()[0], (str, np.str_)
+        ):
+          logging.info("Skipping logging object metric %s", metric_name)
+          continue
+
+      # Apply aggregation and Log
       if op is not None:
-        agg_value = op(agg_value)
+        # Ensure op doesn't crash on empty arrays
+        if agg_value.size > 0:
+          agg_value = op(agg_value)
+
       self._rl_metrics_logger.log(
           "global",
           metric_name,
@@ -628,6 +654,7 @@ class RLCluster:
           metrics_buffer.mode,
           metrics_buffer.global_steps,
       )
+
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
 
@@ -708,17 +735,6 @@ class RLCluster:
       if step != buffered_metrics[-1].global_steps:
         buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
 
-    # Global steps are incremented, log the previous metrics.
-    if self._buffered_train_metrics[0].global_steps < self.global_steps:
-      for m in [self._buffered_train_metrics.pop(0)]:
-        self._log_metrics(m)
-    if (
-        self._buffered_eval_metrics
-        and self._buffered_eval_metrics[0].global_steps < self.global_steps
-    ):
-      for m in [self._buffered_eval_metrics.pop(0)]:
-        self._log_metrics(m)
-
     cur_metrics = buffered_metrics[-1]
     for metric_name, (value, op) in metrics.items():
       if metric_name not in cur_metrics.metrics:
@@ -728,6 +744,20 @@ class RLCluster:
         )
       else:
         cur_metrics.metrics[metric_name][0].append(value)
+
+    # Global steps are incremented, log the previous metrics.
+    if (
+        self._buffered_train_metrics
+        and self._buffered_train_metrics[0].global_steps < self.global_steps
+    ):
+      for m in [self._buffered_train_metrics.pop(0)]:
+        self._log_metrics(m)
+    if (
+        self._buffered_eval_metrics
+        and self._buffered_eval_metrics[0].global_steps < self.global_steps
+    ):
+      for m in [self._buffered_eval_metrics.pop(0)]:
+        self._log_metrics(m)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self.cluster_config.role_to_mesh[

@@ -22,6 +22,7 @@ import jax
 import qwix
 from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.models import automodel
+from tunix.models import naming
 from tunix.rl import reshard
 
 _DEFAULT_TOKENIZER_PATH = 'meta-llama/Llama-3.1-8B'
@@ -106,7 +107,6 @@ def create_model(
           - tokenizer_path: The determined path to the tokenizer model.
   """
   tokenizer_path: str = tokenizer_config['tokenizer_path']
-  model_name = model_config['model_name']
   model_source_str = model_config['model_source']
 
   # Create Model
@@ -129,11 +129,17 @@ def create_model(
   )
 
   # Handle Tokenizer Path overrides
-  if model_name.startswith('gemma3') and model_source_str == 'gcs':
+  model_family = naming.ModelNaming(
+      model_name=model_config['model_name']
+  ).model_family
+  if model_family == 'gemma3' and model_source_str == 'gcs':
     # Use the provided tokenizer path, unless it is the default from base_config
     if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
       tokenizer_path = 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
-  elif model_name.startswith('gemma') and model_source_str == 'kaggle':
+  elif (
+      model_family in ('gemma', 'gemma1p1', 'gemma2')
+      and model_source_str == 'kaggle'
+  ):
     # Use the provided tokenizer path, unless it is the default from base_config
     if not tokenizer_path or tokenizer_path == _DEFAULT_TOKENIZER_PATH:
       tokenizer_path = os.path.join(model_path, 'tokenizer.model')

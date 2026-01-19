@@ -28,7 +28,6 @@ from typing import Any, Optional
 
 abstractmethod = abc.abstractmethod
 dataclass = dataclasses.dataclass
-ABC = abc.ABC
 
 
 @dataclass
@@ -90,7 +89,7 @@ class ToolOutput:
     return str(self.output)
 
 
-class BaseTool(ABC):
+class BaseTool(abc.ABC):
   """Abstract base class defining the interface for all agent tools.
 
   Tools are reusable components that extend agent capabilities by providing

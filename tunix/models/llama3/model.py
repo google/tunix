@@ -110,6 +110,10 @@ class ModelConfig:
         weight_tying=True,
     )
 
+  @classmethod
+  def llama3p2_1b_instruct(cls):
+    return cls.llama3p2_1b()
+
   # Llama3.2 3B
   @classmethod
   def llama3p2_3b(cls):
@@ -125,6 +129,10 @@ class ModelConfig:
         rope_theta=500_000,  # ← from rope_theta
         weight_tying=True,
     )
+
+  @classmethod
+  def llama3p2_3b_instruct(cls):
+    return cls.llama3p2_3b()
 
   @classmethod
   def llama3p1_8b(cls):

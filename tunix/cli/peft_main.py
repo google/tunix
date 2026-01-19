@@ -16,6 +16,8 @@
 from collections.abc import Callable
 from typing import Any
 from absl import app
+from absl import flags
+from absl import logging
 from flax import nnx
 import jax
 from tunix.cli import config
@@ -23,6 +25,10 @@ from tunix.cli.utils import model as model_lib
 from tunix.examples.data import translation_dataset as data_lib
 from tunix.sft import peft_trainer
 from tunix.sft import utils
+
+_PATHWAYS_BNS = flags.DEFINE_string(
+    "pathways_bns", None, "BNS address of the Pathways server."
+)
 
 
 class PeftPipeline(config.HyperParameters):
@@ -81,8 +87,22 @@ class PeftPipeline(config.HyperParameters):
       trainer.train(train_ds, eval_ds)
 
 
+def _setup_jax_pathways(pathways_bns: str):
+  """Sets up Jax with Pathways."""
+  flags.FLAGS.pathways_ifrt = True
+  jax.config.update("jax_xla_backend", "pathways")
+  jax.config.update("jax_backend_target", pathways_bns)
+
+
 def main(argv, **kwargs):
+  if _PATHWAYS_BNS.value:
+    _setup_jax_pathways(_PATHWAYS_BNS.value)
   pipeline = PeftPipeline(argv, **kwargs)
+  logging.info(
+      "--- Launching PEFT pipeline with following config ---\n"
+      "%r\n--------------------------",
+      pipeline.config,
+  )
   pipeline.run_peft_trainer()
 
 

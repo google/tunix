@@ -13,23 +13,22 @@
 # limitations under the License.
 
 
+
 set -x # Enable xtrace
 
+batch_size=${batch_size:-16}
+max_steps=${max_steps:-10}
+
+echo "Using parameters:"
+echo "  Batch Size: $batch_size"
+echo "  Max Steps: $max_steps"
+
 python3 -m tunix.cli.peft_main \
-  base_config.yaml \
-  model_config.model_name="gemma2-2b-it" \
-  model_config.model_id="google/gemma-2/flax/gemma2-2b-it" \
-  model_config.model_source="kaggle" \
+  tunix/cli/base_config.yaml \
+  override_config_file=examples/sft/mtnt/configs/gemma2_2b.yaml \
   model_config.model_download_path="/tmp/models/gemma-2b" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/" \
-  model_config.mesh.shape="(2,2)" \
-  model_config.mesh.axis_names="('fsdp','tp')" \
   tokenizer_config.tokenizer_path="/tmp/models/gemma-2b/models/google/gemma-2/flax/gemma2-2b-it/1/tokenizer.model" \
-  tokenizer_config.tokenizer_type="sentencepiece" \
-  dataset_name="mtnt/en-fr" \
-  optimizer_config.opt_type="adamw" \
-  optimizer_config.learning_rate=1e-5 \
-  training_config.eval_every_n_steps=2 \
-  training_config.max_steps=10 \
-  training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full" \
-  training_config.metrics_logging_options.flush_every_n_steps=2 \
+  batch_size=$batch_size \
+  training_config.max_steps=$max_steps \
+  training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full"

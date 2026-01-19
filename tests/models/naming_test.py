@@ -241,11 +241,27 @@ _TEST_MODEL_INFOS = (
         category='llama3',
     ),
     ModelTestInfo(
+        id='meta-llama/Llama-3.2-1B-Instruct',
+        name='llama-3.2-1b-instruct',
+        family='llama3p2',
+        version='1b_instruct',
+        config_id='llama3p2_1b_instruct',
+        category='llama3',
+    ),
+    ModelTestInfo(
         id='meta-llama/Llama-3.2-3B',
         name='llama-3.2-3b',
         family='llama3p2',
         version='3b',
         config_id='llama3p2_3b',
+        category='llama3',
+    ),
+    ModelTestInfo(
+        id='meta-llama/Llama-3.2-3B-Instruct',
+        name='llama-3.2-3b-instruct',
+        family='llama3p2',
+        version='3b_instruct',
+        config_id='llama3p2_3b_instruct',
         category='llama3',
     ),
     ModelTestInfo(
@@ -487,6 +503,12 @@ class TestNaming(parameterized.TestCase):
         'gemma2-2b-it',
     )
 
+  def test_get_model_name_from_model_id_empty_model_name(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Invalid model ID format: .*. Model name cannot be empty.'
+    ):
+      naming.get_model_name_from_model_id('google/')
+
   @parameterized.named_parameters(_get_test_cases_for_model_id_exists())
   def test_model_id_exists_on_huggingface(self, model_id: str):
     if env_utils.is_internal_env():
@@ -539,6 +561,46 @@ class TestNaming(parameterized.TestCase):
     self.assertEqual(
         naming.get_model_config_category(model_name), expected_category
     )
+
+  def test_model_naming_auto_population(self):
+    model_id = 'meta-llama/Llama-3.1-8B'
+    naming_info = naming.ModelNaming(model_id=model_id)
+    self.assertEqual(naming_info.model_id, model_id)
+    self.assertEqual(naming_info.model_name, 'llama-3.1-8b')
+    self.assertEqual(naming_info.model_family, 'llama3p1')
+    self.assertEqual(naming_info.model_version, '8b')
+    self.assertEqual(naming_info.model_config_category, 'llama3')
+    self.assertEqual(naming_info.model_config_id, 'llama3p1_8b')
+
+  def test_model_naming_no_model_id(self):
+    model_name = 'gemma-2b'
+    naming_info = naming.ModelNaming(model_name=model_name)
+    self.assertIsNone(naming_info.model_id)
+    self.assertEqual(naming_info.model_name, 'gemma-2b')
+    self.assertEqual(naming_info.model_family, 'gemma')
+    self.assertEqual(naming_info.model_version, '2b')
+    self.assertEqual(naming_info.model_config_category, 'gemma')
+    self.assertEqual(naming_info.model_config_id, 'gemma_2b')
+
+  def test_model_naming_missing_args(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Either model_name or model_id must be provided'
+    ):
+      naming.ModelNaming()
+
+  def test_model_naming_invalid_model_name(self):
+    with self.assertRaisesRegex(
+        ValueError, 'Could not determine model family for: invalid-model'
+    ):
+      naming.ModelNaming(model_name='invalid-model')
+
+  def test_model_naming_mismatch(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'model_name set in ModelNaming and one inferred from model_id do not'
+        ' match',
+    ):
+      naming.ModelNaming(model_name='gemma-7b', model_id='google/gemma-2b')
 
 
 if __name__ == '__main__':

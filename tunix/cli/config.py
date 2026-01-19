@@ -23,6 +23,7 @@ import pathlib
 import shutil
 import stat
 from typing import Any, Dict, Iterator, Sequence
+
 from absl import logging
 import dotenv
 import jax
@@ -54,6 +55,7 @@ def string_to_bool(s: str) -> bool:
   if s.lower() == "false":
     return False
   raise ValueError(f"Can't convert {s} to bool")
+
 
 _yaml_types_to_parser = {
     str: str,
@@ -138,6 +140,7 @@ class HyperParameters:
       base_config_file = argv[1]
     raw_data_from_yaml = self._load_config_from_yaml(base_config_file)
     self._validate_env_variable(raw_data_from_yaml)
+    base_model_config = raw_data_from_yaml.get("model_config", {})
 
     config_file_override = None
     cli_overrides = []
@@ -174,6 +177,20 @@ class HyperParameters:
         keys_from_env_and_command_line,
     )
     self.config = raw_keys
+    # Inherit missing keys from model_config to actor_model_config, etc.
+    # Also update keys that were not explicitly overridden
+    current_model_config = self.config.get("model_config", {})
+    for config_key in [
+        "actor_model_config",
+        "reference_model_config",
+        "rollout_model_config",
+    ]:
+      if config_key in self.config:
+        for k, v in current_model_config.items():
+          if k not in self.config[config_key] or self.config[config_key][
+              k
+          ] == base_model_config.get(k):
+            self.config[config_key][k] = v
     self._validate_tokenizer()
     self._validate_model_source(raw_keys)
     self.check_supported_workflow()
@@ -231,9 +248,7 @@ class HyperParameters:
           shutil.rmtree(item_path)
           logging.info("  Removed directory: %s", item_path)
       except (OSError, shutil.Error):
-        logging.warning(
-            "  Failed to delete %s.", item_path, exc_info=True
-        )
+        logging.warning("  Failed to delete %s.", item_path, exc_info=True)
     logging.info("Finished clearing '%r'.", model_download_path)
 
   def _validate_model_source(self, raw_keys: collections.OrderedDict[str, Any]):
@@ -272,14 +287,14 @@ class HyperParameters:
     supported_sources["gemma2"] = ["kaggle", "internal"]
     supported_sources["gemma3"] = ["gcs", "internal"]
 
-    if model_name.startswith("gemma3"):
+    if model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
       expected_sources = supported_sources["gemma3"]
       if model_source not in expected_sources:
         raise ValueError(
             f"Model '{model_name}' must use source(s) {expected_sources}, but"
             f" got '{model_source}'."
         )
-    elif model_name.startswith("gemma2"):
+    elif model_name.startswith("gemma2") or model_name.startswith("gemma-2"):
       expected_sources = supported_sources["gemma2"]
       if model_source not in expected_sources:
         raise ValueError(
@@ -462,9 +477,12 @@ class HyperParameters:
     opt_kwargs = self._extract_kwargs(
         opt_func, optimizer_config, config_path_info, learning_rate_val
     )
+    # Wrap the optimizer function with inject_hyperparams so that
+    # the learning rate can be tracked and logged during training.
+    injected_opt_func = optax.inject_hyperparams(opt_func)
     # Call the optimizer function with the extracted kwargs
     try:
-      return opt_func(**opt_kwargs)
+      return injected_opt_func(**opt_kwargs)
     except TypeError as e:
       raise TypeError(
           f"Error calling {opt_type} with arguments {opt_kwargs}. "
@@ -825,6 +843,7 @@ class HyperParameters:
 
       loaded_module = module
       if self.config["verl_compatible"]:
+
         def reward_fn(prompts, completions, reward_model, **kwargs):
           del prompts, kwargs
           ground_truths = reward_model["ground_truth"]

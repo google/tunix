@@ -44,10 +44,12 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
   """Configuration for GRPO algorithms.
 
   Attributes:
-    algo_variant: The core algorithm variant to use.
-    advantage_estimator: The advantage estimator to use.
-    policy_loss_fn: The policy loss function to use.
-    loss_agg_mode: The aggregation mode for the loss function.
+    algo_variant: The algorithm variant to use. Default: `grpo`.
+    advantage_estimator: The advantage estimator to use. Default: `grpo`.
+    policy_loss_fn: The policy loss function to use. Default: `grpo`.
+    loss_agg_mode: The aggregation mode for the loss function. Default:
+      `sequence-mean-token-mean`.
+    reward_manager: The reward manager to use. Default: `sequence-level`.
     loss_algo: The loss algorithm to use. To be deprecated.
     num_generations: The number of times the policy generates multiple responses
       for a given prompt within a single training step. This corresponds to 'G'
@@ -64,15 +66,16 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
       normalized instead of per-response normalized as mentioned in the paper.
       For GSPO, we use gspo-token loss which is more flexible.
 
-    References:
-      - GRPO: https://arxiv.org/abs/2402.03300
-      - GSPO: https://arxiv.org/abs/2507.18071
+  References:
+    - GRPO: https://arxiv.org/abs/2402.03300
+    - GSPO: https://arxiv.org/abs/2507.18071
   """
 
   algo_variant: str = "grpo"
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "sequence-mean-token-mean"
+  reward_manager: str = "sequence-level"
   loss_algo: (
       str
   ) = (  # grpo or gspo-token # TODO(sizhi): Remove this option once gspo is
@@ -112,8 +115,6 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
   using a reward model, and then calculating a relative advantage based on the
   group's performance to update the policy.
 
-  References:
-    - https://arxiv.org/abs/2402.03300
   """
 
   def __init__(

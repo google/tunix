@@ -48,7 +48,9 @@ class ModelSource(enum.Enum):
 
 def get_model_module(model_name: str, module_type: ModelModule) -> Any:
   """Dynamically imports a model module (e.g., 'model' or 'params')."""
-  model_config_category = naming.get_model_config_category(model_name)
+  model_config_category = naming.ModelNaming(
+      model_name=model_name
+  ).model_config_category
   module_path = (
       f'{_BASE_MODULE_PATH}.{model_config_category}.{module_type.value}'
   )
@@ -85,7 +87,8 @@ def call_model_config(model_name: str) -> Any:
       object.
       TypeError: If the attribute found on the target object is not callable.
   """
-  config_id = naming.get_model_config_id(model_name)
+  naming_info = naming.ModelNaming(model_name=model_name)
+  config_id = naming_info.model_config_id
   model_lib_module = get_model_module(model_name, ModelModule.MODEL)
   target_obj = model_lib_module.ModelConfig
 
@@ -200,9 +203,12 @@ def create_gemma_model_from_params(
   params_lib = get_model_module(model_name, ModelModule.PARAMS)
   model_params = params_lib.load_and_format_params(params_path)
   model_module_lib = get_model_module(model_name, ModelModule.MODEL)
-  family, version = naming.get_model_family_and_version(model_name)
   # TODO(b/451662153): have gemma2 version handling done better in naming.py
-  if family == 'gemma2':
+  naming_info = naming.ModelNaming(model_name=model_name)
+  version = naming_info.model_version
+  if naming_info.model_family == 'gemma1p1':
+    version = f'1.1-{version}'
+  elif naming_info.model_family == 'gemma2':
     version = f'2-{version}'
   model = model_module_lib.Gemma.from_params(model_params, version=version)
   return model, model_params
@@ -292,7 +298,8 @@ def create_model_from_safe_tensors(
       ImportError: If the required model module cannot be found.
       AttributeError: If create_model_from_safe_tensors is not in the module.
   """
-  if model_name.startswith('gemma'):
+  naming_info = naming.ModelNaming(model_name=model_name)
+  if naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2', 'gemma3'):
     params_module = get_model_module(model_name, ModelModule.PARAMS_SAFETENSORS)
   else:
     params_module = get_model_module(model_name, ModelModule.PARAMS)
@@ -360,7 +367,7 @@ class AutoModel:
 
     model: nnx.Module = None
     model_params: Any = None
-    model_name = naming.get_model_name_from_model_id(model_id)
+    naming_info = naming.ModelNaming(model_id=model_id)
 
     # Download the model
     if model_source in (ModelSource.INTERNAL, ModelSource.GCS):
@@ -377,17 +384,19 @@ class AutoModel:
     )
 
     # Case 1: Special handling cases for Gemma models
-    if model_name.startswith(('gemma3', 'gemma-3')):
+    if naming_info.model_family == 'gemma3':
       if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         model, model_params = create_gemma3_model_from_checkpoint(
-            ckpt_path=resolved_model_path, model_name=model_name, mesh=mesh
+            ckpt_path=resolved_model_path,
+            model_name=naming_info.model_name,
+            mesh=mesh,
         )
       else:
         raise NotImplementedError(
             'Gemma 3 models are only supported from GCS or INTERNAL.'
             f' Specified model source: {model_source}'
         )
-    elif model_name.startswith('gemma'):
+    elif naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2'):
       if model_source == ModelSource.KAGGLE:
         # Download model from Kaggle requires NNX conversion and can takes long.
         # It is recommended to save the NNX converted model for later runs.
@@ -399,7 +408,7 @@ class AutoModel:
         intermediate_ckpt_dir = kwargs.get('intermediate_ckpt_dir')
         rng_seed = kwargs.get('rng_seed', 0)
         model, model_params = create_gemma_model_with_nnx_conversion(
-            model_name=model_name,
+            model_name=naming_info.model_name,
             ckpt_path=resolved_model_path,
             intermediate_ckpt_dir=intermediate_ckpt_dir,
             rng_seed=rng_seed,
@@ -407,7 +416,7 @@ class AutoModel:
         )
       elif model_source == ModelSource.INTERNAL:
         model, model_params = create_gemma_model_from_params(
-            params_path=resolved_model_path, model_name=model_name
+            params_path=resolved_model_path, model_name=naming_info.model_name
         )
       else:
         raise NotImplementedError(
@@ -419,17 +428,17 @@ class AutoModel:
       raise NotImplementedError(
           'Only Gemma models are supported from KAGGLE or GCS. Please use'
           ' HUGGINGFACE for other models. Specified model source:'
-          f' {model_source} and model name: {model_name}'
+          f' {model_source} and model name: {naming_info.model_name}'
       )
 
     # Case 2: Common path for all models -- create model from safe tensors
     if not model_params:
       # pick corresponding config based on model version
-      model_params = call_model_config(model_name)
+      model_params = call_model_config(naming_info.model_name)
 
       with mesh:
         model = create_model_from_safe_tensors(
-            model_name,
+            naming_info.model_name,
             resolved_model_path,
             model_params,
             mesh,

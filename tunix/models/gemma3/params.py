@@ -28,12 +28,9 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
+import sentencepiece as spm
 from tunix.models import safetensors_saver
 from tunix.models.gemma3 import model as model_lib
-
-# Keep the import below for google internal lint.
-import sentencepiece as spm  # isort:skip  # pylint: disable=line-too-long
-
 
 # Pretrained
 GEMMA3_270M_PT = 'gs://gemma-data/checkpoints/gemma3-270m-pt'
@@ -151,29 +148,24 @@ def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
   return flax.traverse_util.unflatten_dict(new_params)
 
 
-def _extract_gemma3_lora_layers(layer: Any) -> dict[str, tuple[Any, Any]]:
-  """Extract LoRA layers from a Gemma3 model.
-
-  Args:
-    layer: Gemma3 model layer with possible LoRA weights.
-
-  Returns:
-    Dict mapping custom extracted layer paths to (lora_a, lora_b) tuples.
-  """
-  if hasattr(layer.attn, 'kv_einsum'):
-    proj = layer.attn.kv_einsum
-    path = safetensors_saver.qwix_path_to_str(proj.qwix_path)
-    return {
-        path.replace('kv_einsum', 'k_einsum'): (
-            proj.w_lora_a,
-            proj.w_lora_b[:, 0],
-        ),
-        path.replace('kv_einsum', 'v_einsum'): (
-            proj.w_lora_a,
-            proj.w_lora_b[:, 1],
-        ),
-    }
-  return {}
+def _extract_gemma3_lora_layers(
+    lora_layers: dict[str, list[Any]],
+) -> dict[str, list[Any]]:
+  """Extract LoRA layers from a Gemma3 model."""
+  updated_lora_layers = {}
+  for k, v in lora_layers.items():
+    if 'kv_einsum' in k:
+      updated_lora_layers[k.replace('kv_einsum', 'k_einsum')] = [
+          v[0],
+          v[1][:, 0],
+      ]
+      updated_lora_layers[k.replace('kv_einsum', 'v_einsum')] = [
+          v[0],
+          v[1][:, 1],
+      ]
+    else:
+      updated_lora_layers[k] = v
+  return updated_lora_layers
 
 
 def _gemma3_state_key_to_safetensors_key(lora_name: str) -> str:
@@ -192,6 +184,17 @@ def _gemma3_state_key_to_safetensors_key(lora_name: str) -> str:
       .replace('v_einsum', 'v_proj')
       .replace('attn_vec_einsum', 'o_proj')
   )
+
+
+_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES = {
+    'q_proj': (1, 0),
+    'k_proj': (1, 0),
+    'v_proj': (1, 0),
+    'o_proj': (1, 0),
+    'up_proj': (1, 0),
+    'down_proj': (1, 0),
+    'gate_proj': (1, 0),
+}
 
 
 def save_lora_merged_model_as_safetensors(
@@ -217,12 +220,6 @@ def save_lora_merged_model_as_safetensors(
       rank=rank,
       alpha=alpha,
       state_key_transform_fn=_gemma3_state_key_to_safetensors_key,
-      field_patterns=(
-          'q_einsum',
-          'attn_vec_einsum',
-          'gate_proj',
-          'up_proj',
-          'down_proj',
-      ),
       custom_layer_extractor_fn=_extract_gemma3_lora_layers,
+      transpose_rules=_GEMMA3_HUGGINGFACE_TRANSPOSE_RULES,
   )

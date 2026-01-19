@@ -162,18 +162,39 @@ class RolloutConfig:
   # Whether to enable deterministic sampling for SG-Lang JAX rollout engine.
   rollout_sglang_jax_enable_deterministic_sampling: bool = False
 
-  # List of token buckets for jax jit
-  rollout_sglang_jax_precompile_token_paddings: Optional[List] = None
+  # Whether to use sort or mask implementation in sampler, sort has better evaluation result.
+  rollout_sglang_jax_use_sort_for_toppk_minp: bool = True
 
-  # List of batch sizes buckets for jax jit
-  rollout_sglang_jax_precompile_bs_paddings: Optional[List] = None
+  # Whether to use lora
+  rollout_sglang_jax_enable_static_lora: bool = False
 
-  # The maximum number of tokens in a chunk for the chunked prefill.
-  # Setting this to -1 means disabling chunked prefill.
-  rollout_sglang_jax_chunked_prefill_size: int = -1
+  # Whether to use single controller mode, single controller mode is required in pathways
+  rollout_sglang_jax_enable_single_process: bool = True
+
+  # Specify the modules which are required to use lora
+  rollout_sglang_jax_lora_target_modules: Optional[List[str]] = None
+
+  # Specify the lora RANK
+  rollout_sglang_jax_max_lora_rank: Optional[int] = None
+
+  rollout_sglang_jax_lora_scaling: Optional[float] = None
+
+  # Specify the paddings for batch_size
+  rollout_sglang_jax_precompile_bs_paddings: Optional[List[int]] = None
+
+  # Specify the paddings for tokens which is used in prefll
+  rollout_sglang_jax_precompile_token_paddings: Optional[List[int]] = None
+
+  # Specify the the maximum number of tokens in a chunk for the chunked prefill
+  rollout_sglang_jax_chunked_prefill_size: Optional[int] = -1
 
   # The number of tokens in a page
   rollout_sglang_jax_page_size: int = 64
+
+  # The format of the model weights to load.
+  rollout_sglang_jax_load_format: str = "auto"
+
+  rollout_sglang_jax_max_running_requests: Optional[int] = None
 
 
 class BaseRollout(ABC):

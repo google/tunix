@@ -33,7 +33,6 @@ from tunix.rl.agentic.rewards import reward_types
 
 
 BaseTaskEnv = base_environment.BaseTaskEnv
-Trajectory = base_agent.Trajectory
 ConversationAgentBase = base_agent.ConversationAgentBase
 logger = logging.getLogger(__name__)
 

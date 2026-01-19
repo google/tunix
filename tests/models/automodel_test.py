@@ -4,6 +4,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from tunix.models import automodel
+from tunix.models import naming
 
 
 def _get_all_models_test_parameters():
@@ -53,8 +54,24 @@ def _get_all_models_test_parameters():
       dict(testcase_name="llama3.1-8b", model_name="llama3.1-8b"),
       dict(testcase_name="llama-3.1-8b", model_name="llama-3.1-8b"),
       dict(testcase_name="llama3.2-1b", model_name="llama3.2-1b"),
+      dict(
+          testcase_name="llama-3.2-1b-instruct",
+          model_name="llama-3.2-1b-instruct",
+      ),
+      dict(
+          testcase_name="llama3.2-1b-instruct",
+          model_name="llama3.2-1b-instruct",
+      ),
       dict(testcase_name="llama-3.2-1b", model_name="llama-3.2-1b"),
       dict(testcase_name="llama3.2-3b", model_name="llama3.2-3b"),
+      dict(
+          testcase_name="llama-3.2-3b-instruct",
+          model_name="llama-3.2-3b-instruct",
+      ),
+      dict(
+          testcase_name="llama3.2-3b-instruct",
+          model_name="llama3.2-3b-instruct",
+      ),
       dict(testcase_name="llama-3.2-3b", model_name="llama-3.2-3b"),
       dict(testcase_name="qwen2.5-0.5b", model_name="qwen2.5-0.5b"),
       dict(testcase_name="qwen2.5-1.5b", model_name="qwen2.5-1.5b"),
@@ -142,11 +159,21 @@ class AutoModelTest(parameterized.TestCase):
     mock_params_module.__name__ = "mock_params_module"
     mock_get_model_module.return_value = mock_params_module
     mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    naming_info = naming.ModelNaming(model_name=model_name)
     automodel.create_model_from_safe_tensors(
         model_name, "file_dir", "model_config", mesh
     )
     mock_create_fn.assert_called_once_with(
         file_dir="file_dir", config="model_config", mesh=mesh
+    )
+
+    if naming_info.model_family in ("gemma", "gemma1p1", "gemma2", "gemma3"):
+      expected_module_type = automodel.ModelModule.PARAMS_SAFETENSORS
+    else:
+      expected_module_type = automodel.ModelModule.PARAMS
+
+    mock_get_model_module.assert_called_once_with(
+        model_name, expected_module_type
     )
 
   @parameterized.named_parameters(
@@ -164,6 +191,11 @@ class AutoModelTest(parameterized.TestCase):
           testcase_name="gemma-2-2b-it",
           model_name="gemma-2-2b-it",
           expected_version="2-2b_it",
+      ),
+      dict(
+          testcase_name="gemma1.1-2b-it",
+          model_name="gemma1.1-2b-it",
+          expected_version="1.1-2b_it",
       ),
   )
   @mock.patch.object(automodel, "get_model_module", autospec=True)

@@ -280,28 +280,28 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
     # No pre-resharding is needed.
     return src_pytree
 
-  to_split_axis = None
-  for axis_name in intermediate_mesh.axis_names:
-    if axis_name.endswith(INTERMEDIATE_REPLICA_SUFFIX):
-      to_split_axis = axis_name
-      break
-  assert (
-      to_split_axis is not None
-  ), f'No replica axis found in the intermediate mesh {intermediate_mesh}.'
+  for _intermediate_mesh in to_split_src_pytree_leaves.keys():
+    to_split_axis = None
+    for axis_name in _intermediate_mesh.axis_names:
+      if axis_name.endswith(INTERMEDIATE_REPLICA_SUFFIX):
+        to_split_axis = axis_name
+        break
+    assert (
+        to_split_axis is not None
+    ), f'No replica axis found in the intermediate mesh {_intermediate_mesh}.'
 
-  for key in to_split_src_pytree_leaves.keys():
     temp_source = jax.jit(
         _identity,
-        out_shardings=to_split_intermediate_sharding_leaves[key],
-    )(to_split_src_pytree_leaves[key])
+        out_shardings=to_split_intermediate_sharding_leaves[_intermediate_mesh],
+    )(to_split_src_pytree_leaves[_intermediate_mesh])
 
-  # Update the to_split_src_pytree_leaves with the new splitted array.
+    # Update the to_split_src_pytree_leaves with the new splitted array.
     updated_to_split_src_pytree_leaves, *_ = splitfn(temp_source, to_split_axis)
 
-    for i in range(len(to_split_src_pytree_leaves_indexes[key])):
-      to_update_src_pytree_leaves[to_split_src_pytree_leaves_indexes[key][i]] = (
-          updated_to_split_src_pytree_leaves[i]
-      )
+    for i in range(len(to_split_src_pytree_leaves_indexes[_intermediate_mesh])):
+      to_update_src_pytree_leaves[
+          to_split_src_pytree_leaves_indexes[_intermediate_mesh][i]
+      ] = updated_to_split_src_pytree_leaves[i]
 
   updated_src_pytree = jax.tree_util.tree_unflatten(
       src_treedef, to_update_src_pytree_leaves
@@ -354,7 +354,7 @@ def _get_reshard_fn_pathwaysutils(
       if use_experimental_pre_reshard:
         try:
           # This will raise an ImportError if the API is not available.
-          pw_jax.jaxlib_pathways._split_by_mesh_axis  # pylint: disable=protected-access
+          pw_jax.split_by_mesh_axis
         except ImportError:
           logging.debug(
               'split_by_mesh_axis is not available until JAX 0.8.0. Skipping'

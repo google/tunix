@@ -300,7 +300,7 @@ class ConfigTest(parameterized.TestCase):
           expected=((2, 2), ("x", "y")),
       ),
   )
-  @mock.patch.object(jax, 'device_count')
+  @mock.patch.object(jax, "device_count")
   def test_create_mesh_valid(
       self, mock_device_count_fn, raw_keys, mock_num_devices, expected
   ):
@@ -386,7 +386,7 @@ class ConfigTest(parameterized.TestCase):
           error_regex="requires 6 devices, but found 5",
       ),
   )
-  @mock.patch.object(jax, 'device_count')
+  @mock.patch.object(jax, "device_count")
   def test_create_mesh_invalid(
       self,
       mock_device_count_fn,
@@ -453,7 +453,7 @@ class ConfigTest(parameterized.TestCase):
 
     hp.config["reward_functions"] = ["tunix/cli/reward_fn/dummy.py"]
 
-    with mock.patch.object(config, 'get_project_root', return_value=root):
+    with mock.patch.object(config, "get_project_root", return_value=root):
       original_cwd = os.getcwd()
       try:
         os.chdir(run_dir)
@@ -495,6 +495,55 @@ class ConfigTest(parameterized.TestCase):
         self.assertLen(reward_fns, 1)
       self.assertEqual(reward_fns[0].__name__, "external_reward_func")
       self.assertEqual(reward_fns[0](5), 50)
+
+  def test_model_config_inheritance(self):
+    # Test that actor_model_config inherits from model_config
+    # Scenario 1: Override model_config.model_name, actor should inherit
+    hp = self.initialize_config([
+        "model_config.model_name=gemma2-2b-it",
+        "model_config.model_source=kaggle",
+    ])
+    self.assertEqual(hp.config["model_config"]["model_name"], "gemma2-2b-it")
+    self.assertEqual(
+        hp.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+    )
+
+    # Scenario 2: Override actor, reference and rollout model name to different value, it should keep override
+    hp2 = self.initialize_config([
+        "actor_model_config.model_name=gemma2-2b-it",
+        "actor_model_config.model_source=kaggle",
+        "reference_model_config.model_name=gemma3-4b",
+        "reference_model_config.model_source=gcs",
+        "rollout_model_config.model_name=gemma-3-1b-it",
+        "rollout_model_config.model_source=gcs",
+    ])
+    self.assertEqual(hp2.config["model_config"]["model_name"], "llama3.1-8b")
+    self.assertEqual(
+        hp2.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+    )
+    self.assertEqual(
+        hp2.config["reference_model_config"]["model_name"], "gemma3-4b"
+    )
+    self.assertEqual(
+        hp2.config["rollout_model_config"]["model_name"], "gemma-3-1b-it"
+    )
+
+    # Scenario 3: Override actor_model_config and reference_model_config have higher priority than model_config, it should keep override
+    hp3 = self.initialize_config([
+        "model_config.model_name=gemma3-12b",
+        "model_config.model_source=gcs",
+        "actor_model_config.model_name=gemma2-2b-it",
+        "actor_model_config.model_source=kaggle",
+        "reference_model_config.model_name=gemma3-4b",
+        "reference_model_config.model_source=gcs",
+    ])
+    self.assertEqual(hp3.config["model_config"]["model_name"], "gemma3-12b")
+    self.assertEqual(
+        hp3.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+    )
+    self.assertEqual(
+        hp3.config["reference_model_config"]["model_name"], "gemma3-4b"
+    )
 
 
 if __name__ == "__main__":

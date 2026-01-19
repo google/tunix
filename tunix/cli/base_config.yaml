@@ -14,13 +14,15 @@
 
 ################################## LOAD MODEL ##################################
 model_config: &base_model_config
-  # Specify model name in style of {model_version}-{model size}, this will use to invoke model config
+  # The unique full name identifier of the model, matching exactly with the name used in Huggingface
+  # e.g., "gemma-2b","llama-3.1-8b", or Kaggle, e.g., "gemma2-2b-it".
   model_name: "llama3.1-8b"
 
   # Chagne model source to your downloading model workflow. Example: "kaggle" | "huggingface" | "gcs" | ""
   model_source: "huggingface"
 
-  # Full model identifier, either from huggingface or kaggle, e.g., "meta-llama/Llama-3.1-8B"
+  # Full model name identifier (case sensitive), as it appears on Huggingface, or Kaggle, e.g.,
+  # "meta-llama/Llama-3.1-8B" or "google/gemma-2/flax/gemma2-2b-it".
   model_id: "meta-llama/Llama-3.1-8B"
 
   # For models from GCS or internal sources, specify the path to the model files.

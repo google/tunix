@@ -16,7 +16,9 @@
 from absl import app
 from absl import flags
 from absl import logging
+from flax import nnx
 import jax
+import jax.numpy as jnp
 from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
@@ -99,7 +101,11 @@ class GrpoPipeline(config.HyperParameters):
           self.config["actor_model_config"]["lora_config"],
       )
     else:
-      actor_model = reference_model
+      graph_def, params = nnx.split(reference_model)
+      actor_model = nnx.merge(
+          graph_def,
+          jax.tree.map(jnp.copy, params),
+      )
 
     tokenizer = model_lib.create_tokenizer(
         self.config["tokenizer_config"], tokenizer_path
@@ -146,9 +152,7 @@ class GrpoPipeline(config.HyperParameters):
             "max_prompt_length", None
         ),
     )
-    mesh = self.create_mesh("actor_model_config")
-    with mesh:
-      grpo_trainer.train(dataset)
+    grpo_trainer.train(dataset)
 
 
 def _setup_jax_pathways(pathways_bns: str):

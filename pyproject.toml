@@ -23,6 +23,7 @@ dependencies = [
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
   "grain",
+  "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
@@ -37,7 +38,6 @@ dependencies = [
   "tensorflow_datasets",
   "tqdm",
   "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
-  "hf_transfer",  # Huggingface caching in CI
 ]
 
 [project.optional-dependencies]
@@ -90,7 +90,6 @@ pyink-annotation-pragmas = [
   "@test",
 ]
 pyink-ipynb-indentation = 2
-pyink-ipynb-unicode-escape = true
 
 [tool.isort]
 profile = "google"       # or "black", etc.

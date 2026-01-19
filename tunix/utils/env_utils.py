@@ -14,6 +14,8 @@
 
 """Environment utils."""
 
+import os
+
 import flax
 
 
@@ -31,3 +33,6 @@ def is_internal_env():
     return True
   except ImportError:
     return False
+
+
+SGLANG_JAX_TP_AXIS_NAME = os.getenv('SGLANG_JAX_TP_AXIS_NAME', 'tensor')

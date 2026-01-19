@@ -42,6 +42,7 @@ from tqdm.auto import tqdm
 import transformers
 from tunix.cli.utils import data as data_lib
 from tunix.examples.data import math_dataset
+from tunix.generate import mappings
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
@@ -244,6 +245,34 @@ parser.add_argument(
     required=False,
     help="Name of dataset, required when data_source is tfds",
 )
+parser.add_argument(
+    "--enable-lora",
+    action="store_true",
+    default=False,
+    required=False,
+    help="Enable LoRA.",
+)
+parser.add_argument(
+    "--lora-rank",
+    type=int,
+    default=64,
+    required=False,
+    help="Rank of LoRA.",
+)
+parser.add_argument(
+    "--lora-alpha",
+    type=float,
+    default=64.0,
+    required=False,
+    help="Alpha of LoRA.",
+)
+parser.add_argument(
+    "--lora-target-modules",
+    nargs="+",
+    type=str,
+    default=None,
+    help="List of target modules to apply LoRA",
+)
 
 
 # Parse arguments
@@ -292,9 +321,14 @@ NNX_CKPT_DIR = os.path.join(args.root_dir, "rl/grpo/models/", HF_MODEL_VERSION)
 SEED = 42
 
 # ====== LoRA ======
-ENABLE_LORA = False
-RANK = 64
-ALPHA = 64.0
+ENABLE_LORA = args.enable_lora
+RANK = args.lora_rank
+ALPHA = args.lora_alpha
+LORA_TARGET_MODULES = args.lora_target_modules
+if ENABLE_LORA and LORA_TARGET_MODULES is None:
+  raise ValueError(
+      f"{LORA_TARGET_MODULES} can not be None when LoRA is enabled!"
+  )
 
 # ====== Sharding ======
 if "Qwen2.5-0.5B-Instruct" in args.model_version:
@@ -684,7 +718,7 @@ if DO_MODEL_DISPLAY:
 # Policy model
 # TODO(b/434959964): Supports lora in vLLM Jax backend
 if ENABLE_LORA:
-  training_model = get_lora_model(ref_model, model_mesh=mesh)
+  training_model = get_lora_model(ref_model)
   training_mesh = ref_mesh
 else:
   training_model, training_mesh, _ = get_model(
@@ -1040,13 +1074,16 @@ if args.enable_profiler:
 
 def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
   if engine == "sglang_jax":
-    return base_rollout.RolloutConfig(
+    config = base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
         max_prompt_length=MAX_PROMPT_LENGTH,
         kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
+        rollout_mapping_config=mappings.MappingConfig.build(
+            model=ref_model, backend="sglang_jax"
+        ),
         rollout_sglang_jax_model_version=SGLANGJAX_MODEL_VERSION,
         rollout_sglang_jax_mem_fraction_static=0.2,
         rollout_sglang_jax_init_with_random_weights=True,
@@ -1057,6 +1094,13 @@ def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
         rollout_sglang_jax_chunked_prefill_size=2048,
         rollout_sglang_jax_page_size=64,
     )
+    if ENABLE_LORA:
+      config.rollout_sglang_jax_enable_static_lora = True
+      config.rollout_sglang_jax_lora_target_modules = LORA_TARGET_MODULES
+      config.rollout_sglang_jax_max_lora_rank = RANK
+      config.rollout_sglang_jax_lora_scaling = ALPHA / RANK
+
+    return config
 
   return base_rollout.RolloutConfig(
       max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -1160,8 +1204,7 @@ print(
 
 
 show_hbm_usage("Right before training")
-with training_mesh:
-  grpo_trainer.train(train_dataset, eval_ds=val_dataset)
+grpo_trainer.train(train_dataset, eval_ds=val_dataset)
 
 # Load checkpoint first.
 

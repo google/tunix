@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import dataclasses
-
+from absl import logging
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class AlgorithmConfig:
@@ -28,12 +28,14 @@ class AlgorithmConfig:
   algo_variant: str = "grpo"
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
+  reward_manager: str = "sequence-level"
 
   def __post_init__(self):
     valid_algo_variants = [
         "grpo",
-        "gspo",
+        "gspo-token",
         "ppo",
+        "dapo",
     ]
     valid_advantage_estimators = ["grpo", "gae"]
     valid_policy_loss_fns = ["grpo", "ppo"]
@@ -52,3 +54,13 @@ class AlgorithmConfig:
           f"policy_loss_fn must be one of {valid_policy_loss_fns}."
           f" Received: {self.policy_loss_fn}"
       )
+
+    # Automatically prints configuration upon initialization.
+    self.print_config()
+
+  def print_config(self):
+    """Prints all configuration fields, working dynamically for child classes."""
+    logging.info(f"Initializing {self.__class__.__name__}:")
+    for field in dataclasses.fields(self):
+      value = getattr(self, field.name)
+      logging.info(f"  {field.name}: {value}")

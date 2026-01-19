@@ -141,6 +141,18 @@ def _qwen3_state_key_to_safetensors_key(lora_name: str) -> str:
   return f"model.{lora_name}.weight".replace(".attn.", ".self_attn.")
 
 
+_QWEN3_HUGGINGFACE_TRANSPOSE_RULES = {
+    "q_proj": (1, 0),
+    "k_proj": (1, 0),
+    "v_proj": (1, 0),
+    "o_proj": (1, 0),
+    "up_proj": (1, 0),
+    "down_proj": (1, 0),
+    "gate_proj": (1, 0),
+    "gate": (1, 0),
+}
+
+
 def save_lora_merged_model_as_safetensors(
     local_model_path: str,
     output_dir: str,
@@ -164,13 +176,5 @@ def save_lora_merged_model_as_safetensors(
       rank=rank,
       alpha=alpha,
       state_key_transform_fn=_qwen3_state_key_to_safetensors_key,
-      field_patterns=(
-          "q_proj",
-          "k_proj",
-          "v_proj",
-          "o_proj",
-          "gate_proj",
-          "up_proj",
-          "down_proj",
-      ),
+      transpose_rules=_QWEN3_HUGGINGFACE_TRANSPOSE_RULES,
   )
