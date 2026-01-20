@@ -9,6 +9,7 @@ from tunix.sft import metrics_logger
 from tunix.rl.agentic.agents import tool_agent
 from tunix.rl.agentic.environments import tool_environment
 from tunix.rl.agentic.rewards import reward
+from tunix.models import automodel
 from tunix.rl.agentic.tools import calculator_tool
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -75,10 +76,9 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
 mesh = jax.sharding.Mesh(
     np.asarray(jax.local_devices())[:4].reshape(1, 4), ('fsdp', 'tp')
 )
-MODEL_CP_PATH = '/cns/gg-d/home/qwix-dev/qwen3/torch/0.6b/'
 
 config = model.ModelConfig.qwen3_0p6b()  # pick corresponding config based on model version
-qwen3 = params.create_model_from_safe_tensors(MODEL_CP_PATH, config, mesh)
+qwen3 = automodel.AutoModel.from_pretrained(model_id="Qwen/Qwen3-0.6B", mesh=mesh, model_download_path="./.tunix/models_cache")
 nnx.display(qwen3)
 
 # Optimizer, learning rate scheduler, gradient clipping
