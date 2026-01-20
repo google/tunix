@@ -20,6 +20,11 @@ import numpy as np
 from tunix.models.qwen3 import params
 from tunix.models.qwen3 import model
 
+import pathwaysutils
+pathwaysutils.initialize()
+
+print("jax devices: ", jax.devices())
+
 TRAIN_FRACTION = 1.0
 
 # === Generation ===
@@ -78,8 +83,9 @@ mesh = jax.sharding.Mesh(
 )
 
 config = model.ModelConfig.qwen3_0p6b()  # pick corresponding config based on model version
-qwen3 = automodel.AutoModel.from_pretrained(model_id="Qwen/Qwen3-0.6B", mesh=mesh, model_download_path="./.tunix/models_cache")
-nnx.display(qwen3)
+qwen3, qwen3_path = automodel.AutoModel.from_pretrained(model_id="Qwen/Qwen3-0.6B", mesh=mesh, model_download_path="./.tunix/models_cache")
+# nnx.display(qwen3)
+print(f"Qwen3 parameters stored to {qwen3_path}")
 
 # Optimizer, learning rate scheduler, gradient clipping
 optimizer = optax.adamw(
@@ -130,7 +136,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_CP_PATH)
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # RL cluster
