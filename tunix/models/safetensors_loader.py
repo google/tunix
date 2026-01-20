@@ -20,6 +20,7 @@ import mmap
 import os
 import struct
 
+from absl import logging
 from etils import epath
 from flax import nnx
 import jax
@@ -30,9 +31,11 @@ from tunix.oss import utils
 from tunix.utils import compat
 from tunix.utils import torch_utils
 
+
 load_file_from_gcs = utils.load_file_from_gcs
 
 torch_key_to_jax_key = torch_utils.torch_key_to_jax_key
+
 
 def stoi(s):
   """Convert string to int if possible, otherwise return as is."""
@@ -193,11 +196,16 @@ def load_and_create_model(
     file_handles.append(fh)
 
   state_dict = {}
+  skipped_keys = []
   for array, metadata_list in arrays:
     for metadata in metadata_list:
-      jax_key_mapped, transform = torch_key_to_jax_key(
-          key_map, metadata['name']
-      )
+      try:
+        jax_key_mapped, transform = torch_key_to_jax_key(
+            key_map, metadata['name']
+        )
+      except ValueError:
+        skipped_keys.append(metadata['name'])
+        continue
       parameter = array[
           metadata['offset_elements'] : metadata['offset_elements']
           + metadata['size_elements']
@@ -209,6 +217,15 @@ def load_and_create_model(
         if reshape:
           parameter = parameter.reshape(reshape)
       state_dict[jax_key_mapped] = parameter
+
+    if skipped_keys:
+      logging.warning(
+          'Skipped loading %d keys because they could not be mapped to model '
+          'weights. This may be expected, for example when loading only text '
+          'weights from a multimodal checkpoint. Missing keys: [%s]',
+          len(skipped_keys),
+          ', '.join(skipped_keys),
+      )
 
   if preprocess_fn is not None:
     state_dict = preprocess_fn(state_dict)
