@@ -365,11 +365,12 @@ def _get_reshard_fn_pathwaysutils(
               split_by_mesh_axis.split_by_mesh_axis, x, sharding
           )
 
-
-      return experimental_reshard.reshard(
+      # TODO(b/476149699): Migrate to new API once it's verified.
+      return experimental_reshard._reshard_with_sidechannel(
           x,
           sharding,
           donate=donate,
+          may_alias=None,
           cache_resharding_plans=cache_resharding_plans,
       )
 
