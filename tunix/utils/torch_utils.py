@@ -10,7 +10,9 @@ def torch_key_to_jax_key(mapping, source_key):
       if re.match(pat, source_key)
   ]
   if len(subs) != 1:
-    raise ValueError(f"Only one key should be found: {subs} for {source_key}")
+    raise ValueError(
+        f"Only one key should be found. Found: {subs} for {source_key}"
+    )
   else:
     return subs[0]
 

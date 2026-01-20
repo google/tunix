@@ -14,84 +14,88 @@ from tunix.models.gemma3 import model as model_lib
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   """Mapping of torch_keys to (nnx_keys, (permute_rule, reshape_rule))."""
   return {
-      r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+      r"(?:language_model\.)?model\.embed_tokens\.weight": (
+          "embedder.input_embedding", None
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
           r"tmp.layers.\1.attn.q",
           ((1, 0), (cfg.embed_dim, cfg.num_heads, cfg.head_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
           r"tmp.layers.\1.attn.k",
           ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
           r"tmp.layers.\1.attn.v",
           ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
           r"layers.\1.attn.attn_vec_einsum.w",
           ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
           r"layers.\1.mlp.gate_proj.kernel",
           ((1, 0), None),
       ),
-      r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
           r"layers.\1.mlp.up_proj.kernel",
           ((1, 0), None),
       ),
-      r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
           r"layers.\1.mlp.down_proj.kernel",
           ((1, 0), None),
       ),
-      r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.input_layernorm\.weight": (
           r"layers.\1.pre_attention_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
           r"layers.\1.post_attention_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.(post_feedforward_layernorm|post_ffn_layernorm|post_ffw_layernorm)\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.(post_feedforward_layernorm|post_ffn_layernorm|post_ffw_layernorm)\.weight": (
           r"layers.\1.post_ffw_norm.scale",
           None,
       ),
-      r"model\.norm\.weight": ("final_norm.scale", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
+      r"(?:language_model\.)?model\.norm\.weight": ("final_norm.scale", None),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
           r"layers.\1.attn._query_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (
           r"layers.\1.attn._key_norm.scale",
           None,
       ),
       r"lm_head\.weight": ("unused.lm_head.weight", None),
       r"lm_head\.bias": ("unused.lm_head.bias", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.bias": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.bias": (
           r"unused.layers.\1.attn.\2.bias",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.input_layernorm\.bias": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.input_layernorm\.bias": (
           r"unused.layers.\1.input_layernorm.bias",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.post_attention_layernorm\.bias": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.post_attention_layernorm\.bias": (
           r"unused.layers.\1.post_attention_layernorm.bias",
           None,
       ),
-      r"model\.rotary_emb\..*": ("unused.rotary_emb", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.rotary_emb\..*": (
+      r"(?:language_model\.)?model\.rotary_emb\..*": (
+          "unused.rotary_emb", None
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.rotary_emb\..*": (
           r"unused.layers.\1.attn.rotary_emb",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.qkv_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.qkv_proj\.weight": (
           r"unused.layers.\1.attn.qkv_proj.weight",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
           r"layers.\1.pre_ffw_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.(pre_ffn_layernorm|pre_ffw_layernorm)\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.(pre_ffn_layernorm|pre_ffw_layernorm)\.weight": (
           r"layers.\1.pre_ffw_norm.scale",
           None,
       ),
