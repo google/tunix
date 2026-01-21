@@ -20,7 +20,6 @@ model_config:
     shape: "(2,4)"
     axis_names: "('fsdp','tp')"
   rng_seed: 42
-  lora_config: {}
 actor_model_config:
   lora_config:
     rank: 64
