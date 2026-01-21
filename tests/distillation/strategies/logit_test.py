@@ -46,20 +46,23 @@ class LogitStrategyTest(parameterized.TestCase):
     pass
 
   @parameterized.named_parameters(
-      ("valid", 2.0, 0.5),
-      ("alpha_zero", 3.0, 0.0),
-      ("alpha_one", 2.0, 1.0),
+      ("valid", 2.0, 0.5, 0),
+      ("alpha_zero", 3.0, 0.0, 0),
+      ("alpha_one", 2.0, 1.0, 0),
+      ("top_k", 2.0, 0.5, 50),
   )
-  def test_init_valid(self, temp, alpha):
+  def test_init_valid(self, temp, alpha, top_k):
     strategy = LogitStrategy(
         student_forward_fn=self.dummy_fn,
         teacher_forward_fn=self.dummy_fn,
         labels_fn=self.dummy_fn,
         temperature=temp,
         alpha=alpha,
+        distill_top_k=top_k,
     )
     self.assertEqual(strategy.temperature, float(temp))
     self.assertEqual(strategy.alpha, alpha)
+    self.assertEqual(strategy.distill_top_k, top_k)
 
   @parameterized.named_parameters(
       ("temp_zero", 0, 0.5),
@@ -97,13 +100,63 @@ class LogitStrategyTest(parameterized.TestCase):
         alpha=alpha,
     )
 
-    computed_loss = strategy.compute_loss(
+    # Now returns tuple (loss, metrics)
+    computed_loss, metrics = strategy.compute_loss(
         student_output=student_logits,
         teacher_output=teacher_logits,
         labels=labels,
     )
 
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-4, atol=1e-4)
+    # Check if metrics are present
+    self.assertIn("distill/soft_loss", metrics)
+    self.assertIn("distill/hard_loss", metrics)
+    self.assertIn("distill/kl_div", metrics)
+    self.assertIn("distill/teacher_loss", metrics)
+
+  def test_top_k_distillation_logic(self):
+    """Verifies that setting distill_top_k changes the computed loss."""
+    s_key, t_key, l_key = jax.random.split(jax.random.key(42), 3)
+    batch_size, num_classes = 2, 20
+    student_logits = self._get_dummy_logits(s_key, batch_size, num_classes)
+    teacher_logits = self._get_dummy_logits(t_key, batch_size, num_classes)
+    labels = self._get_dummy_labels(l_key, batch_size, num_classes)
+    temp = 2.0
+    alpha = 0.5
+
+    # 1. Compute loss with FULL vocab (k=0)
+    strategy_full = LogitStrategy(
+        student_forward_fn=self.dummy_fn,
+        teacher_forward_fn=self.dummy_fn,
+        labels_fn=self.dummy_fn,
+        temperature=temp,
+        alpha=alpha,
+        distill_top_k=0,
+    )
+    loss_full, _ = strategy_full.compute_loss(
+        student_output=student_logits,
+        teacher_output=teacher_logits,
+        labels=labels,
+    )
+
+    # 2. Compute loss with Top-K (k=2)
+    # Since num_classes=20, filtering to top 2 should definitely change the KL term
+    strategy_k = LogitStrategy(
+        student_forward_fn=self.dummy_fn,
+        teacher_forward_fn=self.dummy_fn,
+        labels_fn=self.dummy_fn,
+        temperature=temp,
+        alpha=alpha,
+        distill_top_k=2,
+    )
+    loss_k, _ = strategy_k.compute_loss(
+        student_output=student_logits,
+        teacher_output=teacher_logits,
+        labels=labels,
+    )
+
+    # The losses should be different because the distribution is truncated
+    self.assertNotAlmostEqual(loss_full, loss_k, places=4)
 
   @parameterized.named_parameters(
       ("alpha_one", 1.0),
@@ -125,12 +178,14 @@ class LogitStrategyTest(parameterized.TestCase):
     )
     expected_loss = 2.49732
 
-    computed_loss = strategy.compute_eval_loss(
+    # Now returns tuple (loss, metrics)
+    computed_loss, metrics = strategy.compute_eval_loss(
         student_output=student_logits,
         labels=labels,
     )
 
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-5, atol=1e-5)
+    self.assertEqual(metrics, {})
 
   def test_get_train_loss(self):
     strategy = LogitStrategy(
@@ -143,7 +198,9 @@ class LogitStrategyTest(parameterized.TestCase):
         "teacher_output": jnp.array([4.0, 5.0, 6.0]),
         "labels": jnp.array([7.0, 8.0, 9.0]),
     }
-    expected_loss = strategy.compute_loss(
+    
+    # Manually compute expected tuple
+    expected_loss, expected_metrics = strategy.compute_loss(
         student_output=inputs["student_output"],
         teacher_output=inputs["teacher_output"],
         labels=inputs["labels"],
@@ -152,12 +209,16 @@ class LogitStrategyTest(parameterized.TestCase):
     teacher_output = strategy.get_teacher_outputs(
         teacher_model=DummyModel(), inputs=inputs
     )
-    computed_loss = strategy.get_train_loss(
+    
+    # get_train_loss should return tuple now
+    computed_loss, computed_metrics = strategy.get_train_loss(
         student_model=DummyModel(), teacher_output=teacher_output, inputs=inputs
     )
 
     npt.assert_allclose(teacher_output, inputs["teacher_output"], rtol=1e-6)
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    # Check keys match
+    self.assertEqual(expected_metrics.keys(), computed_metrics.keys())
 
   def test_get_eval_loss(self):
     strategy = LogitStrategy(
@@ -170,16 +231,19 @@ class LogitStrategyTest(parameterized.TestCase):
         "teacher_output": jnp.array([]),
         "labels": jnp.array([7.0, 8.0, 9.0]),
     }
-    expected_loss = strategy.compute_eval_loss(
+    # Expected returns tuple
+    expected_loss, expected_metrics = strategy.compute_eval_loss(
         student_output=inputs["student_output"],
         labels=inputs["labels"],
     )
 
-    computed_loss = strategy.get_eval_loss(
+    # get_eval_loss returns tuple
+    computed_loss, computed_metrics = strategy.get_eval_loss(
         student_model=DummyModel(), inputs=inputs
     )
 
     npt.assert_allclose(computed_loss, expected_loss, rtol=1e-6)
+    self.assertEqual(computed_metrics, expected_metrics)
 
 
 if __name__ == "__main__":
