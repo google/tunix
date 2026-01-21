@@ -687,6 +687,8 @@ class HyperParameters:
 
       # If specified value is not one of type in base config yaml or is not
       # consumed by to type parser, error out
+      # TODO(b/477343879): ensure Type checking for values with no defaults such
+      # as lora_config
       if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and (
           type(raw_data_from_yaml[k]) not in _yaml_types_to_parser
       ):

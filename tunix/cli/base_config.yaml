@@ -48,12 +48,14 @@ model_config: &base_model_config
   # Directory used for NNX conversion if downloaded Gemma/Gemma2 from Kaggle source. 
   intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
   ################################# LoRa #################################
-  lora_config:
-    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
-    rank: 16
-    alpha: 2.0
-    weight_qtype: "nf4"
-    tile_size: 256
+  # If you want to use LoRa, specify the module_path, rank, and alpha. You can also optionally specify the weight_qtype and tile_size, e.g.:
+  #lora_config:
+  #  module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
+  #  rank: 16
+  #  alpha: 2.0
+  #  weight_qtype: "nf4"
+  #  tile_size: 256
+  lora_config: {}
 
   ################################## MESH ##################################
   mesh:
