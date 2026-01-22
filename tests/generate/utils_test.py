@@ -880,3 +880,87 @@ class UtilsTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         dst_state['untouched_variable'][...], jnp.array(-1)
     )
+
+  def test_transfer_state_with_interleaved_scanned_layers(self):
+    """Test transfer with interleaved scanned layers using regex in mappings."""
+    num_src_layers = 2
+    num_tgt_layers = 4
+    embed_dim = 4
+    vocab_size = 8
+
+    # Source state: 2 layers
+    # src[0] = 1.0 (maps to tgt[0])
+    # src[1] = 2.0 (maps to tgt[2])
+    src_weights = jnp.stack(
+        [
+            jnp.full((embed_dim, vocab_size), i + 1, dtype=jnp.float32)
+            for i in range(num_src_layers)
+        ],
+        axis=0,
+    )
+    src_state = MockState({
+        "base.decoder.layers.layers_0.GptOssAttention.query.kernel": MockParam(
+            src_weights
+        ),
+    })
+
+    # Target state: 4 layers, all zeros initially
+    target_params = {}
+    for i in range(num_tgt_layers):
+      target_params[f"decoder.layer.{i}.weight"] = MockParam(
+          jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32)
+      )
+    tgt_state = MockState(target_params)
+
+    # Mappings: Transfer only layers 0 and 2 from source to target
+    mappings = {
+        "base.decoder.layers.layers_0.GptOssAttention.query.kernel": (
+            "decoder.layer.(0|2).weight",
+            ("layer", None, None),
+        ),
+    }
+    transpose_keys = {"kernel": (1, 0)}
+
+    new_tgt_state = utils.transfer_state_with_mappings(
+        src_state,
+        tgt_state,
+        key_mappings=mappings,
+        transpose_keys=transpose_keys,
+    )
+
+    # Verify: Layer 0 and 2 should be transferred and transposed
+
+    # Layer 0 comes from src[0] -> Value 1.0
+    expected_layer_0 = jnp.full((vocab_size, embed_dim), 1.0, dtype=jnp.float32)
+
+    # Layer 2 comes from src[1] -> Value 2.0
+    expected_layer_2 = jnp.full((vocab_size, embed_dim), 2.0, dtype=jnp.float32)
+
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.0.weight"], expected_layer_0
+        ),
+        "Interleaved layer 0 mismatch",
+    )
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.2.weight"], expected_layer_2
+        ),
+        "Interleaved layer 2 mismatch",
+    )
+
+    # Layers 1 and 3 should remain zero (not mapped)
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.1.weight"],
+            jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32),
+        ),
+        "Non-interleaved layer 1 should be zero",
+    )
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.3.weight"],
+            jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32),
+        ),
+        "Non-interleaved layer 3 should be zero",
+    )

@@ -341,15 +341,38 @@ def build_flat_dict(
     A new flat dictionary with the mapped keys and values.
   """
   new_flat_dict = {}
+  compiled_mappings = []
+
+  # PRE-COMPILE MAPPINGS
+  # Convert target string patterns into Python Regex objects for fast matching.
+  for src, (tgt, sharding) in mappings.items():
+    # Scenario A: The mapping already contains regex special characters (manual
+    # filtering). The assumption is that `src` does not contain regex
+    # characters like `()`; only `tgt` can contain them.
+    # Example: 'layers.(0|2|4).*' used to select only even layers for MoE
+    # interleaving.
+    if any(char in tgt for char in ['|', '(', ')']):
+      pattern = '^' + tgt + '$'
+    else:
+      # Scenario B: Standard wildcard mapping.
+      # We escape special dots and replace '.*' with a capturing group '(\d+)'
+      # to extract the layer index from the path.
+      pattern = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
+    compiled_mappings.append((src, re.compile(pattern), sharding))
+
+  # ITERATE THROUGH ACTUAL PARAMETERS
   for keys, v in flat_state:
+    # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
     path = '.'.join(str(key) for key in keys)
     mapped = False
-    for src, (tgt, sharding) in mappings.items():
-      regex = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
-      matched = re.match(regex, path)
+    for src, regex, sharding in compiled_mappings:
+      matched = regex.match(path)
       if matched:
         # Extract wildcards if any
         wildcards = matched.groups()
+
+        # Reconstruct the internal name by filling '*' in the source string
+        # with the captured wildcards from the external path.
         src_parts = []
         wc_index = 0
         for part in src.split('.'):
@@ -359,11 +382,16 @@ def build_flat_dict(
           else:
             src_parts.append(part)
         actual_src = '.'.join(src_parts)
-        # Check if this is a scanned parameter (has 'layer' in sharding spec)
+
+        # HANDLE SCANNED VS REGULAR PARAMS
+        # Scanned parameters have 'layer' in their sharding spec. This means we
+        # stack multiple individual layer weights into one big array.
         if sharding and 'layer' in sharding:
           if actual_src not in new_flat_dict:
             new_flat_dict[actual_src] = ([], [], sharding)
-          layer_number = int(matched.groups()[0])
+
+          # Extract layer index from regex match for correct sorting.
+          layer_number = int(wildcards[0]) if wildcards else 0
           new_flat_dict[actual_src][0].append((layer_number, v))
           new_flat_dict[actual_src][1].append((layer_number, path))
         else:
@@ -376,7 +404,7 @@ def build_flat_dict(
     if not mapped:
       logging.warning('!!! No mapping for flat state: %s', path)
 
-  # Sort layers
+  # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
