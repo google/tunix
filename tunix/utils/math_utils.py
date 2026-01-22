@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Math utils for evaluating on Math Dataset like Math500 and AIME2024."""
+
 import re
 from absl import logging
 from pylatexenc import latex2text
@@ -432,14 +433,13 @@ def remove_boxed(s):
 def extract_boxed_answer(solution: str):
   """Extract the answer from inside a LaTeX \\boxed{} command"""
   solution = last_boxed_only_string(solution)
-  solution = remove_boxed(solution)
+  solution = remove_boxed(solution) if solution is not None else solution
   logging.vlog(4, f"{solution=} in extracted_boxed_answer")
   return solution
 
 
 def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:
-  """Grades a given answer against a ground truth using sympy for evaluation.
-  """
+  """Grades a given answer against a ground truth using sympy for evaluation."""
   ground_truth_normalized = _normalize(ground_truth)
   given_normalized = _normalize(given_answer)
 
