@@ -586,7 +586,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self, queue: queue_lib.AbstractDataQueue, batch_size: int
   ):
     """Yields micro-batches from a queue until a None is received."""
-    print("Yields micro-batches from a queue. blocking untill train_data_queue has data...")
+    print("Yields micro-batches from a queue. blocking untill train_data_queue has data micro batch...")
     item_iterator = iter(lambda: queue.get(block=True), None)
     print("item_iterator created. train_data_queue is now populated and unblocked...")
     while True:
@@ -689,9 +689,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
     print("micro_batches_per_full_batch:", micro_batches_per_full_batch)
     for train_micro_batch in train_data_gen:
-      print("sleep for 45 seconds to simulate long training step, step: %s", self.rl_cluster.global_steps)
-      time.sleep(45)
-      print("wake up from sleep for step: %s", self.rl_cluster.global_steps)
+      # print("sleep for 45 seconds to simulate long training step, step: %s", self.rl_cluster.global_steps)
+      # time.sleep(45)
+      # print("wake up from sleep for step: %s", self.rl_cluster.global_steps)
+      print("Training step, global_steps:", self.rl_cluster.global_steps)
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         logging.info(
             "Reached max_steps: %d >= %d",

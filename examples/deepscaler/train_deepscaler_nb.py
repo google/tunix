@@ -35,6 +35,23 @@ pathwaysutils.initialize()
 
 print("jax devices: ", jax.devices())
 
+from absl import logging
+
+# Ensure INFO and higher messages are processed
+logging.set_verbosity(logging.INFO)
+# To ensure it goes to stderr, especially if C++ interop is involved:
+logging.use_python_logging()
+
+import logging
+import sys
+
+# Configure the root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Explicitly send to stdout
+)
+
 try:
   wandb.login(key="")
   print("linchai: logged in to W&B")
@@ -195,6 +212,14 @@ GENERATION_CONFIGS = {
 # ====== Rollout ======
 ROLLOUT_ENGINE = "sglang_jax" # one of "vanilla", "vllm" or "sglang_jax"
 
+mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
+if ROLLOUT_ENGINE == "sglang_jax":
+  rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:4].reshape(1, 4), ('fsdp', 'tp'))
+  trainer_mesh = jax.sharding.Mesh(np.array(jax.devices())[4:].reshape(2, 2), ('fsdp', 'tp'))
+else:
+  rollout_mesh = mesh
+  trainer_mesh = mesh
+
 # %%
 # try:
   # from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
@@ -241,16 +266,6 @@ AutoTokenizer = transformers.AutoTokenizer
 # %%
 print("start loading model and trainer instances...")
 show_hbm_usage("Before model loading")
-
-# %%
-print("Loading model..., PATH: ", MODEL_PATH)
-mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
-print("model_path: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.bfloat16)
-qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
-# nnx.display(model)
-print("Model loaded.")
 
 # %%
 show_hbm_usage("after model loading with fp32")
@@ -325,13 +340,9 @@ print ("Done with loading datasets")
 show_hbm_usage("Done with loading datasets")
 
 # %%
-mesh = jax.make_mesh(
-    *MESH,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
-)
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, trainer_mesh, dtype=jnp.float32)
 # nnx.display(qwen2_ref)
 
 
@@ -361,9 +372,9 @@ def get_lora_model(base_model, model_mesh):
 
 # %%
 if TRAIN_WITH_LORA:
-  qwen2_actor = get_lora_model(qwen2_ref, mesh)
+  qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
 else:
-  qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+  qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, trainer_mesh, dtype=jnp.float32)
 
 # %%
 show_hbm_usage("after loading qwen2_actor")
@@ -414,12 +425,6 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-if ROLLOUT_ENGINE == "sglang_jax":
-  rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:2].reshape(1, 2), ('fsdp', 'tp'))
-  trainer_mesh = jax.sharding.Mesh(np.array(jax.devices())[4:].reshape(2, 2), ('fsdp', 'tp'))
-else:
-  rollout_mesh = mesh
-  trainer_mesh = mesh
 print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
 cluster_config = rl_cluster_lib.ClusterConfig(

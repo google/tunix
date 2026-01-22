@@ -635,6 +635,7 @@ def _align_shape(
       original_shape,
       tgt_shape,
   )
+  print('Resolved shape mismatch on %s: %s -> %s' % (src_key, original_shape, tgt_shape))
 
   for axis, repeat_factor in repeat_ops:
     val = jnp.repeat(val, repeat_factor, axis=axis)

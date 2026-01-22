@@ -881,6 +881,7 @@ class UtilsTest(parameterized.TestCase):
         dst_state['untouched_variable'][...], jnp.array(-1)
     )
 
+<<<<<<< HEAD
   def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
     """Test repeating num_heads dimension (non-last axis) for attention weights."""
     # Source k_proj: (model_dim=16, num_heads=2, head_dim=128)
@@ -923,6 +924,9 @@ class UtilsTest(parameterized.TestCase):
     expected_o = jnp.repeat(src_o_proj, 2, axis=2).reshape(16, 512)
     np.testing.assert_allclose(result.params[o_dst_key], expected_o, atol=1e-1)
 
+=======
+<<<<<<< HEAD
+>>>>>>> 48d36bb (latest change)
   def test_transfer_state_with_interleaved_scanned_layers(self):
     """Test transfer with interleaved scanned layers using regex in mappings."""
     num_src_layers = 2
@@ -1006,3 +1010,35 @@ class UtilsTest(parameterized.TestCase):
         ),
         "Non-interleaved layer 3 should be zero",
     )
+=======
+
+
+  def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
+    """Test repeating num_heads dimension (non-last axis) for attention weights."""
+    # Source: (model_dim=16, num_heads=2, head_dim=128)
+    # Target: (model_dim=16, num_heads * head_dim=512)
+    src_k_proj = jnp.arange(16 * 2 * 128, dtype=jnp.float32).reshape(16, 2, 128)
+    src_key = "base.decoder.layers.3.self_attention.key.w"
+    dst_key = "model.layers.3.self_attn.k_proj.w"
+
+    src = MockState({src_key: MockParam(src_k_proj)})
+    dst = MockState(
+        {dst_key: MockParam(jnp.zeros((16, 512), dtype=jnp.float32))}
+    )
+
+    mappings = {src_key: (dst_key, None)}
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    # Verify shape
+    self.assertEqual(result.params[dst_key].shape, (16, 512))
+
+    # Verify that heads are repeated
+    self.assertTrue(
+        jnp.allclose(result.params[dst_key][::2, ...], src_k_proj, atol=1e-1)
+    )
+
+    self.assertTrue(
+        jnp.allclose(result.params[dst_key][1::2, ...], src_k_proj, atol=1e-1)
+    )
+>>>>>>> 8a7d904 (latest change)

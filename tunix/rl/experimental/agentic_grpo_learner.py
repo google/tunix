@@ -377,6 +377,26 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
     )
+    print("Debug: combined_batch created, each field shape: ")
+    print("  prompt_ids:", combined_batch.prompt_ids.shape)
+    print("  prompt_mask:", combined_batch.prompt_mask.shape)
+    print("  completion_ids:", combined_batch.completion_ids.shape)
+    print("  completion_mask:", combined_batch.completion_mask.shape)
+    print("  ref_per_token_logps:", end=" ")
+    if combined_batch.ref_per_token_logps is not None:
+      print(combined_batch.ref_per_token_logps.shape)
+    else:
+      print("None")
+    print("  advantages:", combined_batch.advantages.shape)
+    print("  old_per_token_logps:", end=" ")
+    if combined_batch.old_per_token_logps is not None:
+      print(combined_batch.old_per_token_logps.shape)
+    else:
+      print("None")
+    print("  policy_version:", combined_batch.policy_version.shape)
+    # linchai: debug whether jax.block_until_ready helps with hang issue.
+    jax.block_until_ready(combined_batch)
+    # print("Debug: combined_batch train example is ready.")
     return [
         rl_utils.get_batch_slice(combined_batch, slice(i, i + 1))
         for i in range(self.algo_config.num_generations)
