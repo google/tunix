@@ -31,8 +31,25 @@ pathwaysutils.initialize()
 
 print("jax devices: ", jax.devices())
 
+from absl import logging
+
+# Ensure INFO and higher messages are processed
+logging.set_verbosity(logging.INFO)
+# To ensure it goes to stderr, especially if C++ interop is involved:
+logging.use_python_logging()
+
+import logging
+import sys
+
+# Configure the root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Explicitly send to stdout
+)
+
 try:
-  wandb.login(key="")
+  wandb.login()
   print("linchai: logged in to W&B")
 except wandb.errors.UsageError as e:
   print(f"Failed to log in to W&B: {e}")
@@ -242,16 +259,6 @@ AutoTokenizer = transformers.AutoTokenizer
 # %%
 print("start loading model and trainer instances...")
 show_hbm_usage("Before model loading")
-
-# %%
-print("Loading model..., PATH: ", MODEL_PATH)
-mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
-print("model_path: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.bfloat16)
-qwen2 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
-# nnx.display(model)
-print("Model loaded.")
 
 # %%
 show_hbm_usage("after model loading with fp32")
