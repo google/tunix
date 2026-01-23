@@ -247,32 +247,32 @@ class UtilsTest(parameterized.TestCase):
   def test_transfer_state_with_padding(self):
     # Create source module with smaller head dim
     src = MockState(
-        {"decoder.layers.5.attn.o_proj": MockParam(jnp.ones((2, 4, 64)))}
+        {"decoder.layers.5.attn.k_proj": MockParam(jnp.ones((2, 4, 64)))}
     )
     dst = MockState(
-        {"decoder.layers.5.attn.o_proj": MockParam(jnp.zeros((2, 4, 128)))}
+        {"decoder.layers.5.attn.k_proj": MockParam(jnp.zeros((2, 4, 128)))}
     )
 
     mappings = {
-        "decoder.layers.5.attn.o_proj": ("decoder.layers.5.attn.o_proj", None),
+        "decoder.layers.5.attn.k_proj": ("decoder.layers.5.attn.k_proj", None),
     }
 
     new_tgt_state = utils.transfer_state_with_mappings(src, dst, mappings)
 
     # Validate shape
     self.assertEqual(
-        new_tgt_state.params["decoder.layers.5.attn.o_proj"].shape, (2, 4, 128)
+        new_tgt_state.params["decoder.layers.5.attn.k_proj"].shape, (2, 4, 128)
     )
     # Validate original values copied correctly
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layers.5.attn.o_proj"][:, :, :64], 1.0
+            new_tgt_state.params["decoder.layers.5.attn.k_proj"][:, :, :64], 1.0
         )
     )
     # Validate padded values are zero
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layers.5.attn.o_proj"][:, :, 64:], 0.0
+            new_tgt_state.params["decoder.layers.5.attn.k_proj"][:, :, 64:], 0.0
         )
     )
 
@@ -880,6 +880,48 @@ class UtilsTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         dst_state['untouched_variable'][...], jnp.array(-1)
     )
+
+  def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
+    """Test repeating num_heads dimension (non-last axis) for attention weights."""
+    # Source k_proj: (model_dim=16, num_heads=2, head_dim=128)
+    # Target k_proj: (model_dim=16, num_heads * head_dim=512)
+    src_k_proj = jnp.arange(16 * 2 * 128, dtype=jnp.float32).reshape(16, 2, 128)
+    k_src_key = "layers.0.attn.k_proj.w"
+    k_dst_key = "layers.0.self_attn.k_proj.w"
+
+    # Source o_proj: (model_dim=16, head_dim=128,num_heads=2)
+    # Target o_proj: (model_dim=16, num_heads * head_dim=512)
+    src_o_proj = jnp.arange(16 * 128 * 2, dtype=jnp.float32).reshape(16, 128, 2)
+    o_src_key = "layers.0.attn.o_proj.w"
+    o_dst_key = "layers.0.self_attn.o_proj.w"
+
+    src = MockState({
+        k_src_key: MockParam(src_k_proj),
+        o_src_key: MockParam(src_o_proj),
+    })
+    dst = MockState({
+        k_dst_key: MockParam(jnp.zeros((16, 512), dtype=jnp.float32)),
+        o_dst_key: MockParam(jnp.zeros((16, 512), dtype=jnp.float32)),
+    })
+
+    mappings = {
+        k_src_key: (k_dst_key, None),
+        o_src_key: (o_dst_key, None),
+    }
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    # Verify shapes
+    self.assertEqual(result.params[k_dst_key].shape, (16, 512))
+    self.assertEqual(result.params[o_dst_key].shape, (16, 512))
+
+    # Verify k_proj: heads are repeated on axis 1
+    expected_k = jnp.repeat(src_k_proj, 2, axis=1).reshape(16, 512)
+    np.testing.assert_allclose(result.params[k_dst_key], expected_k, atol=1e-1)
+
+    # Verify o_proj: heads are repeated on axis 2
+    expected_o = jnp.repeat(src_o_proj, 2, axis=2).reshape(16, 512)
+    np.testing.assert_allclose(result.params[o_dst_key], expected_o, atol=1e-1)
 
   def test_transfer_state_with_interleaved_scanned_layers(self):
     """Test transfer with interleaved scanned layers using regex in mappings."""

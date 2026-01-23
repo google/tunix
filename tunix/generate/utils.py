@@ -521,48 +521,6 @@ def _apply_transpose(
   return val
 
 
-def _reshape_attention(
-    val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
-) -> jnp.ndarray:
-  """Reshape attention tensors with special handling.
-
-  Args:
-      val: Value to reshape.
-      tgt_shape: Target shape.
-      src_key: Source key for error messages.
-
-  Returns:
-      Reshaped value.
-
-  Raises:
-      ShapeMismatchError: If reshaping is not possible.
-  """
-  if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
-    new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
-    logging.debug(
-        'Reshaping attention bias on %s: %s -> %s',
-        src_key,
-        val.shape,
-        new_shape,
-    )
-    return jnp.reshape(val, new_shape)
-  # Handle cases like tgt_shape (4096, 1024) and val shape (4096, 8, 128),
-  # which require reshaping.
-  if re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(
-      src_key
-  ) and math.prod(tgt_shape) == math.prod(val.shape):
-    logging.debug(
-        'Reshaping attention proj on %s: %s -> %s',
-        src_key,
-        val.shape,
-        tgt_shape,
-    )
-    return jnp.reshape(val, tgt_shape)
-  raise ShapeMismatchError(
-      f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
-  )
-
-
 def _align_shape(
     val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
 ) -> jnp.ndarray:
@@ -582,12 +540,53 @@ def _align_shape(
   if val.shape == tgt_shape:
     return val
 
+  additional_reshape = False
+  new_tgt_shape = tgt_shape
   # Handle rank mismatch
   if len(val.shape) != len(tgt_shape):
-    return _reshape_attention(val, tgt_shape, src_key)
+    if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
+      new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
+      logging.debug(
+          'Reshaping attention bias on %s: %s -> %s',
+          src_key,
+          val.shape,
+          new_shape,
+      )
+      return jnp.reshape(val, new_shape)
+    elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
+      if math.prod(tgt_shape) == math.prod(val.shape):
+        logging.debug(
+            'Reshaping attention proj on %s: %s -> %s',
+            src_key,
+            val.shape,
+            tgt_shape,
+        )
+        return jnp.reshape(val, tgt_shape)
+      else:
+        # need to reshape and then align each dim
+        additional_reshape = True
+        # Handle cases of mapping from (model_dim, num_head, head_dim) or
+        # (model_dim, head_dim, num_head) to
+        # (model_dim, num_head_dim * head_dim).
+        assert len(val.shape) == 3 and len(tgt_shape) == 2, (
+            f'Unexpected attention proj shape: {val.shape} and target shape:'
+            f' {tgt_shape}'
+        )
+        if 'o_proj' in src_key:
+          # for output proj, head dim is dim(-2)
+          padded_dim = (val.shape[-2] + 127) // 128 * 128
+          repeated_dim = tgt_shape[-1] // padded_dim
+          new_tgt_shape = tgt_shape[:-1] + (padded_dim, repeated_dim)
+        else:
+          # for q/k/v proj, head dim is dim(-1)
+          padded_dim = (val.shape[-1] + 127) // 128 * 128
+          repeated_dim = tgt_shape[-1] // padded_dim
+          new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
+    else:
+      raise ShapeMismatchError(
+          f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
+      )
 
-  original_shape = val.shape
-  # Check if this is an attention weight that can be padded/repeated
   attention_patterns = [
       r'.*(q|k|v|o)_proj.*',
       r'.*(q|k|v|o)_bias.*',
@@ -599,13 +598,16 @@ def _align_shape(
         f'{val.shape} vs {tgt_shape}. Padding/repetition only supported '
         'for attention weights.'
     )
-  # Align each dimension
+
+  original_shape = val.shape
+  # Check if this is an attention weight that can be padded/repeated and
+  # align on each dimension.
   pad_width = []
   repeat_ops = []
-  for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, tgt_shape)):
+  for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, new_tgt_shape)):
     if src_dim < tgt_dim:
       # For QKV, H is dim(-1); For O, H is dim(-2), same for Tunix and vLLM
-      if i == len(val.shape) - 1 or (
+      if ('o_proj' not in src_key and i == len(val.shape) - 1) or (
           'o_proj' in src_key and i == len(val.shape) - 2
       ):
         # Head dimension: pad with zeros
@@ -636,7 +638,14 @@ def _align_shape(
 
   for axis, repeat_factor in repeat_ops:
     val = jnp.repeat(val, repeat_factor, axis=axis)
-  return jnp.pad(val, pad_width)
+  val = jnp.pad(val, pad_width)
+
+  if additional_reshape:
+    assert math.prod(val.shape) == math.prod(
+        tgt_shape
+    ), f'After align, shape mismatch on {src_key}: {val.shape} vs {tgt_shape}'
+    val = jnp.reshape(val, tgt_shape)
+  return val
 
 
 def _apply_dtype_cast(
