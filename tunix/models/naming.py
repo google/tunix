@@ -30,13 +30,12 @@ class ModelNaming:
 
   Attributes:
     model_id: The full model name identifier (case sensitive), as it appears on
-      Huggingface, or Kaggle, including the parent directory. E.g.,
-      "meta-llama/Llama-3.1-8B" or "google/gemma-2/flax/gemma2-2b-it".
+      Huggingface, including the parent directory.
+      E.g.,"meta-llama/Llama-3.1-8B".
     model_name: The unique full name identifier of the model. This should be the
       full name and should match exactly with the model name used in Hugging
-      Face. e.g., "gemma-2b","llama-3.1-8b" or Kaggle, e.g., "gemma2-2b-it". The
-      model name is all lowercase and typically formatted as
-      <model-family>-<model-version>.
+      Face. e.g., "gemma-2b","llama-3.1-8b". The model name is all lowercase and
+      typically formatted as <model-family>-<model-version>.
     model_family: The standardized model family, e.g., "gemma", "gemma2", or
       "qwen2p5". The model is standerdardized by removing unnecessary '-', e.g.,
       "gemma-2" --> "gemma2", replacing '-' with '_',  and replacing '.' with

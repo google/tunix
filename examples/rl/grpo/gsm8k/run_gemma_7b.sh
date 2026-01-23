@@ -42,7 +42,8 @@ echo "Rounded warmup steps: $warmup_steps"
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
   model_config.model_name="gemma-7b-it" \
-  model_config.model_id="google/gemma/flax/7b-it" \
+  model_config.model_id="google/gemma-7b-it" \
+  model_config.model_path="google/gemma/flax/7b-it" \
   model_config.model_source="kaggle" \
   model_config.model_download_path="/tmp/models/gemma-7b" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \

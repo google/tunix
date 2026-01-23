@@ -157,8 +157,10 @@ def create_gemma_model_with_nnx_conversion(
     This is a workaround, as the checkpoints on Kaggle don't work with NNX. This
     takes a long time. Skip if conversion is not needed.
     """
-    if model_name.startswith('gemma2'):
-      params_path = os.path.join(ckpt_path, model_name)
+    if model_name.startswith('gemma-2'):
+      params_path = os.path.join(
+          ckpt_path, model_name.replace('gemma-2', 'gemma2')
+      )
     else:  # gemma
       suffix = '-'.join(model_name.split('-')[1:])
       params_path = os.path.join(ckpt_path, suffix)
@@ -247,7 +249,7 @@ def download_model(
 
   Args:
       model_id_or_path: The full identifier for the model (e.g.,
-        "google/gemma-2b" for KAGGLE/HF, or path for GCS/INTERNAL).
+        "google/gemma-2b" for HF, or model_path for KAGGLE/GCS/INTERNAL).
       model_download_path: The local directory where the model should be
         downloaded.
       model_source: The source of the model (e.g., KAGGLE, GCS, HUGGINGFACE,
@@ -364,13 +366,17 @@ class AutoModel:
         The loaded nnx.Module model.
         The path where the model was downloaded to.
     """
-
+    # TODO(b/477915179): Allow model_id to be config_id or a Kaggle_id
     model: nnx.Module = None
     model_params: Any = None
     naming_info = naming.ModelNaming(model_id=model_id)
 
     # Download the model
-    if model_source in (ModelSource.INTERNAL, ModelSource.GCS):
+    if model_source in (
+        ModelSource.INTERNAL,
+        ModelSource.GCS,
+        ModelSource.KAGGLE,
+    ):
       if model_path is None:
         raise ValueError(
             'model_path is required for model_source: '

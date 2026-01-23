@@ -217,6 +217,26 @@ class AutoModelTest(parameterized.TestCase):
         version=expected_version,
     )
 
+  @parameterized.named_parameters(
+      dict(testcase_name="kaggle", model_source=automodel.ModelSource.KAGGLE),
+      dict(testcase_name="gcs", model_source=automodel.ModelSource.GCS),
+      dict(
+          testcase_name="internal", model_source=automodel.ModelSource.INTERNAL
+      ),
+  )
+  def test_from_pretrained_missing_model_path(self, model_source):
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    with self.assertRaisesRegex(
+        ValueError,
+        f"model_path is required for model_source: {model_source}",
+    ):
+      automodel.AutoModel.from_pretrained(
+          model_id="google/gemma-2b",
+          mesh=mesh,
+          model_source=model_source,
+          model_path=None,
+      )
+
 
 if __name__ == "__main__":
   absltest.main()
