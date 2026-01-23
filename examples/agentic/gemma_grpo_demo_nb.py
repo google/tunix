@@ -313,11 +313,12 @@ def get_ref_model():
     gemma = nnx.merge(graph_def, restored_params)
     return gemma, mesh, None
   else:  # oss
-    model_name = f'gemma2-{MODEL_VERSION}'
+    model_name = f'gemma-2-{MODEL_VERSION}'
     model_config_dict = {
         'model_name': model_name,
         'model_source': 'kaggle',
-        'model_id': f'google/gemma-2/flax/{model_name}',
+        'model_id': f'google/{model_name}',
+        'model_path': f'google/gemma-2/flax/gemma2-{MODEL_VERSION}',
         'model_download_path': MODEL_DOWNLOAD_PATH,
         'intermediate_ckpt_dir': NNX_CKPT_DIR,
         'model_display': False,
