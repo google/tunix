@@ -353,9 +353,9 @@ def _get_reshard_fn_pathwaysutils(
 
       if use_experimental_pre_reshard:
         try:
-          # This will raise an ImportError if the API is not available.
+          # This will raise an AttributeError if the API is not available.
           pw_jax.split_by_mesh_axis
-        except ImportError:
+        except AttributeError:
           logging.debug(
               'split_by_mesh_axis is not available until JAX 0.8.0. Skipping'
               ' pre-reshard.'
