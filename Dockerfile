@@ -17,11 +17,10 @@ RUN python3 -m pip install --upgrade pip
 RUN python3.12 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Upgrade pip
-RUN pip install --upgrade pip
 
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
-RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
+RUN pip uninstall -y pathwaysutils
+RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@e7d15ccbc1f6abc96568f0ce160477239476afcd#egg=pathwaysutils
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
@@ -37,10 +36,13 @@ RUN pip install --upgrade wandb
 WORKDIR /usr/src
 # Clone the repository using HTTPS
 RUN rm -rf sglang-jax && git clone https://github.com/sgl-project/sglang-jax.git 
+RUN rm -rf pathways-utils && git clone https://github.com/AI-Hypercomputer/pathways-utils.git
 WORKDIR /usr/src
 # Install the package in editable mode
 # The -e flag means the installation links to the source code in /usr/src/sglang-jax
 RUN cd sglang-jax/python && pip install --force-reinstall --no-cache-dir  .
+WORKDIR /usr/src
+RUN cd pathways-utils && pip install --force-reinstall --no-cache-dir  .
 
 
 # Set the working directory

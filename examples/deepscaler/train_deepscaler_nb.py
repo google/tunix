@@ -35,22 +35,54 @@ pathwaysutils.initialize()
 
 print("jax devices: ", jax.devices())
 
-from absl import logging
+# from absl import logging
 
 # Ensure INFO and higher messages are processed
-logging.set_verbosity(logging.INFO)
+# logging.set_verbosity(logging.INFO)
 # To ensure it goes to stderr, especially if C++ interop is involved:
-logging.use_python_logging()
+# logging.use_python_logging()
 
 import logging
 import sys
 
-# Configure the root logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout  # Explicitly send to stdout
+
+# Get the logger for the current module
+logger = logging.getLogger(__name__)
+
+# --- Clear any existing handlers from THIS logger to avoid duplicates ---
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# --- Create and configure a new handler for THIS logger ---
+handler = logging.StreamHandler(sys.stdout)
+formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
+handler.setFormatter(formatter)
+handler.setLevel(logging.INFO)  # Ensure the handler processes INFO messages
+
+# --- Add the handler directly to YOUR logger ---
+logger.addHandler(handler)
+
+# --- Set YOUR logger's level ---
+logger.setLevel(logging.INFO)
+
+# --- Prevent messages from propagating to the root logger ---
+# This is important if the root logger's handlers are causing issues
+# or if you want to isolate this logger's output.
+logger.propagate = False
+
+
+
+
+# Configure the root logger
+# logging.basicConfig(
+    # stream=sys.stdout,  # Direct logs to standard output (notebook cell)
+    # level=logging.INFO, # Set the minimum level to INFO
+    # format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
+    # datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
+# )
 
 try:
   wandb.login(key="")
@@ -139,7 +171,7 @@ MESH = [(2, 4), ("fsdp", "tp")]
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 512 # 2048
-TOTAL_GENERATION_STEPS = 1024 # 8192
+TOTAL_GENERATION_STEPS = 512 # 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
