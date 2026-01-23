@@ -305,7 +305,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           sampling_params[i]["sampling_seed"] = seed
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    outputs = self.engine.generate(
+    outputs = self._generate_with_loop_guard(
         input_ids=[ids for ids in prompt_ids],
         sampling_params=sampling_params,
     )
@@ -344,3 +344,43 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         padded_prompt_tokens=all_input_ids,
         logprobs=None,
     )
+
+  def _generate_with_loop_guard(
+      self,
+      *,
+      input_ids: List[List[int]],
+      sampling_params: List[dict],
+  ):
+    coro = self.engine.async_generate(
+        input_ids=input_ids,
+        sampling_params=sampling_params,
+        stream=False,
+    )
+    loop = get_or_create_event_loop()
+
+    if not loop.is_running():
+      res = loop.run_until_complete(coro)
+      return res
+
+    import concurrent
+
+    def wrap_generate():
+      loop = get_or_create_event_loop()
+      return loop.run_until_complete(coro)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+      future = executor.submit(wrap_generate)
+      return future.result()
+
+
+import asyncio
+
+
+def get_or_create_event_loop():
+  try:
+    loop = asyncio.get_running_loop()
+  except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+  finally:
+    return loop

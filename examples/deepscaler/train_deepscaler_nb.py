@@ -6,7 +6,10 @@ import contextlib
 import functools
 import json
 import os
+from pprint import pprint
+import re
 
+# from etils import ecolab
 from flax import nnx
 import grain
 import jax
@@ -15,8 +18,77 @@ import optax
 import qwix
 from tqdm.auto import tqdm
 
+# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+# from etils import ecolab
 import optax
 from orbax import checkpoint as ocp
+
+
+from tunix.models.qwen2 import params as params_lib
+from tunix.models.qwen2 import model as model_lib
+
+
+import wandb
+
+import pathwaysutils
+pathwaysutils.initialize()
+
+print("jax devices: ", jax.devices())
+
+from absl import logging
+
+# Ensure INFO and higher messages are processed
+logging.set_verbosity(logging.INFO)
+# To ensure it goes to stderr, especially if C++ interop is involved:
+logging.use_python_logging()
+
+import logging
+import sys
+
+# Configure the root logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Explicitly send to stdout
+)
+
+try:
+  wandb.login(key="")
+  print("linchai: logged in to W&B")
+except wandb.errors.UsageError as e:
+  print(f"Failed to log in to W&B: {e}")
+  # Handle the error, maybe disable W&B logging
+  wandb.init(mode="disabled")
+
+ # Ensure W&B is initialized for all logging paths (including trainer close hooks)
+wandb_initialized = False
+try:
+  if wandb.run is None:
+    # Generate timestamp-based run name
+    from datetime import datetime
+    run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb.init(
+        project="tunix",
+        name=run_name,
+        config=OmegaConf.to_container(cfg, resolve=True),
+        reinit=False,
+    )
+    print("W&B run URL:", wandb.run.url)
+    wandb_initialized = True
+  else:
+    wandb_initialized = True
+    print("W&B already initialized")
+except Exception as e:
+  print(f"Warning: Failed to initialize WandB: {e}")
+  print("Continuing without WandB logging...")
+  wandb_initialized = False
+
+# If WandB failed to initialize, disable it globally to prevent metrics logger from trying
+if not wandb_initialized:
+  import os
+
+  os.environ["WANDB_MODE"] = "disabled"
+  print("Disabled WandB globally to prevent metrics logger conflicts")
 
 try:
   from etils import ecolab
@@ -31,8 +103,6 @@ except:
   cm = contextlib.nullcontext()
 
 with cm:
-  from tunix.models.qwen2 import params as params_lib
-  from tunix.models.qwen2 import model as model_lib
   from tunix.generate import sampler as sampler_lib
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.agents import model_agent
@@ -63,12 +133,13 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
+# MESH = [(4, 2), ("fsdp", "tp")]
 MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 8192
+MAX_PROMPT_LENGTH = 512 # 2048
+TOTAL_GENERATION_STEPS = 1024 # 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -93,7 +164,9 @@ EPSILON = 0.2
 # ====== Training ======
 BATCH_SIZE = 32
 MINI_BATCH_SIZE = 32
+# agentic hardcoded to 1
 # ROLLOUT_MICRO_BATCH_SIZE = 8
+# agentic hardcoded to 1
 # LOGPS_MICRO_BATCH_SIZE = 8
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
@@ -101,10 +174,11 @@ NUM_BATCHES = 100
 NUM_TEST_BATCHES = 50
 
 EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 100 # can potentially train for more epochs
+NUM_EPOCHS = 1 # can potentially train for more epochs
 
 # Number of training steps.
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+# MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+MAX_STEPS = 100
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -122,7 +196,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 0.1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 500
+SAVE_INTERVAL_STEPS = 1
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -136,31 +210,39 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
+ROLLOUT_ENGINE = "sglang_jax" # one of "vanilla", "vllm" or "sglang_jax"
+
+mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
+if ROLLOUT_ENGINE == "sglang_jax":
+  rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:4].reshape(1, 4), ('fsdp', 'tp'))
+  trainer_mesh = jax.sharding.Mesh(np.array(jax.devices())[4:8].reshape(2, 2), ('fsdp', 'tp'))
+else:
+  rollout_mesh = mesh
+  trainer_mesh = mesh
 
 # %%
-try:
-  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-  file_open = gfile.Open
+# try:
+  # from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+  # file_open = gfile.Open
 
-  NOTEBOOK_ENV = "g3"
-except Exception:
-  NOTEBOOK_ENV = "git"
+  # NOTEBOOK_ENV = "g3"
+# except Exception:
+NOTEBOOK_ENV = "git"
 
-  from google.cloud import storage
+  # from google.cloud import storage
 
-  import fsspec
+import fsspec
 
-  file_open = fsspec.open
+file_open = fsspec.open
 
 if NOTEBOOK_ENV == "g3":
   DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/data/"
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/rl/data"
-  MODEL_PATH_PREFIX = "gs://tunix/rl/models"
-  CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
+  DATA_PATH_PREFIX = "gs://linchai-bucket-dev/rl/data"
+  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
+  CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
@@ -177,15 +259,22 @@ import datasets as datasets_lib
 import transformers
 
 Dataset = datasets_lib.Dataset
+load_dataset = datasets_lib.load_dataset
 AutoTokenizer = transformers.AutoTokenizer
 
 
+# %%
+print("start loading model and trainer instances...")
+show_hbm_usage("Before model loading")
+
+# %%
+show_hbm_usage("after model loading with fp32")
+
 DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
-AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+
 
 def create_datasets(
-    train_ds_path: str = DEEPSCALER_DATA_PATH,
-    test_ds_path: str = AIME_2024_DATA_PATH
+    train_ds_path: str = DEEPSCALER_DATA_PATH
 ):
   def preprocess_fn(example, index):
     return {
@@ -193,75 +282,67 @@ def create_datasets(
         "ground_truth": example["answer"],
         "data_source": "math",
     }
+  train_df = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split="train")
 
-  with file_open(train_ds_path) as train_f, file_open(test_ds_path, 'rb') as test_f:
-    train_df = pd.read_json(train_f)
-    test_df = pd.read_parquet(test_f)
-
-  train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
-  test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
-
-
+  train_ds = train_df.map(preprocess_fn, with_indices=True)
+  print("preprocess train_ds done.")
   def process_item(item):
-      question = item["question"]
-      answer = item["answer"]
+    question = item["question"]
+    answer = item["answer"]
 
-      instruction = "Let's think step by step, and put your final answer within \\boxed{}."
-      prompt = f"{question} {instruction}"
-      prompt = tokenizer.apply_chat_template(
-          [{"role": "user", "content": prompt}],
-          tokenize=False, add_generation_prompt=True)
+    instruction = "Let's think step by step, and put your final answer within \\boxed{}."
+    prompt = f"{question} {instruction}"
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False, add_generation_prompt=True)
 
-      return {
-          "prompts": prompt,
-          "question": question,
-          "answer": answer,
-      }
+    return {
+        "prompts": prompt,
+        "question": question,
+        "answer": answer,
+    }
 
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
-  return train_ds, test_ds
+  print("process_item for train_ds done.")
+  return train_ds
+
 
 # %%
 
-tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
-print(tokenizer_source)
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
 
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
-train_dataset, test_dataset = create_datasets()
+train_dataset = create_datasets()[:200]
+print("Loaded train  datasets with 200 items for debug.")
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
+  print("repeating full train dataset for NUM_EPOCHS: ", NUM_EPOCHS)
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
   val_dataset = None
 else:
   train_dataset = train_dataset[: int(len(train_dataset) * TRAIN_FRACTION)]
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
   val_dataset = train_dataset[int(len(train_dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
-test_dataset = test_dataset.batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
 for s in iter(train_dataset):
   print(s)
   break
 
-for s in iter(test_dataset):
-  print(s)
-  break
+print ("Done with loading datasets")
+# for s in iter(test_dataset):
+  # print(s)
+  # break
 
 # %%
-show_hbm_usage()
+show_hbm_usage("Done with loading datasets")
 
 # %%
-mesh = jax.make_mesh(
-    *MESH,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
-)
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, trainer_mesh, dtype=jnp.float32)
 # nnx.display(qwen2_ref)
 
 
@@ -291,18 +372,17 @@ def get_lora_model(base_model, model_mesh):
 
 # %%
 if TRAIN_WITH_LORA:
-  qwen2_actor = get_lora_model(qwen2_ref, mesh)
+  qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
 else:
-  qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+  qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, trainer_mesh, dtype=jnp.float32)
 
 # %%
-show_hbm_usage()
+show_hbm_usage("after loading qwen2_actor")
 
 # %%
 ModelAgent = model_agent.ModelAgent
 TaskEnvironment = task_environment.TaskEnvironment
 TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
-is_two_reward = reward.is_two_reward
 
 # %%
 # Ckpt saving
@@ -345,11 +425,13 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
+print("Rollout mesh: ", rollout_mesh)
+print("Trainer mesh: ", trainer_mesh)
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_cluster_lib.Role.ACTOR: trainer_mesh,
+        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
@@ -358,12 +440,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
-        train_micro_batch_size = 1,  # larger than 1 will cause OOM on HBM
+        train_micro_batch_size = 1,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -373,6 +455,24 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+        # sglang-jax specific configs
+        rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        rollout_sglang_jax_mem_fraction_static=0.2,
+        rollout_sglang_jax_init_with_random_weights=True,
+        rollout_sglang_jax_disable_radix_cache=True,
+        rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_precompile_bs_paddings=[1, 2],
+        rollout_sglang_jax_precompile_token_paddings=[2048, 4096, 8192],
+        rollout_sglang_jax_chunked_prefill_size=2048,
+        rollout_sglang_jax_page_size=64,
+        # vllm-tpu specific configs
+        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_vllm_hbm_utilization=0.2,
+        # rollout_vllm_tpu_backend_type="jax",
+        # rollout_vllm_server_mode=True,
+        # rollout_vllm_async_scheduling=True,
+        # tensor_parallel_size=4,
+        # data_parallel_size=2,
     ),
 )
 
@@ -382,18 +482,20 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=8,
+    max_concurrency=1,
 )
 
 # %%
 # RL cluster
-with compat.set_mesh(mesh):
-  rl_cluster = rl_cluster_lib.RLCluster(
-      actor=qwen2_actor,
-      reference=qwen2_ref,
-      tokenizer=tokenizer,
-      cluster_config=cluster_config,
-  )
+# with compat.set_mesh(mesh):
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=qwen2_actor,
+    reference=qwen2_ref,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
+
+show_hbm_usage("after RLCluster creation")
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
@@ -404,6 +506,15 @@ grpo_trainer = GRPOLearner(
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
+show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
+
+# Finish WandB after all cleanup operations are complete
+if wandb_initialized:
+  try:
+    wandb.finish()
+    print("WandB session finished successfully")
+  except Exception as e:
+    print(f"Warning: Failed to finish WandB session: {e}")
