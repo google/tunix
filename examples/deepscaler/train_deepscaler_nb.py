@@ -210,10 +210,12 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "sglang_jax" # one of "vanilla", "vllm" or "sglang_jax"
+# ROLLOUT_ENGINE = "sglang_jax" # one of "vanilla", "vllm" or "sglang_jax"
+ROLLOUT_ENGINE = "vllm"
 
-mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
-if ROLLOUT_ENGINE == "sglang_jax":
+# mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
+mesh = None
+if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
   rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:4].reshape(1, 4), ('fsdp', 'tp'))
   trainer_mesh = jax.sharding.Mesh(np.array(jax.devices())[4:8].reshape(2, 2), ('fsdp', 'tp'))
 else:
@@ -456,23 +458,25 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
         # sglang-jax specific configs
-        rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        rollout_sglang_jax_mem_fraction_static=0.2,
-        rollout_sglang_jax_init_with_random_weights=True,
-        rollout_sglang_jax_disable_radix_cache=True,
-        rollout_sglang_jax_enable_deterministic_sampling=False,
-        rollout_sglang_jax_precompile_bs_paddings=[1, 2],
-        rollout_sglang_jax_precompile_token_paddings=[2048, 4096, 8192],
-        rollout_sglang_jax_chunked_prefill_size=2048,
-        rollout_sglang_jax_page_size=64,
+        # rollout_sglang_jax_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_sglang_jax_mem_fraction_static=0.2,
+        # rollout_sglang_jax_init_with_random_weights=True,
+        # rollout_sglang_jax_disable_radix_cache=True,
+        # rollout_sglang_jax_enable_deterministic_sampling=False,
+        # rollout_sglang_jax_precompile_bs_paddings=[1, 2],
+        # rollout_sglang_jax_precompile_token_paddings=[2048, 4096, 8192],
+        # rollout_sglang_jax_precompile_bs_paddings=[8],
+        # rollout_sglang_jax_precompile_token_paddings=[512],
+        # rollout_sglang_jax_chunked_prefill_size=2048,
+        # rollout_sglang_jax_page_size=64,
         # vllm-tpu specific configs
-        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        # rollout_vllm_hbm_utilization=0.2,
-        # rollout_vllm_tpu_backend_type="jax",
-        # rollout_vllm_server_mode=True,
-        # rollout_vllm_async_scheduling=True,
-        # tensor_parallel_size=4,
-        # data_parallel_size=2,
+        rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        rollout_vllm_hbm_utilization=0.2,
+        rollout_vllm_tpu_backend_type="jax",
+        rollout_vllm_server_mode=True,
+        rollout_vllm_async_scheduling=True,
+        tensor_parallel_size=4,
+        data_parallel_size=1,
     ),
 )
 

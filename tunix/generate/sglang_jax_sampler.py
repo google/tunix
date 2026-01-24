@@ -194,6 +194,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
     args["load_format"] = config.load_format
     args["max_running_requests"] = config.max_running_requests
+    args["enable_engine_loop_run_forever_daemon"] = True
 
     return args
 
