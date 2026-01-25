@@ -64,6 +64,7 @@ class ShardingConfig:
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
+    b_sharding = tuple(filter(None, ('dp', fsdp)))
 
     return ShardingConfig(
         emb_vd=('tp', fsdp),
@@ -74,9 +75,9 @@ class ShardingConfig:
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
+        act_btd=(b_sharding, None, None if is_sampling else 'tp'),
+        act_btf=(b_sharding, None, 'tp'),
+        act_btnh=(b_sharding, None, 'tp', None),
         exp_weight_cdf=('fsdp', None, 'tp'),
         exp_weight_cfd=('fsdp', 'tp', None),
         qkv_bias=('tp',),
