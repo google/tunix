@@ -418,6 +418,80 @@ class SamplerTest(parameterized.TestCase):
         result.tokens, [np.array([8, 14, 5]), np.array([14])]
     )
 
+  def test_batch_size_one(self):
+    """Test that sampling works correctly with batch_size=1.
+
+    This test ensures that the token_buffer is properly populated during
+    the while_loop when only a single prompt is provided. Previously,
+    batch_size=1 caused the token_buffer to be truncated instead of
+    properly populated.
+
+    See: https://github.com/google/tunix/issues/809
+    """
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    # Test with a single prompt (batch_size=1)
+    result = sampler(
+        ['input string'],  # Single item batch
+        max_generation_steps=10,
+        return_logits=True,
+        max_prompt_length=4,
+    )
+    self.assertIsNotNone(result)
+    self.assertLen(result.text, 1)
+    self.assertLen(result.tokens, 1)
+    self.assertLen(result.logits, 1)
+    # Verify the token buffer was properly populated
+    self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))
+    # Verify we generated tokens (not truncated)
+    self.assertGreater(len(result.tokens[0]), 0)
+
+  def test_batch_size_one_with_echo(self):
+    """Test batch_size=1 with echo=True."""
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    # Test with a single prompt and echo=True
+    result = sampler(
+        ['hello world'],  # Single item batch
+        max_generation_steps=10,
+        return_logits=True,
+        max_prompt_length=4,
+        echo=True,
+    )
+    self.assertIsNotNone(result)
+    self.assertLen(result.text, 1)
+    self.assertLen(result.tokens, 1)
+    # With echo, we should get prompt + generated tokens
+    # max_prompt_length=4 + max_generation_steps=10 = 14, but may be less
+    # if EOS is hit
+    self.assertGreater(len(result.tokens[0]), 0)
+
 
 if __name__ == '__main__':
   absltest.main()
