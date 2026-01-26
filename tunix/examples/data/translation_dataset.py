@@ -43,6 +43,7 @@ def create_datasets(
     num_train_epochs: int | None,
     tokenizer: tokenizer_lib.Tokenizer,
     instruct_tuned: bool = False,
+    tfds_download: bool = True,
     input_template: dict[str, str] | None = None,
 ) -> tuple[Iterable[TrainingInput], Iterable[TrainingInput]]:
   """Creates train and eval data iterator.
@@ -55,6 +56,7 @@ def create_datasets(
       dataset will be repeated indefinitely.
     tokenizer: The tokenizer to use for tokenizing the dataset.
     instruct_tuned: Whether the dataset should be instruct tuned.
+    tfds_download: the download flag when using TFDS datasets.
     input_template: The input template to use for the dataset.
 
   Returns:
@@ -63,7 +65,9 @@ def create_datasets(
   if dataset_name == "mtnt/en-fr":
     import tensorflow_datasets.translate.mtnt
 
-    train_ds, eval_ds = tfds.data_source(dataset_name, split=("train", "valid"))
+    train_ds, eval_ds = tfds.data_source(
+        dataset_name, split=("train", "valid"), download=tfds_download
+    )
   elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
     train_ds, eval_ds = datasets.load_dataset(
         dataset_name, data_dir="en-fr", split=("train", "validation")

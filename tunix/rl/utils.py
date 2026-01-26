@@ -32,10 +32,10 @@ Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
 
 
-def check_positive(value: int | None, name: str):
+def is_positive_integer(value: int | None, name: str):
   """Checks if the value is positive."""
-  if value is not None and value <= 0:
-    raise ValueError(f"{name} must be positive.")
+  if value is not None and (not value.is_integer() or value <= 0):
+    raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 
 def check_divisibility(
@@ -260,13 +260,4 @@ def get_partition_spec(
     return jax.sharding.PartitionSpec()
 
 
-def maybe_move(arr: jax.Array, mesh: jax.sharding.Mesh) -> jax.Array:
-  """Replaces the array to the new mesh if it's not already there."""
-  if not mesh.devices.size or not mesh.devices.any():
-    return arr
-  if not arr.sharding.device_set.issubset(set(mesh.devices.flatten())):
-    dest_sharding = jax.sharding.NamedSharding(
-        mesh, get_partition_spec(arr.sharding)
-    )
-    return jax.device_put(arr, dest_sharding)
-  return arr
+VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"

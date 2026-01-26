@@ -14,6 +14,7 @@
 
 """Utility functions for agentic models."""
 
+import threading
 from typing import Any, Optional
 
 import numpy as np
@@ -174,3 +175,51 @@ def tokenize_and_generate_masks(
     all_masks.extend(masks)
 
   return all_tokens, all_masks
+
+
+class RolloutSyncLock:
+  """A lock object that allows many simultaneous rollouts or one exclusive weight sync.
+
+  Sync preference: Once a weight sync requests the lock, new rollouts will be
+  blocked until the sync has acquired and released the lock.
+  """
+
+  def __init__(self):
+    self._mutex = threading.Lock()
+    self._can_rollout = threading.Condition(self._mutex)
+    self._can_weight_sync = threading.Condition(self._mutex)
+    self._rollouts = 0
+    # Number of active weight syncs. This should only be 0 or 1.
+    self._weight_syncs = 0
+    self._weight_syncs_waiting = 0
+
+  def acquire_rollout(self):
+    """Acquire a rollout lock."""
+    with self._mutex:
+      while self._weight_syncs > 0 or self._weight_syncs_waiting > 0:
+        self._can_rollout.wait()
+      self._rollouts += 1
+
+  def release_rollout(self):
+    """Release a rollout lock."""
+    with self._mutex:
+      self._rollouts -= 1
+      if self._rollouts == 0 and self._weight_syncs_waiting > 0:
+        self._can_weight_sync.notify()
+
+  def acquire_weight_sync(self):
+    """Acquire a weight sync lock."""
+    with self._mutex:
+      while self._rollouts > 0 or self._weight_syncs > 0:
+        self._weight_syncs_waiting += 1
+        self._can_weight_sync.wait()
+        self._weight_syncs_waiting -= 1
+      self._weight_syncs += 1
+
+  def release_weight_sync(self):
+    """Release a weight sync lock."""
+    with self._mutex:
+      self._weight_syncs -= 1
+      # Notify waiting sync first, then all rollouts
+      self._can_weight_sync.notify()
+      self._can_rollout.notify_all()

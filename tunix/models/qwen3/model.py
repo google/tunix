@@ -25,11 +25,11 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
-from tunix.utils import container
+from tunix.utils import compat
+from tunix.utils import env_utils
 
 
-if hasattr(flax.config, 'flax_always_shard_variable'):
-  flax.config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
 
 
 K_MASK = -2.3819763e38
@@ -49,8 +49,8 @@ class ShardingConfig:
 
   emb_vd: Tuple[str | None, ...]
   emb_dv: Tuple[str | None, ...]
-  q_weight_ndh: Tuple[str | None, ...]
-  kv_weight_ndh: Tuple[str | None, ...]
+  q_weight_dnh: Tuple[str | None, ...]
+  kv_weight_dnh: Tuple[str | None, ...]
   o_weight_nhd: Tuple[str | None, ...]
   ffw_weight_df: Tuple[str | None, ...]
   ffw_weight_fd: Tuple[str | None, ...]
@@ -68,8 +68,8 @@ class ShardingConfig:
     return ShardingConfig(
         emb_vd=('tp', fsdp),
         emb_dv=(fsdp, 'tp'),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_ndh=('tp', fsdp, None),
+        q_weight_dnh=(fsdp, 'tp', None),
+        kv_weight_dnh=(fsdp, 'tp', None),
         o_weight_nhd=('tp', None, fsdp),
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
@@ -95,13 +95,14 @@ class ModelConfig:
   num_kv_heads: int
   rope_theta: int
   norm_eps: float
+  use_tied_embedding: bool = False
   num_experts: int | None = None
   num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
 
   @classmethod
-  def qwen3_0_6b(cls):  # qwen3-0.6B
+  def qwen3_0p6b(cls):  # qwen3-0.6B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -115,7 +116,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_1_7b(cls):  # qwen3-1.7B
+  def qwen3_1p7b(cls):  # qwen3-1.7B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -127,6 +128,44 @@ class ModelConfig:
         norm_eps=1e-06,
         rope_theta=1_000_000,
     )
+
+  @classmethod
+  def qwen3_4b(cls):  # qwen3-4B
+    return cls(
+        num_layers=36,
+        vocab_size=151936,
+        embed_dim=2560,
+        hidden_dim=9728,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        use_tied_embedding=True,
+    )
+
+  @classmethod
+  def _qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
+    return cls(
+        num_layers=36,
+        vocab_size=151936,
+        embed_dim=2560,
+        hidden_dim=9728,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=5_000_000,
+        use_tied_embedding=True,
+    )
+
+  @classmethod
+  def qwen3_4b_instruct_2507(cls):  # Qwen3-4B-Instruct-2507
+    return cls._qwen3_4b_2507()
+
+  @classmethod
+  def qwen3_4b_thinking_2507(cls):  # Qwen3-4B-Thinking-2507
+    return cls._qwen3_4b_2507()
 
   @classmethod
   def qwen3_8b(cls):  # qwen3-8B
@@ -157,7 +196,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen3_30b(cls):  # qwen3-30B
+  def qwen3_30b_a3b(cls):  # qwen3-30B-a3b
     return cls(
         num_layers=48,
         vocab_size=151936,
@@ -298,19 +337,19 @@ class Attention(nnx.Module):
         einsum_str='BTD,DNH->BTNH',
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.q_weight_ndh,
+        sharding=self.shd_config.q_weight_dnh,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_dnh,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_dnh,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
@@ -620,7 +659,7 @@ class DecoderLayer(nnx.Module):
     return cache, outputs
 
 
-class Qwen3(nnx.Module, pytree=False):
+class Qwen3(nnx.Module):
   """Qwen3 model."""
 
   def __init__(
@@ -637,7 +676,7 @@ class Qwen3(nnx.Module, pytree=False):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.layers = container.ModuleList([
+    self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
         for _ in range(config.num_layers)
     ])
@@ -647,12 +686,13 @@ class Qwen3(nnx.Module, pytree=False):
         norm_eps=config.norm_eps,
         shd_config=shd_config,
     )
-    self.lm_head = Einsum(
-        einsum_str='BTD,DV->BTV',
-        shape=(config.embed_dim, config.vocab_size),
-        rngs=rngs,
-        sharding=shd_config.emb_dv,
-    )
+    if not config.use_tied_embedding:
+      self.lm_head = Einsum(
+          einsum_str='BTD,DV->BTV',
+          shape=(config.embed_dim, config.vocab_size),
+          rngs=rngs,
+          sharding=shd_config.emb_dv,
+      )
 
   def init_cache(
       self, batch_size: int, cache_size: int, dtype: jnp.dtype
@@ -710,7 +750,10 @@ class Qwen3(nnx.Module, pytree=False):
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
-    logits = self.lm_head(x)
+    if self.config.use_tied_embedding:
+      logits = self.embedder.decode(x)
+    else:
+      logits = self.lm_head(x)
 
     return logits, new_cache  # pytype: disable=bad-return-type
 

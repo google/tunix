@@ -20,14 +20,16 @@ import abc
 from concurrent import futures
 import itertools
 import math
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
 import jax
-import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
+from tunix.rl import function_registry
+from tunix.rl import reward_manager
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.queue import data_queue as queue_lib
@@ -43,13 +45,16 @@ RewardFn = Callable[..., List[float]]
 
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
+TConfig = TypeVar("TConfig", bound=algo_config_lib.AlgorithmConfig)
 
-class RLLearner(ABC):
+
+class RLLearner(abc.ABC, Generic[TConfig]):
   """Base class that should be extended by specific RL algorithms."""
 
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
+      algo_config: TConfig,
       reward_fns: RewardFn | List[RewardFn],
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
@@ -58,6 +63,8 @@ class RLLearner(ABC):
 
     Args:
       rl_cluster: RL cluster containing actor, reference and reward models.
+      algo_config: An instance of `AlgorithmConfig` containing all
+        training-specific configuration options.
       reward_fns: A single callable or a list of callables that compute a scalar
         reward for given prompts and completions. Each function should accept
         `prompts`, `completions` and optional keyword arguments, and return a
@@ -72,9 +79,16 @@ class RLLearner(ABC):
       data_shuffle_seed: The seed for shuffling the data.
     """
     self.rl_cluster = rl_cluster
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
+    self.algo_config = algo_config
+
+    reward_manager_fn = function_registry.get_reward_manager(
+        algo_config.reward_manager
     )
+    self.reward_manager = reward_manager_fn(
+        reward_fns=reward_fns,
+        algo_config=algo_config,
+    )
+
     self.metric_fns = metric_fns or []
     self.rl_cluster.actor_trainer.is_managed_externally = True
     if hasattr(self.rl_cluster, "critic_trainer"):
@@ -91,7 +105,7 @@ class RLLearner(ABC):
     self.rl_cluster.global_steps = (
         self.rl_cluster.actor_trainer.restored_global_step()
     )
-
+    # Current iter steps for micro-batch based training.
     self._iter_steps = 0
     self._eval_iter_steps = 0
 
@@ -150,20 +164,22 @@ class RLLearner(ABC):
       prompts: List[str],
       completions: List[str],
       mode: rl_cluster_lib.Mode,
+      step: int | None = None,
       **kwargs,
-  ) -> jax.Array:
+  ) -> np.ndarray:
     """Computes the rewards for completions using the provided reward functions.
 
     Args:
       prompts: A list of input prompts.
       completions: A list of generated text completions.
       mode: The mode to use for logging metrics.
+      step: The current training step.
       **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
-      A JAX array (shape `[num_prompts, num_reward_fns]`) of scalar rewards for
-      each prompt-completion pair. The rewards are computed using the provided
-      reward functions.
+      A numpy array (shape `[B]`) of scalar rewards for
+      each prompt-completion pair. The rewards are the sum across all the
+      provided reward functions.
 
     Raises:
         RuntimeError: If 'r' reward is None, indicating a failure to obtain the
@@ -173,69 +189,21 @@ class RLLearner(ABC):
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
-    rewards = np.zeros((len(prompts), len(self.reward_fns)))
-    for i, reward_fn in enumerate(self.reward_fns):
-      r = reward_fn(prompts=prompts, completions=completions, **kwargs)
-      if r is None:
-        raise RuntimeError(
-            f"Failed to obtain result from {reward_fn.__name__}. Result is"
-            " None."
-        )
-      if isinstance(r, list) and len(r) != len(prompts):
-        raise RuntimeError(
-            f"Length mismatch after {reward_fn.__name__}: "
-            f"len(r)={len(r)}, len(prompts)={len(prompts)}. "
-            f"Content of r: {r}"
-        )
-      rewards[:, i] = np.array(r)
-      for reward in r:
-        self.rl_cluster.buffer_metrics(
-            {
-                f"rewards/{reward_fn.__name__}": (
-                    reward,
-                    np.mean,
-                ),
-            },
-            mode=mode,
-        )
 
-    rewards = np.nansum(rewards, axis=1)
-    for trajectory_idx in range(len(prompts)):
-      trajectory_rewards = rewards[trajectory_idx]
-      self.rl_cluster.buffer_metrics(
-          {
-              "rewards/sum": (
-                  np.sum(trajectory_rewards),
-                  np.mean,
-              ),
-          },
-          mode=mode,
-      )
-      self.rl_cluster.buffer_metrics(
-          {
-              "rewards/min": (
-                  np.min(trajectory_rewards),
-                  np.min,
-              ),
-          },
-          mode=mode,
-      )
-    for p, c in zip(prompts, completions):
-      self.rl_cluster.buffer_metrics(
-          {
-              "prompts": (
-                  p,
-                  None,
-              ),
-              "completions": (
-                  c,
-                  None,
-              ),
-          },
-          mode=mode,
-      )
+    rewards_info = self.reward_manager(
+        prompts=prompts,
+        completions=completions,
+        **kwargs,
+    )
 
-    return jnp.array(rewards)
+    if step is not None:
+      self.rl_cluster.buffer_metrics_async(
+          rewards_info["log_metrics"], mode=mode, step=step
+      )
+    else:
+      self.rl_cluster.buffer_metrics(rewards_info["log_metrics"], mode=mode)
+
+    return rewards_info["rewards"]
 
   def _process_accumulated_batches(
       self,
@@ -414,9 +382,10 @@ class RLLearner(ABC):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        # Fetch one training micro-batch
-        example = next(iterator)
-        cur_batch_size = len(example["prompts"])
+        with self.rl_cluster.perf.span("data_loading"):
+          # Fetch one training micro-batch
+          example = next(iterator)
+          cur_batch_size = len(example["prompts"])
 
         # Buffer the fetched micro-batch. We accumulate micro-batches and track
         # their sizes and the total number of samples. This allows us to form a
@@ -598,96 +567,41 @@ class RLLearner(ABC):
     while True:  # loop over M
       try:
         initial_steps = self._iter_steps
-        for _ in range(full_batch_size // mini_batch_size):
-          # reserve 1 for None and the other for repeated interable
-          # if batch_repeat > 1
-          train_data_queue = queue_lib.SimpleDataQueue(
-              maxsize=grad_acc_steps * self._num_iterations() + 1
-          )
-          # Use an unbounded queue for evaluation data.
-          eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
-          initial_steps = self._iter_steps
-          future = self.executor.submit(
-              self._prepare_data,
-              iterator=train_iterator,
-              proceed_num_steps=grad_acc_steps,
-              sample_repeat=self._num_generations(),
-              batch_repeat=self._num_iterations(),
-              service_target_batch_size=service_target_batch_size,
-              data_queue=train_data_queue,
-              async_loading=self.can_enable_async_rollout,
-              mode=rl_cluster_lib.Mode.TRAIN,
+
+        with self.rl_cluster.perf.span_group("global_step"):
+          self._run_global_step(
+              full_batch_size,
+              mini_batch_size,
+              service_target_batch_size,
+              grad_acc_steps,
+              train_iterator,
+              eval_ds,
+              skip_jit,
           )
 
-          curr_eval_ds = None
-          with jax.profiler.StepTraceAnnotation(
-              "trainer", step_num=initial_steps
-          ):
-            while True:
-              with sft_utils.time_measure(suppress_logging=True) as timer:
-                curr_train_ds = train_data_queue.get(block=True)
-
-              if curr_train_ds is None:
-                break
-
-              if self.can_enable_async_rollout:
-                self.rl_cluster.buffer_metrics(
-                    {
-                        "actor_dequeue_time": (
-                            timer(),
-                            np.mean,
-                        ),
-                    },
-                    mode=rl_cluster_lib.Mode.TRAIN,
-                )
-
-              if (
-                  eval_ds
-                  and not curr_eval_ds
-                  and self.rl_cluster.actor_trainer.train_steps
-                  % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
-                  == 0
+          if self.should_sync_weights:
+            logging.debug(
+                "Syncing weights at global step"
+                f" {self.rl_cluster.global_steps} mini batch step"
+                f" {self._iter_steps}"
+            )
+            with self.rl_cluster.perf.span(
+                "weight_sync", self.rl_cluster.perf.all_devices
+            ):
+              with jax.profiler.StepTraceAnnotation(
+                  "sync_sampler_weights", step_num=initial_steps
               ):
-                self._eval_iter_steps = 0
-                self._prepare_data(
-                    iterator=iter(eval_ds),
-                    proceed_num_steps=-1,
-                    sample_repeat=self._num_generations(),
-                    batch_repeat=1,
-                    service_target_batch_size=service_target_batch_size,
-                    data_queue=eval_data_queue,
-                    async_loading=False,
-                    mode=rl_cluster_lib.Mode.EVAL,
-                )
-                curr_eval_ds = eval_data_queue.get(block=True)
-              self.rl_cluster.update_actor(
-                  curr_train_ds,
-                  curr_eval_ds,
-                  skip_jit,
-              )  # loop over μ
-              if hasattr(self.rl_cluster, "critic_trainer"):
-                self.rl_cluster.update_critic(
-                    curr_train_ds,
-                    curr_eval_ds,
-                    skip_jit,
-                )  # loop over μ
+                self.rl_cluster.sync_weights()
+          else:
+            self.rl_cluster.global_steps += (
+                1  # manually increment the global steps.
+            )
 
-          # call to throw stop iteration as a singal to break the loop
-          future.result()
-          # sync the iter steps with internel trainer, this is based on the
-          # assumption that the trainer internally doesn't reset the iter steps.
-          # there is current a unit test to ensure this assumption.
-          self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf.export(),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
 
-        if self.should_sync_weights:
-          with jax.profiler.StepTraceAnnotation(
-              "sync_sampler_weights", step_num=initial_steps
-          ):
-            self.rl_cluster.sync_weights()
-        else:
-          self.rl_cluster.global_steps += (
-              1  # manually increment the global steps.
-          )
         if (
             self.rl_cluster.actor_trainer.train_steps
             >= self.rl_cluster.cluster_config.training_config.max_steps
@@ -696,3 +610,137 @@ class RLLearner(ABC):
       except StopIteration:
         break
     self.rl_cluster.close()
+
+  def _run_global_step(
+      self,
+      full_batch_size: int,
+      mini_batch_size: int,
+      service_target_batch_size: int,
+      grad_acc_steps: int,
+      train_iterator: Iterator[TrainingInputT],
+      eval_ds: Iterable[TrainingInputT] | None,
+      skip_jit: bool,
+  ) -> None:
+    """Run one global step."""
+    for _ in range(full_batch_size // mini_batch_size):
+      initial_steps = self._iter_steps
+
+      with self.rl_cluster.perf.span_group("mini_batch_step"):
+        self._run_mini_batch_step(
+            initial_steps,
+            service_target_batch_size,
+            grad_acc_steps,
+            train_iterator,
+            eval_ds,
+            skip_jit,
+        )
+
+      # sync the iter steps with internel trainer, this is based on the
+      # assumption that the trainer internally doesn't reset the iter steps.
+      # there is current a unit test to ensure this assumption.
+      self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
+
+  def _run_mini_batch_step(
+      self,
+      initial_steps: int,
+      service_target_batch_size: int,
+      grad_acc_steps: int,
+      train_iterator: Iterator[TrainingInputT],
+      eval_ds: Iterable[TrainingInputT] | None,
+      skip_jit: bool,
+  ) -> None:
+    """Run one mini batch step."""
+    with self.rl_cluster.perf.span_group("micro_batch_steps"):
+      self._run_all_micro_batch_steps(
+          initial_steps,
+          service_target_batch_size,
+          grad_acc_steps,
+          train_iterator,
+          eval_ds,
+          skip_jit,
+      )
+
+  def _run_all_micro_batch_steps(
+      self,
+      initial_steps: int,
+      service_target_batch_size: int,
+      grad_acc_steps: int,
+      train_iterator: Iterator[TrainingInputT],
+      eval_ds: Iterable[TrainingInputT] | None,
+      skip_jit: bool,
+  ) -> None:
+    """Run all micro batch steps."""
+
+    # reserve 1 for None and the other for repeated interable
+    # if batch_repeat > 1
+    train_data_queue = queue_lib.SimpleDataQueue(
+        maxsize=grad_acc_steps * self._num_iterations() + 1
+    )
+    # Use an unbounded queue for evaluation data.
+    eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+
+    future = self.executor.submit(
+        self._prepare_data,
+        iterator=train_iterator,
+        proceed_num_steps=grad_acc_steps,
+        sample_repeat=self._num_generations(),
+        batch_repeat=self._num_iterations(),
+        service_target_batch_size=service_target_batch_size,
+        data_queue=train_data_queue,
+        async_loading=self.can_enable_async_rollout,
+        mode=rl_cluster_lib.Mode.TRAIN,
+    )
+
+    curr_eval_ds = None
+    with jax.profiler.StepTraceAnnotation("trainer", step_num=initial_steps):
+      while True:
+        with sft_utils.time_measure(suppress_logging=True) as timer:
+          curr_train_ds = train_data_queue.get(block=True)
+
+        if curr_train_ds is None:
+          break
+
+        if self.can_enable_async_rollout:
+          self.rl_cluster.buffer_metrics(
+              {
+                  "actor_dequeue_time": (
+                      timer(),
+                      np.mean,
+                  ),
+              },
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+
+        if (
+            eval_ds
+            and not curr_eval_ds
+            and self.rl_cluster.actor_trainer.train_steps
+            % self.rl_cluster.cluster_config.training_config.eval_every_n_steps
+            == 0
+        ):
+          self._eval_iter_steps = 0
+          self._prepare_data(
+              iterator=iter(eval_ds),
+              proceed_num_steps=-1,
+              sample_repeat=self._num_generations(),
+              batch_repeat=1,
+              service_target_batch_size=service_target_batch_size,
+              data_queue=eval_data_queue,
+              async_loading=False,
+              mode=rl_cluster_lib.Mode.EVAL,
+          )
+          curr_eval_ds = eval_data_queue.get(block=True)
+        self.rl_cluster.update_actor(
+            curr_train_ds,
+            curr_eval_ds,
+            skip_jit,
+        )  # loop over μ num_iterations
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              curr_train_ds,
+              curr_eval_ds,
+              skip_jit,
+          )  # loop over μ num_iterations
+
+    # call to throw stop iteration as a signal to break the loop
+    future.result()

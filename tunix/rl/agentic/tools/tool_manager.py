@@ -23,13 +23,6 @@ import uuid
 
 from tunix.rl.agentic.tools import base_tool
 
-as_completed = futures.as_completed
-ToolOutput = base_tool.ToolOutput
-ToolCall = base_tool.ToolCall
-BaseTool = base_tool.BaseTool
-
-ThreadPoolExecutor = futures.ThreadPoolExecutor
-
 
 class ToolManager:
   """Centralized router and executor for managing multiple tools in an agent system.
@@ -46,7 +39,10 @@ class ToolManager:
   """
 
   def __init__(
-      self, tool_map: Dict[str, Type[BaseTool]], *, desc_fallback: str = ""
+      self,
+      tool_map: Dict[str, Type[base_tool.BaseTool]],
+      *,
+      desc_fallback: str = "",
   ):
     """Initialize the tool manager with a collection of tool classes.
 
@@ -61,7 +57,7 @@ class ToolManager:
         desc_fallback (str): Default description used when a tool class lacks a
           docstring. Helps maintain consistent documentation.
     """
-    self._tool_dict: Dict[str, BaseTool] = {}
+    self._tool_dict: Dict[str, base_tool.BaseTool] = {}
     for name, cls in tool_map.items():
       if inspect.isabstract(cls):
         raise TypeError(
@@ -81,7 +77,7 @@ class ToolManager:
     """
     return list(self._tool_dict.keys())
 
-  def get_tools(self) -> List[BaseTool]:
+  def get_tools(self) -> List[base_tool.BaseTool]:
     """Get a list of all registered tool instances.
 
     Returns:
@@ -113,7 +109,7 @@ class ToolManager:
     """
     return [tool.to_mcp_json() for tool in self._tool_dict.values()]
 
-  def register_mcp_tool(self, tool: BaseTool):
+  def register_mcp_tool(self, tool: base_tool.BaseTool):
     """Register a pre-instantiated MCP-compatible tool.
 
     Adds a tool instance directly to the registry, useful for tools
@@ -125,7 +121,7 @@ class ToolManager:
     """
     self._tool_dict[tool.name] = tool
 
-  def run(self, tool_name: str, **kwargs: Any) -> ToolOutput:
+  def run(self, tool_name: str, **kwargs: Any) -> base_tool.ToolOutput:
     """Execute a single tool by name with the provided arguments.
 
     Looks up the tool in the registry, executes it with the given parameters,
@@ -142,16 +138,20 @@ class ToolManager:
     """
     tool = self._tool_dict.get(tool_name)
     if tool is None:
-      return ToolOutput(
+      return base_tool.ToolOutput(
           name=tool_name, error=f"Tool '{tool_name}' not registered."
       )
     # pylint: disable=broad-exception-caught
     try:
       return tool.apply(**kwargs)
     except Exception as e:
-      return ToolOutput(name=tool_name, error=f"{type(e).__name__}: {e}")
+      return base_tool.ToolOutput(
+          name=tool_name, error=f"{type(e).__name__}: {e}"
+      )
 
-  async def run_async(self, tool_name: str, **kwargs: Any) -> ToolOutput:
+  async def run_async(
+      self, tool_name: str, **kwargs: Any
+  ) -> base_tool.ToolOutput:
     """Asynchronously execute a single tool by name with the provided arguments.
 
     Looks up the tool in the registry, executes it with the given parameters,
@@ -168,17 +168,19 @@ class ToolManager:
     """
     tool = self._tool_dict.get(tool_name)
     if tool is None:
-      return ToolOutput(
+      return base_tool.ToolOutput(
           name=tool_name, error=f"Tool '{tool_name}' not registered."
       )
     # pylint: disable=broad-exception-caught
     try:
       return await tool.apply_async(**kwargs)
     except Exception as e:
-      return ToolOutput(name=tool_name, error=f"{type(e).__name__}: {e}")
+      return base_tool.ToolOutput(
+          name=tool_name, error=f"{type(e).__name__}: {e}"
+      )
 
   def execute_calls(
-      self, calls: List[ToolCall], parallel: bool = True
+      self, calls: List[base_tool.ToolCall], parallel: bool = True
   ) -> Dict[str, str]:
     """Execute multiple tool calls with optional parallel processing.
 
@@ -210,7 +212,7 @@ class ToolManager:
       return outputs
 
     # Parallel execution using thread pool for improved performance
-    with ThreadPoolExecutor() as executor:
+    with futures.ThreadPoolExecutor() as executor:
       future_to_id = {}
       for call in calls:
         cid = getattr(call, "id", None) or str(uuid.uuid4())
@@ -219,7 +221,7 @@ class ToolManager:
         )
         future_to_id[future] = cid
 
-      for future in as_completed(future_to_id):
+      for future in futures.as_completed(future_to_id):
         cid = future_to_id[future]
         # pylint: disable=broad-exception-caught
         try:

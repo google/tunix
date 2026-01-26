@@ -20,13 +20,14 @@ import gc
 import logging
 import math
 import re
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from flax import nnx
 import jax
 from jax import lax
 import jax.image as jimg
 import jax.numpy as jnp
+import numpy as np
 
 
 def compute_attention_masks(
@@ -89,23 +90,23 @@ def next_power_of_2(x: int) -> int:
 
 
 def pad_to_length(
-    x: jax.Array,
+    x: np.ndarray,
     target_length: int,
     pad_value: int = 0,
     left=False,
     axis: int = 0,
-) -> jax.Array:
-  """Pads a JAX array to a specified target length along a given axis.
+) -> np.ndarray:
+  """Pads a numpy array to a specified target length along a given axis.
 
   Args:
-      x: The JAX array to pad.
+      x: The numpy array to pad.
       target_length: The desired length of the padded array.
       pad_value: The value to use for padding (default: 0).
       left: If True, add padding tokens to the left of the array.
       axis: The axis along which to pad (default: 0).
 
   Returns:
-      A new JAX array that is padded to the target length along the specified
+      A new numpy array that is padded to the target length along the specified
       axis. Returns original array if it is already longer than the target
       length.
   """
@@ -115,12 +116,12 @@ def pad_to_length(
 
   padding_shape = list(x.shape)
   padding_shape[axis] = target_length - length
-  padding = jnp.full(padding_shape, pad_value, dtype=x.dtype)
+  padding = np.full(padding_shape, pad_value, dtype=x.dtype)
 
   if left:
-    return jnp.concatenate([padding, x], axis=axis)
+    return np.concatenate([padding, x], axis=axis)
   else:
-    return jnp.concatenate([x, padding], axis=axis)
+    return np.concatenate([x, padding], axis=axis)
 
 
 def find_first_non_pad_idx(ids, pad_id):
@@ -303,7 +304,7 @@ def get_logprobs_from_vllm_output(
     logprobs: List[Optional[Dict[int, Any]]],
 ) -> List[float]:
   """Extracts the log probs from the vLLM output."""
-  if logprobs is None or logprobs[0] is None:
+  if not logprobs or logprobs[0] is None:
     logging.debug('Logprobs are missing')
     return []
 
@@ -341,15 +342,38 @@ def build_flat_dict(
     A new flat dictionary with the mapped keys and values.
   """
   new_flat_dict = {}
+  compiled_mappings = []
+
+  # PRE-COMPILE MAPPINGS
+  # Convert target string patterns into Python Regex objects for fast matching.
+  for src, (tgt, sharding) in mappings.items():
+    # Scenario A: The mapping already contains regex special characters (manual
+    # filtering). The assumption is that `src` does not contain regex
+    # characters like `()`; only `tgt` can contain them.
+    # Example: 'layers.(0|2|4).*' used to select only even layers for MoE
+    # interleaving.
+    if any(char in tgt for char in ['|', '(', ')']):
+      pattern = '^' + tgt + '$'
+    else:
+      # Scenario B: Standard wildcard mapping.
+      # We escape special dots and replace '.*' with a capturing group '(\d+)'
+      # to extract the layer index from the path.
+      pattern = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
+    compiled_mappings.append((src, re.compile(pattern), sharding))
+
+  # ITERATE THROUGH ACTUAL PARAMETERS
   for keys, v in flat_state:
+    # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
     path = '.'.join(str(key) for key in keys)
     mapped = False
-    for src, (tgt, sharding) in mappings.items():
-      regex = '^' + re.escape(tgt).replace('\\.\\*', r'\.(\d+)') + '$'
-      matched = re.match(regex, path)
+    for src, regex, sharding in compiled_mappings:
+      matched = regex.match(path)
       if matched:
         # Extract wildcards if any
         wildcards = matched.groups()
+
+        # Reconstruct the internal name by filling '*' in the source string
+        # with the captured wildcards from the external path.
         src_parts = []
         wc_index = 0
         for part in src.split('.'):
@@ -359,11 +383,16 @@ def build_flat_dict(
           else:
             src_parts.append(part)
         actual_src = '.'.join(src_parts)
-        # Check if this is a scanned parameter (has 'layer' in sharding spec)
+
+        # HANDLE SCANNED VS REGULAR PARAMS
+        # Scanned parameters have 'layer' in their sharding spec. This means we
+        # stack multiple individual layer weights into one big array.
         if sharding and 'layer' in sharding:
           if actual_src not in new_flat_dict:
             new_flat_dict[actual_src] = ([], [], sharding)
-          layer_number = int(matched.groups()[0])
+
+          # Extract layer index from regex match for correct sorting.
+          layer_number = int(wildcards[0]) if wildcards else 0
           new_flat_dict[actual_src][0].append((layer_number, v))
           new_flat_dict[actual_src][1].append((layer_number, path))
         else:
@@ -376,7 +405,7 @@ def build_flat_dict(
     if not mapped:
       logging.warning('!!! No mapping for flat state: %s', path)
 
-  # Sort layers
+  # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
@@ -464,6 +493,7 @@ def _apply_transpose(
     val: jnp.ndarray,
     src_key: str,
     transpose_keys: Optional[Dict[str, Tuple[int, ...]]],
+    rollout_engine: Optional[str],
 ) -> jnp.ndarray:
   """Apply transpose operation if configured for this key."""
   if not transpose_keys:
@@ -479,48 +509,17 @@ def _apply_transpose(
   if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
     return jnp.transpose(val, transpose_keys[target_key])
+
+  # For LoRA
+  # Note: The following codes takes effect in SGLangJAx rollout, and may not take effect in other rollout engine.
+
+  if rollout_engine == 'sglang_jax' and 'lora' in all_key:
+    for r_key in transpose_keys:
+      if re.compile(rf'{r_key}').match(all_key):
+        logging.debug('Applying LoRA transpose on %s', src_key)
+        return jnp.transpose(val[None, :, :], transpose_keys[r_key])
+
   return val
-
-
-def _reshape_attention(
-    val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
-) -> jnp.ndarray:
-  """Reshape attention tensors with special handling.
-
-  Args:
-      val: Value to reshape.
-      tgt_shape: Target shape.
-      src_key: Source key for error messages.
-
-  Returns:
-      Reshaped value.
-
-  Raises:
-      ShapeMismatchError: If reshaping is not possible.
-  """
-  if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
-    new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
-    logging.debug(
-        'Reshaping attention bias on %s: %s -> %s',
-        src_key,
-        val.shape,
-        new_shape,
-    )
-    return jnp.reshape(val, new_shape)
-  ## here exists tgt_shape is (4096, 1024), but the val shape is (4096, 8, 128) case, so needs reshape
-  if re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(
-      src_key
-  ) and math.prod(tgt_shape) == math.prod(val.shape):
-    logging.debug(
-        'Reshaping attention proj on %s: %s -> %s',
-        src_key,
-        val.shape,
-        tgt_shape,
-    )
-    return jnp.reshape(val, tgt_shape)
-  raise ShapeMismatchError(
-      f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
-  )
 
 
 def _align_shape(
@@ -542,26 +541,74 @@ def _align_shape(
   if val.shape == tgt_shape:
     return val
 
+  additional_reshape = False
+  new_tgt_shape = tgt_shape
   # Handle rank mismatch
   if len(val.shape) != len(tgt_shape):
-    return _reshape_attention(val, tgt_shape, src_key)
+    if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
+      new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
+      logging.debug(
+          'Reshaping attention bias on %s: %s -> %s',
+          src_key,
+          val.shape,
+          new_shape,
+      )
+      return jnp.reshape(val, new_shape)
+    elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
+      if math.prod(tgt_shape) == math.prod(val.shape):
+        logging.debug(
+            'Reshaping attention proj on %s: %s -> %s',
+            src_key,
+            val.shape,
+            tgt_shape,
+        )
+        return jnp.reshape(val, tgt_shape)
+      else:
+        # need to reshape and then align each dim
+        additional_reshape = True
+        # Handle cases of mapping from (model_dim, num_head, head_dim) or
+        # (model_dim, head_dim, num_head) to
+        # (model_dim, num_head_dim * head_dim).
+        assert len(val.shape) == 3 and len(tgt_shape) == 2, (
+            f'Unexpected attention proj shape: {val.shape} and target shape:'
+            f' {tgt_shape}'
+        )
+        if 'o_proj' in src_key:
+          # for output proj, head dim is dim(-2)
+          padded_dim = (val.shape[-2] + 127) // 128 * 128
+          repeated_dim = tgt_shape[-1] // padded_dim
+          new_tgt_shape = tgt_shape[:-1] + (padded_dim, repeated_dim)
+        else:
+          # for q/k/v proj, head dim is dim(-1)
+          padded_dim = (val.shape[-1] + 127) // 128 * 128
+          repeated_dim = tgt_shape[-1] // padded_dim
+          new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
+    else:
+      raise ShapeMismatchError(
+          f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
+      )
 
-  original_shape = val.shape
-  # Check if this is an attention weight that can be padded/repeated
-  attention_patterns = [r'.*(q|k|v|o)_proj.*', r'.*(key|query|value|output).*']
+  attention_patterns = [
+      r'.*(q|k|v|o)_proj.*',
+      r'.*(q|k|v|o)_bias.*',
+      r'.*(key|query|value|output).*',
+  ]
   if not any(re.match(pattern, src_key) for pattern in attention_patterns):
     raise ShapeMismatchError(
         f'Shape mismatch for non-attention weight {src_key}: '
         f'{val.shape} vs {tgt_shape}. Padding/repetition only supported '
         'for attention weights.'
     )
-  # Align each dimension
+
+  original_shape = val.shape
+  # Check if this is an attention weight that can be padded/repeated and
+  # align on each dimension.
   pad_width = []
   repeat_ops = []
-  for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, tgt_shape)):
+  for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, new_tgt_shape)):
     if src_dim < tgt_dim:
       # For QKV, H is dim(-1); For O, H is dim(-2), same for Tunix and vLLM
-      if i == len(val.shape) - 1 or (
+      if ('o_proj' not in src_key and i == len(val.shape) - 1) or (
           'o_proj' in src_key and i == len(val.shape) - 2
       ):
         # Head dimension: pad with zeros
@@ -592,13 +639,19 @@ def _align_shape(
 
   for axis, repeat_factor in repeat_ops:
     val = jnp.repeat(val, repeat_factor, axis=axis)
-  return jnp.pad(val, pad_width)
+  val = jnp.pad(val, pad_width)
+
+  if additional_reshape:
+    assert math.prod(val.shape) == math.prod(
+        tgt_shape
+    ), f'After align, shape mismatch on {src_key}: {val.shape} vs {tgt_shape}'
+    val = jnp.reshape(val, tgt_shape)
+  return val
 
 
 def _apply_dtype_cast(
     val: jnp.ndarray, tgt_dtype: jnp.dtype, src_key: str
 ) -> jnp.ndarray:
-
   if val.dtype != tgt_dtype:
     logging.warning(
         'Type mismatch on %s: %s -> %s',
@@ -617,6 +670,7 @@ def transfer_state_with_mappings(
     key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
+    rollout_engine=None,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
 
@@ -638,8 +692,10 @@ def transfer_state_with_mappings(
   """
   # Get flat target state
   tgt_flat_list = dst_state.flat_state()
+
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
+
   if reshard_fn:
     sharding_dict = {
         key: (
@@ -662,7 +718,7 @@ def transfer_state_with_mappings(
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
     # Apply transpose if configured
-    val = _apply_transpose(val, flat_src_key, transpose_keys)
+    val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
@@ -699,6 +755,115 @@ def transfer_state_with_mappings(
         tgt_param = resharded_values_flat_dict[tgt_key]
 
   return dst_state.from_flat_path(tgt_flat_list)
+
+
+def transfer_state_directly(
+    src_state: Mapping[str, Any],
+    dst_state: Mapping[str, Any],
+    reshard_fn: Callable[..., Mapping[str, Any]],
+) -> None:
+  """Transfers state directly by matching structure, stripping wrappers.
+
+  This handles the logic for syncing weights where no explicit mapping is provided,
+  common in MaxText -> MaxText workflows. This method should work for all MaxText models.
+  It automatically unwraps common containers present in MaxText models like 'base'
+  (MaxText TrainState) and nested 'model' keys (vLLM wrappers). Additionally, it handles
+  multiple mapping types including dicts, nnx.State, and nnx.Dict. Mismatches in keys are
+  logged for debugging and handled by intersecting the source and target trees.
+
+  Args:
+    src_state: The source state to transfer from.
+    dst_state: The destination state to transfer to.
+    reshard_fn: A function to shard the values.
+  """
+
+  def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
+    if isinstance(obj, dict):
+      return key in obj
+
+    return hasattr(obj, key)
+
+  # Unwrap Source (Remove 'base' wrapper from MaxText)
+  if isinstance(src_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
+      src_state, 'base'
+  ):
+    logging.info("Unwrapping 'base' key from source state.")
+    src_state = src_state['base']
+
+  # Unwrap Target (Remove nested 'model' wrappers from vLLM)
+  while isinstance(dst_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
+      dst_state, 'model'
+  ):
+    logging.info("Unwrapping nested 'model' key from target state.")
+    dst_state = dst_state['model']
+
+  # Helper: Convert Target Spec to Pure Dict (Strip NNX Params)
+  # JAX needs a spec tree of pure NamedShardings, not Param(NamedSharding).
+  def to_pure_spec(node: Any) -> Any:
+    # Unwrap NNX containers
+    if hasattr(node, 'to_pure_dict'):
+      node = node.to_pure_dict()
+    elif isinstance(node, (nnx.Dict, nnx.State)):
+      node = dict(node)
+
+    # Recurse into dicts
+    if isinstance(node, dict):
+      return {k: to_pure_spec(v) for k, v in node.items()}
+
+    # Unwrap Variables
+    if isinstance(node, nnx.Variable):
+      return to_pure_spec(node[...])
+    if hasattr(node, 'value'):
+      return node.value
+
+    return node
+
+  # Helper: Intersect Trees (Handle KVCache/RNG mismatches)
+  def intersect_trees(
+      src: Any, tgt_spec: Any, path: str = ''
+  ) -> Tuple[Any, Any]:
+    # Stop recursion if we hit a leaf (non-dict)
+    if not isinstance(src, dict) or not isinstance(tgt_spec, dict):
+      return src, tgt_spec
+
+    src_keys = set(src.keys())
+    tgt_keys = set(tgt_spec.keys())
+    common_keys = src_keys & tgt_keys
+
+    # Debug Logging for dropped keys
+    if src_keys - tgt_keys:
+      logging.debug(
+          "Ignored checkpoint keys at '%s': %s", path, src_keys - tgt_keys
+      )
+    if tgt_keys - src_keys:
+      logging.debug(
+          "Unmatched model keys at '%s': %s", path, tgt_keys - src_keys
+      )
+
+    filtered_src = {}
+    filtered_tgt = {}
+
+    for k in common_keys:
+      new_path = f'{path}/{k}' if path else k
+      s_val, t_val = intersect_trees(src[k], tgt_spec[k], new_path)
+      filtered_src[k] = s_val
+      filtered_tgt[k] = t_val
+
+    return filtered_src, filtered_tgt
+
+  # Prepare clean source and target specs
+  full_source_dict = to_pure_spec(src_state)
+  full_target_spec = to_pure_spec(dst_state)
+
+  # Filter both to their intersection
+  final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
+
+  # Reshard and Update
+  resharded_weights = reshard_fn(
+      source=final_source,
+      target=final_spec,
+  )
+  nnx.update(dst_state, resharded_weights)
 
 
 def verify_state_closeness(golden_state, state, atol=1e-2):

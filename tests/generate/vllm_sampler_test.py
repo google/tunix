@@ -39,8 +39,6 @@ from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 import asyncio
 
-# vLLM Jax backend suggest to use old model desing for now.
-# os.environ["NEW_MODEL_DESIGN"]="True"
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 
@@ -60,12 +58,12 @@ class VllmSamplerTest(absltest.TestCase):
 
     mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
     axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices())
+    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
 
   def load_llama3_model(self, model_version: str, enable_lora: bool = False):
     model_config = {
-        "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3_2_1b,
-        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3_1_8b,
+        "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
+        "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     }
     assert (
         model_version in model_config
@@ -91,10 +89,14 @@ class VllmSamplerTest(absltest.TestCase):
   def test_vllm_sampler_batch_mode(self):
     self._run_vllm_sampler(server_mode=False)
 
+  def test_vllm_sampler_batch_mode_with_data_parallel(self):
+    self._run_vllm_sampler(server_mode=False, data_parallel_size=2)
+    os.environ["NEW_MODEL_DESIGN"] = "False"
+
   def test_vllm_sampler_server_mode(self):
     self._run_vllm_sampler(server_mode=True)
 
-  def _run_vllm_sampler(self, server_mode):
+  def _run_vllm_sampler(self, server_mode, data_parallel_size: int = -1):
     tunix_model, model_config = self.load_llama3_model(
         self.repo_id, enable_lora=self.enable_lora
     )
@@ -105,12 +107,9 @@ class VllmSamplerTest(absltest.TestCase):
         self.model_path
     )
 
-    args = {}
-    args["model"] = self.model_path
-    args["additional_config"] = {}
-    args["additional_config"]["lora_config"] = None
+    lora_config = None
     if self.enable_lora:
-      args["additional_config"]["lora_config"] = {
+      lora_config = {
           "rank": 64,
           "alpha": 64.0,
           "module_path": ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj",
@@ -165,8 +164,9 @@ class VllmSamplerTest(absltest.TestCase):
         init_with_random_weights=True,
         tpu_backend_type="jax",
         mapping_config=mapping_config,
-        lora_config=args["additional_config"]["lora_config"],
+        lora_config=lora_config,
         server_mode=server_mode,
+        data_parallel_size=data_parallel_size,
     )
 
     vl_sampler = vllm_sampler.VllmSampler(
@@ -209,20 +209,12 @@ class VllmSamplerTest(absltest.TestCase):
     _, tunix_state = nnx.split(tunix_model)
     vllm_state = vl_sampler._model_runner.state
 
-    if os.environ.get("NEW_MODEL_DESIGN") == "True":
-      self.assertTrue(
-          np.allclose(
-              tunix_state["embedder"]["input_embedding"].value,
-              vllm_state["embedder"]["input_embedding_table_VD"].value,
-          )
-      )
-    else:
-      self.assertTrue(
-          np.allclose(
-              tunix_state["embedder"]["input_embedding"].value,
-              vllm_state["model"]["embed"]["embedding"].value,
-          )
-      )
+    self.assertTrue(
+        np.allclose(
+            tunix_state["embedder"]["input_embedding"].value,
+            vllm_state["model"]["embed"]["embedding"].value,
+        )
+    )
     if vllm_config.server_mode:
       vl_sampler.stop()
 

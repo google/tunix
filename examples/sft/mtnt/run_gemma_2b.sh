@@ -18,7 +18,8 @@ set -x # Enable xtrace
 python3 -m tunix.cli.peft_main \
   base_config.yaml \
   model_config.model_name="gemma-2b" \
-  model_config.model_id="google/gemma/flax/2b" \
+  model_config.model_id="google/gemma-2b" \
+  model_config.model_path="google/gemma/flax/2b" \
   model_config.model_source="kaggle" \
   model_config.model_download_path="/tmp/models" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/" \

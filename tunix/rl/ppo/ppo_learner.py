@@ -17,14 +17,16 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, List, Sequence
+from typing import Generic, Iterable, List, Sequence
 
 import flax
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
+from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
 from tunix.rl.ppo import ppo_helpers
@@ -32,6 +34,7 @@ from tunix.rl.ppo import ppo_helpers
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
+registry = function_registry.default_registry
 
 
 @flax.struct.dataclass(frozen=True)
@@ -41,11 +44,17 @@ class TrainExample(common.TrainExample):
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class PPOConfig:
+class PPOConfig(algo_config_lib.AlgorithmConfig):
   """Configuration for PPO learner.
 
-  Parameters:
-    num_ppo_epochs: The number of optimization epochs per batch of rollouts.
+  Attributes:
+    algo_variant: The algorithm variant to use. Default: `ppo`.
+    advantage_estimator: The advantage estimator to use. Default: `gae`.
+    policy_loss_fn: The policy loss function to use. Default: `ppo`.
+    reward_manager: The reward manager to use. Default: `sequence-level`.
+    num_iterations: The number of optimization epochs per batch of rollouts.
+      This corresponds to the number of times the policy updates its weights for
+      a given batch of rollouts.
     mini_batch_size: The batch size on which the actual model updates happen.
       The rollout phase (`generate_and_compute_advantages`) happen on a larger
       batch, which is then split into "mini-batches".
@@ -67,7 +76,11 @@ class PPOConfig:
       `["low_var_kl", "kl", "mse_kl"]`.
   """
 
-  num_ppo_epochs: int = 1
+  algo_variant: str = "ppo"
+  advantage_estimator: str = "gae"
+  policy_loss_fn: str = "ppo"
+  reward_manager: str = "sequence-level"
+  num_iterations: int = 1
 
   # PPO loss and advantage computation configs.
   gamma: float = 1.0
@@ -98,7 +111,7 @@ class PPOConfig:
       )
 
 
-class PPOLearner(rl_learner.RLLearner):
+class PPOLearner(rl_learner.RLLearner[PPOConfig]):
   """PPO (Proximal Policy Optimization) learner.
 
   PPO is a reinforcement learning algorithm that fine-tunes models using an
@@ -140,9 +153,9 @@ class PPOLearner(rl_learner.RLLearner):
         prompts), np.min), ...        ... ...    }
       data_shuffle_seed: The seed for shuffling the data.
     """
-    self.ppo_config = ppo_config
     super().__init__(
         rl_cluster=rl_cluster,
+        algo_config=ppo_config,
         reward_fns=reward_fns,
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,
@@ -168,14 +181,17 @@ class PPOLearner(rl_learner.RLLearner):
     )
 
     # ===== Configure the actor (policy) trainer =====
-    self.rl_cluster.actor_trainer.with_loss_fn(ppo_policy_loss_fn, has_aux=True)
+    policy_loss_fn = registry.get(
+        "policy_loss_fn", self.algo_config.policy_loss_fn
+    )
+    self.rl_cluster.actor_trainer.with_loss_fn(policy_loss_fn, has_aux=True)
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
-            "epsilon_low": self.ppo_config.epsilon_low,
-            "epsilon_high": self.ppo_config.epsilon_high,
-            "epsilon_c": self.ppo_config.epsilon_c,
-            "entropy_coef": self.ppo_config.entropy_coef,
+            "epsilon_low": self.algo_config.epsilon_low,
+            "epsilon_high": self.algo_config.epsilon_high,
+            "epsilon_c": self.algo_config.epsilon_c,
+            "entropy_coef": self.algo_config.entropy_coef,
             "pad_id": self.rl_cluster.rollout.pad_id(),
             "eos_id": self.rl_cluster.rollout.eos_id(),
         }
@@ -186,7 +202,7 @@ class PPOLearner(rl_learner.RLLearner):
     self.rl_cluster.critic_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
-            "clip_range_value": self.ppo_config.clip_range_value,
+            "clip_range_value": self.algo_config.clip_range_value,
             "pad_id": self.rl_cluster.rollout.pad_id(),
             "eos_id": self.rl_cluster.rollout.eos_id(),
         }
@@ -196,11 +212,11 @@ class PPOLearner(rl_learner.RLLearner):
     # We just log the metrics returned in `aux`. All other metrics are logged
     # by `RLCluster` itself.
     actor_rl_metrics_to_log = {"pg_clipfrac": np.mean}
-    if self.ppo_config.epsilon_c is not None:
+    if self.algo_config.epsilon_c is not None:
       actor_rl_metrics_to_log["pg_clipfrac_lower"] = np.mean
     if (
-        self.ppo_config.entropy_coef is not None
-        and self.ppo_config.entropy_coef > 0.0
+        self.algo_config.entropy_coef is not None
+        and self.algo_config.entropy_coef > 0.0
     ):
       actor_rl_metrics_to_log["loss/entropy"] = np.mean
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
@@ -238,65 +254,74 @@ class PPOLearner(rl_learner.RLLearner):
     # "experiences".
     completion_output = self.rl_cluster.generate(
         prompts=training_input["prompts"],
+        micro_batch_size=self._rollout_micro_batch_size,
     )
     completion_ids = completion_output.tokens
-    prompt_ids = completion_output.left_padded_prompt_tokens
+    prompt_ids = jnp.array(completion_output.left_padded_prompt_tokens)
 
     batch_size = completion_ids.shape[0]
     logits_to_keep = completion_ids.shape[1]
     prompt_mask = (prompt_ids != pad_value).astype("int32")
-    completion_mask = common.make_completion_mask(
+    completion_mask = common.np_make_completion_mask(
         completion_ids, eos_tok=eos_value
     )
+
+    # Convert completion_ids and completion_mask to jax arrays
+    jax_completion_ids = jnp.array(completion_ids)
+    jax_completion_mask = jnp.array(completion_mask)
+
     eos_idx = jnp.max(
-        common.build_positions_from_mask(completion_mask),
+        common.build_positions_from_mask(jax_completion_mask),
         axis=-1,
     )
 
     # ===== Compute log probs ======
     # Compute log probs from the reference model. Shape = `[B, T]`.
-    if self.ppo_config.beta != 0.0:
+    if self.algo_config.beta != 0.0:
       ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
+          completion_tokens=jax_completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
+          micro_batch_size=self._compute_logps_micro_batch_size,
       )
     else:
       ref_per_token_logps = None
 
     # Get log probs from the policy before model weights are updated. We use
     # the policy model here. Shape = `[B, T]`.
-    # TODO(abheesht): Do we do this only when `self.num_ppo_epochs > 1`? Don't
+    # TODO(abheesht): Do we do this only when `self.num_iterations > 1`? Don't
     # see this condition in other RL libraries.
     old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
         prompt_tokens=prompt_ids,
-        completion_tokens=completion_ids,
+        completion_tokens=jax_completion_ids,
+        micro_batch_size=self._compute_logps_micro_batch_size,
     )
 
     # ===== Value computation ======
     # Get values from the value model before model weights are updated.
     values = self.rl_cluster.get_values(
         prompt_tokens=prompt_ids,
-        completion_tokens=completion_ids,
+        completion_tokens=jax_completion_ids,
         pad_id=pad_value,
         eos_id=eos_value,
     )
     # `values` start from the last *prompt* token. Shape: `[B, T]`.
     values = values[:, -logits_to_keep - 1 : -1]
-    values = values * completion_mask
+    values = values * jax_completion_mask
 
     # ===== Reward computation ======
     # Get rewards from the reward model. Eventual shape: `[B, T]`.
     if self._use_reward_model:
       scores = self.rl_cluster.get_rewards(
           prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
+          completion_tokens=jax_completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
       )[:, -logits_to_keep:]
       # We use the score corresponding to the last non-padding token.
-      last_token_scores = scores[jnp.arange(batch_size), eos_idx]
+      jax_last_token_scores = scores[jnp.arange(batch_size), eos_idx]
+      last_token_scores = jax.device_get(jax_last_token_scores)
     else:
       last_token_scores = self._compute_rewards(
           prompts=training_input["prompts"],
@@ -304,6 +329,7 @@ class PPOLearner(rl_learner.RLLearner):
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
+      jax_last_token_scores = jax.device_put(last_token_scores)
 
     # Reward computation is in accordance with other RL libraries
     # batch reward manager (token-level rewards).
@@ -311,26 +337,31 @@ class PPOLearner(rl_learner.RLLearner):
     # 2. A positive reward is given only at the final timestep, so we add that
     # to the tensor of zeros.
     # 3. Subtract KL divergence from the reward tensor.
-    rewards = jnp.zeros_like(completion_ids)
-    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(last_token_scores)
-    if self.ppo_config.beta != 0.0:
+    rewards = jnp.zeros_like(jax_completion_ids)
+    rewards = rewards.at[jnp.arange(batch_size), eos_idx].add(
+        jax_last_token_scores
+    )
+    if self.algo_config.beta != 0.0:
       # TODO(abheesht): Add a toggle - KL can either be added directly to
       # rewards or computed in the loss function.
       kl = common.compute_kl_divergence(
           old_per_token_logps,
           ref_per_token_logps,
-          method=self.ppo_config.kl_method,
+          method=self.algo_config.kl_method,
       )
-      kl = kl * completion_mask
-      rewards = rewards - self.ppo_config.beta * kl
+      kl = kl * jax_completion_mask
+      rewards = rewards - self.algo_config.beta * kl
 
     # ===== Compute advantages using Generalised Advantage Estimation ======
-    advantages, returns = ppo_helpers.compute_gae_advantages(
+    advantage_estimator = registry.get(
+        "advantage_estimator", self.algo_config.advantage_estimator
+    )
+    advantages, returns = advantage_estimator(
         rewards=rewards,
         values=values,
-        completion_mask=completion_mask,
-        gamma=self.ppo_config.gamma,
-        gae_lambda=self.ppo_config.gae_lambda,
+        completion_mask=jax_completion_mask,
+        gamma=self.algo_config.gamma,
+        gae_lambda=self.algo_config.gae_lambda,
     )
 
     # ===== Metric logging ======
@@ -345,7 +376,7 @@ class PPOLearner(rl_learner.RLLearner):
     )
 
     # Log final rewards (scores + KL penalty)
-    sequence_rewards = rewards.sum(-1)
+    sequence_rewards = jax.device_get(rewards.sum(-1))
     self.rl_cluster.buffer_metrics(
         {
             "reward/mean": (np.mean(sequence_rewards), np.mean),
@@ -354,15 +385,15 @@ class PPOLearner(rl_learner.RLLearner):
         },
         mode=mode,
     )
-    if self.ppo_config.beta != 0.0:
+    if self.algo_config.beta != 0.0:
       # Average of the per-sequence mean KL
       per_sequence_mean_kl = ppo_helpers.masked_mean(
-          kl, completion_mask, axis=-1  # pylint: disable=undefined-variable
+          kl, jax_completion_mask, axis=-1  # pylint: disable=undefined-variable
       )
       self.rl_cluster.buffer_metrics(
           {
               "reward_kl_penalty": (
-                  per_sequence_mean_kl.mean(),
+                  jax.device_get(per_sequence_mean_kl.mean()),
                   np.mean,
               ),
           },
@@ -431,8 +462,8 @@ class PPOLearner(rl_learner.RLLearner):
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
-        completion_ids=completion_ids,
-        completion_mask=completion_mask,
+        completion_ids=jax_completion_ids,
+        completion_mask=jax_completion_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
         returns=returns,
@@ -460,7 +491,7 @@ class PPOLearner(rl_learner.RLLearner):
     return row_offsets.astype(str).tolist()
 
   def _num_iterations(self) -> int:
-    return self.ppo_config.num_ppo_epochs
+    return self.algo_config.num_iterations
 
   def _num_generations(self) -> int:
     return 1
@@ -524,6 +555,7 @@ def ppo_value_loss_fn(
   return vf_loss, aux
 
 
+@registry.register("policy_loss_fn", "ppo")
 def ppo_policy_loss_fn(
     model: nnx.Module,
     train_example: TrainExample,

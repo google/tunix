@@ -14,12 +14,56 @@
 
 """Utilities for sharding tensors."""
 
+from typing import Tuple
+
 import jax
+from jax.interpreters import pxla
 import jax.sharding as shd
 import numpy as np
 
 
-def get_sharding(x, mesh, pspec):
+def shard_input(
+    input_data: jax.Array, data_sharding_axis: Tuple[str, ...]
+) -> jax.Array:
+  """Shards the input data across the available devices.
+
+  Args:
+    input_data: The input data to be sharded, expected to be a TrainingInput
+      dataclass.
+    data_sharding_axis: The sharding axis for the input data, e.g. ("fsdp",).
+
+  Returns:
+    The sharded TrainingInput.
+  """
+  mesh = pxla.thread_resources.env.physical_mesh
+  if mesh.empty:
+    return input_data
+
+  pspec = shd.PartitionSpec(*data_sharding_axis)
+  # Check if the input is already sharded with the target mesh to avoid
+  # re-sharding.
+  is_sharded = jax.tree.map(
+      lambda x: isinstance(x, jax.Array)
+      and hasattr(x, "sharding")
+      and hasattr(x.sharding, "mesh")
+      and x.sharding.mesh == mesh
+      and hasattr(x.sharding, "spec")
+      and x.sharding.spec == pspec,
+      input_data,
+  )
+  if all(jax.tree.leaves(is_sharded)):
+    return input_data
+
+  with jax.transfer_guard("allow"):
+    return jax.tree.map(
+        lambda x: jax.make_array_from_process_local_data(
+            get_sharding(x, mesh=mesh, pspec=pspec), x
+        ),
+        input_data,
+    )
+
+
+def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
   """Get a sharding for an tensor given a mesh and partition spec."""
   # Only shard arrays with rank > 0.
   if not isinstance(x, (np.ndarray, jax.Array)) or x.ndim == 0:

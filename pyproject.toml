@@ -1,13 +1,13 @@
 [project]
 name = "google-tunix"
-version = "0.1.3"
+version = "0.1.6"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
 requires-python = ">=3.11"
 readme = "README.md"
-license = "Apache-2.0"
+license = { text = "Apache-2.0" }
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -20,22 +20,24 @@ classifiers = [
 dependencies = [
   "datasets",
   "flax>=0.11.1",
-  "gcsfs",
+  "fsspec",  # notebook dependency
+  "google-metrax>=0.2.3",
   "grain",
+  "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "qwix",
   "sentencepiece",
-  "tensorboardX",
+  "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
-  "transformers",
-  "hf_transfer",  # Huggingface caching in CI
+  "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
 ]
 
 [project.optional-dependencies]
@@ -51,7 +53,7 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
+  "jax[tpu]>=0.6.0,!=0.7.2, <=0.8.1", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
@@ -88,7 +90,6 @@ pyink-annotation-pragmas = [
   "@test",
 ]
 pyink-ipynb-indentation = 2
-pyink-ipynb-unicode-escape = true
 
 [tool.isort]
 profile = "google"       # or "black", etc.

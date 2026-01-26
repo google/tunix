@@ -16,15 +16,17 @@
 
 This module provides a mechanism to register, retrieve, and combine various
 reward functions. Reward functions take a task context and an agent's action
-as input and return a `RewardOutput` containing a scalar reward and metadata.
+as input and return a `reward_types.RewardOutput` containing a scalar reward and
+metadata.
 """
 
 from typing import Any, Callable, Dict
 
 from tunix.rl.agentic.rewards import reward_types
 
-RewardOutput = reward_types.RewardOutput
-_REGISTRY: Dict[str, Callable[[Dict[str, Any], str], RewardOutput]] = {}
+_REGISTRY: Dict[
+    str, Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+] = {}
 
 
 def register(name: str):
@@ -83,7 +85,7 @@ def get_reward_fn(name: str):
 
 
 @register("exact_match")
-def exact_match(task: Dict[str, Any], action: str) -> RewardOutput:
+def exact_match(task: Dict[str, Any], action: str) -> reward_types.RewardOutput:
   """Binary reward based on exact string matching with ground truth.
 
   Returns 1.0 for perfect matches after whitespace normalization,
@@ -98,12 +100,12 @@ def exact_match(task: Dict[str, Any], action: str) -> RewardOutput:
   """
   truth = str(task.get("ground_truth", "")).strip()
   score = 1.0 if action.strip() == truth else 0.0
-  return RewardOutput(score, {"exact_match": score})
+  return reward_types.RewardOutput(score, {"exact_match": score})
 
 
 def combine_rewards(
     weights: Dict[str, float],
-) -> Callable[[Dict[str, Any], str], RewardOutput]:
+) -> Callable[[Dict[str, Any], str], reward_types.RewardOutput]:
   """Create a composite reward function from multiple registered functions.
 
   Performs weighted linear combination of multiple reward components,
@@ -125,14 +127,16 @@ def combine_rewards(
       out = get_reward_fn(name)(task, action)
       total += w * out.reward
       meta.update(out.metadata)
-    return RewardOutput(total, meta)
+    return reward_types.RewardOutput(total, meta)
 
   return _fn
 
 
 # -------- Example Reward Function --------
 @register("is_two")
-def is_two_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+def is_two_reward(
+    task: Dict[str, Any], action: str
+) -> reward_types.RewardOutput:
   """Specialized reward function that checks if action represents the number 2.
 
   Attempts to parse the action as numeric value and returns 1.0 if it equals
@@ -150,17 +154,21 @@ def is_two_reward(task: Dict[str, Any], action: str) -> RewardOutput:
     score = 1.0 if value == 2.0 else 0.0
   except ValueError:
     score = 0.0
-  return RewardOutput(score, {"is_two": score})
+  return reward_types.RewardOutput(score, {"is_two": score})
 
 
 @register("dummy")
-def dummy_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+def dummy_reward(
+    task: Dict[str, Any], action: str
+) -> reward_types.RewardOutput:
   """A dummy reward function that always returns zero."""
-  return RewardOutput(0.0, {})
+  return reward_types.RewardOutput(0.0, {})
 
 
 @register("calculate")
-def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
+def calculate_reward(
+    task: Dict[str, Any], action: str
+) -> reward_types.RewardOutput:
   """Calculates the reward for a math expression based on answer correctness.
 
   WARNING: Uses eval(), which is NOT SAFE for untrusted input. This is only for
@@ -171,16 +179,15 @@ def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
     action: The model's answer as a string.
 
   Returns:
-    RewardOutput: 1.0 if the model's answer matches the evaluated expression
+    RewardOutput: 1.0 if the model's answer matches the evaluated
+    expression
       within a tolerance, 0.0 otherwise.
   """
   question_str = task.get("question", "")
   expression = question_str.replace("= ?", "").replace("=", "").strip()
 
   try:
-    answer_str = (
-        action.replace("The answer is ", "").strip().rstrip(".")
-    )
+    answer_str = action.replace("The answer is ", "").strip().rstrip(".")
     answer = float(answer_str)
     correct_value = eval(expression)
     tolerance = 1e-6
@@ -191,4 +198,4 @@ def calculate_reward(task: Dict[str, Any], action: str) -> RewardOutput:
 
   except Exception:
     score = 0.0
-  return RewardOutput(score, {"calculate_correct": score})
+  return reward_types.RewardOutput(score, {"calculate_correct": score})
