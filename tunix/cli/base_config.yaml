@@ -14,14 +14,20 @@
 
 ################################## LOAD MODEL ##################################
 model_config: &base_model_config
-  # Specify model name in style of {model_version}-{model size}, this will use to invoke model config
+  # The unique full name identifier of the model, matching exactly with the name used in Huggingface
+  # e.g., "gemma-2b","llama-3.1-8b", or Kaggle, e.g., "gemma2-2b-it".
   model_name: "llama3.1-8b"
 
   # Chagne model source to your downloading model workflow. Example: "kaggle" | "huggingface" | "gcs" | ""
   model_source: "huggingface"
 
-  # Replace it with your own model checkpoint directory.
+  # Full model name identifier (case sensitive), as it appears on Huggingface, or Kaggle, e.g.,
+  # "meta-llama/Llama-3.1-8B" or "google/gemma-2/flax/gemma2-2b-it".
   model_id: "meta-llama/Llama-3.1-8B"
+
+  # For models from GCS or internal sources, specify the path to the model files.
+  model_path: ""
+
   ################################## Checkpoint ##################################
   # for model downloaded from huggingface or kaggle, copy model to local directory.
   model_download_path: "/tmp/models"
@@ -42,12 +48,14 @@ model_config: &base_model_config
   # Directory used for NNX conversion if downloaded Gemma/Gemma2 from Kaggle source. 
   intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
   ################################# LoRa #################################
-  lora_config:
-    module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
-    rank: 16
-    alpha: 2.0
-    weight_qtype: "nf4"
-    tile_size: 256
+  # If you want to use LoRa, specify the module_path, rank, and alpha. You can also optionally specify the weight_qtype and tile_size, e.g.:
+  #lora_config:
+  #  module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj"
+  #  rank: 16
+  #  alpha: 2.0
+  #  weight_qtype: "nf4"
+  #  tile_size: 256
+  lora_config: {}
 
   ################################## MESH ##################################
   mesh:
@@ -83,6 +91,7 @@ tokenizer_config:
 # Math_dataset "gsm8k" for grpo 
 data_source: ""
 data_directory: ""
+data_module: ""
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 num_batches: 3738
@@ -90,6 +99,9 @@ max_target_length: 256
 num_train_epochs: 1
 train_fraction: 1.0
 num_test_batches: 100
+# Controls the download flag only when using TFDS datasets. If false, the
+# data_dir used will be set to `None` and chosen by default by tfds.
+tfds_download: True
 
 ############################### Optimizer ###############################
 # Optimizer config
@@ -127,6 +139,8 @@ training_config: &base_training_config
     max_to_keep: 1
     save_interval_steps: 180
   metrics_logging_options:
+    project_name: "tunix"
+    run_name: ""
     log_dir: "/tmp/logging"
     flush_every_n_steps: 20
   profiler_options:

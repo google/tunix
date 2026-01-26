@@ -18,10 +18,10 @@ import enum
 import inspect
 from typing import Any
 
-import numpy as np
-import sentencepiece as spm
-import transformers
 from etils import epath
+import numpy as np
+
+import sentencepiece as spm
 
 
 class TokenizerType(enum.Enum):
@@ -117,6 +117,13 @@ class TokenizerAdapter:
     else:
       return self._tokenizer.pad_id()
 
+  def dedup_bos_ids(self, ids: list[int]) -> list[int]:
+    """Deduplicates the bos_id at the beginning of the list."""
+    i = 0
+    while i < len(ids) - 1 and ids[i] == ids[i + 1] == self.bos_id():
+      i += 1
+    return ids[i:]
+
   def _missing_methods(self) -> list[str]:
     """Checks if the tokenizer has any missing methods."""
     required_methods = ['encode', 'decode', 'bos_id', 'eos_id', 'pad_id']
@@ -151,44 +158,6 @@ class TokenizerAdapter:
   def tokenizer(self) -> Any:
     return self._tokenizer
 
-
-class Tokenizer(TokenizerAdapter):
-  """Tokenizing and encoding/decoding text using TokenizerAdapter."""
-
-  def __init__(
-      self,
-      tokenizer_type: str = 'sentencepiece',
-      tokenizer_path: str = 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
-      add_bos: bool | None = True,
-      add_eos: bool | None = True,
-      hf_access_token: str | None = None,
-  ):
-
-    self.tokenizer_type = tokenizer_type
-    if tokenizer_type == 'huggingface':
-      tokenizer = transformers.AutoTokenizer.from_pretrained(
-          pretrained_model_name_or_path=tokenizer_path,
-          add_bos_token=add_bos,
-          add_eos_token=add_eos,
-          token=hf_access_token,
-      )
-    elif tokenizer_type == 'sentencepiece':
-      model_proto = epath.Path(tokenizer_path).read_bytes()
-      tokenizer = spm.SentencePieceProcessor()
-      tokenizer.LoadFromSerializedProto(model_proto)
-      options = []
-      if add_bos:
-        options.append('bos')
-      if add_eos:
-        options.append('eos')
-
-      extra_options_str = ':'.join(options)
-      if extra_options_str:
-        tokenizer.SetEncodeExtraOptions(extra_options_str)
-    else:
-      raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
-    super().__init__(tokenizer)
-
   def apply_chat_template(
       self,
       messages: list[dict[str, str]],
@@ -221,6 +190,10 @@ class Tokenizer(TokenizerAdapter):
           **kwargs,
       )
     elif self._tokenizer_type == TokenizerType.SP:
+      # TODO(haoyugao): The tokenizer type is SP but the template is for
+      # Gemma. This should be aligned, for example by adding a 'gemma'
+      # tokenizer type or a flag. For now, all sentencepiece tokenizers default
+      # to using the Gemma chat template.
       return self._apply_gemma_chat_template(
           messages, add_generation_prompt, tokenize
       )
@@ -257,6 +230,46 @@ class Tokenizer(TokenizerAdapter):
     if tokenize:
       return self.encode(chat_str)
     return chat_str
+
+
+class Tokenizer(TokenizerAdapter):
+  """Tokenizing and encoding/decoding text using TokenizerAdapter."""
+
+  def __init__(
+      self,
+      tokenizer_type: str = 'sentencepiece',
+      tokenizer_path: str = 'gs://gemma-data/tokenizers/tokenizer_gemma2.model',
+      add_bos: bool | None = True,
+      add_eos: bool | None = True,
+      hf_access_token: str | None = None,
+  ):
+
+    self.tokenizer_type = tokenizer_type
+    if tokenizer_type == 'huggingface':
+      import transformers  # pylint: disable=g-import-not-at-top
+
+      tokenizer = transformers.AutoTokenizer.from_pretrained(
+          pretrained_model_name_or_path=tokenizer_path,
+          add_bos_token=add_bos,
+          add_eos_token=add_eos,
+          token=hf_access_token,
+      )
+    elif tokenizer_type == 'sentencepiece':
+      model_proto = epath.Path(tokenizer_path).read_bytes()
+      tokenizer = spm.SentencePieceProcessor()
+      tokenizer.LoadFromSerializedProto(model_proto)
+      options = []
+      if add_bos:
+        options.append('bos')
+      if add_eos:
+        options.append('eos')
+
+      extra_options_str = ':'.join(options)
+      if extra_options_str:
+        tokenizer.SetEncodeExtraOptions(extra_options_str)
+    else:
+      raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
+    super().__init__(tokenizer)
 
   def tokenize(
       self,

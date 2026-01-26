@@ -1,0 +1,59 @@
+# Copyright 2025 Google LLC
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will build tunix python package and run tpu regression tests.
+
+name: Tunix Nightly Regression Tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run the job every day at 2am
+    - cron:  '0 10 * * *' # 10:00 AM UTC, 2:00 AM PST
+
+concurrency:
+  # Dedup scheduled runs but nothing else
+  group: >
+    ${{
+      github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
+      github.run_id
+    }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+jobs:
+  build_tunix_package:
+    name: Build tunix package
+    uses: ./.github/workflows/build_package.yml
+
+  tunix_tpu_nightly_regression:
+    needs: build_tunix_package
+    uses: ./.github/workflows/tpu-nightly-regression.yml
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  notify_failure:
+    name: Notify failed build # creates an issue or modifies last open existing issue for failed build
+    needs: [build_tunix_package, tunix_tpu_nightly_regression]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+    - name: Check whether one of the jobs failed
+      if: ${{ contains(needs.*.result, 'failure') && github.event.pull_request == null && github.event_name != 'workflow_dispatch' }}
+      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}

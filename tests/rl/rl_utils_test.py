@@ -44,7 +44,8 @@ class UtilsTest(absltest.TestCase):
     )
     model1 = tc.get_lora_model(
         tc.ToyTransformer(
-            rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+            config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+            rngs=nnx.Rngs(0),
         ),
         mesh=mesh1,
     )
@@ -58,7 +59,8 @@ class UtilsTest(absltest.TestCase):
     )
     model2 = tc.get_lora_model(
         tc.ToyTransformer(
-            rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+            config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+            rngs=nnx.Rngs(0),
         ),
         mesh=mesh2,
     )
@@ -68,17 +70,20 @@ class UtilsTest(absltest.TestCase):
 
     model3 = tc.get_lora_model(
         tc.ToyTransformer(
-            rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+            config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+            rngs=nnx.Rngs(0),
         ),
     )
     self.assertIsNone(utils.get_pytree_mesh_info(nnx.state(model3)))
 
   def test_is_sharing_weights(self):
     m1 = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+        config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     m2 = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+        config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     m3 = nnx.clone(m1)
     self.assertIsNot(nnx.state(m1), nnx.state(m2))
@@ -135,7 +140,8 @@ class UtilsTest(absltest.TestCase):
 
   def test_create_critic_model(self):
     actor_model = tc.ToyTransformer(
-        rngs=nnx.Rngs(0), vocab_size=tc.MockVocab().GetPieceSize()
+        config=tc.ModelConfig(vocab_size=tc.MockVocab().GetPieceSize()),
+        rngs=nnx.Rngs(0),
     )
     critic_model = utils.create_critic_model(actor_model)
 

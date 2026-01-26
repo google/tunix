@@ -19,9 +19,9 @@ import dataclasses
 import gc
 import os
 import shutil
+import sys
 from typing import Any, List, Tuple
 
-from flax import config as flax_config
 from flax import nnx
 import huggingface_hub
 import jax
@@ -29,26 +29,41 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 from tunix.rl import reshard
+from tunix.utils import env_utils
 
 import sentencepiece as spm
 
-if hasattr(flax_config, 'flax_always_shard_variable'):
-  flax_config.update('flax_always_shard_variable', False)
+env_utils.setup_sharding_environment()
+
+
+def _convert_to_nparray(arr):
+  if isinstance(arr, jax.Array):
+    return np.asarray(arr)
+  return arr
 
 
 def assert_equal(path, x, y):
-  np.testing.assert_array_equal(x, y, err_msg=f'Mismatch at path: {path}')
+  np.testing.assert_array_equal(
+      _convert_to_nparray(x),
+      _convert_to_nparray(y),
+      err_msg=f'Mismatch at path: {path}',
+  )
 
 
 def assert_not_equal(path, x, y):
   np.testing.assert_(
-      np.any(np.not_equal(x, y)), msg=f'Unexpected match at path: {path}'
+      np.any(np.not_equal(_convert_to_nparray(x), _convert_to_nparray(y))),
+      msg=f'Unexpected match at path: {path}',
   )
 
 
 def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
   np.testing.assert_allclose(
-      x, y, atol, rtol, err_msg=f'Mismatch at path: {path}'
+      _convert_to_nparray(x),
+      _convert_to_nparray(y),
+      atol,
+      rtol,
+      err_msg=f'Mismatch at path: {path}',
   )
 
 
@@ -89,27 +104,28 @@ class Decoder(nnx.Module):
 class ModelConfig:
   """Model config for testing."""
 
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
+  num_layers: int = 4
+  num_kv_heads: int = 4
+  head_dim: int = 16
+  vocab_size: int = 256
 
 
-class ToyTransformer(nnx.Module, pytree=False):
+class ToyTransformer(nnx.Module):
   """Toy transformer for testing."""
 
   def __init__(
       self,
+      config: ModelConfig,
+      *,
       rngs: nnx.Rngs,
-      vocab_size: int = 256,
-      num_layers: int = 4,
   ):
-    self.config = ModelConfig(
-        num_layers=num_layers, num_kv_heads=4, head_dim=16
+    self.config = config
+    self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
+    self.layers = nnx.List(
+        [Decoder(rngs=rngs) for _ in range(config.num_layers)]
     )
-    self.emb = nnx.Embed(vocab_size, 16, rngs=rngs)
-    self.layers = [Decoder(rngs=rngs) for _ in range(num_layers)]
     self.lm_head = nnx.Linear(
-        in_features=16, out_features=vocab_size, rngs=rngs
+        in_features=16, out_features=config.vocab_size, rngs=rngs
     )
 
     self.head_dim = 16
@@ -131,6 +147,9 @@ class ToyTransformer(nnx.Module, pytree=False):
   @property
   def num_embed(self) -> int:
     return self.emb.num_embeddings
+
+  def get_model_input(self):
+    return get_dummy_inputs_for_lora_toy_transformer_tests()
 
 
 def get_dummy_inputs_for_lora_toy_transformer_tests():
@@ -212,13 +231,17 @@ class MockVocab(spm.SentencePieceProcessor):
     reverse_mapping = {v: k for k, v in self._mapping_text_to_id.items()}
     return ' '.join(reverse_mapping[e] for e in ids)
 
-  def EncodeAsIds(self, text: str) -> list[int]:  # pylint: disable=invalid-name
+  def EncodeAsIds(self, text: str, **kwargs) -> list[int]:  # pylint: disable=invalid-name
     words = text.split(' ')
-    return [self._mapping_text_to_id[word] for word in words]
+    return [
+        self._mapping_text_to_id[word]
+        for word in words
+        if word in self._mapping_text_to_id
+    ]
 
 
-class MockTransformerWithScoreHead(nnx.Module):
-  """Gemma transformer with a score head."""
+class ToyTransformerWithScoreHead(nnx.Module):
+  """Toy transformer with a score head."""
 
   def __init__(self, transformer: nnx.Module, rngs: nnx.Rngs):
     """Initializes the transformer with a score head.
@@ -308,3 +331,13 @@ def clear_jax_arrays():
     if isinstance(obj, jnp.ndarray):
       del globals()[name]
   gc.collect()
+
+
+def is_running_in_colab() -> bool:
+  """Checks if the code is running within a Colab IPython kernel."""
+  try:
+    # get_ipython() is defined in IPython. Check for 'kernel' attribute
+    # which is characteristic of a Colab/Jupyter kernel.
+    return hasattr(sys.modules['IPython'].get_ipython(), 'kernel')
+  except (NameError, KeyError, AttributeError):
+    return False

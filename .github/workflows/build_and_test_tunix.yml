@@ -17,8 +17,11 @@
 
 name: Tunix Package Tests
 
+# Trigger the workflow only when code is merging to the 'main' branch.
 on:
-  pull_request:
+  pull_request: # Automatically trigger on pull requests affecting this file
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     # Run the job every 4 hours
@@ -46,7 +49,7 @@ jobs:
   # copybara:strip_end
   tunix_cpu_unit_tests:
   # copybara:strip_begin
-  # LINT.ThenChange(Internal path for github_actions, don't change this line.)
+  # LINT.ThenChange(//depot/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/copy.bara.sky:github_actions)
   # copybara:strip_end
     needs: build_tunix_package
     uses: ./.github/workflows/cpu-tests.yml
@@ -57,12 +60,14 @@ jobs:
   # copybara:strip_end
   tunix_tpu_unit_tests:
   # copybara:strip_begin
-  # LINT.ThenChange(Internal path for github_actions, don't change this line.)
+  # LINT.ThenChange(//depot/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/copy.bara.sky:github_actions)
   # copybara:strip_end
     needs: build_tunix_package
     uses: ./.github/workflows/tpu-tests.yml
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build

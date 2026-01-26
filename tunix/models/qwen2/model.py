@@ -26,7 +26,10 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
-from tunix.utils import container
+from tunix.utils import compat
+from tunix.utils import env_utils
+
+env_utils.setup_sharding_environment()
 
 K_MASK = -2.3819763e38
 
@@ -45,8 +48,8 @@ class ShardingConfig:
 
   emb_vd: Tuple[str | None, ...]
   emb_dv: Tuple[str | None, ...]
-  q_weight_ndh: Tuple[str | None, ...]
-  kv_weight_ndh: Tuple[str | None, ...]
+  q_weight_dnh: Tuple[str | None, ...]
+  kv_weight_dnh: Tuple[str | None, ...]
   o_weight_nhd: Tuple[str | None, ...]
   ffw_weight_df: Tuple[str | None, ...]
   ffw_weight_fd: Tuple[str | None, ...]
@@ -65,8 +68,8 @@ class ShardingConfig:
     return ShardingConfig(
         emb_vd=('tp', fsdp),
         emb_dv=(fsdp, 'tp'),
-        q_weight_ndh=('tp', fsdp, None),
-        kv_weight_ndh=('tp', fsdp, None),
+        q_weight_dnh=(fsdp, 'tp', None),
+        kv_weight_dnh=(fsdp, 'tp', None),
         o_weight_nhd=('tp', None, fsdp),
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
@@ -99,7 +102,7 @@ class ModelConfig:
 
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
-  def qwen2_5_0_5b(cls):  # qwen2.5-0.5B
+  def qwen2p5_0p5b(cls):  # qwen2.5-0.5B
     return cls(
         num_layers=24,
         vocab_size=151936,
@@ -115,7 +118,7 @@ class ModelConfig:
 
   # DeepSeek-R1-Distill-Qwen-1.5B
   @classmethod
-  def deepseek_r1_distill_qwen_1_5b(cls):
+  def deepseek_r1_distill_qwen_1p5b(cls):
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -130,7 +133,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen2_5_1_5b(cls):  # qwen2.5-1.5B
+  def qwen2p5_1p5b(cls):  # qwen2.5-1.5B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -145,7 +148,7 @@ class ModelConfig:
     )
 
   @classmethod
-  def qwen2_5_math_1_5b(cls):  # qwen2.5-math-1.5B
+  def qwen2p5_math_1p5b(cls):  # qwen2.5-math-1.5B
     return cls(
         num_layers=28,
         vocab_size=151936,
@@ -161,7 +164,7 @@ class ModelConfig:
 
   # qwen2.5-coder-3B and qwen2.5-3B share the same config.
   @classmethod
-  def qwen2_5_3b(cls):
+  def qwen2p5_3b(cls):
     return cls(
         num_layers=36,
         vocab_size=151936,
@@ -177,7 +180,7 @@ class ModelConfig:
 
   # qwen2.5-7B and qwen2.5-coder-7B share the same config.
   @classmethod
-  def qwen2_5_7b(cls):
+  def qwen2p5_7b(cls):
     return cls(
         num_layers=28,
         vocab_size=152064,
@@ -349,19 +352,19 @@ class Attention(nnx.Module):
         einsum_str='BTD,DNH->BTNH',
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.q_weight_ndh,
+        sharding=self.shd_config.q_weight_dnh,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_dnh,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
-        sharding=self.shd_config.kv_weight_ndh,
+        sharding=self.shd_config.kv_weight_dnh,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
@@ -620,7 +623,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
         rngs=rngs,
         shd_config=shd_config,
     )
-    self.layers = container.ModuleList([
+    self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(

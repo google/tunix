@@ -31,7 +31,7 @@ from tunix.models.gemma3 import params as gemma3_params_lib
 
 def load_gemma3_model(mesh):
   config = (
-      gemma3_model_lib.ModelConfig.gemma3_27b()
+      gemma3_model_lib.ModelConfig.gemma3_27b_it()
   )  # pick corresponding config based on model version
   return config, gemma3_params_lib.create_model_from_checkpoint(
       gemma3_params_lib.GEMMA3_27B_IT, config, mesh
@@ -246,7 +246,11 @@ def convert_jax_weight_to_torch(
 def main(test_args):
   devices = jax.devices()
   print(f"Running on devices: {devices}")
-  mesh = mesh = jax.make_mesh((1, len(devices)), ("fsdp", "tp"))
+  mesh = mesh = jax.make_mesh(
+      (1, len(devices)),
+      ("fsdp", "tp"),
+      axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+  )
   hf_name, tunix_model_loader, tunix_tokenizer_loader = SUPPORTED_MODELS[
       test_args.model_name
   ]

@@ -144,8 +144,9 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
   )
   # Not able to handle resharding with undividable shardings.
   if src_largest_shards % dst_largest_shards != 0:
-    logging.warning(
-        'Resharding with undividable shardings is not supported.'
+    logging.debug(
+        'Resharding with undividable shardings is not optimized with'
+        ' experimental pre-reshard.'
         ' source_sharding=%s, target_sharding=%s',
         source_sharding,
         target_sharding,
@@ -256,9 +257,9 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
       for path, intermediate_sharding in intermediate_sharding_leaves_with_path
   }
 
-  to_split_src_pytree_leaves = []
-  to_split_src_pytree_leaves_indexes = []
-  to_split_intermediate_sharding_leaves = []
+  to_split_src_pytree_leaves = {}
+  to_split_src_pytree_leaves_indexes = {}
+  to_split_intermediate_sharding_leaves = {}
 
   intermediate_mesh = None
   to_update_src_pytree_leaves = []
@@ -270,37 +271,38 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
     ):
       # The to_split_axis should always be the same along all the intermediate
       # shardings.
-      if intermediate_mesh is None:
-        intermediate_mesh = intermediate_sharding.mesh
-      to_split_src_pytree_leaves.append(src)
-      to_split_src_pytree_leaves_indexes.append(i)
-      to_split_intermediate_sharding_leaves.append(intermediate_sharding)
+      intermediate_mesh = intermediate_sharding.mesh
+      to_split_src_pytree_leaves.setdefault(intermediate_mesh, []).append(src)
+      to_split_src_pytree_leaves_indexes.setdefault(intermediate_mesh, []).append(i)
+      to_split_intermediate_sharding_leaves.setdefault(intermediate_mesh, []).append(intermediate_sharding)
 
   if intermediate_mesh is None:
     # No pre-resharding is needed.
     return src_pytree
 
-  to_split_axis = None
-  for axis_name in intermediate_mesh.axis_names:
-    if axis_name.endswith(INTERMEDIATE_REPLICA_SUFFIX):
-      to_split_axis = axis_name
-      break
-  assert (
-      to_split_axis is not None
-  ), f'No replica axis found in the intermediate mesh {intermediate_mesh}.'
+  for _intermediate_mesh in to_split_src_pytree_leaves.keys():
+    to_split_axis = None
+    for axis_name in _intermediate_mesh.axis_names:
+      if axis_name.endswith(INTERMEDIATE_REPLICA_SUFFIX):
+        to_split_axis = axis_name
+        break
+    assert (
+        to_split_axis is not None
+    ), f'No replica axis found in the intermediate mesh {_intermediate_mesh}.'
 
-  temp_source = jax.jit(
-      _identity,
-      out_shardings=to_split_intermediate_sharding_leaves,
-  )(to_split_src_pytree_leaves)
+    temp_source = jax.jit(
+        _identity,
+        out_shardings=to_split_intermediate_sharding_leaves[_intermediate_mesh],
+    )(to_split_src_pytree_leaves[_intermediate_mesh])
 
-  # Update the to_split_src_pytree_leaves with the new splitted array.
-  to_split_src_pytree_leaves, *_ = splitfn(temp_source, to_split_axis)
+    # Update the to_split_src_pytree_leaves with the new splitted array.
+    updated_to_split_src_pytree_leaves, *_ = splitfn(temp_source, to_split_axis)
 
-  for i in range(len(to_split_src_pytree_leaves_indexes)):
-    to_update_src_pytree_leaves[to_split_src_pytree_leaves_indexes[i]] = (
-        to_split_src_pytree_leaves[i]
-    )
+    for i in range(len(to_split_src_pytree_leaves_indexes[_intermediate_mesh])):
+      to_update_src_pytree_leaves[
+          to_split_src_pytree_leaves_indexes[_intermediate_mesh][i]
+      ] = updated_to_split_src_pytree_leaves[i]
+
   updated_src_pytree = jax.tree_util.tree_unflatten(
       src_treedef, to_update_src_pytree_leaves
   )
@@ -351,9 +353,9 @@ def _get_reshard_fn_pathwaysutils(
 
       if use_experimental_pre_reshard:
         try:
-          # This will raise an ImportError if the API is not available.
-          pw_jax.jaxlib_pathways._split_by_mesh_axis  # pylint: disable=protected-access
-        except ImportError:
+          # This will raise an AttributeError if the API is not available.
+          pw_jax.split_by_mesh_axis
+        except AttributeError:
           logging.debug(
               'split_by_mesh_axis is not available until JAX 0.8.0. Skipping'
               ' pre-reshard.'
@@ -363,11 +365,12 @@ def _get_reshard_fn_pathwaysutils(
               split_by_mesh_axis.split_by_mesh_axis, x, sharding
           )
 
-
-      return experimental_reshard.reshard(
+      # TODO(b/476149699): Migrate to new API once it's verified.
+      return experimental_reshard._reshard_with_sidechannel(
           x,
           sharding,
           donate=donate,
+          may_alias=None,
           cache_resharding_plans=cache_resharding_plans,
       )
 

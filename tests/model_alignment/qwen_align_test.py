@@ -111,23 +111,23 @@ class QwenAlignTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name="deepseek_r1_distill_qwen_1_5b",
+          testcase_name="deepseek_r1_distill_qwen_1p5b",
           model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-          model_config=qwen2_model.ModelConfig.deepseek_r1_distill_qwen_1_5b,
+          model_config=qwen2_model.ModelConfig.deepseek_r1_distill_qwen_1p5b,
           model_params=qwen2_params,
           tolerance=2e-3,
       ),
       dict(
-          testcase_name="qwen2_5_1_5b_instruct",
+          testcase_name="qwen2p5_1p5b_instruct",
           model_name="Qwen/Qwen2.5-1.5B-Instruct",
-          model_config=qwen2_model.ModelConfig.qwen2_5_1_5b,
+          model_config=qwen2_model.ModelConfig.qwen2p5_1p5b,
           model_params=qwen2_params,
           tolerance=1e-3,
       ),
       dict(
-          testcase_name="qwen3_0_6b",
+          testcase_name="qwen3_0p6b",
           model_name="Qwen/Qwen3-0.6B",
-          model_config=qwen3_model.ModelConfig.qwen3_0_6b,
+          model_config=qwen3_model.ModelConfig.qwen3_0p6b,
           model_params=qwen3_params,
           tolerance=1e-3,
       ),
@@ -147,7 +147,11 @@ class QwenAlignTest(parameterized.TestCase):
     jax_model = model_params.create_model_from_safe_tensors(
         model_path,
         model_config(),
-        mesh=jax.make_mesh((1, 1), ("fsdp", "tp")),
+        mesh=jax.make_mesh(
+            (1, 1),
+            ("fsdp", "tp"),
+            axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
+        ),
         dtype=jnp.float32,
     )
     print("JAX model loaded.")

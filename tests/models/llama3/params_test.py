@@ -72,7 +72,7 @@ class Llama3ParamsTest(absltest.TestCase):
       model_name: Name of the model for logging (e.g., "1B")
       model_path: Path to the model directory
       config_fn: Function to create model config (e.g.,
-        model.ModelConfig.llama3_2_1b)
+        model.ModelConfig.llama3p2_1b)
       mesh_config: Mesh configuration tuple (e.g., [(1, 4), ("fsdp", "tp")])
     """
     if model_path is None:
@@ -82,7 +82,7 @@ class Llama3ParamsTest(absltest.TestCase):
       )
 
     config = config_fn()
-    mesh = jax.make_mesh(*mesh_config)
+    mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
 
     with mesh:
       # Test that model loading completes without exceptions
@@ -115,7 +115,7 @@ class Llama3ParamsTest(absltest.TestCase):
     self._test_model_loading(
         model_name="1B",
         model_path=local_model_path_1b,
-        config_fn=model.ModelConfig.llama3_2_1b,
+        config_fn=model.ModelConfig.llama3p2_1b,
         mesh_config=[(1, len(jax.devices())), ("fsdp", "tp")],
     )
 

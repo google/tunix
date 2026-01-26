@@ -141,12 +141,12 @@ def show_hbm_usage(title=""):
     title: The title to print before the HBM usage.
   """
   fmt_size = functools.partial(humanize.naturalsize, binary=True)
-  devices = jax.devices()
   # Force a GC sweep to catch recently deallocated arrays
   gc.collect()
 
   if google_utils.pathways_available():
     logging.info("%s - Using Pathways compatible HBM stats collector", title)
+    devices = jax.devices()
     hbm_stats = _pathways_hbm_usage_gb(devices)
     for i, (used, _) in enumerate(hbm_stats):
       logging.info("Using %s on %s", fmt_size(used), devices[i])
@@ -154,6 +154,7 @@ def show_hbm_usage(title=""):
     logging.info(
         "%s - Pathways not available. Using default HBM stats collector", title
     )
+    devices = jax.local_devices()
     hbm_stats = _jax_hbm_usage_gb(devices)
 
     for i, (used, limit) in enumerate(hbm_stats):
