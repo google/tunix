@@ -142,6 +142,13 @@ class RolloutConfig:
   rollout_vllm_hf_config_path: str | None = None
   rollout_vllm_additional_config: dict[str, Any] | None = None
 
+  # Whether to enable data parallel in attention for vLLM rollout engine.
+  rollout_vllm_enable_dp_attention: bool = False
+
+  # Maximum number of batched tokens and sequences for vLLM rollout engine.
+  rollout_vllm_max_num_batched_tokens: int = 2048
+  rollout_vllm_max_num_seqs: int = 256
+
   # SG-Lang JAX specific rollout configs.
 
   # Model version for SG-Lang JAX rollout engine.
