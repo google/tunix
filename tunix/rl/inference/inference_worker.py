@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Inference worker for RL."""
-import threading
 
 from flax import nnx
 import jax
@@ -32,7 +31,6 @@ class InferenceWorker:
             " reference and reward."
         )
     self._models = models
-    self._model_lock = threading.Lock()
     # TODO(tsbao): support multiple reward models.
 
   def get_rewards(
@@ -42,8 +40,7 @@ class InferenceWorker:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    with self._model_lock:
-      reward_model = self._models.get("reward")
+    reward_model = self._models.get("reward")
     if reward_model is None:
       raise ValueError("Reward model is not available.")
     return common.compute_score(
@@ -58,8 +55,7 @@ class InferenceWorker:
       eos_id: int,
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    with self._model_lock:
-      ref_model = self._models.get("reference")
+    ref_model = self._models.get("reference")
     if ref_model is None:
       raise ValueError("Reference model is not available.")
     return common.compute_per_token_logps(
@@ -81,8 +77,7 @@ class InferenceWorker:
       eos_id: int,
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    with self._model_lock:
-      critic_model = self._models.get("critic")
+    critic_model = self._models.get("critic")
     if critic_model is None:
       raise ValueError("Critic model is not available.")
     return common.compute_score(
