@@ -31,6 +31,7 @@ import numpy as np
 import omegaconf
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import metrics as perf_metrics
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 
@@ -194,6 +195,37 @@ class HyperParameters:
     self._validate_tokenizer()
     self._validate_model_source(raw_keys)
     self.check_supported_workflow()
+    self._validate_perf_metrics(entry_point=argv[0])
+
+  def _validate_perf_metrics(self, entry_point: str):
+    """Validates that perf metrics are only enabled for GRPO.
+
+    Args:
+      entry_point: The entry point of the pipeline.
+
+    Raises:
+      ValueError: If perf metrics are enabled but the entry point is not
+        "grpo_main".
+    """
+    perf_config = self.config.get("training_config", {}).get(
+        "perf_metrics_options", {}
+    )
+
+    if perf_config and perf_config.get("enable_perf_metrics", False):
+      if not entry_point.endswith("grpo_main"):
+        raise ValueError(
+            "Perf metrics are currently only supported for GRPO training"
+            " (grpo_main)."
+        )
+      custom_export_fn_path = perf_config.get("custom_export_fn_path")
+      if (
+          custom_export_fn_path
+          and self._get_function_from_path(custom_export_fn_path) is None
+      ):
+        raise ValueError(
+            "Could not load custom export function from"
+            f" {custom_export_fn_path}"
+        )
 
   def _validate_tokenizer(self):
     """Validate the tokenizer configuration.
@@ -621,6 +653,16 @@ class HyperParameters:
             constructed_training_config[key] = profiler.ProfilerOptions(**value)
           except ValueError as e:
             raise ValueError(f"Invalid profiler options: {value}") from e
+        else:
+          constructed_training_config[key] = None
+      elif key == "perf_metrics_options":
+        if value:
+          try:
+            constructed_training_config[key] = perf_metrics.PerfMetricsOptions(
+                **value
+            )
+          except ValueError as e:
+            raise ValueError(f"Invalid perf metrics options: {value}") from e
         else:
           constructed_training_config[key] = None
       elif "optimizer_config" in key:

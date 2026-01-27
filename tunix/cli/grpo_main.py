@@ -23,6 +23,8 @@ from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
+from tunix.perf import export as perf_export
+from tunix.perf import metrics as perf_metrics
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
@@ -88,6 +90,28 @@ class GrpoPipeline(config.HyperParameters):
 
     return rl_cluster_lib.RLTrainingConfig(**constructed_rl_training_config)
 
+  def create_perf_config(self, cluster_config: rl_cluster_lib.ClusterConfig):
+    perf_metrics_options = cluster_config.training_config.perf_metrics_options
+    if not perf_metrics_options or not perf_metrics_options.enable_perf_metrics:
+      return None
+
+    perf_config = perf_metrics.PerfMetricsConfig()
+    custom_export_fn_path = perf_metrics_options.custom_export_fn_path
+    if custom_export_fn_path:
+      perf_config.custom_export_fn = self._get_function_from_path(
+          custom_export_fn_path
+      )
+      if perf_config.custom_export_fn is None:
+        raise ValueError(
+            "Could not load custom export function from"
+            f" {custom_export_fn_path}"
+        )
+    else:
+      perf_config.custom_export_fn = (
+          perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+      )
+    return perf_config
+
   def create_rl_cluster(self):
     reference_model, tokenizer_path = model_lib.create_model(
         self.config["reference_model_config"],
@@ -111,11 +135,14 @@ class GrpoPipeline(config.HyperParameters):
         self.config["tokenizer_config"], tokenizer_path
     )
 
+    cluster_config = self.create_cluster_config()
+    perf_config = self.create_perf_config(cluster_config)
     return rl_cluster_lib.RLCluster(
         actor=actor_model,
         reference=reference_model,
         tokenizer=tokenizer,
-        cluster_config=self.create_cluster_config(),
+        cluster_config=cluster_config,
+        perf_config=perf_config,
     )
 
   def run_grpo_trainer(self):
