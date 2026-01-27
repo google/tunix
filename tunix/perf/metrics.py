@@ -71,6 +71,12 @@ class MetricsBuffer:
   mode: str = "train"
 
 
+@dataclasses.dataclass(slots=True)
+class PerfMetricsOptions:
+  enable_perf_metrics: bool = False
+  custom_export_fn_path: str = ""
+
+
 class PerfMetricsConfig:
   # (query, epoch) -> metrics
   custom_export_fn: Callable[[PerfSpanQuery], MetricsT] | None = None

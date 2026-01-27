@@ -143,6 +143,9 @@ training_config: &base_training_config
     run_name: ""
     log_dir: "/tmp/logging"
     flush_every_n_steps: 20
+  perf_metrics_options: # Currently only supported for grpo_main.
+    enable_perf_metrics: false
+    custom_export_fn_path: ""
   profiler_options:
     log_dir: "/tmp/profiling"
     skip_first_n_steps: 1

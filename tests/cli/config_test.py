@@ -545,6 +545,50 @@ class ConfigTest(parameterized.TestCase):
         hp3.config["reference_model_config"]["model_name"], "gemma3-4b"
     )
 
+  def test_perf_metrics_validation_grpo_enabled(self):
+    # Enable perf metrics in grpo_main -> Should succeed
+    argv = [
+        "grpo_main",
+        "base_config.yaml",
+        "training_config.perf_metrics_options.enable_perf_metrics=True",
+    ]
+    config.initialize(argv)
+
+  def test_perf_metrics_validation_peft_enabled_fails(self):
+    # Enable perf metrics in peft_main -> Should fail
+    argv = [
+        "peft_main",
+        "base_config.yaml",
+        "training_config.perf_metrics_options.enable_perf_metrics=True",
+    ]
+    with self.assertRaisesRegex(
+        ValueError,
+        "Perf metrics are currently only supported for GRPO training",
+    ):
+      config.initialize(argv)
+
+  def test_perf_metrics_validation_peft_disabled(self):
+    # Disable perf metrics in peft_main -> Should succeed
+    argv = [
+        "peft_main",
+        "base_config.yaml",
+        "training_config.perf_metrics_options.enable_perf_metrics=False",
+    ]
+    config.initialize(argv)
+
+  def test_perf_metrics_validation_invalid_custom_export_fn_path(self):
+    argv = [
+        "grpo_main",
+        "base_config.yaml",
+        "training_config.perf_metrics_options.enable_perf_metrics=True",
+        "training_config.perf_metrics_options.custom_export_fn_path=invalid.path",
+    ]
+    with self.assertRaisesRegex(
+        ValueError,
+        "Could not load custom export function from invalid.path",
+    ):
+      config.initialize(argv)
+
 
 if __name__ == "__main__":
   if "HF_TOKEN" not in os.environ:

@@ -31,6 +31,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
@@ -67,6 +68,9 @@ class TrainingConfig:
 
   # Configs for the profiler.
   profiler_options: profiler.ProfilerOptions | None = None
+
+  # Configs for performance metrics.
+  perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
 
   data_sharding_axis: Tuple[str, ...] = ("fsdp",)
 
