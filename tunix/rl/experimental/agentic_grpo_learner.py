@@ -395,7 +395,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # print("None")
     # print("  policy_version:", combined_batch.policy_version.shape)
     # linchai: debug whether jax.block_until_ready helps with hang issue.
-    jax.block_until_ready(combined_batch)
+    # jax.block_until_ready(combined_batch)
     # print("Debug: combined_batch train example is ready.")
     return [
         rl_utils.get_batch_slice(combined_batch, slice(i, i + 1))
