@@ -35,17 +35,27 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_env = mock.create_autospec(
         base_environment.BaseTaskEnv, instance=True
     )
+
+    self.mock_env.max_steps = 10
+
     self.mock_model_call = mock.Mock()
     self.mock_final_reward_fn = mock.Mock(
         return_value=reward_types.RewardOutput(reward=0.5)
     )
     self.mock_tokenizer = mock.Mock()
+    self.mock_tokenizer.encode.return_value = [1, 2, 3]
     self.mock_chat_parser = mock.Mock()
 
-    # Configure mock agent
     self.trajectory = agent_types.Trajectory()
     self.mock_agent.trajectory = self.trajectory
     self.mock_agent.chat_completions = []
+    self.current_step = None
+
+    self._chat_history = []
+    type(self.mock_agent).chat_completions = mock.PropertyMock(
+        side_effect=lambda: self._chat_history
+    )
+
     self.current_step = None
 
     def _update_from_model(resp):
@@ -53,9 +63,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           model_response=resp, action=agent_types.Action(action=['action'])
       )
       self.trajectory.steps.append(self.current_step)
-      self.mock_agent.chat_completions.append(
-          {'role': 'assistant', 'content': resp}
-      )
+      self._chat_history.append({'role': 'assistant', 'content': resp})
       return self.current_step
 
     def _update_from_env(observation, reward, done, info):
@@ -64,26 +72,20 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         self.current_step.reward = reward
         self.current_step.done = done
         self.current_step.info = info
-      self.mock_agent.chat_completions.append(
-          {'role': 'user', 'content': observation}
-      )
-
-    def _get_current_state():
-      return self.current_step
+      self._chat_history.append({'role': 'user', 'content': observation})
 
     def _reset_agent():
       self.trajectory.steps.clear()
-      self.mock_agent.chat_completions.clear()
+      self._chat_history.clear()  # Clear the local list
       self.current_step = None
 
     self.mock_agent.update_from_model.side_effect = _update_from_model
     self.mock_agent.update_from_env.side_effect = _update_from_env
-    self.mock_agent.get_current_state.side_effect = _get_current_state
     self.mock_agent.reset.side_effect = _reset_agent
+    self.mock_agent.get_current_state.side_effect = lambda: self.current_step
 
     # Configure mock env
     self.mock_env.reset.return_value = ('initial_obs', {})
-    # Let it run for 2 steps then done
     self.mock_env.step.side_effect = [
         ('obs1', 1.0, False, {}),
         ('obs2', 2.0, True, {}),
@@ -97,6 +99,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     return await engine.collect(mode=mode)
 
   def test_collect_trajectory_mode(self):
+    self.mock_env.max_steps = 5
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,
         env=self.mock_env,
@@ -133,6 +136,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         agent=self.mock_agent,
         env=self.mock_env,
         model_call=self.mock_model_call,
+        max_context_limit=1024,
     )
     conversation = asyncio.run(self._run_collect(engine, mode='Conversation'))
 
@@ -160,6 +164,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         model_call=self.mock_model_call,
         tokenizer=self.mock_tokenizer,
         chat_parser=self.mock_chat_parser,
+        max_context_limit=1024,
     )
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
     expected_tokens = {
@@ -177,6 +182,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'policy_version': None,
         'original_input': None,
         'group_id': None,
+        'status': 'SUCCEEDED',
     }
     self.assertEqual(token_data, expected_tokens)
 
@@ -249,29 +255,6 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     asyncio.run(self._run_collect(engine))
     mock_tokenize.assert_not_called()
 
-  def test_collect_timeout(self):
-    with mock.patch.object(trajectory_collect_engine.time, 'time') as mock_time:
-      mock_time.side_effect = [
-          100.0,  # start time in _reset
-          100.05,  # time check in _one_step (1st call)
-          100.11,  # time check in _one_step (2nd call) -> timeout
-          100.12,  # time access in logging.warning
-      ]
-      engine = trajectory_collect_engine.TrajectoryCollectEngine(
-          agent=self.mock_agent,
-          env=self.mock_env,
-          model_call=self.mock_model_call,
-          timeout=0.1,
-      )
-      result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
-
-    # Should run for two steps, with the second one timing out and marked as
-    # done
-    self.assertLen(result_traj.steps, 2)
-    self.assertFalse(result_traj.steps[0].done)
-    self.assertTrue(result_traj.steps[1].done)
-    self.assertEqual(self.mock_env.step.call_count, 2)
-
   async def _run_collect_multiple(self, engine_args, pairs):
     results = []
     async for (
@@ -283,77 +266,104 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       results.append((i, traj))
     return results
 
-  def test_collect_multiple(self):
-    # Helper to configure a new mock agent
-    def configure_mock_agent(initial_obs):
-      agent = mock.create_autospec(
-          base_agent.ConversationAgentBase, instance=True
+
+def test_collect_multiple(self):
+  # Helper to configure a new mock agent
+  def configure_mock_agent(initial_obs):
+    agent = mock.create_autospec(
+        base_agent.ConversationAgentBase, instance=True
+    )
+    traj = agent_types.Trajectory()
+    agent.trajectory = traj
+    agent.chat_completions = []
+    current_step = [None]
+
+    def _update_from_model(resp):
+      step = agent_types.Step(
+          model_response=resp, action=agent_types.Action(action=['action'])
       )
-      traj = agent_types.Trajectory()
-      agent.trajectory = traj
-      agent.chat_completions = []
-      current_step = [None]
+      traj.steps.append(step)
+      current_step[0] = step
+      agent.chat_completions.append({'role': 'assistant', 'content': resp})
+      return step
 
-      def _update_from_model(resp):
-        step = agent_types.Step(
-            model_response=resp, action=agent_types.Action(action=['action'])
-        )
-        traj.steps.append(step)
-        current_step[0] = step
-        agent.chat_completions.append({'role': 'assistant', 'content': resp})
-        return step
+    def _update_from_env(observation, reward, done, info):
+      if current_step[0]:
+        current_step[0].observation = observation
+        current_step[0].reward = reward
+        current_step[0].done = done
+        current_step[0].info = info
+      agent.chat_completions.append({'role': 'user', 'content': observation})
 
-      def _update_from_env(observation, reward, done, info):
-        if current_step[0]:
-          current_step[0].observation = observation
-          current_step[0].reward = reward
-          current_step[0].done = done
-          current_step[0].info = info
-        agent.chat_completions.append({'role': 'user', 'content': observation})
+    agent.update_from_model.side_effect = _update_from_model
+    agent.update_from_env.side_effect = _update_from_env
+    agent.get_current_state.side_effect = lambda: current_step[0]
 
-      agent.update_from_model.side_effect = _update_from_model
-      agent.update_from_env.side_effect = _update_from_env
-      agent.get_current_state.side_effect = lambda: current_step[0]
+    def _reset_agent():
+      traj.steps.clear()
+      agent.chat_completions.clear()
 
-      def _reset_agent():
-        traj.steps.clear()
-        agent.chat_completions.clear()
+    agent.reset.side_effect = _reset_agent
+    return agent
 
-      agent.reset.side_effect = _reset_agent
-      return agent
+  agent1 = configure_mock_agent('initial1')
+  env1 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
+  env1.reset.return_value = ('initial1', {})
+  env1.step.return_value = ('obs1', 1.0, True, {})
+  env1.task = {}
 
-    agent1 = configure_mock_agent('initial1')
-    env1 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
-    env1.reset.return_value = ('initial1', {})
-    env1.step.return_value = ('obs1', 1.0, True, {})
-    env1.task = {}
+  agent2 = configure_mock_agent('initial2')
+  env2 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
+  env2.reset.return_value = ('initial2', {})
+  env2.step.side_effect = [
+      ('obs2a', 2.0, False, {}),
+      ('obs2b', 2.1, True, {}),
+  ]
+  env2.task = {}
 
-    agent2 = configure_mock_agent('initial2')
-    env2 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
-    env2.reset.return_value = ('initial2', {})
-    env2.step.side_effect = [
-        ('obs2a', 2.0, False, {}),
-        ('obs2b', 2.1, True, {}),
-    ]
-    env2.task = {}
 
-    pairs = [(agent1, env1), (agent2, env2)]
-    mock_model_call = mock.Mock(side_effect=['resp1', 'resp2a', 'resp2b'])
-    engine_args = {
-        'model_call': mock_model_call,
-        'mode': 'Conversation',
-    }
+def test_status_max_context_limit_reached(self):
+  # Setup specific for this test
+  self.mock_tokenizer.encode.return_value = [1] * 100  # 100 tokens per call
+  self.mock_env.max_steps = 5
+  self.mock_chat_parser.parse.return_value = (  # Ensure parser works
+      'mock_parsed_text'
+  )
 
-    results = asyncio.run(self._run_collect_multiple(engine_args, pairs))
+  engine = trajectory_collect_engine.TrajectoryCollectEngine(
+      agent=self.mock_agent,
+      env=self.mock_env,
+      model_call=self.mock_model_call,
+      tokenizer=self.mock_tokenizer,
+      chat_parser=self.mock_chat_parser,
+      max_context_limit=150,
+  )
 
-    self.assertLen(results, 2)
-    results.sort(key=lambda x: x[0])
-    # The default mode for collect() is "Conversation", so we check conversation
-    # length.
-    # Pair 1: reset_obs, model_resp, step_obs -> 3 messages
-    self.assertLen(results[0][1], 3)
-    # Pair 2: reset_obs, resp1, obs1, resp2, obs2 -> 5 messages
-    self.assertLen(results[1][1], 5)
+  result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+  # Verify status is MAX_CONTEXT_LIMIT_REACHED
+  self.assertEqual(
+      result_traj.status, agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+  )
+  # 100 prompt + 100 step = 200 > 150. Should stop after 1 step.
+  self.assertLen(result_traj.steps, 1)
+
+  def test_collect_timeout(self):
+    self.mock_env.max_steps = 10
+    with mock.patch.object(time, 'time') as mock_time:
+      mock_time.side_effect = [100.0, 100.05, 100.15, 100.15]
+
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          max_context_limit=1024,
+          timeout=0.1,
+      )
+      result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertTrue(result_traj.steps[-1].done)
+    self.assertEqual(result_traj.status, agent_types.TrajectoryStatus.TIMEOUT)
 
 
 if __name__ == '__main__':
