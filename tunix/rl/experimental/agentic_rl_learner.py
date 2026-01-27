@@ -45,6 +45,7 @@ from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
+from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
@@ -325,11 +326,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     if env:
       env.task["policy_version"] = version
-    result = self.rl_cluster.generate(
-        prompts=chat_lists,
-        apply_chat_template=True,
-        mode=rl_cluster_lib.Mode.TRAIN,
+    # result = self.rl_cluster.generate(
+        # prompts=chat_lists,
+        # apply_chat_template=True,
+        # mode=rl_cluster_lib.Mode.TRAIN,
+    # )
+    # Mock model generation outputs.
+    print(f"_model_call mocked rollout geneartion")
+    mocked_jax_array = jax.device_put(np.random.randn(1, 512))
+    result = base_rollout.RolloutOutput(
+      text = "This is a mocked model outputs." * 32,
+      logits = None,
+      tokens = mocked_jax_array,
+      left_padded_prompt_tokens=mocked_jax_array, 
+      logprobs=None
     )
+    # print(f"_model_call: policy_version={version}, result: {result}")
 
     return result.text[0]
 
