@@ -1,26 +1,31 @@
-```{include} intro.md
+# Tunix: A JAX-native LLM Post-Training Library
+<!--
+```{include} guides/intro.md
 :start-line: 2
-```
+``` -->
 
 ```{toctree}
 :maxdepth: 2
 
-quickstart.md
-design.md
-agentic_rl.md
-performance.md
-reliability.md
-launching.md
-rollout.md
-algorithms.md
-models.md
-metrics.md
-examples.md
-talks.md
-contributing.md
+guides/contributing.md
 code-of-conduct.md
 gallery.rst
 ```
+<!--
+TODO: add these back
+guides/quickstart.md
+guides/design.md
+guides/agentic_rl.md
+guides/performance.md
+guides/reliability.md
+guides/launching.md
+guides/rollout.md
+guides/algorithms.md
+guides/models.md
+guides/metrics.md
+guides/examples.md
+guides/talks.md
+-->
 
 ```{eval-rst}
 
