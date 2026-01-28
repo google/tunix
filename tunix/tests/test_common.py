@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
+from tenacity import retry, stop_after_attempt, wait_exponential
 from tunix.rl import reshard
 from tunix.utils import env_utils
 
@@ -268,16 +269,34 @@ class ToyTransformerWithScoreHead(nnx.Module):
     return score
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+)
+def safe_list_files(repo_id):
+  return huggingface_hub.list_repo_files(repo_id)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+)
+def safe_download(repo_id, filename, local_dir):
+  return huggingface_hub.hf_hub_download(
+      repo_id=repo_id, filename=filename, local_dir=local_dir
+  )
+
+
 def download_from_huggingface(repo_id: str, model_path: str):
   """Download checkpoint files from huggingface."""
   print('Make sure you logged in to the huggingface cli.')
-  all_files = huggingface_hub.list_repo_files(repo_id)
+
+  all_files = safe_list_files(repo_id)
   filtered_files = [f for f in all_files if not f.startswith('original/')]
 
   for filename in filtered_files:
-    huggingface_hub.hf_hub_download(
-        repo_id=repo_id, filename=filename, local_dir=model_path
-    )
+
+    safe_download(repo_id=repo_id, filename=filename, local_dir=model_path)
   print(f'Downloaded {filtered_files} to: {model_path}')
 
 
