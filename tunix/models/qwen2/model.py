@@ -116,6 +116,11 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
+  # qwen2.5-0.5B-Instruct uses the same architecture.
+  @classmethod
+  def qwen2p5_0p5b_instruct(cls):  # qwen2.5-0.5B-Instruct
+    return cls.qwen2p5_0p5b()
+
   # DeepSeek-R1-Distill-Qwen-1.5B
   @classmethod
   def deepseek_r1_distill_qwen_1p5b(cls):
