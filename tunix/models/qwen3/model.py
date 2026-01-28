@@ -25,6 +25,7 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.generate import mappings
 from tunix.utils import compat
 from tunix.utils import env_utils
 
@@ -659,7 +660,7 @@ class DecoderLayer(nnx.Module):
     return cache, outputs
 
 
-class Qwen3(nnx.Module):
+class Qwen3(mappings.BackendMappingMixin, nnx.Module):
   """Qwen3 model."""
 
   def __init__(
