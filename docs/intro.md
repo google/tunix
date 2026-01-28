@@ -1,4 +1,4 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Tunix: A JAX-native LLM Post-Training Library
 

@@ -1,4 +1,4 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 # Algorithms
 
 Tunix supports a wide array of SOTA algorithms for RL and SFT. Its modular design
