@@ -150,12 +150,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
-          "No key mappings configuration found. Proceeding with direct structural "
-          "weight synchronization (assuming matching source/target structures)."
+          "No key mappings configuration found. Proceeding with direct"
+          " structural weight synchronization (assuming matching source/target"
+          " structures)."
       )
 
       additional_config = self.config.additional_config or {}
-      if 'maxtext_config' not in additional_config:
+      if "maxtext_config" not in additional_config:
         raise ValueError(
             "Direct weight synchronization is currently supported only for "
             "MaxText models. The required 'maxtext_config' key is missing "
@@ -167,7 +168,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
       )
-
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -348,7 +348,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def __call__(
       self,
-      input_strings: List[str],
+      input_strings: str | List[str],
       max_generation_steps: int,
       max_prompt_length: int = None,
       temperature: float = 0.0,
@@ -362,6 +362,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       pad_output: bool = False,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
+    if not isinstance(input_strings, List):
+      input_strings = [input_strings]
+
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
       raise ValueError(
