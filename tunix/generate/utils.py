@@ -817,36 +817,86 @@ def transfer_state_directly(
 
     return node
 
-  # Helper: Intersect Trees (Handle KVCache/RNG mismatches)
+  # Helper: Intersect Trees (Handle KVCache/RNG mismatches and Scanned Layers)
   def intersect_trees(
-      src: Any, tgt_spec: Any, path: str = ''
+      src: Any, tgt_spec: Any, path: str = '', slice_idx: Optional[int] = None
   ) -> Tuple[Any, Any]:
     # Stop recursion if we hit a leaf (non-dict)
     if not isinstance(src, dict) or not isinstance(tgt_spec, dict):
+      if slice_idx is not None:
+        try:
+          # Assume scan axis is 0 for MaxText weights
+          return src[slice_idx], tgt_spec
+        except (IndexError, TypeError) as e:
+          logging.warning(
+              "Failed to slice scanned parameter at '%s' with index %s: %s", 
+              path, slice_idx, e
+          )
+          return src, tgt_spec
       return src, tgt_spec
 
     src_keys = set(src.keys())
     tgt_keys = set(tgt_spec.keys())
-    common_keys = src_keys & tgt_keys
-
-    # Debug Logging for dropped keys
-    if src_keys - tgt_keys:
-      logging.debug(
-          "Ignored checkpoint keys at '%s': %s", path, src_keys - tgt_keys
-      )
-    if tgt_keys - src_keys:
-      logging.debug(
-          "Unmatched model keys at '%s': %s", path, tgt_keys - src_keys
-      )
 
     filtered_src = {}
     filtered_tgt = {}
 
-    for k in common_keys:
+    for k in tgt_keys:
       new_path = f'{path}/{k}' if path else k
-      s_val, t_val = intersect_trees(src[k], tgt_spec[k], new_path)
-      filtered_src[k] = s_val
-      filtered_tgt[k] = t_val
+
+      # 1. Direct Match (Unscanned -> Unscanned)
+      if k in src_keys:
+        s_val, t_val = intersect_trees(
+            src[k], tgt_spec[k], new_path, slice_idx
+        )
+        filtered_src[k] = s_val
+        filtered_tgt[k] = t_val
+        continue
+
+      # 2. Scanned -> Unscanned Match
+      if slice_idx is None:
+        match = re.fullmatch(r"layers_(\d+)", k)
+        if match:
+          idx = int(match.group(1))
+          
+          # Case 2a: Standard MaxText (Source has explicit 'layers' container)
+          # src: {'layers': ...}, tgt: {'layers_0': ...}
+          if 'layers' in src_keys:
+            s_val, t_val = intersect_trees(
+                src['layers'], tgt_spec[k], new_path, slice_idx=idx
+            )
+            filtered_src[k] = s_val
+            filtered_tgt[k] = t_val
+            continue
+            
+          # Case 2b: GPT-OSS style (Source IS the 'layers' container)
+          # We are likely inside 'base.decoder.layers', so 'path' ends with 'layers'.
+          # src: stacked_params, tgt: {'layers_0': ...}
+          elif path.endswith('layers'):
+             s_val, t_val = intersect_trees(
+                src, tgt_spec[k], new_path, slice_idx=idx
+             )
+             filtered_src[k] = s_val
+             filtered_tgt[k] = t_val
+             continue
+
+    # Debug Logging for dropped keys
+    if src_keys - tgt_keys:
+      ignored = src_keys - tgt_keys
+      # Don't log if we matched via scanning (src has 'layers', tgt has 'layers_X')
+      if 'layers' in ignored and any(re.match(r"layers_\d+", k) for k in tgt_keys):
+        pass
+      elif any(re.match(r"layers_\d+", k) for k in tgt_keys) and path.endswith('layers'):
+        pass
+      else:
+        logging.debug(
+            "Ignored checkpoint keys at '%s': %s", path, ignored
+        )
+
+    if tgt_keys - set(filtered_tgt.keys()):
+      logging.debug(
+          "Unmatched model keys at '%s': %s", path, tgt_keys - set(filtered_tgt.keys())
+      )
 
     return filtered_src, filtered_tgt
 
@@ -854,7 +904,7 @@ def transfer_state_directly(
   full_source_dict = to_pure_spec(src_state)
   full_target_spec = to_pure_spec(dst_state)
 
-  # Filter both to their intersection
+  # Filter both to their intersection / mapping
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
 
   # Reshard and Update
