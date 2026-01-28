@@ -27,10 +27,11 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from tunix.rl.agentic import utils
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
+from tunix.rl.agentic.agents import context_util
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
-
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
@@ -59,8 +60,9 @@ class TrajectoryCollectEngine:
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
-      max_steps: int = 10,
       gamma: float = 1.0,
+      max_steps: int = 10,
+      max_context_tokens: int = 2048,
       timeout: float = 30.0,
       tokenizer=None,
       chat_parser=None,
@@ -77,10 +79,12 @@ class TrajectoryCollectEngine:
         final_reward_fn (Optional[Callable]): Optional function to compute
           additional reward at episode end. Takes (task, response) and returns
           float. Defaults to zero if not provided.
+        gamma (float): Discount factor for return calculation (1.0 = no
+          discounting).
         max_steps (int): Maximum number of interaction steps before forced
           termination
-        gamma (float): Discount factor for return calculation (1.0 = no
-          discounting)
+        max_context_tokens (int): Maximum number of context tokens to use before
+          forced termination.
         timeout (float): Maximum episode duration in seconds before timeout
           termination
         tokenizer: Optional tokenizer for converting messages to token IDs
@@ -94,8 +98,9 @@ class TrajectoryCollectEngine:
         lambda *_: reward_types.RewardOutput(reward=0.0)
     )
     self.model_call_kwargs = model_call_kwargs or {}
-    self.max_steps = max_steps
     self.gamma = gamma
+    self.max_steps = max_steps
+    self.max_context_tokens = max_context_tokens
     self.timeout = timeout
 
     # Tokenizer utilities for stepwise tokenization
@@ -120,10 +125,47 @@ class TrajectoryCollectEngine:
         Trajectory | dict | list: Depending on mode.
     """
     await self._reset()
+
+    token_func = (
+        lambda s: len(self.tokenizer.encode(s)) if self.tokenizer else 0
+    )
+
+    current_token_count = 0
+    if self.agent.trajectory.task:
+      current_token_count += token_func(
+          context_util.safe_serialize(self.agent.trajectory.task)
+      )
+
+    self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+
     for _ in range(self.max_steps):
-      done = await self._one_step()
+      current_step, done = await self._one_step()
+
+      if self.tokenizer and current_step:
+        step_cost = context_util.count_step_tokens(
+            current_step,
+            tokenizer=token_func,
+            # optional: media_costs=self.media_config
+        )
+        current_token_count += step_cost
+
+        # Check if adding this step pushed us over the limit
+        if current_token_count >= self.max_context_tokens:
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.TRUNCATED_TOKENS
+          )
+          break
+
       if done:
+        if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
+          self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
         break
+
+    if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
+      self.agent.trajectory.status = (
+          agent_types.TrajectoryStatus.TRUNCATED_STEPS
+      )
+
     await self._append_final_reward()
     self.compute_mc_reward()
     self.compute_trajectory_reward()
@@ -198,8 +240,9 @@ class TrajectoryCollectEngine:
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
-      max_steps: int = 10,
       gamma: float = 1.0,
+      max_steps: int = 10,
+      max_context_tokens: int = 2048,
       timeout: float = 30.0,
       mode: str = "Trajectory",
   ) -> AsyncGenerator[Tuple[int, Any], None]:
@@ -214,8 +257,9 @@ class TrajectoryCollectEngine:
           environment) pairs
         model_call (Callable): Shared model inference function for all pairs
         final_reward_fn (Optional[Callable]): Shared final reward function
-        max_steps (int): Maximum steps per episode
         gamma (float): Discount factor for return calculation
+        max_steps (int): Maximum steps per episode
+        max_context_tokens (int): Maximum context tokens per episode
         timeout (float): Per-episode timeout in seconds
         mode (str): Output format. See `collect` method for options.
 
@@ -231,8 +275,9 @@ class TrajectoryCollectEngine:
           env,
           model_call=model_call,
           final_reward_fn=final_reward_fn,
-          max_steps=max_steps,
           gamma=gamma,
+          max_steps=max_steps,
+          max_context_tokens=max_context_tokens,
           timeout=timeout,
       )
       traj = await engine.collect(mode=mode)
@@ -268,25 +313,24 @@ class TrajectoryCollectEngine:
 
     self._start_ts = time.time()
 
-  async def _one_step(self) -> bool:
-    """Executes a single step of the agent-environment interaction.
-
-    This involves calling the model, updating the agent with the response,
-    stepping the environment with the agent's action, and updating the agent
-    with the environment's feedback.
+  async def _one_step(self) -> tuple[Optional[agent_types.Step], bool]:
+    """Executes a single step and returns the Step object and Done status.
 
     Returns:
-        bool: True if the episode is done (either by environment or timeout),
-          False otherwise.
+        tuple[Step | None, bool]: Returns the generated Step object (or None if
+        failed)
+                                  and a boolean indicating if the episode is
+                                  done.
     """
-    resp = await asyncio.get_event_loop().run_in_executor(
-        None,
+    resp = await asyncio.to_thread(
         self.model_call,
         [self.agent.chat_completions],
         self.env,
         **self.model_call_kwargs,
     )
-    action = self.agent.update_from_model(resp).action
+
+    agent_update = self.agent.update_from_model(resp)
+    action = agent_update.action
 
     if action is None:
       logger.warning(
@@ -294,48 +338,52 @@ class TrajectoryCollectEngine:
       )
       action = []
 
-    obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
-        None, self.env.step, action
-    )
+    obs, rew, done, info = await asyncio.to_thread(self.env.step, action)
+
     self.agent.update_from_env(obs, rew, done, info)
 
-    if self.tokenizer is not None and self.chat_parser is not None:
-      cur_step = self.agent.get_current_state()
-      if cur_step is not None:
-        assistant_message, env_messages = (
-            utils.get_recent_assistant_user_messages(
-                self.agent.chat_completions
-            )
+    cur_step = self.agent.get_current_state()
+
+    if cur_step is not None and self.tokenizer and self.chat_parser:
+      assistant_message, env_messages = (
+          utils.get_recent_assistant_user_messages(self.agent.chat_completions)
+      )
+
+      # Assistant tokens/masks
+      if assistant_message:
+        a_tokens, a_masks = utils.tokenize_and_generate_masks(
+            [assistant_message],
+            tokenizer=self.tokenizer,
+            parser=self.chat_parser,
+            contains_first_msg=False,
+            contains_generation_msg=False,
         )
+        cur_step.assistant_tokens = a_tokens
+        cur_step.assistant_masks = a_masks
 
-        # assistant tokens
-        if assistant_message:
-          assistant_tokens, assistant_masks = utils.tokenize_and_generate_masks(
-              [assistant_message],
-              tokenizer=self.tokenizer,
-              parser=self.chat_parser,
-              contains_first_msg=False,
-              contains_generation_msg=False,
-          )
-          cur_step.assistant_tokens = assistant_tokens
-          cur_step.assistant_masks = assistant_masks
-
-        # env tokens
-        if env_messages:
-          env_tokens, env_masks = utils.tokenize_and_generate_masks(
-              env_messages,
-              tokenizer=self.tokenizer,
-              parser=self.chat_parser,
-              contains_first_msg=False,
-              contains_generation_msg=False,
-          )
-          cur_step.env_tokens = env_tokens
-          cur_step.env_masks = env_masks
+      # Environment tokens/masks
+      if env_messages:
+        e_tokens, e_masks = utils.tokenize_and_generate_masks(
+            env_messages,
+            tokenizer=self.tokenizer,
+            parser=self.chat_parser,
+            contains_first_msg=False,
+            contains_generation_msg=False,
+        )
+        cur_step.env_tokens = e_tokens
+        cur_step.env_masks = e_masks
 
     if time.time() - self._start_ts > self.timeout:
-      self.agent.get_current_state().done = True
-      return True
-    return done
+      if cur_step:
+        cur_step.done = True
+
+      self.agent.trajectory.status = (
+          agent_types.TrajectoryStatus.TRUNCATED_TIMEOUT
+      )
+
+      return cur_step, True
+
+    return cur_step, done
 
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.

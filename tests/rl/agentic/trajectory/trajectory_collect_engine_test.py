@@ -40,6 +40,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         return_value=reward_types.RewardOutput(reward=0.5)
     )
     self.mock_tokenizer = mock.Mock()
+    self.mock_tokenizer.encode.return_value = [1, 2, 3]
     self.mock_chat_parser = mock.Mock()
 
     # Configure mock agent
@@ -103,6 +104,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         model_call=self.mock_model_call,
         final_reward_fn=self.mock_final_reward_fn,
         max_steps=5,
+        max_context_tokens=1024,
         gamma=0.9,
     )
     result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
@@ -134,6 +136,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         agent=self.mock_agent,
         env=self.mock_env,
         model_call=self.mock_model_call,
+        max_context_tokens=1024,
         max_steps=5,
     )
     conversation = asyncio.run(self._run_collect(engine, mode='Conversation'))
@@ -163,6 +166,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         tokenizer=self.mock_tokenizer,
         chat_parser=self.mock_chat_parser,
         max_steps=5,
+        max_context_tokens=1024,
     )
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
     expected_tokens = {
@@ -264,6 +268,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           env=self.mock_env,
           model_call=self.mock_model_call,
           max_steps=5,
+          max_context_tokens=1024,
           timeout=0.1,
       )
       result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
@@ -285,6 +290,99 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ):
       results.append((i, traj))
     return results
+
+  def test_status_truncated_steps(self):
+    """Verifies status is TRUNCATED_STEPS when max_steps is hit without done."""
+    # Env never returns done=True
+    self.mock_env.step.side_effect = [('obs', 0.0, False, {})] * 10
+    self.mock_model_call.side_effect = ['resp'] * 10
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        max_steps=3,
+    )
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(
+        result_traj.status, agent_types.TrajectoryStatus.TRUNCATED_STEPS
+    )
+    self.assertEqual(len(result_traj.steps), 3)
+
+  def test_status_truncated_tokens(self):
+    """Verifies status is TRUNCATED_TOKENS when token limit is exceeded."""
+    # Mock tokenizer to return a fixed length
+    self.mock_tokenizer.encode.return_value = [1] * 100  # 100 tokens per call
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        max_context_tokens=150,  # Room for ~1.5 steps (task + 1 step)
+        max_steps=5,
+    )
+
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(
+        result_traj.status, agent_types.TrajectoryStatus.TRUNCATED_TOKENS
+    )
+    # Task + 1 step = ~200 tokens, which > 150. Should stop after 1st step.
+    self.assertLess(len(result_traj.steps), 5)
+
+  def test_status_truncated_timeout(self):
+    """Verifies status is TRUNCATED_TIMEOUT when time limit is exceeded."""
+    with mock.patch.object(time, 'time') as mock_time:
+      # 1. reset start_ts, 2. first loop check, 3. second loop check (trigger)
+      mock_time.side_effect = [100.0, 100.05, 100.15]
+
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          max_steps=5,
+          timeout=0.1,
+      )
+      result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(
+        result_traj.status, agent_types.TrajectoryStatus.TRUNCATED_TIMEOUT
+    )
+    self.assertTrue(result_traj.steps[-1].done)
+
+  # --- Remaining existing tests ---
+
+  def test_collect_conversation_mode(self):
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        max_steps=5,
+    )
+    conversation = asyncio.run(self._run_collect(engine, mode='Conversation'))
+    self.assertEqual(len(conversation), 5)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_collect_with_tokenization(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [1]),
+        ([201, 202], [1, 1]),
+        ([301, 302], [1, 1]),
+        ([203, 204], [1, 1]),
+        ([303, 304], [1, 1]),
+    ]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_steps=5,
+    )
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertEqual(token_data['prompt_tokens'], [101])
 
   def test_collect_multiple(self):
     # Helper to configure a new mock agent
