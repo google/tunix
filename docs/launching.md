@@ -48,11 +48,12 @@ This collection includes command-line interface (CLI) scripts designed to handle
 >     *   `KAGGLE_KEY`: Your Kaggle API key.
 
 <section class="zippy">
-##### Guide to Setup Credential
+
+#### Guide to Setup Credential
 
  TL;DR: This is a guide that covers how to get your keys, authorize them for restricted access, and save them permanently in a `.env` file.
 
-###### Hugging Face (Token & Access)
+##### Hugging Face (Token & Access)
 
 **Step A: Generate the Token**
 
@@ -74,7 +75,7 @@ This collection includes command-line interface (CLI) scripts designed to handle
 
 
 
-###### Kaggle (Key & Access)
+##### Kaggle (Key & Access)
 
 **Step A: Generate the API Key**
 
@@ -90,7 +91,7 @@ This collection includes command-line interface (CLI) scripts designed to handle
 3. Review and Sign **Consent Form**.
 
 
-###### Create the `.env` File
+##### Create the `.env` File
 
 Instead of typing `export` every time, we will save these credentials in a file that sits in your project folder.
 

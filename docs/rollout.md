@@ -21,7 +21,7 @@ Tunix supports multiple rollout engines (selected by `rollout_engine`):
 
 `vllm` and `sglang` provide better performance with large batch size and agentic RL.
 
-#### Sampling Knobs
+## Sampling Knobs
 
 These are used by all the rollout engines:
 
