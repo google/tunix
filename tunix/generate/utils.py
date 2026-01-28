@@ -23,6 +23,7 @@ import re
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from flax import nnx
+from flax import traverse_util
 import jax
 from jax import lax
 import jax.numpy as jnp
@@ -756,6 +757,47 @@ def transfer_state_with_mappings(
   return dst_state.from_flat_path(tgt_flat_list)
 
 
+def _slice_scanned_param(
+    src_val: Any, tgt_val: Any, slice_idx: int, key_path: str
+) -> Any:
+  """Slices a scanned parameter dynamically detecting the scan axis."""
+  if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
+    return src_val
+
+  src_shape = src_val.shape
+  tgt_shape = tgt_val.shape
+
+  if src_shape == tgt_shape:
+    return src_val
+
+  if len(src_shape) == len(tgt_shape) + 1:
+    scan_axis = None
+    # Check which dimension, when removed, matches the target shape
+    for i in range(len(src_shape)):
+      if src_shape[:i] + src_shape[i + 1 :] == tgt_shape:
+        scan_axis = i
+        break
+
+    if scan_axis is not None:
+      # Construct slice: (:, :, slice_idx, :, :)
+      slicer = [slice(None)] * len(src_shape)
+      slicer[scan_axis] = slice_idx
+      return src_val[tuple(slicer)]
+
+    logging.warning(
+        "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
+        ' determine scan axis.',
+        key_path, src_shape, tgt_shape,
+    )
+
+  # Fallback
+  try:
+    return src_val[slice_idx]
+
+  except (IndexError, TypeError):
+    return src_val
+
+
 def transfer_state_directly(
     src_state: Mapping[str, Any],
     dst_state: Mapping[str, Any],
@@ -817,44 +859,89 @@ def transfer_state_directly(
 
     return node
 
-  # Helper: Intersect Trees (Handle KVCache/RNG mismatches)
-  def intersect_trees(
-      src: Any, tgt_spec: Any, path: str = ''
-  ) -> Tuple[Any, Any]:
-    # Stop recursion if we hit a leaf (non-dict)
+  # Helper: Intersect Trees (Handle KVCache/RNG mismatches and Scanned Layers)
+  def intersect_trees(src: Any, tgt_spec: Any) -> Tuple[Any, Any]:
+    """Optimized intersection using flat dictionary traversal."""
+    # Fast path for non-dict inputs (leaves)
     if not isinstance(src, dict) or not isinstance(tgt_spec, dict):
       return src, tgt_spec
 
-    src_keys = set(src.keys())
-    tgt_keys = set(tgt_spec.keys())
-    common_keys = src_keys & tgt_keys
+    # Flatten both structures to (path_tuple) -> value
+    # usage of sep='/' is optional, but tuples are faster for manipulation
+    src_flat = traverse_util.flatten_dict(src)
+    tgt_flat = traverse_util.flatten_dict(tgt_spec)
 
-    # Debug Logging for dropped keys
-    if src_keys - tgt_keys:
-      logging.debug(
-          "Ignored checkpoint keys at '%s': %s", path, src_keys - tgt_keys
-      )
-    if tgt_keys - src_keys:
-      logging.debug(
-          "Unmatched model keys at '%s': %s", path, tgt_keys - src_keys
-      )
+    filtered_src_flat = {}
+    filtered_tgt_flat = {}
 
-    filtered_src = {}
-    filtered_tgt = {}
+    # Compile regex once
+    layer_pattern = re.compile(r'^layers_(\d+)$')
 
-    for k in common_keys:
-      new_path = f'{path}/{k}' if path else k
-      s_val, t_val = intersect_trees(src[k], tgt_spec[k], new_path)
-      filtered_src[k] = s_val
-      filtered_tgt[k] = t_val
+    for key_tuple, tgt_val in tgt_flat.items():
+      # Try Direct Match
+      if key_tuple in src_flat:
+        filtered_src_flat[key_tuple] = src_flat[key_tuple]
+        filtered_tgt_flat[key_tuple] = tgt_val
+        continue
 
-    return filtered_src, filtered_tgt
+      # Try Scanned Layer Mapping
+      # We look for 'layers_X' in the path and try to map it to 'layers' (MaxText)
+      # or remove it (GPT-OSS / implicit stack).
+
+      # Locate which part of the path is 'layers_X'
+      layer_idx = -1
+      match_index = -1
+
+      for i, part in enumerate(key_tuple):
+        # Optimization: Only check strings that look like layers
+        if isinstance(part, str) and part.startswith('layers_'):
+          m = layer_pattern.match(part)
+          if m:
+            layer_idx = int(m.group(1))
+            match_index = i
+            break
+
+      if match_index != -1:
+        # Candidate A: Replace 'layers_X' with 'layers' (Standard MaxText)
+        # e.g. ('decoder', 'layers_0', 'mlp') -> ('decoder', 'layers', 'mlp')
+        candidate_a = list(key_tuple)
+        candidate_a[match_index] = 'layers'
+        candidate_a = tuple(candidate_a)
+
+        if candidate_a in src_flat:
+          src_val = src_flat[candidate_a]
+          filtered_src_flat[key_tuple] = _slice_scanned_param(
+              src_val, tgt_val, layer_idx, str(key_tuple)
+          )
+          filtered_tgt_flat[key_tuple] = tgt_val
+          continue
+
+        # Candidate B: Remove 'layers_X' (Implicit Container / GPT-OSS)
+        # e.g. ('layers', 'layers_0', 'mlp') -> ('layers', 'mlp') 
+        # or ('layers_0', 'mlp') -> ('mlp')
+        candidate_b = list(key_tuple)
+        candidate_b.pop(match_index)
+        candidate_b = tuple(candidate_b)
+
+        if candidate_b in src_flat:
+          src_val = src_flat[candidate_b]
+          filtered_src_flat[key_tuple] = _slice_scanned_param(
+              src_val, tgt_val, layer_idx, str(key_tuple)
+          )
+          filtered_tgt_flat[key_tuple] = tgt_val
+          continue
+
+    # Unflatten back to nested structure
+    return (
+        traverse_util.unflatten_dict(filtered_src_flat),
+        traverse_util.unflatten_dict(filtered_tgt_flat),
+    )
 
   # Prepare clean source and target specs
   full_source_dict = to_pure_spec(src_state)
   full_target_spec = to_pure_spec(dst_state)
 
-  # Filter both to their intersection
+  # Filter both to their intersection / mapping
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
 
   # Reshard and Update
@@ -863,6 +950,14 @@ def transfer_state_directly(
       target=final_spec,
   )
   nnx.update(dst_state, resharded_weights)
+
+  # Explicitly free memory
+  del resharded_weights
+  del final_source
+  gc.collect()
+
+  # Wait for completion
+  jax.tree.leaves(dst_state)[0].block_until_ready()
 
 
 def verify_state_closeness(golden_state, state, atol=1e-2):
