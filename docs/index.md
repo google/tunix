@@ -19,7 +19,6 @@ examples.md
 talks.md
 contributing.md
 code-of-conduct.md
-gallery.rst
 ```
 
 ```{eval-rst}
