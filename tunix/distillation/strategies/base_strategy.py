@@ -58,13 +58,13 @@ class BaseStrategy(ABC):
   @abstractmethod
   def compute_loss(
       self, student_output: Any, teacher_output: Any, labels: jax.Array
-  ) -> jax.Array:
+  ) -> jax.Array | tuple[jax.Array, dict[str, jax.Array]]:
     """Computes the distillation loss based on model outputs and labels."""
 
   @abstractmethod
   def compute_eval_loss(
       self, student_output: Any, labels: jax.Array
-  ) -> jax.Array:
+  ) -> jax.Array | tuple[jax.Array, dict[str, jax.Array]]:
     """Computes the distillation loss based on model outputs and labels."""
 
   def pre_process_models(
@@ -129,7 +129,7 @@ class BaseStrategy(ABC):
       student_model: nnx.Module,
       teacher_output: Any,
       inputs: dict[str, jax.Array],
-  ) -> jax.Array:
+  ) -> jax.Array | tuple[jax.Array, dict[str, jax.Array]]:
     """Computes the distillation loss."""
     student_output = self.get_student_outputs(student_model, inputs)
     labels = self._labels_fn(**inputs)
@@ -143,7 +143,7 @@ class BaseStrategy(ABC):
       self,
       student_model: nnx.Module,
       inputs: dict[str, jax.Array],
-  ) -> jax.Array:
+  ) -> jax.Array | tuple[jax.Array, dict[str, jax.Array]]:
     """Computes the task loss based on student model forward pass and labels."""
     student_output = self.get_student_outputs(student_model, inputs)
     student_output = jax.lax.stop_gradient(student_output)
