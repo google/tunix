@@ -696,8 +696,16 @@ class Sampler(base_sampler.BaseSampler):
 
     tokens = [self.tokenize(x) for x in input_strings]
     max_tokens_length = max(len(x) for x in tokens)
+    # If max_prompt_length is explicitly set, respect it (truncate if needed).
+    # This ensures consistent shapes across batches for RL training.
+    # If max_prompt_length is None, auto-size to next power of 2.
+    user_specified_length = max_prompt_length is not None
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
-      max_prompt_length = utils.next_power_of_2(max_tokens_length)
+      if user_specified_length:
+        # User specified a length but prompts are longer - we'll truncate
+        pass  # Keep the user-specified max_prompt_length
+      else:
+        max_prompt_length = utils.next_power_of_2(max_tokens_length)
 
     all_input_ids = np.array([
         utils.pad_to_length(
@@ -705,6 +713,7 @@ class Sampler(base_sampler.BaseSampler):
             target_length=max_prompt_length,
             pad_value=self.tokenizer.pad_id(),
             left=True,
+            truncate=user_specified_length,  # Truncate if user specified length
         )
         for x in tokens
     ])
