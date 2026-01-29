@@ -70,46 +70,46 @@ features!
 
 ## Installation
 
-- You can install Tunix in several ways:
+You can install Tunix in several ways:
 
 1. From PyPI (recommended):
 
-```sh
-pip install "google-tunix[prod]"
-```
+  ```sh
+  pip install "google-tunix[prod]"
+  ```
 
 2. Directly from GitHub (latest main branch)
 
-```sh
-pip install git+https://github.com/google/tunix
-```
+  ```sh
+  pip install git+https://github.com/google/tunix
+  ```
 
 3. From source (editable install) If you plan to modify the codebase and run it
-   in development mode. If you'd like to install vllm, the tpu-inference
-   supported version is not released yet, please follow the instructions to
-   install manually
-   (https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/)
-   or download the docker image (vllm/vllm-tpu:v0.11.1) then
-   `pip install tpu-inference` for TPU backend:
+  in development mode. If you'd like to install vllm, the tpu-inference
+  supported version is not released yet, please follow the instructions to
+  install manually
+  (https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/)
+  or download the docker image (vllm/vllm-tpu:v0.11.1) then
+  `pip install tpu-inference` for TPU backend:
 
-```sh
-git clone https://github.com/google/tunix.git
-cd tunix
-pip install -e ".[dev]"
+  ```sh
+  git clone https://github.com/google/tunix.git
+  cd tunix
+  pip install -e ".[dev]"
 
-# Then install vLLM and tpu-inference
-```
+  # Then install vLLM and tpu-inference
+  ```
 
-- Using tunix with SGLang-Jax rollout
+Using tunix with SGLang-Jax rollout
 
 1. Install tunix using above ways
 1. Then install SGLang-Jax
 
-```
-git clone git@github.com:sgl-project/sglang-jax.git
-cd sglang-jax/python
-pip install -e .
-```
+  ```
+  git clone git@github.com:sgl-project/sglang-jax.git
+  cd sglang-jax/python
+  pip install -e .
+  ```
 
 ## Getting Started
 
