@@ -113,6 +113,13 @@ class GrpoPipeline(config.HyperParameters):
     return perf_config
 
   def create_rl_cluster(self):
+    # Should not use LoRA for reference model.
+    if self.config["reference_model_config"].get("lora_config"):
+      logging.warning(
+          "LoRA config is not supported for the reference model. Disabling"
+          " LoRA."
+      )
+      del self.config["reference_model_config"]["lora_config"]
     reference_model, tokenizer_path = model_lib.create_model(
         self.config["reference_model_config"],
         self.config["tokenizer_config"],
