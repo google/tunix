@@ -222,11 +222,11 @@ class DistillationTrainerTest(absltest.TestCase):
     variables = nnx.state(student_model, nnx.Param)
 
     self.assertEqual(
-        variables.layers[0].w1.kernel.value.sharding.spec,
+        variables.layers[0].w1.kernel[...].sharding.spec,
         shd.PartitionSpec('fsdp', 'tp'),
     )
     self.assertEqual(
-        variables.layers[0].w2.kernel.value.sharding.spec,
+        variables.layers[0].w2.kernel[...].sharding.spec,
         shd.PartitionSpec('tp', 'fsdp'),
     )
 
@@ -252,7 +252,7 @@ class DistillationTrainerTest(absltest.TestCase):
     unsharded_variables = nnx.state(unsharded_student_model, nnx.Param)
 
     self.assertIsInstance(
-        unsharded_variables.layers[0].w1.kernel.value.sharding,
+        unsharded_variables.layers[0].w1.kernel[...].sharding,
         jax.sharding.SingleDeviceSharding,
     )
     jax.tree.map_with_path(tc.assert_close, variables, unsharded_variables)

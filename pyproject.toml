@@ -32,7 +32,7 @@ dependencies = [
   "omegaconf", # CLI config
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
-  "qwix",
+  "qwix>=0.1.5",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
