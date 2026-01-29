@@ -158,7 +158,6 @@ class HyperParameters:
         "training_config",
         "optimizer_config",
         "profiler_options",
-        "rl_training_config",
     }
 
     all_overrides = []
@@ -904,7 +903,7 @@ class HyperParameters:
         for _, member in inspect.getmembers(module):
           if inspect.isfunction(member):
             # Check if the function was defined in this module
-            if member.__module__ == module_name:
+            if member.__module__ == module_name and not member.__name__.startswith("_"):
               defined_functions.append(member)
         reward_fns.extend(defined_functions)
     return reward_fns
