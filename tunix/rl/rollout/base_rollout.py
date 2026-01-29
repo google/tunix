@@ -142,6 +142,21 @@ class RolloutConfig:
   rollout_vllm_hf_config_path: str | None = None
   rollout_vllm_additional_config: dict[str, Any] | None = None
 
+  # Whether to enable data parallel in attention for vLLM rollout engine.
+  # The "attn_dp" mesh axis is used when the degree of tensor parallelism 
+  # specified is more than the number of KV heads in the model. Enabling this
+  # allows for non-attention tensors to be sharded across "attn_dp" and "model"
+  # axes, which can help reduce memory usage for large models with few KV heads.
+  rollout_vllm_enable_dp_attention: bool = False
+
+  # Maximum number of batched tokens allowed in vLLM. This allows for pending prefill requests
+  # to be batched along with decode requests if enough tokens are available. Only used when
+  # chunked prefill is enabled.
+  rollout_vllm_max_num_batched_tokens: Optional[int] = None
+
+  # Maximum number of concurrent sequences allowed to be processed in vLLM.
+  rollout_vllm_max_num_seqs: Optional[int] = None
+
   # SG-Lang JAX specific rollout configs.
 
   # Model version for SG-Lang JAX rollout engine.
