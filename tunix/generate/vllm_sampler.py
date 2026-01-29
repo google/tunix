@@ -67,6 +67,9 @@ class VllmConfig:
   async_scheduling: bool = False
   tensor_parallel_size: int = -1
   data_parallel_size: int = -1
+  enable_dp_attention: bool = False
+  max_num_batched_tokens: Optional[int] = None
+  max_num_seqs: Optional[int] = None
   hf_config_path: Optional[Dict[str, Any]] = None
   additional_config: Optional[Dict[str, Any]] = None
 
@@ -210,6 +213,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["tensor_parallel_size"] = tensor_parallel_size
     args["async_scheduling"] = config.async_scheduling
 
+    if config.max_num_batched_tokens is not None:
+      args["max_num_batched_tokens"] = config.max_num_batched_tokens
+
+    if config.max_num_seqs is not None:
+      args["max_num_seqs"] = config.max_num_seqs
+
     args["additional_config"] = {}
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
@@ -217,6 +226,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
             "device_indexes": device_indexes,
+            "enable_dp_attention": config.enable_dp_attention,
         }
     }
 
