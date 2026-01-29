@@ -29,31 +29,36 @@ import jaxtyping
 from flax import nnx
 from tunix.rl import utils
 
+
 # TODO(tsbao): move this to util
 def callback_on_ready(
+    in_data: jaxtyping.PyTree,
     x: jaxtyping.PyTree,
-    success: Callable[[], None],
-    failure: Callable[[Exception], None],
+    success: Callable[[float], None],
+    failure: Callable[[float, Exception], None],
 ):
   """Callback to invoke when the Jax array is ready."""
   fut = futures.Future()
+  start_time = [-1.0]
 
   def callback(f):
     e = f.exception()
     if e is None:
-      success()
+      success(start_time[0])
     else:
-      failure(e)
+      failure(start_time[0], e)
 
   fut.add_done_callback(callback)
 
   def wait():
     try:
+      jax.block_until_ready(in_data)
+      start_time[0] = time.perf_counter()
       jax.block_until_ready(x)
     except Exception as e:  # pylint: disable=broad-exception-caught
       fut.set_exception(e)
     else:
-      fut.set_result(x)
+      fut.set_result((x))
 
   threading.Thread(target=wait).start()
 
@@ -475,15 +480,23 @@ def reshard_pytree(
       ],
   )
 
-  start = time.time()
+  start = time.perf_counter()
 
   resharded_array = reshard_fn(source, dst_shardings)
 
   callback_on_ready(
+      source,
       resharded_array,
-      lambda: logging.info('Reshard finished in %.2fs', time.time() - start),
-      lambda e: logging.error(
-          'Reshard failed in %.2fs: %s', time.time() - start, e
+      lambda reshard_start: logging.info(
+          'Input ready in %.2fs. Reshard finished in %.2fs',
+          reshard_start - start,
+          time.perf_counter() - reshard_start,
+      ),
+      lambda reshard_start, e: logging.error(
+          'Input ready in %.2fs. Reshard failed in %.2fs: %s',
+          reshard_start - start,
+          time.perf_counter() - reshard_start,
+          e,
       ),
   )
   return resharded_array
