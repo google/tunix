@@ -255,7 +255,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
 
   def __call__(
       self,
-      input_strings: List[str],
+      input_strings: str| List[str],
       max_generation_steps: int,
       max_prompt_length: int | None = None,
       temperature: float = 0.0,
@@ -279,6 +279,9 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           f"{max_generation_steps} and `max_model_len`="
           f"{self.args['context_length']}."
       )
+    
+    if not isinstance(input_strings, List):
+      input_strings = [input_strings]
 
     self.sampling_params = self.engine.get_default_sampling_params()
     self.sampling_params.max_new_tokens = max_generation_steps
