@@ -80,6 +80,13 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
 
+def get_or_create_loop():
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
 
 class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   """Base class for Agentic RL Learners using asynchronous rollouts."""
@@ -123,6 +130,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       metric_fns: Metric functions.
       data_shuffle_seed: Seed for data shuffling.
     """
+
+    import queue
+    import threading
+
+    result_queue = queue.Queue()
+
+    def run_loop_forever():
+        loop = get_or_create_loop()
+        result_queue.put(loop)
+        loop.run_forever()
+
+    loop_thread = threading.Thread(target=run_loop_forever, daemon=True)
+    loop_thread.start()
+    self.loop = result_queue.get()
+
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
 
@@ -521,17 +543,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     return self.algo_config.num_generations
 
   @staticmethod
-  def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
+  def _run_async(coro: Coroutine[Any, Any, Any], loop) -> Any:
     """Runs a coroutine, handling existing event loops correctly."""
-    try:
-      loop = asyncio.get_running_loop()
-    except RuntimeError:
-      # asyncio.get_running_loop() raises RuntimeError if no loop is running.
-      # If no loop is running, start a new one using asyncio.run().
-      return asyncio.run(coro)
-    else:
-      # If a loop is already running, use it to run the coroutine.
-      return loop.run_until_complete(coro)
+    return asyncio.run_coroutine_threadsafe(coro, loop)
 
   async def _producer(
       self,
@@ -662,9 +676,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         prompt_queue.put(None)
         break
 
-    producer_future = self.executor.submit(
-        self._run_async,
-        self._producer(orchestrator, prompt_queue, train_data_queue),
+    producer_future = self._run_async(
+      self._producer(orchestrator, prompt_queue, train_data_queue),
+      self.loop,
     )
 
     # 2. Consume training examples and train.
@@ -741,8 +755,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             eval_examples.extend(train_examples)
           return eval_examples
 
-        eval_future = self.executor.submit(
-            self._run_async, _eval_runner_async(eval_orchestrator)
+        eval_future = self._run_async(
+          _eval_runner_async(eval_orchestrator), self.loop
         )
         eval_examples = eval_future.result()
         self._eval_iter_steps += 1
