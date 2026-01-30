@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
   "datasets",
-  "flax>=0.11.1",
+  "flax>=0.11.1, <0.12.0", # vllm doesn't work with flax>=0.12.0, relax this later
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
   "grain",
@@ -32,7 +32,7 @@ dependencies = [
   "omegaconf", # CLI config
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
-  "qwix",
+  "qwix<0.1.5",  # qwix 0.1.5 depends on flax 0.12.0, which is not compatible with vllm
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
