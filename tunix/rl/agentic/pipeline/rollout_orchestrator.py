@@ -21,6 +21,7 @@ groups them into batches for further processing.
 
 from __future__ import annotations
 
+import traceback
 import asyncio
 from collections.abc import Hashable
 import copy
@@ -57,7 +58,7 @@ class RolloutOrchestrator:
       *,
       rollout_sync_lock: utils.RolloutSyncLock,
       engine_cls: Type[TrajectoryCollectEngine] = TrajectoryCollectEngine,
-      engine_defaults: Optional[Dict[str, Any]] = None,
+      engine_kwargs: Optional[Dict[str, Any]] = None,
       max_concurrency: Optional[int] = None,
   ):
     """Initializes the RolloutOrchestrator.
@@ -73,14 +74,14 @@ class RolloutOrchestrator:
       engine_cls: The class used to instantiate trajectory collection engines.
         Each engine is responsible for running a single episode of interaction
         between an agent and an environment.
-      engine_defaults: A dictionary of default keyword arguments to be passed to
+      engine_kwargs: A dictionary of default keyword arguments to be passed to
         the `engine_cls` constructor when creating new engine instances.
       max_concurrency: The maximum number of agent-environment interaction
         episodes to run in parallel. This limits the number of concurrent calls
         to the underlying language model.
     """
     self.engine_cls = engine_cls
-    self.engine_defaults = engine_defaults or {}
+    self.engine_kwargs = engine_kwargs or {}
     self.max_concurrency = max_concurrency
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
@@ -96,7 +97,7 @@ class RolloutOrchestrator:
       model_call_kwargs: Optional[Dict[str, Any]] = None,
   ) -> Trajectory:
     """Helper method to collect a single trajectory."""
-    engine_kwargs = self.engine_defaults.copy()
+    engine_kwargs = self.engine_kwargs.copy()
     if model_call_kwargs:
       engine_kwargs["model_call_kwargs"] = model_call_kwargs
     engine = self.engine_cls(agent, env, **engine_kwargs)
@@ -193,6 +194,7 @@ class RolloutOrchestrator:
     except ExceptionGroup as eg:
       for e in eg.exceptions:
         self._logger.error("Fatal error in runner for pair %d: %s", i, e)
+        traceback.print_exc()
       raise eg.exceptions[0]
     finally:
       self._logger.debug(
