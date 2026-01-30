@@ -155,13 +155,16 @@ jobs:
         run: |
           echo "Current directory:"
           pwd
-          pip install --upgrade pip setuptools wheel
+          pip install --upgrade pip setuptools==78.1.0 wheel
 
           # Install Tunix with dev dependencies without overwriting the vLLM dependencies.
           pip install -e .[dev]
           pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
+          pip install flax<=0.12.0 --force-reinstall
+          pip install qwix<0.1.5 --force-reinstall
           # tpu-inference/Numba needs NumPy 2.3 or less.
-          pip install numpy==2.3.5 --force-reinstall
+          # opencv-python-headless 4.12.0.88 requires numpy<2.3.0,>=2.
+          pip install "numpy<2.3.0,>=2" --force-reinstall
 
       - name: GRPO Integration Test
         env:
