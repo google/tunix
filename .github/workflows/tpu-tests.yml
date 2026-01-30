@@ -197,6 +197,8 @@ jobs:
           pip list | egrep 'jax|flax|libtpu'
           cd ..
           git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . --force-reinstall && cd ../..
+          # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
+          pip install qwix --force-reinstall
           # TODO(b/470113586): Remove this test once the bug is fixed.
           pip install jax[tpu]==0.8.1 --force-reinstall
           pip list | egrep 'jax|flax|libtpu'
