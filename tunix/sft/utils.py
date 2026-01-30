@@ -113,6 +113,11 @@ def _pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
         "This function must not be called within jax tracer (e.g. jit, vmap,"
         " grad)"
     )
+    # The array could probably be deleted between the time we get the live
+    # arrays and now. Skip them if so.
+    if array.is_deleted():
+      continue
+
     for buffer in array.addressable_shards:
       # Using id() on the shard data is a good way to get a unique identifier
       # for the underlying buffer. This ensures that even if multiple
