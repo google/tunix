@@ -278,7 +278,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           f"{self.args['context_length']}."
       )
 
-    if not isinstance(input_strings, List):
+    if isinstance(input_strings, str):
       input_strings = [input_strings]
 
     self.sampling_params = self.engine.get_default_sampling_params()

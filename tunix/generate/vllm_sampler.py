@@ -372,7 +372,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       pad_output: bool = False,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
-    if not isinstance(input_strings, List):
+    if isinstance(input_strings, str):
       input_strings = [input_strings]
 
     # max_tokens: maximum number of tokens to generate
