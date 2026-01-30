@@ -1053,6 +1053,59 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         4,
     )
 
+  def test_put_prompts_to_queue(self):
+    vocab = test_common.MockVocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+        ),
+        rollout_config=base_rollout.RolloutConfig(),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+
+    grpo_config = agentic_grpo_learner.GRPOConfig()
+    grpo_learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+    grpo_learner._full_batch_size = 2
+
+    # Test with matching batch size
+    prompt_queue = queue.Queue()
+    batch1 = {"prompts": ["prompt1", "prompt2"]}
+    grpo_learner._put_prompts_to_queue(prompt_queue, batch1)
+    self.assertEqual(prompt_queue.get_nowait(), batch1)
+
+    # Test with non-matching batch size
+    batch2 = {"prompts": ["prompt3"]}
+    grpo_learner._put_prompts_to_queue(prompt_queue, batch2)
+    self.assertIsNone(prompt_queue.get_nowait())
+
   @unittest.skip("b/461854722")
   def test_grpo_with_lora_model(self):
     # reshard through default device_put.

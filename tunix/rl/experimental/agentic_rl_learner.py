@@ -657,7 +657,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     for _ in range(initial_buffer_size):
       try:
-        prompt_queue.put(next(full_dataset_iterator))
+        self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
       except StopIteration:
         prompt_queue.put(None)
         break
@@ -772,7 +772,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 self.policy_version,
             )
             try:
-              prompt_queue.put(next(full_dataset_iterator))
+              self._put_prompts_to_queue(
+                  prompt_queue, next(full_dataset_iterator)
+              )
             except StopIteration:
               prompt_queue.put(None)
           finally:
@@ -781,10 +783,38 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else:
           self.rl_cluster.global_steps += 1
           try:
-            prompt_queue.put(next(full_dataset_iterator))
+            self._put_prompts_to_queue(
+                prompt_queue, next(full_dataset_iterator)
+            )
           except StopIteration:
             prompt_queue.put(None)
         micro_batches_since_last_sync = 0
 
     _ = producer_future.result()
     self.rl_cluster.close()
+
+  def _put_prompts_to_queue(
+      self,
+      prompt_queue: queue.Queue[TrainingInputT | None],
+      batch,
+  ):
+    """Puts a batch of prompts into the queue.
+
+    If the batch size does not match the expected full batch size, a warning is
+    logged, and a StopIteration is raised to signal the end of the dataset.
+    A None is put into the queue upon StopIteration to signal completion.
+
+    Args:
+      prompt_queue: The queue to put the batch into.
+      batch: The batch of prompts (TrainingInputT).
+    """
+    if len(batch["prompts"]) != self._full_batch_size:
+      logging.warning(
+          "partial batch %d vs %d detected. The rest of the batch will be"
+          " skipped.",
+          len(batch["prompts"]),
+          self._full_batch_size,
+      )
+      prompt_queue.put(None)
+    else:
+      prompt_queue.put(batch)
