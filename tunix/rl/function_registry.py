@@ -13,13 +13,17 @@
 # limitations under the License.
 
 
+import importlib
 import threading
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from absl import logging
+
 
 _POLICY_LOSS_FN_CATEGORY = "policy_loss_fn"
 _ADVANTAGE_ESTIMATOR_CATEGORY = "advantage_estimator"
 _REWARD_MANAGER_CATEGORY = "reward_manager"
 
+_HAVE_REWARDS_LOADED = False
 
 class FunctionRegistry:
   """A thread-safe registry for functions, organized by category."""
@@ -141,6 +145,12 @@ def register_advantage_estimator(
 
 def get_reward_manager(name: str) -> Callable[..., Any]:
   """Returns the reward manager function by name."""
+  global _HAVE_REWARDS_LOADED
+  if not _HAVE_REWARDS_LOADED:
+    logging.info("Lazy loading rewards manager...")
+    importlib.import_module("tunix.rl.reward_manager")
+    _HAVE_REWARDS_LOADED = True
+
   return default_registry.get(_REWARD_MANAGER_CATEGORY, name)
 
 

@@ -34,7 +34,6 @@ import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
-from tunix.rl import reward_manager
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
