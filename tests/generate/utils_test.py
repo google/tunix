@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.generate import utils
 from tunix.rl import reshard
+from tunix.utils import compat
 
 
 PartitionSpec = sharding.PartitionSpec
@@ -688,11 +689,11 @@ class UtilsTest(parameterized.TestCase):
 
   def test_transfer_state_directly_simple_transfer(self):
     """Tests direct state transfer with matching structures."""
-    src_state = nnx.Dict(
-        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([1.0, 2.0]))))
+    src_state = compat.ModuleDict(
+        decoder=compat.ModuleDict(layer0=compat.ModuleDict(weight=nnx.Param(jnp.array([1.0, 2.0]))))
     )
-    dst_state = nnx.Dict(
-        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([0.0, 0.0]))))
+    dst_state = compat.ModuleDict(
+        decoder=compat.ModuleDict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([0.0, 0.0]))))
     )
 
     mock_reshard = lambda source, target: source
