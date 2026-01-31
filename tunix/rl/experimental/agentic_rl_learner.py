@@ -204,7 +204,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._compute_logps_micro_batch_size = (
         self._training_config.compute_logps_micro_batch_size
     )
-    sft_utils.show_hbm_usage(title="AgenticRLLearner init")
+    # sft_utils.show_hbm_usage(title="AgenticRLLearner init")
 
     self.chat_parser = chat_parser
     self.tokenizer = rl_cluster.tokenizer

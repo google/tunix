@@ -38,7 +38,7 @@ print("jax devices: ", jax.devices())
 from absl import logging
 
 # Ensure INFO and higher messages are processed
-logging.set_verbosity(logging.INFO)
+logging.set_verbosity(logging.DEBUG)
 # To ensure it goes to stderr, especially if C++ interop is involved:
 logging.use_python_logging()
 
@@ -47,7 +47,7 @@ import sys
 
 # Configure the root logger
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     stream=sys.stdout  # Explicitly send to stdout
 )
@@ -267,10 +267,10 @@ AutoTokenizer = transformers.AutoTokenizer
 
 # %%
 print("start loading model and trainer instances...")
-show_hbm_usage("Before model loading")
+# show_hbm_usage("Before model loading")
 
 # %%
-show_hbm_usage("after model loading with fp32")
+# show_hbm_usage("after model loading with fp32")
 
 DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
 
@@ -339,7 +339,7 @@ print ("Done with loading datasets")
   # break
 
 # %%
-show_hbm_usage("Done with loading datasets")
+# show_hbm_usage("Done with loading datasets")
 
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
@@ -379,7 +379,7 @@ else:
   qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, trainer_mesh, dtype=jnp.float32)
 
 # %%
-show_hbm_usage("after loading qwen2_actor")
+# show_hbm_usage("after loading qwen2_actor")
 
 # %%
 ModelAgent = model_agent.ModelAgent
@@ -499,7 +499,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 
-show_hbm_usage("after RLCluster creation")
+# show_hbm_usage("after RLCluster creation")
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
@@ -510,7 +510,7 @@ grpo_trainer = GRPOLearner(
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
-show_hbm_usage("after GRPOLearner creation")
+# show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
