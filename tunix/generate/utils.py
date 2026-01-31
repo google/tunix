@@ -608,6 +608,7 @@ def transfer_state_with_mappings(
       val,
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
+    print(f'Transferring {flat_src_key} -> {tgt_key} with shape {val.shape}->{tgt_param.value.shape=}')
     # Apply transpose if configured
     val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
     # Apply optional hook function

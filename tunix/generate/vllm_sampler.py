@@ -443,6 +443,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         for x in out_tokens[0]
     ]
     # To support multisampling, just return the whole list of SamplerOutput
+    print(f"YY {decoded_outputs[0]=}")
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
         logits=None,

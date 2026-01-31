@@ -33,6 +33,8 @@ from tunix.generate import sampler as vanilla_sampler
 from tunix.generate import vllm_sampler
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
+from tunix.models.qwen2 import model as qwen2_lib
+from tunix.models.qwen2 import params as qwen2_params
 from tunix.sft import utils as base_utils
 from tunix.tests import test_common as tc
 from vllm.inputs import TokensPrompt
@@ -40,14 +42,16 @@ from vllm.sampling_params import SamplingParams
 import asyncio
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
-
+import pathwaysutils
+pathwaysutils.initialize()
 
 class VllmSamplerTest(absltest.TestCase):
 
   @classmethod
   def setUpClass(cls) -> None:
     super().setUpClass()
-    cls.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
+    # cls.repo_id = "meta-llama/Llama-3.2-1B-Instruct"
+    cls.repo_id = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
     temp_dir = tempfile.gettempdir()
     cls.model_path = os.path.join(temp_dir, "models", cls.repo_id)
 
@@ -56,23 +60,31 @@ class VllmSamplerTest(absltest.TestCase):
     # TODO(b/432096319): Enable after LoRA support in vLLM
     cls.enable_lora = False
 
-    mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
+    # mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
+    mesh_shape = (1, 2)
     axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
+    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices()[0:2], axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
 
   def load_llama3_model(self, model_version: str, enable_lora: bool = False):
     model_config = {
         "meta-llama/Llama-3.2-1B-Instruct": llama_lib.ModelConfig.llama3p2_1b,
         "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b,
     }
     assert (
         model_version in model_config
     ), f"Invalid model version: {model_version}"
     model_config = model_config[model_version]()
 
-    llama3 = llama_params.create_model_from_safe_tensors(
-        self.model_path, model_config, self.mesh
-    )
+    if "llama" in model_version:
+      llama3 = llama_params.create_model_from_pretrained(
+          self.model_path, model_config, self.mesh
+      )
+    else:
+      llama3 = qwen2_params.create_model_from_safe_tensors(
+          self.model_path, model_config, self.mesh
+      )
+
     if enable_lora:
       llama3 = tc.get_lora_model(
           llama3,
@@ -160,7 +172,7 @@ class VllmSamplerTest(absltest.TestCase):
         model_version=self.model_path,
         max_model_len=512,
         mesh=self.mesh,
-        hbm_utilization=0.2,
+        hbm_utilization=0.8,
         init_with_random_weights=True,
         tpu_backend_type="jax",
         mapping_config=mapping_config,
@@ -230,11 +242,12 @@ class VllmSamplerTest(absltest.TestCase):
         model_version=self.model_path,
         max_model_len=512,
         mesh=self.mesh,
-        hbm_utilization=0.2,
+        hbm_utilization=0.8,
         init_with_random_weights=True,
         tpu_backend_type="jax",
         mapping_config=mapping_config,
         server_mode=True,
+        async_scheduling=True,
     )
 
     vl_sampler = vllm_sampler.VllmSampler(
@@ -281,6 +294,7 @@ class VllmSamplerTest(absltest.TestCase):
 
     def _call_sampler(templated_prompt: str, delay: float):
       time.sleep(delay)
+      print(f"YY submitting new prompt")
       return vl_sampler(
           input_strings=[templated_prompt],
           max_generation_steps=128,

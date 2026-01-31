@@ -215,8 +215,10 @@ ROLLOUT_ENGINE = "vllm"
 
 # mesh = jax.make_mesh(*MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0]))
 mesh = None
+rollout_dp = 1
+rollout_tp = 2
 if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
-  rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:4].reshape(1, 4), ('fsdp', 'tp'))
+  rollout_mesh = jax.sharding.Mesh(np.array(jax.devices())[:(rollout_dp*rollout_tp)].reshape(rollout_dp, rollout_tp), ('fsdp', 'tp'))
   trainer_mesh = jax.sharding.Mesh(np.array(jax.devices())[4:8].reshape(2, 2), ('fsdp', 'tp'))
 else:
   rollout_mesh = mesh
@@ -267,10 +269,10 @@ AutoTokenizer = transformers.AutoTokenizer
 
 # %%
 print("start loading model and trainer instances...")
-show_hbm_usage("Before model loading")
+# show_hbm_usage("Before model loading")
 
 # %%
-show_hbm_usage("after model loading with fp32")
+# show_hbm_usage("after model loading with fp32")
 
 DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
 
@@ -339,7 +341,7 @@ print ("Done with loading datasets")
   # break
 
 # %%
-show_hbm_usage("Done with loading datasets")
+# show_hbm_usage("Done with loading datasets")
 
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
@@ -379,7 +381,7 @@ else:
   qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, trainer_mesh, dtype=jnp.float32)
 
 # %%
-show_hbm_usage("after loading qwen2_actor")
+# show_hbm_usage("after loading qwen2_actor")
 
 # %%
 ModelAgent = model_agent.ModelAgent
@@ -475,8 +477,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rollout_vllm_tpu_backend_type="jax",
         rollout_vllm_server_mode=True,
         rollout_vllm_async_scheduling=True,
-        tensor_parallel_size=4,
-        data_parallel_size=1,
+        tensor_parallel_size=rollout_tp,
+        data_parallel_size=rollout_dp,
     ),
 )
 
@@ -499,7 +501,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 
-show_hbm_usage("after RLCluster creation")
+# show_hbm_usage("after RLCluster creation")
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
@@ -510,7 +512,7 @@ grpo_trainer = GRPOLearner(
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
-show_hbm_usage("after GRPOLearner creation")
+# show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
