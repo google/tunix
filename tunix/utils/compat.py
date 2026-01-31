@@ -20,11 +20,15 @@ import jax
 
 # Flax version compatibility.
 ModuleList = list
+ModuleDict = dict
 
 # To accomodate github requirements. nnx.List is available in flax 0.12.0 and
 # later.
 if hasattr(nnx, "List"):
   ModuleList = nnx.List  # noqa: N816 (public alias)
+
+if hasattr(nnx, "Dict"):
+  ModuleDict = nnx.Dict
 
 
 # JAX version compatibility

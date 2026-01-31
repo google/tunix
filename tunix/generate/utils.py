@@ -27,6 +27,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+from tunix.utils import compat
 
 
 def compute_attention_masks(
@@ -783,16 +784,16 @@ def transfer_state_directly(
     return hasattr(obj, key)
 
   # Unwrap Source (Remove 'base' wrapper from MaxText)
-  if isinstance(src_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
-      src_state, 'base'
-  ):
+  if isinstance(
+      src_state, (dict, nnx.State, compat.ModuleDict)
+  ) and safe_has_key(src_state, 'base'):
     logging.info("Unwrapping 'base' key from source state.")
     src_state = src_state['base']
 
   # Unwrap Target (Remove nested 'model' wrappers from vLLM)
-  while isinstance(dst_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
-      dst_state, 'model'
-  ):
+  while isinstance(
+      dst_state, (dict, nnx.State, compat.ModuleDict)
+  ) and safe_has_key(dst_state, 'model'):
     logging.info("Unwrapping nested 'model' key from target state.")
     dst_state = dst_state['model']
 
@@ -802,9 +803,9 @@ def transfer_state_directly(
     # Unwrap NNX containers
     if hasattr(node, 'to_pure_dict'):
       node = node.to_pure_dict()
-    elif isinstance(node, (nnx.Dict, nnx.State)):
-      node = dict(node)
-
+    elif isinstance(node, (compat.ModuleDict, nnx.State)):
+      if not isinstance(node, dict):
+        node = dict(node)
     # Recurse into dicts
     if isinstance(node, dict):
       return {k: to_pure_spec(v) for k, v in node.items()}
