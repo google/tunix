@@ -36,7 +36,7 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
 
   def __init__(
       self,
-      task: Dict[str, Any] | None = None,
+      single_example: Dict[str, Any],
       *,
       reward_fn=None,
       **kwargs,
@@ -44,23 +44,28 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
     """Initialize the task environment.
 
     Args:
-      task (Dict[str, Any] | None): Task specification containing problem
-        description, ground truth, or other parameters.
+      single_example: A single prompt.
       reward_fn: Reward function that takes (task, action) and returns
         RewardOutput with `.reward` and `.metadata` fields. If None, defaults to
         `dummy_reward`.
       **kwargs: Extra arguments ignored by this environment but accepted for
         compatibility with a common environment config interface.
     """
+    # TODO(tsbao): right now we assume it's a math problem. We should either
+    # rename this to be MathEnvironment, or make it more generic.
+    question_text = single_example["question"][0]
+    # Embed original input to avoid materializing the dataset in producer.
+    task = {"question": question_text, "original_input": single_example}
+    # Pass along other metadata from the original example.
+    for key, value in single_example.items():
+      if key not in ["prompts", "original_input"]:
+        task[key] = value[0]
+
     if reward_fn is None:
       logging.warning("No reward_fn provided, defaulting to dummy_reward().")
       reward_fn = reward.dummy_reward
 
-    # Single-turn environment: max_steps is 1 by default.
-    max_steps = kwargs.pop("max_steps", 1)
-    super().__init__(
-        task=task, reward_fn=reward_fn, max_steps=max_steps, **kwargs
-    )
+    super().__init__(task=task, reward_fn=reward_fn, max_steps=1, **kwargs)
 
   def _initial_observation(self) -> Dict[str, Any]:
     """Reset the environment and return the task as the initial observation."""
@@ -112,5 +117,5 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
       env_args: A dictionary containing environment configuration.
     """
     reward_fn = env_args.pop("reward_fn", None)
-    task = env_args
-    return cls(task=task, reward_fn=reward_fn)
+    group_id = env_args.pop("group_id", None)
+    return cls(single_example=env_args, reward_fn=reward_fn, group_id=group_id)

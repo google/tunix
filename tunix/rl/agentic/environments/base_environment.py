@@ -255,7 +255,7 @@ class BaseTaskEnv(BaseEnv):
     self.max_steps = max_steps
     self.step_count = 0
     # Allow subclasses to store any extra initialization arguments if needed.
-    self._extra_kwargs = kwargs
+    self.extra_kwargs = kwargs
 
   # ---------- Template methods to be implemented by subclasses ----------
 

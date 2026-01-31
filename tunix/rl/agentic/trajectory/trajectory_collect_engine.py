@@ -23,13 +23,15 @@ multi-pair trajectory collection.
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
 
 import numpy as np
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
+
+P = ParamSpec("P")
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
@@ -54,7 +56,7 @@ class TrajectoryCollectEngine:
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       *,
-      model_call: Callable[..., str],
+      model_call: Callable[Concatenate[Dict[str, str], P], str],
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
@@ -71,8 +73,9 @@ class TrajectoryCollectEngine:
         agent (ConversationAgentBase): The agent that will interact with the
           environment
         env (BaseTaskEnv): The environment providing tasks and feedback
-        model_call (Callable): Function that takes chat completions and returns
-          model response string. Handles the actual LLM inference.
+        model_call (Callable): Function that takes chat completions as first
+          argument with optional kwargs and returns model response string.
+          Handles the actual LLM inference.
         final_reward_fn (Optional[Callable]): Optional function to compute
           additional reward at episode end. Takes (task, response) and returns
           float. Defaults to zero if not provided.
@@ -279,7 +282,7 @@ class TrajectoryCollectEngine:
     resp = await asyncio.get_event_loop().run_in_executor(
         None,
         self.model_call,
-        [self.agent.chat_completions],
+        self.agent.chat_completions,
         self.env,
         **self.model_call_kwargs,
     )
