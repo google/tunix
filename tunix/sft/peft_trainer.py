@@ -260,6 +260,7 @@ class PeftTrainer:
     self._buffered_eval_metrics: MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
+    self._jit_cache = set()
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -565,13 +566,21 @@ class PeftTrainer:
       cache_nnx_graph: bool = False,
   ) -> None:
     """Training loop."""
+    logging.log_first_n(
+        logging.INFO,
+        f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
+        1,
+    )
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
     if not skip_jit:
-      logging.info(
-          "Training with mesh: %s. Compiled train_step cache size: %s",
-          pxla.thread_resources.env.physical_mesh,
-          train_step.jitted_fn._cache_size(),  # pytype: disable=attribute-error,protected-access
+      cache_size = train_step.jitted_fn._cache_size()  # pytype: disable=attribute-error
+      logging.log_if(
+          logging.INFO,
+          f"Compiled train_step cache size: {cache_size}",
+          lambda: cache_size not in self._jit_cache,
       )
+      self._jit_cache.add(cache_size)
+
     if cache_nnx_graph:
       # For performance, cache the nnx graph traversals. However, the training
       # loop must _not_ modify the model or optimizer graph in this case.  For
