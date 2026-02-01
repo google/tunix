@@ -62,6 +62,7 @@ class VllmConfig:
   # However, frequent swapping can increase latency due to the overhead of
   # transferring data between CPU and TPU/GPU memory.
   swap_space: float = 4.0  # in GiB
+  stop_strings: Optional[List[str]] = None
   lora_config: Optional[Dict[str, Any]] = None
   server_mode: bool = False
   async_scheduling: bool = False
@@ -409,6 +410,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.prompt_logprobs = 1  # b/428730696
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
+      if self.config.stop_strings:
+        sampling_params.stop = self.config.stop_strings
+        sampling_params.detokenize = True
 
       if top_p is not None:
         sampling_params.top_p = top_p

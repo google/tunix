@@ -51,6 +51,7 @@ class VllmRollout(base_rollout.BaseRollout):
             mapping_config=mapping_config,
             lora_config=rollout_config.rollout_vllm_lora_config,
             swap_space=rollout_config.rollout_vllm_swap_space_size_gb,
+            stop_strings=rollout_config.rollout_vllm_stop_strings,
             server_mode=rollout_config.rollout_vllm_server_mode,
             async_scheduling=rollout_config.rollout_vllm_async_scheduling,
             tensor_parallel_size=rollout_config.tensor_parallel_size,

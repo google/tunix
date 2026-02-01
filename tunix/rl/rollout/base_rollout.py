@@ -135,6 +135,10 @@ class RolloutConfig:
   # Swap space size for vLLM rollout engine, in GiB.
   rollout_vllm_swap_space_size_gb: float = 4.0
 
+  # stop strings for vLLM rollout engine.
+  rollout_vllm_stop_strings: list[str] | None = None
+
+
   # Whether to enable asynchronous scheduling for vLLM rollout engine.
   rollout_vllm_async_scheduling: bool = False
 
