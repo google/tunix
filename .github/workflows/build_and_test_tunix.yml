@@ -44,24 +44,12 @@ jobs:
     name: Build tunix package
     uses: ./.github/workflows/build_package.yml
 
-  # copybara:strip_begin
-  # LINT.IfChange()
-  # copybara:strip_end
   tunix_cpu_unit_tests:
-  # copybara:strip_begin
-  # LINT.ThenChange(//depot/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/copy.bara.sky:github_actions)
-  # copybara:strip_end
     needs: build_tunix_package
     uses: ./.github/workflows/cpu-tests.yml
 
 
-  # copybara:strip_begin
-  # LINT.IfChange()
-  # copybara:strip_end
   tunix_tpu_unit_tests:
-  # copybara:strip_begin
-  # LINT.ThenChange(//depot/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/copy.bara.sky:github_actions)
-  # copybara:strip_end
     needs: build_tunix_package
     uses: ./.github/workflows/tpu-tests.yml
     secrets:

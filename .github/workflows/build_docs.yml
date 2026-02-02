@@ -9,13 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  # copybara:strip_begin
-  # LINT.IfChange()
-  # copybara:strip_end
   build-docs:
-  # copybara:strip_begin
-  # LINT.ThenChange(//depot/GOOGLE_INTERNAL_PACKAGE_PATH/third_party/py/tunix/copy.bara.sky:github_actions)
-  # copybara:strip_end
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
