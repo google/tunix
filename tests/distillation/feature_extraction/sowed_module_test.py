@@ -31,7 +31,7 @@ class SimpleLayer(nnx.Module):
 
   def __call__(self, x: jax.Array) -> jax.Array:
     # Simple operation: add param and return
-    return x + self.param.value
+    return x + self.param[...]
 
 
 class Block(nnx.Module, pytree=False):

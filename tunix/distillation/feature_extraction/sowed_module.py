@@ -74,7 +74,7 @@ def wrap_model_with_sowed_modules(
   """
   replacements = []
 
-  for path, module in model.iter_modules():
+  for path, module in nnx.iter_modules(model):
     # Only wrap if it's the target module_to_wrap and not already wrapped
     if isinstance(module, tuple(modules_to_capture)) and not isinstance(
         module, SowedModule
@@ -136,7 +136,7 @@ def unwrap_sowed_modules(model: nnx.Module):
   replacements = []
 
   # Collect all wrapper instances and their original wrapped modules
-  for path, module in model.iter_modules():
+  for path, module in nnx.iter_modules(model):
     if isinstance(module, SowedModule):
       if not hasattr(module, "wrapped_model"):
         raise ValueError(
