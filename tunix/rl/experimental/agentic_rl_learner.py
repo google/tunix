@@ -317,15 +317,25 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     return agent, env
 
-  def _model_call(self, chat_lists, env: Any = None):
+  def _model_call(
+      self, chat_lists: List[Dict[str, str]], env: Any = None
+  ) -> str:
     """Calls model generation."""
     version = self.policy_version
 
     if env:
       env.task["policy_version"] = version
+
+    if self.chat_parser:
+      chat_lists = self.chat_parser.parse(
+          messages=chat_lists,
+          add_generation_prompt=True,
+          is_first_msg=True,  # no op if system msg is populated in reset
+      )
+
     result = self.rl_cluster.generate(
         prompts=chat_lists,
-        apply_chat_template=True,
+        apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
     )
 
@@ -333,7 +343,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
-    engine_defaults = dict(
+    engine_kwargs = dict(
         model_call=self._model_call,
         final_reward_fn=reward.dummy_reward,
         tokenizer=self.tokenizer,
@@ -341,7 +351,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,
-        engine_defaults=engine_defaults,
+        engine_kwargs=engine_kwargs,
         max_concurrency=self.algo_config.max_concurrency,
         rollout_sync_lock=self._rollout_sync_lock,
     )
