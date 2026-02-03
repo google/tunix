@@ -30,7 +30,7 @@ The data flow is designed around an asynchronous producer-consumer pattern:
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, List, Sequence, TypeVar
+from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
 import jax
@@ -41,6 +41,10 @@ from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import base_agent
+from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.environments import base_environment
+from tunix.rl.agentic.environments import task_environment
 from tunix.rl.experimental import agentic_rl_learner
 
 
@@ -66,6 +70,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     off_policy_steps: Number of off-policy steps can be accepted before a
       policy update.
   """
+
   algo_variant: str = "agentic_grpo"
   advantage_estimator: str = "agentic_grpo"
   policy_loss_fn: str = "agentic_grpo"
@@ -126,6 +131,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
+      agent_class: Type[
+          base_agent.ConversationAgentBase
+      ] = model_agent.ModelAgent,
+      agent_kwargs: Dict[str, Any] | None = None,
+      env_class: Type[
+          base_environment.BaseTaskEnv
+      ] = task_environment.TaskEnvironment,
+      env_kwargs: Dict[str, Any] | None = None,
   ):
     """Initializes the `GRPOTrainer`.
 
@@ -160,6 +173,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
         algo_config=algo_config,
         chat_parser=chat_parser,
+        agent_class=agent_class,
+        agent_kwargs=agent_kwargs,
+        env_class=env_class,
+        env_kwargs=env_kwargs,
     )
 
     # Workaround to pass loss fn with algorithm flag
@@ -229,6 +246,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_texts = []
     completion_tokens_list = []
     policy_versions_list = []
+
     for item in results:
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(

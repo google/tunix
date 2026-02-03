@@ -21,7 +21,7 @@ import random
 import shutil
 import tempfile
 import types
-from typing import AsyncIterable, Iterable
+from typing import Any, AsyncIterable, Iterable
 import unittest
 from unittest import mock
 
@@ -46,6 +46,9 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common
 from typing_extensions import override
+from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
+from tunix.rl.agentic.agents.agent_types import Action, Step
+from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
 Mesh = sharding.Mesh
@@ -195,8 +198,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       async def _orchestrator_producer(
           self,
           orchestrator,
-          prompt_iterator: Iterable[TrainingInputT]
-          | AsyncIterable[TrainingInputT],
+          prompt_iterator: (
+              Iterable[TrainingInputT] | AsyncIterable[TrainingInputT]
+          ),
           num_generations: int = 1,
           collect_mode: str = "Token",
       ):
@@ -373,6 +377,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             ),
             None,
         )
+
     algo_config = agentic_grpo_learner.GRPOConfig(
         beta=0.1,
         epsilon=0.2,
@@ -1195,6 +1200,142 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     jax.tree.map_with_path(
         test_common.assert_equal, original_base_params, base_params
     )
+
+  def test_customized_agent_env(self):
+
+    class MockEnv(BaseTaskEnv):
+
+      def __init__(self, entry: dict[str, str], max_steps: int, **kwargs):
+        self.entry = entry
+        super().__init__(max_steps=max_steps, **kwargs)
+
+      def _initial_observation(self) -> Any:
+        return "Initial prompt."
+
+      def _step_impl(self, action: Any) -> EnvStepResult:
+        if self.step_count < self.max_steps - 1:
+          reward = 1.0
+          done = False
+        else:
+          reward = 0.0
+          done = True
+        return EnvStepResult(
+            observation=f"Observation after step {self.step_count}",
+            reward=reward,
+            done=done,
+            info={"max_steps": self.max_steps},
+        )
+
+    class MockAgent(ConversationAgentBase):
+
+      def __init__(self, system_prompt: str):
+        super().__init__(system_prompt=system_prompt)
+        self.step = 0
+
+      def _observation_to_messages(self, observation, reward, done, info):
+        max_steps = info.get("max_steps", None)
+        if max_steps is not None:
+          remaining_steps = max_steps - self.step - 1
+          if remaining_steps > 0:
+            observation += f"\nSteps Remaining: {remaining_steps}"
+          else:
+            observation += "\nYou have reached the maximum number of steps."
+        self._messages.append({"role": "user", "content": observation})
+        self.cur_step = Step(observation=observation)
+
+      def update_from_model(self, response, **kwargs):
+        self._trajectory.steps.append(self.cur_step)
+        cur_step = self._trajectory.steps[-1]
+        cur_step.model_response = response
+        cur_step.action = f"Model action: {response}"
+
+        self._messages.append({"role": "assistant", "content": response})
+        return Action(action=cur_step.action)
+
+    vocab = test_common.MockVocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=2,
+            max_steps=20,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    rl_cluster.with_external_metrics_logger(print)
+
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        loss_algo="grpo",
+    )
+    grpo_learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
+        chat_parser=MockChatParser(),
+        agent_class=MockAgent,
+        agent_kwargs={"system_prompt": "System prompt."},
+        env_class=MockEnv,
+        env_kwargs={"max_steps": 3},
+    )
+
+    agents = []
+    envs = []
+
+    original_fn = grpo_learner._create_agent_env_pair
+
+    def _patch_create_agent_env_pair(single_example, group_id):
+      agent, env = original_fn(single_example, group_id)
+      agents.append(agent)
+      envs.append(env)
+      return agent, env
+
+    grpo_learner._create_agent_env_pair = _patch_create_agent_env_pair
+
+    self.assertFalse(grpo_learner.should_sync_weights)
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
+    eval_ds = _dummy_dataset(batch_size=1)
+
+    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+      grpo_learner.train(train_ds, eval_ds)
+
+    variables = nnx.state(model, nnx.Param)
+    jax.tree.map_with_path(
+        test_common.assert_not_equal, original_variables, variables
+    )
+
+    # TODO(tsbao): check on generated agents and envs once deepcopy is removed.
 
 
 if __name__ == "__main__":

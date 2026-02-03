@@ -149,12 +149,14 @@ class TrajectoryCollectEngine:
               "assistant_masks": getattr(step, "assistant_masks", []),
               "env_tokens": getattr(step, "env_tokens", []),
               "env_masks": getattr(step, "env_masks", []),
-              "conversation_tokens": getattr(
-                  step, "assistant_tokens", []
-              ) + getattr(step, "env_tokens", []),
-              "conversation_masks": getattr(
-                  step, "assistant_masks", []
-              ) + getattr(step, "env_masks", []),
+              "conversation_tokens": (
+                  getattr(step, "assistant_tokens", [])
+                  + getattr(step, "env_tokens", [])
+              ),
+              "conversation_masks": (
+                  getattr(step, "assistant_masks", [])
+                  + getattr(step, "env_masks", [])
+              ),
               "reward": step.reward,
               "mc_return": step.mc_return,
           }
@@ -183,7 +185,7 @@ class TrajectoryCollectEngine:
           "conversation_masks": conversation_masks,
           "trajectory_reward": self.agent.trajectory.reward,
           "policy_version": self.env.task.get("policy_version"),
-          "original_input": self.env.task.get("original_input"),
+          "original_input": self.agent.trajectory.task,
           "group_id": self.env.task.get("group_id"),
       }
     elif mode == "Conversation":
