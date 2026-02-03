@@ -360,6 +360,10 @@ class PerfMetricsExport:
       rollout_span.extend(group.find_all_inner_spans("rollout"))
     for group in refer_groups:
       refer_inference_span.extend(group.find_all_inner_spans("refer_inference"))
+      for group1 in group.find_all_inner_groups("actor_training"):
+        refer_inference_span.extend(
+            group1.find_all_inner_spans("refer_inference")
+        )
     for group in actor_groups:
       actor_train_groups.extend(group.find_all_inner_groups("actor_training"))
     # TODO(yangmu) rewrite this after peft_train_step is attached to device

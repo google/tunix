@@ -60,12 +60,11 @@ class ExportTest(absltest.TestCase):
     tpu0_timeline.span("rollout", 0.3, [])  # end 0.41
     host_timeline.span_end(0.4)
 
+    host_timeline.span_group_begin("actor_training", 0.5)
+    tpu0_timeline.span_group_begin("actor_training", 0.5)
     host_timeline.span_begin("refer_inference", 0.5)
     tpu0_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
-
-    host_timeline.span_group_begin("actor_training", 0.7)
-    tpu0_timeline.span_group_begin("actor_training", 0.7)
     host_timeline.span_begin("peft_train_step", 0.70)
     host_timeline.span_end(0.75)
     host_timeline.span_begin("peft_train_step", 0.76)
@@ -93,11 +92,11 @@ class ExportTest(absltest.TestCase):
         "perf/weight_sync_time": 0.1,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_time": 0.31,
         "perf/sum/actor_train_step_time": 0.1,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_time": 0.31,
         "perf/mean/actor_train_step_time": 0.05,
     }
     actual_metrics = {}
@@ -139,12 +138,11 @@ class ExportTest(absltest.TestCase):
     tpu0_timeline.span("rollout", 0.3, [])  # end 0.41
     host_timeline.span_end(0.4)
 
+    host_timeline.span_group_begin("actor_training", 0.5)
+    tpu1_timeline.span_group_begin("actor_training", 0.5)
     host_timeline.span_begin("refer_inference", 0.5)
     tpu1_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
-
-    host_timeline.span_group_begin("actor_training", 0.7)
-    tpu1_timeline.span_group_begin("actor_training", 0.7)
     host_timeline.span_begin("peft_train_step", 0.70)
     host_timeline.span_end(0.75)
     host_timeline.span_begin("peft_train_step", 0.76)
@@ -176,12 +174,12 @@ class ExportTest(absltest.TestCase):
         "perf/first_micro_batch_rollout_time": 0.41,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_time": 0.31,
         "perf/sum/actor_train_step_time": 0.1,
         "perf/sum/between_micro_batch_gap_time": 0.0,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_time": 0.31,
         "perf/mean/actor_train_step_time": 0.05,
         "perf/mean/between_micro_batch_gap_time": 0.0,
     }
@@ -224,12 +222,11 @@ class ExportTest(absltest.TestCase):
     tpu0_timeline.span("rollout", 0.3, [])  # end 0.41
     host_timeline.span_end(0.4)
 
+    host_timeline.span_group_begin("actor_training", 0.5)
+    tpu2_timeline.span_group_begin("actor_training", 0.5)
     host_timeline.span_begin("refer_inference", 0.5)
     tpu1_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
-
-    host_timeline.span_group_begin("actor_training", 0.7)
-    tpu2_timeline.span_group_begin("actor_training", 0.7)
     host_timeline.span_begin("peft_train_step", 0.70)
     host_timeline.span_end(0.75)
     host_timeline.span_begin("peft_train_step", 0.76)
@@ -263,13 +260,13 @@ class ExportTest(absltest.TestCase):
         "perf/first_micro_batch_rollout_time": 0.41,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_time": 0.31,
         "perf/sum/actor_train_step_time": 0.1,
         "perf/sum/refer_gap_time": 0.0,
         "perf/sum/actor_gap_time": 0.0,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_time": 0.31,
         "perf/mean/actor_train_step_time": 0.05,
         "perf/mean/refer_gap_time": 0.0,
         "perf/mean/actor_gap_time": 0.0,
