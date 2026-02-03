@@ -143,7 +143,7 @@ class RolloutConfig:
   rollout_vllm_additional_config: dict[str, Any] | None = None
 
   # Whether to enable data parallel in attention for vLLM rollout engine.
-  # The "attn_dp" mesh axis is used when the degree of tensor parallelism 
+  # The "attn_dp" mesh axis is used when the degree of tensor parallelism
   # specified is more than the number of KV heads in the model. Enabling this
   # allows for non-attention tensors to be sharded across "attn_dp" and "model"
   # axes, which can help reduce memory usage for large models with few KV heads.
@@ -210,6 +210,9 @@ class RolloutConfig:
   rollout_sglang_jax_load_format: str = "auto"
 
   rollout_sglang_jax_max_running_requests: Optional[int] = None
+
+  # The logging level for the SGLang JAX rollout engine (e.g., "debug", "info").
+  rollout_sglang_jax_log_level: str = "info"
 
 
 class BaseRollout(ABC):
