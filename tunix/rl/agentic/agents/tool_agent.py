@@ -17,7 +17,7 @@
 import copy
 import json
 import logging
-from typing import Any
+from typing import Any, Dict
 import uuid
 
 from tunix.rl.agentic.agents import agent_types
@@ -74,8 +74,15 @@ class ToolAgent(base_agent.ConversationAgentBase):
     content = system_prompt + (self.tools_prompt or "")
     self._messages = [{"role": "system", "content": content}]
 
-  def _observation_to_messages(self, observation: Any) -> None:
+  def _observation_to_messages(
+      self,
+      observation: Any,
+      reward: float,
+      done: bool,
+      info: Dict[str, Any],
+  ) -> None:
     """Convert environment observation into messages, including tool outputs."""
+    del reward, done, info  # Unused in this implementation.
     if isinstance(observation, dict):
       if "tool_outputs" in observation:
         # Handle structured tool execution results.

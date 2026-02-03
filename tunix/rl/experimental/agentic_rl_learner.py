@@ -23,22 +23,24 @@ import contextlib
 import dataclasses
 import itertools
 import queue
-from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
+from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
 
 from absl import logging
 import flax
 import jax
+from tunix.rl import reward_manager  # pylint: disable=unused-import
 from jax import typing
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
-from tunix.rl import reward_manager
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
@@ -111,6 +113,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
+      agent_class: Type[
+          base_agent.ConversationAgentBase
+      ] = model_agent.ModelAgent,
+      agent_kwargs: Dict[str, Any] | None = None,
+      env_class: Type[
+          base_environment.BaseTaskEnv
+      ] = task_environment.TaskEnvironment,
+      env_kwargs: Dict[str, Any] | None = None,
   ):
     """Initializes the `AgenticRLLearner`.
 
@@ -121,6 +131,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       chat_parser: A parser to handle chat message formatting.
       metric_fns: Metric functions.
       data_shuffle_seed: Seed for data shuffling.
+      agent_class: User defined agent class.
+      agent_kwargs: Keyword arguments for the agent class.
+      env_class: User defined environment class.
+      env_kwargs: Keyword arguments for the environment class.
     """
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
@@ -145,6 +159,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if data_shuffle_seed is not None
         else None
     )
+
+    self.agent_class = agent_class
+    self.agent_kwargs = agent_kwargs or {}
+    self.env_class = env_class
+    self.env_kwargs = env_kwargs or {}
 
     self._training_config = self.rl_cluster.cluster_config.training_config
 
@@ -283,9 +302,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
         yield micro_batch
 
-  def _make_agent_env_pair(
-      self, single_example: TrainingInputT, group_id: int | None = None
-  ) -> tuple[model_agent.ModelAgent, task_environment.TaskEnvironment]:
+  def _create_agent_env_pair(
+      self, single_example: TrainingInputT, group_id: int
+  ) -> tuple[base_agent.ConversationAgentBase, base_environment.BaseTaskEnv]:
     """Constructs an (agent, environment) pair for a single input sample.
 
     This is used to set up a rollout for one generation within a group.
@@ -296,24 +315,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         prompt.
 
     Returns:
-      A tuple containing a configured `ModelAgent` and `TaskEnvironment`.
+      A tuple of agent and environment.
     """
-
-    question_text = single_example["question"][0]
-    # Embed original input to avoid materializing the dataset in producer.
-    task = {"question": question_text, "original_input": single_example}
-    if group_id is not None:
-      task["group_id"] = group_id
-    # Pass along other metadata from the original example.
-    for key, value in single_example.items():
-      if key not in ["prompts", "original_input"]:
-        task[key] = value[0]
-    agent = model_agent.ModelAgent(system_prompt=self.algo_config.system_prompt)
-    # TODO: b/456528861 - Support both single-turn and multi-turn from config.
-    env = task_environment.TaskEnvironment(
-        task=task,
-        reward_fn=reward.dummy_reward,
-        max_steps=1,
+    agent = self.agent_class(
+        **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
+    )  # if agent_kwargs contains "system_prompt", it will be honored.
+    env = self.env_class(
+        single_example, **{"group_id": group_id, **self.env_kwargs}
     )
     return agent, env
 
@@ -383,12 +391,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       i = 0
       if is_async_iterator:
         async for single_example in prompt_iterator:
-          agent, env = self._make_agent_env_pair(single_example, group_id=i)
+          agent, env = self._create_agent_env_pair(single_example, group_id=i)
           yield agent, env
           i += 1
       else:
         for single_example in prompt_iterator:
-          agent, env = self._make_agent_env_pair(single_example, group_id=i)
+          agent, env = self._create_agent_env_pair(single_example, group_id=i)
           yield agent, env
           i += 1
 
@@ -397,7 +405,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         orchestrator.run_producers_from_stream(
             pairs_stream=pairs_stream_generator(),
             group_size=self.algo_config.num_generations,
-            group_key=lambda i, env, traj: env.task["group_id"],
+            group_key=lambda i, env, traj: env.extra_kwargs["group_id"],
             num_episodes=num_generations,
             collect_mode=collect_mode,
         )

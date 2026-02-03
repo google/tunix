@@ -21,6 +21,7 @@ groups them into batches for further processing.
 
 from __future__ import annotations
 
+import traceback
 import asyncio
 from collections.abc import Hashable
 import copy
@@ -193,6 +194,7 @@ class RolloutOrchestrator:
     except ExceptionGroup as eg:
       for e in eg.exceptions:
         self._logger.error("Fatal error in runner for pair %d: %s", i, e)
+      traceback.print_exc()
       raise eg.exceptions[0]
     finally:
       self._logger.debug(
