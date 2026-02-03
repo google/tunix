@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
+import os
 from typing import Callable
 
 import numpy as np
@@ -57,20 +59,27 @@ class PerfMetricsExport:
    export_fn = PerfMetricsExport.create_metrics_export_fn(cluster_config)
   """
 
+  _DEFAULT_EXPORT_DIR = "/tmp/perf_traces"
+
   @staticmethod
   def from_role_to_devices(
       role_to_devices: dict[str, list[str]],
+      export_dir: str | None = None,
   ) -> MetricsExportFn:
     """Creates a metrics export function based on the role to devices mapping."""
     r2d = role_to_devices
     if r2d["rollout"] == r2d["actor"] == r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_colocated, r2d)
+      return partial(PerfMetricsExport._grpo_metrics_colocated, r2d, export_dir)
     elif r2d["rollout"] != r2d["actor"] == r2d["refer"]:
       return partial(
-          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2, r2d
+          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2,
+          r2d,
+          export_dir,
       )
     elif r2d["rollout"] != r2d["actor"] != r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d)
+      return partial(
+          PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d, export_dir
+      )
     else:
       raise ValueError("Unsupported mesh configuration.")
 
@@ -97,7 +106,8 @@ class PerfMetricsExport:
             "rollout": list(rollo_devices),
             "actor": list(actor_devices),
             "refer": list(refer_devices),
-        }
+        },
+        export_dir=cluster_config.training_config.perf_metrics_options.log_dir,
     )
 
   # TODO(yangmu): DEPRECATED: remove after all users use the new API.
@@ -109,7 +119,9 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_colocated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      export_dir: str | None,
+      query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are colocated on the same mesh."""
     # Step 1: gather spans and span groups
@@ -151,6 +163,14 @@ class PerfMetricsExport:
         span.duration for span in actor_train_step_spans
     ]
 
+    PerfMetricsExport._log_perfetto_trace(
+        export_dir,
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
@@ -168,7 +188,9 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_rollout_1_actor_2_reference_2(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      export_dir: str | None,
+      query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: actor and reference are on the same mesh,rollout is on a different mesh."""
     # Step 1: gather spans and span groups
@@ -221,6 +243,14 @@ class PerfMetricsExport:
         for a, b in zip(actor_train_groups[:-1], refer_inference_spans[1:])
     ] + [0.0]
 
+    PerfMetricsExport._log_perfetto_trace(
+        export_dir,
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
@@ -242,7 +272,9 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_fully_disaggregated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      export_dir: str | None,
+      query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are all on different meshes."""
     # Step 1: gather spans and span groups
@@ -298,6 +330,14 @@ class PerfMetricsExport:
         for a, b in zip(actor_train_groups[:-1], actor_train_groups[1:])
     ] + [0.0]
 
+    PerfMetricsExport._log_perfetto_trace(
+        export_dir,
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
@@ -318,6 +358,121 @@ class PerfMetricsExport:
         "perf/mean/actor_gap_time": (np.mean(actor_gap_time), None),
     }
     # pyformat: enable
+
+  @staticmethod
+  def _log_perfetto_trace(
+      export_dir: str | None,
+      global_step_group: SpanGroup,
+      rollout_spans: list[Span],
+      refer_inference_spans: list[Span],
+      actor_train_groups: list[SpanGroup],
+  ) -> None:
+    """Generates and writes Perfetto trace events to a file."""
+    trace_events = PerfMetricsExport._generate_perfetto_trace(
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+    PerfMetricsExport._write_perfetto_trace(
+        export_dir, global_step_group, trace_events
+    )
+
+  @staticmethod
+  def _write_perfetto_trace(
+      export_dir: str | None,
+      global_step_group: SpanGroup,
+      trace_events: str,
+  ) -> None:
+    """Writes Perfetto trace events to a file."""
+    export_dir = export_dir or PerfMetricsExport._DEFAULT_EXPORT_DIR
+    try:
+      os.makedirs(export_dir, exist_ok=True)
+      trace_filename = f"perf_trace_{int(global_step_group.begin * 1e6)}.json"
+      with open(os.path.join(export_dir, trace_filename), "w") as f:
+        f.write(trace_events)
+    except Exception as e:  # pylint: disable=broad-except
+      logging.error(
+          "Failed to write perfetto trace. Skipping the trace dump: %s", e
+      )
+
+  @staticmethod
+  def _generate_perfetto_trace(
+      global_step_group: SpanGroup,
+      rollout_spans: list[Span],
+      refer_inference_spans: list[Span],
+      actor_train_groups: list[SpanGroup],
+  ) -> str:
+    events = []
+
+    # Metadata for process names
+    events.extend([
+        {
+            "name": "process_name",
+            "ph": "M",
+            "pid": 0,
+            "tid": 0,
+            "args": {"name": "Main"},
+        },
+        {
+            "name": "process_name",
+            "ph": "M",
+            "pid": 1,
+            "tid": 0,
+            "args": {"name": "Rollout"},
+        },
+        {
+            "name": "process_name",
+            "ph": "M",
+            "pid": 2,
+            "tid": 0,
+            "args": {"name": "Reference"},
+        },
+        {
+            "name": "process_name",
+            "ph": "M",
+            "pid": 3,
+            "tid": 0,
+            "args": {"name": "Actor"},
+        },
+    ])
+
+    def add_span(s: Span | SpanGroup, pid: int, tid: int):
+      events.append({
+          "name": s.name,
+          "cat": "PERF",
+          "ph": "X",
+          "ts": int(s.begin * 1_000_000),
+          "dur": int(s.duration * 1_000_000),
+          "pid": pid,
+          "tid": tid,
+      })
+
+    def add_group(g: SpanGroup, pid: int, tid: int):
+      add_span(g, pid, tid)
+      for inner in g.inner:
+        if isinstance(inner, SpanGroup):
+          add_group(inner, pid, tid)
+        elif isinstance(inner, Span):
+          add_span(inner, pid, tid)
+
+    # Main
+    if global_step_group:
+      add_group(global_step_group, 0, 0)
+
+    # Rollout
+    for s in rollout_spans:
+      add_span(s, 1, 0)
+
+    # Reference
+    for s in refer_inference_spans:
+      add_span(s, 2, 0)
+
+    # Actor
+    for g in actor_train_groups:
+      add_group(g, 3, 0)
+
+    return json.dumps(events)
 
   @staticmethod
   def _grpo_extract_spans_and_groups(
