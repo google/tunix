@@ -3,20 +3,18 @@
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
 
 import contextlib
-import functools
-import json
 import os
 
 from flax import nnx
 import grain
 import jax
 from jax import numpy as jnp
+import numpy as np
 import optax
-import qwix
-from tqdm.auto import tqdm
-
 import optax
 from orbax import checkpoint as ocp
+import qwix
+from tqdm.auto import tqdm
 
 try:
   from etils import ecolab
@@ -33,19 +31,14 @@ except:
 with cm:
   from tunix.models.qwen2 import params as params_lib
   from tunix.models.qwen2 import model as model_lib
-  from tunix.generate import sampler as sampler_lib
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.agents import model_agent
   from tunix.rl.agentic.environments import task_environment
-  from tunix.rl.agentic.rewards import reward
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  import jax
-  import numpy as np
   from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.rollout import base_rollout
-  from tunix.sft import metrics_logger
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
   from tunix.utils import compat
@@ -77,7 +70,7 @@ TOP_K = 50
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
 # paper. The "group" in GRPO comes from here.
-NUM_GENERATIONS = 2
+NUM_GENERATIONS = 8
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -91,17 +84,15 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 32
-MINI_BATCH_SIZE = 32
-# ROLLOUT_MICRO_BATCH_SIZE = 8
-# LOGPS_MICRO_BATCH_SIZE = 8
+BATCH_SIZE = 128
+MINI_BATCH_SIZE = 64
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
 
 EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 100 # can potentially train for more epochs
+NUM_EPOCHS = 100  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
@@ -136,7 +127,21 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang-jax"
+ROLLOUT_ENGINE = "sglang_jax" # one of "vanilla", "vllm" or "sglang_jax"
+
+mesh = jax.make_mesh(
+    *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
+)
+if ROLLOUT_ENGINE == "sglang_jax":
+  rollout_mesh = jax.sharding.Mesh(
+      np.array(jax.devices())[:4].reshape(1, 4), ("fsdp", "tp")
+  )
+  trainer_mesh = jax.sharding.Mesh(
+      np.array(jax.devices())[4:].reshape(2, 2), ("fsdp", "tp")
+  )
+else:
+  rollout_mesh = mesh
+  trainer_mesh = mesh
 
 # %%
 try:
@@ -201,22 +206,23 @@ def create_datasets(
   train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
   test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
 
-
   def process_item(item):
-      question = item["question"]
-      answer = item["answer"]
+    question = item["question"]
+    answer = item["answer"]
 
-      instruction = "Let's think step by step, and put your final answer within \\boxed{}."
-      prompt = f"{question} {instruction}"
-      prompt = tokenizer.apply_chat_template(
-          [{"role": "user", "content": prompt}],
-          tokenize=False, add_generation_prompt=True)
+    instruction = (
+        "Let's think step by step, and put your final answer within \\boxed{}."
+    )
+    prompt = f"{question} {instruction}"
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": prompt}],
+        tokenize=False, add_generation_prompt=True)
 
-      return {
-          "prompts": prompt,
-          "question": question,
-          "answer": answer,
-      }
+    return {
+        "prompts": prompt,
+        "question": question,
+        "answer": answer,
+    }
 
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
   test_ds = grain.MapDataset.source(test_ds).map(process_item)
@@ -225,7 +231,6 @@ def create_datasets(
 # %%
 
 tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
-print(tokenizer_source)
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
@@ -243,26 +248,15 @@ else:
   val_dataset = train_dataset[int(len(train_dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
 test_dataset = test_dataset.batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
-for s in iter(train_dataset):
-  print(s)
-  break
-
-for s in iter(test_dataset):
-  print(s)
-  break
+# %%
+show_hbm_usage("Done with loading datasets")
 
 # %%
-show_hbm_usage()
-
-# %%
-mesh = jax.make_mesh(
-    *MESH,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(("fsdp", "tp")),
-)
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
-# nnx.display(qwen2_ref)
+qwen2_ref = params_lib.create_model_from_safe_tensors(
+    MODEL_PATH, config, trainer_mesh, dtype=jnp.bfloat16
+)
 
 
 # %%
@@ -291,18 +285,19 @@ def get_lora_model(base_model, model_mesh):
 
 # %%
 if TRAIN_WITH_LORA:
-  qwen2_actor = get_lora_model(qwen2_ref, mesh)
+  qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
 else:
-  qwen2_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh, dtype=jnp.float32)
+  qwen2_actor = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, trainer_mesh, dtype=jnp.float32
+  )
 
 # %%
-show_hbm_usage()
+show_hbm_usage("after loading qwen2_actor")
 
 # %%
 ModelAgent = model_agent.ModelAgent
 TaskEnvironment = task_environment.TaskEnvironment
 TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
-is_two_reward = reward.is_two_reward
 
 # %%
 # Ckpt saving
@@ -345,11 +340,13 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
+print("Rollout mesh: ", rollout_mesh)
+print("Trainer mesh: ", trainer_mesh)
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.REFERENCE: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
+        rl_cluster_lib.Role.ACTOR: trainer_mesh,
+        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
@@ -358,7 +355,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
-        train_micro_batch_size = 1,  # larger than 1 will cause OOM on HBM
+        # deepscaler defaults to using dynamic batch size.
+        # with dynamic batch size, the config that matters are: ppo_max_token_len_per_gpu=30000.
+        # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
+        # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
+        # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
+        train_micro_batch_size=2,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -373,6 +375,25 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+        # sglang-jax specific configs
+        rollout_sglang_jax_model_version=(
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+        ),
+        rollout_sglang_jax_mem_fraction_static=0.8,
+        rollout_sglang_jax_init_with_random_weights=True,
+        rollout_sglang_jax_disable_radix_cache=True,
+        rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_chunked_prefill_size=2048,
+        rollout_sglang_jax_max_running_requests=32,
+        rollout_sglang_jax_page_size=128,
+        # vllm-tpu specific configs
+        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_vllm_hbm_utilization=0.2,
+        # rollout_vllm_tpu_backend_type="jax",
+        # rollout_vllm_server_mode=True,
+        # rollout_vllm_async_scheduling=True,
+        # tensor_parallel_size=4,
+        # data_parallel_size=2,
     ),
 )
 
@@ -382,18 +403,38 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=8,
+    max_concurrency=64,
 )
 
 # %%
 # RL cluster
-with compat.set_mesh(mesh):
-  rl_cluster = rl_cluster_lib.RLCluster(
-      actor=qwen2_actor,
-      reference=qwen2_ref,
-      tokenizer=tokenizer,
-      cluster_config=cluster_config,
-  )
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=qwen2_actor,
+    reference=qwen2_ref,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
+
+show_hbm_usage("after RLCluster creation")
+
+# %%
+import logging
+import sys
+# Get the logger for the current module
+logger = logging.getLogger(__name__)
+
+# --- Clear any existing handlers from THIS logger to avoid duplicates ---
+for handler in logger.handlers[:]:
+  logger.removeHandler(handler)
+
+# Configure the root logger
+logging.basicConfig(
+    stream=sys.stdout,  # Direct logs to standard output (notebook cell)
+    level=logging.INFO,  # Set the minimum level to INFO
+    format="%(asctime)s - %(levelname)s - %(message)s",  # Optional: customize the format
+    datefmt="%Y-%m-%d %H:%M:%S",  # Optional: customize the date format
+)
+# %%
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
@@ -404,6 +445,7 @@ grpo_trainer = GRPOLearner(
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
+show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
