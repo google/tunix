@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import itertools
 import queue
+import threading
 from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
 
 from absl import logging
@@ -191,7 +192,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             rl_cluster_lib.Role.ROLLOUT
         ]
     )
-    self.executor = futures.ThreadPoolExecutor(max_workers=3)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
     self._rollout_micro_batch_size = (
@@ -207,6 +207,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.policy_version = 0
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
     self._full_batch_size = 0
+
+    loop_queue = queue.Queue()
+
+    def run_loop_forever():
+      loop = agentic_utils.get_or_create_loop()
+      loop_queue.put(loop)
+      loop.run_forever()
+
+    loop_thread = threading.Thread(target=run_loop_forever, daemon=True)
+    loop_thread.start()
+    self.loop = loop_queue.get()
 
   def _compute_rewards(
       self,
@@ -538,19 +549,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """Returns the number of generations per prompt."""
     return self.algo_config.num_generations
 
-  @staticmethod
-  def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
-    """Runs a coroutine, handling existing event loops correctly."""
-    try:
-      loop = asyncio.get_running_loop()
-    except RuntimeError:
-      # asyncio.get_running_loop() raises RuntimeError if no loop is running.
-      # If no loop is running, start a new one using asyncio.run().
-      return asyncio.run(coro)
-    else:
-      # If a loop is already running, use it to run the coroutine.
-      return loop.run_until_complete(coro)
-
   async def _producer(
       self,
       orchestrator,
@@ -680,9 +678,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         prompt_queue.put(None)
         break
 
-    producer_future = self.executor.submit(
-        self._run_async,
+    producer_future = asyncio.run_coroutine_threadsafe(
         self._producer(orchestrator, prompt_queue, train_data_queue),
+        self.loop,
     )
 
     # 2. Consume training examples and train.
@@ -759,8 +757,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             eval_examples.extend(train_examples)
           return eval_examples
 
-        eval_future = self.executor.submit(
-            self._run_async, _eval_runner_async(eval_orchestrator)
+        eval_future = asyncio.run_coroutine_threadsafe(
+            _eval_runner_async(eval_orchestrator), self.loop
         )
         eval_examples = eval_future.result()
         self._eval_iter_steps += 1
