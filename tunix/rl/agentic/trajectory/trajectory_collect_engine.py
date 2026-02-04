@@ -335,6 +335,7 @@ class TrajectoryCollectEngine:
           cur_step.env_masks = env_masks
 
     if time.time() - self._start_ts > self.timeout:
+      logging.warning("Episode timed out.")
       self.agent.get_current_state().done = True
       return True
     return done
