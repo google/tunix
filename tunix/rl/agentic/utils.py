@@ -14,6 +14,7 @@
 
 """Utility functions for agentic models."""
 
+import asyncio
 import threading
 from typing import Any, Optional
 
@@ -223,3 +224,13 @@ class RolloutSyncLock:
       # Notify waiting sync first, then all rollouts
       self._can_weight_sync.notify()
       self._can_rollout.notify_all()
+
+
+def get_or_create_loop():
+  """Returns the current event loop or creates a new one if needed."""
+  try:
+    loop = asyncio.get_event_loop()
+  except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+  return loop
