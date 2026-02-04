@@ -22,6 +22,7 @@ from typing import Callable
 
 import numpy as np
 from tunix.perf import metrics
+from tunix.perf import perfetto
 from tunix.perf import span
 from tunix.perf import trace
 from tunix.rl import rl_cluster
@@ -35,6 +36,7 @@ Span = span.Span
 SpanGroup = span.SpanGroup
 
 MetricsExportFn = Callable[[PerfSpanQuery], MetricsT]
+PerfettoTraceWriter = perfetto.PerfettoTraceWriter
 
 
 class PerfMetricsExport:
@@ -60,17 +62,23 @@ class PerfMetricsExport:
   @staticmethod
   def from_role_to_devices(
       role_to_devices: dict[str, list[str]],
+      export_dir: str | None = None,
   ) -> MetricsExportFn:
     """Creates a metrics export function based on the role to devices mapping."""
     r2d = role_to_devices
+    writer = PerfettoTraceWriter(export_dir)
     if r2d["rollout"] == r2d["actor"] == r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_colocated, r2d)
+      return partial(PerfMetricsExport._grpo_metrics_colocated, r2d, writer)
     elif r2d["rollout"] != r2d["actor"] == r2d["refer"]:
       return partial(
-          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2, r2d
+          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2,
+          r2d,
+          writer,
       )
     elif r2d["rollout"] != r2d["actor"] != r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d)
+      return partial(
+          PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d, writer
+      )
     else:
       raise ValueError("Unsupported mesh configuration.")
 
@@ -92,12 +100,18 @@ class PerfMetricsExport:
         trace.create_device_timeline_id, refer_mesh.devices.flatten().tolist()
     )
 
+    if cluster_config.training_config.perf_metrics_options:
+      export_dir = cluster_config.training_config.perf_metrics_options.log_dir
+    else:
+      export_dir = None
+
     return PerfMetricsExport.from_role_to_devices(
         role_to_devices={
             "rollout": list(rollo_devices),
             "actor": list(actor_devices),
             "refer": list(refer_devices),
-        }
+        },
+        export_dir=export_dir,
     )
 
   # TODO(yangmu): DEPRECATED: remove after all users use the new API.
@@ -109,7 +123,9 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_colocated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      writer: PerfettoTraceWriter,
+      query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are colocated on the same mesh."""
     # Step 1: gather spans and span groups
@@ -151,6 +167,13 @@ class PerfMetricsExport:
         span.duration for span in actor_train_step_spans
     ]
 
+    writer.log_trace(
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
@@ -168,7 +191,9 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_rollout_1_actor_2_reference_2(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      writer: PerfettoTraceWriter,
+      query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: actor and reference are on the same mesh,rollout is on a different mesh."""
     # Step 1: gather spans and span groups
@@ -221,6 +246,13 @@ class PerfMetricsExport:
         for a, b in zip(actor_train_groups[:-1], refer_inference_spans[1:])
     ] + [0.0]
 
+    writer.log_trace(
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
@@ -242,7 +274,9 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_fully_disaggregated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      writer: PerfettoTraceWriter,
+      query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are all on different meshes."""
     # Step 1: gather spans and span groups
@@ -297,6 +331,13 @@ class PerfMetricsExport:
         b.end - a.begin
         for a, b in zip(actor_train_groups[:-1], actor_train_groups[1:])
     ] + [0.0]
+
+    writer.log_trace(
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
 
     # pyformat: disable
     return {
