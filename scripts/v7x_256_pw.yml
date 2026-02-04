@@ -1,0 +1,70 @@
+    apiVersion: pathways-job.pathways.domain/v1
+    kind: PathwaysJob
+    metadata:
+      name: lancewang-v7x-256-pw-2
+      labels:
+        kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+        xpk.google.com/workload: lancewang-v7x-256-pw-2
+    spec:
+      maxRestarts: 0
+      customComponents:
+
+
+
+
+      workers:
+      - type: tpu7x-standard-4t
+        topology: 4x8x8
+        numSlices: 1
+        maxSliceRestarts: 1
+        terminationGracePeriodSeconds: 30
+        priorityClassName: very-high
+        nodeSelector:
+
+      pathwaysDir: gs://cloud-pathways-staging/tmp #This bucket needs to be created in advance.
+      controller:
+        # #Pod template for training, default mode.
+        deploymentMode: default
+        mainContainerName: jax-tpu
+        elasticSlices: 0
+        template:
+
+          metadata:
+          spec:
+            containers:
+              - name: jax-tpu
+                # image: gcr.io/cloud-tpu-multipod-dev/abhinavsing_vllm_runner:latest
+                image: gcr.io/tpu-prod-env-multipod/maxtext_post_training_nightly@sha256:0001cf806424f5d7a5874d339934bc3cd94d489ec73fa83dbf06cbeabcf0dc10
+                imagePullPolicy: Always
+                env:
+                ports:
+
+
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  (while true; do echo "This loop runs forever"; done)
+
+                resources:
+                  limits:
+                    cpu: "24"
+                    memory: 100G
+
+                volumeMounts:
+                - mountPath: /tmp
+                  name: shared-tmp
+
+
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
