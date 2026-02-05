@@ -87,6 +87,39 @@ def get_recent_assistant_user_messages(
   return assistant_message, env_messages
 
 
+def convert_messages_to_string(
+    message: dict[str, Any],
+) -> dict[str, str]:
+  """Converts non-string message values to strings.
+
+  Specifically, numpy array values are converted to their item representation.
+  Raises an error if, after processing, any value is not a string.
+
+  Args:
+    message: A dictionary representing a message.
+
+  Returns:
+    A new dictionary with all values ensured to be strings.
+
+  Raises:
+    ValueError: If any message field is not a string after preprocessing.
+  """
+  # Parse message to text
+  processed_messages = {}
+  for k, v in message.items():
+    if isinstance(v, np.ndarray):
+      processed_messages[k] = v.item()
+    else:
+      processed_messages[k] = v
+
+    if not isinstance(processed_messages[k], str):
+      raise ValueError(
+          f"Message field {k} must be a string after preprocessing, got"
+          f" {type(processed_messages[k])}."
+      )
+  return processed_messages
+
+
 def convert_single_message(
     msg: dict[str, str],
     tokenizer: Any,
@@ -106,9 +139,9 @@ def convert_single_message(
   Returns:
     A tuple containing (tokens, mask).
   """
-  # Parse message to text
+  processed_messages = convert_messages_to_string(msg)
   msg_text = parser.parse(
-      messages=[msg],
+      messages=[processed_messages],
       add_generation_prompt=is_generation,
       is_first_msg=is_first,
   )
