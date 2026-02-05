@@ -48,7 +48,7 @@ with mesh:
 ```
 
 ## Fully optimized models
-Model optimization is critical for efficient model execution. This includes optimal shardings on TPUs, optimization with Pallal kernels, etc. Tunix provides a lightweight suite of models which is only optimized to some extent. Integration of Tunix and [Maxtext](https://github.com/AI-Hypercomputer/maxtext) enables users to run the RL workloads with fully optimized models. Refer to the [single-host](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/posttraining/rl.md) and [multi-host](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/posttraining/rl_on_multi_host.md) tutorial on how to run an optimized model RL workload with Maxtext and Tunix.
+Model optimization is critical for efficient model execution. This includes optimal shardings on TPUs, optimization with Pallas kernels, etc. Tunix provides a lightweight suite of models which is only optimized to some extent. Integration of Tunix and [Maxtext](https://github.com/AI-Hypercomputer/maxtext) enables users to run the RL workloads with fully optimized models. Refer to the [single-host](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/posttraining/rl.md) and [multi-host](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/posttraining/rl_on_multi_host.md) tutorial on how to run an optimized model RL workload with Maxtext and Tunix.
 
 ## Adding a new model
 You can add new models to Tunix codebase by following the Tunix convention.
