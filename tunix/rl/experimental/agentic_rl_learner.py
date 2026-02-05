@@ -787,6 +787,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 "Weights synced. Policy version incremented to %d.",
                 self.policy_version,
             )
+            self.rl_cluster.global_steps += 1
             try:
               self._put_prompts_to_queue(
                   prompt_queue, next(full_dataset_iterator)
