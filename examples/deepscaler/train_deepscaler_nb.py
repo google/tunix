@@ -15,6 +15,7 @@ import optax
 from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
+import math
 
 try:
   from etils import ecolab
@@ -43,6 +44,14 @@ with cm:
   from tunix.utils import math_rewards
   from tunix.utils import compat
 
+try:
+  import pathwaysutils
+  pathwaysutils.initialize()
+except:
+  pass
+
+print("jax devices: ", jax.devices())
+
 # %%
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -57,6 +66,8 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -84,6 +95,7 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
+ENABLE_REMAT = True
 BATCH_SIZE = 128
 MINI_BATCH_SIZE = 64
 NUM_BATCHES = 100
@@ -127,17 +139,41 @@ GENERATION_CONFIGS = {
     "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
 }
 # ====== Rollout ======
-ROLLOUT_ENGINE = "sglang_jax" # one of "vanilla", "vllm" or "sglang_jax"
+ROLLOUT_ENGINE = os.getenv(
+    "ROLLOUT_ENGINE", "sglang_jax"
+)  # one of "vanilla", "vllm" or "sglang_jax"
 
 mesh = jax.make_mesh(
     *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
 )
-if ROLLOUT_ENGINE == "sglang_jax":
-  rollout_mesh = jax.sharding.Mesh(
-      np.array(jax.devices())[:4].reshape(1, 4), ("fsdp", "tp")
+
+trainer_devices = math.prod(TRAINER_MESH[0])
+rollout_devices = math.prod(ROLLOUT_MESH[0])
+
+if trainer_devices + rollout_devices > jax.device_count():
+  raise ValueError(
+      "Trainer devices must be less than or equal to the number of devices"
+      " available."
   )
-  trainer_mesh = jax.sharding.Mesh(
-      np.array(jax.devices())[4:].reshape(2, 2), ("fsdp", "tp")
+
+
+if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
+  rollout_device_list = jax._src.mesh_utils.create_device_mesh(
+      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+  )
+  print(f"YY {rollout_device_list=}")
+  rollout_mesh = jax.make_mesh(
+      *ROLLOUT_MESH,
+      devices=jax.devices()[:rollout_devices],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+  )
+  trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
+      TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+  )
+  trainer_mesh = jax.make_mesh(
+      *TRAINER_MESH,
+      devices=jax.devices()[-trainer_devices:],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
   )
 else:
   rollout_mesh = mesh
@@ -163,8 +199,8 @@ if NOTEBOOK_ENV == "g3":
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/rl/data"
-  MODEL_PATH_PREFIX = "gs://tunix/rl/models"
+  DATA_PATH_PREFIX = "gs://tunix/data"
+  MODEL_PATH_PREFIX = "gs://tunix/models"
   CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
@@ -253,6 +289,9 @@ show_hbm_usage("Done with loading datasets")
 
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+if ENABLE_REMAT:
+  config.remat_config = model_lib.RematConfig.BLOCK
+
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=jnp.bfloat16
@@ -342,6 +381,55 @@ if MAX_GRAD_NORM is not None:
 # Training config
 print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
+
+base_rollout_dict = {
+    "max_tokens_to_generate": TOTAL_GENERATION_STEPS,
+    "max_prompt_length": MAX_PROMPT_LENGTH,
+    "kv_cache_size": MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+    "temperature": TEMPERATURE,
+    "top_p": TOP_P,
+    "top_k": TOP_K,
+    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
+}
+
+sglang_jax_rollout_dict = {
+    # sglang-jax specific configs
+    "rollout_sglang_jax_model_version": (
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    ),
+    "rollout_sglang_jax_mem_fraction_static": 0.8,
+    "rollout_sglang_jax_init_with_random_weights": True,
+    "rollout_sglang_jax_disable_radix_cache": True,
+    "rollout_sglang_jax_enable_deterministic_sampling": False,
+    "rollout_sglang_jax_chunked_prefill_size": 2048,
+    "rollout_sglang_jax_max_running_requests": 32,
+    "rollout_sglang_jax_page_size": 128,
+}
+
+vllm_rollout_dict = {
+    # vllm-tpu specific configs
+    "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "rollout_vllm_hbm_utilization": 0.85,
+    "rollout_vllm_tpu_backend_type": "jax",
+    "rollout_vllm_server_mode": True,
+    "rollout_vllm_async_scheduling": True,
+    "tensor_parallel_size": ROLLOUT_MESH[0][1],
+    "data_parallel_size": ROLLOUT_MESH[0][0],
+}
+
+if ROLLOUT_ENGINE == "sglang_jax":
+  rollout_engine_config = base_rollout.RolloutConfig(
+      **base_rollout_dict, **sglang_jax_rollout_dict
+  )
+elif ROLLOUT_ENGINE == "vllm":
+  rollout_engine_config = base_rollout.RolloutConfig(
+      **base_rollout_dict, **vllm_rollout_dict
+  )
+elif ROLLOUT_ENGINE == "vanilla":
+  rollout_engine_config = base_rollout.RolloutConfig(**base_rollout_dict)
+else:
+  raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
@@ -367,34 +455,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
     ),
-    rollout_config=base_rollout.RolloutConfig(
-        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-        max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        top_k=TOP_K,
-        eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
-        # sglang-jax specific configs
-        rollout_sglang_jax_model_version=(
-            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-        ),
-        rollout_sglang_jax_mem_fraction_static=0.8,
-        rollout_sglang_jax_init_with_random_weights=True,
-        rollout_sglang_jax_disable_radix_cache=True,
-        rollout_sglang_jax_enable_deterministic_sampling=False,
-        rollout_sglang_jax_chunked_prefill_size=2048,
-        rollout_sglang_jax_max_running_requests=32,
-        rollout_sglang_jax_page_size=128,
-        # vllm-tpu specific configs
-        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        # rollout_vllm_hbm_utilization=0.2,
-        # rollout_vllm_tpu_backend_type="jax",
-        # rollout_vllm_server_mode=True,
-        # rollout_vllm_async_scheduling=True,
-        # tensor_parallel_size=4,
-        # data_parallel_size=2,
-    ),
+    rollout_config=rollout_engine_config,
 )
 
 grpo_config = GRPOConfig(
