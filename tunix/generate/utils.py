@@ -661,6 +661,16 @@ def _apply_dtype_cast(
     return val.astype(tgt_dtype)
   return val
 
+def simple_reshard(values_dict, shardings_dict):
+    """Simple wrapper to force physical data movement using jax.device_put."""
+    result = {}
+    for key, val in values_dict.items():
+        target_sharding = shardings_dict.get(key)
+        if target_sharding is not None:
+            result[key] = jax.device_put(val, target_sharding)
+        else:
+            result[key] = val
+    return result
 
 def transfer_state_with_mappings(
     src_state,
@@ -694,6 +704,7 @@ def transfer_state_with_mappings(
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
+  reshard_fn = simple_reshard
 
   if reshard_fn:
     sharding_dict = {
