@@ -1,5 +1,16 @@
 # Copyright 2025 Google LLC
-# Licensed under the Apache License, Version 2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Loads Gemma3 parameters from safetensors files."""
 
@@ -13,7 +24,7 @@ from tunix.models.gemma3 import model as model_lib
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   """Mapping of torch_keys to (nnx_keys, (permute_rule, reshape_rule))."""
-  return {
+  mapping = {
       r"(?:language_model\.)?model\.embed_tokens\.weight": (
           "embedder.input_embedding", None
       ),
@@ -100,6 +111,105 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
   }
+
+  # Vision Tower (SigLIP).
+  if cfg.siglip_config is not None:
+    mapping.update({
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.weight": (
+            "vision_encoder.siglip_encoder.embedding.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.bias": (
+            "vision_encoder.siglip_encoder.embedding.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.embeddings\.position_embedding\.weight": (
+            "vision_encoder.siglip_encoder.pos_embedding",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.weight": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.bias": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.bias",
+            None,
+        ),
+        # Multi-modal Projector
+        r"multi_modal_projector\.mm_input_projection_weight": (
+            "embedder.mm_input_projection.w",
+            None,
+        ),
+        r"multi_modal_projector\.mm_soft_emb_norm\.weight": (
+            "embedder.mm_soft_embedding_norm.scale",
+            None,
+        ),
+    })
+  return mapping
 
 
 def _make_preprocess_fn(cfg: model_lib.ModelConfig):

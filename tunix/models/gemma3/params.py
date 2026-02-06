@@ -19,7 +19,6 @@ This provides a mapping from the upstream checkpoints[1] to our implementation.
 [1] https://github.com/google-deepmind/gemma
 """
 
-import functools
 from typing import Any
 
 from etils import epath
@@ -28,9 +27,10 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 from orbax import checkpoint as ocp
-import sentencepiece as spm
 from tunix.models import safetensors_saver
 from tunix.models.gemma3 import model as model_lib
+
+import sentencepiece as spm
 
 # Pretrained
 GEMMA3_270M_PT = 'gs://gemma-data/checkpoints/gemma3-270m-pt'
@@ -48,6 +48,37 @@ GEMMA3_27B_IT = 'gs://gemma-data/checkpoints/gemma3-27b-it'
 GEMMA3_TOKENIZER = 'gs://gemma-data/tokenizers/tokenizer_gemma3.model'
 
 
+def _get_param_dtype(
+    path: tuple[Any, ...],
+    default_dtype: jnp.dtype,
+) -> jnp.dtype:
+  """Get dtype for a parameter based on its path.
+
+  All vision components are necessarily kept in fp32.
+
+  Args:
+    path: Weight path.
+    default_dtype: Default dtype. Everything except vision components will be
+      converted to this dtype.
+
+  Returns:
+    Dtype of the parameter.
+  """
+  keys = [k.key for k in path if isinstance(k, jax.tree_util.DictKey)]
+  if not keys:
+    return default_dtype
+
+  if keys[0] == 'vision_encoder':
+    return jnp.float32
+
+  if keys[0] == 'embedder':
+    # mm_input_projection and mm_soft_embedding_norm
+    if len(keys) > 1 and str(keys[1]).startswith('mm_'):
+      return jnp.float32
+
+  return default_dtype
+
+
 def create_model_from_checkpoint(
     checkpoint_path: str,
     model_config: model_lib.ModelConfig,
@@ -59,15 +90,23 @@ def create_model_from_checkpoint(
       lambda: model_lib.Gemma3(model_config, rngs=nnx.Rngs(0))
   )
   params = ocp.StandardCheckpointer().restore(checkpoint_path)
-  params = map_from_upstream_checkpoint(params)
+  params = map_from_upstream_checkpoint(
+      params, text_only=model_config.siglip_config is None
+  )
+
   if mesh is not None:
-    params = jax.tree.map(
-        lambda x, shd: jnp.asarray(x, device=shd, dtype=dtype),
+    params = jax.tree_util.tree_map_with_path(
+        lambda p, x, s: jnp.asarray(
+            x, device=s, dtype=_get_param_dtype(p, dtype)
+        ),
         params,
         nnx.to_pure_dict(nnx.get_named_sharding(nnx.state(abs_model), mesh)),
     )
   else:
-    params = jax.tree.map(functools.partial(jnp.asarray, dtype=dtype), params)
+    params = jax.tree_util.tree_map_with_path(
+        lambda p, x: jnp.asarray(x, dtype=_get_param_dtype(p, dtype)),
+        params,
+    )
   nnx.update(abs_model, params)
   return abs_model
 
@@ -88,7 +127,9 @@ def create_tokenizer(
   return spm_processor
 
 
-def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
+def map_from_upstream_checkpoint(
+    params, model_type: str = 'gemma3', *, text_only: bool = True
+):
   """Map from upstream checkpoint to our implementation."""
   # From:
   #
@@ -105,6 +146,32 @@ def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
   # ('transformer/layer_0/post_ffw_norm', 'scale') (1152,)
   # ('transformer/layer_0/pre_attention_norm', 'scale') (1152,)
   # ('transformer/layer_0/pre_ffw_norm', 'scale') (1152,)
+  # ======== Vision ========
+  # ('transformer/embedder/mm_input_projection', 'w') (1152, 2560)
+  # ('transformer/embedder/mm_soft_embedding_norm', 'scale') (1152,)
+  # === SigLipFromPatches_0/siglip_encoder ===
+  # ('pos_embedding') (1, 4096, 1152)
+  # ('embedding', 'kernel') (14, 14, 3, 1152)
+  # ('embedding', 'bias') (1152,)
+  # ('Transformer/encoder_norm', 'scale') (1152,)
+  # ('Transformer/encoder_norm', 'bias') (1152,)
+  # == Transformer/encoderblock_* ==
+  # ('LayerNorm_0', 'scale') (1152,)
+  # ('LayerNorm_0', 'bias') (1152,)
+  # ('LayerNorm_1', 'scale') (1152,)
+  # ('LayerNorm_1', 'bias') (1152,)
+  # ('MlpBlock_0/Dense_0', 'kernel') (1152, 4304)
+  # ('MlpBlock_0/Dense_0', 'bias') (4304,)
+  # ('MlpBlock_0/Dense_1', 'kernel') (4304, 1152)
+  # ('MlpBlock_0/Dense_1', 'bias') (1152,)
+  # ('MultiHeadDotProductAttention_0/key', 'kernel') (1152, 16, 72)
+  # ('MultiHeadDotProductAttention_0/key', 'bias') (16, 72)
+  # ('MultiHeadDotProductAttention_0/query', 'kernel') (1152, 16, 72)
+  # ('MultiHeadDotProductAttention_0/query', 'bias') (16, 72)
+  # ('MultiHeadDotProductAttention_0/value', 'kernel') (1152, 16, 72)
+  # ('MultiHeadDotProductAttention_0/value', 'bias') (16, 72)
+  # ('MultiHeadDotProductAttention_0/out', 'kernel') (16, 72, 1152)
+  # ('MultiHeadDotProductAttention_0/out', 'bias') (1152,)
   #
   # To:
   #
@@ -122,18 +189,101 @@ def map_from_upstream_checkpoint(params, model_type: str = 'gemma3'):
   # ('layers', 0, 'post_ffw_norm', 'scale') (1152,)
   # ('layers', 0, 'pre_attention_norm', 'scale') (1152,)
   # ('layers', 0, 'pre_ffw_norm', 'scale') (1152,)
+  # ======== Vision ========
+  # ('embedder', 'mm_input_projection', 'w')
+  # ('embedder', 'mm_soft_embedding_norm', 'scale')
+  # === vision_encoder/siglip_encoder ===
+  # ('pos_embedding') (1, 4096, 1152)
+  # ('embedding', 'kernel') (14, 14, 3, 1152)
+  # ('embedding', 'bias') (1152,)
+  # ('transformer', 'encoder_norm', 'scale') (1152,)
+  # ('transformer', 'encoder_norm', 'bias') (1152,)
+  # ('transformer', 'blocks', *, 'ln1', 'scale') (1152,)
+  # ('transformer', 'blocks', *, 'ln1', 'bias') (1152,)
+  # ('transformer', 'blocks', *, 'ln2', 'scale') (1152,)
+  # ('transformer', 'blocks', *, 'ln2', 'bias') (1152,)
+  # ('transformer', 'blocks', *, 'mlp', 'fc1', 'kernel') (1152, 4304)
+  # ('transformer', 'blocks', *, 'mlp', 'fc1', 'bias') (4304,)
+  # ('transformer', 'blocks', *, 'mlp', 'fc2', 'kernel') (4304, 1152)
+  # ('transformer', 'blocks', *, 'mlp', 'fc2', 'bias') (1152,)
+  # ('transformer', 'blocks', *, 'attn', 'key', 'kernel') (1152, 1152)
+  # ('transformer', 'blocks', *, 'attn', 'key', 'bias') (1152,)
+  # ('transformer', 'blocks', *, 'attn', 'query', 'kernel') (1152, 1152)
+  # ('transformer', 'blocks', *, 'attn', 'query', 'bias') (1152,)
+  # ('transformer', 'blocks', *, 'attn', 'value', 'kernel') (1152, 1152)
+  # ('transformer', 'blocks', *, 'attn', 'value', 'bias') (1152,)
+  # ('transformer', 'blocks', *, 'attn', 'out', 'kernel') (1152, 1152)
+  # ('transformer', 'blocks', *, 'attn', 'out', 'bias') (1152,)
+
   new_params = {}
   for key_path, value in flax.traverse_util.flatten_dict(params).items():
     module_path, param_name = key_path
-    module_path = module_path.split('/')[1:]  # Remove the leading 'transformer'
+    # Remove the leading 'transformer'/`SigLIPFromPatches`
+    module_path = module_path.split('/')[1:]
+
+    # SigLIP encoder
     if module_path[0] == 'siglip_encoder':
-      continue  # We don't support MM input yet.
-    if module_path[0] == 'embedder':
-      if len(module_path) > 1 and module_path[1].startswith('mm_'):
-        continue  # We don't support MM input yet.
-    if module_path[0] in ('embedder', 'final_norm'):
-      new_params[(module_path[0], param_name)] = value
+      if text_only:
+        continue
+
+      target_prefix = ('vision_encoder', 'siglip_encoder')
+      # Patch embedding
+      if module_path[-1] == 'embedding':
+        target_prefix += ('embedding',)
+        new_params[(*target_prefix, param_name)] = value
+        continue
+
+      # Positional embedding
+      if param_name == 'pos_embedding':
+        new_params[(*target_prefix, 'pos_embedding')] = value
+        continue
+
+      # Transformer
+      target_prefix += ('transformer',)
+      if module_path[-1] == 'encoder_norm':
+        new_params[(*target_prefix, 'encoder_norm', param_name)] = value
+        continue
+
+      # All remaining paths are of the form
+      # `siglip_encoder/Transformer/encoderblock_{idx}/*`.
+      block_idx = int(module_path[2].split('_')[-1])
+      layer_name = module_path[3:]
+      target_prefix += ('blocks', block_idx)
+
+      if 'LayerNorm' in layer_name[0]:
+        idx = int(layer_name[0].split('_')[-1])
+        new_params[(*target_prefix, f'ln{idx+1}', param_name)] = value
+      elif 'MlpBlock' in layer_name[0]:
+        idx = int(layer_name[-1].split('_')[-1])
+        new_params[(*target_prefix, 'mlp', f'fc{idx+1}', param_name)] = value
+      elif 'MultiHeadDotProductAttention' in layer_name[0]:
+        if param_name == 'kernel':
+          if layer_name[-1] == 'out':
+            value = value.reshape(-1, value.shape[-1])
+          else:
+            value = value.reshape(value.shape[0], -1)
+        elif param_name == 'bias':
+          value = value.reshape(-1)
+        new_params[
+            (*target_prefix, 'attn', f'{layer_name[-1]}_proj', param_name)
+        ] = value
       continue
+
+    if module_path[0] == 'embedder':
+      # `mm_input_projection` and `mm_soft_embedding_norm`.
+      if len(module_path) > 1 and module_path[1].startswith('mm_'):
+        if text_only:
+          continue
+        new_params[tuple(module_path + [param_name])] = value
+      else:
+        new_params[('embedder', param_name)] = value
+      continue
+
+    # Final layer norm
+    if module_path[0] == 'final_norm':
+      new_params[('final_norm', param_name)] = value
+      continue
+
     # module_path should now look like ('layer_0', 'attn', '_key_norm')
     layer_idx = ('layers', int(module_path[0].removeprefix('layer_')))
     if module_path[1:] == ['mlp', 'gating_einsum']:

@@ -611,9 +611,9 @@ class Sampler(base_sampler.BaseSampler):
     transformer = nnx.merge(self._transformer_graphdef, params)
     logits, cache = transformer(
         last_token,
-        step_positions,
-        sampler_state.cache,
-        attention_mask,
+        positions=step_positions,
+        cache=sampler_state.cache,
+        attention_mask=attention_mask,
     )
     updated_sampler_state = self._sample(
         logits=logits,
