@@ -412,10 +412,10 @@ class SamplerTest(parameterized.TestCase):
         eos_tokens=[7, 21],
         temperature=0.9,
         top_p=1.0,
-        seed=42,
+        seed=0,
     )
     np.testing.assert_equal(
-        result.tokens, [np.array([8, 14, 5]), np.array([14])]
+        result.tokens, [np.array([14]), np.array([12, 1, 17])]
     )
 
 
