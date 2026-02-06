@@ -137,16 +137,28 @@ class PerfettoTraceWriterTest(absltest.TestCase):
 
     writer.log_trace(*_create_mock_spans())
 
-    # Metadata (4) + Global (12) + Rollout (2) + Refer (2) + Actor (4) = 24
-    self.assertLen(captured_packets, 24)
+    # Metadata (5) (Global + 4 Tracks) + Main (12) + Rollout (2) + Refer (2) + Actor (4) = 25
+    self.assertLen(captured_packets, 25)
 
     # Helper to simplify assertions
     SliceBegin = perfetto.TrackEvent.Type.TYPE_SLICE_BEGIN
     SliceEnd = perfetto.TrackEvent.Type.TYPE_SLICE_END
+    ChildTracksOrdering = perfetto.TrackDescriptor.ChildTracksOrdering
+
+    def assert_global_track(packet):
+      self.assertEqual(packet.track_descriptor.uuid, perfetto.ROOT_TRACK_UUID)
+      self.assertEqual(
+          packet.track_descriptor.child_ordering,
+          ChildTracksOrdering.EXPLICIT,
+      )
 
     def assert_metadata(packet, name, uuid):
       self.assertEqual(packet.track_descriptor.uuid, uuid)
       self.assertEqual(packet.track_descriptor.name, name)
+      self.assertEqual(
+          packet.track_descriptor.parent_uuid, perfetto.ROOT_TRACK_UUID
+      )
+      self.assertEqual(packet.track_descriptor.sibling_order_rank, uuid)
 
     def assert_slice(packet, type_, uuid, ts, name=None):
       self.assertEqual(packet.track_event.type, type_)
@@ -156,58 +168,59 @@ class PerfettoTraceWriterTest(absltest.TestCase):
         self.assertEqual(packet.track_event.name, name)
 
     with self.subTest("Metadata"):
-      assert_metadata(captured_packets[0], "Main", 1)
-      assert_metadata(captured_packets[1], "Rollout", 2)
-      assert_metadata(captured_packets[2], "Reference", 3)
-      assert_metadata(captured_packets[3], "Actor", 4)
+      assert_global_track(captured_packets[0])
+      assert_metadata(captured_packets[1], "Main", 1)
+      assert_metadata(captured_packets[2], "Rollout", 2)
+      assert_metadata(captured_packets[3], "Reference", 3)
+      assert_metadata(captured_packets[4], "Actor", 4)
 
     with self.subTest("Main Track"):
       # global_step
-      assert_slice(captured_packets[4], SliceBegin, 1, 0, "global_step")
-      assert_slice(captured_packets[5], SliceEnd, 1, 10_000_000_000)
+      assert_slice(captured_packets[5], SliceBegin, 1, 0, "global_step")
+      assert_slice(captured_packets[6], SliceEnd, 1, 10_000_000_000)
       # mini_batch_step
-      assert_slice(captured_packets[6], SliceBegin, 1, 0, "mini_batch_step")
-      assert_slice(captured_packets[7], SliceEnd, 1, 10_000_000_000)
+      assert_slice(captured_packets[7], SliceBegin, 1, 0, "mini_batch_step")
+      assert_slice(captured_packets[8], SliceEnd, 1, 10_000_000_000)
       # rollout
-      assert_slice(captured_packets[8], SliceBegin, 1, 0, "rollout")
-      assert_slice(captured_packets[9], SliceEnd, 1, 4_000_000_000)
+      assert_slice(captured_packets[9], SliceBegin, 1, 0, "rollout")
+      assert_slice(captured_packets[10], SliceEnd, 1, 4_000_000_000)
       # refer_inference
       assert_slice(
-          captured_packets[10], SliceBegin, 1, 4_000_000_000, "refer_inference"
+          captured_packets[11], SliceBegin, 1, 4_000_000_000, "refer_inference"
       )
-      assert_slice(captured_packets[11], SliceEnd, 1, 6_000_000_000)
+      assert_slice(captured_packets[12], SliceEnd, 1, 6_000_000_000)
       # actor_training
       assert_slice(
-          captured_packets[12], SliceBegin, 1, 6_000_000_000, "actor_training"
+          captured_packets[13], SliceBegin, 1, 6_000_000_000, "actor_training"
       )
-      assert_slice(captured_packets[13], SliceEnd, 1, 9_000_000_000)
+      assert_slice(captured_packets[14], SliceEnd, 1, 9_000_000_000)
       # peft_train_step
       assert_slice(
-          captured_packets[14], SliceBegin, 1, 6_000_000_000, "peft_train_step"
+          captured_packets[15], SliceBegin, 1, 6_000_000_000, "peft_train_step"
       )
-      assert_slice(captured_packets[15], SliceEnd, 1, 9_000_000_000)
+      assert_slice(captured_packets[16], SliceEnd, 1, 9_000_000_000)
 
     with self.subTest("Rollout Track"):
-      assert_slice(captured_packets[16], SliceBegin, 2, 0, "rollout")
-      assert_slice(captured_packets[17], SliceEnd, 2, 4_000_000_000)
+      assert_slice(captured_packets[17], SliceBegin, 2, 0, "rollout")
+      assert_slice(captured_packets[18], SliceEnd, 2, 4_000_000_000)
 
     with self.subTest("Reference Track"):
       assert_slice(
-          captured_packets[18], SliceBegin, 3, 4_000_000_000, "refer_inference"
+          captured_packets[19], SliceBegin, 3, 4_000_000_000, "refer_inference"
       )
-      assert_slice(captured_packets[19], SliceEnd, 3, 6_000_000_000)
+      assert_slice(captured_packets[20], SliceEnd, 3, 6_000_000_000)
 
     with self.subTest("Actor Track"):
       # actor_training
       assert_slice(
-          captured_packets[20], SliceBegin, 4, 6_000_000_000, "actor_training"
+          captured_packets[21], SliceBegin, 4, 6_000_000_000, "actor_training"
       )
-      assert_slice(captured_packets[21], SliceEnd, 4, 9_000_000_000)
+      assert_slice(captured_packets[22], SliceEnd, 4, 9_000_000_000)
       # peft_train_step
       assert_slice(
-          captured_packets[22], SliceBegin, 4, 6_000_000_000, "peft_train_step"
+          captured_packets[23], SliceBegin, 4, 6_000_000_000, "peft_train_step"
       )
-      assert_slice(captured_packets[23], SliceEnd, 4, 9_000_000_000)
+      assert_slice(captured_packets[24], SliceEnd, 4, 9_000_000_000)
 
     mock_builder.serialize.assert_called_once()
     mock_open.return_value.write.assert_called_once()

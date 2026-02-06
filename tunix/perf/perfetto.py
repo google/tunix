@@ -23,12 +23,14 @@ from absl import logging
 from perfetto.trace_builder.proto_builder import TraceProtoBuilder
 from tunix.perf import span
 
+from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackDescriptor
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
 
 Span = span.Span
 SpanGroup = span.SpanGroup
 
 DEFAULT_EXPORT_DIR = "/tmp/perf_traces"
+ROOT_TRACK_UUID = 100
 
 
 def _add_trace_events(
@@ -49,6 +51,13 @@ def _add_trace_events(
     actor_train_groups: A list of SpanGroups for actor training operations.
   """
 
+  packet = builder.add_packet()
+  packet.track_descriptor.uuid = ROOT_TRACK_UUID
+  packet.track_descriptor.name = "Post-Training Run"
+  packet.track_descriptor.child_ordering = (
+      TrackDescriptor.ChildTracksOrdering.EXPLICIT
+  )
+
   # Metadata for process names
   # Main: uuid=1, Rollout: uuid=2, Reference: uuid=3, Actor: uuid=4
   for name, uuid in [
@@ -60,6 +69,8 @@ def _add_trace_events(
     packet = builder.add_packet()
     packet.track_descriptor.uuid = uuid
     packet.track_descriptor.name = name
+    packet.track_descriptor.parent_uuid = ROOT_TRACK_UUID
+    packet.track_descriptor.sibling_order_rank = uuid
 
   def add_span(s: Span | SpanGroup, track_uuid: int):
     # Slice Begin
