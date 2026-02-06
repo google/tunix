@@ -12,6 +12,7 @@
 .envrc
 
 # virtualenv/venv directories
+**/.venv/
 /venv/
 /bin/
 /include/
