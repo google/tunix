@@ -245,6 +245,14 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     if self.algorithm == "orpo":
       self._aux_metrics_to_log["odds_ratio"] = np.mean
 
+  
+  
+    _IMAGE_SOFT_TOKEN_ID = 262144
+    _NUM_IMAGE_TOKENS = 256  
+
+
+    
+  
   @override
   def _prepare_inputs(
       self,
@@ -309,6 +317,11 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         pixel_values = jnp.concatenate([pixel_values, pixel_values], axis=0)
 
     attention_mask = common.make_causal_attn_mask(mask)
+    # If we have pixel_values, assume multimodal and enable Gemma3 image-token rules.
+    if pixel_values is not None:
+      attention_mask = self.model.make_mm_attention_mask(input_ids, mask)
+    
+    
     logits_to_keep = completion_ids.shape[1]
     positions = common.build_positions_from_mask(mask)
 
