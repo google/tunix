@@ -604,7 +604,6 @@ def _align_shape(
   # align on each dimension.
   pad_width = []
   repeat_ops = []
-  print(f'Aligning shape for {src_key}: {val.shape} -> {tgt_shape} (intermediate: {new_tgt_shape})')
   for i, (src_dim, tgt_dim) in enumerate(zip(val.shape, new_tgt_shape)):
     if src_dim < tgt_dim:
       # For QKV, H is dim(-1); For O, H is dim(-2), same for Tunix and vLLM
@@ -636,7 +635,6 @@ def _align_shape(
       original_shape,
       tgt_shape,
   )
-  print(f'Applying repeat and pad on {src_key}: repeat_ops={repeat_ops}, pad_width={pad_width}')
 
   for axis, repeat_factor in repeat_ops:
     val = jnp.repeat(val, repeat_factor, axis=axis)

@@ -23,13 +23,8 @@ import contextlib
 import dataclasses
 import itertools
 import queue
-<<<<<<< HEAD
 import threading
 from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
-=======
-import time
-from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
->>>>>>> fc5e31c (hang repro)
 
 from absl import logging
 import flax
@@ -52,6 +47,7 @@ from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
+from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
