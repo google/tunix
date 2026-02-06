@@ -71,6 +71,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
       policy update.
     num_generations: Number of samples per prompt.
     num_iterations: Number of iterations per batch.
+    episode_timeout: Timeout for each episode in seconds.
   """
 
   system_prompt: str = ""
@@ -78,6 +79,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   off_policy_steps: int = 0
   num_generations: int = 1
   num_iterations: int = 1
+  episode_timeout: float = 1800.0
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -367,6 +369,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         final_reward_fn=reward.dummy_reward,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        timeout=self.algo_config.episode_timeout,
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,

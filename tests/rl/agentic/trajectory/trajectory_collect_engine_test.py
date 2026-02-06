@@ -253,11 +253,12 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     mock_tokenize.assert_not_called()
 
   def test_collect_timeout(self):
-    with mock.patch.object(time, 'time') as mock_time:
+    with mock.patch.object(trajectory_collect_engine.time, 'time') as mock_time:
       mock_time.side_effect = [
           100.0,  # start time in _reset
           100.05,  # time check in _one_step (1st call)
           100.11,  # time check in _one_step (2nd call) -> timeout
+          100.12,  # time access in logging.warning
       ]
       engine = trajectory_collect_engine.TrajectoryCollectEngine(
           agent=self.mock_agent,
