@@ -694,7 +694,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
     for train_micro_batch in train_data_gen:
-      sft_utils.show_hbm_usage(title=f"Start each micro train batch, {micro_batches_since_last_sync=}, {self.rl_cluster.global_steps=}")
+      print(f"Start each micro train batch, {micro_batches_since_last_sync=}, {self.rl_cluster.global_steps=}")
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         logging.info(
             "Reached max_steps: %d >= %d",
@@ -774,7 +774,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           [merged_train_micro_batch], current_eval_dataset, skip_jit
       )
       
-      sft_utils.show_hbm_usage(title="After actor update")
+      # sft_utils.show_hbm_usage(title="After actor update")
       if hasattr(self.rl_cluster, "critic_trainer"):
         self.rl_cluster.update_critic(
             train_micro_batch, current_eval_dataset, skip_jit

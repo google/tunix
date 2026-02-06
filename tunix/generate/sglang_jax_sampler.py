@@ -193,7 +193,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["load_format"] = config.load_format
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
-    # args["log_requests_level"] = 3
 
     return args
 
@@ -354,6 +353,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       input_ids: List[List[int]],
       sampling_params: List[dict],
   ):
+    print("Generating with SGLang-Jax sampler...")
     coro = self.engine.async_generate(
         input_ids=input_ids,
         sampling_params=sampling_params,

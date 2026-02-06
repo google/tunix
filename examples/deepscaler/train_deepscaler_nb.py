@@ -34,6 +34,14 @@ print("jax devices: ", jax.devices())
 import logging
 import sys
 
+root = logging.getLogger()
+root.setLevel(logging.INFO)
+
+from absl import logging
+logging.use_absl_handler()
+logging.set_verbosity(logging.INFO)
+logging.set_stderrthreshold('info')
+
 
 try:
   wandb.login()
@@ -138,7 +146,7 @@ EPSILON = 0.2
 
 # ====== Training ======
 BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
+MINI_BATCH_SIZE = 32
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -435,7 +443,7 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=64,
+    max_concurrency=128,
 )
 
 # %%
@@ -447,31 +455,16 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 
-show_hbm_usage("after RLCluster creation")
 
-# from absl import logging
-
-# Redirect absl to print to stdout directly
-# logging.info = lambda msg, *args, **kwargs: print(msg.format(*args) if args else msg)
-
-
-import logging
-# Get the logger for the current module
-logger = logging.getLogger(__name__)
-
-# --- Clear any existing handlers from THIS logger to avoid duplicates ---
-for handler in logger.handlers[:]:
-    logger.removeHandler(handler)
-
-
-
+# import logging
+# logging.basicConfig(
+    # stream=sys.stdout,  # Direct logs to standard output (notebook cell)
+    # level=logging.INFO, # Set the minimum level to INFO
+    # format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
+    # datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
+# )
 # Configure the root logger
-logging.basicConfig(
-    stream=sys.stdout,  # Direct logs to standard output (notebook cell)
-    level=logging.INFO, # Set the minimum level to INFO
-    format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
-    datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
-)
+show_hbm_usage("after RLCluster creation")
 
 
 # GRPO Trainer

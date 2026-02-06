@@ -100,6 +100,7 @@ class RolloutOrchestrator:
     engine_kwargs = self.engine_kwargs.copy()
     if model_call_kwargs:
       engine_kwargs["model_call_kwargs"] = model_call_kwargs
+    print(f"Run engine...")
     engine = self.engine_cls(agent, env, **engine_kwargs)
     if mode:
       return await engine.collect(mode)
@@ -294,7 +295,7 @@ class RolloutOrchestrator:
             and not self._stop.is_set()
         ):
           try:
-            self._logger.debug("Getting one pair: %d", next_pair_index)
+            self._logger.info("Getting one pair: %d, active_tasks len: %d", next_pair_index, len(active_tasks))
             if is_async_stream:
               agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:

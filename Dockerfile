@@ -10,6 +10,9 @@ RUN apt-get update && \
     apt-get install -y git python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
+# Install nano for easier file editing
+RUN apt-get update && apt-get install -y nano
+
 # Upgrade pip
 RUN python3 -m pip install --upgrade pip
 
