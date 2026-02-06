@@ -107,6 +107,10 @@ def _sample_top_p(
     probs: jnp.ndarray, p: float, key: jax.Array, k: Optional[int] = None
 ) -> jnp.ndarray:
   """Sample a token using top-p sampling."""
+  # Optimization: skip sorting if top_p is 1.0 and top_k is full vocab.
+  if p >= 1.0 and k is None:
+    return jax.random.categorical(key, logits=jnp.log(probs))
+
   k = probs.shape[-1] if k is None else k
   probs_sorted, indices = jax.lax.top_k(probs, k=k)
   cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
@@ -124,7 +128,10 @@ def _sample_top_p(
 def sample_top_p(
     logits, key, temperature: float, top_p: float, top_k: Optional[int]
 ):
-  probs = jax.nn.softmax(logits[:, -1] / temperature, axis=-1)
+  """Sample a token using top-p sampling."""
+  # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
+  logits = logits[:, -1].astype(jnp.float32)
+  probs = jax.nn.softmax(logits / temperature, axis=-1)
   next_token = _sample_top_p(probs, top_p, key, top_k)
   return next_token
 
