@@ -73,12 +73,12 @@ logger.propagate = False
 
 
 # Configure the root logger
-# logging.basicConfig(
-    # stream=sys.stdout,  # Direct logs to standard output (notebook cell)
-    # level=logging.INFO, # Set the minimum level to INFO
-    # format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
-    # datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
-# )
+logging.basicConfig(
+    stream=sys.stdout,  # Direct logs to standard output (notebook cell)
+    level=logging.INFO, # Set the minimum level to INFO
+    format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
+    datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
+)
 
 try:
   wandb.login()
@@ -158,13 +158,12 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-# MESH = [(4, 2), ("fsdp", "tp")]
 MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 512 # 2048
-TOTAL_GENERATION_STEPS = 512 # 8192
+MAX_PROMPT_LENGTH = 2048
+TOTAL_GENERATION_STEPS = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -342,8 +341,7 @@ tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
-train_dataset = create_datasets()[:200]
-print("Loaded train  datasets with 200 items for debug.")
+train_dataset = create_datasets()
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:

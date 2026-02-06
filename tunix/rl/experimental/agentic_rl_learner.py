@@ -47,7 +47,6 @@ from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
-from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
@@ -185,7 +184,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.rollout.model(),
         )
     )
-    print(f"AgenticRLLearner initialized. {self.should_sync_weights=}")
 
     # Enable async rollout if trainer and rollout are not on the same mesh.
     # If they do, then doesn't make sense for the interleave because they will
@@ -561,7 +559,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       train_data_queue,
   ):
     """Produces training examples from prompts in the dataset_iterator."""
-    print("Produces training examples from prompts in the dataset_iterator, with prompt_queue size: ", prompt_queue.qsize(), "...")
     loop = asyncio.get_running_loop()
     async_queue_iter = self._AsyncQueueIterator(prompt_queue, loop)
 
@@ -605,9 +602,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self, queue: queue_lib.AbstractDataQueue, batch_size: int
   ):
     """Yields micro-batches from a queue until a None is received."""
-    print("Yields micro-batches from a queue. blocking untill train_data_queue has data micro batch...")
     item_iterator = iter(lambda: queue.get(block=True), None)
-    print("item_iterator created. train_data_queue is now populated and unblocked...")
     while True:
       batch = list(itertools.islice(item_iterator, batch_size))
       if not batch:
@@ -631,7 +626,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       return
 
     full_batch_size = len(first_item["prompts"])
-    print(f"full_batch_size = {full_batch_size}")
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -658,11 +652,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
         f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
     )
-    print(  # pylint: disable=logging-fstring-interpolation
-        f"Training with {full_batch_size=}, {mini_batch_size=},"
-        f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
-    )
 
     logging.info("Starting AgenticRLLearner training loop.")
     full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
@@ -678,7 +667,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
     # 1. Start producer thread to generate rollouts and training examples.
-    print("Building orchestrator...")
     orchestrator = self._build_orchestrator()
 
     prompt_queue = queue.Queue()
@@ -686,7 +674,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     logging.info(
         "Prefilling prompt queue with %d batches.", initial_buffer_size
     )
-    print("Prefilling prompt queue with %d batches.", initial_buffer_size)
     for _ in range(initial_buffer_size):
       try:
         self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
@@ -700,18 +687,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
 
     # 2. Consume training examples and train.
-    print("Starting training loop by consuming data...")
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size * self._num_generations()
     )
+    
+    sft_utils.show_hbm_usage(title="After getting a new batch of train_data")
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
-    print("micro_batches_per_full_batch:", micro_batches_per_full_batch)
     for train_micro_batch in train_data_gen:
-      # print("sleep for 45 seconds to simulate long training step, step: %s", self.rl_cluster.global_steps)
-      # time.sleep(45)
-      # print("wake up from sleep for step: %s", self.rl_cluster.global_steps)
-      print("Training step, global_steps:", self.rl_cluster.global_steps)
+      sft_utils.show_hbm_usage(title=f"Start each micro train batch, {micro_batches_since_last_sync=}")
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         logging.info(
             "Reached max_steps: %d >= %d",
@@ -790,6 +774,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.update_actor(
           [merged_train_micro_batch], current_eval_dataset, skip_jit
       )
+      
+      sft_utils.show_hbm_usage(title="After actor update")
       if hasattr(self.rl_cluster, "critic_trainer"):
         self.rl_cluster.update_critic(
             train_micro_batch, current_eval_dataset, skip_jit
@@ -797,25 +783,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
-      print("micro_batches_since_last_sync:", micro_batches_since_last_sync)
       if micro_batches_since_last_sync == micro_batches_per_full_batch:
-        print("Time to consider weight sync...")
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
-          print("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()
           try:
             logging.info("Sync lock acquired. Syncing weights.")
-            print("Sync lock acquired. Syncing weights.")
+            
+            sft_utils.show_hbm_usage(title="Before weight sync")
             self.rl_cluster.sync_weights()
+            sft_utils.show_hbm_usage(title="After weight sync")
             self.policy_version += 1
             logging.info(
                 "Weights synced. Policy version incremented to %d.",
                 self.policy_version,
-            )
-            print(
-                "Weights synced. Policy version incremented to %d."
-                % self.policy_version
             )
             try:
               self._put_prompts_to_queue(
@@ -826,10 +807,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           finally:
             self._rollout_sync_lock.release_weight_sync()
             logging.info("Sync lock released.")
-            print("Sync lock released.")
         else:
           self.rl_cluster.global_steps += 1
-          print("Global steps incremented to", self.rl_cluster.global_steps)
           try:
             self._put_prompts_to_queue(
                 prompt_queue, next(full_dataset_iterator)

@@ -98,7 +98,7 @@ class ModelConfig:
   norm_eps: float
   use_tied_embedding: bool = False
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
-  remat_config: RematConfig = RematConfig.NONE
+  remat_config: RematConfig = RematConfig.BLOCK
 
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod

@@ -770,7 +770,6 @@ class RLCluster:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
-        print("Actor training scheduled....")
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):

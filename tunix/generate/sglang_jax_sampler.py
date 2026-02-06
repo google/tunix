@@ -184,15 +184,16 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["max_lora_rank"] = config.max_lora_rank
     args["max_loras_per_batch"] = 1
     args["lora_scaling"] = config.lora_scaling
+    args["precompile_token_paddings"] = config.precompile_token_paddings
+    args["precompile_bs_paddings"] = config.precompile_bs_paddings
+    args["chunked_prefill_size"] = config.chunked_prefill_size
+    args["page_size"] = config.page_size
     args["tp_size"] = self._find_tp_size(config.mesh)
     args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
     args["load_format"] = config.load_format
-    args["precompile_bs_paddings"] = [8]
-    args["precompile_token_paddings"] = [512]
-    args["chunked_prefill_size"] = config.chunked_prefill_size
-    args["page_size"] = config.page_size
-    args["max_running_requests"] = 8
+    args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
+    args["log_requests_level"] = 3
 
     return args
 
