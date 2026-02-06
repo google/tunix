@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from absl import logging
+import logging
 import jax
 import jaxtyping
 from flax import nnx
@@ -144,12 +144,10 @@ def _maybe_find_intermediate_sharding(source_sharding, target_sharding):
   )
   # Not able to handle resharding with undividable shardings.
   if src_largest_shards % dst_largest_shards != 0:
-    logging.debug(
-        'Resharding with undividable shardings is not optimized with'
-        ' experimental pre-reshard.'
-        ' source_sharding=%s, target_sharding=%s',
-        source_sharding,
-        target_sharding,
+    print(
+        f'Resharding with undividable shardings is not optimized with'
+        f' experimental pre-reshard.'
+        f' source_sharding={source_sharding=}, target_sharding={target_sharding=}',
     )
     return None
 

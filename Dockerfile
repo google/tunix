@@ -36,13 +36,10 @@ RUN pip install --upgrade wandb
 WORKDIR /usr/src
 # Clone the repository using HTTPS
 RUN rm -rf sglang-jax && git clone https://github.com/sgl-project/sglang-jax.git 
-# RUN rm -rf pathways-utils && git clone https://github.com/AI-Hypercomputer/pathways-utils.git
 WORKDIR /usr/src
 # Install the package in editable mode
 # The -e flag means the installation links to the source code in /usr/src/sglang-jax
 RUN cd sglang-jax/python && pip install --force-reinstall --no-cache-dir  .
-# WORKDIR /usr/src
-# RUN cd pathways-utils && pip install --force-reinstall --no-cache-dir  .
 
 
 # Set the working directory

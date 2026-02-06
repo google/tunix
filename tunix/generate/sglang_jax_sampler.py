@@ -128,9 +128,9 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           config.mapping_config.lora_to_hf_transpose_keys
       )
 
-    self._logger = logging.getLogger(self.__class__.__name__)
+    # self._logger = logging.getLogger(self.__class__.__name__)
 
-    self._logger.debug(f"{self.to_hf_key_mappings=}")
+    logging.debug(f"{self.to_hf_key_mappings=}")
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -193,7 +193,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["load_format"] = config.load_format
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
-    args["log_requests_level"] = 3
+    # args["log_requests_level"] = 3
 
     return args
 

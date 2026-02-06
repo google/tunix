@@ -32,7 +32,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Dict, List, Sequence, Type, TypeVar
 
-from absl import logging
+import logging
 import jax
 import jax.numpy as jnp
 import numpy as np

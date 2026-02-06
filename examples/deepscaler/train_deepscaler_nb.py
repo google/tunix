@@ -4,8 +4,8 @@
 
 import contextlib
 import os
-from pprint import pprint
-import re
+
+import wandb
 
 # from etils import ecolab
 from flax import nnx
@@ -31,60 +31,14 @@ pathwaysutils.initialize()
 
 print("jax devices: ", jax.devices())
 
-# from absl import logging
-
-# Ensure INFO and higher messages are processed
-# logging.set_verbosity(logging.INFO)
-# To ensure it goes to stderr, especially if C++ interop is involved:
-# logging.use_python_logging()
-
 import logging
 import sys
 
-
-# Get the logger for the current module
-logger = logging.getLogger(__name__)
-
-# --- Clear any existing handlers from THIS logger to avoid duplicates ---
-for handler in logger.handlers[:]:
-    logger.removeHandler(handler)
-
-# --- Create and configure a new handler for THIS logger ---
-handler = logging.StreamHandler(sys.stdout)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-handler.setFormatter(formatter)
-handler.setLevel(logging.INFO)  # Ensure the handler processes INFO messages
-
-# --- Add the handler directly to YOUR logger ---
-logger.addHandler(handler)
-
-# --- Set YOUR logger's level ---
-logger.setLevel(logging.INFO)
-
-# --- Prevent messages from propagating to the root logger ---
-# This is important if the root logger's handlers are causing issues
-# or if you want to isolate this logger's output.
-logger.propagate = False
-
-
-
-
-# Configure the root logger
-logging.basicConfig(
-    stream=sys.stdout,  # Direct logs to standard output (notebook cell)
-    level=logging.INFO, # Set the minimum level to INFO
-    format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
-    datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
-)
 
 try:
   wandb.login()
   print("linchai: logged in to W&B")
 except wandb.errors.UsageError as e:
-  print(f"Failed to log in to W&B: {e}")
   # Handle the error, maybe disable W&B logging
   wandb.init(mode="disabled")
 
@@ -98,17 +52,14 @@ try:
     wandb.init(
         project="tunix",
         name=run_name,
-        config=OmegaConf.to_container(cfg, resolve=True),
         reinit=False,
     )
     print("W&B run URL:", wandb.run.url)
     wandb_initialized = True
   else:
     wandb_initialized = True
-    print("W&B already initialized")
 except Exception as e:
-  print(f"Warning: Failed to initialize WandB: {e}")
-  print("Continuing without WandB logging...")
+  print(f"Warning: Failed to initialize WandB: {e}. Continuing without WandB logging.")
   wandb_initialized = False
 
 # If WandB failed to initialize, disable it globally to prevent metrics logger from trying
@@ -291,15 +242,8 @@ AutoTokenizer = transformers.AutoTokenizer
 print("start loading model and trainer instances...")
 show_hbm_usage("Before model loading")
 
-# %%
-show_hbm_usage("after model loading with fp32")
 
-DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
-
-
-def create_datasets(
-    train_ds_path: str = DEEPSCALER_DATA_PATH
-):
+def create_datasets():
   def preprocess_fn(example, index):
     return {
         "question": example["problem"],
@@ -359,6 +303,7 @@ show_hbm_usage("Done with loading datasets")
 
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config.remat_config = model_lib.RematConfig.BLOCK
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=jnp.bfloat16
@@ -448,7 +393,6 @@ if MAX_GRAD_NORM is not None:
 # Training config
 print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
-print("Trainer mesh: ", trainer_mesh)
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
@@ -496,7 +440,6 @@ grpo_config = GRPOConfig(
 
 # %%
 # RL cluster
-# with compat.set_mesh(mesh):
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen2_actor,
     reference=qwen2_ref,
@@ -505,6 +448,31 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 show_hbm_usage("after RLCluster creation")
+
+# from absl import logging
+
+# Redirect absl to print to stdout directly
+# logging.info = lambda msg, *args, **kwargs: print(msg.format(*args) if args else msg)
+
+
+import logging
+# Get the logger for the current module
+logger = logging.getLogger(__name__)
+
+# --- Clear any existing handlers from THIS logger to avoid duplicates ---
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+
+
+# Configure the root logger
+logging.basicConfig(
+    stream=sys.stdout,  # Direct logs to standard output (notebook cell)
+    level=logging.INFO, # Set the minimum level to INFO
+    format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
+    datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
+)
+
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
@@ -523,7 +491,7 @@ grpo_trainer.train(train_dataset)
 # Finish WandB after all cleanup operations are complete
 if wandb_initialized:
   try:
-    wandb.finish()
+    wandb.finish() 
     print("WandB session finished successfully")
   except Exception as e:
     print(f"Warning: Failed to finish WandB session: {e}")

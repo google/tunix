@@ -652,7 +652,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
         f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
     )
-
     logging.info("Starting AgenticRLLearner training loop.")
     full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
 
@@ -695,7 +694,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
     for train_micro_batch in train_data_gen:
-      sft_utils.show_hbm_usage(title=f"Start each micro train batch, {micro_batches_since_last_sync=}")
+      sft_utils.show_hbm_usage(title=f"Start each micro train batch, {micro_batches_since_last_sync=}, {self.rl_cluster.global_steps=}")
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         logging.info(
             "Reached max_steps: %d >= %d",

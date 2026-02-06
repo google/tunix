@@ -200,6 +200,7 @@ class RLCluster:
     self.cluster_config = cluster_config
     self.r2m = cluster_config.role_to_mesh
     self._init_backbone_sharing_map(actor, reference)
+    print("Backbone sharing map:", self._backbone_sharing_map)
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])

@@ -206,6 +206,14 @@ def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   )
 
 
+def print_sharding(sharding):
+  print(f"Inside JIT: Array sharding is: {sharding}")
+  # You can inspect attributes of the sharding object here
+  if isinstance(sharding, shd.NamedSharding):
+    print(f"  Mesh axes: {sharding.mesh.axis_names}")
+    print(f"  PartitionSpec: {sharding.spec}")
+
+
 class Einsum(nnx.Module):
   """Einsum is a convenience module for parameterized tensor multiplication."""
 
@@ -449,7 +457,10 @@ class Attention(nnx.Module):
     # GQA
     query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
     attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
+    
     attn = attn.reshape((b, qh, t, s))
+    # attn = shard(attn, ('fsdp', 'tp', None, None))
+    jax.debug.inspect_array_sharding(attn, callback=print_sharding)
 
     if attn_mask is not None:
       attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
@@ -461,6 +472,8 @@ class Attention(nnx.Module):
     attn = attn.reshape((b, kh, qh // kh, t, s))
     qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
     qkv = qkv.reshape((b, t, qh, d))
+    # qkv = shard(qkv, ('fsdp', None, 'tp', None))
+    jax.debug.inspect_array_sharding(qkv, callback=print_sharding)
 
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)

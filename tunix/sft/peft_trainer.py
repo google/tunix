@@ -771,7 +771,7 @@ class PeftTrainer:
       eval_step_fn: Callable[..., Any],
   ) -> None:
     """Runs evaluation loop."""
-    logging.info("Running evaluation on train step %d.", self._train_steps)
+    print(f"Running evaluation on train step {self._train_steps=}.")
     eval_iterator = iter(eval_ds)
     with self._switch_mode(sft_metrics_logger.Mode.EVAL):
       eval_loss, eval_steps = 0, 0
