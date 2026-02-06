@@ -17,8 +17,9 @@
 from __future__ import annotations
 
 import functools
-import logging
 from typing import Callable
+
+from absl import logging
 
 import numpy as np
 from tunix.perf import metrics
@@ -64,12 +65,23 @@ class PerfMetricsExport:
     """Creates a metrics export function based on the role to devices mapping."""
     r2d = role_to_devices
     if r2d["rollout"] == r2d["actor"] == r2d["refer"]:
+      logging.info(
+          "Collecting perf metrics with rollout, actor and reference colocated."
+      )
       return partial(PerfMetricsExport._grpo_metrics_colocated, r2d)
     elif r2d["rollout"] != r2d["actor"] == r2d["refer"]:
+      logging.info(
+          "Collecting perf metrics with rollout on one mesh, and actor and"
+          " reference on another mesh."
+      )
       return partial(
           PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2, r2d
       )
     elif r2d["rollout"] != r2d["actor"] != r2d["refer"]:
+      logging.info(
+          "Collecting perf metrics fully disaggregated: rollout, actor and"
+          " reference on three different meshes."
+      )
       return partial(PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d)
     else:
       raise ValueError("Unsupported mesh configuration.")
