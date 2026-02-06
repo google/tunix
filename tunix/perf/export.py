@@ -22,6 +22,7 @@ from typing import Callable
 
 import numpy as np
 from tunix.perf import metrics
+from tunix.perf import perfetto
 from tunix.perf import span
 from tunix.perf import trace
 from tunix.rl import rl_cluster
@@ -35,6 +36,7 @@ Span = span.Span
 SpanGroup = span.SpanGroup
 
 MetricsExportFn = Callable[[PerfSpanQuery], MetricsT]
+PerfettoTraceWriter = perfetto.PerfettoTraceWriter
 
 
 class PerfMetricsExport:
@@ -60,17 +62,39 @@ class PerfMetricsExport:
   @staticmethod
   def from_role_to_devices(
       role_to_devices: dict[str, list[str]],
+      trace_writer: PerfettoTraceWriter | None = None,
   ) -> MetricsExportFn:
-    """Creates a metrics export function based on the role to devices mapping."""
+    """Creates a metrics export function based on the role to devices mapping.
+
+    Args:
+      role_to_devices: A dictionary mapping role names to a list of device
+        identifiers.
+      trace_writer: An optional PerfettoTraceWriter to log performance traces.
+        If None, a default writer is created.
+
+    Returns:
+      A callable function that takes a PerfSpanQuery and returns MetricsT.
+    """
+
+    if trace_writer is None:
+      # If no trace writer is provided, create a default one.
+      logging.info("Creating a default trace writer for metrics export.")
+      trace_writer = PerfettoTraceWriter(None)
     r2d = role_to_devices
     if r2d["rollout"] == r2d["actor"] == r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_colocated, r2d)
+      return partial(
+          PerfMetricsExport._grpo_metrics_colocated, r2d, trace_writer
+      )
     elif r2d["rollout"] != r2d["actor"] == r2d["refer"]:
       return partial(
-          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2, r2d
+          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2,
+          r2d,
+          trace_writer,
       )
     elif r2d["rollout"] != r2d["actor"] != r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d)
+      return partial(
+          PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d, trace_writer
+      )
     else:
       raise ValueError("Unsupported mesh configuration.")
 
@@ -92,12 +116,19 @@ class PerfMetricsExport:
         trace.create_device_timeline_id, refer_mesh.devices.flatten().tolist()
     )
 
+    export_dir = (
+        cluster_config.training_config.perf_metrics_options.log_dir
+        if cluster_config.training_config.perf_metrics_options
+        else None  # A default directory will be used in this case.
+    )
+
     return PerfMetricsExport.from_role_to_devices(
         role_to_devices={
             "rollout": list(rollo_devices),
             "actor": list(actor_devices),
             "refer": list(refer_devices),
-        }
+        },
+        trace_writer=PerfettoTraceWriter(export_dir),
     )
 
   # TODO(yangmu): DEPRECATED: remove after all users use the new API.
@@ -109,9 +140,21 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_colocated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      trace_writer: PerfettoTraceWriter,
+      query: PerfSpanQuery,
   ) -> MetricsT:
-    """GRPO workflow: rollout, actor and reference are colocated on the same mesh."""
+    """GRPO workflow: rollout, actor and reference are colocated on the same mesh.
+
+    Args:
+      role_to_devices: A dictionary mapping role names to a list of device
+        identifiers.
+      trace_writer: A PerfettoTraceWriter to log performance traces.
+      query: The PerfSpanQuery object to extract spans from.
+
+    Returns:
+      A dictionary of performance metrics.
+    """
     # Step 1: gather spans and span groups
 
     (
@@ -151,6 +194,13 @@ class PerfMetricsExport:
         span.duration for span in actor_train_step_spans
     ]
 
+    trace_writer.log_trace(
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
@@ -168,9 +218,21 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_rollout_1_actor_2_reference_2(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      trace_writer: PerfettoTraceWriter,
+      query: PerfSpanQuery,
   ) -> MetricsT:
-    """GRPO workflow: actor and reference are on the same mesh,rollout is on a different mesh."""
+    """GRPO workflow: actor and reference are on the same mesh,rollout is on a different mesh.
+
+    Args:
+      role_to_devices: A dictionary mapping role names to a list of device
+        identifiers.
+      trace_writer: A PerfettoTraceWriter to log performance traces.
+      query: The PerfSpanQuery object to extract spans from.
+
+    Returns:
+      A dictionary of performance metrics.
+    """
     # Step 1: gather spans and span groups
 
     (
@@ -221,6 +283,13 @@ class PerfMetricsExport:
         for a, b in zip(actor_train_groups[:-1], refer_inference_spans[1:])
     ] + [0.0]
 
+    trace_writer.log_trace(
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
+
     # pyformat: disable
     return {
         "perf/global_step_time": (global_step_time, None),
@@ -242,9 +311,21 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_fully_disaggregated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      trace_writer: PerfettoTraceWriter,
+      query: PerfSpanQuery,
   ) -> MetricsT:
-    """GRPO workflow: rollout, actor and reference are all on different meshes."""
+    """GRPO workflow: rollout, actor and reference are all on different meshes.
+
+    Args:
+      role_to_devices: A dictionary mapping role names to a list of device
+        identifiers.
+      trace_writer: A PerfettoTraceWriter to log performance traces.
+      query: The PerfSpanQuery object to extract spans from.
+
+    Returns:
+      A dictionary of performance metrics.
+    """
     # Step 1: gather spans and span groups
 
     (
@@ -297,6 +378,13 @@ class PerfMetricsExport:
         b.end - a.begin
         for a, b in zip(actor_train_groups[:-1], actor_train_groups[1:])
     ] + [0.0]
+
+    trace_writer.log_trace(
+        global_step_group,
+        rollout_spans,
+        refer_inference_spans,
+        actor_train_groups,
+    )
 
     # pyformat: disable
     return {
