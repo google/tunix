@@ -91,10 +91,10 @@ See [Models](models.md) for a full list and details on how to add new ones.
 ## Citing Tunix
 
 ```bibtex
-@misc{tunix2026,
+@misc{tunix2025,
   title={Tunix (Tune-in-JAX)},
   author={Bao, Tianshu and Carpenter, Jeff and Chai, Lin and Gao, Haoyu and Jiang, Yangmu and Noghabi, Shadi and Sharma, Abheesht and Tan, Sizhi and Wang, Lance and Yan, Ann and Yu, Weiren and et al},
-  year={2026},
+  year={2025},
   howpublished={\url{https://github.com/google/tunix}},
 }
 ```
