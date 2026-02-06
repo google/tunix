@@ -36,6 +36,11 @@ SpanGroup = span.SpanGroup
 
 MetricsExportFn = Callable[[PerfSpanQuery], MetricsT]
 
+_GrpoExtractSpansFn = Callable[
+    [PerfSpanQuery],
+    tuple[bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]],
+]
+
 
 class PerfMetricsExport:
   """Provides helper functions to create metrics export functions.
@@ -60,22 +65,34 @@ class PerfMetricsExport:
   @staticmethod
   def from_role_to_devices(
       role_to_devices: dict[str, list[str]],
+      log_rollout_time_at_micro_batch_level: bool = False,
+      log_actor_train_time_at_micro_batch_level: bool = False,
   ) -> MetricsExportFn:
     """Creates a metrics export function based on the role to devices mapping."""
     r2d = role_to_devices
     if r2d["rollout"] == r2d["actor"] == r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_colocated, r2d)
+      export_fn = PerfMetricsExport._grpo_metrics_colocated
     elif r2d["rollout"] != r2d["actor"] == r2d["refer"]:
-      return partial(
-          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2, r2d
-      )
+      export_fn = PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2
     elif r2d["rollout"] != r2d["actor"] != r2d["refer"]:
-      return partial(PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d)
+      export_fn = PerfMetricsExport._grpo_metrics_fully_disaggregated
     else:
       raise ValueError("Unsupported mesh configuration.")
 
+    extract_spans_fn = partial(
+        PerfMetricsExport._grpo_extract_spans_and_groups,
+        role_to_devices,
+        log_rollout_time_at_micro_batch_level,
+        log_actor_train_time_at_micro_batch_level,
+    )
+    return partial(export_fn, extract_spans_fn)
+
   @staticmethod
-  def from_cluster_config(cluster_config: ClusterConfig) -> MetricsExportFn:
+  def from_cluster_config(
+      cluster_config: ClusterConfig,
+      log_rollout_time_at_micro_batch_level: bool = False,
+      log_actor_train_time_at_micro_batch_level: bool = False,
+  ) -> MetricsExportFn:
     """Creates a metrics export function based on the mesh topology in cluster config."""
 
     rollo_mesh = cluster_config.role_to_mesh[rl_cluster.Role.ROLLOUT]
@@ -97,7 +114,9 @@ class PerfMetricsExport:
             "rollout": list(rollo_devices),
             "actor": list(actor_devices),
             "refer": list(refer_devices),
-        }
+        },
+        log_rollout_time_at_micro_batch_level=log_rollout_time_at_micro_batch_level,
+        log_actor_train_time_at_micro_batch_level=log_actor_train_time_at_micro_batch_level,
     )
 
   # TODO(yangmu): DEPRECATED: remove after all users use the new API.
@@ -109,7 +128,7 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_colocated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      extract_spans_fn: _GrpoExtractSpansFn, query: PerfSpanQuery
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are colocated on the same mesh."""
     # Step 1: gather spans and span groups
@@ -121,7 +140,7 @@ class PerfMetricsExport:
         refer_inference_spans,
         actor_train_groups,
         actor_train_step_spans,
-    ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
+    ) = extract_spans_fn(query)
     if not ok:
       return {}
 
@@ -168,7 +187,7 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_rollout_1_actor_2_reference_2(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      extract_spans_fn: _GrpoExtractSpansFn, query: PerfSpanQuery
   ) -> MetricsT:
     """GRPO workflow: actor and reference are on the same mesh,rollout is on a different mesh."""
     # Step 1: gather spans and span groups
@@ -180,7 +199,7 @@ class PerfMetricsExport:
         refer_inference_spans,
         actor_train_groups,
         actor_train_step_spans,
-    ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
+    ) = extract_spans_fn(query)
     if not ok:
       return {}
 
@@ -242,7 +261,7 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_fully_disaggregated(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      extract_spans_fn: _GrpoExtractSpansFn, query: PerfSpanQuery
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are all on different meshes."""
     # Step 1: gather spans and span groups
@@ -254,7 +273,7 @@ class PerfMetricsExport:
         refer_inference_spans,
         actor_train_groups,
         actor_train_step_spans,
-    ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
+    ) = extract_spans_fn(query)
     if not ok:
       return {}
 
@@ -321,7 +340,10 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_extract_spans_and_groups(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      log_rollout_time_at_micro_batch_level: bool,
+      log_actor_train_time_at_micro_batch_level: bool,
+      query: PerfSpanQuery,
   ) -> tuple[
       bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
   ]:
@@ -373,6 +395,23 @@ class PerfMetricsExport:
         actor_train_step_span.extend(
             actor_train_group.find_all_inner_spans("peft_train_step")
         )
+
+    if (
+        log_actor_train_time_at_micro_batch_level
+        or log_rollout_time_at_micro_batch_level
+    ):
+      global_step_index: int = len(
+          query().main().all_groups("global_step").get()
+      )
+      logging.info("global step [%s]", global_step_index)
+    if log_actor_train_time_at_micro_batch_level:
+      for i, time in enumerate(
+          [group.duration for group in actor_train_groups]
+      ):
+        logging.info("actor train time [%s] = %s sec", i, time)
+    if log_rollout_time_at_micro_batch_level:
+      for i, time in enumerate([span.duration for span in rollout_span]):
+        logging.info("rollout time [%s] = %s sec", i, time)
 
     return (
         True,
