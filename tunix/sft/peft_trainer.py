@@ -704,7 +704,7 @@ class PeftTrainer:
           ):
             self._train_steps += 1
             self._write_train_metrics()
-
+            print(f"Completed train step {self._train_steps}.")
             # Checkpoint frequency is configured by checkpointing_options.
             self.checkpoint_manager.save(
                 self._train_steps,

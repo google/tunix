@@ -36,8 +36,6 @@ WORKDIR /usr/src
 RUN git clone https://github.com/sgl-project/sglang-jax.git
 # Install the package in editable mode
 # The -e flag means the installation links to the source code in /usr/src/sglang-jax
-RUN cd sglang-jax && git checkout e1cd7316e7e855bd0dc937835bdc14434cfab9d8
-WORKDIR /usr/src
 RUN cd sglang-jax/python && pip install --no-cache-dir -e .
 
 # Reset the working directory to /app
