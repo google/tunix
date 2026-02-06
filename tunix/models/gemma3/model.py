@@ -881,6 +881,8 @@ class RMSNorm(nnx.Module):
 class MultimodalProjector(nnx.Module):
   """Image soft token pooling + projection."""
 
+  IMAGE_SOFT_TOKEN_ID: int = 262144
+  
   def __init__(
       self,
       vision_embed_dim: int,
@@ -1092,7 +1094,36 @@ class Gemma3(nnx.Module):
             (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
         ),
     }
+    
+  @staticmethod
+  def make_mm_attention_mask(
+      input_ids: jaxtyping.Array,   # [B, L]
+      input_mask: jaxtyping.Array,  # [B, L] (1 for valid tokens, 0 for pad)
+  ) -> jaxtyping.Array:
+    """Builds Gemma3 multimodal attention mask.
 
+    - Base causal attention
+    - Text can attend to image tokens
+    - Image tokens attend bidirectionally to other image tokens
+    - Padding respected
+    """
+
+    # Base causal mask (already handles pad keys)
+    from tunix.rl import common  # local import avoids circular deps
+
+    attn = common.make_causal_attn_mask(input_mask)  # [B, L, L]
+
+    image_mask = (input_ids == Gemma3.IMAGE_SOFT_TOKEN_ID)  # [B, L]
+
+    # Allow any query to attend to image keys
+    attn = attn | image_mask[:, None, :]
+
+    # Fully open image <-> image attention
+    attn = attn | (image_mask[:, :, None] & image_mask[:, None, :])
+
+  
+
+    return attn
   @property
   def embed_dim(self) -> int:
     return self.embedder.embed_dim
