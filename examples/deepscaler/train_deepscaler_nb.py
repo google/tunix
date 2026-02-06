@@ -24,7 +24,6 @@ from tqdm.auto import tqdm
 import optax
 from orbax import checkpoint as ocp
 
-
 import wandb
 
 import pathwaysutils
@@ -257,12 +256,11 @@ print("Model loaded.")
 # %%
 show_hbm_usage("after model loading with fp32")
 
-# DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
-DEEPSCALER_DATA_PATH = os.path.join("gs://linchai-bucket-dev/rl/data/", "DeepScaleR-Preview-Dataset/deepscaler.json")
-# AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
 
+os.environ["HF_TOKEN"] = "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"
 
-
+print("hf token: ", os.environ["HF_TOKEN"])
 def create_datasets(
     train_ds_path: str = DEEPSCALER_DATA_PATH
 ):
@@ -308,7 +306,7 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
 train_dataset = create_datasets()[:200]
-print("Loaded train  datasets with 100 items for debug.")
+print("Loaded train  datasets with 200 items for debug.")
 
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
@@ -437,7 +435,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
+        checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
@@ -448,25 +446,6 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
-        # sglang-jax specific configs
-        rollout_sglang_jax_model_version=(
-            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-        ),
-        rollout_sglang_jax_mem_fraction_static=0.8,
-        rollout_sglang_jax_init_with_random_weights=True,
-        rollout_sglang_jax_disable_radix_cache=True,
-        rollout_sglang_jax_enable_deterministic_sampling=False,
-        rollout_sglang_jax_chunked_prefill_size=2048,
-        rollout_sglang_jax_max_running_requests=32,
-        rollout_sglang_jax_page_size=128,
-        # vllm-tpu specific configs
-        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-        # rollout_vllm_hbm_utilization=0.2,
-        # rollout_vllm_tpu_backend_type="jax",
-        # rollout_vllm_server_mode=True,
-        # rollout_vllm_async_scheduling=True,
-        # tensor_parallel_size=4,
-        # data_parallel_size=2,
     ),
 )
 
@@ -476,8 +455,7 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=64,
-)
+    max_concurrency=64,)
 
 # %%
 # RL cluster
