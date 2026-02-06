@@ -21,10 +21,10 @@ multi-pair trajectory collection.
 """
 
 import asyncio
-import logging
 import time
 from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
 
+from absl import logging
 import numpy as np
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import base_agent
@@ -35,7 +35,6 @@ P = ParamSpec("P")
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
-logger = logging.getLogger(__name__)
 
 
 class TrajectoryCollectEngine:
@@ -62,7 +61,7 @@ class TrajectoryCollectEngine:
       ] = None,
       max_steps: int = 10,
       gamma: float = 1.0,
-      timeout: float = 30.0,
+      timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
       model_call_kwargs: Optional[Dict[str, Any]] = None,
@@ -291,7 +290,7 @@ class TrajectoryCollectEngine:
     action = self.agent.update_from_model(resp).action
 
     if action is None:
-      logger.warning(
+      logging.warning(
           "Agent returned None action, using empty action list as fallback"
       )
       action = []
@@ -335,6 +334,7 @@ class TrajectoryCollectEngine:
           cur_step.env_masks = env_masks
 
     if time.time() - self._start_ts > self.timeout:
+      logging.warning("Episode timed out after %d seconds.", self.timeout)
       self.agent.get_current_state().done = True
       return True
     return done
