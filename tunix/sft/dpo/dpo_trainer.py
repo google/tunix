@@ -25,11 +25,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from PIL import Image
 # TODO(abheesht): We should move TokenizerAdapter outside `generate`.
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common
 from tunix.sft import peft_trainer
 from typing_extensions import override
+
+ImageType = np.ndarray | jax.Array | Image.Image
 
 
 @flax.struct.dataclass(frozen=True)
@@ -40,12 +43,12 @@ class DataInput:
   preprocessing is taken care of by `DPOTrainer`.
 
   Attributes:
-    prompts: A list of prompts.
+    prompts: A list of either strings, or dicts with "text" and "image" keys.
     chosen_responses: A list of chosen responses.
     rejected_responses: A list of rejected responses.
   """
 
-  prompts: list[str]
+  prompts: list[str | dict[str, str | ImageType]]
   chosen_responses: list[str]
   rejected_responses: list[str]
 
@@ -59,6 +62,8 @@ class TrainingInput:
   Attributes:
     prompt_ids: Prompt IDs. Should be left-padded.
     prompt_mask: Prompt mask. Should be left-padded.
+    pixel_values: Optional pixels for multimodal inputs. Assumed same size
+      across batch if provided.
     chosen_ids: Chosen response IDs. Should be right-padded.
     chosen_mask: Chosen response mask. Should be right-padded.
     rejected_ids: Rejected response IDs. Should be right-padded.
@@ -75,6 +80,8 @@ class TrainingInput:
   rejected_ids: jax.Array | np.ndarray
   rejected_mask: jax.Array | np.ndarray
 
+  pixel_values: jax.Array | np.ndarray | None = None
+
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample:
@@ -85,6 +92,7 @@ class TrainExample:
   ref_rejected_logps: jax.Array | None
   completion_mask: jax.Array
   logits_to_keep: int = flax.struct.field(pytree_node=False)
+  pixel_values: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -111,6 +119,7 @@ def compute_logps(
     attention_mask,
     logits_to_keep,
     completion_mask,
+    pixel_values=None,
 ):
   """Computes the log probabilities for chosen and rejected tokens."""
   token_logps = common.get_per_token_logps(
@@ -119,6 +128,7 @@ def compute_logps(
       positions=positions,
       attn_mask=attention_mask,
       logits_to_keep=logits_to_keep,
+      pixel_values=pixel_values,
   )
   token_logps = (token_logps * completion_mask).sum(axis=-1)
 
@@ -235,6 +245,14 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     if self.algorithm == "orpo":
       self._aux_metrics_to_log["odds_ratio"] = np.mean
 
+  
+  
+    _IMAGE_SOFT_TOKEN_ID = 262144
+    _NUM_IMAGE_TOKENS = 256  
+
+
+    
+  
   @override
   def _prepare_inputs(
       self,
@@ -291,7 +309,19 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
     # Compute positions, attention mask, etc., to be fed to the model.
     mask = jnp.concat([prompt_mask, completion_mask], axis=1)
+    
+    
+    # Pixel values (for multimodal): duplicate for chosen+rejected forward.
+    pixel_values = training_input.pixel_values
+    if pixel_values is not None:
+        pixel_values = jnp.concatenate([pixel_values, pixel_values], axis=0)
+
     attention_mask = common.make_causal_attn_mask(mask)
+    # If we have pixel_values, assume multimodal and enable Gemma3 image-token rules.
+    if pixel_values is not None:
+      attention_mask = self.model.make_mm_attention_mask(input_ids, mask)
+    
+    
     logits_to_keep = completion_ids.shape[1]
     positions = common.build_positions_from_mask(mask)
 
@@ -306,6 +336,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
           attention_mask,
           logits_to_keep,
           completion_mask,
+          pixel_values=pixel_values,
       )
     return TrainExample(
         input_ids=input_ids,
@@ -315,6 +346,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         ref_rejected_logps=ref_rejected_logps,
         completion_mask=completion_mask,
         logits_to_keep=logits_to_keep,
+        pixel_values=pixel_values,
     )
 
   @override
@@ -374,6 +406,7 @@ def dpo_loss_fn(
       train_example.attention_mask,
       train_example.logits_to_keep,
       train_example.completion_mask,
+      pixel_values=train_example.pixel_values,
   )
 
   if algorithm == "orpo":
@@ -459,36 +492,51 @@ def dpo_loss_fn(
 
 
 def _generate_ids_and_masks(
-    input_strings: list[str],
+    inputs: list[str | dict[str, str | ImageType]],
     tokenizer: Any,
     max_length: int,
     left_pad: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
   """Generates ids and masks for a list of strings."""
-  tokens = [_tokenize(x, tokenizer) for x in input_strings]
+  tokens, pixel_values = zip(*[_tokenize(x, tokenizer) for x in inputs])
   all_input_ids = jnp.array([
       common.pad_to_length(
-          x[:max_length],
+          input_ids[:max_length],
           target_length=max_length,
           pad_value=tokenizer.pad_id(),
           left=left_pad,
           axis=-1,
       )
-      for x in tokens
+      for input_ids in tokens
   ])
+  if pixel_values[0] is not None:
+    assert all(pv.shape == pixel_values[0].shape for pv in pixel_values)
+    all_pixel_values = jnp.concat(pixel_values)
+  else:
+    all_pixel_values = None
   # generate masks
   all_input_mask = (all_input_ids != tokenizer.pad_id()).astype("int32")
-  return all_input_ids, all_input_mask
+  return all_input_ids, all_input_mask, all_pixel_values
 
 
-def _tokenize(input_string: str, tokenizer: Any) -> jax.Array:
+def _tokenize(
+    inp: str | dict[str, str | ImageType], tokenizer: Any
+) -> tuple[jax.Array, jax.Array | None]:
   """Tokenizes the input string."""
-  input_ids = tokenizer.encode(input_string)
+  if isinstance(inp, str):
+    input_ids = tokenizer.encode(inp)
+    pixel_values = None
+  elif "text" in inp.keys() and "image" in inp.keys():
+    input_ids, pixel_values = tokenizer.encode(inp["text"], images=inp["image"])
+  else:
+    raise ValueError(
+        "expected either str input or dict with 'text' and 'image' keys."
+    )
   bos_tok = [tokenizer.bos_id()] if tokenizer.bos_id() else []
   input_ids = jnp.array(
     tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=jnp.int32
   )
-  return input_ids
+  return input_ids, pixel_values
 
 
 def _preprocess_dict(
@@ -496,33 +544,42 @@ def _preprocess_dict(
 ) -> DataInput | TrainingInput:
   """Wraps input dict with either DataInput or TrainingInput."""
 
-  training_input_fields = [
-      field.name for field in dataclasses.fields(DataInput)
-  ]
+  data_input_fields = [field.name for field in dataclasses.fields(DataInput)]
   tokenized_input_fields = [
       field.name for field in dataclasses.fields(TrainingInput)
   ]
 
   # If the dict contains tokenized fields, we should wrap it with
   # TrainingInput.
-  if all(field in training_input for field in tokenized_input_fields):
-    return TrainingInput(
-        **{field: training_input[field] for field in tokenized_input_fields}
-    )
-  elif all(field in training_input for field in training_input_fields):
+  if all(
+      field in training_input
+      for field in tokenized_input_fields
+      if field != "pixel_values"
+  ):
+    return TrainingInput(**{
+        field: training_input.get(field, None)
+        for field in tokenized_input_fields
+    })
+  elif all(field in training_input for field in data_input_fields):
     return DataInput(
-        **{field: training_input[field] for field in training_input_fields}
+        **{field: training_input[field] for field in data_input_fields}
     )
   else:
     raise ValueError(
         "Training input must contain either tokenized fields "
-        f"({training_input_fields}) or raw string fields "
-        f"({training_input_fields}). Received: {training_input.keys()}."
+        f"({tokenized_input_fields}) or raw string fields "
+        f"({data_input_fields}). Received: {training_input.keys()}."
     )
 
 
 def process_dpo_record(
-    record: dict[str, str | list[str]],
+    record: dict[
+        str,
+        str
+        | list[str]
+        | dict[str, str | ImageType]
+        | list[dict[str, str | ImageType]],
+    ],
     tokenizer: Any,
     max_prompt_length: int,
     max_response_length: int,
@@ -538,9 +595,11 @@ def process_dpo_record(
 
   Args:
       record: A dictionary, containing "prompts", "chosen_responses", and
-        "rejected_responses" as keys. The values can be a single string or a
-        list of strings.
-      tokenizer: The tokenizer to use for converting text into token IDs.
+        "rejected_responses". Each field can be a single string or a list of
+        strings, and prompts can additionally be a single dict or list of dicts
+        with "text" and "image" keys for multimodal inputs.
+      tokenizer: The tokenizer or processor to use for converting text into
+        token IDs.
       max_prompt_length: The maximum length for the tokenized prompts. Any
         sequence longer than this will be truncated.
       max_response_length: The maximum length for the tokenized responses. Any
@@ -554,7 +613,7 @@ def process_dpo_record(
   chosen_responses = record["chosen_responses"]
   rejected_responses = record["rejected_responses"]
 
-  unbatched = isinstance(prompts, str)
+  unbatched = isinstance(prompts, (str, dict))
 
   if unbatched:
     prompts = [prompts]
@@ -564,16 +623,16 @@ def process_dpo_record(
     rejected_responses = [rejected_responses]
 
   # Only prompt is left padded, others are right padded.
-  prompt_ids, prompt_mask = _generate_ids_and_masks(
+  prompt_ids, prompt_mask, pixel_values = _generate_ids_and_masks(
       prompts,
       tokenizer,
       max_prompt_length,
       left_pad=True,
   )
-  chosen_ids, chosen_mask = _generate_ids_and_masks(
+  chosen_ids, chosen_mask, _ = _generate_ids_and_masks(
       chosen_responses, tokenizer, max_response_length, left_pad=False
   )
-  rejected_ids, rejected_mask = _generate_ids_and_masks(
+  rejected_ids, rejected_mask, _ = _generate_ids_and_masks(
       rejected_responses, tokenizer, max_response_length, left_pad=False
   )
 
@@ -584,6 +643,8 @@ def process_dpo_record(
     prompt_mask = jnp.squeeze(prompt_mask, axis=0)
     chosen_mask = jnp.squeeze(chosen_mask, axis=0)
     rejected_mask = jnp.squeeze(rejected_mask, axis=0)
+    if pixel_values is not None:
+      pixel_values = jnp.squeeze(pixel_values, axis=0)
 
   return TrainingInput(
       prompt_ids=prompt_ids,
@@ -592,6 +653,7 @@ def process_dpo_record(
       chosen_mask=chosen_mask,
       rejected_ids=rejected_ids,
       rejected_mask=rejected_mask,
+      pixel_values=pixel_values,
   )
 
 

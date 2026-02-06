@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 from flax import nnx
 import jax
 from jax import lax
+import jax.image as jimg
 import jax.numpy as jnp
 import numpy as np
 
