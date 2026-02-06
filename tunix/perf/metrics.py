@@ -71,9 +71,15 @@ class MetricsBuffer:
   mode: str = "train"
 
 
-@dataclasses.dataclass(slots=True)
+@dataclasses.dataclass(frozen=True)
 class PerfMetricsOptions:
+  # Whether to enable performance metrics. If False, all other options will be
+  # ignored.
   enable_perf_metrics: bool = False
+  # Directory to write the raw metrics/events to.
+  log_dir: str = ""
+  # Path to the custom export function. If set, the custom export function will
+  # be loaded from the path instead of being created by PerfMetricsExport.
   custom_export_fn_path: str = ""
 
 

@@ -27,17 +27,17 @@ actor_model_config:
     alpha: 64.0
     module_path: ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum"
   mesh:
-    shape: "(2,4)"
+    shape: "(2,2)"
     axis_names: "('fsdp','tp')"
 rollout_model_config:
   mesh:
-    shape: "(2,4)"
+    shape: "(2,2)"
     axis_names: "('fsdp','tp')"
 tokenizer_config:
   tokenizer_type: "sentencepiece"
   add_bos: False
 dataset_name: "gsm8k"
-batch_size: 1
+batch_size: 4
 num_batches: 3738
 num_test_batches: 100
 num_train_epochs: 1
@@ -59,6 +59,8 @@ rl_training_config:
   max_steps: 3738
   metrics_logging_options:
     flush_every_n_steps: 20
+  perf_metrics_options:
+    enable_perf_metrics: true
   checkpointing_options:
     save_interval_steps: 500
     max_to_keep: 4

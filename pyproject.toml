@@ -32,6 +32,7 @@ dependencies = [
   "omegaconf", # CLI config
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
+  "perfetto",  # Perfetto trace writer for metrics export
   "qwix",
   "sentencepiece",
   "sympy",  # Eval result parsing

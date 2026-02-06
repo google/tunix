@@ -146,6 +146,7 @@ training_config: &base_training_config
   perf_metrics_options: # Currently only supported for grpo_main.
     enable_perf_metrics: false
     custom_export_fn_path: ""
+    log_dir: "/tmp/perf_metrics"
   profiler_options:
     log_dir: "/tmp/profiling"
     skip_first_n_steps: 1
