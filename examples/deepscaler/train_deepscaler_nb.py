@@ -423,8 +423,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
