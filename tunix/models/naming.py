@@ -31,7 +31,8 @@ class ModelNaming:
   Attributes:
     model_id: The full model name identifier (case sensitive), as it appears on
       Huggingface, including the parent directory.
-      E.g.,"meta-llama/Llama-3.1-8B".
+      E.g.,"meta-llama/Llama-3.1-8B". Can also be the model_config_id directly,
+      e.g., llama3p1_8b.
     model_name: The unique full name identifier of the model. This should be the
       full name and should match exactly with the model name used in Hugging
       Face. e.g., "gemma-2b","llama-3.1-8b". The model name is all lowercase and
@@ -101,22 +102,30 @@ class _ModelFamilyInfo:
 # model_family and config_category. Key is the prefix of the hugging face model
 # id and value is the internal model family and config_category.
 _MODEL_FAMILY_INFO_MAPPING = immutabledict.immutabledict({
+    # HF id support for model id
     'gemma-': _ModelFamilyInfo(family='gemma', config_category='gemma'),
-    'gemma1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
     'gemma-1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
-    'gemma2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
     'gemma-2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
-    'gemma3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
     'gemma-3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
-    'llama3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
     'llama-3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
-    'llama3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
     'llama-3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
-    'llama3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'llama-3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'qwen2.5-': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
     'qwen3-': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
     'deepseek-r1-distill-qwen-': _ModelFamilyInfo(
+        family='deepseek_r1_distill_qwen', config_category='qwen2'
+    ),
+    # Config id support for model id
+    'gemma_': _ModelFamilyInfo(family='gemma', config_category='gemma'),
+    'gemma1p1_': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
+    'gemma2_': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
+    'gemma3_': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
+    'llama3_': _ModelFamilyInfo(family='llama3', config_category='llama3'),
+    'llama3p1_': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
+    'llama3p2_': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
+    'qwen2p5_': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
+    'qwen3_': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
+    'deepseek_r1_distill_qwen_': _ModelFamilyInfo(
         family='deepseek_r1_distill_qwen', config_category='qwen2'
     ),
 })
@@ -205,7 +214,8 @@ def get_model_name_from_model_id(model_id: str) -> str:
 
   Args:
     model_id: The full model name identifier, as it appears on huggingface,
-      including the parent directory. E.g., meta-llama/Llama-3.1-8B.
+      including the parent directory. E.g., meta-llama/Llama-3.1-8B. Can also be
+      the model_config_id directly, e.g., llama3p1_8b.
 
   Returns:
     The model_name string.
@@ -219,8 +229,4 @@ def get_model_name_from_model_id(model_id: str) -> str:
     if model_name.startswith('meta-llama-'):
       return model_name.replace('meta-llama-', 'llama-', 1)
     return model_name
-  else:
-    raise ValueError(
-        f'Invalid model ID format: {model_id!r}. Model ID should be in the'
-        ' format of <parent-dir>/<model-name>'
-    )
+  return model_id.lower()
