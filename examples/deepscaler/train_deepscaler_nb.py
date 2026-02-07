@@ -260,8 +260,7 @@ def create_datasets():
     }
   train_df = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split="train")
 
-  train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
-  test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
+  train_ds = train_df.map(preprocess_fn, with_indices=True)
 
   def process_item(item):
     question = item["question"]
@@ -304,7 +303,6 @@ else:
   train_dataset = train_dataset[: int(len(train_dataset) * TRAIN_FRACTION)]
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
   val_dataset = train_dataset[int(len(train_dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
-test_dataset = test_dataset.batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
 # %%
 show_hbm_usage("Done with loading datasets")
@@ -312,6 +310,7 @@ show_hbm_usage("Done with loading datasets")
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 config.remat_config = model_lib.RematConfig.BLOCK
+
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=jnp.bfloat16
@@ -434,6 +433,25 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         top_p=TOP_P,
         top_k=TOP_K,
         eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+        # sglang-jax specific configs
+        rollout_sglang_jax_model_version=(
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+        ),
+        rollout_sglang_jax_mem_fraction_static=0.8,
+        rollout_sglang_jax_init_with_random_weights=True,
+        rollout_sglang_jax_disable_radix_cache=True,
+        rollout_sglang_jax_enable_deterministic_sampling=False,
+        rollout_sglang_jax_chunked_prefill_size=2048,
+        rollout_sglang_jax_max_running_requests=32,
+        rollout_sglang_jax_page_size=128,
+        # vllm-tpu specific configs
+        # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        # rollout_vllm_hbm_utilization=0.2,
+        # rollout_vllm_tpu_backend_type="jax",
+        # rollout_vllm_server_mode=True,
+        # rollout_vllm_async_scheduling=True,
+        # tensor_parallel_size=4,
+        # data_parallel_size=2,
     ),
 )
 
