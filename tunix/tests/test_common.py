@@ -28,11 +28,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
+import sentencepiece as spm
 import tenacity
 from tunix.rl import reshard
+from tunix.utils import compat
 from tunix.utils import env_utils
-
-import sentencepiece as spm
 
 env_utils.setup_sharding_environment()
 
@@ -122,7 +122,7 @@ class ToyTransformer(nnx.Module):
   ):
     self.config = config
     self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
-    self.layers = nnx.List(
+    self.layers = compat.ModuleList(
         [Decoder(rngs=rngs) for _ in range(config.num_layers)]
     )
     self.lm_head = nnx.Linear(

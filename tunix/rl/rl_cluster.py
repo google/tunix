@@ -196,6 +196,7 @@ class RLCluster:
       perf_config: perf_metrics.PerfMetricsConfig | None = None,
   ):
     self.cluster_config = cluster_config
+    self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
     self._init_backbone_sharing_map(actor, reference)
 
@@ -247,13 +248,6 @@ class RLCluster:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
-    if perf_config is None:
-      self._perf = perf_trace.NoopTracer()
-    else:
-      devices = []
-      for mesh in cluster_config.role_to_mesh.values():
-        devices.extend(mesh.devices.flatten().tolist())
-      self._perf = perf_trace.PerfTracer(devices, perf_config.custom_export_fn)
 
     self._init_cluster()
     gc.collect()
@@ -462,6 +456,21 @@ class RLCluster:
     else:
       raise NotImplementedError(
           f"Rollout engine {self.cluster_config.rollout_engine} not supported"
+      )
+
+    # vLLM and SGLang constructs their own mesh
+    if self._rollout.mesh is not None:
+      self.r2m[Role.ROLLOUT] = self._rollout.mesh
+
+    # Initialize the performance tracer after we have all the meshes
+    if self.perf_config is None:
+      self._perf = perf_trace.NoopTracer()
+    else:
+      devices = []
+      for mesh in self.cluster_config.role_to_mesh.values():
+        devices.extend(mesh.devices.flatten().tolist())
+      self._perf = perf_trace.PerfTracer(
+          devices, self.perf_config.custom_export_fn
       )
 
     # 2. Initialize inference worker.
