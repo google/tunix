@@ -275,6 +275,12 @@ parser.add_argument(
     default=None,
     help="List of target modules to apply LoRA",
 )
+parser.add_argument(
+    "--sglang-jax-log-level",
+    type=str,
+    default="info",
+    help="Log level for sglang jax rollout engine",
+)
 
 
 # Parse arguments
@@ -1100,6 +1106,7 @@ def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
         rollout_sglang_jax_precompile_token_paddings=[2048],
         rollout_sglang_jax_chunked_prefill_size=2048,
         rollout_sglang_jax_page_size=64,
+        rollout_sglang_jax_log_level=args.sglang_jax_log_level,
     )
     if ENABLE_LORA:
       config.rollout_sglang_jax_enable_static_lora = True
