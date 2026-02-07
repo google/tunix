@@ -58,7 +58,12 @@ class VllmSamplerTest(absltest.TestCase):
 
     mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
     axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
+    cls.mesh = jax.make_mesh(
+        mesh_shape,
+        axis_names,
+        devices=jax.devices(),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
+    )
 
   def load_llama3_model(self, model_version: str, enable_lora: bool = False):
     model_config = {
@@ -173,6 +178,8 @@ class VllmSamplerTest(absltest.TestCase):
         tokenizer=model_tokenizer,
         config=vllm_config,
     )
+    # vLLM construct its own mesh
+    self.assertNotEqual(vl_sampler.mesh, self.mesh)
     state = nnx.state(tunix_model)
     vl_sampler.load_checkpoint(state)
 
@@ -292,7 +299,9 @@ class VllmSamplerTest(absltest.TestCase):
           pad_output=True,
       )
 
-    async def __call_sampler_async(index: int, templated_prompt: str, delay: float):
+    async def __call_sampler_async(
+        index: int, templated_prompt: str, delay: float
+    ):
       loop = asyncio.get_running_loop()
       result = await loop.run_in_executor(
           None,
@@ -307,9 +316,7 @@ class VllmSamplerTest(absltest.TestCase):
       tasks = []
       for idx, templated_prompt in enumerate(templated_prompts):
         task = loop.create_task(
-            __call_sampler_async(
-                idx, templated_prompt, delays[idx]
-            )
+            __call_sampler_async(idx, templated_prompt, delays[idx])
         )
 
         tasks.append(task)
@@ -331,9 +338,7 @@ class VllmSamplerTest(absltest.TestCase):
     for (prompt, expectations), sampler_output in zip(
         prompt_expectations, results
     ):
-      tc.validate_llm_outputs(
-          [(prompt, expectations)], sampler_output.text
-      )
+      tc.validate_llm_outputs([(prompt, expectations)], sampler_output.text)
 
     expected_order = list(range(len(prompts)))
     self.assertCountEqual(completion_order, expected_order)
@@ -345,6 +350,7 @@ class VllmSamplerTest(absltest.TestCase):
             "expected out-of-order completions."
         ),
     )
+
 
 if __name__ == "__main__":
   absltest.main()

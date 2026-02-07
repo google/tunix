@@ -130,6 +130,7 @@ class SglangJaxSamplerTest(absltest.TestCase):
         tokenizer=model_tokenizer,
         config=sglang_jax_config,
     )
+    self.assertNotEqual(sgl_sampler.mesh, self.mesh)
     state = nnx.state(tunix_model)
     sgl_sampler.load_checkpoint(state)
 
