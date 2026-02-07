@@ -228,6 +228,18 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       return None
 
   @property
+  def mesh(self) -> jax.sharding.Mesh:
+    if hasattr(self._model_runner, "mesh") and isinstance(
+        self._model_runner.mesh, jax.sharding.Mesh
+    ):
+      return self._model_runner.mesh
+    else:
+      raise AttributeError(
+          "SGLang model runner doesn't have mesh or mesh is not a"
+          " jax.sharding.Mesh."
+      )
+
+  @property
   def transformer(self):
     # sglang-jax doesn't expose the underlying model
     return None
