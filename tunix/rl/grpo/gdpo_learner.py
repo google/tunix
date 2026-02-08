@@ -13,20 +13,24 @@
 # limitations under the License.
 """Helper functions for GDPO Trainer."""
 
+import dataclasses
 from typing import Callable, List, Sequence
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_learner
 from tunix.rl.grpo import grpo_learner as grpo_learner_lib
 
+TrainingInputT = rl_learner.TrainingInputT
 RewardFn = Callable[..., List[float]]
-
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
 
+@dataclasses.dataclass(slots=True, kw_only=True)
 class GDPOConfig(grpo_learner_lib.GRPOConfig):
   """Configuration for GDPO.
 
@@ -61,7 +65,7 @@ class GDPOLearner(grpo_learner_lib.GrpoLearner[GDPOConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-  def _compute_rewards(
+  def _compute_gdpo_specific_rewards(
       self,
       prompts: List[str],
       completions: List[str],
@@ -146,6 +150,126 @@ class GDPOLearner(grpo_learner_lib.GrpoLearner[GDPOConfig]):
 
     return jnp.array(rewards)
 
+  def _generate_and_compute_advantage(
+      self,
+      training_input: TrainingInputT,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+  ) -> grpo_learner_lib.TrainExample:
+    """Generate text completions and compute the advantages for GRPO training.
+
+    Args:
+      training_input: A dictionary containing the training input data,
+        containing the key 'prompts'.
+      mode: The mode to use for logging metrics.
+
+    Returns:
+      A `TrainExample` instance containing the processed input data, including
+      prompt IDs, completion IDs, masks, advantages, and per-token log
+      probabilities from the reference and policy models.
+    """
+    training_input["prompts"] = list(training_input["prompts"])
+    pad_value = self.rl_cluster.rollout.pad_id()
+    eos_value = self.rl_cluster.rollout.eos_id()
+    rollout_output = self.rl_cluster.generate(
+        prompts=training_input["prompts"],
+        mode=mode,
+        micro_batch_size=(
+            self._rollout_micro_batch_size * self.algo_config.num_generations
+        ),
+    )
+    completion_ids = rollout_output.tokens
+    prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
+    completion_text = rollout_output.text
+
+    # Assemble masks
+    completion_padding_mask = np.not_equal(completion_ids, pad_value)
+    completion_mask = common.np_make_completion_mask(
+        completion_ids, eos_tok=eos_value
+    )
+    # Apply the padding mask to the completion mask.
+    completion_mask = completion_mask * completion_padding_mask
+
+    # Convert completion_ids and completion_mask to jax arrays
+    jax_completion_ids = jnp.array(completion_ids)
+
+    if self.algo_config.beta != 0.0:
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
+      # TODO(yangmu): use function decorator to trace this part, same below.
+      with self.rl_cluster.perf.span("refer_inference", devices) as interval:
+        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=jax_completion_ids,
+            pad_id=pad_value,
+            eos_id=eos_value,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.algo_config.num_generations
+            ),
+        )
+        interval.device_end([ref_per_token_logps])
+    else:
+      ref_per_token_logps = None
+    if self.algo_config.num_iterations > 1:
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
+      with self.rl_cluster.perf.span(
+          "old_actor_inference", devices
+      ) as interval:
+        old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=jax_completion_ids,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.algo_config.num_generations
+            ),
+        )
+        interval.device_end([old_per_token_logps])
+    else:
+      old_per_token_logps = None
+
+    with self.rl_cluster.perf.span("advantage_computation"):
+      # Compute rewards and advantages
+      rewards = self._compute_gdpo_specific_rewards(
+          prompts=training_input["prompts"],
+          completions=completion_text,
+          mode=mode,
+          **{k: v for k, v in training_input.items() if k != "prompts"},
+      )
+      advantage_estimator = function_registry.get_advantage_estimator(
+          self.algo_config.advantage_estimator
+      )
+      advantages = advantage_estimator(
+          rewards=rewards, num_generations=self.algo_config.num_generations
+      )
+
+    # Log completion lengths.
+    agg_completion_mask = completion_mask.sum(axis=-1)
+    self.rl_cluster.buffer_metrics(
+        {
+            "completions/mean_length": (
+                np.mean(agg_completion_mask),
+                np.mean,
+            ),
+            "completions/max_length": (
+                np.max(agg_completion_mask),
+                np.max,
+            ),
+            "completions/min_length": (
+                np.min(agg_completion_mask),
+                np.min,
+            ),
+        },
+        mode=mode,
+    )
+    for m_fn in self.metric_fns:
+      user_defined_metric = m_fn(
+          prompts=training_input["prompts"],
+          completions=completion_text,
+          advances=advantages,
+          rewards=rewards,
+          **{k: v for k, v in training_input.items() if k != "prompts"},
+      )
+      self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
+
 
 @function_registry.register_advantage_estimator("gdpo")
 def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
@@ -159,26 +283,27 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
     Group reward decoupled normalization advantages.
   """
   rewards_per_func = jnp.nan_to_num(rewards)
-  all_reward_advantage = []
-  for reward_index in range(rewards.shape[-1]):
-    reward_for_index = rewards_per_func[:, reward_index]
-    each_reward_mean_grouped = reward_for_index.reshape(
-        -1, num_generations
-    ).mean(axis=1)
-    each_reward_std_grouped = reward_for_index.reshape(-1, num_generations).std(
-        axis=1
-    )
-    each_reward_mean_grouped = each_reward_mean_grouped.repeat(num_generations)
-    each_reward_std_grouped = each_reward_std_grouped.repeat(num_generations)
-    each_reward_advantage = reward_for_index - each_reward_mean_grouped
-    each_reward_advantage = each_reward_advantage / (
-        each_reward_std_grouped + 1e-4
-    )
-    all_reward_advantage.append(each_reward_advantage)
+  # Reshape to group by generations.
+  # Shape: (num_prompts, num_generations, num_reward_fns)
+  grouped_rewards = rewards_per_func.reshape(
+      -1, num_generations, rewards.shape[-1]
+  )
 
-  combined_reward_advantage = jnp.stack(all_reward_advantage, axis=1)
+  # Compute mean and std per group for each reward function,
+  # Use keepdims for broadcasting.
+  # Shape: (num_prompts, 1, num_reward_fns)
+  mean_grouped = grouped_rewards.mean(axis=1, keepdims=True)
+  std_grouped = grouped_rewards.std(axis=1, keepdims=True)
+
+  # Normalize within each group and reshape back.
+  normalized_advantages = (grouped_rewards - mean_grouped) / (
+      std_grouped + 1e-4
+  )
+  combined_reward_advantage = normalized_advantages.reshape(
+      rewards_per_func.shape
+  )
+
   pre_bn_advantages = jnp.nansum(combined_reward_advantage, axis=1)
-
   bn_advantages_mean = pre_bn_advantages.mean()
   bn_advantages_std = pre_bn_advantages.std()
   advantages = (pre_bn_advantages - bn_advantages_mean) / (
