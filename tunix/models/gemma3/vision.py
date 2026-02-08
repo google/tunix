@@ -29,8 +29,6 @@ import numpy as np
 from tunix.utils import compat
 from tunix.utils import sharding_utils
 
-TOKEN_PLACEHOLDER = 262144
-
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class SigLIPShardingConfig:
@@ -84,9 +82,17 @@ class SigLIPConfig:
 
   num_mm_tokens_per_image_prepool: int = 4096
   num_mm_tokens_per_image: int = 256
+
+  # Processor args
   image_height: int = 896
   image_width: int = 896
   image_channels: int = 3
+  image_mean: tuple[float, ...] = (127.5, 127.5, 127.5)
+  image_std: tuple[float, ...] = (127.5, 127.5, 127.5)
+  soft_token_placeholder: int = 219
+  start_of_image_token: int = 255999
+  end_of_image_token: int = 256000
+  double_new_line_token: int = 108
 
   patch_size: tuple[int, int] = (14, 14)
   width: int = 1152
