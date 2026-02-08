@@ -113,7 +113,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   }
 
   # Vision Tower (SigLIP).
-  if cfg.siglip_config is not None:
+  if cfg.vision_config is not None:
     mapping.update({
         r"vision_tower\.vision_model\.embeddings\.patch_embedding\.weight": (
             "vision_encoder.siglip_encoder.embedding.kernel",
