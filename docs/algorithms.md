@@ -40,19 +40,19 @@ often requires extending a Learner to consume it.
        CONFIGURATION                            LEARNER (The Engine)
      (Defines Params)                       (Orchestrates Execution)
    +-------------------+                   +-----------------------+
-   |  AlgorithmConfig  | <---(binds)--|       RLLearner       |
+   |  AlgorithmConfig  | <---(binds)--     |       RLLearner       |
    +-------------------+                   +-----------------------+
              ^                                         ^      |
              |                                         |      +---(Uses)---> [Function Registry]
      (Inheritance)                               (Inheritance)                (Loss, Advantage, Reward)
              |                                         |
    +-------------------+                   +-----------------------+
-   |    GRPOConfig     | <---(binds)--|      GRPOLearner      |
+   |    GRPOConfig     | <---(binds)--     |      GRPOLearner      |
    +-------------------+                   +-----------------------+
              ^                                         ^
              |                                         |
    +-------------------+                   +-----------------------+
-   |    DAPOConfig     | <---(binds)--|      DAPOLearner    |
+   |    DAPOConfig     | <---(binds)--     |      DAPOLearner    |
    +-------------------+                   +-----------------------+
 
 ```
