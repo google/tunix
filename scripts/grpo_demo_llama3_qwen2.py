@@ -21,6 +21,15 @@ Example usage:
 python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 --model-version=Qwen/Qwen2.5-0.5B-Instruct
 
+Multi-Rollout: sglang
+
+1. baseline
+python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way
+
+2. test (very slow if --num-rollout-worker is greater than 1, better set --num-batches=1 --num-test-batches=1)
+python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=multi-rollout
+python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=multi-rollout --num-rollout-worker=2
+
 """
 
 import argparse
@@ -50,6 +59,7 @@ from tunix.models.qwen2 import params as qwen2_params
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout import rollout_engine_group
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import utils
@@ -211,6 +221,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--num-rollout-worker",
+    type=int,
+    default=1,
+    required=False,
+    help=(
+        "Num of rollout works. Only applies when --cluster-setup=multi-rollout."
+    ),
+)
+parser.add_argument(
     "--max-tpu-to-use",
     type=int,
     default=-1,
@@ -288,7 +307,6 @@ logging.set_verbosity(
     script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING)
 )
 
-GCS_BUCKET_PREFIX = "gs://tunix/"
 PROFILER_SUBDIR = "rl/grpo/profiler/"
 DATA_SUBDIR = "rl/grpo/data/"
 TRAIN_DATA = "gsm8k_train.json"
@@ -298,12 +316,9 @@ HF_MODEL_VERSION = args.model_version
 
 TRAIN_FRACTION = 1.0
 # Derived profiler path
-PROFILER_PATH = os.path.join(GCS_BUCKET_PREFIX, PROFILER_SUBDIR)
+PROFILER_PATH = os.path.join(args.root_dir, PROFILER_SUBDIR)
 
 # Derived Data Path
-GCS_TRAIN_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, DATA_SUBDIR, TRAIN_DATA)
-GCS_TEST_DATA_PATH = os.path.join(GCS_BUCKET_PREFIX, DATA_SUBDIR, TEST_DATA)
-
 LOCAL_TRAIN_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
 LOCAL_TEST_DATA_DIR = os.path.join(args.root_dir, DATA_SUBDIR)
 
@@ -353,9 +368,14 @@ elif args.cluster_setup == "disaggregated-2-way":
   REF_TPU_TO_USE = TRAINER_TPU_TO_USE
   ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE - TRAINER_TPU_TO_USE
 elif args.cluster_setup == "disaggregated-3-way":
-  TRAINER_TPU_TO_USE = TOTAL_TPU_TO_USE // 2
-  REF_TPU_TO_USE = TOTAL_TPU_TO_USE // 4
-  ROLLOUT_TPU_TO_USE = TOTAL_TPU_TO_USE - TRAINER_TPU_TO_USE - REF_TPU_TO_USE
+  TRAINER_TPU_TO_USE = 2 # TOTAL_TPU_TO_USE // 2
+  REF_TPU_TO_USE = 2 # TOTAL_TPU_TO_USE // 4
+  ROLLOUT_TPU_TO_USE = 1 # TOTAL_TPU_TO_USE - TRAINER_TPU_TO_USE - REF_TPU_TO_USE
+elif args.cluster_setup == "multi-rollout":
+  assert(1 <= args.num_rollout_worker <= 4)
+  TRAINER_TPU_TO_USE = 2
+  REF_TPU_TO_USE = 2
+  ROLLOUT_TPU_TO_USE = args.num_rollout_worker
 else:
   raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
 
@@ -384,12 +404,18 @@ elif args.cluster_setup == "disaggregated-2-way":
   REF_DEVICE_END_IDX = TRAINER_DEVICE_END_IDX
 
 elif args.cluster_setup == "disaggregated-3-way":
-  REF_DEVICE_START_IDX = ROLLOUT_DEVICE_END_IDX
+  REF_DEVICE_START_IDX = 4 # ROLLOUT_DEVICE_END_IDX
   REF_DEVICE_END_IDX = REF_DEVICE_START_IDX + REF_TPU_TO_USE
 
   TRAINER_DEVICE_START_IDX = REF_DEVICE_END_IDX
   TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
 
+elif args.cluster_setup == "multi-rollout":
+  REF_DEVICE_START_IDX = 4 # ROLLOUT_DEVICE_END_IDX
+  REF_DEVICE_END_IDX = REF_DEVICE_START_IDX + REF_TPU_TO_USE
+
+  TRAINER_DEVICE_START_IDX = REF_DEVICE_END_IDX
+  TRAINER_DEVICE_END_IDX = TRAINER_DEVICE_START_IDX + TRAINER_TPU_TO_USE
 else:
   raise ValueError(f"Unknown cluster setup: {args.cluster_setup}")
 
@@ -450,7 +476,10 @@ assert ROLLOUT_TPU_TO_USE % args.rollout_tp == 0, (
 assert (
     args.rollout_tp <= MAX_TP_SIZE
 ), f"rollout_tp {args.rollout_tp} must be <= MAX_TP_SIZE {MAX_TP_SIZE}"
-if args.rollout_dp == -1 and args.rollout_tp == -1:
+if args.cluster_setup == "multi-rollout":
+  rollout_tp = 1
+  rollout_dp = 1
+elif args.rollout_dp == -1 and args.rollout_tp == -1:
   rollout_tp = min(MAX_TP_SIZE, ROLLOUT_TPU_TO_USE)
   rollout_dp = ROLLOUT_TPU_TO_USE // rollout_tp
 elif args.rollout_dp == -1:
@@ -463,10 +492,11 @@ else:
   rollout_dp = args.rollout_dp
   rollout_tp = args.rollout_tp
 
-assert rollout_dp * rollout_tp == ROLLOUT_TPU_TO_USE, (
-    f"rollout_dp {rollout_dp} * rollout_tp {rollout_tp} must equal"
-    f" ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE}"
-)
+if args.cluster_setup != "multi-rollout":
+  assert rollout_dp * rollout_tp == ROLLOUT_TPU_TO_USE, (
+      f"rollout_dp {rollout_dp} * rollout_tp {rollout_tp} must equal"
+      f" ROLLOUT_TPU_TO_USE {ROLLOUT_TPU_TO_USE}"
+  )
 
 print(f"{ROLLOUT_TPU_TO_USE=}, {REF_TPU_TO_USE=}, {TRAINER_TPU_TO_USE=}")
 print(f" {rollout_dp=}, {rollout_tp=}, {trainer_fsdp=}, {trainer_tp=}")
@@ -478,6 +508,11 @@ if args.cluster_setup == "colocated":
 elif args.cluster_setup == "disaggregated-2-way":
   REF_MESH = MESH
 elif args.cluster_setup == "disaggregated-3-way":
+  # Ref share the same sharding as trainer
+  ref_fsdp = min(trainer_fsdp, REF_TPU_TO_USE)
+  ref_tp = REF_TPU_TO_USE // ref_fsdp
+  REF_MESH = [(ref_fsdp, ref_tp), ("fsdp", "tp")]
+elif args.cluster_setup == "multi-rollout":
   # Ref share the same sharding as trainer
   ref_fsdp = min(trainer_fsdp, REF_TPU_TO_USE)
   ref_tp = REF_TPU_TO_USE // ref_fsdp
@@ -730,17 +765,32 @@ if DO_MODEL_DISPLAY:
 
 show_hbm_usage("After creating the reference lora model")
 
-rollout_device_arrays = mesh_utils.create_device_mesh(
-    ROLLOUT_MESH[0],
-    devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
-    allow_split_physical_axes=True,
-)
+if args.cluster_setup == "multi-rollout":
+  rollout_group_meshes = []
+  for i in range(args.num_rollout_worker):
+    rollout_device_arrays = mesh_utils.create_device_mesh(
+        ROLLOUT_MESH[0],
+        devices=jax.devices()[(ROLLOUT_DEVICE_START_IDX+i):(ROLLOUT_DEVICE_START_IDX+i+1)],
+        allow_split_physical_axes=True,
+    )
+    rollout_mesh = jax.sharding.Mesh(
+        rollout_device_arrays,
+        ROLLOUT_MESH[1],
+        axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+    )
+    rollout_group_meshes.append(rollout_mesh)
+else:
+  rollout_device_arrays = mesh_utils.create_device_mesh(
+      ROLLOUT_MESH[0],
+      devices=jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX],
+      allow_split_physical_axes=True,
+  )
 
-rollout_mesh = jax.sharding.Mesh(
-    rollout_device_arrays,
-    ROLLOUT_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-)
+  rollout_mesh = jax.sharding.Mesh(
+      rollout_device_arrays,
+      ROLLOUT_MESH[1],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+  )
 
 match_format = re.compile(
     rf"^[\s]{{0,}}"
@@ -868,12 +918,12 @@ def check_numbers(prompts, completions, answer, **kargs):  # pylint: disable=unu
   ]
 
   scores = []
-  print("START ============================")
-  print(f"Question: {question[0]}")
-  print(f"Answer: {answer[0]}")
-  print(f"Response: {responses[0]}")
-  print(f"Extracted: {extracted_responses[0]}")
-  print("END ==============================")
+  # print("START ============================")
+  # print(f"Question: {question[0]}")
+  # print(f"Answer: {answer[0]}")
+  # print(f"Response: {responses[0]}")
+  # print(f"Extracted: {extracted_responses[0]}")
+  # print("END ==============================")
   for guess, true_answer in zip(extracted_responses, answer):
     if guess is None:
       scores.append(0)
@@ -1112,7 +1162,7 @@ def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
       data_parallel_size=ROLLOUT_MESH[0][0],
       tensor_parallel_size=ROLLOUT_MESH[0][1],
       rollout_vllm_model_version=VLLM_MODEL_VERSION,
-      rollout_vllm_hbm_utilization=0.2,
+      rollout_vllm_hbm_utilization=0.4,
       rollout_vllm_tpu_backend_type="jax",
       rollout_vllm_server_mode=args.rollout_server_mode,
       rollout_vllm_async_scheduling=args.async_scheduling,
@@ -1120,12 +1170,21 @@ def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
 
 
 # Training config
+
+if args.cluster_setup == "multi-rollout":
+  role_to_mesh={
+      rl_cluster_lib.Role.ACTOR: training_mesh,
+      rl_cluster_lib.Role.REFERENCE: ref_mesh,
+      rl_cluster_lib.Role.ROLLOUT_GROUP: rollout_group_meshes,
+  }
+else:
+  role_to_mesh={
+      rl_cluster_lib.Role.ACTOR: training_mesh,
+      rl_cluster_lib.Role.REFERENCE: ref_mesh,
+      rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+  }
 cluster_config = rl_cluster_lib.ClusterConfig(
-    role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: training_mesh,
-        rl_cluster_lib.Role.REFERENCE: ref_mesh,
-        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
-    },
+    role_to_mesh=role_to_mesh,
     rollout_engine=args.rollout_engine,
     offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
@@ -1174,8 +1233,12 @@ grpo_trainer = grpo_learner.GRPOLearner(
 
 show_hbm_usage("After creating the learner")
 
+if isinstance(rl_cluster._rollout, rollout_engine_group.RolloutEngineGroup):
+  rollout_sampler = rl_cluster._rollout.rollout_engines[0]._sampler  # pylint: disable=protected-access
+else:
+  rollout_sampler = rl_cluster._rollout._sampler  # pylint: disable=protected-access
 
-rollout_sampler = rl_cluster._rollout._sampler  # pylint: disable=protected-access
+# with jax.profiler.trace("/home/yangmu/github/tunix/aui/xprof"):
 (eval_corr, eval_total, eval_accuracy, eval_partial_accuracy, eval_format_accuracy) = evaluate(  # pylint: disable=unbalanced-tuple-unpacking
     test_dataset,
     rollout_sampler,
@@ -1186,6 +1249,7 @@ print(
     f" {eval_partial_accuracy=}%, {eval_format_accuracy=}%"
 )
 
+# exit()
 # for eval_example in QUALITATIVE_EVAL_EXAMPLES:
 #   question = eval_example["question"]
 #   answer = eval_example["answer"]
@@ -1204,6 +1268,7 @@ print(
 
 
 show_hbm_usage("Right before training")
+
 grpo_trainer.train(train_dataset, eval_ds=val_dataset)
 
 # Load checkpoint first.
