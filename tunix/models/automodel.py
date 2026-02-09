@@ -148,6 +148,7 @@ def create_gemma_model_with_nnx_conversion(
     intermediate_ckpt_dir: str,
     rng_seed: int,
     mesh: jax.sharding.Mesh,
+    model_path: str | None = None,
 ) -> tuple[nnx.Module, Any]:
   """Creates a Gemma model with NNX conversion, using a cached checkpoint if available."""
 
@@ -157,13 +158,26 @@ def create_gemma_model_with_nnx_conversion(
     This is a workaround, as the checkpoints on Kaggle don't work with NNX. This
     takes a long time. Skip if conversion is not needed.
     """
-    if model_name.startswith('gemma-2'):
-      params_path = os.path.join(
-          ckpt_path, model_name.replace('gemma-2', 'gemma2')
+    if model_path:
+      dir_name = os.path.basename(model_path)
+    else:
+      # If model_path is not provided, fall back to inferring from model_name
+      logging.warning(
+          'model_path is not provided. Inferring from model_name. This may lead'
+          ' to incorrect results if the model_name is not a standard Gemma'
+          ' model name.'
       )
-    else:  # gemma
-      suffix = '-'.join(model_name.split('-')[1:])
-      params_path = os.path.join(ckpt_path, suffix)
+      naming_info = naming.ModelNaming(model_name=model_name)
+      version_dashed = naming_info.model_version.replace('_', '-')
+
+      if naming_info.model_family == 'gemma2':
+        dir_name = f'gemma2-{version_dashed}'
+      elif naming_info.model_family == 'gemma1p1':
+        dir_name = f'1.1-{version_dashed}'
+      else:  # gemma
+        dir_name = version_dashed
+
+    params_path = os.path.join(ckpt_path, dir_name)
 
     model, params = create_gemma_model_from_params(params_path, model_name)
 
@@ -419,6 +433,7 @@ class AutoModel:
             intermediate_ckpt_dir=intermediate_ckpt_dir,
             rng_seed=rng_seed,
             mesh=mesh,
+            model_path=model_path,
         )
       elif model_source == ModelSource.INTERNAL:
         model, model_params = create_gemma_model_from_params(
