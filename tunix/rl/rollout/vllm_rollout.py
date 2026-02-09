@@ -35,9 +35,10 @@ class VllmRollout(base_rollout.BaseRollout):
       mesh: jax.sharding.Mesh,
       rollout_config: base_rollout.RolloutConfig,
   ):
-    self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
-        mapping_obj=rollout_config.rollout_mapping_config, model=model, backend="vllm_jax",
+        mapping_obj=rollout_config.rollout_mapping_config,
+        model=model,
+        backend="vllm_jax",
     )
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
@@ -61,6 +62,10 @@ class VllmRollout(base_rollout.BaseRollout):
     )
     state = nnx.state(model)
     self._sampler.load_checkpoint(state)
+
+  @property
+  def mesh(self) -> Optional[jax.sharding.Mesh]:
+    return self._sampler.mesh
 
   def generate(
       self,

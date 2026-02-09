@@ -38,7 +38,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sampling_params import SamplingParams
 
-
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
@@ -127,6 +126,18 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # lora.
     if config.lora_config and config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
+
+  @property
+  def mesh(self) -> jax.sharding.Mesh:
+    if hasattr(self._model_runner, "mesh") and isinstance(
+        self._model_runner.mesh, jax.sharding.Mesh
+    ):
+      return self._model_runner.mesh
+    else:
+      raise AttributeError(
+          "vLLM model runner doesn't have mesh or mesh is not a"
+          " jax.sharding.Mesh."
+      )
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly

@@ -241,3 +241,8 @@ class BaseRollout(ABC):
   @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""
+
+  @property
+  def mesh(self) -> Optional[jax.sharding.Mesh]:
+    """Returns the mesh used by the rollout model, if applicable."""
+    return None

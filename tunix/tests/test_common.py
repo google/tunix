@@ -121,7 +121,7 @@ class ToyTransformer(nnx.Module):
   ):
     self.config = config
     self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
-    self.layers = nnx.List(
+    self.layers = compat.ModuleList(
         [Decoder(rngs=rngs) for _ in range(config.num_layers)]
     )
     self.lm_head = nnx.Linear(
