@@ -83,7 +83,7 @@ class RolloutOrchestrator:
     self.engine_cls = engine_cls
     self.engine_kwargs = engine_kwargs or {}
     self.max_concurrency = max_concurrency
-    self._tasks: List[asyncio.Task] = []
+    self._tasks: List[asyncio.Task[None]] = []
     self._stop = asyncio.Event()
     self._logger = logging.getLogger(self.__class__.__name__)
     self._manager: Optional[GroupQueueManager] = None
