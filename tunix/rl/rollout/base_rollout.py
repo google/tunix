@@ -211,6 +211,9 @@ class RolloutConfig:
 
   rollout_sglang_jax_max_running_requests: Optional[int] = None
 
+  # The logging level for the SGLang JAX rollout engine (e.g., "debug", "info").
+  rollout_sglang_jax_log_level: str = "info"
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""
