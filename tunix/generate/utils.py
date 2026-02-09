@@ -704,7 +704,6 @@ def transfer_state_with_mappings(
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
-  reshard_fn = simple_reshard
 
   if reshard_fn:
     sharding_dict = {
