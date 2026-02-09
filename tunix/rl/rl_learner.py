@@ -121,7 +121,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     # If they do, then doesn't make sense for the interleave because they will
     # have resource contention.
     self.can_enable_async_rollout = (
-        self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
+        rl_cluster_lib.Role.ROLLOUT in self.rl_cluster.cluster_config.role_to_mesh
+        and self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
         != self.rl_cluster.cluster_config.role_to_mesh[
             rl_cluster_lib.Role.ROLLOUT
         ]

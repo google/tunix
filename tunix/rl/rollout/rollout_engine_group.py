@@ -25,14 +25,12 @@ from tunix.rl.rollout import base_rollout
 
 class RolloutTrafficRoutingConfig(enum.Enum):
   """Rollout traffic routing algorithm."""
-
   pass
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
 class RolloutWeightSyncConfig:
   """Configuration for the weight sync strategy."""
-
   pass
 
 
@@ -54,35 +52,82 @@ class RolloutEngineGroupConfig:
   weight_sync_config: RolloutWeightSyncConfig
 
 
-class RolloutEngineGroup:
+class RolloutEngineGroup(base_rollout.BaseRollout):
   """RolloutEngineGroup manages multiple rollout engines, and route traffic to them based on routing config."""
+
+  def __init__(
+      self,
+      type: str,
+      models: list[Any],
+      tokenizer: Any,
+      meshes: list[jax.sharding.Mesh],
+      rollout_config: base_rollout.RolloutConfig,
+      **kwargs
+  ):
+    self.round = 0
+    self.rollout_engines = []
+    for i, mesh in enumerate(meshes):
+      if type == "vllm":
+        from tunix.rl.rollout import vllm_rollout
+        # TODO: self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT)
+        self.rollout_engines.append(
+          vllm_rollout.VllmRollout(
+              models[i],
+              tokenizer,
+              cache_config_or_size=kwargs.get("cache_config_or_size"),
+              mesh=mesh,
+              rollout_config=rollout_config))
+      elif type == "sglang_jax":
+        from tunix.rl.rollout import sglang_jax_rollout
+        self.rollout_engines.append(
+          sglang_jax_rollout.SglangJaxRollout(
+              models[i],
+              tokenizer,
+              mesh=mesh,
+              rollout_config=rollout_config))
+      else:
+        raise ValueError(f"Unknown rollout engine type: {type}")
+
 
   def generate(
       self, prompts, rollout_config: base_rollout.RolloutConfig, **kwargs
   ) -> base_rollout.RolloutOutput:
-    raise NotImplementedError("Not implemented for RolloutEngineGroup.")
+    round = self.round
+    self.round = (self.round + 1) % len(self.rollout_engines)
+    print(f"generate() rollout round: {round}")
+    return self.rollout_engines[round].generate(prompts, rollout_config, **kwargs)
 
+  
   def get_per_token_logps(
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
-      completion_mask: jax.Array | None = None,
-      **kwargs
+      completion_mask: jax.Array | None = None
   ) -> jax.Array:
-    raise NotImplementedError("Not implemented for RolloutEngineGroup.")
+    round = self.round
+    self.round = (self.round + 1) % len(self.rollout_engines)
+    print(f"get_per_token_logps() rollout round: {round}")
+    return self.rollout_engines[round].get_per_token_logps(
+        prompt_tokens, completion_tokens, completion_mask)
+
 
   def update_params(
       self,
       params: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
-    raise NotImplementedError("Not implemented for RolloutEngineGroup.")
+    for i, engine in enumerate(self.rollout_engines):
+      print(f"update_params() for engine {i}")
+      engine.update_params(params, filter_types)
+
 
   def pad_id(self) -> int:
-    raise NotImplementedError("Not implemented for RolloutEngineGroup.")
+    return self.rollout_engines[0].pad_id()
+
 
   def eos_id(self) -> int:
-    raise NotImplementedError("Not implemented for RolloutEngineGroup.")
+    return self.rollout_engines[0].eos_id()
+
 
   def model(self) -> Any:
     # if use RolloutEngineGroup, we disable CPU offloading, which

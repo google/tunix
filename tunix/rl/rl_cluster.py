@@ -49,6 +49,7 @@ from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
+from tunix.rl.rollout import rollout_engine_group
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 from tunix.sft import sharding_utils
@@ -77,6 +78,7 @@ class Role(enum.Enum):
   REFERENCE = "reference"  # kept fixed during training
   REWARD = "reward"
   ROLLOUT = "rollout"
+  ROLLOUT_GROUP = "rollout_group"
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -171,7 +173,7 @@ class ClusterConfig:
       cost of increased latency if swapping occurs.
   """
 
-  role_to_mesh: dict[Role, Mesh]
+  role_to_mesh: dict[Role, Mesh | list[Mesh]]
   role_to_logical_axis_rule: dict[Role, flax.typing.LogicalRules] | None = None
   rollout_engine: str | type[base_rollout.BaseRollout] = "vanilla"
   offload_to_cpu: bool = False
@@ -204,7 +206,24 @@ class RLCluster:
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
 
-    if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
+    self.rollout_actor = None
+    self.rollout_actor_group = None
+    if Role.ROLLOUT_GROUP in self.r2m:
+      rollout_data_type = (
+          self.cluster_config.rollout_config[Mode.TRAIN].data_type
+          if isinstance(self.cluster_config.rollout_config, dict)
+          else self.cluster_config.rollout_config.data_type
+      )
+      self.rollout_actor_group = []
+      for mesh in self.r2m[Role.ROLLOUT_GROUP]:
+        self.rollout_actor_group.append(
+            self._load_model(
+                actor,
+                mesh,
+                rollout_data_type,
+            )
+        )
+    elif Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
     elif self.cluster_config.rollout_engine == "vanilla":
       rollout_data_type = (
@@ -268,7 +287,7 @@ class RLCluster:
         collections.defaultdict(list)
     )
 
-    if self.r2m[Role.ACTOR] == self.r2m[Role.ROLLOUT]:
+    if Role.ROLLOUT in self.r2m and self.r2m[Role.ACTOR] == self.r2m[Role.ROLLOUT]:
       # Given that we load both actor trainer and rollout from `actor`,
       # if the meshes are the same, they are able to share the same model.
       # TODO(linchai): We may want to enable different shardings for actor
@@ -408,20 +427,30 @@ class RLCluster:
       if loaded_vllm_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
 
-      # TODO(linchai): maybe support offloading for vllm rollout.
-      with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
-        # vLLM handles model initialization and loading internally, so we need
-        # to provide logical axis rules for vLLM to correctly shard the model on
-        # the rollout mesh. This is important for out-of-tree models in vLLM
-        # that are implemented with custom logical axis rules, like is the case
-        # for MaxText models.
-        self._rollout = vllm_rollout.VllmRollout(
-            self.rollout_actor,
-            self.tokenizer,
+      if Role.ROLLOUT_GROUP in self.r2m:
+        self._rollout = rollout_engine_group.RolloutEngineGroup(
+            type="vllm",
+            models=self.rollout_actor_group,
+            tokenizer=self.tokenizer,
             cache_config_or_size=max_kv_cache_size,
-            mesh=self.r2m[Role.ROLLOUT],
+            meshes=self.r2m[Role.ROLLOUT_GROUP],
             rollout_config=loaded_vllm_config,
         )
+      else:
+        # TODO(linchai): maybe support offloading for vllm rollout.
+        with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+          # vLLM handles model initialization and loading internally, so we need
+          # to provide logical axis rules for vLLM to correctly shard the model on
+          # the rollout mesh. This is important for out-of-tree models in vLLM
+          # that are implemented with custom logical axis rules, like is the case
+          # for MaxText models.
+          self._rollout = vllm_rollout.VllmRollout(
+                self.rollout_actor,
+                self.tokenizer,
+                cache_config_or_size=max_kv_cache_size,
+                mesh=self.r2m[Role.ROLLOUT],
+                rollout_config=loaded_vllm_config,
+            )
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
@@ -436,12 +465,22 @@ class RLCluster:
       else:
         raise ValueError("Rollout sglang jax model config is missing!")
 
-      self._rollout = sglang_jax_rollout.SglangJaxRollout(
-          self.rollout_actor,
-          self.tokenizer,
-          mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=loaded_sglang_jax_config,
-      )
+      if Role.ROLLOUT_GROUP in self.r2m:
+        self._rollout = rollout_engine_group.RolloutEngineGroup(
+            type="sglang_jax",
+            models=self.rollout_actor_group,
+            tokenizer=self.tokenizer,
+            cache_config_or_size=max_kv_cache_size,
+            meshes=self.r2m[Role.ROLLOUT_GROUP],
+            rollout_config=loaded_sglang_jax_config,
+        )
+      else:
+        self._rollout = sglang_jax_rollout.SglangJaxRollout(
+            self.rollout_actor,
+            self.tokenizer,
+            mesh=self.r2m[Role.ROLLOUT],
+            rollout_config=loaded_sglang_jax_config,
+        )
     elif (
         isinstance(self.cluster_config.rollout_engine, type)
         and issubclass(
@@ -553,6 +592,7 @@ class RLCluster:
           perf_tracer=self._perf,
       )
     del self.rollout_actor
+    del self.rollout_actor_group
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
@@ -580,7 +620,7 @@ class RLCluster:
   ):
     """Updates models sharing weights."""
     for role in self._backbone_sharing_map[role]:
-      if role == Role.ROLLOUT:
+      if role == Role.ROLLOUT or role == Role.ROLLOUT_GROUP:
         if hasattr(self, "rollout_actor"):
           nnx.update(self.rollout_actor, params)
         else:
@@ -857,29 +897,42 @@ class RLCluster:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
-      model = self.rollout.model()
-      self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
-
+    if Role.ROLLOUT_GROUP in self.r2m:
       if isinstance(self.cluster_config.rollout_config, dict):
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
 
-      with self._perf.span("rollout", mesh.devices) as span:
-        outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(string_prompts), step=micro_batch_size
-            )
-        ]
-        span.device_end([o.tokens for o in outputs])
+      outputs = [
+          self.rollout.generate(string_prompts[s], rollout_config)
+          for s in rl_utils.chunk_slices_by_size(
+              stop=len(string_prompts), step=micro_batch_size
+          )
+      ]
+    else:
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
+        model = self.rollout.model()
+        self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
+        if self.cluster_config.offload_to_cpu:
+          self.rollout.update_params(nnx.state(model))
 
-      self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
-      if self.cluster_config.offload_to_cpu:
-        self.rollout.update_params(nnx.state(model))
+        if isinstance(self.cluster_config.rollout_config, dict):
+          rollout_config = self.cluster_config.rollout_config[mode]
+        else:
+          rollout_config = self.cluster_config.rollout_config
+
+        with self._perf.span("rollout", mesh.devices) as span:
+          outputs = [
+              self.rollout.generate(string_prompts[s], rollout_config)
+              for s in rl_utils.chunk_slices_by_size(
+                  stop=len(string_prompts), step=micro_batch_size
+              )
+          ]
+          span.device_end([o.tokens for o in outputs])
+
+        self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
+        if self.cluster_config.offload_to_cpu:
+          self.rollout.update_params(nnx.state(model))
 
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
