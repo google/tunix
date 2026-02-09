@@ -143,7 +143,7 @@ class RolloutConfig:
   rollout_vllm_additional_config: dict[str, Any] | None = None
 
   # Whether to enable data parallel in attention for vLLM rollout engine.
-  # The "attn_dp" mesh axis is used when the degree of tensor parallelism 
+  # The "attn_dp" mesh axis is used when the degree of tensor parallelism
   # specified is more than the number of KV heads in the model. Enabling this
   # allows for non-attention tensors to be sharded across "attn_dp" and "model"
   # axes, which can help reduce memory usage for large models with few KV heads.
