@@ -29,6 +29,8 @@ except:
   cm = contextlib.nullcontext()
 
 with cm:
+  from tunix import PerfMetricsConfig
+  from tunix import PerfMetricsExport
   from tunix.models.qwen2 import params as params_lib
   from tunix.models.qwen2 import model as model_lib
   from tunix.sft import metrics_logger
@@ -60,8 +62,8 @@ MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 8192
+MAX_PROMPT_LENGTH = 1024
+TOTAL_GENERATION_STEPS = 128
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -70,7 +72,7 @@ TOP_K = 50
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
 # paper. The "group" in GRPO comes from here.
-NUM_GENERATIONS = 8
+NUM_GENERATIONS = 2
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -84,15 +86,15 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
+BATCH_SIZE = 1
+MINI_BATCH_SIZE = 1
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
 
-EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 100  # can potentially train for more epochs
+EVAL_EVERY_N_STEPS = 50  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+NUM_EPOCHS = 2  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
@@ -304,6 +306,12 @@ TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
+
+# # Perf metrics logging
+# perf_metrics_config = PerfMetricsConfig()
+# perf_metrics_config.custom_export_fn = PerfMetricsExport.from_cluster_config(
+#     cluster_config
+# )
 
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
