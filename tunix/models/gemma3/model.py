@@ -27,6 +27,7 @@ from jax import numpy as jnp
 import jaxtyping
 from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
 from tunix.models.gemma3 import vision
+from tunix.models.gemma3 import token_utils
 from tunix.utils import compat
 from tunix.utils import env_utils
 from tunix.utils import sharding_utils
@@ -115,7 +116,7 @@ class ModelConfig:
       QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM
   )
 
-  siglip_config: vision.SigLIPConfig | None = None
+  vision_config: vision.SigLIPConfig | None = None
 
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
@@ -203,7 +204,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -245,7 +246,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -287,7 +288,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -918,9 +919,9 @@ class Gemma3(nnx.Module):
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
 
-    if config.siglip_config is not None:
+    if config.vision_config is not None:
       self.vision_encoder = vision.SigLiP(
-          config=config.siglip_config,
+          config=config.vision_config,
           shd_config=config.shd_config.siglip,
           rngs=rngs,
       )
@@ -1031,7 +1032,7 @@ class Gemma3(nnx.Module):
       images: jaxtyping.Array | None = None,  # (B, H, W, C) or (B, N, H, W, C)
   ) -> jaxtyping.Array:
     """Encode the text tokens, eventually including the vision embeddings."""
-    if images is not None:
+    if self.config.vision_config is not None and images is not None:
       self._assert_support_mm()
       if len(images.shape) == 4:  # If num_images is 1, add an axis.
         images = einops.rearrange(images, 'b h w c -> b 1 h w c')
@@ -1070,7 +1071,7 @@ class Gemma3(nnx.Module):
     merged_embeddings = merge_embeddings_lib.merge_embeddings(
         text_embeddings=embeddings,
         vision_embeddings=soft_embeddings,
-        mask=tokens == vision.TOKEN_PLACEHOLDER,
+        mask=tokens == self.config.vision_config.soft_token_placeholder_id,  # pytype: disable=attribute-error
     )
 
     return merged_embeddings
@@ -1086,6 +1087,34 @@ class Gemma3(nnx.Module):
     soft_embeddings = self.vision_encoder(images=images)
     soft_embeddings = self.embedder.encode_vision(soft_embeddings)
     return soft_embeddings
+
+  def add_mm_tokens(
+      self,
+      tokens: jaxtyping.ArrayLike,  # (B, L)
+      images: jaxtyping.ArrayLike,  # (B, N, H, W, C)
+  ) -> jaxtyping.ArrayLike:
+    """Add MM tokens to the original text tokens."""
+    if images is None:
+      return tokens
+
+    self._assert_support_mm()
+    if len(images.shape) == 4:  # If num_images is 1, add an axis.
+      images = einops.rearrange(images, 'b h w c -> b 1 h w c')
+
+    max_num_images = images.shape[1]
+
+    config = self.config.vision_config
+    assert config is not None  # Just to please the type checker.
+
+    return token_utils.add_extra_tokens_for_images(
+        tokens=tokens,
+        max_num_images=max_num_images,
+        num_tokens_per_image=config.num_mm_tokens_per_image,
+        start_of_image_token=config.start_of_image_token,
+        end_of_image_token=config.end_of_image_token,
+        soft_token_placeholder=config.soft_token_placeholder,
+        double_new_line_token=config.double_new_line_token,
+    )
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.
