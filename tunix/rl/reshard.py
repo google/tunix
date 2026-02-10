@@ -28,6 +28,7 @@ import jax
 import jaxtyping
 from flax import nnx
 from tunix.rl import utils
+from jax._src.sharding_impls import GSPMDSharding as GSPMDSharding
 
 # TODO(tsbao): move this to util
 def callback_on_ready(
@@ -449,7 +450,7 @@ def reshard_pytree(
 
   def _get_dst_sharding(x):
     if isinstance(
-        x, jax.sharding.NamedSharding | jax.sharding.SingleDeviceSharding
+        x, jax.sharding.NamedSharding | jax.sharding.SingleDeviceSharding | GSPMDSharding
     ):
       return x
     else:
