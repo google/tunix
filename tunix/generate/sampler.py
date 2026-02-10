@@ -103,36 +103,33 @@ class CacheConfig:
   head_dim: int
 
 
-def _sample_top_p(
-    probs: jnp.ndarray, p: float, key: jax.Array, k: Optional[int] = None
+def sample_top_p(
+    logits: jnp.ndarray,
+    key: jax.Array,
+    temperature: float,
+    top_p: float,
+    top_k: int | None,
 ) -> jnp.ndarray:
   """Sample a token using top-p sampling."""
-  # Optimization: skip sorting if top_p is 1.0 and top_k is full vocab.
-  if p >= 1.0 and k is None:
-    return jax.random.categorical(key, logits=jnp.log(probs))
+  # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
+  next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
 
-  k = probs.shape[-1] if k is None else k
+  # Skip softmax and sorting if top_p is 1.0 and top_k is full vocab.
+  if top_p >= 1.0 and top_k is None:
+    return jax.random.categorical(key, logits=next_token_logits)
+
+  probs = jax.nn.softmax(next_token_logits, axis=-1)
+  k = probs.shape[-1] if top_k is None else top_k
+
   probs_sorted, indices = jax.lax.top_k(probs, k=k)
   cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
-  mask = cumsum_probs - probs_sorted > p
+  mask = cumsum_probs - probs_sorted > top_p
   probs_sorted = jnp.where(mask, 0.0, probs_sorted)
   probs_sorted /= jnp.sum(probs_sorted, axis=-1, keepdims=True)
 
   next_token = jax.random.categorical(key, logits=jnp.log(probs_sorted))
-
   next_token = jnp.take_along_axis(indices, next_token[..., None], axis=-1)
   next_token = jnp.squeeze(next_token, axis=-1)
-  return next_token
-
-
-def sample_top_p(
-    logits, key, temperature: float, top_p: float, top_k: Optional[int]
-):
-  """Sample a token using top-p sampling."""
-  # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
-  logits = logits[:, -1].astype(jnp.float32)
-  probs = jax.nn.softmax(logits / temperature, axis=-1)
-  next_token = _sample_top_p(probs, top_p, key, top_k)
   return next_token
 
 
