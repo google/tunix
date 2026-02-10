@@ -74,6 +74,7 @@ class VllmRollout(base_rollout.BaseRollout):
       self,
       prompts: list[str],
       rollout_config: base_rollout.RolloutConfig,
+      stop_strings: Optional[list[str]] = None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""

@@ -381,6 +381,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      stop_strings: Optional[List[str]] = None,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
     if isinstance(input_strings, str):
@@ -400,6 +401,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           max_tokens=max_generation_steps,
           ignore_eos=False,
           temperature=temperature,
+          stop=stop_strings,
       )
     else:
       if self._driver is not None:
@@ -425,6 +427,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.top_p = top_p
       if top_k is not None:
         sampling_params.top_k = top_k
+      if stop_strings is not None:
+        sampling_params.stop = stop_strings
 
       self.sampling_params = sampling_params
 
