@@ -17,18 +17,20 @@ set -x # Enable xtrace
 
 python3 -m tunix.cli.peft_main \
   base_config.yaml \
-  model_name="gemma-3-4b-pt" \
-  model_id="google/gemma-3-4b-pt" \
-  model_path="gs://gemma-data/checkpoints/gemma3-4b-pt" \
-  model_source="gcs" \
-  tokenizer_path="gs://gemma-data/tokenizers/tokenizer_gemma3.model" \
+  model_config.model_name="gemma-3-4b-pt" \
+  model_config.model_id="google/gemma-3-4b-pt" \
+  model_config.model_path="gs://gemma-data/checkpoints/gemma3-4b-pt" \
+  model_config.model_source="gcs" \
+  model_config.lora_config={} \
+  model_config.mesh.shape="(4,2)" \
+  model_config.mesh.axis_names="('fsdp','tp')" \
+  tokenizer_config.tokenizer_path="gs://gemma-data/tokenizers/tokenizer_gemma3.model" \
+  tokenizer_config.tokenizer_type="sentencepiece" \
   dataset_name="mtnt/en-fr" \
   optimizer_config.opt_type="adamw" \
   optimizer_config.learning_rate=1e-5 \
   training_config.eval_every_n_steps=20 \
   training_config.max_steps=100 \
   training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full" \
-  training_config.metrics_logging_options.flush_every_n_steps=20 \
-  lora_config={} \
-  mesh.shape="(2,2)" \
-  mesh.axis_names="('fsdp','tp')"
+  training_config.metrics_logging_options.flush_every_n_steps=20
+
