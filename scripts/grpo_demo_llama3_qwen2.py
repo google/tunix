@@ -23,12 +23,29 @@ python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 
 Multi-Rollout: sglang
 
-1. baseline
-python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way
+1. quality baseline
 
-2. test (very slow if --num-rollout-worker is greater than 1, better set --num-batches=1 --num-test-batches=1)
-python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=multi-rollout
-python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=multi-rollout --num-rollout-worker=2
+  python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way
+
+2. quality test (very slow if --num-rollout-worker is greater than 1, better set --num-batches=1 --num-test-batches=1)
+
+  python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=multi-rollout
+  python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=sglang_jax --cluster-setup=multi-rollout --num-rollout-worker=2
+
+Multi-Rollout: vllm
+
+1. quality baseline
+
+  python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm --cluster-setup=disaggregated-3-way
+
+2. quality test
+
+  python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm --cluster-setup=multi-rollout
+  python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm --cluster-setup=multi-rollout --num-rollout-worker=2
+
+3. performance benchmark
+
+  python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --rollout-engine=vllm --cluster-setup=multi-rollout --run-benchmark=True --rollout-server-mode=True --num-rollout-worker=4 --num-test-batches=96 --use-thread-pool=True
 
 """
 
@@ -228,6 +245,20 @@ parser.add_argument(
     help=(
         "Num of rollout works. Only applies when --cluster-setup=multi-rollout."
     ),
+)
+parser.add_argument(
+    "--run-benchmark",
+    type=bool,
+    default=False,
+    required=False,
+    help="Run benchmark, skip eval and train.",
+)
+parser.add_argument(
+    "--use-thread-pool",
+    type=bool,
+    default=False,
+    required=False,
+    help="Use thread pool for concurrent rollout generation.",
 )
 parser.add_argument(
     "--max-tpu-to-use",
@@ -1232,6 +1263,65 @@ grpo_trainer = grpo_learner.GRPOLearner(
 )
 
 show_hbm_usage("After creating the learner")
+
+if args.run_benchmark:
+  import tunix.perf.trace as trace
+  import concurrent.futures
+
+  rollout_devices = jax.devices()[ROLLOUT_DEVICE_START_IDX:ROLLOUT_DEVICE_END_IDX]
+  rollout_config = get_rollout_config(args.rollout_engine)
+
+  def benchmark_single(tracer, eval_dataset, warmup: bool = False):
+    for i, batch in enumerate(eval_dataset):
+      questions = batch["question"]
+      questions = [str(q) for q in questions]
+      if warmup:
+        responses = rl_cluster._rollout.generate(
+            questions, rollout_config=rollout_config
+        )
+      else:
+        with tracer.span("generate", [rollout_devices[i % args.num_rollout_worker]]) as span:
+          responses = rl_cluster._rollout.generate(
+              questions, rollout_config=rollout_config
+          )
+          span.device_end([responses.logits])
+
+
+  def benchmark_multi(tracer, eval_dataset):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_rollout_worker) as executor:
+      futures = []
+      for i, batch in enumerate(eval_dataset):
+        questions = [str(q) for q in batch["question"]]
+        
+        def run_gen(qs, idx):
+          device = rollout_devices[idx % args.num_rollout_worker]
+          with tracer.span("generate", [device]) as span:
+            res = rl_cluster._rollout.generate(
+                qs, rollout_config=rollout_config
+            )
+            span.device_end([res.logits])
+            return res
+
+        futures.append(executor.submit(run_gen, questions, i))
+      
+      for future in concurrent.futures.as_completed(futures):
+        future.result()
+
+  # warmup
+  benchmark_single(None, test_dataset, warmup=True)
+  trace._synchronize_devices()
+
+  # benchmark
+  tracer = trace.PerfTracer(devices=rollout_devices)
+  benchmark = benchmark_multi if args.use_thread_pool else benchmark_single
+  with tracer.span_group("benchmark"):
+    benchmark(tracer, test_dataset)
+    with tracer.span("sync"):
+      trace._synchronize_devices()
+
+  tracer.print()
+
+  exit()
 
 if isinstance(rl_cluster._rollout, rollout_engine_group.RolloutEngineGroup):
   rollout_sampler = rl_cluster._rollout.rollout_engines[0]._sampler  # pylint: disable=protected-access
