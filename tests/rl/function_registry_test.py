@@ -15,8 +15,7 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.rl import function_registry
-
-# from my_module import function_registry # Or include class def above
+from unittest import mock
 
 
 # --- Dummy functions for testing ---
@@ -110,6 +109,106 @@ class FunctionRegistryTest(parameterized.TestCase):
         LookupError, "No such category: 'advantage_estimator'"
     ):
       registry.list_functions("advantage_estimator")
+
+
+class GlobalHelpersTest(absltest.TestCase):
+  """Tests for the module-level helper functions."""
+
+  def setUp(self):
+    super().setUp()
+    # ISOLATION: Replace the global 'default_registry' with a fresh instance
+    # for every test. This prevents side effects between tests.
+    self.original_registry = function_registry.default_registry
+    function_registry.default_registry = function_registry.FunctionRegistry()
+
+  def tearDown(self):
+    super().tearDown()
+    # Restore the original registry
+    function_registry.default_registry = self.original_registry
+
+  def test_policy_loss_fn_helpers(self):
+    # Test the module-level decorator
+    @function_registry.register_policy_loss_fn("global_loss")
+    def my_loss():
+      return "loss"
+
+    # Test the module-level getter
+    retrieved = function_registry.get_policy_loss_fn("global_loss")
+    self.assertIs(retrieved, my_loss)
+
+  def test_advantage_estimator_helpers(self):
+    @function_registry.register_advantage_estimator("global_adv")
+    def my_adv():
+      return "adv"
+
+    retrieved = function_registry.get_advantage_estimator("global_adv")
+    self.assertIs(retrieved, my_adv)
+
+  def test_reward_manager_registration_helper(self):
+    # Note: We test get_reward_manager separately in LazyLoadingTest
+    @function_registry.register_reward_manager("global_reward")
+    def my_reward():
+      return "reward"
+
+    # We can check the registry directly to verify registration worked
+    # without triggering the lazy loader yet.
+    retrieved = function_registry.default_registry.get(
+        function_registry._REWARD_MANAGER_CATEGORY, "global_reward"
+    )
+    self.assertIs(retrieved, my_reward)
+
+
+class LazyLoadingTest(absltest.TestCase):
+  """Tests specifically for the get_reward_manager lazy import logic."""
+
+  def setUp(self):
+    super().setUp()
+    # 1. Reset the global lazy-load flag so we can test the trigger again.
+    self.original_flag = function_registry._HAVE_REWARDS_LOADED
+    function_registry._HAVE_REWARDS_LOADED = False
+
+    # 2. Reset registry to clear previous tests
+    self.original_registry = function_registry.default_registry
+    function_registry.default_registry = function_registry.FunctionRegistry()
+
+  def tearDown(self):
+    super().tearDown()
+    function_registry._HAVE_REWARDS_LOADED = self.original_flag
+    function_registry.default_registry = self.original_registry
+
+  @mock.patch.object(function_registry.importlib, "import_module")
+  def test_get_reward_manager_triggers_import_once(self, mock_import):
+    """Verifies that accessing a reward triggers the import exactly once."""
+
+    # Register a dummy reward so the 'get' call succeeds after the import
+    @function_registry.register_reward_manager("lazy_reward")
+    class DummyReward:
+      pass
+
+    # --- Call 1: Should trigger import ---
+    result = function_registry.get_reward_manager("lazy_reward")
+
+    self.assertIs(result, DummyReward)
+    # Verify we tried to import the specific file
+    mock_import.assert_called_once_with("tunix.rl.reward_manager")
+
+    # --- Call 2: Should NOT trigger import ---
+    function_registry.get_reward_manager("lazy_reward")
+
+    # Assert import was still only called once (call count didn't increase)
+    mock_import.assert_called_once()
+
+  def test_get_reward_manager_sets_flag_true(self):
+    """Verifies the global flag is actually updated."""
+    # We mock import_module so it doesn't crash trying to find a real file
+    with mock.patch.object(function_registry.importlib, "import_module"):
+      # Just calling it should flip the flag, even if lookup fails later
+      try:
+        function_registry.get_reward_manager("missing_reward")
+      except LookupError:
+        pass  # We expect a lookup error, but we care about the flag
+
+    self.assertTrue(function_registry._HAVE_REWARDS_LOADED)
 
 
 if __name__ == "__main__":
