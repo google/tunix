@@ -21,10 +21,10 @@ framework.
 """
 
 import json
-import logging
 from typing import Any, Dict, List
 import uuid
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward

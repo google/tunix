@@ -21,13 +21,13 @@ groups them into batches for further processing.
 
 from __future__ import annotations
 
-import traceback
 import asyncio
 from collections.abc import Hashable
 import copy
-import logging
+import traceback
 from typing import Any, AsyncIterable, Callable, Dict, Iterable, List, Optional, Tuple, Type
 
+from absl import logging
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -85,8 +85,7 @@ class RolloutOrchestrator:
     self.max_concurrency = max_concurrency
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
-    self._logger = logging.getLogger(self.__class__.__name__)
-    self._manager: Optional[GroupQueueManager] = None
+    self._group_queue_manager: Optional[GroupQueueManager] = None
     self._rollout_sync_lock = rollout_sync_lock
 
   async def _collect_trajectory(
@@ -162,9 +161,7 @@ class RolloutOrchestrator:
       collect_mode: An optional string to select the collection mode.
     """
     episode_count = 0
-    self._logger.debug(
-        "Starting generating trajectories(_runner) for pair %d", i
-    )
+    logging.debug("Starting generating trajectories(_runner) for pair %d", i)
 
     try:
       # Parallel execution for the group
@@ -193,11 +190,11 @@ class RolloutOrchestrator:
         self._rollout_sync_lock.release_rollout()
     except ExceptionGroup as eg:
       for e in eg.exceptions:
-        self._logger.error("Fatal error in runner for pair %d: %s", i, e)
+        logging.error("Fatal error in runner for pair %d: %s", i, e)
       traceback.print_exc()
       raise eg.exceptions[0]
     finally:
-      self._logger.debug(
+      logging.debug(
           "Runner for pair %d completed with %d episodes", i, episode_count
       )
 
@@ -254,17 +251,17 @@ class RolloutOrchestrator:
       raise ValueError(
           f"num_episodes must be a positive integer, got {num_episodes}"
       )
-    self._logger.info(
+    logging.info(
         "Starting run_producers_from_stream with %d concurrency",
         self.max_concurrency,
     )
 
     if not self.max_concurrency:
       raise ValueError("max_concurrency must be set to use start_producers.")
-    if self._manager:
+    if self._group_queue_manager:
       raise RuntimeError("Orchestrator is already running.")
 
-    self._manager = GroupQueueManager(
+    self._group_queue_manager = GroupQueueManager(
         group_size=group_size, max_open_buckets=max_open_groups
     )
     self._stop.clear()
@@ -280,7 +277,7 @@ class RolloutOrchestrator:
     stream_exhausted = False
 
     try:
-      self._logger.debug(
+      logging.debug(
           "Orchestrator producer loop starting with %d concurrency",
           self.max_concurrency,
       )
@@ -294,7 +291,7 @@ class RolloutOrchestrator:
             and not self._stop.is_set()
         ):
           try:
-            self._logger.debug("Getting one pair: %d", next_pair_index)
+            logging.debug("Getting one pair: %d", next_pair_index)
             if is_async_stream:
               agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:
@@ -304,7 +301,7 @@ class RolloutOrchestrator:
                     i=next_pair_index,
                     agent=agent,
                     env=env,
-                    manager=self._manager,
+                    manager=self._group_queue_manager,
                     group_key=group_key,
                     num_episodes=num_episodes,
                     start_step_fn=start_step_fn,
@@ -315,11 +312,11 @@ class RolloutOrchestrator:
             self._tasks.append(task)
             next_pair_index += 1
           except (StopIteration, StopAsyncIteration):
-            self._logger.debug("Pairs stream exhausted.")
+            logging.debug("Pairs stream exhausted.")
             stream_exhausted = True
             break
           except Exception as e:
-            self._logger.error(
+            logging.error(
                 "Error getting next trajectory pair %d: %s", next_pair_index, e
             )
             raise e
@@ -347,20 +344,20 @@ class RolloutOrchestrator:
       if self._tasks:
         await asyncio.gather(*self._tasks, return_exceptions=True)
     except asyncio.CancelledError:
-      self._logger.debug("Producer task was cancelled.")
+      logging.debug("Producer task was cancelled.")
       # The consumer's `finally` block will handle cleanup.
       raise
     except Exception as e:
-      self._logger.error("Producer task failed: %s", e)
-      if self._manager:
-        await self._manager.put_exception(e)
+      logging.error("Producer task failed: %s", e)
+      if self._group_queue_manager:
+        await self._group_queue_manager.put_exception(e)
       raise
     finally:
       # Shield the final cleanup step to ensure it runs even if the producer
       # task is being cancelled. This prevents leaving the manager in an
       # inconsistent state.
-      if self._manager:
-        await asyncio.shield(self._manager.prepare_clear())
+      if self._group_queue_manager:
+        await asyncio.shield(self._group_queue_manager.prepare_clear())
 
   async def yield_batches(self, batch_size: int):
     """Yields batches of trajectories from the internal queue.
@@ -381,11 +378,11 @@ class RolloutOrchestrator:
       RuntimeError: If `run_producers_from_stream` has not been called to start
         the producers.
     """
-    if not self._manager:
+    if not self._group_queue_manager:
       raise RuntimeError("Producers have not been started.")
     try:
       while not self._stop.is_set():
-        batch = await self._manager.get_batch(batch_size)
+        batch = await self._group_queue_manager.get_batch(batch_size)
         if not batch:
           # If batch is empty, it means producers are done and queue is empty.
           break
@@ -394,7 +391,7 @@ class RolloutOrchestrator:
       # This is the normal shutdown path when the consumer stops listening.
       pass
     except Exception as e:
-      self._logger.error("Error yielding batches: %s", e)
+      logging.error("Error yielding batches: %s", e)
       raise
     finally:
       # This block executes when the consumer (the 'async for' loop) stops.
@@ -404,7 +401,7 @@ class RolloutOrchestrator:
       # (`run_producers_from_stream`) to handle the full cleanup, as it has
       # the correct context to await its child tasks.
       self._stop.set()
-      self._logger.debug("Consumer stopped; signaling producers to stop.")
+      logging.debug("Consumer stopped; signaling producers to stop.")
       for t in self._tasks:
         if not t.done():
           t.cancel()
