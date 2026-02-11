@@ -17,7 +17,7 @@
 
 import functools
 import gc
-import logging
+from absl import logging
 import math
 import re
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
