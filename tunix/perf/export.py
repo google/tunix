@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import functools
 from typing import Callable
+from typing import Protocol
 
 from absl import logging
-
 import numpy as np
 from tunix.perf import metrics
 from tunix.perf import perfetto
@@ -38,6 +38,16 @@ SpanGroup = span.SpanGroup
 
 MetricsExportFn = Callable[[PerfSpanQuery], MetricsT]
 PerfettoTraceWriter = perfetto.PerfettoTraceWriter
+
+
+class _GrpoExtractSpansFn(Protocol):
+
+  def __call__(
+      self, query: PerfSpanQuery
+  ) -> tuple[
+      bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
+  ]:
+    return (False, None, None, None, None, None)
 
 
 class PerfMetricsExport:
@@ -64,6 +74,8 @@ class PerfMetricsExport:
   def from_role_to_devices(
       role_to_devices: dict[str, list[str]],
       trace_writer: PerfettoTraceWriter | None = None,
+      log_rollout_time_at_micro_batch_level: bool = False,
+      log_actor_train_time_at_micro_batch_level: bool = False,
   ) -> MetricsExportFn:
     """Creates a metrics export function based on the role to devices mapping.
 
@@ -72,6 +84,12 @@ class PerfMetricsExport:
         identifiers.
       trace_writer: An optional PerfettoTraceWriter to log performance traces.
         If None, a default writer is created.
+      log_rollout_time_at_micro_batch_level: Whether to log rollout time at the
+        micro batch level. This is a temporary flag. It will be removed once
+        metrics are exported at the micro batch.
+      log_actor_train_time_at_micro_batch_level: Whether to log actor train time
+        at the micro batch level. This is a temporary flag. It will be removed
+        once metrics are exported at the micro batch.
 
     Returns:
       A callable function that takes a PerfSpanQuery and returns MetricsT.
@@ -81,38 +99,61 @@ class PerfMetricsExport:
       # If no trace writer is provided, create a default one.
       logging.info("Creating a default trace writer for metrics export.")
       trace_writer = PerfettoTraceWriter(None)
+
     r2d = role_to_devices
     if r2d["rollout"] == r2d["actor"] == r2d["refer"]:
       logging.info(
           "Collecting perf metrics with rollout, actor and reference colocated."
       )
-      return partial(
-          PerfMetricsExport._grpo_metrics_colocated, r2d, trace_writer
-      )
+      export_fn = PerfMetricsExport._grpo_metrics_colocated
     elif r2d["rollout"] != r2d["actor"] == r2d["refer"]:
       logging.info(
           "Collecting perf metrics with rollout on one mesh, and actor and"
           " reference on another mesh."
       )
-      return partial(
-          PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2,
-          r2d,
-          trace_writer,
-      )
+      export_fn = PerfMetricsExport._grpo_metrics_rollout_1_actor_2_reference_2
     elif r2d["rollout"] != r2d["actor"] != r2d["refer"]:
       logging.info(
           "Collecting perf metrics fully disaggregated: rollout, actor and"
           " reference on three different meshes."
       )
-      return partial(
-          PerfMetricsExport._grpo_metrics_fully_disaggregated, r2d, trace_writer
-      )
+      export_fn = PerfMetricsExport._grpo_metrics_fully_disaggregated
     else:
       raise ValueError("Unsupported mesh configuration.")
 
+    extract_spans_fn = partial(
+        PerfMetricsExport._grpo_extract_spans_and_groups,
+        role_to_devices=role_to_devices,
+        log_rollout_time_at_micro_batch_level=log_rollout_time_at_micro_batch_level,
+        log_actor_train_time_at_micro_batch_level=log_actor_train_time_at_micro_batch_level,
+    )
+    return partial(export_fn, extract_spans_fn, trace_writer)
+
   @staticmethod
-  def from_cluster_config(cluster_config: ClusterConfig) -> MetricsExportFn:
-    """Creates a metrics export function based on the mesh topology in cluster config."""
+  def from_cluster_config(
+      cluster_config: ClusterConfig,
+      log_rollout_time_at_micro_batch_level: bool = False,
+      log_actor_train_time_at_micro_batch_level: bool = False,
+  ) -> MetricsExportFn:
+    """Creates a metrics export function based on the mesh topology in cluster config.
+
+    This function extracts the device mappings from the `cluster_config` to
+    determine the mesh configuration (colocated, partially disaggregated, or
+    fully disaggregated) and returns the appropriate metrics export function.
+
+    Args:
+      cluster_config: The cluster configuration containing role to mesh
+        mappings.
+      log_rollout_time_at_micro_batch_level: Whether to log rollout time at
+        micro batch level. This is a temporary flag. It will be removed once
+        metrics are exported at the micro batch.
+      log_actor_train_time_at_micro_batch_level: Whether to log actor train time
+        at micro batch level. This is a temporary flag. It will be removed once
+        metrics are exported at the micro batch.
+
+    Returns:
+      A callable function that takes a PerfSpanQuery and returns MetricsT.
+    """
 
     rollo_mesh = cluster_config.role_to_mesh[rl_cluster.Role.ROLLOUT]
     actor_mesh = cluster_config.role_to_mesh[rl_cluster.Role.ACTOR]
@@ -141,6 +182,8 @@ class PerfMetricsExport:
             "refer": list(refer_devices),
         },
         trace_writer=PerfettoTraceWriter(export_dir),
+        log_rollout_time_at_micro_batch_level=log_rollout_time_at_micro_batch_level,
+        log_actor_train_time_at_micro_batch_level=log_actor_train_time_at_micro_batch_level,
     )
 
   # TODO(yangmu): DEPRECATED: remove after all users use the new API.
@@ -152,15 +195,14 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_colocated(
-      role_to_devices: dict[str, list[str]],
+      extract_spans_fn: _GrpoExtractSpansFn,
       trace_writer: PerfettoTraceWriter,
       query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are colocated on the same mesh.
 
     Args:
-      role_to_devices: A dictionary mapping role names to a list of device
-        identifiers.
+      extract_spans_fn: A callable to extract spans and span groups.
       trace_writer: A PerfettoTraceWriter to log performance traces.
       query: The PerfSpanQuery object to extract spans from.
 
@@ -176,7 +218,7 @@ class PerfMetricsExport:
         refer_inference_spans,
         actor_train_groups,
         actor_train_step_spans,
-    ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
+    ) = extract_spans_fn(query=query)
     if not ok:
       return {}
 
@@ -230,7 +272,7 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_rollout_1_actor_2_reference_2(
-      role_to_devices: dict[str, list[str]],
+      extract_spans_fn: _GrpoExtractSpansFn,
       trace_writer: PerfettoTraceWriter,
       query: PerfSpanQuery,
   ) -> MetricsT:
@@ -254,7 +296,7 @@ class PerfMetricsExport:
         refer_inference_spans,
         actor_train_groups,
         actor_train_step_spans,
-    ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
+    ) = extract_spans_fn(query=query)
     if not ok:
       return {}
 
@@ -323,7 +365,7 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_metrics_fully_disaggregated(
-      role_to_devices: dict[str, list[str]],
+      extract_spans_fn: _GrpoExtractSpansFn,
       trace_writer: PerfettoTraceWriter,
       query: PerfSpanQuery,
   ) -> MetricsT:
@@ -347,7 +389,7 @@ class PerfMetricsExport:
         refer_inference_spans,
         actor_train_groups,
         actor_train_step_spans,
-    ) = PerfMetricsExport._grpo_extract_spans_and_groups(role_to_devices, query)
+    ) = extract_spans_fn(query=query)
     if not ok:
       return {}
 
@@ -421,7 +463,11 @@ class PerfMetricsExport:
 
   @staticmethod
   def _grpo_extract_spans_and_groups(
-      role_to_devices: dict[str, list[str]], query: PerfSpanQuery
+      role_to_devices: dict[str, list[str]],
+      *,  # force keyword arguments
+      log_rollout_time_at_micro_batch_level: bool,
+      log_actor_train_time_at_micro_batch_level: bool,
+      query: PerfSpanQuery,
   ) -> tuple[
       bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
   ]:
@@ -473,6 +519,23 @@ class PerfMetricsExport:
         actor_train_step_span.extend(
             actor_train_group.find_all_inner_spans("peft_train_step")
         )
+
+    if (
+        log_actor_train_time_at_micro_batch_level
+        or log_rollout_time_at_micro_batch_level
+    ):
+      global_step_index: int = len(
+          query().main().all_groups("global_step").get()
+      )
+      logging.info("global step [%s]", global_step_index)
+    if log_actor_train_time_at_micro_batch_level:
+      for i, time in enumerate(
+          [group.duration for group in actor_train_groups]
+      ):
+        logging.info("actor train time [%s] = %s sec", i, time)
+    if log_rollout_time_at_micro_batch_level:
+      for i, time in enumerate([span.duration for span in rollout_span]):
+        logging.info("rollout time [%s] = %s sec", i, time)
 
     return (
         True,
