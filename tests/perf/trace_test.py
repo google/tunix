@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -58,7 +60,7 @@ def timelines_tostring(tracer: PerfTracer) -> list[str]:
 
 class TracerTest(parameterized.TestCase):
 
-  @patch("time.perf_counter")
+  @mock.patch.object(time, "perf_counter", autospec=True)
   def test_host_ok(self, mock_perf_counter):
     mock_perf_counter.side_effect = [0.0, 2.0, 3.0]
 
@@ -76,7 +78,7 @@ class TracerTest(parameterized.TestCase):
         ],
     )
 
-  @patch("time.perf_counter")
+  @mock.patch.object(time, "perf_counter", autospec=True)
   def test_device_ok(self, mock_perf_counter):
     mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0]
     waitlist = mock_array()
@@ -105,7 +107,7 @@ class TracerTest(parameterized.TestCase):
         ],
     )
 
-  @patch("time.perf_counter")
+  @mock.patch.object(time, "perf_counter", autospec=True)
   def test_device_multi_ok(self, mock_perf_counter):
     mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0]
     waitlist = mock_array()
@@ -135,7 +137,7 @@ class TracerTest(parameterized.TestCase):
         ],
     )
 
-  @patch("time.perf_counter")
+  @mock.patch.object(time, "perf_counter", autospec=True)
   def test_device_span_begin_algorithm(self, mock_perf_counter):
     mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0, 4.0, 6.0, 7.0]
     waitlist = mock_array()
@@ -168,7 +170,7 @@ class TracerTest(parameterized.TestCase):
         ],
     )
 
-  @patch("time.perf_counter")
+  @mock.patch.object(time, "perf_counter", autospec=True)
   def test_device_all_matcher(self, mock_perf_counter):
     mock_perf_counter.side_effect = [0.0, 2.0, 3.0, 5.0, 5.0]
     waitlist = mock_array()
@@ -202,7 +204,7 @@ class TracerTest(parameterized.TestCase):
         ],
     )
 
-  @patch("time.perf_counter")
+  @mock.patch.object(time, "perf_counter", autospec=True)
   def test_span_group_ok(self, mock_perf_counter):
     mock_perf_counter.side_effect = [
         0.0,
@@ -279,6 +281,84 @@ class TracerTest(parameterized.TestCase):
         name for name in dir(PerfTracer()) if not name.startswith("_")
     ]
     self.assertEqual(noop_public_attrs, perf_public_attrs)
+
+  def test_device_span_with_explicit_group(self):
+    timeline = DeviceTimeline("tpu0", 0.0)
+
+    # Create nested structure: group1 > group2
+    group1 = timeline.span_group_begin("group1", 0.5)
+    group2 = timeline.span_group_begin("group2", 0.6)
+
+    # Add a span to group1 explicitly
+    timeline.device_span(
+        "span_in_group1", thread_begin=0.7, end=0.8, group=group1
+    )
+
+    # Add a span implicitly (should go to group2)
+    timeline.device_span("span_in_group2", thread_begin=0.9, end=1.0)
+
+    with self.subTest("Verify group1 structure"):
+      self.assertLen(group1.inner, 2)
+      self.assertIs(group1.inner[0], group2)
+      self.assertEqual(group1.inner[1].name, "span_in_group1")
+
+    with self.subTest("Verify group2 structure"):
+      self.assertLen(group2.inner, 1)
+      self.assertEqual(group2.inner[0].name, "span_in_group2")
+
+  @mock.patch.object(trace, "_async_wait", autospec=True)
+  @mock.patch.object(time, "perf_counter", autospec=True)
+  def test_device_span_async_parent_capture(
+      self, mock_perf_counter, mock_async_wait
+  ):
+    mock_perf_counter.side_effect = [
+        0.0,  # 1. __init__ (born)
+        1.0,  # 2. span_group("GroupA") begin
+        2.0,  # 3. span("Span1") begin (thread)
+        3.0,  # 4. span("Span1") end (thread)
+        4.0,  # 5. span_group("GroupB") begin
+        5.0,  # 6. on_success callback for Span1 (device end time)
+        6.0,  # 7. span_group("GroupB") end
+        7.0,  # 8. span_group("GroupA") end
+    ]
+    waitlist = mock_array()
+
+    captured_success_callback = []
+
+    def fake_async_wait(waitlist, success, failure):
+      del waitlist, failure  # Unused
+      captured_success_callback.append(success)
+      return mock.create_autospec(threading.Thread, instance=True)
+
+    mock_async_wait.side_effect = fake_async_wait
+
+    tracer = PerfTracer(devices=["tpu0"])
+
+    with tracer.span_group("GroupA"):
+      # Span1 is initiated in GroupA.
+      with tracer.span("Span1", devices=["tpu0"]) as span:
+        span.device_end(waitlist)
+      # Span1 is still active when we enter GroupB, and ends in GroupB.
+      with tracer.span_group("GroupB"):
+        if captured_success_callback:
+          captured_success_callback[0]()
+
+    device_timeline = tracer._get_or_create_device_timeline("tpu0")
+    root = device_timeline.root
+
+    with self.subTest("Root contains GroupA"):
+      self.assertLen(root.inner, 1)
+      group_a = root.inner[0]
+      self.assertEqual(group_a.name, "GroupA")
+
+    with self.subTest("GroupA contains Span1 and GroupB"):
+      group_a_children_names = [child.name for child in group_a.inner]
+      self.assertIn("Span1", group_a_children_names)
+      self.assertIn("GroupB", group_a_children_names)
+
+    with self.subTest("GroupB should NOT have Span1"):
+      group_b = [child for child in group_a.inner if child.name == "GroupB"][0]
+      self.assertEmpty(group_b.inner)
 
 
 if __name__ == "__main__":
