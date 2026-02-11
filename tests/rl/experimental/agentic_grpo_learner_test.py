@@ -41,10 +41,12 @@ import orbax.checkpoint as ocp
 from tunix.generate import tokenizer_adapter
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.sft import metrics_logger
 from tunix.rl.experimental import agentic_grpo_learner
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common
+from tunix.utils import trajectory_logger
 from typing_extensions import override
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.agents.agent_types import Action, Step
@@ -1110,6 +1112,87 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     batch2 = {"prompts": ["prompt3"]}
     grpo_learner._put_prompts_to_queue(prompt_queue, batch2)
     self.assertIsNone(prompt_queue.get_nowait())
+
+  def test_trajectory_logging(self):
+    log_dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, log_dir)
+    vocab = test_common.MockVocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=2,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+            metrics_logging_options=metrics_logger.MetricsLoggerOptions(
+                log_dir=log_dir
+            ),
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        loss_algo="grpo",
+    )
+    grpo_learner = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
+        chat_parser=MockChatParser(),
+    )
+    train_ds = _dummy_dataset(MySource(data=["1"], repeat=1), batch_size=1)
+
+    with mock.patch.object(
+        trajectory_logger, "log_item"
+    ) as mock_log_item, mock.patch.object(
+        rl_cluster, "generate", side_effect=_mock_generate
+    ):
+      grpo_learner.train(train_ds)
+      if grpo_learner._trajectory_logger:
+        grpo_learner._trajectory_logger.stop()
+      self.assertEqual(grpo_learner.rl_cluster.global_steps, 1)
+      self.assertEqual(mock_log_item.call_count, grpo_config.num_generations)
+
+      for i in range(grpo_config.num_generations):
+        traj = mock_log_item.call_args_list[i][0][1]
+        self.assertIn("conversation_text", traj)
+        conversation = traj["conversation_text"]
+        assistant_msgs = [
+            m for m in conversation if m["role"] == "assistant"
+        ]
+        self.assertNotEmpty(assistant_msgs)
+        self.assertIn(assistant_msgs[0]["content"], _MOCK_RESPONSES)
+        self.assertEqual(traj.get("policy_version"), 0)
 
   @unittest.skip("b/461854722")
   def test_grpo_with_lora_model(self):

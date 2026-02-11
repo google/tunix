@@ -46,6 +46,7 @@ from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.rl.experimental import agentic_rl_learner
+from tunix.utils import trajectory_logger
 
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
@@ -179,6 +180,21 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         env_kwargs=env_kwargs,
     )
 
+    self._trajectory_logger = None
+    metrics_logger_options = (
+        self.rl_cluster.cluster_config.training_config.metrics_logging_options
+    )
+    metrics_log_dir = (
+        metrics_logger_options.log_dir if metrics_logger_options else None
+    )
+
+    if metrics_log_dir:
+      self._trajectory_logger = trajectory_logger.AsyncTrajectoryLogger(
+          metrics_log_dir
+      )
+    else:
+      logging.warning("Metrics log dir is None, skipping trajectory logging.")
+
     # Workaround to pass loss fn with algorithm flag
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
@@ -246,8 +262,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_texts = []
     completion_tokens_list = []
     policy_versions_list = []
+    trajectories_to_log = []
 
     for item in results:
+      trajectories_to_log.append(item.traj)
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(
           message["content"]
@@ -260,6 +278,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
+
+    # Log trajectory.
+    if self._trajectory_logger and trajectories_to_log:
+      for traj in trajectories_to_log:
+        self._trajectory_logger.log_item_async(traj)
 
     # All results in a group share the same prompt.
     prompt_tokens = results[0].traj.get("prompt_tokens")
