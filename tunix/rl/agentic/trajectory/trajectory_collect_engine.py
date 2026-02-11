@@ -278,7 +278,6 @@ class TrajectoryCollectEngine:
         bool: True if the episode is done (either by environment or timeout),
           False otherwise.
     """
-    print("One step...")
     resp = await asyncio.get_event_loop().run_in_executor(
         None,
         self.model_call,

@@ -42,6 +42,8 @@ logging.use_absl_handler()
 logging.set_verbosity(logging.INFO)
 logging.set_stderrthreshold('info')
 
+# import os
+# os.environ["WANDB_MODE"] = "online"
 
 try:
   wandb.login()
@@ -50,32 +52,6 @@ except wandb.errors.UsageError as e:
   # Handle the error, maybe disable W&B logging
   wandb.init(mode="disabled")
 
- # Ensure W&B is initialized for all logging paths (including trainer close hooks)
-wandb_initialized = False
-try:
-  if wandb.run is None:
-    # Generate timestamp-based run name
-    from datetime import datetime
-    run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    wandb.init(
-        project="tunix",
-        name=run_name,
-        reinit=False,
-    )
-    print("W&B run URL:", wandb.run.url)
-    wandb_initialized = True
-  else:
-    wandb_initialized = True
-except Exception as e:
-  print(f"Warning: Failed to initialize WandB: {e}. Continuing without WandB logging.")
-  wandb_initialized = False
-
-# If WandB failed to initialize, disable it globally to prevent metrics logger from trying
-if not wandb_initialized:
-  import os
-
-  os.environ["WANDB_MODE"] = "disabled"
-  print("Disabled WandB globally to prevent metrics logger conflicts")
 
 try:
   from etils import ecolab
@@ -103,6 +79,7 @@ with cm:
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
   from tunix.utils import compat
+  from tunix.sft import profiler
 
 # %%
 # ====== Data ======
@@ -121,8 +98,8 @@ MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 8192
+MAX_PROMPT_LENGTH = 128
+TOTAL_GENERATION_STEPS = 256
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -145,8 +122,8 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 32
+BATCH_SIZE = 16
+MINI_BATCH_SIZE = 8
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -157,7 +134,7 @@ NUM_EPOCHS = 100  # can potentially train for more epochs
 
 # Number of training steps.
 # MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
-MAX_STEPS = 100
+MAX_STEPS = 10
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -230,11 +207,12 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/02")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 
+PROFILER_PATH = os.path.join("gs://linchai-bucket-dev/rl/profiler", "deepscaler_profiler")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 import pandas as pd
@@ -294,7 +272,7 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 # %%
 train_dataset = create_datasets()
 
-train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
+train_dataset = train_dataset.batch(BATCH_SIZE)[:5]
 if TRAIN_FRACTION == 1.0:
   print("repeating full train dataset for NUM_EPOCHS: ", NUM_EPOCHS)
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
@@ -422,8 +400,15 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
+        # profiler
+        profiler_options = profiler.ProfilerOptions(
+          profiler_steps=1,
+          skip_first_n_steps=1,
+          set_profile_options=False,
+          log_dir=PROFILER_PATH,
+        )
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -441,9 +426,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rollout_sglang_jax_init_with_random_weights=True,
         rollout_sglang_jax_disable_radix_cache=True,
         rollout_sglang_jax_enable_deterministic_sampling=False,
-        rollout_sglang_jax_chunked_prefill_size=2048,
+        rollout_sglang_jax_chunked_prefill_size=256,
         rollout_sglang_jax_max_running_requests=32,
-        rollout_sglang_jax_page_size=128,
+        rollout_sglang_jax_page_size=64,
         # vllm-tpu specific configs
         # rollout_vllm_model_version="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
         # rollout_vllm_hbm_utilization=0.2,
@@ -498,11 +483,3 @@ show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
-
-# Finish WandB after all cleanup operations are complete
-if wandb_initialized:
-  try:
-    wandb.finish() 
-    print("WandB session finished successfully")
-  except Exception as e:
-    print(f"Warning: Failed to finish WandB session: {e}")

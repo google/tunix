@@ -100,7 +100,7 @@ class RolloutOrchestrator:
     engine_kwargs = self.engine_kwargs.copy()
     if model_call_kwargs:
       engine_kwargs["model_call_kwargs"] = model_call_kwargs
-    print(f"Run engine...")
+    # print(f"Run engine...")
     engine = self.engine_cls(agent, env, **engine_kwargs)
     if mode:
       return await engine.collect(mode)
@@ -119,6 +119,7 @@ class RolloutOrchestrator:
   ):
     """Collects one trajectory and queues it."""
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+    print(f"Collected trajectory for pair {pair_idx=}, episode {episode_idx=}: {traj=}")
     gid = group_key(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
     item = TrajectoryItem(

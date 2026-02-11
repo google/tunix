@@ -620,6 +620,7 @@ class RLCluster:
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
     for metric_name, (value, op) in metrics_buffer.metrics.items():
+      print(f"Logging metric {metric_name} with value {value} and op {op}")
       # Convert to numpy array immediately.
       # This handles nested lists, mixed types, and JAX arrays automatically.
       try:
@@ -729,6 +730,7 @@ class RLCluster:
       mode: The mode of the workload, either TRAIN or EVAL.
       step: The step number for the metrics. Only used in TRAIN mode.
     """
+    print(f"Buffering metrics at step {step} for mode {mode}: {metrics}")
     if mode == Mode.TRAIN:
       buffered_metrics = self._buffered_train_metrics
     else:
@@ -751,10 +753,12 @@ class RLCluster:
         cur_metrics.metrics[metric_name][0].append(value)
 
     # Global steps are incremented, log the previous metrics.
+    print(f"Current buffered train metrics not None: {len(self._buffered_train_metrics)}, global_steps: {self.global_steps}, _buffered_train_metrics[0].global_steps: {self._buffered_train_metrics[0].global_steps if self._buffered_train_metrics else 'None'}")
     if (
         self._buffered_train_metrics
         and self._buffered_train_metrics[0].global_steps < self.global_steps
     ):
+      print(f"Logging buffered train metrics at global_steps {self.global_steps}")
       for m in [self._buffered_train_metrics.pop(0)]:
         self._log_metrics(m)
     if (

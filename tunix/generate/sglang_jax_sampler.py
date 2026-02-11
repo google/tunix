@@ -353,7 +353,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       input_ids: List[List[int]],
       sampling_params: List[dict],
   ):
-    print("Generating with SGLang-Jax sampler...")
     coro = self.engine.async_generate(
         input_ids=input_ids,
         sampling_params=sampling_params,

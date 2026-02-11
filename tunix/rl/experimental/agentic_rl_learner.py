@@ -173,6 +173,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.rl_cluster.global_steps = (
         self.rl_cluster.actor_trainer.restored_global_step()
     )
+    print(f"Initialized AgenticRLLearner with global_steps={self.rl_cluster.global_steps}")
     # Current iter steps for micro-batch based training.
     self._iter_steps = 0
     self._eval_iter_steps = 0

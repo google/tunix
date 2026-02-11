@@ -114,6 +114,7 @@ class MetricsLogger:
     )
     mode_metrics[metric_name].append(scalar_value)
 
+    print(f"Jax monitoring log: {metrics_prefix}/{mode}/{metric_name} = {scalar_value} at step {step}")
     jax.monitoring.record_scalar(
         f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step
     )
