@@ -175,19 +175,36 @@ class CheckpointManager:
     else:
       abstract_params = nnx.state(model)
 
-    def map_to_pspec(data):
-      return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
-
     model_cp_args = ocp.args.PyTreeRestore(
         item=abstract_params,
-        restore_args=jax.tree_util.tree_map(map_to_pspec, abstract_params),
+        restore_args=ocp.checkpoint_utils.construct_restore_args(
+            target=abstract_params
+        ),
     )
+
+    def fix_sharding(state):
+      # Scalar values in optimizer states like step and count is initialized as
+      # SingleDeviceSharding, which will fail if optimizer is sharded. To fix
+      # it, we will replicate the scalar values.
+      shardings = jax.tree_util.tree_map(lambda x: x.sharding, state)
+      try:
+        named_sharding = next(
+            s
+            for s in jax.tree_util.tree_leaves(shardings)
+            if isinstance(s, jax.sharding.NamedSharding)
+        )
+        return nnx.get_named_sharding(optimizer_state, named_sharding.mesh)
+      except StopIteration:
+        return shardings
 
     if optimizer is not None and 'optimizer_state' in metadata.item_metadata:
       optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      fixed_sharding = fix_sharding(optimizer_state)
       optimizer_cp_args = ocp.args.PyTreeRestore(
           item=optimizer_state,
-          restore_args=jax.tree_util.tree_map(map_to_pspec, optimizer_state),
+          restore_args=ocp.checkpoint_utils.construct_restore_args(
+              target=optimizer_state, sharding_tree=fixed_sharding
+          ),
       )
       ckpt = self._checkpoint_manager.restore(
           step,

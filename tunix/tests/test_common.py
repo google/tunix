@@ -86,12 +86,16 @@ class Decoder(nnx.Module):
         out_features=32,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('fsdp', 'tp')),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros_init(), ('tp',)),
     )
     self.w2 = nnx.Linear(
         in_features=32,
         out_features=16,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('tp', 'fsdp')),
+        bias_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), ('fsdp',)
+        ),
     )
 
   def __call__(self, x):
