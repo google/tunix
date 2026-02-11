@@ -86,6 +86,9 @@ class SglangJaxConfig:
   load_format: str = "auto"
   max_running_requests: int = None
 
+  # Logging knob to enable debugging at different verbosity levels.
+  log_level: str = "info"
+
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   """A sampler for sglang-jax-style autoregressive decoding using JAX and NNX models.
@@ -194,6 +197,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
 
+    args["log_level"] = config.log_level
     return args
 
   def _validate_config(self, config: SglangJaxConfig):
