@@ -376,6 +376,14 @@ _TEST_MODEL_INFOS = (
         config_id='qwen3_30b_a3b',
         category='qwen3',
     ),
+    ModelTestInfo(
+        id='Qwen/Qwen3-32B',
+        name='qwen3-32b',
+        family='qwen3',
+        version='32b',
+        config_id='qwen3_32b',
+        category='qwen3',
+    ),
 )
 
 _ALL_MODEL_MODULES = [
