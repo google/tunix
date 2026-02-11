@@ -41,11 +41,11 @@ from __future__ import annotations
 
 from concurrent import futures
 import contextlib
-import logging
 import threading
 import time
 from typing import Any, Callable
 
+from absl import logging
 import jax
 import jaxtyping
 import numpy as np

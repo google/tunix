@@ -15,13 +15,9 @@
 """Agent implementation for single-turn interactions."""
 
 import copy
-import logging
 
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
-
-
-logger = logging.getLogger(__name__)
 
 
 class ModelAgent(base_agent.ConversationAgentBase):

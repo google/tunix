@@ -15,11 +15,10 @@
 """Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
 
 import dataclasses
-import logging
 import math
-import re
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -131,9 +130,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           config.mapping_config.lora_to_hf_transpose_keys
       )
 
-    self._logger = logging.getLogger(self.__class__.__name__)
-
-    self._logger.debug(f"{self.to_hf_key_mappings=}")
+    logging.debug(f"{self.to_hf_key_mappings=}")
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly

@@ -56,6 +56,7 @@ class TrajectoryCollectEngine:
       env: BaseTaskEnv,
       *,
       model_call: Callable[Concatenate[Dict[str, str], P], str],
+      model_call_kwargs: Optional[Dict[str, Any]] = None,
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
@@ -63,7 +64,6 @@ class TrajectoryCollectEngine:
       timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
-      model_call_kwargs: Optional[Dict[str, Any]] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -74,16 +74,17 @@ class TrajectoryCollectEngine:
         model_call (Callable): Function that takes chat completions as first
           argument with optional kwargs and returns model response string.
           Handles the actual LLM inference.
+        model_call_kwargs (Optional[Dict[str, Any]]): Optional kwargs to pass to
+          model_call.
         final_reward_fn (Optional[Callable]): Optional function to compute
           additional reward at episode end. Takes (task, response) and returns
           float. Defaults to zero if not provided.
-        gamma (float): Discount factor for return calculation (1.0 = no
+        gamma (float): Discount factor for MC reward calculation (1.0 = no
           discounting)
         timeout (float): Maximum episode duration in seconds before timeout
           termination
         tokenizer: Optional tokenizer for converting messages to token IDs
         chat_parser: Optional chat parser for formatting messages
-        model_call_kwargs: Optional kwargs to pass to model_call.
     """
     self.agent = agent
     self.env = env
