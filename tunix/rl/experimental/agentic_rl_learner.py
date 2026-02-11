@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import abc
 import asyncio
-from concurrent import futures
 import contextlib
 import dataclasses
 import itertools
 import queue
 import threading
-from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
+from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
 
 from absl import logging
 import flax
