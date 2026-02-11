@@ -163,8 +163,8 @@ if NOTEBOOK_ENV == "g3":
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/rl/data"
-  MODEL_PATH_PREFIX = "gs://tunix/rl/models"
+  DATA_PATH_PREFIX = "gs://tunix/data"
+  MODEL_PATH_PREFIX = "gs://tunix/models"
   CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
