@@ -184,7 +184,7 @@ Next, we load the English-French translation dataset. Note you can use your own
 datasets too (PyGrain, Hugging Face dataset, TFDS, etc.).
 
 ```sh
-gsutil cp gs://gemma-data/tokenizers/tokenizer_gemma3.model .
+gcloud storage cp gs://gemma-data/tokenizers/tokenizer_gemma3.model .
 ```
 
 ```python
