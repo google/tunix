@@ -404,13 +404,27 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       i = 0
       if is_async_iterator:
         async for single_example in prompt_iterator:
-          agent, env = self._create_agent_env_pair(single_example, group_id=i)
-          yield agent, env
+          # Create agent-env pairs in parallel for a group to handle potential
+          # cold start latency on env creation.
+          agent_env_pairs = await asyncio.gather(*[
+              self.loop.run_in_executor(
+                  None, self._create_agent_env_pair, single_example, i
+              )
+              for _ in range(num_generations)
+          ])
+          for agent, env in agent_env_pairs:
+            yield agent, env
           i += 1
       else:
         for single_example in prompt_iterator:
-          agent, env = self._create_agent_env_pair(single_example, group_id=i)
-          yield agent, env
+          agent_env_pairs = await asyncio.gather(*[
+              self.loop.run_in_executor(
+                  None, self._create_agent_env_pair, single_example, i
+              )
+              for _ in range(num_generations)
+          ])
+          for agent, env in agent_env_pairs:
+            yield agent, env
           i += 1
 
     # Start producers in the background.
@@ -419,7 +433,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             pairs_stream=pairs_stream_generator(),
             group_size=self.algo_config.num_generations,
             group_key=lambda i, env, traj: env.extra_kwargs["group_id"],
-            num_episodes=num_generations,
             collect_mode=collect_mode,
         )
     )
@@ -475,7 +488,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     micro_batches = [cached_inputs_for_window[0]] * num_generations
     training_input = rl_utils.merge_micro_batches(micro_batches)
 
-    prompt_index = batch_results[0].pair_index
+    prompt_index = batch_results[0].pair_index // num_generations
     if mode == rl_cluster_lib.Mode.TRAIN and self._full_batch_size:
       expected_step = prompt_index // self._full_batch_size
     else:
