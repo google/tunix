@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from absl.testing import parameterized
+from absl.testing import absltest
 from flax import nnx
 import jax
 from jax import sharding
@@ -170,7 +171,8 @@ class UtilsTest(parameterized.TestCase):
 
   def test_transfer_state_with_mappings_tranpose_and_sharding_device(self):
     device_count = len(jax.devices())
-    assert device_count % 2 == 0, "This example assumes even number of devices"
+    if device_count < 2 or device_count % 2 != 0:
+      self.skipTest("This example assumes even number of devices >= 2")
 
     devices_array = np.array(jax.devices()).reshape((device_count // 2, 2))
     mesh = Mesh(devices_array, axis_names=("data", "model"))
@@ -818,14 +820,13 @@ class UtilsTest(parameterized.TestCase):
     self.assertFalse(hasattr(dst_state_mixed['decoder'], 'layer1'))
 
   def test_transfer_state_directly_with_plain_dicts(self):
-    """Tests transfer with plain dicts, nnx.State, and various variables."""
+    """Tests transfer with plain dicts and various variables."""
     src_state = {
         'decoder': {
-            'layer0':
-                nnx.State({
+            'layer0': {
                     'weight': nnx.Param(jnp.array(1.0)),
                     'some_variable': nnx.Variable(jnp.array([1, 2])),
-                }),
+                },
             'extra_layer': {
                 'sub': {
                     'value': nnx.Param(jnp.array(3.0))
@@ -836,11 +837,10 @@ class UtilsTest(parameterized.TestCase):
     }
     dst_state = {
         'decoder': {
-            'layer0':
-                nnx.State({
+            'layer0': {
                     'weight': nnx.Param(jnp.array(0.0)),
                     'some_variable': nnx.Variable(jnp.array([0, 0])),
-                }),
+                },
             'layer1': {
                 'weight': nnx.Param(jnp.array(0.0))
             },  # untouched
@@ -1006,3 +1006,71 @@ class UtilsTest(parameterized.TestCase):
         ),
         "Non-interleaved layer 3 should be zero",
     )
+
+  def test_transfer_state_directly_scanned_layers(self):
+    """Tests transfer from scanned 'layers' in source to 'layers_X' in dest."""
+    # Source has 'layers' containing stacked weights (shape (2, ...))
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                layers=nnx.Dict(
+                    mlp=nnx.Dict(
+                         # Stacked weight for 2 layers: 0->10.0, 1->20.0
+                        weight=nnx.Param(jnp.array([10.0, 20.0]))
+                    )
+                )
+            )
+        )
+    )
+    # Dest has 'layers_0', 'layers_1' unrolled
+    dst_state = nnx.Dict(
+        model=nnx.Dict(
+            decoder=nnx.Dict(
+                layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+                layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+            )
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['model']['decoder']['layers_0']['mlp']['weight'][...], # Use [...]
+        jnp.array(10.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state['model']['decoder']['layers_1']['mlp']['weight'][...], # Use [...]
+        jnp.array(20.0),
+    )
+
+  def test_transfer_state_directly_implicit_layers_container(self):
+    """Tests transfer when source IS the layers container (GPT-OSS style)."""
+    # Use nnx.Dict for consistency
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            mlp=nnx.Dict(weight=nnx.Param(jnp.array([100.0, 200.0])))
+        )
+    )
+    
+    dst_state = nnx.Dict(
+        layers=nnx.Dict(
+            layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+            layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+        )
+    )
+    
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['layers']['layers_0']['mlp']['weight'][...],
+        jnp.array(100.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state['layers']['layers_1']['mlp']['weight'][...],
+        jnp.array(200.0),
+    )
+
+if __name__ == "__main__":
+  absltest.main()
