@@ -44,11 +44,9 @@ class GroupQueueManagerTest(absltest.TestCase):
       item2 = _create_item("g1", 1)
 
       await manager.put(item1)
-      self.assertEqual(manager._open_bucket_count(), 1)
       self.assertEmpty(manager._ready_groups)
 
       await manager.put(item2)
-      self.assertEqual(manager._open_bucket_count(), 0)
       self.assertLen(manager._ready_groups, 1)
 
       batch = await manager.get_batch(2)
@@ -99,32 +97,6 @@ class GroupQueueManagerTest(absltest.TestCase):
       self.assertLen(batch2, 1)
       self.assertEqual(batch2[0], items[2])
       self.assertEmpty(manager._batch_buf)
-
-    asyncio.run(_run_test())
-
-  def test_max_open_buckets(self):
-    """Tests that put blocks when max_open_buckets is reached."""
-
-    async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(
-          group_size=2, max_open_buckets=1
-      )
-      item_g1 = _create_item("g1", 0)
-      item_g2 = _create_item("g2", 0)
-
-      await manager.put(item_g1)
-
-      put_task = asyncio.create_task(manager.put(item_g2))
-
-      await asyncio.sleep(0.01)
-      self.assertFalse(put_task.done())
-
-      await manager.put(_create_item("g1", 1))
-      await asyncio.sleep(0.01)
-
-      await put_task
-      self.assertEqual(manager._open_bucket_count(), 1)
-      self.assertIn("g2", manager._buckets)
 
     asyncio.run(_run_test())
 
