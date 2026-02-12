@@ -1,8 +1,10 @@
 import json
 import os
-
+import traceback 
 from typing import Any
-
+from absl import logging 
+import sys
+import numpy as np
 try:
     import r2egym
     from r2egym.agenthub.action import Action
@@ -37,6 +39,7 @@ class SWEEnv(BaseTaskEnv):
     def __init__(
         self,
         entry: dict,
+        group_id: int | None = None,
         step_timeout: int = 90,
         reward_timeout: int = 300,
         backend: str = "kubernetes",
@@ -54,6 +57,7 @@ class SWEEnv(BaseTaskEnv):
             delete_image: Whether to delete the Docker image after closing.
         """
         self.entry = entry
+        self.group_id = group_id
         self.step_timeout = step_timeout
         self.reward_timeout = reward_timeout
         self.total_steps = 0
@@ -63,12 +67,30 @@ class SWEEnv(BaseTaskEnv):
         self.verbose = verbose
         self.scaffold = scaffold
         assert scaffold in ["r2egym", "sweagent"], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
+        os.write(1, f"SWEEnv is initialized with: {max_steps}\n".encode())
         super().__init__(max_steps=max_steps)
+
+        if not hasattr(self, "extra_kwargs"):
+            self.extra_kwargs = {}
+            
+        self.extra_kwargs["group_id"] = group_id
         
+    def _check_np_array(self):
+        print(f"DEBUG: entry type: {type(self.entry)}")
+        print(f"DEBUG: entry content: {self.entry}")
+        # for id, entry in enumerate(self.entry):
+        #     logging.info(f"Checking entry {entry} for numpy arrays",entry)
+        #     # for k,v in entry.items():
+            #     if isinstance(v, np.ndarray):
+            #         logging.info(f"Found numpy array in entry {entry['id']} key {k}, converting to list")
+                    
     def _initial_observation(self) -> Any:
         if not self.env:
             # Initialize environment if not created yet.
-            env_args = EnvArgs(ds=self.entry)
+            single_example = {}
+            for k, v in self.entry.items():
+                single_example[k] = v[0] if isinstance(v, list) else v
+            env_args = EnvArgs(ds=single_example)
             self.env = RepoEnv(env_args, backend=self.backend, step_timeout=self.step_timeout, reward_timeout=self.reward_timeout, verbose=self.verbose)
         else:
             self.env.reset()
@@ -82,20 +104,23 @@ class SWEEnv(BaseTaskEnv):
         return self.env.get_task_instruction()
 
     def _step_impl(self, action: Any) -> EnvStepResult:
+        os.write(1, b"SWEEnv step impl called\n")
         if isinstance(action, str):
+            os.write(1, f"action string: {action}\n".encode())
             action_obj: Action = Action.from_string(action)
         else:
             action_obj = action
 
         if not action_obj.function_name:
-            print("didn't find any funciton to call")
+            os.write(1, b"didn't find any funciton to call\n")
             return EnvStepResult(observation="", reward=0, done=False, info={})
 
         # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
-        print("calling r2e env")
+        os.write(1, b"calling r2e env\n")
         obs, reward, done, info = self.env.step(action_obj)
 
         self.total_steps += 1
+        sys.stdout.flush()
         return EnvStepResult(observation=str(obs), reward=reward, done=done, info=info)
 
 

@@ -21,7 +21,8 @@ and complete episode trajectories.
 
 from collections.abc import Hashable
 import dataclasses
-from typing import Any, Dict, Optional
+from enum import Enum, auto
+from typing import Any, Dict, List, Optional
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -70,6 +71,25 @@ class Step:
   reward: float = 0.0
   done: bool = False
   mc_return: float = 0.0
+  thought_tokens: Optional[List[int]] = None
+  model_response_tokens: Optional[List[int]] = None
+  action_tokens: Optional[List[int]] = None
+  observation_tokens: Optional[List[int]] = None
+
+
+class TrajectoryStatus(Enum):
+  """Enum for trajectory status."""
+
+  SUCCEEDED = auto()
+  RUNNING = auto()
+
+  # Agent Constraints
+  TRUNCATED_STEPS = auto()  # corresponds to `max_steps`
+  TRUNCATED_TOKENS = auto()  # corresponds to `max_context_tokens`
+  TRUNCATED_TIMEOUT = auto()  # corresponds to `timeout`
+
+  # System Errors
+  FAILED = auto()
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -84,11 +104,14 @@ class Trajectory:
     task: Task description, initial prompt, or episode specification.
     steps: Chronologically ordered sequence of interaction steps.
     reward: Total episode reward (cumulative or final environment score).
+    status: Status of the trajectory (e.g., "success", "truncated").
   """
 
   task: Any = None
   steps: list[Step] = dataclasses.field(default_factory=list)
   reward: float = 0.0
+  status: TrajectoryStatus = TrajectoryStatus.RUNNING
+  failure_message: Optional[str] = None
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -103,9 +126,10 @@ class Trajectory:
         "task": self.task,
         "steps": [dataclasses.asdict(step) for step in self.steps],
         "reward": float(self.reward),
+        "status": self.status.name,
+        "failure_message": self.failure_message,
     }
-
-
+  
 @dataclasses.dataclass(kw_only=True)
 class TrajectoryItem:
   """Represents an item within a Trajectory, potentially for pairing or grouping.

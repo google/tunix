@@ -1,0 +1,308 @@
+import sys
+import os
+import logging
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from flax import nnx
+import optax
+from orbax import checkpoint as ocp
+from kubernetes import client, config as k8s_config
+from transformers import AutoTokenizer
+from datasets import load_dataset
+
+# ==========================================
+# 1. Path Setup
+# ==========================================
+# Use the absolute path to the ROOT folder (the one containing the rllm package)
+rllm_root = os.path.expanduser('~/rllm')
+pathways_root = os.path.expanduser('~/pathways-utils')
+r2egym_root = os.path.expanduser('~/r2egym')
+
+for root in [rllm_root, pathways_root, r2egym_root]:
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+# Verification
+try:
+    import rllm
+    import pathwaysutils 
+    import r2egym
+    print("✅ rllm, pathways-utils, r2egym are successfully mapped.")
+except ImportError as e:
+    print(f"❌ Still missing a module: {e}")
+
+# ==========================================
+# 2. Imports from Custom Modules
+# ==========================================
+from tunix.models.qwen3 import params as params_lib
+from tunix.models.qwen3 import model as model_lib
+from tunix.sft import utils as sft_utils
+from tunix.sft import metrics_logger
+from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.rollout import base_rollout
+from tunix.rl.experimental import agentic_grpo_learner
+from tunix.rl.agentic.parser.chat_template_parser import parser
+from tunix.rl.agentic.rewards.reward_types import RewardOutput
+from rllm.agents.system_prompts import (
+    SWE_SYSTEM_PROMPT, 
+    SWE_SYSTEM_PROMPT_FN_CALL, 
+    SWE_USER_PROMPT, 
+    SWE_USER_PROMPT_FN_CALL, 
+    SWEAGENT_SYSTEM_PROMPT, 
+    SWEAGENT_USER_PROMPT
+)
+
+# Assumed custom imports based on usage
+from swe_agent import SWEAgent
+from swe_env import SWEEnv
+
+# ==========================================
+# 3. Environment Configuration
+# ==========================================
+DATASET_CACHE = os.getenv('DATASET_CACHE', '/tmp/dataset_cache')
+TASKS_TO_PROCESS = 100
+
+os.environ["KUBECONFIG"] = "~/.kube/config"
+os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
+os.environ["NODE_SELECTOR_VAL"] = "deepswe-worker-pool" # NB: change based on your node pool name
+
+# Kubernetes Setup
+try:
+    k8s_config.load_kube_config()
+    k8s_client = client.CoreV1Api()
+    # k8s_client.list_namespace(timeout_seconds=5)
+except Exception as e:
+    print(f"Warning: Kubernetes config loading failed: {e}")
+
+# ==========================================
+# 4. Data Loading
+# ==========================================
+print("Loading Dataset...")
+dataset = load_dataset("R2E-Gym/R2E-Gym-V1", split="train", cache_dir=DATASET_CACHE, num_proc=32)
+entries = []
+unique_images = set()
+
+for i, entry in enumerate(dataset):
+    if "docker_image" in entry:
+        unique_images.add(entry["docker_image"])
+        entries.append(entry)
+    if i >= TASKS_TO_PROCESS - 1:
+        break
+
+unique_images = list(unique_images)
+print(f"Found {len(unique_images)} unique Docker images to download")
+IDS = [f"task-{i}" for i in range(len(entries))]
+
+# ==========================================
+# 5. Model & Training Hyperparameters
+# ==========================================
+# MODEL_PATH = "/scratch/models/DeepSeek-R1-Distill-Qwen-1.5B/"
+MODEL_PATH = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+
+# ====== Data ======
+TRAIN_FRACTION = 1.0
+
+# ====== Reproducibility ======
+SEED = 42
+
+# ====== LoRA ======
+RANK = 64
+ALPHA = 64.0
+TRAIN_WITH_LORA = False
+
+# ====== Sharding ======
+MESH = [(4, 2), ("fsdp", "tp")]
+
+# ====== GRPO ======
+# === Generation during GRPO training ===
+MAX_PROMPT_LENGTH = 2048
+TOTAL_GENERATION_STEPS = 512
+TEMPERATURE = 0.6
+TOP_P = 0.95
+TOP_K = 50
+NUM_GENERATIONS = 2 # This corresponds to `G` in Algorithm 1
+
+# === other GRPO configs ===
+NUM_ITERATIONS = 1
+BETA = 0.001
+EPSILON = 0.2
+
+# ====== Training ======
+BATCH_SIZE = 16
+MINI_BATCH_SIZE = 16
+# ROLLOUT_MICRO_BATCH_SIZE = 8
+# LOGPS_MICRO_BATCH_SIZE = 8
+NUM_BATCHES = 1
+NUM_TEST_BATCHES = 50
+
+EVAL_EVERY_N_STEPS = 10
+NUM_EPOCHS = 100 
+
+# Number of training steps.
+MAX_STEPS = 10
+
+# === AdamW, warmup, cosine scheduler ===
+LEARNING_RATE = 1e-6
+B1 = 0.9  
+B2 = 0.99 
+WEIGHT_DECAY = 0.1
+WARMUP_STEPS = int(0.1 * MAX_STEPS)
+MAX_GRAD_NORM = 0.1
+
+# ====== Checkpoint saving ======
+SAVE_INTERVAL_STEPS = 500
+MAX_TO_KEEP = 4
+DO_MEM_PROFILING = False
+
+# ====== Inference ======
+GENERATION_CONFIGS = {
+    "greedy": {"temperature": 1e-4, "top_k": 1, "top_p": 1.0},
+    "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
+    "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
+}
+
+# ====== Rollout ======
+ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang_jax"
+CKPT_DIR = os.path.join("/tmp/cp", "deepswe_ckpt/01")
+
+# ==========================================
+# 6. JAX Device & Mesh Setup
+# ==========================================
+devices = jax.devices()
+split = int(len(devices) / 2)
+rollout_devices = np.array(devices[:split]).reshape(2,2)
+train_devices = np.array(devices[split:]).reshape(2,2)
+
+rollout_mesh = Mesh(rollout_devices, axis_names=('fsdp', 'tp'))
+train_mesh = Mesh(train_devices, axis_names=('fsdp', 'tp'))
+
+# ==========================================
+# 7. Model Initialization
+# ==========================================
+print("Initializing Model...")
+config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
+
+qwen_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16)
+qwen_reference = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16)
+
+sft_utils.show_hbm_usage()
+
+# ==========================================
+# 8. Tokenizer & Parser
+# ==========================================
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_PATH, 
+    local_files_only=True,
+    trust_remote_code=True
+)
+
+chat_parser = parser.QwenChatTemplateParser(tokenizer)
+
+# ==========================================
+# 9. Optimizer & Checkpointing
+# ==========================================
+checkpointing_options = ocp.CheckpointManagerOptions(
+    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+)
+metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=2
+)
+
+optimizer = optax.adamw(
+    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=LEARNING_RATE,
+        warmup_steps=WARMUP_STEPS,
+        decay_steps=MAX_STEPS,
+        end_value=0.0,
+    ),
+    b1=B1,
+    b2=B2,
+    weight_decay=WEIGHT_DECAY,
+)
+
+# ==========================================
+# 10. RL Cluster Setup
+# ==========================================
+cluster_config = rl_cluster_lib.ClusterConfig(
+    role_to_mesh={
+        rl_cluster_lib.Role.ACTOR: train_mesh,
+        rl_cluster_lib.Role.REFERENCE: train_mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+    },
+    rollout_engine=ROLLOUT_ENGINE,
+    offload_to_cpu=False,
+    training_config=rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optimizer,
+        eval_every_n_steps=EVAL_EVERY_N_STEPS,
+        max_steps=10, # Note: Overridden locally to 20 in config vs MAX_STEPS above
+        mini_batch_size=MINI_BATCH_SIZE,
+        train_micro_batch_size=1,
+        metrics_logging_options=metrics_logging_options,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
+    ),
+    rollout_config=base_rollout.RolloutConfig(
+        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
+        max_prompt_length=MAX_PROMPT_LENGTH,
+        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        top_k=TOP_K,
+        eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+    ),
+)
+
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=qwen_actor,
+    reference=qwen_reference,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
+
+# ==========================================
+# 11. Learner & Agent Setup
+# ==========================================
+grpo_config = agentic_grpo_learner.GRPOConfig(
+    num_generations=NUM_GENERATIONS,
+    beta=BETA,
+    epsilon=EPSILON,
+    system_prompt=SWE_SYSTEM_PROMPT,
+    max_concurrency=1,
+    epsilon_high=0.28,
+    off_policy_steps=0,
+)
+
+# Helper for dummy reward function (placeholder)
+def dummy_reward_fn(prompts, completions, **kwargs):
+    return 0
+
+agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
+    rl_cluster=rl_cluster,
+    reward_fns=dummy_reward_fn,
+    agent_class=SWEAgent,
+    agent_kwargs={},
+    env_class=SWEEnv,
+    env_kwargs={"max_steps": 3}, 
+    algo_config=grpo_config,
+)
+
+# ==========================================
+# 12. Execution (Train)
+# ==========================================
+batch_entries = entries[:16]  # just take the first batch for testing
+process = []
+
+for entry in batch_entries:
+    processed_entry = {}
+    for k, v in entry.items():
+        if isinstance(v, list):
+            processed_entry[k] = [v]
+        else:
+            processed_entry[k] = v
+    process.append(processed_entry)
+
+print("Starting training...")
+agentic_grpo_learner.train(train_dataset=process)
