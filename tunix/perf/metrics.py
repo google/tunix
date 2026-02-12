@@ -71,8 +71,11 @@ class MetricsBuffer:
   mode: str = "train"
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class PerfMetricsOptions:
+  # Whether to enable the trace writer. By default, it is enabled when perf
+  # metrics are enabled. If False, the trace will not be written out.
+  enable_trace_writer: bool = True
   # Directory to write the raw metrics/events to.
   log_dir: str = ""
   # Path to the custom export function. If set, the custom export function will
