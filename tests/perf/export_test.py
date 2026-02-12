@@ -31,11 +31,15 @@ DeviceTimeline = trace.DeviceTimeline
 
 
 def _create_mock_cluster_config_with_perf_metrics(
-    perf_metrics_log_dir: str | None,
+    enable_perf_metrics: bool = True,
+    enable_trace_writer: bool = True,
+    perf_metrics_log_dir: str = "",
 ) -> mock.Mock:
   """Creates a mock ClusterConfig object for testing.
 
   Args:
+    enable_perf_metrics: whether to enable perf metrics.
+    enable_trace_writer: whether to enable trace writer.
     perf_metrics_log_dir: the log directory for perf metrics.
 
   Returns:
@@ -60,11 +64,12 @@ def _create_mock_cluster_config_with_perf_metrics(
   )
   cluster_config.training_config = mock_training_config
 
-  if perf_metrics_log_dir:
+  if enable_perf_metrics:
     mock_options = mock.create_autospec(
         metrics.PerfMetricsOptions, instance=True
     )
     mock_options.log_dir = perf_metrics_log_dir
+    mock_options.enable_trace_writer = enable_trace_writer
     mock_training_config.perf_metrics_options = mock_options
   else:
     mock_training_config.perf_metrics_options = None
@@ -75,7 +80,9 @@ class ExportTest(absltest.TestCase):
 
   def test_from_cluster_config_with_export_dir(self):
     log_dir = "/tmp/test_log_dir"
-    cluster_config = _create_mock_cluster_config_with_perf_metrics(log_dir)
+    cluster_config = _create_mock_cluster_config_with_perf_metrics(
+        perf_metrics_log_dir=log_dir
+    )
     with mock.patch.object(
         export, "PerfettoTraceWriter", autospec=True
     ) as mock_writer:
@@ -84,7 +91,7 @@ class ExportTest(absltest.TestCase):
 
   def test_from_cluster_config_without_export_dir(self):
     cluster_config = _create_mock_cluster_config_with_perf_metrics(
-        perf_metrics_log_dir=None
+        perf_metrics_log_dir=""
     )
     with mock.patch.object(
         export, "PerfettoTraceWriter", autospec=True
@@ -92,16 +99,45 @@ class ExportTest(absltest.TestCase):
       PerfMetricsExport.from_cluster_config(cluster_config)
       mock_writer.assert_called_with(None)
 
+  def test_from_cluster_config_with_disabled_trace_writer(self):
+    log_dir = "/tmp/test_log_dir"
+    cluster_config = _create_mock_cluster_config_with_perf_metrics(
+        perf_metrics_log_dir=log_dir, enable_trace_writer=False
+    )
+    with mock.patch.object(
+        export, "PerfettoTraceWriter", autospec=True
+    ) as mock_writer:
+      PerfMetricsExport.from_cluster_config(cluster_config)
+      mock_writer.assert_not_called()
+
+  def test_from_cluster_config_with_disabled_perf_metrics(self):
+    cluster_config = _create_mock_cluster_config_with_perf_metrics(
+        enable_perf_metrics=False
+    )
+    with mock.patch.object(
+        export, "PerfettoTraceWriter", autospec=True
+    ) as mock_writer:
+      PerfMetricsExport.from_cluster_config(cluster_config)
+      mock_writer.assert_not_called()
+
   @patch("time.perf_counter")
-  def test_export_grpo_metrics_colocated(self, mock_perf_counter):
+  def test_export_grpo_metrics_colocated_with_trace_writer(
+      self, mock_perf_counter
+  ):
     # tpu0 span end times
     mock_perf_counter.side_effect = [0.41, 0.61, 1.21]
+    mock_trace_writer = mock.create_autospec(
+        export.PerfettoTraceWriter, instance=True
+    )
 
-    export_fn = PerfMetricsExport.from_role_to_devices({
-        "rollout": ["tpu0"],
-        "refer": ["tpu0"],
-        "actor": ["tpu0"],
-    })
+    export_fn = PerfMetricsExport.from_role_to_devices(
+        {
+            "rollout": ["tpu0"],
+            "refer": ["tpu0"],
+            "actor": ["tpu0"],
+        },
+        trace_writer=mock_trace_writer,
+    )
     host_timeline = ThreadTimeline("host", 0.0)
     tpu0_timeline = DeviceTimeline("tpu0", 0.0)
     timelines = {
@@ -166,6 +202,8 @@ class ExportTest(absltest.TestCase):
       actual_metrics[k] = float(v[0])
 
     self.assertDictAlmostEqual(actual_metrics, expected_metrics)
+
+    mock_trace_writer.log_trace.assert_called_once()
 
   @patch("time.perf_counter")
   def test_export_grpo_metrics_rollout_1_actor_2_reference_2(

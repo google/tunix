@@ -550,7 +550,7 @@ class ConfigTest(parameterized.TestCase):
     argv = [
         "grpo_main",
         "base_config.yaml",
-        "training_config.perf_metrics_options.enable_perf_metrics=True",
+        "training_config.perf_metrics_options.log_dir=/tmp/perf_metrics",
     ]
     config.initialize(argv)
 
@@ -559,7 +559,7 @@ class ConfigTest(parameterized.TestCase):
     argv = [
         "peft_main",
         "base_config.yaml",
-        "training_config.perf_metrics_options.enable_perf_metrics=True",
+        "training_config.perf_metrics_options.log_dir=/tmp/perf_metrics",
     ]
     with self.assertRaisesRegex(
         ValueError,
@@ -572,7 +572,6 @@ class ConfigTest(parameterized.TestCase):
     argv = [
         "peft_main",
         "base_config.yaml",
-        "training_config.perf_metrics_options.enable_perf_metrics=False",
     ]
     config.initialize(argv)
 
@@ -580,7 +579,6 @@ class ConfigTest(parameterized.TestCase):
     argv = [
         "grpo_main",
         "base_config.yaml",
-        "training_config.perf_metrics_options.enable_perf_metrics=True",
         "training_config.perf_metrics_options.custom_export_fn_path=invalid.path",
     ]
     with self.assertRaisesRegex(
