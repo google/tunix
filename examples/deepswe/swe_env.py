@@ -99,6 +99,10 @@ class SWEEnv(BaseTaskEnv):
         return EnvStepResult(observation=str(obs), reward=reward, done=done, info=info)
 
 
+    def compute_final_reward(self):
+        """Run tests in the Docker container and return reward (0 or 1)."""
+        return self.env.compute_reward()
+
     def close(self) -> None:
         """Close the environment and clean up resources."""
         if self.env is not None:
