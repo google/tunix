@@ -199,7 +199,6 @@ class RolloutOrchestrator:
           [int, BaseTaskEnv, Trajectory], Hashable
       ] = lambda i, _, __: i,
       collect_mode: Optional[str] = None,
-      max_open_groups: Optional[int] = None,
       start_step_fn: Optional[Callable[[], int]] = None,
   ):
     """Dynamically runs collectors from a stream of agent-env pairs.
@@ -223,8 +222,6 @@ class RolloutOrchestrator:
         agent-environment pair index.
       collect_mode: An optional string to select the collection mode for
         `TrajectoryCollectEngine`.
-      max_open_groups: The maximum number of groups that can be open
-        simultaneously in the GroupQueueManager.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
 
@@ -242,9 +239,7 @@ class RolloutOrchestrator:
     if self._group_queue_manager:
       raise RuntimeError("Orchestrator is already running.")
 
-    self._group_queue_manager = GroupQueueManager(
-        group_size=group_size, max_open_buckets=max_open_groups
-    )
+    self._group_queue_manager = GroupQueueManager(group_size=group_size)
     self._stop.clear()
     self._tasks.clear()
 

@@ -41,30 +41,23 @@ class GroupQueueManager:
       self,
       *,
       group_size: int,
-      max_open_buckets: Optional[int] = None,
   ):
     self.group_size = group_size
-    self.max_open_buckets = max_open_buckets or 0
     self._buckets: Dict[Hashable, List[TrajectoryItem]] = {}
     self._ready_groups: Deque[List[TrajectoryItem]] = collections.deque()
     self._clearing = False
     self._exc: Optional[BaseException] = None
     self._lock = asyncio.Lock()
-    self._capacity = asyncio.Condition(self._lock)
     self._have_ready = asyncio.Event()
     self._batch_buf: List[TrajectoryItem] = []
 
   async def put_exception(self, exc: BaseException):
     self._exc = exc
     self._have_ready.set()
-    async with self._capacity:
-      self._capacity.notify_all()
 
   async def prepare_clear(self):
     self._clearing = True
     self._have_ready.set()
-    async with self._capacity:
-      self._capacity.notify_all()
 
   async def clear(self):
     async with self._lock:
@@ -79,7 +72,7 @@ class GroupQueueManager:
     """Adds an item, grouping by `group_id`.
 
     Items are grouped in buckets. When a bucket reaches `self.group_size`, it's
-    moved to `_ready_groups`. Waits if `max_open_buckets` is exceeded.
+    moved to `_ready_groups`.
 
     Args:
       item: The TrajectoryItem to add.
@@ -92,15 +85,7 @@ class GroupQueueManager:
     if self._exc:
       raise self._exc
     key = item.group_id
-    async with self._capacity:
-      new_bucket = key not in self._buckets
-      while (
-          (not self._clearing)
-          and (self.max_open_buckets > 0)
-          and new_bucket
-          and (self._open_bucket_count() >= self.max_open_buckets)
-      ):
-        await self._capacity.wait()
+    async with self._lock:
       if self._clearing:
         return
       if self._exc:
@@ -110,7 +95,6 @@ class GroupQueueManager:
       if len(bucket) == self.group_size:
         self._ready_groups.append(bucket.copy())
         del self._buckets[key]
-        self._capacity.notify_all()
         self._have_ready.set()
 
   async def _get_one_ready_group(self) -> List[TrajectoryItem]:
@@ -155,5 +139,4 @@ class GroupQueueManager:
         self._batch_buf.extend(group[room:])
     return out
 
-  def _open_bucket_count(self) -> int:
-    return len(self._buckets)
+
