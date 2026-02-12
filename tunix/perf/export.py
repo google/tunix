@@ -45,7 +45,7 @@ class _GrpoExtractSpansFn(Protocol):
   def __call__(
       self, query: PerfSpanQuery
   ) -> tuple[
-      bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
+      bool, list[SpanGroup], list[Span], list[Span], list[SpanGroup], list[Span]
   ]:
     return (False, None, None, None, None, None)
 
@@ -213,7 +213,7 @@ class PerfMetricsExport:
 
     (
         ok,
-        global_step_group,
+        global_step_groups,
         rollout_spans,
         refer_inference_spans,
         actor_train_groups,
@@ -222,6 +222,9 @@ class PerfMetricsExport:
     if not ok:
       return {}
 
+    if not global_step_groups:
+      raise ValueError("global_step_groups is empty")
+    global_step_group = global_step_groups[0]
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
@@ -249,7 +252,7 @@ class PerfMetricsExport:
     ]
 
     trace_writer.log_trace(
-        global_step_group,
+        global_step_groups,
         rollout_spans,
         refer_inference_spans,
         actor_train_groups,
@@ -291,7 +294,7 @@ class PerfMetricsExport:
 
     (
         ok,
-        global_step_group,
+        global_step_groups,
         rollout_spans,
         refer_inference_spans,
         actor_train_groups,
@@ -300,6 +303,9 @@ class PerfMetricsExport:
     if not ok:
       return {}
 
+    if not global_step_groups:
+      raise ValueError("global_step_groups is empty")
+    global_step_group = global_step_groups[0]
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     # If weight sync is skipped (due to shared model), create a zero duration
     # span for metrics computation.
@@ -338,7 +344,7 @@ class PerfMetricsExport:
     ] + [0.0]
 
     trace_writer.log_trace(
-        global_step_group,
+        global_step_groups,
         rollout_spans,
         refer_inference_spans,
         actor_train_groups,
@@ -384,7 +390,7 @@ class PerfMetricsExport:
 
     (
         ok,
-        global_step_group,
+        global_step_groups,
         rollout_spans,
         refer_inference_spans,
         actor_train_groups,
@@ -393,6 +399,9 @@ class PerfMetricsExport:
     if not ok:
       return {}
 
+    if not global_step_groups:
+      raise ValueError("global_step_groups is empty")
+    global_step_group = global_step_groups[0]
     weight_sync_span = global_step_group.find_last_inner_span("weight_sync")
     if weight_sync_span is None:
       logging.warning("weight_sync is None")
@@ -434,7 +443,7 @@ class PerfMetricsExport:
     ] + [0.0]
 
     trace_writer.log_trace(
-        global_step_group,
+        global_step_groups,
         rollout_spans,
         refer_inference_spans,
         actor_train_groups,
@@ -469,18 +478,28 @@ class PerfMetricsExport:
       log_actor_train_time_at_micro_batch_level: bool,
       query: PerfSpanQuery,
   ) -> tuple[
-      bool, SpanGroup, list[Span], list[Span], list[SpanGroup], list[Span]
+      bool, list[SpanGroup], list[Span], list[Span], list[SpanGroup], list[Span]
   ]:
     """Extracts spans and span groups of the last global step for GRPO workflow."""
 
-    global_steps: list[SpanGroup] = (
-        query().main().last_group("global_step").get()
+    # Get all global step groups from all host threads. The first
+    # global step group is the one from the main thread.
+    global_step_groups: list[SpanGroup] = []
+    main_thread_id = query.get_main_thread_id()
+    host_timelines = [main_thread_id] + sorted(
+        tid
+        for tid in query.get_timeline_ids()
+        if tid != main_thread_id and tid.startswith("thread-")
     )
-    if not global_steps:
-      logging.warning("global_step is None")
-      return (False, SpanGroup(""), [], [], [], [])
 
-    global_step_group: SpanGroup = global_steps[0]
+    for tid in host_timelines:
+      gs = query().timeline(tid).last_group("global_step").get()
+      if gs:
+        global_step_groups.extend(gs)
+
+    if not global_step_groups:
+      logging.warning("global_step is None")
+      return (False, [SpanGroup("")], [], [], [], [])
 
     micro_batch: PerfSpanQuery = (
         query()
@@ -495,7 +514,7 @@ class PerfMetricsExport:
 
     if not rollout_groups or not refer_groups or not actor_groups:
       logging.warning("rollout_group or refer_group or actor_group is None")
-      return (False, SpanGroup(""), [], [], [], [])
+      return (False, [SpanGroup("")], [], [], [], [])
 
     rollout_span: list[Span] = []
     refer_inference_span: list[Span] = []
@@ -539,7 +558,7 @@ class PerfMetricsExport:
 
     return (
         True,
-        global_step_group,
+        global_step_groups,
         rollout_span,
         refer_inference_span,
         actor_train_groups,

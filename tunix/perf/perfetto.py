@@ -36,7 +36,7 @@ ROOT_TRACK_UUID = 100
 def _add_trace_events(
     *,
     builder: TraceProtoBuilder,
-    global_step_group: SpanGroup,
+    global_step_groups: list[SpanGroup],
     rollout_spans: list[Span],
     refer_inference_spans: list[Span],
     actor_train_groups: list[SpanGroup],
@@ -45,7 +45,7 @@ def _add_trace_events(
 
   Args:
     builder: The TraceProtoBuilder to add events to.
-    global_step_group: A SpanGroup representing the global step.
+    global_step_groups: A list of SpanGroup representing the global steps.
     rollout_spans: A list of Spans for rollout operations.
     refer_inference_spans: A list of Spans for reference inference operations.
     actor_train_groups: A list of SpanGroups for actor training operations.
@@ -58,13 +58,46 @@ def _add_trace_events(
       TrackDescriptor.ChildTracksOrdering.EXPLICIT
   )
 
+  # Try to merge global_step_groups
+  merged_global_step: SpanGroup | Span | None = None
+  if global_step_groups:
+    try:
+      first_group, *other_groups = global_step_groups
+      merged_global_step = first_group
+      for g in other_groups:
+        merged_global_step = span.merge_span_group_trees(merged_global_step, g)
+    except ValueError:
+      logging.warning("Could not merge global step groups", exc_info=True)
+      merged_global_step = None
+
   # Metadata for process names
-  # Main: uuid=1, Rollout: uuid=2, Reference: uuid=3, Actor: uuid=4
+  # Main: 1 (merging all global steps),
+  # Main -- thread {i}: uuid=1000+i (if merging fails -- due to overlapping spans),
+  # Rollout: uuid=2000, Reference: uuid=2001, Actor: uuid=2002
+  use_merged_main_track = merged_global_step and isinstance(
+      merged_global_step, SpanGroup
+  )
+
+  if use_merged_main_track:
+    packet = builder.add_packet()
+    packet.track_descriptor.uuid = 1
+    packet.track_descriptor.name = "Main"
+    packet.track_descriptor.parent_uuid = ROOT_TRACK_UUID
+    packet.track_descriptor.sibling_order_rank = 1
+  else:
+    # If no merged global step or it's not a SpanGroup, create a track for each
+    # global step thread.
+    for i, _ in enumerate(global_step_groups):
+      packet = builder.add_packet()
+      packet.track_descriptor.uuid = 1000 + i
+      packet.track_descriptor.name = f"Main -- thread {i}"
+      packet.track_descriptor.parent_uuid = ROOT_TRACK_UUID
+      packet.track_descriptor.sibling_order_rank = 1000 + i
+
   for name, uuid in [
-      ("Main", 1),
-      ("Rollout", 2),
-      ("Reference", 3),
-      ("Actor", 4),
+      ("Rollout", 2000),
+      ("Reference", 2001),
+      ("Actor", 2002),
   ]:
     packet = builder.add_packet()
     packet.track_descriptor.uuid = uuid
@@ -97,19 +130,23 @@ def _add_trace_events(
         add_span(inner, track_uuid)
 
   # Main
-  add_group(global_step_group, 1)
+  if use_merged_main_track:
+    add_group(merged_global_step, 1)
+  else:
+    for i, group in enumerate(global_step_groups):
+      add_group(group, 1000 + i)
 
   # Rollout
   for s in rollout_spans:
-    add_span(s, 2)
+    add_span(s, 2000)
 
   # Reference
   for s in refer_inference_spans:
-    add_span(s, 3)
+    add_span(s, 2001)
 
   # Actor
   for g in actor_train_groups:
-    add_group(g, 4)
+    add_group(g, 2002)
 
 
 class PerfettoTraceWriter:
@@ -163,7 +200,7 @@ class PerfettoTraceWriter:
 
   def log_trace(
       self,
-      global_step_group: SpanGroup,
+      global_step_groups: list[SpanGroup],
       rollout_spans: list[Span],
       refer_inference_spans: list[Span],
       actor_train_groups: list[SpanGroup],
@@ -171,15 +208,16 @@ class PerfettoTraceWriter:
     """Generates and writes Perfetto trace events to a file.
 
     Args:
-      global_step_group: A SpanGroup representing the global step.
+      global_step_groups: A list of SpanGroup representing the global steps.
       rollout_spans: A list of Spans for rollout operations.
       refer_inference_spans: A list of Spans for reference inference operations.
-      actor_train_groups: A list of SpanGroups for actor training operations.
+      actor_train_groups: A list of SpanGroup for actor training operations.
     """
+
     builder = TraceProtoBuilder()
     _add_trace_events(
         builder=builder,
-        global_step_group=global_step_group,
+        global_step_groups=global_step_groups,
         rollout_spans=rollout_spans,
         refer_inference_spans=refer_inference_spans,
         actor_train_groups=actor_train_groups,
