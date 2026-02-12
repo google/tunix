@@ -64,11 +64,8 @@ class TrajectoryCollectEngine:
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
       gamma: float = 1.0,
-<<<<<<< HEAD
-=======
       max_steps: int = 10,
       max_context_tokens: Optional[int] = None,
->>>>>>> 05ec4fe (add deepswe train script)
       timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
