@@ -1,0 +1,15 @@
+conda create -n deepswe_g2 python=3.12.12 -y
+ 1135  conda activate deepswe_g2
+ 1136  pip install -e . uninstall tunix
+ 1137  git clone https://github.com/R2E-Gym/R2E-Gym.git 
+ git clone https://github.com/google/tunix.git 
+ git clone --recurse-submodules https://github.com/rllm-org/rllm.git
+ 1144  pip install -e . 
+ 1145  ls
+ 1146  cd R2E-Gym/
+ 1147  pip install -e . 
+ 1148  cd ..
+ 1149  cd rllm
+ 1150  ls
+ 1151  pip install -e .
+
