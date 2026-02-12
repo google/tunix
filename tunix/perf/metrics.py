@@ -129,6 +129,12 @@ class PerfSpanQuery:
     query._select_groups = self._select_groups.copy()
     return query
 
+  def get_main_thread_id(self) -> str:
+    return self._main_thread_id
+
+  def get_timeline_ids(self) -> list[str]:
+    return list(self._timelines.keys())
+
   def timeline(self, id: str) -> PerfSpanQuery:
     self._select_timeline = id
     return self
