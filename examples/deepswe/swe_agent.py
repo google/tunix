@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-
+import traceback
 try:
     from r2egym.agenthub.action import Action as SWEAction
 except ImportError:
@@ -15,6 +15,7 @@ TOKEN_WARNING_THRESHOLD = 28000
 
 
 def parse_oai_response(response):
+    logging.info("Parsing OpenAI function-calling response.")
     thought = response.choices[0].message.content
     if not thought:
         thought = ""
@@ -34,24 +35,26 @@ def parse_xml_response(response_text: str) -> tuple[str, SWEAction]:
     - action: the entire first <function=...></function> block
     Returns (thought, action).
     """
-    # Regex to match (non-greedily) from `<function=` up to the first `</function>`
-    pattern = re.compile(r"(?s)(<function=.*?</function>)")
+
+    logging.info("Parsing XML response.")
+    
+    pattern = re.compile(r"(?s)(<function(?:=.*?)?>.*?</function>)")
+    
     match = pattern.search(response_text)
 
     if match:
-        action = match.group(1)  # The entire <function=...></function> block
-        thought = response_text[: match.start()]  # Everything before the block
+        action_raw = match.group(1)
+        # Thought is everything before the very first function block
+        thought = response_text[:match.start()].strip()
     else:
-        # If no match, treat entire text as "thought"
-        thought = response_text
-        action = ""
+        thought = response_text.strip()
+        action_raw = ""
 
-    # Strip leading/trailing whitespace
-    thought = thought.strip()
-    action = action.strip()
-
-    # convert action to Action object
-    action = SWEAction.from_string(action)
+    logging.info("Extracted thought: %s", thought)
+    
+    # Pass the first block to the Action constructor
+    action = SWEAction.from_string(action_raw)
+    logging.info("Extracted action: %s", action.to_xml_string())
 
     return thought, action
 
@@ -60,13 +63,14 @@ logger = logging.getLogger(__name__)
 
 
 class SWEAgent(ConversationAgentBase):
-    def __init__(self,  use_fn_calling: bool = False, format_model_response: bool = False, scaffold: str = "r2egym"):
+    def __init__(self,  system_prompt: str = None, use_fn_calling: bool = False, format_model_response: bool = False, scaffold: str = "r2egym"):
         self.use_fn_calling = use_fn_calling
         self.format_model_response = format_model_response
         assert scaffold in ["r2egym", "sweagent"], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
-        system_prompt = SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
-        if scaffold == "sweagent":
-            system_prompt = SWEAGENT_SYSTEM_PROMPT
+        if system_prompt is None:
+            system_prompt = SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
+            if scaffold == "sweagent":
+                system_prompt = SWEAGENT_SYSTEM_PROMPT
         self.user_prompt_template = SWE_USER_PROMPT_FN_CALL if use_fn_calling else SWE_USER_PROMPT
         if scaffold == "sweagent":
             self.user_prompt_template = SWEAGENT_USER_PROMPT
@@ -106,6 +110,8 @@ class SWEAgent(ConversationAgentBase):
             None
         """
         self._trajectory.steps.append(self.cur_step)
+        logging.info("update from model response()")
+        logging.info("use_fn_calling: %s", self.use_fn_calling)
         if self.use_fn_calling:
             thought, action = parse_oai_response(response)
         else:

@@ -73,7 +73,8 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
     Returns:
       An `EnvStepResult` containing an empty observation, the calculated reward,
       done=True, and info including the agent's response and reward metadata.
-    """
+    """ 
+    logging.info("TaskEnvironment received action: %s", action)
     if isinstance(action, agent_types.Action):
       action = action.action
     r_out = self.reward_fn(task=self.task, action=action)

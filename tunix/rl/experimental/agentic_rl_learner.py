@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import abc
 import asyncio
 from concurrent import futures
@@ -310,7 +311,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         micro_batch = {}
         for key in buffer:
           micro_batch_list_slice = buffer[key][:micro_batch_size]
-          micro_batch[key] = np.array(micro_batch_list_slice)
+          micro_batch[key] = micro_batch_list_slice
           buffer[key] = buffer[key][micro_batch_size:]
 
         yield micro_batch
@@ -470,8 +471,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A list of `TrainExample` instances, ready for training.
     """
+    if not cached_inputs_for_window or cached_inputs_for_window[0] is None:
+      logging.warning("Skipping batch: No valid inputs found (likely upstream timeout).")
+      return []
+    # for cached_input in cached_inputs_for_window:
+    #   logging.info(f"Cached input type: {type(cached_input)}")
+    #   logging.info(f"Cached input content: {cached_input}")
+    #   logging.info(f"Cached input keys: {list(cached_input.keys())}")
+    #   logging.info("\n")
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
+    
     num_generations = self.algo_config.num_generations
     micro_batches = [cached_inputs_for_window[0]] * num_generations
     training_input = rl_utils.merge_micro_batches(micro_batches)
@@ -524,7 +534,33 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self, example: TrainingInputT, prompt_index: int
   ) -> List[str]:
     """Computes the trajectory ID for each prompt in the batch."""
-    batch_size = len(example["prompts"]) // self.algo_config.num_generations
+    # len(example["prompts"]) 
+    # batch_size = 16 // self.algo_config.num_generations
+    logging.info("compute_trajectory_ids")
+    # --- RENAME KEY HERE ---
+    # Safely rename 'prompt' to 'prompts' so downstream code can reuse it
+    if "prompt" in example and "prompts" not in example:
+        example["prompts"] = example.pop("prompt")
+        logging.info("Renamed key 'prompt' to 'prompts'")
+    # # 2. Inspect the 'example' object
+    # try:
+    #   logging.info(f"Example Type: {type(example)}")
+
+    #   # If example is a dict (batch), print keys and lengths
+    #   if isinstance(example, dict):
+    #     logging.info(f"Example Keys: {list(example.keys())}")
+    #     for k, v in example.items():
+    #         # Print length of lists to verify batch size
+    #         if isinstance(v, list):
+    #             logging.info(f"Key '{k}' len: {len(v)}")
+    #   else:
+    #     # Fallback: print raw string representation
+    #     logging.info(f"Example Content: {str(example)[:500]}...")
+
+    # except Exception as e:
+    #   logging.error(f"Error printing debug info: {e}")
+
+    batch_size = len(example['prompts']) // self.algo_config.num_generations
     if batch_size != 1:
       raise ValueError(
           "_compute_trajectory_ids expects inputs for a single prompt group,"
@@ -625,7 +661,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    full_batch_size = len(first_item["prompts"])
+    # full_batch_size = len(first_item["prompts"])
+    full_batch_size = 16
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -752,13 +789,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               all_eval_prompts,
               num_generations=self._num_generations(),
           ):
-            train_examples = self._batch_to_train_example(
-                batch,
-                cached_inputs,
-                rl_cluster_lib.Mode.EVAL,
-            )
-            eval_examples.extend(train_examples)
-          return eval_examples
+            logging.info("sizhi: Stage 1: Received raw batch data from orchestrator (Batch len: %d)", len(batch))
+
+            try:
+              logging.info("sizhi: Stage 2: Preparing train examples for consumer")
+              train_examples = self._batch_to_train_example(
+                  batch,
+                  cached_inputs,
+                  rl_cluster_lib.Mode.EVAL,
+              )
+              eval_examples.extend(train_examples)
+              return eval_examples
+            except Exception as e:
+              logging.exception("Exception in _batch_to_train_example: %s", e)
+              raise
 
         eval_future = asyncio.run_coroutine_threadsafe(
             _eval_runner_async(eval_orchestrator), self.loop
@@ -827,13 +871,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue: The queue to put the batch into.
       batch: The batch of prompts (TrainingInputT).
     """
-    if len(batch["prompts"]) != self._full_batch_size:
-      logging.warning(
-          "partial batch %d vs %d detected. The rest of the batch will be"
-          " skipped.",
-          len(batch["prompts"]),
-          self._full_batch_size,
-      )
-      prompt_queue.put(None)
-    else:
-      prompt_queue.put(batch)
+    # if len(batch["prompts"]) != self._full_batch_size:
+    #   logging.warning(
+    #       "partial batch %d vs %d detected. The rest of the batch will be"
+    #       " skipped.",
+    #       len(batch["prompts"]),
+    #       self._full_batch_size,
+    #   )
+    #   prompt_queue.put(None)
+    # else:
+    #   prompt_queue.put(batch)
+    prompt_queue.put(batch)
