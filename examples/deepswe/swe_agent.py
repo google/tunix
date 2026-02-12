@@ -35,26 +35,24 @@ def parse_xml_response(response_text: str) -> tuple[str, SWEAction]:
     - action: the entire first <function=...></function> block
     Returns (thought, action).
     """
-
-    logging.info("Parsing XML response.")
-    
-    pattern = re.compile(r"(?s)(<function(?:=.*?)?>.*?</function>)")
-    
+    # Regex to match (non-greedily) from `<function=` up to the first `</function>`
+    pattern = re.compile(r"(?s)(<function=.*?</function>)")
     match = pattern.search(response_text)
 
     if match:
-        action_raw = match.group(1)
-        # Thought is everything before the very first function block
-        thought = response_text[:match.start()].strip()
+        action = match.group(1)  # The entire <function=...></function> block
+        thought = response_text[: match.start()]  # Everything before the block
     else:
-        thought = response_text.strip()
-        action_raw = ""
+        # If no match, treat entire text as "thought"
+        thought = response_text
+        action = ""
 
-    logging.info("Extracted thought: %s", thought)
-    
-    # Pass the first block to the Action constructor
-    action = SWEAction.from_string(action_raw)
-    logging.info("Extracted action: %s", action.to_xml_string())
+    # Strip leading/trailing whitespace
+    thought = thought.strip()
+    action = action.strip()
+
+    # convert action to Action object
+    action = SWEAction.from_string(action)
 
     return thought, action
 
