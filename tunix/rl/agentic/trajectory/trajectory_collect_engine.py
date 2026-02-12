@@ -342,13 +342,24 @@ class TrajectoryCollectEngine:
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.
 
-    Applies the final reward function (if provided) to the episode's
-    final response and adds it to the last step's reward. This enables
-    additional reward signals based on overall episode performance.
+    If the environment provides a ``compute_final_reward`` method (e.g.
+    SWE-bench running tests inside a Docker container), it is used in
+    preference to the callback-based ``final_reward_fn``.  This mirrors
+    the pattern used by rllm's ``AgentExecutionEngine``.
     """
     last_step = self.agent.get_current_state()
     if last_step is None:
       return
+
+    if hasattr(self.env, 'compute_final_reward') and callable(
+        self.env.compute_final_reward
+    ):
+      reward = await asyncio.get_event_loop().run_in_executor(
+          None, self.env.compute_final_reward
+      )
+      last_step.reward += reward
+      return
+
     final_reward = await asyncio.get_event_loop().run_in_executor(
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
