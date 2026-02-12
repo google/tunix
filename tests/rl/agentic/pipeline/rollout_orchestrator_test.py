@@ -2,10 +2,12 @@
 
 import asyncio
 from collections.abc import Mapping
+import math
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -43,13 +45,7 @@ class MockEnv(base_environment.BaseTaskEnv):
     )
 
 
-def _group_by_pair_index(
-    pair_index: int, env: MockEnv, traj: rollout_orchestrator.Trajectory
-) -> int:
-  return pair_index
-
-
-class RolloutOrchestratorTest(absltest.TestCase):
+class RolloutOrchestratorTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -61,18 +57,50 @@ class RolloutOrchestratorTest(absltest.TestCase):
     self.mock_collect = self.collect_patcher.start()
     self.addCleanup(self.collect_patcher.stop)
 
-  def test_streaming_successful_run(self):
-    asyncio.run(self._test_streaming_successful_run())
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='group_size_1_batch_size_2',
+          num_pairs=3,
+          group_size=1,
+          batch_size=2,
+      ),
+      dict(
+          testcase_name='group_size_2_batch_size_2',
+          num_pairs=4,
+          group_size=2,
+          batch_size=2,
+      ),
+      dict(
+          testcase_name='group_size_1_batch_size_5',
+          num_pairs=5,
+          group_size=1,
+          batch_size=5,
+      ),
+      dict(
+          testcase_name='group_size_3_batch_size_3',
+          num_pairs=6,
+          group_size=3,
+          batch_size=3,
+      ),
+      dict(
+          testcase_name='group_size_2_batch_size_4',
+          num_pairs=6,
+          group_size=2,
+          batch_size=4,
+      ),
+  )
+  def test_streaming_successful_run(self, num_pairs, group_size, batch_size):
+    asyncio.run(
+        self._test_streaming_successful_run(num_pairs, group_size, batch_size)
+    )
 
-  async def _test_streaming_successful_run(self):
+  async def _test_streaming_successful_run(
+      self, num_pairs, group_size, batch_size
+  ):
     orchestrator = rollout_orchestrator.RolloutOrchestrator(
         max_concurrency=2,
         rollout_sync_lock=utils.RolloutSyncLock(),
     )
-    num_pairs = 3
-    num_episodes = 2
-    group_size = 2
-    batch_size = 2
 
     def pair_generator():
       for i in range(num_pairs):
@@ -88,8 +116,7 @@ class RolloutOrchestratorTest(absltest.TestCase):
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
             group_size=group_size,
-            group_key=_group_by_pair_index,
-            num_episodes=num_episodes,
+            group_key=lambda i, env, traj: i // group_size,
         )
     )
     await asyncio.sleep(0)
@@ -99,33 +126,48 @@ class RolloutOrchestratorTest(absltest.TestCase):
       batches.append(batch)
     await producer_task
 
-    self.assertLen(batches, 3)
+    # Check if the orchestrator yields the correct number of batches.
+    self.assertLen(batches, math.ceil(num_pairs / batch_size))
+    for batch in batches:
+      self.assertLessEqual(len(batch), batch_size)
+      if group_size > 1 and batch_size <= group_size:
+        # If group_size > 1 and batch_size <= group_size, items in a batch
+        # are expected to come from the same group.
+        group_ids = set(item.group_id for item in batch)
+        self.assertLen(group_ids, 1)
+
     all_items = []
     for batch in batches:
-      self.assertLen(batch, 2)
       all_items.extend(batch)
 
-    self.assertLen(all_items, 6)
+    self.assertLen(all_items, num_pairs)
 
     pair_indices = sorted([item.pair_index for item in all_items])
-    self.assertEqual(pair_indices, [0, 0, 1, 1, 2, 2])
+    self.assertEqual(pair_indices, list(range(num_pairs)))
 
-    episode_ids_per_pair = {}
+    items_by_group = {}
     for item in all_items:
       self.assertEqual(
           item.traj, {'trajectory': [f'traj_for_env_{item.pair_index}']}
       )
-      self.assertEqual(item.group_id, item.pair_index)
-      self.assertEqual(item.episode_id, 0)
-      self.assertIn(item.metadata['generation_id'], [0, 1])
-      if item.pair_index not in episode_ids_per_pair:
-        episode_ids_per_pair[item.pair_index] = []
-      episode_ids_per_pair[item.pair_index].append(
-          item.metadata['generation_id']
-      )
+      self.assertEqual(item.group_id, item.pair_index // group_size)
+      if item.group_id not in items_by_group:
+        items_by_group[item.group_id] = []
+      items_by_group[item.group_id].append(item)
 
-    for i in range(num_pairs):
-      self.assertCountEqual(episode_ids_per_pair[i], [0, 1])
+    self.assertLen(items_by_group, num_pairs // group_size)
+    for group_id in items_by_group:
+      self.assertLen(items_by_group[group_id], group_size)
+      pair_indices_in_group = sorted(
+          [item.pair_index for item in items_by_group[group_id]]
+      )
+      expected_pair_indices = list(
+          range(
+              group_id * group_size,
+              group_id * group_size + group_size,
+          )
+      )
+      self.assertEqual(pair_indices_in_group, expected_pair_indices)
 
   def test_streaming_producer_runner_exception(self):
     asyncio.run(self._test_streaming_producer_runner_exception())
@@ -153,8 +195,7 @@ class RolloutOrchestratorTest(absltest.TestCase):
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
             group_size=1,
-            group_key=_group_by_pair_index,
-            num_episodes=1,
+            group_key=lambda i, *_: i,
         )
     )
     await asyncio.sleep(0)
@@ -188,8 +229,7 @@ class RolloutOrchestratorTest(absltest.TestCase):
         orchestrator.run_producers_from_stream(
             pairs_stream=faulty_generator(),
             group_size=1,
-            group_key=_group_by_pair_index,
-            num_episodes=1,
+            group_key=lambda i, *_: i,
         )
     )
     await asyncio.sleep(0)

@@ -178,7 +178,8 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
       merged[key] = list(chain.from_iterable(all_values))
     else:
       merged[key] = tree_util.tree_map(
-          lambda *xs: np.concatenate(xs), *all_values
+          lambda *xs: np.concatenate([np.atleast_1d(x) for x in xs]),
+          *all_values,
       )
 
   return merged

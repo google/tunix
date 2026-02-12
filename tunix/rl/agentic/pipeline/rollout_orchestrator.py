@@ -107,7 +107,6 @@ class RolloutOrchestrator:
   async def _run_and_queue_one_episode(
       self,
       pair_idx: int,
-      episode_idx: int,
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
@@ -122,22 +121,20 @@ class RolloutOrchestrator:
     item = TrajectoryItem(
         pair_index=pair_idx,
         group_id=gid,
-        episode_id=0,
         start_step=start_step,
         traj=traj,
-        metadata={"generation_id": episode_idx},
+        metadata={"generation_id": pair_idx},
     )
     await manager.put(item)
     return 1
 
   async def _runner(
       self,
-      i: int,
+      pair_index: int,
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
       group_key: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
-      num_episodes: int = 1,
       start_step_fn: Optional[Callable[[], int]] = None,
       collect_mode: Optional[str] = None,
   ):
@@ -149,53 +146,45 @@ class RolloutOrchestrator:
     `num_episodes` limit.
 
     Args:
-      i: The index of the agent-environment pair.
+      pair_index: The index of the agent-environment pair.
       agent: The ConversationAgentBase instance.
       env: The BaseTaskEnv instance.
       manager: The GroupQueueManager to put collected trajectories into.
       group_key: A callable to determine the group ID for a trajectory.
-      num_episodes: The maximum number of episodes to collect for this pair,
-        defaults to 1.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
       collect_mode: An optional string to select the collection mode.
     """
     episode_count = 0
-    logging.debug("Starting generating trajectories(_runner) for pair %d", i)
+    logging.debug(
+        "Starting generating trajectories(_runner) for pair %d", pair_index
+    )
 
     try:
       # Parallel execution for the group
       self._rollout_sync_lock.acquire_rollout()
       try:
-        tasks = []
-        async with asyncio.TaskGroup() as tg:
-          for ep_id in range(num_episodes):
-            # TODO(b/462779884): Replace deepcopy with a factory pattern.
-            task = tg.create_task(
-                self._run_and_queue_one_episode(
-                    pair_idx=i,
-                    episode_idx=ep_id,
-                    agent=copy.deepcopy(agent),
-                    env=copy.deepcopy(env),
-                    manager=manager,
-                    group_key=group_key,
-                    start_step_fn=start_step_fn,
-                    collect_mode=collect_mode,
-                )
-            )
-            tasks.append(task)
-        results = [task.result() for task in tasks]
-        episode_count = sum(results)
+        episode_count = await self._run_and_queue_one_episode(
+            pair_idx=pair_index,
+            agent=agent,
+            env=env,
+            manager=manager,
+            group_key=group_key,
+            start_step_fn=start_step_fn,
+            collect_mode=collect_mode,
+        )
       finally:
         self._rollout_sync_lock.release_rollout()
     except ExceptionGroup as eg:
       for e in eg.exceptions:
-        logging.error("Fatal error in runner for pair %d: %s", i, e)
+        logging.error("Fatal error in runner for pair %d: %s", pair_index, e)
       traceback.print_exc()
       raise eg.exceptions[0]
     finally:
       logging.debug(
-          "Runner for pair %d completed with %d episodes", i, episode_count
+          "Runner for pair %d completed with %d episodes",
+          pair_index,
+          episode_count,
       )
 
   async def run_producers_from_stream(
@@ -210,7 +199,6 @@ class RolloutOrchestrator:
           [int, BaseTaskEnv, Trajectory], Hashable
       ] = lambda i, _, __: i,
       collect_mode: Optional[str] = None,
-      num_episodes: int = 1,
       max_open_groups: Optional[int] = None,
       start_step_fn: Optional[Callable[[], int]] = None,
   ):
@@ -235,22 +223,15 @@ class RolloutOrchestrator:
         agent-environment pair index.
       collect_mode: An optional string to select the collection mode for
         `TrajectoryCollectEngine`.
-      num_episodes: The maximum number of episodes to collect for each
-        agent-environment pair. If None, runs indefinitely until stopped.
       max_open_groups: The maximum number of groups that can be open
         simultaneously in the GroupQueueManager.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
 
     Raises:
-      ValueError: If `num_episodes` is not a positive integer.
       ValueError: If `max_concurrency` is not set.
       RuntimeError: If the orchestrator is already running.
     """
-    if num_episodes <= 0:
-      raise ValueError(
-          f"num_episodes must be a positive integer, got {num_episodes}"
-      )
     logging.info(
         "Starting run_producers_from_stream with %d concurrency",
         self.max_concurrency,
@@ -298,12 +279,11 @@ class RolloutOrchestrator:
               agent, env = next(pairs_iterator)
             task = asyncio.create_task(
                 self._runner(
-                    i=next_pair_index,
+                    pair_index=next_pair_index,
                     agent=agent,
                     env=env,
                     manager=self._group_queue_manager,
                     group_key=group_key,
-                    num_episodes=num_episodes,
                     start_step_fn=start_step_fn,
                     collect_mode=collect_mode,
                 )

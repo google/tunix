@@ -22,13 +22,12 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 
 def _create_item(
-    group_id: str, episode_id: int, pair_index: int = 0
+    group_id: str, pair_index: int = 0
 ) -> agent_types.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
   return agent_types.TrajectoryItem(
       pair_index=pair_index,
       group_id=group_id,
-      episode_id=episode_id,
       start_step=0,
       traj=None,
   )
@@ -41,7 +40,7 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = group_queue_manager.GroupQueueManager(group_size=2)
-      item1 = _create_item("g1", 1)
+      item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
       await manager.put(item1)
@@ -63,7 +62,7 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = group_queue_manager.GroupQueueManager(group_size=2)
-      item1 = _create_item("g1", 1)
+      item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
       async def producer():
@@ -85,7 +84,7 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = group_queue_manager.GroupQueueManager(group_size=3)
-      items = [_create_item("g1", 1, i) for i in range(3)]
+      items = [_create_item("g1", i) for i in range(3)]
       for item in items:
         await manager.put(item)
 
@@ -110,8 +109,8 @@ class GroupQueueManagerTest(absltest.TestCase):
       manager = group_queue_manager.GroupQueueManager(
           group_size=2, max_open_buckets=1
       )
-      item_g1 = _create_item("g1", 1)
-      item_g2 = _create_item("g2", 1)
+      item_g1 = _create_item("g1", 0)
+      item_g2 = _create_item("g2", 0)
 
       await manager.put(item_g1)
 
@@ -125,7 +124,7 @@ class GroupQueueManagerTest(absltest.TestCase):
 
       await put_task
       self.assertEqual(manager._open_bucket_count(), 1)
-      self.assertIn(("g2", 1), manager._buckets)
+      self.assertIn("g2", manager._buckets)
 
     asyncio.run(_run_test())
 
@@ -138,7 +137,7 @@ class GroupQueueManagerTest(absltest.TestCase):
       await manager.put_exception(exc)
 
       with self.assertRaises(ValueError):
-        await manager.put(_create_item("g1", 1))
+        await manager.put(_create_item("g1", 0))
 
       with self.assertRaises(ValueError):
         await manager.get_batch(1)

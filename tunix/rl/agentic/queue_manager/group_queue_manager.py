@@ -19,7 +19,7 @@ import asyncio
 import collections
 from collections.abc import Hashable
 import dataclasses
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional
 from tunix.rl.agentic.agents import agent_types
 
 TrajectoryItem = agent_types.TrajectoryItem
@@ -28,10 +28,10 @@ dataclass = dataclasses.dataclass
 
 
 class GroupQueueManager:
-  """Manages queues of trajectory items, grouping them by group_id and episode_id.
+  """Manages queues of trajectory items, grouping them by group_id.
 
   This class collects `TrajectoryItem` instances into buckets based on their
-  `(group_id, episode_id)`. Once a bucket reaches `group_size`, it becomes a
+  `group_id`. Once a bucket reaches `group_size`, it becomes a
   "ready group" and can be retrieved in batches. It also handles managing the
   number of open buckets and provides mechanisms for clearing and handling
   exceptions.
@@ -45,7 +45,7 @@ class GroupQueueManager:
   ):
     self.group_size = group_size
     self.max_open_buckets = max_open_buckets or 0
-    self._buckets: Dict[Tuple[Hashable, int], List[TrajectoryItem]] = {}
+    self._buckets: Dict[Hashable, List[TrajectoryItem]] = {}
     self._ready_groups: Deque[List[TrajectoryItem]] = collections.deque()
     self._clearing = False
     self._exc: Optional[BaseException] = None
@@ -76,7 +76,7 @@ class GroupQueueManager:
       self._have_ready = asyncio.Event()
 
   async def put(self, item: TrajectoryItem):
-    """Adds an item, grouping by `(group_id, episode_id)`.
+    """Adds an item, grouping by `group_id`.
 
     Items are grouped in buckets. When a bucket reaches `self.group_size`, it's
     moved to `_ready_groups`. Waits if `max_open_buckets` is exceeded.
@@ -91,7 +91,7 @@ class GroupQueueManager:
       return
     if self._exc:
       raise self._exc
-    key = (item.group_id, item.episode_id)
+    key = item.group_id
     async with self._capacity:
       new_bucket = key not in self._buckets
       while (
