@@ -278,6 +278,24 @@ class UtilsTest(parameterized.TestCase):
         )
     )
 
+  def test_transfer_state_with_bias_padding_and_reshape(self):
+    """Test rank mismatch, reshape and padding for attention bias."""
+    src_key = "layers.0.attn.q_bias"
+    src_q_bias = jnp.ones((256,), dtype=jnp.float32)
+    src = MockState({src_key: MockParam(src_q_bias)})
+    dst = MockState(
+        {src_key: MockParam(jnp.zeros((4, 128), dtype=jnp.float32))}
+    )
+
+    mappings = {src_key: (src_key, None)}
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    # Verify shape
+    self.assertEqual(result.params[src_key].shape, (4, 128))
+    # Verify values are repeated correctly
+    self.assertTrue(jnp.allclose(result.params[src_key], 1.0))
+
   def test_transfer_state_with_scanned_layers(self):
     """Comprehensive test for scanned layers covering multiple scenarios."""
     num_layers = 3

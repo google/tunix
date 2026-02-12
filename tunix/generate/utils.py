@@ -547,14 +547,22 @@ def _align_shape(
   # Handle rank mismatch
   if len(val.shape) != len(tgt_shape):
     if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
-      new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
-      logging.debug(
-          'Reshaping attention bias on %s: %s -> %s',
-          src_key,
-          val.shape,
-          new_shape,
-      )
-      return jnp.reshape(val, new_shape)
+      if math.prod(tgt_shape) == math.prod(val.shape):
+        new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
+        logging.debug(
+            'Reshaping attention bias on %s: %s -> %s',
+            src_key,
+            val.shape,
+            new_shape,
+        )
+        return jnp.reshape(val, new_shape)
+      else:
+        # If target pads number of heads, we need to reshape and then pad, we
+        # don't consider padding head dimensions here.
+        new_src_shape = (val.shape[0] // tgt_shape[1], tgt_shape[1])
+        val = jnp.reshape(val, new_src_shape)
+        new_tgt_shape = tgt_shape
+
     elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
       if math.prod(tgt_shape) == math.prod(val.shape):
         logging.debug(
