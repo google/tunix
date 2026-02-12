@@ -211,6 +211,9 @@ async def run_evaluation():
       )
   )
 
+  # Yield control so the producer task can initialize its _manager.
+  await asyncio.sleep(0)
+
   results = []
   start_time = time.time()
 
