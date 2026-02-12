@@ -13,3 +13,36 @@ conda create -n deepswe_g2 python=3.12.12 -y
  1150  ls
  1151  pip install -e .
 
+ hugepage/enabled")
+  warnings.warn(
+2026-02-12 08:49:07 - INFO - Loading model weights from /scratch/models/Qwen/Qwen3-4B-Instruct-2507 ...
+2026-02-12 08:49:11 - INFO -  - Pathways not available. Using default HBM stats collector
+2026-02-12 08:49:11 - INFO - Using 3.7 GiB / 15.7 GiB (0.2379297078390618) on TPU_0(process=0,(0,0,0,0))
+2026-02-12 08:49:11 - INFO - Using 3.7 GiB / 15.7 GiB (0.2379297078390618) on TPU_1(process=0,(1,0,0,0))
+2026-02-12 08:49:11 - INFO - Using 3.7 GiB / 15.7 GiB (0.2379297078390618) on TPU_2(process=0,(0,1,0,0))
+2026-02-12 08:49:11 - INFO - Using 3.7 GiB / 15.7 GiB (0.2379297078390618) on TPU_3(process=0,(1,1,0,0))
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+2026-02-12 08:49:11,948 - __main__ - INFO - Starting evaluation: 10 instances, max_concurrent=8, max_steps=30
+2026-02-12 08:49:11,948 - RolloutOrchestrator - INFO - Starting run_producers_from_stream with 8 concurrency
+Traceback (most recent call last):
+  File "/home/haoyugao_google_com/tunix/examples/deepswe/eval_deepswe.py", line 291, in <module>
+    eval_results = asyncio.run(run_evaluation())
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/haoyugao_google_com/miniconda3/envs/deepswe_g2/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/home/haoyugao_google_com/miniconda3/envs/deepswe_g2/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/haoyugao_google_com/miniconda3/envs/deepswe_g2/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/haoyugao_google_com/tunix/examples/deepswe/eval_deepswe.py", line 217, in run_evaluation
+    async for batch in orchestrator.yield_batches(batch_size=1):
+  File "/home/haoyugao_google_com/tunix/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 385, in yield_batches
+    raise RuntimeError("Producers have not been started.")
+RuntimeError: Producers have not been started.
+
