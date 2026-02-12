@@ -5,7 +5,7 @@ authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
@@ -33,7 +33,7 @@ dependencies = [
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
-  "qwix",
+  "qwix==0.1.5",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
@@ -55,7 +55,7 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2, <=0.8.1", # Jax 0.7.2 has performance regression on OSS
+  "jax[tpu]==0.8.1",
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
