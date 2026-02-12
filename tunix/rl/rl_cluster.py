@@ -794,6 +794,7 @@ class RLCluster:
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
+      enable_thinking: bool = False
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -806,6 +807,7 @@ class RLCluster:
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
+      enable_thinking: Whether to enable reasoning for supported models.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -818,7 +820,7 @@ class RLCluster:
               prompt,  # pytype: disable=wrong-arg-types
               add_generation_prompt=True,
               tokenize=False,
-              enable_thinking=False,
+              enable_thinking=enable_thinking
           )
           for prompt in prompts
       ]
