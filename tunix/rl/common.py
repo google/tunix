@@ -397,7 +397,8 @@ def aggregate_loss(
   else:
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
-        " 'token-mean', 'sequence-mean-token-mean'."
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'sequence-mean-token-sum-norm'."
     )
   return loss
 

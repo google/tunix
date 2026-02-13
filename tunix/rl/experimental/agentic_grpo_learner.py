@@ -60,16 +60,23 @@ TrainExample = agentic_rl_learner.TrainExample
 class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   """Configuration for GRPO algorithm.
 
-  Parameters:
+  Attributes:
+    algo_variant: Algorithm variant name.
+    advantage_estimator: Name of the advantage estimator function.
+    policy_loss_fn: Name of the policy loss function.
+    loss_agg_mode: Method for aggregating the loss. Supported values:
+      "token-mean", "sequence-mean-token-mean", "sequence-mean-token-scale",
+      "sequence-mean-token-sum-norm".
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
     epsilon: PPO-style clipping epsilon.
+    epsilon_high: PPO-style clipping epsilon upper bound.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
-    off_policy_steps: Number of off-policy steps can be accepted before a
-      policy update.
+    off_policy_steps: Number of off-policy steps can be accepted before a policy
+      update.
   """
 
   algo_variant: str = "agentic_grpo"
@@ -166,6 +173,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
            ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
            ...       # ... }
       data_shuffle_seed: The seed used to shuffle the training data.
+      agent_class: The class of the agent to be used.
+      agent_kwargs: Keyword arguments to pass to the agent class.
+      env_class: The class of the environment to be used.
+      env_kwargs: Keyword arguments to pass to the environment class.
     """  # fmt: skip
     super().__init__(
         rl_cluster=rl_cluster,
