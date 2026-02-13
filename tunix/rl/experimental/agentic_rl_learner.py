@@ -174,7 +174,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self.rl_cluster.actor_trainer.restored_global_step()
     )
     # Current iter steps for micro-batch based training.
-    self._iter_steps = 0
+    self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
     self._eval_iter_steps = 0
 
     # Sync weights if the actor model and rollout model are not sharing weights.
@@ -194,7 +194,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             rl_cluster_lib.Role.ROLLOUT
         ]
     )
-    self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
     self._rollout_micro_batch_size = (
         self._training_config.rollout_micro_batch_size
@@ -441,6 +440,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             group_size=self.algo_config.num_generations,
             group_key=lambda i, env, traj: env.extra_kwargs["group_id"],
             collect_mode=collect_mode,
+            init_pair_index=self.rl_cluster.global_steps
+            * self._full_batch_size,
         )
     )
 
@@ -636,6 +637,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
     full_batch_iterator = iter(train_dataset)
+
+    if self.rl_cluster.global_steps > 0:
+      logging.info(
+          "Skipping %d batches from train_dataset to fast-forward to step %d",
+          self.rl_cluster.global_steps,
+          self.rl_cluster.global_steps,
+      )
+      # TODO(b/483779605): Current implementation of fast-forwarding does not
+      # take into account the mini-batch size. Follow-up CL will address this.
+      for _ in range(self.rl_cluster.global_steps):
+        try:
+          next(full_batch_iterator)
+        except StopIteration:
+          logging.warning("Train dataset exhausted while skipping batches.")
+          self.rl_cluster.close()
+          return
 
     try:
       first_item = next(full_batch_iterator)
