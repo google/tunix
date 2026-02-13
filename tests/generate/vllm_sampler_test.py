@@ -172,6 +172,7 @@ class VllmSamplerTest(absltest.TestCase):
     vl_sampler = vllm_sampler.VllmSampler(
         tokenizer=model_tokenizer,
         config=vllm_config,
+        enable_prefix_caching=True,  # Test kwargs forwarding
     )
     state = nnx.state(tunix_model)
     vl_sampler.load_checkpoint(state)

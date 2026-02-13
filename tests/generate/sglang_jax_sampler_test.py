@@ -129,6 +129,8 @@ class SglangJaxSamplerTest(absltest.TestCase):
     sgl_sampler = sglang_jax_sampler.SglangJaxSampler(
         tokenizer=model_tokenizer,
         config=sglang_jax_config,
+        # Test kwargs forwarding
+        disable_precompile=False,
     )
     state = nnx.state(tunix_model)
     sgl_sampler.load_checkpoint(state)
