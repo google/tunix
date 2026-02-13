@@ -915,7 +915,9 @@ def transfer_state_directly(
     for key_tuple, tgt_val in tgt_flat.items():
       # Try Direct Match
       if key_tuple in src_flat:
-        filtered_src_flat[key_tuple] = src_flat[key_tuple]
+        src_val = src_flat[key_tuple]
+        src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(key_tuple))
+        filtered_src_flat[key_tuple] = src_val
         filtered_tgt_flat[key_tuple] = tgt_val
         continue
 
@@ -954,9 +956,14 @@ def transfer_state_directly(
 
         if found_candidate:
           src_val = src_flat[found_candidate]
-          filtered_src_flat[key_tuple] = _slice_scanned_param(
+          # Slice the scanned parameter
+          sliced_val = _slice_scanned_param(
               src_val, tgt_val, layer_idx, str(key_tuple)
           )
+          sliced_val = _apply_dtype_cast(
+              sliced_val, tgt_val.dtype, str(key_tuple)
+          )
+          filtered_src_flat[key_tuple] = sliced_val
           filtered_tgt_flat[key_tuple] = tgt_val
           continue
 
