@@ -200,6 +200,7 @@ class RolloutOrchestrator:
       ] = lambda i, _, __: i,
       collect_mode: Optional[str] = None,
       start_step_fn: Optional[Callable[[], int]] = None,
+      init_pair_index: int = 0,
   ):
     """Dynamically runs collectors from a stream of agent-env pairs.
 
@@ -249,7 +250,7 @@ class RolloutOrchestrator:
     else:
       pairs_iterator = iter(pairs_stream)
     active_tasks: set[asyncio.Task] = set()
-    next_pair_index = 0
+    next_pair_index = init_pair_index
     stream_exhausted = False
 
     try:
