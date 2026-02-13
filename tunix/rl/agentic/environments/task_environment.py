@@ -52,7 +52,11 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
         compatibility with a common environment config interface.
     """
     if reward_fn is None:
-      logging.warning("No reward_fn provided, defaulting to dummy_reward().")
+      logging.log_first_n(
+          logging.WARNING,
+          "No reward_fn provided, defaulting to dummy_reward().",
+          1,
+      )
       reward_fn = reward.dummy_reward
 
     super().__init__(
