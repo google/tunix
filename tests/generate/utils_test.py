@@ -1090,5 +1090,100 @@ class UtilsTest(parameterized.TestCase):
         jnp.array(200.0),
     )
 
+  def test_transfer_state_directly_with_dtype_casting(self):
+    """Tests that transfer_state_directly correctly casts dtypes (e.g., f32 to bf16)."""
+    # Source state in float32
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(
+                weight=nnx.Param(jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32))
+            ),
+            # Scanned layers in float32
+            layers=nnx.Dict(
+                mlp=nnx.Dict(
+                    weight=nnx.Param(jnp.array([[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32))
+                )
+            )
+        )
+    )
+
+    # Destination state in bfloat16
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(
+                weight=nnx.Param(jnp.zeros((3,), dtype=jnp.bfloat16))
+            ),
+            # Unrolled layers in bfloat16
+            layers_0=nnx.Dict(
+                mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16)))
+            ),
+            layers_1=nnx.Dict(
+                mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16)))
+            )
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    # Verify direct mapping cast
+    self.assertEqual(dst_state['decoder']['layer0']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['decoder']['layer0']['weight'][...],
+        jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+
+    # Verify scanned layer mapping cast
+    self.assertEqual(dst_state['decoder']['layers_0']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['decoder']['layers_0']['mlp']['weight'][...],
+        jnp.array([10.0, 11.0], dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+    self.assertEqual(dst_state['decoder']['layers_1']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['decoder']['layers_1']['mlp']['weight'][...],
+        jnp.array([20.0, 21.0], dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+
+  def test_transfer_state_directly_scanned_layers_casting(self):
+    """Tests transfer from scanned layers container with dtype casting."""
+    # Source has scanned layers in float32
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            mlp=nnx.Dict(
+                weight=nnx.Param(jnp.array([100.0, 200.0], dtype=jnp.float32))
+            )
+        )
+    )
+
+    # Destination has unrolled layers_X in bfloat16
+    dst_state = nnx.Dict(
+        layers=nnx.Dict(
+            layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16)))),
+            layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16)))),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    # Verify casting and slicing for implicit layers
+    self.assertEqual(dst_state['layers']['layers_0']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['layers']['layers_0']['mlp']['weight'][...],
+        jnp.array(100.0, dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+    self.assertEqual(dst_state['layers']['layers_1']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['layers']['layers_1']['mlp']['weight'][...],
+        jnp.array(200.0, dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+
+
 if __name__ == "__main__":
   absltest.main()
