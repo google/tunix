@@ -204,12 +204,16 @@ class RolloutConfig:
   rollout_sglang_jax_chunked_prefill_size: Optional[int] = -1
 
   # The number of tokens in a page
-  rollout_sglang_jax_page_size: int = 64
+  rollout_sglang_jax_page_size: int = 128
 
   # The format of the model weights to load.
   rollout_sglang_jax_load_format: str = "auto"
 
+  # The maximum number of running requests to accumulate batch
   rollout_sglang_jax_max_running_requests: Optional[int] = None
+
+  # The log level of sglang_jax
+  rollout_sglang_jax_log_level: Optional[str] = "info"
 
 
 class BaseRollout(ABC):
