@@ -62,6 +62,7 @@ class VllmRollout(base_rollout.BaseRollout):
             hf_config_path=rollout_config.rollout_vllm_hf_config_path,
             additional_config=rollout_config.rollout_vllm_additional_config,
         ),
+        **rollout_config.rollout_vllm_kwargs,
     )
     state = nnx.state(model)
     self._sampler.load_checkpoint(state)
@@ -87,6 +88,7 @@ class VllmRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,
         echo=False,
         pad_output=True,
+        **kwargs,
     )
 
     return base_rollout.RolloutOutput(
