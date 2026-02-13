@@ -1,13 +1,21 @@
 name: Auto-assign issues
 on:
   issues:
-    types: [opened, reopened]
+    types: 
+      - [opened, reopened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   assign:
     runs-on: ubuntu-latest
     steps:
-      - name: Assign issue
-        uses: peter-evans/assign-issue@v2
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/github-script@v8
         with:
-          assignees: tianshub, wang2yn84, lc5211, hgao327, sizhit2, abheesht17, jiangyangmu
+          script: |
+            const script = require('./\.github/workflows/issue-auto-assign.js')
+            script({github, context})
