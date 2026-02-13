@@ -63,6 +63,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             page_size=rollout_config.rollout_sglang_jax_page_size,
             load_format=rollout_config.rollout_sglang_jax_load_format,
             max_running_requests=rollout_config.rollout_sglang_jax_max_running_requests,
+            log_level=rollout_config.rollout_sglang_jax_log_level,
         ),
     )
     state = nnx.state(model)
