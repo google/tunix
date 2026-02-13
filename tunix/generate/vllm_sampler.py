@@ -61,11 +61,14 @@ class VllmConfig:
   # However, frequent swapping can increase latency due to the overhead of
   # transferring data between CPU and TPU/GPU memory.
   swap_space: float = 4.0  # in GiB
+  stop_strings: Optional[List[str]] = None 
   lora_config: Optional[Dict[str, Any]] = None
   server_mode: bool = False
   async_scheduling: bool = False
   tensor_parallel_size: int = -1
   data_parallel_size: int = -1
+  expert_parallel_size: int = 1
+  enable_expert_parallelism: bool = False
   enable_dp_attention: bool = False
   max_num_batched_tokens: Optional[int] = None
   max_num_seqs: Optional[int] = None
@@ -199,15 +202,55 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     """Setup vllm config from Tunix Vllm config."""
     tensor_parallel_size = config.tensor_parallel_size
     data_parallel_size = config.data_parallel_size
+    expert_parallel_size = config.expert_parallel_size
     total_mesh_devices = self._find_total_size(config.mesh)
 
+    if expert_parallel_size < 1:
+      raise ValueError(
+          f"expert_parallel_size must be at least 1, but got {expert_parallel_size}."
+      )
+    if config.enable_expert_parallelism and expert_parallel_size <= 1:
+      raise ValueError(
+          "When enable_expert_parallelism is True, expert_parallel_size must be"
+          " greater than 1."
+      )
+
     if config.tensor_parallel_size == -1 and config.data_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices
+      if total_mesh_devices % expert_parallel_size != 0:
+        raise ValueError(
+            f"Total devices ({total_mesh_devices}) must be divisible by"
+            f" expert_parallel_size ({expert_parallel_size})."
+        )
+      tensor_parallel_size = total_mesh_devices // expert_parallel_size
       data_parallel_size = 1
     elif config.tensor_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices // data_parallel_size
+      denominator = data_parallel_size * expert_parallel_size
+      if total_mesh_devices % denominator != 0:
+        raise ValueError(
+            f"Total devices ({total_mesh_devices}) must be divisible by"
+            f" data_parallel_size * expert_parallel_size ({denominator})."
+        )
+      tensor_parallel_size = total_mesh_devices // denominator
     elif config.data_parallel_size == -1:
-      data_parallel_size = total_mesh_devices // tensor_parallel_size
+      denominator = tensor_parallel_size * expert_parallel_size
+      if total_mesh_devices % denominator != 0:
+        raise ValueError(
+            f"Total devices ({total_mesh_devices}) must be divisible by"
+            f" tensor_parallel_size * expert_parallel_size ({denominator})."
+        )
+      data_parallel_size = total_mesh_devices // denominator
+
+    total_parallel_size = (
+        tensor_parallel_size * data_parallel_size * expert_parallel_size
+    )
+    if total_parallel_size != total_mesh_devices:
+      raise ValueError(
+          f"The product of parallelism sizes (tp={tensor_parallel_size},"
+          f" dp={data_parallel_size}, ep={expert_parallel_size}) is"
+          f" {total_parallel_size}, which does not match the total number of"
+          f" devices in the mesh ({total_mesh_devices})."
+      )
+
 
     args = {}
     # Init vLLM model with random weights to speed up bootstrap time, because
@@ -234,11 +277,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
     device_indexes = config.mesh.device_ids.flatten().tolist()
+    sharding_strategy = {
+        "device_indexes": device_indexes,
+        "enable_dp_attention": config.enable_dp_attention,
+    }
+    if config.enable_expert_parallelism:
+      sharding_strategy["expert_parallelism"] = config.expert_parallel_size
     args["additional_config"]["sharding"] = {
-        "sharding_strategy": {
-            "device_indexes": device_indexes,
-            "enable_dp_attention": config.enable_dp_attention,
-        }
+        "sharding_strategy": sharding_strategy,
     }
 
     # Add support for "hf_config_path" and "additional_config" which are
@@ -420,6 +466,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.prompt_logprobs = 1  # b/428730696
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
+
+      if self.config.stop_strings:
+        sampling_params.stop = self.config.stop_strings
+        sampling_params.detokenize = True
 
       if top_p is not None:
         sampling_params.top_p = top_p
