@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import dataclasses
 import itertools
+import copy
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
@@ -408,7 +409,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
-                  None, self._create_agent_env_pair, single_example, i
+                  None,
+                  self._create_agent_env_pair,
+                  copy.deepcopy(single_example),
+                  i,
               )
               for _ in range(num_generations)
           ])
@@ -419,7 +423,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         for single_example in prompt_iterator:
           agent_env_pairs = await asyncio.gather(*[
               self.loop.run_in_executor(
-                  None, self._create_agent_env_pair, single_example, i
+                  None,
+                  self._create_agent_env_pair,
+                  copy.deepcopy(single_example),
+                  i,
               )
               for _ in range(num_generations)
           ])
