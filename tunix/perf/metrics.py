@@ -73,9 +73,9 @@ class MetricsBuffer:
 
 @dataclasses.dataclass(frozen=True)
 class PerfMetricsOptions:
-  # Whether to enable performance metrics. If False, all other options will be
-  # ignored.
-  enable_perf_metrics: bool = False
+  # Whether to enable the trace writer. By default, it is enabled when perf
+  # metrics are enabled. If False, the trace will not be written out.
+  enable_trace_writer: bool = True
   # Directory to write the raw metrics/events to.
   log_dir: str = ""
   # Path to the custom export function. If set, the custom export function will
