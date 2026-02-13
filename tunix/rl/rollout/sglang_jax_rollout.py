@@ -65,6 +65,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             max_running_requests=rollout_config.rollout_sglang_jax_max_running_requests,
             log_level=rollout_config.rollout_sglang_jax_log_level,
         ),
+        **rollout_config.rollout_sglang_jax_kwargs,
     )
     state = nnx.state(model)
     self._sampler.load_checkpoint(state)
@@ -86,6 +87,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,
         echo=False,
         pad_output=True,
+        **kwargs,
     )
 
     return base_rollout.RolloutOutput(
