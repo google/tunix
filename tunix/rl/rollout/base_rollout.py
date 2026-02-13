@@ -157,6 +157,9 @@ class RolloutConfig:
   # Maximum number of concurrent sequences allowed to be processed in vLLM.
   rollout_vllm_max_num_seqs: Optional[int] = None
 
+  # Additional keyword arguments forwarded directly to the vLLM sampler/engine.
+  rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
+
   # SG-Lang JAX specific rollout configs.
 
   # Model version for SG-Lang JAX rollout engine.
@@ -214,6 +217,11 @@ class RolloutConfig:
 
   # The log level of sglang_jax
   rollout_sglang_jax_log_level: Optional[str] = "info"
+
+  # Additional keyword arguments forwarded directly to the SG-Lang JAX sampler/engine.
+  rollout_sglang_jax_kwargs: dict[str, Any] = dataclasses.field(
+      default_factory=dict
+  )
 
 
 class BaseRollout(ABC):

@@ -103,6 +103,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self,
       tokenizer: Any,
       config: SglangJaxConfig,
+      **kwargs,
   ):
     """Initializes the SglangJaxSampler.
 
@@ -112,6 +113,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     """
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.args = self._sglang_jax_config(config)
+    if kwargs:
+      self.args.update(kwargs)
     self.engine = Engine(**self.args)
 
     self.to_hf_key_mappings = update_hf_key_mappings_with_lora(
@@ -278,6 +281,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      **kwargs,
   ) -> base_sampler.SamplerOutput:
     # max_generation_steps: maximum number of tokens to generate
     if (
@@ -305,6 +309,19 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self.sampling_params.top_p = top_p
     if top_k is not None:
       self.sampling_params.top_k = top_k
+
+    try:
+      self.sampling_params.update(**kwargs)
+      logging.warning(
+          "Received additional kwargs that are not explicitly defined in the"
+          f" method signature: {kwargs}. These will be forwarded to the"
+          " underlying sampler, but please ensure that they are valid."
+      )
+    except Exception as e:
+      logging.warning(
+          f"Failed to update sampling_params with kwargs: {kwargs}. Error: {e}"
+      )
+
     sampling_params = [
         self.sampling_params.convert_to_dict() for _ in input_strings
     ]
