@@ -81,7 +81,7 @@ class SglangJaxConfig:
   precompile_token_paddings: Optional[List[int]] = None
   precompile_bs_paddings: Optional[List[int]] = None
   chunked_prefill_size: Optional[int] = -1
-  page_size: int = 64
+  page_size: int = 128
   load_format: str = "auto"
   max_running_requests: int = None
 
