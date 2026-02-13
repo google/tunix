@@ -59,8 +59,11 @@ class VllmRollout(base_rollout.BaseRollout):
                 "async_scheduling": (
                     rollout_config.rollout_vllm_async_scheduling
                 ),
+                "stop_strings": rollout_config.rollout_vllm_stop_strings,
                 "tensor_parallel_size": rollout_config.tensor_parallel_size,
                 "data_parallel_size": rollout_config.data_parallel_size,
+                "expert_parallel_size": rollout_config.expert_parallel_size,
+                "enable_expert_parallelism": rollout_config.rollout_vllm_enable_expert_parallelism,
                 "max_num_batched_tokens": (
                     rollout_config.rollout_vllm_max_num_batched_tokens
                 ),
