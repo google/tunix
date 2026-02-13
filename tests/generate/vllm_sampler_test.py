@@ -177,6 +177,7 @@ class VllmSamplerTest(absltest.TestCase):
     vl_sampler = vllm_sampler.VllmSampler(
         tokenizer=model_tokenizer,
         config=vllm_config,
+        enable_prefix_caching=True,  # Test kwargs forwarding
     )
     # vLLM construct its own mesh
     self.assertNotEqual(vl_sampler.mesh, self.mesh)

@@ -87,6 +87,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       tokenizer: Any,
       config: VllmConfig,
+      **kwargs,
   ):
     """Initializes the VllmSampler.
 
@@ -110,7 +111,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
-    self.args = self._vllm_config(config)
+    self.args = self._vllm_config(config, **kwargs)
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -195,7 +196,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # since vllm doesn't support DP yet, simply return the total rank size.
     return math.prod(mesh.shape.values())
 
-  def _vllm_config(self, config: VllmConfig):
+  def _vllm_config(self, config: VllmConfig, **kwargs):
     """Setup vllm config from Tunix Vllm config."""
     tensor_parallel_size = config.tensor_parallel_size
     data_parallel_size = config.data_parallel_size
@@ -248,6 +249,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if config.additional_config:
       args["additional_config"].update(config.additional_config)
+
+    if kwargs:
+      args.update(kwargs)
 
     return args
 
@@ -381,6 +385,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
     if isinstance(input_strings, str):
@@ -425,6 +430,19 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.top_p = top_p
       if top_k is not None:
         sampling_params.top_k = top_k
+
+      try:
+        sampling_params.update(**kwargs)
+        logging.warning(
+            "Received additional kwargs that are not explicitly defined in the"
+            f" method signature: {kwargs}. These will be forwarded to the"
+            " underlying sampler, but please ensure that they are valid."
+        )
+      except Exception as e:
+        logging.warning(
+            f"Failed to update sampling_params with kwargs: {kwargs}."
+            f" Error: {e}"
+        )
 
       self.sampling_params = sampling_params
 
