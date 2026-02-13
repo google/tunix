@@ -314,16 +314,17 @@ def _experimental_pre_reshard(splitfn, src_pytree, target_shardings):
 
 def _get_reshard_fn_pathwaysutils(
     *,
-    cache_resharding_plans: bool,
+    cache_resharding_plans: bool,  # pylint: disable=unused-argument
     donate: bool,
-    use_experimental_pre_reshard: bool,
+    use_experimental_pre_reshard: bool,  # pylint: disable=unused-argument
+    use_ifrt_reshard: bool = False,
 ):
   """Returns a reshard function using pathwaysutils.
 
   Args:
     cache_resharding_plans: Whether to cache resharding plans.
     donate: Whether to donate the input buffer.
-    use_experimental_pre_reshard: Ignored.
+    use_experimental_pre_reshard: Whether to use intermediate sharding.
 
   Returns:
     A reshard function.
@@ -332,7 +333,6 @@ def _get_reshard_fn_pathwaysutils(
   # not linked to the binary.
   try:
     from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-    from pathwaysutils.experimental import split_by_mesh_axis  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
     from pathwaysutils import jax as pw_jax  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
   except ImportError:
     logging.info(
@@ -350,31 +350,25 @@ def _get_reshard_fn_pathwaysutils(
         x: Any,
         sharding: jax.sharding.Sharding | Any,
     ):
-
-      if use_experimental_pre_reshard:
+      # Solution 0: ifrt_reshard_available is set to False to use sidechannel
+      # API.
+      if not use_ifrt_reshard:
         try:
-          # This will raise an AttributeError if the API is not available.
-          pw_jax.split_by_mesh_axis
+          pw_jax.ifrt_reshard_available = lambda: False
         except AttributeError:
-          logging.debug(
-              'split_by_mesh_axis is not available until JAX 0.8.0. Skipping'
-              ' pre-reshard.'
-          )
-        else:
-          x = _experimental_pre_reshard(
-              split_by_mesh_axis.split_by_mesh_axis, x, sharding
-          )
-
-      # TODO(b/476149699): Migrate to new API once it's verified.
-      return experimental_reshard._reshard_with_sidechannel(
+          logging.debug('ifrt_reshard_available is not available.')
+      return experimental_reshard.reshard_with_intermediate_sharding(
           x,
+          jax.tree_util.tree_map(
+              _get_sharding,
+              x,
+          ),
           sharding,
           donate=donate,
           may_alias=None,
-          cache_resharding_plans=cache_resharding_plans,
       )
 
-  return reshard_fn
+    return reshard_fn
 
 
 def _get_reshard_fn_jax_device_put(
@@ -382,6 +376,7 @@ def _get_reshard_fn_jax_device_put(
     donate: bool,
     cache_resharding_plans: bool = False,  # pylint: disable=unused-argument
     use_experimental_pre_reshard: bool = False,  # pylint: disable=unused-argument
+    use_ifrt_reshard: bool = False,  # pylint: disable=unused-argument
 ):
   return functools.partial(
       jax.device_put,
@@ -389,11 +384,25 @@ def _get_reshard_fn_jax_device_put(
   )
 
 
+def _get_sharding(x):
+  if isinstance(
+      x, jax.sharding.NamedSharding | jax.sharding.SingleDeviceSharding
+  ):
+    return x
+  else:
+    return jax.sharding.NamedSharding(
+        x.sharding.mesh,
+        x.sharding.spec,
+        memory_kind=x.sharding.memory_kind,
+    )
+
+
 def _get_reshard_fn(
     cache_resharding_plans: bool,
     donate: bool,
     use_experimental_pre_reshard: bool,
     get_reshard_fns: list[Callable[..., Any]],
+    use_ifrt_reshard: bool = False,
 ):
   """Returns a reshard function.
 
@@ -412,6 +421,7 @@ def _get_reshard_fn(
           cache_resharding_plans=cache_resharding_plans,
           donate=donate,
           use_experimental_pre_reshard=use_experimental_pre_reshard,
+          use_ifrt_reshard=use_ifrt_reshard,
       )
     except (ImportError, EnvironmentError):
       logging.debug('Could not support {get_reshard_fn=}.', exc_info=True)
@@ -427,6 +437,7 @@ def reshard_pytree(
     cache_plan: bool = True,
     donate_input: bool = False,
     use_experimental_pre_reshard: bool = True,
+    use_ifrt_reshard: bool = False,
 ) -> jaxtyping.PyTree:
   """Reshard input pytree from source sharding and mesh to target sharding and mesh.
 
@@ -447,20 +458,8 @@ def reshard_pytree(
     The resharded pytree.
   """
 
-  def _get_dst_sharding(x):
-    if isinstance(
-        x, jax.sharding.NamedSharding | jax.sharding.SingleDeviceSharding
-    ):
-      return x
-    else:
-      return jax.sharding.NamedSharding(
-          x.sharding.mesh,
-          x.sharding.spec,
-          memory_kind=x.sharding.memory_kind,
-      )
-
   dst_shardings = jax.tree_util.tree_map(
-      _get_dst_sharding,
+      _get_sharding,
       target,
   )
 
@@ -468,6 +467,7 @@ def reshard_pytree(
       cache_resharding_plans=cache_plan,
       donate=donate_input,
       use_experimental_pre_reshard=use_experimental_pre_reshard,
+      use_ifrt_reshard=use_ifrt_reshard,
       get_reshard_fns=[
           #
           _get_reshard_fn_pathwaysutils,
