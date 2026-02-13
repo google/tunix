@@ -28,6 +28,7 @@ from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
+from tunix.generate import utils
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -204,6 +205,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       prompt IDs, completion IDs, masks, advantages, and per-token log
       probabilities from the reference and policy models.
     """
+    rollout_config = self.rl_cluster.cluster_config.rollout_config
+    if isinstance(rollout_config, dict):
+      rollout_config = rollout_config[mode]
+
     training_input["prompts"] = list(training_input["prompts"])
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
@@ -214,21 +219,20 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             self._rollout_micro_batch_size * self.algo_config.num_generations
         ),
     )
-    completion_ids = rollout_output.tokens
+    padded_completion_ids = [utils.pad_to_length(
+        completion_ids,
+        target_length=rollout_config.max_tokens_to_generate,
+        pad_value=pad_value,
+        left=False,
+    ) for completion_ids in rollout_output.tokens]
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
-    completion_text = rollout_output.text
 
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
-    completion_padding_mask = np.not_equal(completion_ids, pad_value)
-    completion_mask = common.np_make_completion_mask(
-        completion_ids, eos_tok=eos_value
-    )
-    # Apply the padding mask to the completion mask.
-    completion_mask = completion_mask * completion_padding_mask
+    completion_mask = np.not_equal(padded_completion_ids, pad_value)
 
     # Convert completion_ids and completion_mask to jax arrays
-    jax_completion_ids = jnp.array(completion_ids)
+    jax_completion_ids = jnp.array(padded_completion_ids)
     jax_completion_mask = jnp.array(completion_mask)
 
     if self.algo_config.beta != 0.0:
@@ -269,7 +273,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       # Compute rewards and advantages
       rewards = self._compute_rewards(
           prompts=training_input["prompts"],
-          completions=completion_text,
+          completions=rollout_output.text,
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
@@ -302,7 +306,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     for m_fn in self.metric_fns:
       user_defined_metric = m_fn(
           prompts=training_input["prompts"],
-          completions=completion_text,
+          completions=rollout_output.text,
           advances=advantages,
           rewards=rewards,
           **{k: v for k, v in training_input.items() if k != "prompts"},

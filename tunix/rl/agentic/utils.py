@@ -22,6 +22,22 @@ import numpy as np
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
 
 
+def left_pad(x, length, pad):
+  x = np.asarray(x, dtype=np.int32)
+  if x.size >= length:
+    return x[-length:]
+  pad_part = np.full(length - x.size, pad, np.int32)
+  return np.concatenate([pad_part, x], axis=0)
+
+
+def right_pad(x, length, pad):
+  x = np.asarray(x, dtype=np.int32)
+  if x.size >= length:
+    return x[:length]
+  pad_part = np.full(length - x.size, pad, np.int32)
+  return np.concatenate([x, pad_part], axis=0)
+
+
 def pad_prompt_and_completion(
     prompt_tokens: list[int],
     completion_tokens: list[int],
@@ -30,21 +46,6 @@ def pad_prompt_and_completion(
     pad_id: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Pads prompt tokens to the left and completion tokens to the right."""
-
-  def left_pad(x, length, pad):
-    x = np.asarray(x, dtype=np.int32)
-    if x.size >= length:
-      return x[-length:]
-    pad_part = np.full(length - x.size, pad, np.int32)
-    return np.concatenate([pad_part, x], axis=0)
-
-  def right_pad(x, length, pad):
-    x = np.asarray(x, dtype=np.int32)
-    if x.size >= length:
-      return x[:length]
-    pad_part = np.full(length - x.size, pad, np.int32)
-    return np.concatenate([x, pad_part], axis=0)
-
   left_padded_prompt_tokens = left_pad(prompt_tokens, max_prompt_length, pad_id)
   right_padded_completion_tokens = right_pad(
       completion_tokens, max_generation_steps, pad_id
@@ -57,7 +58,7 @@ def pad_prompt_and_completion(
 
 
 def get_recent_assistant_user_messages(
-    chat_completions_messages: list[dict[str, Any]]
+    chat_completions_messages: list[dict[str, Any]],
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
   """Extracts the most recent assistant message and environment messages (user/tool) from a chat completions list.
 
