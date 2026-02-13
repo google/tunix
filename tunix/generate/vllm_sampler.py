@@ -60,10 +60,13 @@ class VllmConfig:
   additional_config: Optional[Dict[str, Any]] = None
   enable_dp_attention: bool = False
   hbm_utilization: float = 0.5
+  stop_strings: Optional[List[str]] = None 
   lora_config: Optional[Dict[str, Any]] = None
   mesh: jax.sharding.Mesh = None
   data_parallel_size: int = -1
   tensor_parallel_size: int = -1
+  expert_parallel_size: int = 1
+  enable_expert_parallelism: bool = False
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -80,6 +83,12 @@ class VllmConfig:
             "Engine kwargs setting key '%s' with value '%s'.", key, value
         )
         setattr(self, key, value)
+
+  enable_dp_attention: bool = False
+  max_num_batched_tokens: Optional[int] = None
+  max_num_seqs: Optional[int] = None
+  hf_config_path: Optional[Dict[str, Any]] = None
+  additional_config: Optional[Dict[str, Any]] = None
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -190,6 +199,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           src_state=updated_weights,
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
+          delete_dst_mem=True,
       )
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
@@ -210,13 +220,35 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     tensor_parallel_size = config.tensor_parallel_size
     data_parallel_size = config.data_parallel_size
+    expert_parallel_size = config.expert_parallel_size
     total_mesh_devices = self._find_total_size(config.mesh)
 
+    if expert_parallel_size < 1:
+      raise ValueError(
+          f"expert_parallel_size must be at least 1, but got {expert_parallel_size}."
+      )
+    if config.enable_expert_parallelism and expert_parallel_size <= 1:
+      raise ValueError(
+          "When enable_expert_parallelism is True, expert_parallel_size must be"
+          " greater than 1."
+      )
+
     if config.tensor_parallel_size == -1 and config.data_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices
+      if total_mesh_devices % expert_parallel_size != 0:
+        raise ValueError(
+            f"Total devices ({total_mesh_devices}) must be divisible by"
+            f" expert_parallel_size ({expert_parallel_size})."
+        )
+      tensor_parallel_size = total_mesh_devices // expert_parallel_size
       data_parallel_size = 1
     elif config.tensor_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices // data_parallel_size
+      denominator = data_parallel_size * expert_parallel_size
+      if total_mesh_devices % denominator != 0:
+        raise ValueError(
+            f"Total devices ({total_mesh_devices}) must be divisible by"
+            f" data_parallel_size * expert_parallel_size ({denominator})."
+        )
+      tensor_parallel_size = total_mesh_devices // denominator
     elif config.data_parallel_size == -1:
       data_parallel_size = total_mesh_devices // tensor_parallel_size
 
@@ -418,6 +450,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.prompt_logprobs = 1  # b/428730696
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
+
+      if self.config.stop_strings:
+        sampling_params.stop = self.config.stop_strings
+        sampling_params.detokenize = True
 
       if top_p is not None:
         sampling_params.top_p = top_p

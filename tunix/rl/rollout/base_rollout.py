@@ -111,6 +111,7 @@ class RolloutConfig:
   # Parallelism configs.
   tensor_parallel_size: int = -1
   data_parallel_size: int = -1
+  expert_parallel_size: int = 1
 
   # vLLM specific rollout configs.
 
@@ -135,6 +136,9 @@ class RolloutConfig:
   # Swap space size for vLLM rollout engine, in GiB.
   rollout_vllm_swap_space_size_gb: float = 4.0
 
+  # stop strings for vLLM rollout engine.
+  rollout_vllm_stop_strings: list[str] | None = None
+
   # Whether to enable asynchronous scheduling for vLLM rollout engine.
   rollout_vllm_async_scheduling: bool = False
 
@@ -148,6 +152,8 @@ class RolloutConfig:
   # allows for non-attention tensors to be sharded across "attn_dp" and "model"
   # axes, which can help reduce memory usage for large models with few KV heads.
   rollout_vllm_enable_dp_attention: bool = False
+
+  rollout_vllm_enable_expert_parallelism: bool = False
 
   # Maximum number of batched tokens allowed in vLLM. This allows for pending prefill requests
   # to be batched along with decode requests if enough tokens are available. Only used when
