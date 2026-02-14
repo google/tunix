@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linchai-training-deployment
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: training-app
+  template:
+    metadata:
+      labels:
+        app: training-app
+    spec:
+      serviceAccountName: default
+      containers:
+      - name: training-container
+        image: YOUR-TRAINING-IMAGE:latest
+        env:
+        - name: WANDB_DIR
+          value: "/mnt/wandb-gcs"
+        volumeMounts:
+        - name: wandb-gcs-volume
+          mountPath: "/mnt/wandb-gcs"
+      volumes:
+      - name: wandb-gcs-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: gs://linchai-bucket-dev
+            # Optional: Add mount options if needed
+            # mountOptions: "implicit-dirs"

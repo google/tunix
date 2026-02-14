@@ -3,6 +3,7 @@
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
 
 import contextlib
+import datetime
 import os
 
 import wandb
@@ -53,15 +54,12 @@ except wandb.errors.UsageError as e:
   wandb.init(mode="disabled")
 
 
-# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-# from etils import ecolab
-import optax
-from orbax import checkpoint as ocp
-
-import pathwaysutils
-pathwaysutils.initialize()
-
-print("jax devices: ", jax.devices())
+try:
+  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  wandb.init(project="tunix", name=run_name, anonymous="allow")
+  # wandb.init(project="tunix", name=run_name, anonymous="allow", id="65yzz3vm", resume="allow",)
+except Exception as e:
+  print(f"linchai: W&B initialization failed with error: {e}")
 
 try:
   from etils import ecolab
@@ -108,8 +106,8 @@ MESH = [(2, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 128
-TOTAL_GENERATION_STEPS = 256
+MAX_PROMPT_LENGTH = 2048
+TOTAL_GENERATION_STEPS = 4096
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -132,9 +130,9 @@ BETA = 0.001
 EPSILON = 0.2
 
 # ====== Training ======
-BATCH_SIZE = 16
-MINI_BATCH_SIZE = 8
-NUM_BATCHES = 100
+BATCH_SIZE = 64
+MINI_BATCH_SIZE = 64
+NUM_BATCHES = 1250
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
@@ -143,8 +141,8 @@ EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 100  # can potentially train for more epochs
 
 # Number of training steps.
-# MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
-MAX_STEPS = 10
+MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+# MAX_STEPS = 5
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -162,7 +160,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 0.1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 1
+SAVE_INTERVAL_STEPS = 10
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -247,8 +245,10 @@ def create_datasets():
         "data_source": "math",
     }
   train_df = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split="train")
+  test_df = load_dataset("HuggingFaceH4/aime_2024")
 
   train_ds = train_df.map(preprocess_fn, with_indices=True)
+  test_ds = test_df.map(preprocess_fn, with_indices=True)
 
   def process_item(item):
     question = item["question"]
@@ -269,8 +269,9 @@ def create_datasets():
     }
 
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  print("process_item for train_ds done.")
-  return train_ds
+  test_ds = grain.MapDataset.source(test_ds).map(process_item)
+  print(f"process_item for train_ds and test_ds done. {len(train_ds)} train samples, {len(test_ds)} test samples.")
+  return train_ds, test_ds
 
 
 # %%
@@ -280,9 +281,10 @@ tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
-train_dataset = create_datasets()
+train_dataset, test_dataset = create_datasets()
 
-train_dataset = train_dataset.batch(BATCH_SIZE)[:5]
+train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
+train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
   print("repeating full train dataset for NUM_EPOCHS: ", NUM_EPOCHS)
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
@@ -291,6 +293,8 @@ else:
   train_dataset = train_dataset[: int(len(train_dataset) * TRAIN_FRACTION)]
   train_dataset = train_dataset.repeat(NUM_EPOCHS)
   val_dataset = train_dataset[int(len(train_dataset) * TRAIN_FRACTION) :].repeat(NUM_EPOCHS)
+
+test_dataset = test_dataset.batch(BATCH_SIZE)[:NUM_TEST_BATCHES]
 
 # %%
 show_hbm_usage("Done with loading datasets")
@@ -410,15 +414,15 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
         # profiler
-        profiler_options = profiler.ProfilerOptions(
-          profiler_steps=1,
-          skip_first_n_steps=1,
-          set_profile_options=False,
-          log_dir=PROFILER_PATH,
-        )
+        # profiler_options = profiler.ProfilerOptions(
+          # profiler_steps=1,
+          # skip_first_n_steps=1,
+          # set_profile_options=False,
+          # log_dir=PROFILER_PATH,
+        # )
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
@@ -436,7 +440,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rollout_sglang_jax_init_with_random_weights=True,
         rollout_sglang_jax_disable_radix_cache=True,
         rollout_sglang_jax_enable_deterministic_sampling=False,
-        rollout_sglang_jax_chunked_prefill_size=256,
+        rollout_sglang_jax_chunked_prefill_size=2048,
         rollout_sglang_jax_max_running_requests=32,
         rollout_sglang_jax_page_size=64,
         # vllm-tpu specific configs
@@ -456,7 +460,7 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=128,
+    max_concurrency=64,
 )
 
 # %%
@@ -469,14 +473,6 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 
-# import logging
-# logging.basicConfig(
-    # stream=sys.stdout,  # Direct logs to standard output (notebook cell)
-    # level=logging.INFO, # Set the minimum level to INFO
-    # format="%(asctime)s - %(levelname)s - %(message)s", # Optional: customize the format
-    # datefmt="%Y-%m-%d %H:%M:%S" # Optional: customize the date format
-# )
-# Configure the root logger
 show_hbm_usage("after RLCluster creation")
 
 

@@ -618,6 +618,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
     full_batch_iterator = iter(train_dataset)
+    if self.rl_cluster.global_steps > 0:
+      logging.info(
+          "Skipping %d batches from train_dataset to fast-forward to step %d",
+          self.rl_cluster.global_steps,
+          self.rl_cluster.global_steps,
+      )
+      for _ in range(self.rl_cluster.global_steps):
+        try:
+          next(full_batch_iterator)
+        except StopIteration:
+          logging.warning("Train dataset exhausted while skipping batches.")
+          self.rl_cluster.close()
+          return
+
+    if self.rl_cluster.global_steps > 0:
+      logging.info(
+          "Skipping %d batches from train_dataset to fast-forward to step %d",
+          self.rl_cluster.global_steps,
+          self.rl_cluster.global_steps,
+      )
+      # TODO(b/483779605): Current implementation of fast-forwarding does not
+      # take into account the mini-batch size. Follow-up CL will address this.
+      for _ in range(self.rl_cluster.global_steps):
+        try:
+          next(full_batch_iterator)
+        except StopIteration:
+          logging.warning("Train dataset exhausted while skipping batches.")
+          self.rl_cluster.close()
+          return
 
     if self.rl_cluster.global_steps > 0:
       logging.info(
