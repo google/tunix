@@ -66,7 +66,8 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
 
   Parameters:
     system_prompt: System prompt for the agent.
-    max_concurrency: Maximum number of concurrent rollout engines.
+    max_concurrency: Maximum number of concurrent requests to the rollout
+      engines.
     off_policy_steps: Number of off-policy steps can be accepted before a
       policy update.
     num_generations: Number of samples per prompt.
@@ -75,7 +76,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   """
 
   system_prompt: str = ""
-  max_concurrency: int = 16
+  max_concurrency: int = 32
   off_policy_steps: int = 0
   num_generations: int = 1
   num_iterations: int = 1
