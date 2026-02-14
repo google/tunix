@@ -56,8 +56,8 @@ except wandb.errors.UsageError as e:
 
 try:
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb.init(project="tunix", name=run_name, anonymous="allow")
-  # wandb.init(project="tunix", name=run_name, anonymous="allow", id="65yzz3vm", resume="allow",)
+  # wandb.init(project="tunix", name=run_name, anonymous="allow")
+  wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
