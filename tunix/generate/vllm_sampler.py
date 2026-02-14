@@ -431,18 +431,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if top_k is not None:
         sampling_params.top_k = top_k
 
-      try:
-        sampling_params.update(**kwargs)
-        logging.warning(
-            "Received additional kwargs that are not explicitly defined in the"
-            f" method signature: {kwargs}. These will be forwarded to the"
-            " underlying sampler, but please ensure that they are valid."
-        )
-      except Exception as e:
-        logging.warning(
-            f"Failed to update sampling_params with kwargs: {kwargs}."
-            f" Error: {e}"
-        )
+      if kwargs:
+        try:
+          sampling_params.update(**kwargs)
+          logging.log_first_n(
+              logging.INFO,
+              "Received additional kwargs that are not explicitly defined in the"
+              f" method signature: {kwargs}. These will be forwarded to the"
+              " underlying sampler, but please ensure that they are valid.", 1
+          )
+        except Exception as e:
+          logging.log_first_n(
+              logging.INFO,
+              f"Failed to update sampling_params with kwargs: {kwargs}."
+              f" Error: {e}", 1
+          )
 
       self.sampling_params = sampling_params
 
