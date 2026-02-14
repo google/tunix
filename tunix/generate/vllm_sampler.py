@@ -324,7 +324,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           single_output.token_ids = single_output.token_ids[:-1]
           single_output.logprobs = single_output.logprobs[:-1]
 
-        out_tokens[idx].append(single_output.token_ids)
+        out_tokens[idx].append(
+            np.array(single_output.token_ids, dtype=np.int32)
+        )
         decoded_outputs[idx].append(
             self.tokenizer.decode(single_output.token_ids)
         )
@@ -478,20 +480,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     ]
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
-    all_output_ids = [
-        utils.pad_to_length(
-            np.array(x, dtype=np.int32),
-            target_length=max_generation_steps,
-            pad_value=self.tokenizer.pad_id(),
-            left=False,
-        )
-        for x in out_tokens[0]
-    ]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
         logits=None,
-        tokens=all_output_ids,
+        tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs[0],
     )
