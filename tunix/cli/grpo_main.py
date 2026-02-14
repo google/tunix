@@ -92,7 +92,7 @@ class GrpoPipeline(config.HyperParameters):
 
   def create_perf_config(self, cluster_config: rl_cluster_lib.ClusterConfig):
     perf_metrics_options = cluster_config.training_config.perf_metrics_options
-    if not perf_metrics_options or not perf_metrics_options.enable_perf_metrics:
+    if not perf_metrics_options:
       return None
 
     perf_config = perf_metrics.PerfMetricsConfig()

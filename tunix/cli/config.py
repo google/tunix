@@ -211,7 +211,7 @@ class HyperParameters:
         "perf_metrics_options", {}
     )
 
-    if perf_config and perf_config.get("enable_perf_metrics", False):
+    if perf_config:
       if not entry_point.endswith("grpo_main"):
         raise ValueError(
             "Perf metrics are currently only supported for GRPO training"

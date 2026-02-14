@@ -73,9 +73,6 @@ class MetricsBuffer:
 
 @dataclasses.dataclass(frozen=True)
 class PerfMetricsOptions:
-  # Whether to enable performance metrics. If False, all other options will be
-  # ignored.
-  enable_perf_metrics: bool = False
   # Directory to write the raw metrics/events to.
   log_dir: str = ""
   # Path to the custom export function. If set, the custom export function will
