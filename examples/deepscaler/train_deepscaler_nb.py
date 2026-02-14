@@ -15,17 +15,10 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import optax
-import optax
 from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
 
-# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-# from etils import ecolab
-import optax
-from orbax import checkpoint as ocp
-
-import wandb
 
 import pathwaysutils
 pathwaysutils.initialize()
@@ -192,13 +185,6 @@ else:
   rollout_mesh = mesh
   trainer_mesh = mesh
 
-# %%
-# try:
-  # from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-  # file_open = gfile.Open
-
-  # NOTEBOOK_ENV = "g3"
-# except Exception:
 NOTEBOOK_ENV = "git"
 
   # from google.cloud import storage
@@ -239,8 +225,6 @@ print("start loading model and trainer instances...")
 show_hbm_usage("Before model loading")
 
 # %%
-show_hbm_usage("after model loading with fp32")
-
 def create_datasets():
   def preprocess_fn(example, index):
     return {
@@ -362,14 +346,6 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
 )
-
-# %%
-# # Logs
-# if NOTEBOOK_ENV == "g3":
-#   %load_ext GOOGLE_INTERNAL_PACKAGE_PATH.learning.brain.tensorboard.notebook.extension
-# else:
-#   %load_ext tensorboard
-# %tensorboard --logdir /tmp/content/tmp/tensorboard/grpo --port=0
 
 # %%
 # Optimizer, learning rate scheduler, gradient clipping
