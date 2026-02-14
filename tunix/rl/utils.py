@@ -173,7 +173,6 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
 
   for key in batches[0].keys():
     all_values = [item[key] for item in batches]
-    print(f"Merging micro-batches for key: {key} and value: {all_values}")
 
     if isinstance(all_values[0], list):
       merged[key] = list(chain.from_iterable(all_values))
