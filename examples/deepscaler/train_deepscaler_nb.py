@@ -9,12 +9,11 @@ from flax import nnx
 import grain
 import jax
 from jax import numpy as jnp
-import numpy as np
 import optax
 import optax
 from orbax import checkpoint as ocp
 import qwix
-from tqdm.auto import tqdm
+
 import math
 import logging
 import sys
@@ -526,6 +525,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 show_hbm_usage("after RLCluster creation")
 
 # %%
+
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
