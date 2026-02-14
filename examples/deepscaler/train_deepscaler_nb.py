@@ -103,11 +103,13 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 4096
+TOTAL_GENERATION_STEPS = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -141,8 +143,8 @@ EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 100  # can potentially train for more epochs
 
 # Number of training steps.
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
-# MAX_STEPS = 5
+# MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+MAX_STEPS = 30
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -236,6 +238,8 @@ AutoTokenizer = transformers.AutoTokenizer
 print("start loading model and trainer instances...")
 show_hbm_usage("Before model loading")
 
+# %%
+show_hbm_usage("after model loading with fp32")
 
 def create_datasets():
   def preprocess_fn(example, index):
@@ -283,7 +287,6 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 # %%
 train_dataset, test_dataset = create_datasets()
 
-train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 train_dataset = train_dataset.batch(BATCH_SIZE)[:NUM_BATCHES]
 if TRAIN_FRACTION == 1.0:
   print("repeating full train dataset for NUM_EPOCHS: ", NUM_EPOCHS)
@@ -392,6 +395,7 @@ if MAX_GRAD_NORM is not None:
 # Training config
 print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
@@ -489,3 +493,9 @@ show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
+
+try:
+  wandb.finish()
+  print("WandB session finished successfully")
+except Exception as e:
+  print(f"Warning: Failed to finish WandB session: {e}")
