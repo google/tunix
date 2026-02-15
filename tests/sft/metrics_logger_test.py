@@ -80,6 +80,7 @@ class MetricLoggerTest(absltest.TestCase):
   def test_logger_handles_missing_wandb_gracefully(self, mock_register):
     """Tests that the logger doesn't crash if wandb is not installed."""
     # wandb is not supported in internal environment.
+    self.assertEqual(1, 0)
     if env_utils.is_internal_env():
       return
 
