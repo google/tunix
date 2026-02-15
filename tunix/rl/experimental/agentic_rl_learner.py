@@ -727,124 +727,136 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size * self._num_generations()
     )
-    micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
-    for train_micro_batch in train_data_gen:
-      if self.rl_cluster.global_steps >= self._training_config.max_steps:
-        logging.info(
-            "Reached max_steps: %d >= %d",
-            self.rl_cluster.global_steps,
-            self._training_config.max_steps,
-        )
-        prompt_queue.put(None)
-        break
-      self._iter_steps += 1
+    should_stop = False
 
-      # Filter out examples that are too old (off-policy).
-      filtered_train_micro_batch = []
-      for train_example in train_micro_batch:
-        if train_example.policy_version is not None and (
-            train_example.policy_version[0] == -1
-            or (
-                self.policy_version - train_example.policy_version[0]
-                <= self.algo_config.off_policy_steps
-            )
-        ):
-          filtered_train_micro_batch.append(train_example)
-      if not filtered_train_micro_batch:
-        logging.warning(
-            "Skipping microbatch: all %d examples are too old."
-            " Current policy version: %d, data versions: %s,"
-            " off_policy_steps: %d",
-            len(train_micro_batch),
-            self.policy_version,
-            str([
-                train_example.policy_version[0]
-                for train_example in train_micro_batch
-            ]),
-            self.algo_config.off_policy_steps,
-        )
-        continue
-      train_micro_batch = filtered_train_micro_batch
+    while self.rl_cluster.global_steps < self._training_config.max_steps:
+      # Start of Global Step
 
-      merged_train_micro_batch = jax.tree.map(
-          lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
-      )
+      # Start of Mini Batch
+      for _ in range(micro_batches_per_full_batch):
+        # Start of Micro Batch
+        try:
+          train_micro_batch = next(train_data_gen)
+        except StopIteration:
+          should_stop = True
+          break
 
-      # --- Evaluation Logic ---
-      current_eval_dataset = None
-      if (
-          all_eval_prompts
-          and self.rl_cluster.actor_trainer.train_steps
-          % training_config.eval_every_n_steps
-          == 0
-      ):
-        self._eval_iter_steps = 0
-        eval_orchestrator = self._build_orchestrator()
+        self._iter_steps += 1
 
-        async def _eval_runner_async(current_eval_orchestrator):
-          eval_examples = []
-          async for batch, cached_inputs in self._orchestrator_producer(
-              current_eval_orchestrator,
-              all_eval_prompts,
-              num_generations=self._num_generations(),
+        # Filter out examples that are too old (off-policy).
+        filtered_train_micro_batch = []
+        for train_example in train_micro_batch:
+          if train_example.policy_version is not None and (
+              train_example.policy_version[0] == -1
+              or (
+                  self.policy_version - train_example.policy_version[0]
+                  <= self.algo_config.off_policy_steps
+              )
           ):
-            train_examples = self._batch_to_train_example(
-                batch,
-                cached_inputs,
-                rl_cluster_lib.Mode.EVAL,
-            )
-            eval_examples.extend(train_examples)
-          return eval_examples
+            filtered_train_micro_batch.append(train_example)
+        if not filtered_train_micro_batch:
+          logging.warning(
+              "Skipping microbatch: all %d examples are too old."
+              " Current policy version: %d, data versions: %s,"
+              " off_policy_steps: %d",
+              len(train_micro_batch),
+              self.policy_version,
+              str([
+                  train_example.policy_version[0]
+                  for train_example in train_micro_batch
+              ]),
+              self.algo_config.off_policy_steps,
+          )
+          continue
+        train_micro_batch = filtered_train_micro_batch
 
-        eval_future = asyncio.run_coroutine_threadsafe(
-            _eval_runner_async(eval_orchestrator), self.loop
+        merged_train_micro_batch = jax.tree.map(
+            lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
         )
-        eval_examples = eval_future.result()
-        self._eval_iter_steps += 1
-        current_eval_dataset = eval_examples
 
-      # --- Training Step ---
-      self.rl_cluster.update_actor(
-          [merged_train_micro_batch], current_eval_dataset, skip_jit
-      )
-      if hasattr(self.rl_cluster, "critic_trainer"):
-        self.rl_cluster.update_critic(
-            train_micro_batch, current_eval_dataset, skip_jit
+        # --- Evaluation Logic for one micro-batch ---
+        current_eval_dataset = None
+        if (
+            all_eval_prompts
+            and self.rl_cluster.actor_trainer.train_steps
+            % training_config.eval_every_n_steps
+            == 0
+        ):
+          self._eval_iter_steps = 0
+          eval_orchestrator = self._build_orchestrator()
+
+          async def _eval_runner_async(current_eval_orchestrator):
+            eval_examples = []
+            async for batch, cached_inputs in self._orchestrator_producer(
+                current_eval_orchestrator,
+                all_eval_prompts,
+                num_generations=self._num_generations(),
+            ):
+              train_examples = self._batch_to_train_example(
+                  batch,
+                  cached_inputs,
+                  rl_cluster_lib.Mode.EVAL,
+              )
+              eval_examples.extend(train_examples)
+            return eval_examples
+
+          eval_future = asyncio.run_coroutine_threadsafe(
+              _eval_runner_async(eval_orchestrator), self.loop
+          )
+          eval_examples = eval_future.result()
+          self._eval_iter_steps += 1
+          current_eval_dataset = eval_examples
+
+        # --- Training Step for one micro-batch ---
+        self.rl_cluster.update_actor(
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              train_micro_batch, current_eval_dataset, skip_jit
+          )
+
+      if should_stop:
+        break
+
+      # End of Mini Batch
 
       # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
-        if self.should_sync_weights:
-          logging.info("Requesting sync lock to sync weights...")
-          self._rollout_sync_lock.acquire_weight_sync()
-          try:
-            logging.info("Sync lock acquired. Syncing weights.")
-            self.rl_cluster.sync_weights()
-            self.policy_version += 1
-            logging.info(
-                "Weights synced. Policy version incremented to %d.",
-                self.policy_version,
-            )
-            try:
-              self._put_prompts_to_queue(
-                  prompt_queue, next(full_dataset_iterator)
-              )
-            except StopIteration:
-              prompt_queue.put(None)
-          finally:
-            self._rollout_sync_lock.release_weight_sync()
-            logging.info("Sync lock released.")
-        else:
-          self.rl_cluster.global_steps += 1
+      if self.should_sync_weights:
+        logging.info("Requesting sync lock to sync weights...")
+        self._rollout_sync_lock.acquire_weight_sync()
+        try:
+          logging.info("Sync lock acquired. Syncing weights.")
+          self.rl_cluster.sync_weights()
+          self.policy_version += 1
+          logging.info(
+              "Weights synced. Policy version incremented to %d.",
+              self.policy_version,
+          )
           try:
             self._put_prompts_to_queue(
                 prompt_queue, next(full_dataset_iterator)
             )
           except StopIteration:
             prompt_queue.put(None)
-        micro_batches_since_last_sync = 0
+        finally:
+          self._rollout_sync_lock.release_weight_sync()
+          logging.info("Sync lock released.")
+      else:
+        self.rl_cluster.global_steps += 1
+        try:
+          self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
+        except StopIteration:
+          prompt_queue.put(None)
+      # End of Global Step
+
+    logging.info(
+        "Training loop finished. global_steps: %d, max_steps: %d",
+        self.rl_cluster.global_steps,
+        self._training_config.max_steps,
+    )
+    prompt_queue.put(None)
 
     _ = producer_future.result()
     self.rl_cluster.close()
