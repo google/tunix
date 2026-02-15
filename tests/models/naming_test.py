@@ -488,6 +488,41 @@ def _get_test_cases_for_model_id_exists() -> list[dict[str, str]]:
   ]
 
 
+def _get_test_cases_for_auto_population_with_HF_model_id() -> (
+    list[dict[str, str]]
+):
+  test_cases = []
+  _validate_full_model_coverage()
+  for model_info in _TEST_MODEL_INFOS:
+    test_cases.append({
+        'testcase_name': model_info.config_id,
+        'model_id': model_info.id,
+        'expected_name': model_info.name,
+        'expected_family': model_info.family,
+        'expected_version': model_info.version,
+        'expected_category': model_info.category,
+        'expected_config_id': model_info.config_id,
+    })
+  return test_cases
+
+
+def _get_test_cases_for_auto_population_with_config_id() -> (
+    list[dict[str, str]]
+):
+  test_cases = []
+  _validate_full_model_coverage()
+  for model_info in _TEST_MODEL_INFOS:
+    test_cases.append({
+        'testcase_name': model_info.config_id,
+        'model_id': model_info.config_id,
+        'expected_family': model_info.family,
+        'expected_version': model_info.version,
+        'expected_category': model_info.category,
+        'expected_config_id': model_info.config_id,
+    })
+  return test_cases
+
+
 class TestNaming(parameterized.TestCase):
 
   @parameterized.named_parameters(
@@ -501,9 +536,15 @@ class TestNaming(parameterized.TestCase):
         expected_name,
     )
 
-  def test_get_model_name_from_model_id_invalid_fails(self):
-    with self.assertRaisesRegex(ValueError, 'Invalid model ID format'):
-      naming.get_model_name_from_model_id('Llama-3.1-8B')
+  def test_get_model_name_from_model_id_no_slash_succeeds(self):
+    self.assertEqual(
+        naming.get_model_name_from_model_id('Llama-3.1-8B'), 'llama-3.1-8b'
+    )
+
+  def test_get_model_name_from_model_id_config_id(self):
+    self.assertEqual(
+        naming.get_model_name_from_model_id('llama3p1_8b'), 'llama3p1_8b'
+    )
 
   def test_get_model_name_from_model_id_nested_path(self):
     self.assertEqual(
@@ -544,7 +585,15 @@ class TestNaming(parameterized.TestCase):
 
   def test_get_model_family_and_version_invalid_fails(self):
     with self.assertRaisesRegex(
-        ValueError, 'Could not determine model family for: foobar.'
+        ValueError, 'Could not determine model family for: foo-bar.'
+    ):
+      naming.get_model_family_and_version('foo-bar')
+
+  def test_get_model_family_and_version_invalid_format_fails(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        'Invalid model ID format: .* Expected a Huggingface model ID or a'
+        ' ConfigId.',
     ):
       naming.get_model_family_and_version('foobar')
 
@@ -555,6 +604,8 @@ class TestNaming(parameterized.TestCase):
   def test_split(self):
     self.assertEqual(naming.split('gemma-7b'), ('gemma-', '7b'))
     self.assertEqual(naming.split('gemma-1.1-7b'), ('gemma-1.1-', '7b'))
+    self.assertEqual(naming.split('gemma_7b'), ('gemma_', '7b'))
+    self.assertEqual(naming.split('gemma1p1_7b'), ('gemma1p1_', '7b'))
 
   @parameterized.named_parameters(_get_test_cases_for_get_model_config_id())
   def test_get_model_config_id(self, model_name: str, expected_config_id: str):
@@ -570,15 +621,60 @@ class TestNaming(parameterized.TestCase):
         naming.get_model_config_category(model_name), expected_category
     )
 
-  def test_model_naming_auto_population(self):
-    model_id = 'meta-llama/Llama-3.1-8B'
-    naming_info = naming.ModelNaming(model_id=model_id)
-    self.assertEqual(naming_info.model_id, model_id)
-    self.assertEqual(naming_info.model_name, 'llama-3.1-8b')
-    self.assertEqual(naming_info.model_family, 'llama3p1')
-    self.assertEqual(naming_info.model_version, '8b')
-    self.assertEqual(naming_info.model_config_category, 'llama3')
-    self.assertEqual(naming_info.model_config_id, 'llama3p1_8b')
+  @parameterized.named_parameters(
+      _get_test_cases_for_auto_population_with_HF_model_id()
+  )
+  def test_model_naming_auto_population_with_HF_model_id(
+      self,
+      *,
+      model_id: str,
+      expected_name: str,
+      expected_family: str,
+      expected_version: str,
+      expected_category: str,
+      expected_config_id: str,
+  ):
+    with self.subTest(name='Test Model naming creation with HFModelId'):
+      naming_info = naming.ModelNaming(model_id=naming.HFModelId(model_id))
+      self.assertEqual(naming_info.model_id, model_id)
+      self.assertEqual(naming_info.model_name, expected_name)
+      self.assertEqual(naming_info.model_family, expected_family)
+      self.assertEqual(naming_info.model_version, expected_version)
+      self.assertEqual(naming_info.model_config_category, expected_category)
+      self.assertEqual(naming_info.model_config_id, expected_config_id)
+
+    with self.subTest(name='Test Model id type detection'):
+      self.assertTrue(naming._is_hf_model_id_type(naming_info.model_id))
+      self.assertFalse(naming._is_config_id_type(naming_info.model_id))
+      self.assertTrue(naming._is_hf_model_id_type(naming_info.model_name))
+      self.assertFalse(naming._is_config_id_type(naming_info.model_name))
+
+  @parameterized.named_parameters(
+      _get_test_cases_for_auto_population_with_config_id()
+  )
+  def test_model_naming_auto_population_with_config_id_model_id(
+      self,
+      *,
+      model_id: str,
+      expected_family: str,
+      expected_version: str,
+      expected_category: str,
+      expected_config_id: str,
+  ):
+    with self.subTest(name='Test Model naming creation with ConfigId'):
+      naming_info = naming.ModelNaming(model_id=naming.ConfigId(model_id))
+      self.assertEqual(naming_info.model_id, model_id)
+      self.assertEqual(naming_info.model_name, model_id)
+      self.assertEqual(naming_info.model_family, expected_family)
+      self.assertEqual(naming_info.model_version, expected_version)
+      self.assertEqual(naming_info.model_config_category, expected_category)
+      self.assertEqual(naming_info.model_config_id, expected_config_id)
+
+    with self.subTest(name='Test Model id type detection'):
+      self.assertFalse(naming._is_hf_model_id_type(naming_info.model_id))
+      self.assertTrue(naming._is_config_id_type(naming_info.model_id))
+      self.assertFalse(naming._is_hf_model_id_type(naming_info.model_name))
+      self.assertTrue(naming._is_config_id_type(naming_info.model_name))
 
   def test_model_naming_no_model_id(self):
     model_name = 'gemma-2b'
@@ -608,7 +704,9 @@ class TestNaming(parameterized.TestCase):
         'model_name set in ModelNaming and one inferred from model_id do not'
         ' match',
     ):
-      naming.ModelNaming(model_name='gemma-7b', model_id='google/gemma-2b')
+      naming.ModelNaming(
+          model_name='gemma-7b', model_id=naming.HFModelId('google/gemma-2b')
+      )
 
 
 if __name__ == '__main__':
