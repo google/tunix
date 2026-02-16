@@ -17,7 +17,9 @@ from absl.testing import parameterized
 import jax.numpy as jnp
 import numpy as np
 from tunix.models.gemma3 import utils
-from tunix.models.gemma3 import vision
+
+
+_TOKEN_PLACEHOLDER = 219
 
 
 class UtilsTest(parameterized.TestCase):
@@ -46,12 +48,14 @@ class UtilsTest(parameterized.TestCase):
     tokens = jnp.array([[
         1,
         2,
-        vision.TOKEN_PLACEHOLDER,
-        vision.TOKEN_PLACEHOLDER,
+        _TOKEN_PLACEHOLDER,
+        _TOKEN_PLACEHOLDER,
         3,
         utils._PADDING_ID,
     ]])
-    result = utils.get_positions_and_attention_mask(tokens)
+    result = utils.get_positions_and_attention_mask(
+        tokens, token_placeholder_id=_TOKEN_PLACEHOLDER
+    )
     positions = result['positions']
     attention_mask = result['attention_mask']
 
