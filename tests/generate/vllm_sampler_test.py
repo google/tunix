@@ -162,8 +162,6 @@ class VllmSamplerTest(absltest.TestCase):
     mapping_config = mappings.MappingConfig.build(tunix_model)
 
     vllm_config = vllm_sampler.VllmConfig(
-        model_version=self.model_path,
-        max_model_len=512,
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
@@ -172,12 +170,16 @@ class VllmSamplerTest(absltest.TestCase):
         lora_config=lora_config,
         server_mode=server_mode,
         data_parallel_size=data_parallel_size,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },  # Test kwargs forwarding
     )
 
     vl_sampler = vllm_sampler.VllmSampler(
         tokenizer=model_tokenizer,
         config=vllm_config,
-        enable_prefix_caching=True,  # Test kwargs forwarding
     )
     # vLLM construct its own mesh
     self.assertNotEqual(vl_sampler.mesh, self.mesh)
@@ -235,14 +237,17 @@ class VllmSamplerTest(absltest.TestCase):
 
     mapping_config = mappings.MappingConfig.build(tunix_model)
     vllm_config = vllm_sampler.VllmConfig(
-        model_version=self.model_path,
-        max_model_len=512,
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
         tpu_backend_type="jax",
         mapping_config=mapping_config,
         server_mode=True,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },  # Test kwargs forwarding
     )
 
     vl_sampler = vllm_sampler.VllmSampler(

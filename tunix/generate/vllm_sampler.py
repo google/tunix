@@ -46,31 +46,44 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 class VllmConfig:
   """Vllm rollout configuations."""
 
-  model_version: str
-  max_model_len: int
-  mesh: jax.sharding.Mesh
-  hbm_utilization: float
-  init_with_random_weights: bool
-  tpu_backend_type: str
-  mapping_config: MappingConfig
-  # The size of the CPU swap space to use for the KV cache, in GiB.
-  # This allows vLLM to offload KV cache blocks from TPU/GPU memory (HBM) to
-  # CPU memory (RAM) when HBM is full.
-  # A larger swap space allows for larger batch sizes and longer sequences
-  # than what can fit in HBM alone, potentially increasing throughput.
-  # However, frequent swapping can increase latency due to the overhead of
-  # transferring data between CPU and TPU/GPU memory.
-  swap_space: float = 4.0  # in GiB
-  lora_config: Optional[Dict[str, Any]] = None
+  # Sampler related
   server_mode: bool = False
-  async_scheduling: bool = False
-  tensor_parallel_size: int = -1
-  data_parallel_size: int = -1
-  enable_dp_attention: bool = False
-  max_num_batched_tokens: Optional[int] = None
-  max_num_seqs: Optional[int] = None
-  hf_config_path: Optional[Dict[str, Any]] = None
+  mapping_config: MappingConfig = dataclasses.field(
+      default_factory=MappingConfig
+  )
+
+  # vLLM Env vars
+  init_with_random_weights: bool = True
+  tpu_backend_type: str = "jax"
+
+  # vLLM engine arg related, requires additional processing before passing into engine
   additional_config: Optional[Dict[str, Any]] = None
+  enable_dp_attention: bool = False
+  hbm_utilization: float = 0.5
+  lora_config: Optional[Dict[str, Any]] = None
+  mesh: jax.sharding.Mesh = None
+  data_parallel_size: int = -1
+  tensor_parallel_size: int = -1
+
+  # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
+  engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
+  _processed_engine_kwargs: Dict[str, Any] = dataclasses.field(
+      init=False, default_factory=dict
+  )
+
+  def __post_init__(self, engine_kwargs: Optional[Dict[str, Any]]):
+    engine_kwargs = engine_kwargs or {}
+    self._processed_engine_kwargs = engine_kwargs
+    if engine_kwargs:
+      for key, value in engine_kwargs.items():
+        if hasattr(self, key):
+          logging.warning(
+              f"Engine kwargs contains key '{key}' which conflicts with an"
+              " existing attribute. The engine kwargs will be ignored for this"
+              " key."
+          )
+        else:
+          setattr(self, key, value)
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -87,7 +100,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       tokenizer: Any,
       config: VllmConfig,
-      **kwargs,
   ):
     """Initializes the VllmSampler.
 
@@ -111,7 +123,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
-    self.args = self._vllm_config(config, **kwargs)
+    self.args = self._vllm_config(config)
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -196,8 +208,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # since vllm doesn't support DP yet, simply return the total rank size.
     return math.prod(mesh.shape.values())
 
-  def _vllm_config(self, config: VllmConfig, **kwargs):
+  def _vllm_config(self, config: VllmConfig):
     """Setup vllm config from Tunix Vllm config."""
+    args = config._processed_engine_kwargs.copy()
+
     tensor_parallel_size = config.tensor_parallel_size
     data_parallel_size = config.data_parallel_size
     total_mesh_devices = self._find_total_size(config.mesh)
@@ -210,48 +224,29 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     elif config.data_parallel_size == -1:
       data_parallel_size = total_mesh_devices // tensor_parallel_size
 
-    args = {}
+    args["data_parallel_size"] = data_parallel_size
+    args["tensor_parallel_size"] = tensor_parallel_size
+
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
 
-    args["model"] = config.model_version
-    args["max_model_len"] = config.max_model_len
     args["gpu_memory_utilization"] = config.hbm_utilization
-    args["swap_space"] = config.swap_space
 
-    args["data_parallel_size"] = data_parallel_size
-    args["tensor_parallel_size"] = tensor_parallel_size
-    args["async_scheduling"] = config.async_scheduling
+    args["additional_config"] = config.additional_config or {}
 
-    if config.max_num_batched_tokens is not None:
-      args["max_num_batched_tokens"] = config.max_num_batched_tokens
-
-    if config.max_num_seqs is not None:
-      args["max_num_seqs"] = config.max_num_seqs
-
-    args["additional_config"] = {}
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
+
     device_indexes = config.mesh.device_ids.flatten().tolist()
+
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
             "device_indexes": device_indexes,
             "enable_dp_attention": config.enable_dp_attention,
         }
     }
-
-    # Add support for "hf_config_path" and "additional_config" which are
-    # directly passed to vLLM engine and part of the vLLM config contract.
-    if config.hf_config_path:
-      args["hf_config_path"] = config.hf_config_path
-
-    if config.additional_config:
-      args["additional_config"].update(config.additional_config)
-
-    if kwargs:
-      args.update(kwargs)
 
     return args
 
@@ -438,15 +433,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           sampling_params.update(**kwargs)
           logging.log_first_n(
               logging.INFO,
-              "Received additional kwargs that are not explicitly defined in the"
-              f" method signature: {kwargs}. These will be forwarded to the"
-              " underlying sampler, but please ensure that they are valid.", 1
+              "Received additional kwargs that are not explicitly defined in"
+              f" the method signature: {kwargs}. These will be forwarded to the"
+              " underlying sampler, but please ensure that they are valid.",
+              1,
           )
         except Exception as e:
           logging.log_first_n(
               logging.INFO,
               f"Failed to update sampling_params with kwargs: {kwargs}."
-              f" Error: {e}", 1
+              f" Error: {e}",
+              1,
           )
 
       self.sampling_params = sampling_params
