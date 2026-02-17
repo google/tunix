@@ -59,6 +59,7 @@ class _FakeLLMEngine:
     self._pending: list[str] = []
     self._lock = threading.Lock()
     self.engine_core = _StubEngineCore()
+    self.log_called = threading.Event()
 
   # The driver only exercises a subset of the LLMEngine surface.
   def add_request(self, request_id: str, *_, **__):
@@ -91,6 +92,12 @@ class _FakeLLMEngine:
 
   def abort_request(self, *_args, **_kwargs):
     pass
+
+  # Log stats API exercised by the driver's log thread.
+  def do_log_stats(self):
+    # Signal that the log stats method was called.
+    self.log_called.set()
+    return None
 
 
 class VllmDriverAsyncTest(absltest.TestCase):
@@ -138,6 +145,16 @@ class VllmDriverAsyncTest(absltest.TestCase):
     # All completions should be observed, but not necessarily in submit order.
     self.assertEqual(finished_order, completion_order)
     self.assertNotEqual(finished_order, request_ids)
+
+  def test_log_thread_calls_do_log_stats(self):
+    engine = _FakeLLMEngine([])
+    driver = VLLMInProcessDriver(
+        llm_engine=engine, log_stats_interval_s=0.01, auto_start=True
+    )
+    self.addCleanup(driver.shutdown)
+
+    # Wait for the log thread to call into the engine's do_log_stats.
+    self.assertTrue(engine.log_called.wait(timeout=1.0))
 
 
 if __name__ == "__main__":
