@@ -22,12 +22,12 @@ where multiprocessing is undesirable (e.g. JAX integration).
 from __future__ import annotations
 
 from concurrent.futures import Future
-from absl import logging
 import os
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Union
 
+from absl import logging
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
@@ -57,6 +57,7 @@ class VLLMInProcessDriver:
       llm_engine: LLMEngine,
       *,
       poll_interval_s: float = 0.005,
+      log_stats_interval_s: float = 10.0,
       stream_callback: Optional[StreamCallback] = None,
       auto_start: bool = True,
   ) -> None:
@@ -68,6 +69,8 @@ class VLLMInProcessDriver:
     self._work_event = threading.Event()
     self._stop_event = threading.Event()
     self._loop_thread: Optional[threading.Thread] = None
+    self._log_thread: Optional[threading.Thread] = None
+    self._log_stats_interval_s: float = log_stats_interval_s
 
     self._pending: Dict[str, RequestFuture] = {}
     self._last_error: Optional[BaseException] = None
@@ -82,10 +85,14 @@ class VLLMInProcessDriver:
       *,
       usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
       poll_interval_s: float = 0.005,
+      log_stats_interval_s: float = 1.0,
       stream_callback: Optional[StreamCallback] = None,
       auto_start: bool = True,
   ) -> "VLLMInProcessDriver":
-    logging.debug(f"Creating VLLMInProcessDriver with engine_args: {engine_args} and usage_context: {usage_context}")
+    logging.debug(
+        f"Creating VLLMInProcessDriver with engine_args: {engine_args} and"
+        f" usage_context: {usage_context}"
+    )
     llm_engine = LLMEngine.from_engine_args(
         engine_args,
         usage_context=usage_context,
@@ -115,7 +122,10 @@ class VLLMInProcessDriver:
       if request_id in self._pending:
         raise ValueError(f"Request {request_id} already pending.")
       self._pending[request_id] = future
-      logging.debug(f"VLLMInProcessDriver submitting request {request_id} with prompt {prompt} and sampling params {params} to vLLM engine.")
+      logging.debug(
+          f"VLLMInProcessDriver submitting request {request_id} with prompt"
+          f" {prompt} and sampling params {params} to vLLM engine."
+      )
       self._llm_engine.add_request(
           request_id=request_id,
           prompt=prompt,
@@ -137,6 +147,19 @@ class VLLMInProcessDriver:
         target=self._loop, name="VLLMInProcessDriverLoop", daemon=True
     )
     self._loop_thread.start()
+
+    self._log_thread = threading.Thread(
+        target=self._log_loop, name="VLLMLogStats", daemon=True
+    )
+    self._log_thread.start()
+
+  def _log_loop(self) -> None:
+    while not self._stop_event.is_set():
+      try:
+        self._llm_engine.do_log_stats()
+      except BaseException:  # pylint: disable=broad-exception-caught
+        logging.exception("log_stats failed")
+      self._stop_event.wait(self._log_stats_interval_s)
 
   def cancel(self, request_id: str) -> None:
     with self._engine_lock:
@@ -164,6 +187,9 @@ class VLLMInProcessDriver:
     if self._loop_thread is not None:
       self._loop_thread.join()
       self._loop_thread = None
+    if self._log_thread is not None:
+      self._log_thread.join()
+      self._log_thread = None
 
   def pause(self) -> None:
     raise RuntimeError("Pause feature WIP")
@@ -177,7 +203,12 @@ class VLLMInProcessDriver:
         if not self._wait_for_work():
           continue
         outputs = self._step_engine()
-        logging.log_every_n(logging.DEBUG, f"VLLMInProcessDriver loop step outputs: {[output.request_id for output in outputs]}", 40)
+        logging.log_every_n(
+            logging.DEBUG,
+            "VLLMInProcessDriver loop step outputs:"
+            f" {[output.request_id for output in outputs]}",
+            40,
+        )
         if outputs:
           for output in outputs:
             self._handle_output(output)
@@ -199,9 +230,19 @@ class VLLMInProcessDriver:
   def _step_engine(
       self,
   ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
-    logging.log_every_n(logging.DEBUG, f"VLLMInProcessDriver loop waking up to process one step of requests.", 100)
+    logging.log_every_n(
+        logging.DEBUG,
+        f"VLLMInProcessDriver loop waking up to process one step of requests.",
+        100,
+    )
     with self._engine_lock:
-      logging.log_every_n(logging.DEBUG, f"VLLMInProcessDriver has {self._llm_engine.get_num_unfinished_requests()} pending requests.", 100)
+      logging.log_every_n(
+          logging.DEBUG,
+          "VLLMInProcessDriver has"
+          f" {self._llm_engine.get_num_unfinished_requests()} pending"
+          " requests.",
+          100,
+      )
       if self._llm_engine.has_unfinished_requests():
         return self._llm_engine.step()
       return []
@@ -218,7 +259,9 @@ class VLLMInProcessDriver:
       future = self._pending.pop(output.request_id, None)
     if future is None or future.done():
       return
-    logging.debug(f"VLLMInProcessDriver completed request id: {output.request_id}.")
+    logging.debug(
+        f"VLLMInProcessDriver completed request id: {output.request_id}."
+    )
     future.set_result(output)
 
   def _record_error(self, exc: BaseException) -> None:
