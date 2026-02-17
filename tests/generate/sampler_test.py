@@ -111,6 +111,65 @@ class SamplerTest(parameterized.TestCase):
               result_padded.tokens[i].shape[0], max_generation_steps
           )
 
+  def test_multimodal_samples(self):
+    vocab = tc.MockVocab(is_multimodal=True)
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(
+            vocab_size=vocab.GetPieceSize(), vision_config=tc.VisionConfig()
+        ),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    class DummyImageProcessor:
+
+      def __call__(self, images):
+        # returns dummy processed images
+        return np.ones((len(images), 1, 32, 32, 3), dtype=np.float32)
+
+    image_processor = DummyImageProcessor()
+
+    max_generation_steps = 8
+
+    # We pass in 2 strings and 2 corresponding dummy images
+    images = [
+        np.zeros((32, 32, 3)),
+        np.zeros((32, 32, 3)),
+    ]
+
+    result = sampler(
+        [
+            'quantization <soi> <img> <img> Tunix',
+            '<soi> <img> <img> Parallax distributed',
+        ],
+        max_generation_steps=max_generation_steps,
+        return_logits=True,
+        max_prompt_length=8,
+        echo=True,
+        images=images,
+        image_processor=image_processor,
+    )
+
+    self.assertIsNotNone(result)
+    self.assertReasonableTensor(result.tokens)
+    self.assertReasonableTensor(result.logits)
+    np.testing.assert_allclose(
+        result.tokens,
+        np.array([
+            [1, 21, 23, 22, 22, 14, 8, 25, 8, 25, 8, 25, 8, 25],
+            [1, 23, 22, 22, 15, 18, 8, 25, 8, 25, 8, 25, 8, 25],
+        ]),
+    )
+
   @parameterized.named_parameters(
       dict(
           testcase_name='case1',
