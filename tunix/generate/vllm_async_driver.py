@@ -73,7 +73,7 @@ class VLLMInProcessDriver:
     self._log_stats_interval_s: float = log_stats_interval_s
 
     self._pending: Dict[str, RequestFuture] = {}
-    self._last_error: Optional[BaseException] = None
+    self._last_error: Optional[Exception] = None
 
     if auto_start:
       self.start()
@@ -157,7 +157,7 @@ class VLLMInProcessDriver:
     while not self._stop_event.is_set():
       try:
         self._llm_engine.do_log_stats()
-      except BaseException:  # pylint: disable=broad-exception-caught
+      except Exception:  # pylint: disable=broad-exception-caught
         logging.exception("log_stats failed")
       self._stop_event.wait(self._log_stats_interval_s)
 
@@ -214,7 +214,7 @@ class VLLMInProcessDriver:
             self._handle_output(output)
         else:
           time.sleep(self._poll_interval_s)
-    except BaseException as exc:  # pylint: disable=broad-exception-caught
+    except Exception as exc:  # pylint: disable=broad-exception-caught
       self._record_error(exc)
 
   def _wait_for_work(self) -> bool:
@@ -264,7 +264,7 @@ class VLLMInProcessDriver:
     )
     future.set_result(output)
 
-  def _record_error(self, exc: BaseException) -> None:
+  def _record_error(self, exc: Exception) -> None:
     logging.debug("VLLMInProcessDriver encountered an error: %s", exc)
     self._last_error = exc
     with self._engine_lock:
@@ -279,7 +279,7 @@ class VLLMInProcessDriver:
     return self._llm_engine
 
   @property
-  def last_error(self) -> Optional[BaseException]:
+  def last_error(self) -> Optional[Exception]:
     return self._last_error
 
   def __enter__(self) -> "VLLMInProcessDriver":

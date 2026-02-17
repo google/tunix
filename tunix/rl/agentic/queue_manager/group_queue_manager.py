@@ -15,11 +15,13 @@
 """Manages queues of trajectory items, grouping them by group_id and episode_id."""
 
 from __future__ import annotations
+
 import asyncio
 import collections
 from collections.abc import Hashable
 import dataclasses
 from typing import Deque, Dict, List, Optional
+
 from tunix.rl.agentic.agents import agent_types
 
 TrajectoryItem = agent_types.TrajectoryItem
@@ -46,12 +48,12 @@ class GroupQueueManager:
     self._buckets: Dict[Hashable, List[TrajectoryItem]] = {}
     self._ready_groups: Deque[List[TrajectoryItem]] = collections.deque()
     self._clearing = False
-    self._exc: Optional[BaseException] = None
+    self._exc: Optional[Exception] = None
     self._lock = asyncio.Lock()
     self._have_ready = asyncio.Event()
     self._batch_buf: List[TrajectoryItem] = []
 
-  async def put_exception(self, exc: BaseException):
+  async def put_exception(self, exc: Exception):
     self._exc = exc
     self._have_ready.set()
 
@@ -78,7 +80,7 @@ class GroupQueueManager:
       item: The TrajectoryItem to add.
 
     Raises:
-      BaseException: If an exception has been set via `put_exception`.
+      Exception: If an exception has been set via `put_exception`.
     """
     if self._clearing:
       return
@@ -138,5 +140,3 @@ class GroupQueueManager:
         out.extend(group[:room])
         self._batch_buf.extend(group[room:])
     return out
-
-
