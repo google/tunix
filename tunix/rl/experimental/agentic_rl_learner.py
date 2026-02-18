@@ -685,6 +685,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_micro_batch_size = (
         self._training_config.train_micro_batch_size or mini_batch_size
     )
+    # Rollout and compute_logps micro batch sizes have to be 1 since we only
+    # process inidividual prompts.
     self._rollout_micro_batch_size = 1
     self._compute_logps_micro_batch_size = 1
     for v, n in [
