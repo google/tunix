@@ -147,6 +147,7 @@ training_config: &base_training_config
   # Currently only supported for grpo_main. Configs you can specify are:
     # log_dir = the directory to save the trace files.
     # custom_export_fn_path = the path to the custom export function.
+    # enable_trace_writer = whether to enable writing out the trace for visualization (enabled by default).
   perf_metrics_options: {}
   profiler_options:
     log_dir: "/tmp/profiling"
