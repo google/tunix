@@ -110,13 +110,13 @@ class RolloutOrchestrator:
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
-      group_key: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
+      group_key_fn: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
       start_step_fn: Optional[Callable[[], int]],
       collect_mode: Optional[str],
   ):
     """Collects one trajectory and queues it."""
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
-    gid = group_key(pair_idx, env, traj)
+    gid = group_key_fn(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
     item = TrajectoryItem(
         pair_index=pair_idx,
@@ -134,7 +134,7 @@ class RolloutOrchestrator:
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
-      group_key: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
+      group_key_fn: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
       start_step_fn: Optional[Callable[[], int]] = None,
       collect_mode: Optional[str] = None,
   ):
@@ -150,7 +150,7 @@ class RolloutOrchestrator:
       agent: The ConversationAgentBase instance.
       env: The BaseTaskEnv instance.
       manager: The GroupQueueManager to put collected trajectories into.
-      group_key: A callable to determine the group ID for a trajectory.
+      group_key_fn: A callable to determine the group ID for a trajectory.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
       collect_mode: An optional string to select the collection mode.
@@ -169,7 +169,7 @@ class RolloutOrchestrator:
             agent=agent,
             env=env,
             manager=manager,
-            group_key=group_key,
+            group_key_fn=group_key_fn,
             start_step_fn=start_step_fn,
             collect_mode=collect_mode,
         )
@@ -195,7 +195,7 @@ class RolloutOrchestrator:
       ),
       *,
       group_size: int,
-      group_key: Callable[
+      group_key_fn: Callable[
           [int, BaseTaskEnv, Trajectory], Hashable
       ] = lambda i, _, __: i,
       collect_mode: Optional[str] = None,
@@ -215,7 +215,7 @@ class RolloutOrchestrator:
       pairs_stream: An iterable of tuples, where each tuple contains an
         ConversationAgentBase and a BaseTaskEnv instance.
       group_size: The number of trajectories to collect before forming a group.
-      group_key: A callable that takes `(pair_index, env, trajectory)` and
+      group_key_fn: A callable that takes `(pair_index, env, trajectory)` and
         returns a hashable group identifier. Using a callable allows for
         flexible grouping strategies. For example, trajectories can be grouped
         by task properties from the environment (`env`) or by outcomes within
@@ -225,6 +225,7 @@ class RolloutOrchestrator:
         `TrajectoryCollectEngine`.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
+      init_pair_index: The initial pair index to start from for trajectories.
 
     Raises:
       ValueError: If `max_concurrency` is not set.
@@ -279,7 +280,7 @@ class RolloutOrchestrator:
                     agent=agent,
                     env=env,
                     manager=self._group_queue_manager,
-                    group_key=group_key,
+                    group_key_fn=group_key_fn,
                     start_step_fn=start_step_fn,
                     collect_mode=collect_mode,
                 )

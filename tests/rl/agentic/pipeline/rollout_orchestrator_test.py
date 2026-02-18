@@ -116,7 +116,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
             group_size=group_size,
-            group_key=lambda i, env, traj: i // group_size,
+            group_key_fn=lambda i, env, traj: i // group_size,
         )
     )
     await asyncio.sleep(0)
@@ -189,13 +189,14 @@ class RolloutOrchestratorTest(parameterized.TestCase):
       if env.env_id == failing_pair_index:
         raise ValueError('Collection failed!')
       return {'trajectory': [f'traj_for_env_{env.env_id}']}
+
     self.mock_collect.side_effect = failing_side_effect
 
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pair_generator(),
             group_size=1,
-            group_key=lambda i, *_: i,
+            group_key_fn=lambda i, *_: i,
         )
     )
     await asyncio.sleep(0)
@@ -229,7 +230,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
         orchestrator.run_producers_from_stream(
             pairs_stream=faulty_generator(),
             group_size=1,
-            group_key=lambda i, *_: i,
+            group_key_fn=lambda i, *_: i,
         )
     )
     await asyncio.sleep(0)
