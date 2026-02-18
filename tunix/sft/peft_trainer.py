@@ -579,7 +579,7 @@ class PeftTrainer:
       logging.log_if(
           logging.INFO,
           f"Compiled train_step cache size: {cache_size}",
-          lambda: cache_size not in self._jit_cache,
+          condition=cache_size not in self._jit_cache,
       )
       self._jit_cache.add(cache_size)
 

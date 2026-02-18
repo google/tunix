@@ -863,14 +863,14 @@ class RLCluster:
           itertools.chain.from_iterable(out.logprobs for out in outputs)
       )
 
-    logits = None
-    if isinstance(outputs[0].logits, jnp.ndarray):
-      logits = jnp.concatenate([out.logits for out in outputs], axis=0)
-
     return base_rollout.RolloutOutput(
         text=texts,
-        logits=logits,
-        tokens=np.concatenate([out.tokens for out in outputs], axis=0),
+        logits=list(
+            itertools.chain.from_iterable(out.logits for out in outputs)
+        ),
+        tokens=list(
+            itertools.chain.from_iterable(out.tokens for out in outputs)
+        ),
         left_padded_prompt_tokens=np.concatenate(
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),

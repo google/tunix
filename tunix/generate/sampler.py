@@ -777,7 +777,6 @@ class Sampler(base_sampler.BaseSampler):
     else:
       out_tokens = []
       out_logits = []
-      lengths = []
       for i, token_buffer in enumerate(token_buffers):
         start_idx = (
             utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
@@ -793,7 +792,6 @@ class Sampler(base_sampler.BaseSampler):
         out_tokens.append(jax.device_get(token_buffer[start_idx:end_idx]))
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
-        lengths.append(end_idx - start_idx)
 
       decoded_outputs = [
           self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
