@@ -60,7 +60,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
         seed=rollout_config.seed,
-        pad_output=True,
+        pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
     )
     return base_rollout.RolloutOutput(

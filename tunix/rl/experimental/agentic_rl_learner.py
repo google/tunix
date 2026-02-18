@@ -19,9 +19,9 @@ from __future__ import annotations
 import abc
 import asyncio
 import contextlib
+import copy
 import dataclasses
 import itertools
-import copy
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
@@ -29,13 +29,13 @@ from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterat
 from absl import logging
 import flax
 import jax
-from tunix.rl import reward_manager  # pylint: disable=unused-import
 from jax import typing
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
+from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
@@ -48,6 +48,7 @@ from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
+
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -66,6 +67,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
 
   Parameters:
     system_prompt: System prompt for the agent.
+    max_response_length: Maximum number of tokens for each episode.
     max_concurrency: Maximum number of concurrent requests to the rollout
       engines.
     off_policy_steps: Number of off-policy steps can be accepted before a
@@ -76,6 +78,9 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   """
 
   system_prompt: str = ""
+  # TODO(tsbao): we need to update the scripts that uses max_tokens_to_generate
+  # once this new agentic_rl_learner is used.
+  max_response_length: int = 1024
   max_concurrency: int = 32
   off_policy_steps: int = 0
   num_generations: int = 1
@@ -142,6 +147,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
+    self._patch_rollout_config()
 
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
@@ -220,6 +226,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     loop_thread = threading.Thread(target=run_loop_forever, daemon=True)
     loop_thread.start()
     self.loop = loop_queue.get()
+
+  def _patch_rollout_config(self):
+    rollout_config = self.rl_cluster.cluster_config.rollout_config
+    if not isinstance(rollout_config, dict):
+      rollout_config = {"train": rollout_config}
+    for config in rollout_config.values():
+      config.max_tokens_to_generate = self.algo_config.max_response_length
 
   def _compute_rewards(
       self,
@@ -514,7 +527,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           step=expected_step,
       )
     return self._process_results(
-        results=batch_results,
+        trajectories=batch_results,
         training_input=training_input,
         mode=mode,
         expected_step=expected_step,
@@ -523,7 +536,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   @abc.abstractmethod
   def _process_results(
       self,
-      results: List[Any],
+      trajectories: List[Any],
       training_input: TrainingInputT,
       mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
       expected_step: int | None = None,
