@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import copy
 import dataclasses
@@ -48,7 +49,6 @@ from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
-
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -220,6 +220,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     def run_loop_forever():
       loop = agentic_utils.get_or_create_loop()
+      loop.set_default_executor(
+          ThreadPoolExecutor(max_workers=algo_config.max_concurrency + 1)
+      )
       loop_queue.put(loop)
       loop.run_forever()
 
