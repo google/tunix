@@ -363,15 +363,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
     all_output_ids = [
-        utils.pad_to_length(
-            np.array(x["output_ids"], dtype=np.int32),
-            target_length=max_generation_steps,
-            pad_value=self.tokenizer.pad_id(),
-            left=False,
-        )
-        for x in outputs
+        np.array(x["output_ids"], dtype=np.int32) for x in outputs
     ]
-    all_output_ids = jnp.array(all_output_ids)
     output_texts = [o["text"] for o in outputs]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
