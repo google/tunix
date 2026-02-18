@@ -53,7 +53,7 @@ See [Design Overview](design.md) for more details on the architecture.
           Sequence Policy Optimization)
       -   [DAPO](https://arxiv.org/abs/2503.14476) (Direct Alignment via Preference
           Optimization)
-      -   [Dr.GRPO](https://arxiv.org/abs/2503.14476) (Distributionally Robust
+      -   [Dr.GRPO](https://arxiv.org/abs/2503.20783) (Distributionally Robust
           GRPO)
 -   **[Agentic RL](agentic_rl.md)**:
     -   Multi-turn tool use
