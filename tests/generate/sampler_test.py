@@ -418,6 +418,41 @@ class SamplerTest(parameterized.TestCase):
         result.tokens, [np.array([14]), np.array([12, 1, 17])]
     )
 
+  def test_forbidden_token_ids(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=128,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    vocab_size = vocab.GetPieceSize()
+    num_allowed_tokens = vocab_size // 4
+    forbidden_tokens = set(range(num_allowed_tokens, vocab_size))
+    # EOS is forbidden so we are sure to get a full length generation.
+    forbidden_tokens.add(vocab.eos_id())
+    max_generation_steps = 100
+
+    result = sampler(
+        ['input string'],
+        max_generation_steps=max_generation_steps,
+        return_logits=False,
+        forbidden_tokens=forbidden_tokens,
+        temperature=1.0,  # Ensure some randomness
+        seed=123,
+    )
+    self.assertLen(result.tokens[0], max_generation_steps)
+    self.assertNoCommonElements(result.tokens[0], forbidden_tokens)
+
 
 if __name__ == '__main__':
   absltest.main()
