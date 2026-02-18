@@ -236,7 +236,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   def _process_results(
       self,
       trajectories: List[Any],
-      training_input: TrainingInputT,
       mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
       expected_step: int | None = None,
   ) -> List[TrainExample]:
@@ -254,7 +253,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     Args:
       trajectories: A list of trajectory results for a single GRPO group.
-      training_input: The merged training input for the group.
       mode: The current mode (TRAIN or EVAL).
       expected_step: The expected training step.
 
@@ -365,15 +363,20 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # Prepare arguments for reward computation by forwarding all training inputs
     # except for prompts, which is passed explicitly.
+    original_input = trajectories[0].traj["original_input"]
+    original_inputs = rl_utils.merge_micro_batches(
+        [original_input] * self.algo_config.num_generations
+    )
+
     reward_kwargs = {
-        key: value for key, value in training_input.items() if key != "prompts"
+        key: value for key, value in original_inputs.items() if key != "prompts"
     }
     # TODO: b/456528861 - Refactor reward computation to happen within the
     # environment during rollout, rather than as a post-processing step. This
     # would align with the standard agentic RL pattern and remove the need for
     # `dummy_reward`.
     rewards = self._compute_rewards(
-        prompts=training_input["prompts"],
+        prompts=original_inputs["prompts"],
         completions=completion_texts,
         mode=mode,
         **reward_kwargs,
@@ -411,13 +414,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
-          prompts=training_input["prompts"],
+          prompts=original_inputs["prompts"],
           completions=completion_texts,
           advantages=advantages,
           rewards=rewards,
           **{
               key: value
-              for key, value in training_input.items()
+              for key, value in original_inputs.items()
               if key != "prompts"
           },
       )
