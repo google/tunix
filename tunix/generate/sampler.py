@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 import dataclasses
 from typing import Any, Optional
 import warnings
@@ -66,7 +66,7 @@ class _SamplingState:
   logits_buffer: jnp.ndarray | None  # [B, L, V]
 
   # List of tokens that are forbidden to be generated.
-  forbidden_token_ids: Sequence[int] | None
+  forbidden_token_ids: tuple[int, ...] | None
 
   # Random seed for sampling.
   seed: jax.Array
@@ -311,7 +311,7 @@ class Sampler(base_sampler.BaseSampler):
       all_input_ids: jax.Array,
       total_sampling_steps: int,
       include_logits: bool,
-      forbidden_token_ids: Sequence[int] | None,
+      forbidden_token_ids: tuple[int, ...] | None,
       temperature: float,
       top_p: Optional[float],
       top_k: Optional[int],
@@ -641,7 +641,7 @@ class Sampler(base_sampler.BaseSampler):
       echo: bool = False,
       return_logits: bool = False,
       eos_tokens: Sequence[int] | None = None,
-      forbidden_tokens: Sequence[str] | None = None,
+      forbidden_tokens: Iterable[int] | None = None,
       temperature: float = 0.0,
       top_p: Optional[float] = None,
       top_k: Optional[int] = None,
@@ -665,8 +665,7 @@ class Sampler(base_sampler.BaseSampler):
       return_logits: whether to return per-step logits used during generation.
       eos_tokens: end of sequence tokens to stop generation. If None, the
         tokenizer's eos_id will be used.
-      forbidden_tokens: list of tokens that are forbidden to be generated. Each
-        token must map to a single token id in the vocab.
+      forbidden_tokens: Optional Iterable of token IDs that are disallowed.
       temperature: temperature for sampling.
       top_p: top-p sampling threshold.
       top_k: top-k sampling threshold.
@@ -686,17 +685,7 @@ class Sampler(base_sampler.BaseSampler):
         [input_strings] if isinstance(input_strings, str) else input_strings
     )
 
-    forbidden_token_ids = None
-    if forbidden_tokens is not None:
-      forbidden_token_ids = []
-      for token in forbidden_tokens:
-        token_id = self.tokenizer.encode(token)
-        if len(token_id) != 1:
-          raise ValueError(
-              'Forbidden tokens must map to single token ids in the vocab.'
-          )
-        forbidden_token_ids.extend(token_id)
-      forbidden_token_ids = tuple(forbidden_token_ids)
+    forbidden_token_ids = tuple(forbidden_tokens) if forbidden_tokens else None
 
     tokens = [self.tokenize(x) for x in input_strings]
     max_tokens_length = max(len(x) for x in tokens)
