@@ -79,6 +79,7 @@ class MetricLoggerTest(absltest.TestCase):
   @mock.patch.object(jax.monitoring, "register_scalar_listener")
   def test_logger_handles_missing_wandb_gracefully(self, mock_register):
     """Tests that the logger doesn't crash if wandb is not installed."""
+    self.assertEqual(1, 0)
     # wandb is not supported in internal environment.
     if env_utils.is_internal_env():
       return
