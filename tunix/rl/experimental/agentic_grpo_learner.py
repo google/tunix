@@ -372,6 +372,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     reward_kwargs = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
+    print("reward_kwargs for reward computation: ", reward_kwargs)
     # TODO: b/456528861 - Refactor reward computation to happen within the
     # environment during rollout, rather than as a post-processing step. This
     # would align with the standard agentic RL pattern and remove the need for
