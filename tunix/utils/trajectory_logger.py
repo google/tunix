@@ -105,8 +105,16 @@ def log_item(
   df = pd.DataFrame(
       serialized_item if isinstance(item, list) else [serialized_item]
   )
-  with file_path.open('a') as f:
-    df.to_csv(f, header=write_header, index=False)
+  if str(file_path).startswith('gs://'):
+    if file_path.exists():
+      with file_path.open('r') as f:
+        old_df = pd.read_csv(f)
+      df = pd.concat([old_df, df], ignore_index=True)
+    with file_path.open('w') as f:
+      df.to_csv(f, header=True, index=False)
+  else:
+    with file_path.open('a') as f:
+      df.to_csv(f, header=write_header, index=False)
 
 
 class AsyncTrajectoryLogger:
