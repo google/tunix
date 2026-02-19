@@ -195,6 +195,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
       )
+    # Resetting prefix cache is lightweight, so we do it disregarding whether
+    # prefix caching is enabled or not.
+    self._reset_prefix_cache()
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -202,6 +205,35 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.update_params(updated_weights=path_or_weights, filter_types=None)
     else:
       raise NotImplementedError("Only support in memory weight sync as of now.")
+
+  def _reset_prefix_cache(
+      self,
+      reset_running_requests: bool = False,
+      reset_connector: bool = False,
+  ) -> bool:
+    """Resets vLLM prefix cache.
+
+    Args:
+        reset_running_requests: Also reset active/running requests.
+        reset_connector: Also reset cache connector state.
+
+    Returns:
+        True if the prefix cache was successfully reset, False otherwise.
+
+    Raises:
+        RuntimeError: If the vLLM engine is not initialized.
+    """
+    if self.llm is not None:
+      return self.llm.reset_prefix_cache(
+          reset_running_requests=reset_running_requests,
+          reset_connector=reset_connector,
+      )
+    if self._driver is not None:
+      return self._driver.llm_engine.reset_prefix_cache(
+          reset_running_requests=reset_running_requests,
+          reset_connector=reset_connector,
+      )
+    raise RuntimeError("vLLM engine is not initialized.")
 
   def _find_total_size(self, mesh: jax.sharding.Mesh) -> int:
     """Finds the tensor parallel size from the mesh."""
