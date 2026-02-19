@@ -621,7 +621,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=2,
+        train_micro_batch_size=1,
         # metrics logging
         # metrics_logging_options=metrics_logging_options,
         # checkpoint saving
