@@ -106,7 +106,6 @@ class RolloutOrchestrator:
 
   async def _run_and_queue_one_episode(
       self,
-      pair_idx: int,
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
@@ -115,6 +114,7 @@ class RolloutOrchestrator:
       collect_mode: Optional[str],
   ):
     """Collects one trajectory and queues it."""
+    pair_idx = env.extra_kwargs["pair_index"]
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
     gid = group_key_fn(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
@@ -130,7 +130,6 @@ class RolloutOrchestrator:
 
   async def _runner(
       self,
-      pair_index: int,
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
@@ -146,7 +145,6 @@ class RolloutOrchestrator:
     `num_episodes` limit.
 
     Args:
-      pair_index: The index of the agent-environment pair.
       agent: The ConversationAgentBase instance.
       env: The BaseTaskEnv instance.
       manager: The GroupQueueManager to put collected trajectories into.
@@ -157,7 +155,8 @@ class RolloutOrchestrator:
     """
     episode_count = 0
     logging.debug(
-        "Starting generating trajectories(_runner) for pair %d", pair_index
+        "Starting generating trajectories(_runner) for pair %d",
+        env.extra_kwargs["pair_index"],
     )
 
     try:
@@ -165,7 +164,6 @@ class RolloutOrchestrator:
       self._rollout_sync_lock.acquire_rollout()
       try:
         episode_count = await self._run_and_queue_one_episode(
-            pair_idx=pair_index,
             agent=agent,
             env=env,
             manager=manager,
@@ -177,13 +175,17 @@ class RolloutOrchestrator:
         self._rollout_sync_lock.release_rollout()
     except ExceptionGroup as eg:
       for e in eg.exceptions:
-        logging.error("Fatal error in runner for pair %d: %s", pair_index, e)
+        logging.error(
+            "Fatal error in runner for pair %d: %s",
+            env.extra_kwargs["pair_index"],
+            e,
+        )
       traceback.print_exc()
       raise eg.exceptions[0]
     finally:
       logging.debug(
           "Runner for pair %d completed with %d episodes",
-          pair_index,
+          env.extra_kwargs["pair_index"],
           episode_count,
       )
 
@@ -200,7 +202,6 @@ class RolloutOrchestrator:
       ] = lambda i, _, __: i,
       collect_mode: Optional[str] = None,
       start_step_fn: Optional[Callable[[], int]] = None,
-      init_pair_index: int = 0,
   ):
     """Dynamically runs collectors from a stream of agent-env pairs.
 
@@ -225,7 +226,6 @@ class RolloutOrchestrator:
         `TrajectoryCollectEngine`.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
-      init_pair_index: The initial pair index to start from for trajectories.
 
     Raises:
       ValueError: If `max_concurrency` is not set.
@@ -251,7 +251,6 @@ class RolloutOrchestrator:
     else:
       pairs_iterator = iter(pairs_stream)
     active_tasks: set[asyncio.Task] = set()
-    next_pair_index = init_pair_index
     stream_exhausted = False
 
     try:
@@ -269,14 +268,12 @@ class RolloutOrchestrator:
             and not self._stop.is_set()
         ):
           try:
-            logging.debug("Getting one pair: %d", next_pair_index)
             if is_async_stream:
               agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:
               agent, env = next(pairs_iterator)
             task = asyncio.create_task(
                 self._runner(
-                    pair_index=next_pair_index,
                     agent=agent,
                     env=env,
                     manager=self._group_queue_manager,
@@ -287,14 +284,14 @@ class RolloutOrchestrator:
             )
             active_tasks.add(task)
             self._tasks.append(task)
-            next_pair_index += 1
           except (StopIteration, StopAsyncIteration):
             logging.debug("Pairs stream exhausted.")
             stream_exhausted = True
             break
           except Exception as e:
             logging.error(
-                "Error getting next trajectory pair %d: %s", next_pair_index, e
+                "Error getting next trajectory: %s",
+                e,
             )
             raise e
         # If no tasks are running and stream is exhausted, done.

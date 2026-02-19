@@ -29,8 +29,10 @@ class MockAgent(base_agent.ConversationAgentBase):
 class MockEnv(base_environment.BaseTaskEnv):
   """A mock environment."""
 
-  def __init__(self, task: Mapping[str, Any] | None = None, env_id: int = 0):
-    super().__init__(task=task)
+  def __init__(
+      self, task: Mapping[str, Any] | None = None, env_id: int = 0, **kwargs
+  ):
+    super().__init__(task=task, **kwargs)
     self.env_id = env_id
 
   def _initial_observation(self):
@@ -104,7 +106,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
 
     def pair_generator():
       for i in range(num_pairs):
-        yield MockAgent(), MockEnv(env_id=i)
+        yield MockAgent(), MockEnv(env_id=i, group_id=0, pair_index=i)
 
     async def side_effect_fn(*args, **kwargs):
       env = args[1]
@@ -182,7 +184,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
 
     def pair_generator():
       for i in range(num_pairs):
-        yield MockAgent(), MockEnv(env_id=i)
+        yield MockAgent(), MockEnv(env_id=i, group_id=0, pair_index=i)
 
     async def failing_side_effect(*args, **kwargs):
       env = args[1]
@@ -221,7 +223,7 @@ class RolloutOrchestratorTest(parameterized.TestCase):
       for i in range(5):
         if i == failing_pair_index:
           raise ValueError('Generator failed!')
-        yield MockAgent(), MockEnv(env_id=i)
+        yield MockAgent(), MockEnv(env_id=i, group_id=0, pair_index=i)
 
     self.mock_collect.side_effect = None
     self.mock_collect.return_value = {'trajectory': ['mock_traj']}
