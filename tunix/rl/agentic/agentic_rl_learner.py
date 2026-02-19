@@ -20,12 +20,10 @@ import abc
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import copy
 import dataclasses
 import itertools
-import copy
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
@@ -167,8 +165,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
     )
-    print("initialize reward functions and reward manager....")
-    print(f"reward_manager_fn={reward_manager_fn}, reward_fns={reward_fns}")
     self.reward_manager = reward_manager_fn(
         reward_fns=reward_fns,
         algo_config=algo_config,
@@ -587,7 +583,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       train_data_queue,
   ):
     """Produces training examples from prompts in the dataset_iterator."""
-    print("Producer started, waiting for prompts...")
     loop = asyncio.get_running_loop()
     async_queue_iter = self._AsyncQueueIterator(prompt_queue, loop)
 

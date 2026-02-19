@@ -26,9 +26,6 @@ from tunix.models.llama3 import params
 from tunix.tests import test_common as tc
 
 
-import pathwaysutils
-pathwaysutils.initialize()
-
 MODEL_VERSION = "meta-llama/Llama-3.2-1B-Instruct"
 
 # Consider switch to tempfile after figuring out how it works

@@ -436,7 +436,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     reward_kwargs = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
-    print("reward_kwargs for reward computation: ", reward_kwargs)
 
     reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
     with self.rl_cluster.perf_v2.span(
