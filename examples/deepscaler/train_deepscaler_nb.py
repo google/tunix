@@ -127,7 +127,7 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
 TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -166,8 +166,8 @@ EPSILON_HIGH = 0.28
 # ====== Training ======
 ENABLE_REMAT = True
 BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
-NUM_BATCHES = 100
+MINI_BATCH_SIZE = 128
+NUM_BATCHES = 1250
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
@@ -499,6 +499,8 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
+MAX_NUM_SEQS =768
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
