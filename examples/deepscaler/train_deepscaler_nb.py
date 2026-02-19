@@ -50,15 +50,31 @@ absl_logging.set_stderrthreshold("info")
 
 print("Logging configured at INFO level.")
 
-# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-# from etils import ecolab
-import optax
-from orbax import checkpoint as ocp
 
-import pathwaysutils
-pathwaysutils.initialize()
+try:
+  import pathwaysutils
+  pathwaysutils.initialize()
+except:
+  pass
 
 print("jax devices: ", jax.devices())
+# import os
+# os.environ["WANDB_MODE"] = "online"
+
+# try:
+  # wandb.login()
+  # print("linchai: logged in to W&B")
+# except wandb.errors.UsageError as e:
+  # Handle the error, maybe disable W&B logging
+  # wandb.init(mode="disabled")
+
+
+# try:
+  # run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  # wandb.init(project="tunix", name=run_name, anonymous="allow")
+  # wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
+# except Exception as e:
+  # print(f"linchai: W&B initialization failed with error: {e}")
 
 try:
   from etils import ecolab
@@ -605,7 +621,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
         train_micro_batch_size=2,
         # metrics logging
-        metrics_logging_options=metrics_logging_options,
+        # metrics_logging_options=metrics_logging_options,
         # checkpoint saving
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
