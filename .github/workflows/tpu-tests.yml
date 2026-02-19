@@ -196,7 +196,9 @@ jobs:
           unset JAX_PLATFORMS
           pip list | egrep 'jax|flax|libtpu'
           cd ..
-          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . --force-reinstall && cd ../..
+          # TODO(b/483477587): sglang-jax introduced an AttributeError in https://github.com/sgl-project/sglang-jax/pull/802 when handler.formatter is None.
+          # Pin to commit 1ac109870b82cf1ede1bac91b4f10d2757953037 before the issue is fixed.
+          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1ac109870b82cf1ede1bac91b4f10d2757953037 && cd python && pip install -e . --force-reinstall && cd ../..
           # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
           pip install qwix --force-reinstall
           # TODO(b/470113586): Remove this test once the bug is fixed.
