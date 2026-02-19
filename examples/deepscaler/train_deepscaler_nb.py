@@ -113,7 +113,7 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
 TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -144,8 +144,8 @@ EPSILON = 0.2
 # ====== Training ======
 ENABLE_REMAT = True
 BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
-NUM_BATCHES = 100
+MINI_BATCH_SIZE = 128
+NUM_BATCHES = 1250
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
@@ -459,16 +459,20 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
+MAX_NUM_SEQS =768
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    "rollout_vllm_hbm_utilization": 0.85,
+    "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
-    "rollout_vllm_kwargs": {"kv_cache_metrics": True},
+    "rollout_vllm_max_num_seqs": MAX_NUM_SEQS,
+    "rollout_vllm_max_num_batched_tokens": MAX_BATCHED_TOKENS,
+    "rollout_vllm_kwargs": {"kv_cache_metrics": True, "disable_log_stats": False, "enable_prefix_caching": True},
 }
 
 if ROLLOUT_ENGINE == "sglang_jax":
@@ -526,7 +530,7 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=64,
+    max_concurrency=MAX_NUM_SEQS,
 )
 
 # %%
