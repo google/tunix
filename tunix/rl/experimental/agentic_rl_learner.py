@@ -354,9 +354,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
+    prompts = [[chat] for chat in chat_lists]
 
     result = self.rl_cluster.generate(
-        prompts=chat_lists,
+        prompts=prompts,
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
     )
@@ -471,16 +472,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A list of `TrainExample` instances, ready for training.
     """
-    if not cached_inputs_for_window or cached_inputs_for_window[0] is None:
-      logging.warning("Skipping batch: No valid inputs found (likely upstream timeout).")
-      return []
-    # for cached_input in cached_inputs_for_window:
-    #   logging.info(f"Cached input type: {type(cached_input)}")
-    #   logging.info(f"Cached input content: {cached_input}")
-    #   logging.info(f"Cached input keys: {list(cached_input.keys())}")
-    #   logging.info("\n")
-    # Create a merged training_input where each field from the original input
-    # is repeated G times to align with the G completions.
+    # if not cached_inputs_for_window or cached_inputs_for_window[0] is None:
+    #   logging.warning("Skipping batch: No valid inputs found (likely upstream timeout).")
+    #   return []
+
     
     num_generations = self.algo_config.num_generations
     micro_batches = [cached_inputs_for_window[0]] * num_generations
@@ -534,32 +529,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self, example: TrainingInputT, prompt_index: int
   ) -> List[str]:
     """Computes the trajectory ID for each prompt in the batch."""
-    # len(example["prompts"]) 
-    # batch_size = 16 // self.algo_config.num_generations
-    logging.info("compute_trajectory_ids")
-    # --- RENAME KEY HERE ---
-    # Safely rename 'prompt' to 'prompts' so downstream code can reuse it
-    if "prompt" in example and "prompts" not in example:
-        example["prompts"] = example.pop("prompt")
-        logging.info("Renamed key 'prompt' to 'prompts'")
-    # # 2. Inspect the 'example' object
-    # try:
-    #   logging.info(f"Example Type: {type(example)}")
-
-    #   # If example is a dict (batch), print keys and lengths
-    #   if isinstance(example, dict):
-    #     logging.info(f"Example Keys: {list(example.keys())}")
-    #     for k, v in example.items():
-    #         # Print length of lists to verify batch size
-    #         if isinstance(v, list):
-    #             logging.info(f"Key '{k}' len: {len(v)}")
-    #   else:
-    #     # Fallback: print raw string representation
-    #     logging.info(f"Example Content: {str(example)[:500]}...")
-
-    # except Exception as e:
-    #   logging.error(f"Error printing debug info: {e}")
-
     batch_size = len(example['prompts']) // self.algo_config.num_generations
     if batch_size != 1:
       raise ValueError(
@@ -661,8 +630,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    # full_batch_size = len(first_item["prompts"])
-    full_batch_size = 16
+    full_batch_size = len(first_item["prompts"])
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size

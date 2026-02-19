@@ -788,93 +788,6 @@ class RLCluster:
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
-  # def generate(
-  #     self,
-  #     prompts: list[str] | list[list[dict[str, str]]],
-  #     apply_chat_template: bool = False,
-  #     mode: Mode = Mode.TRAIN,
-  #     micro_batch_size: int | None = None,
-  # ) -> base_rollout.RolloutOutput:
-  #   """Generates text from the given prompts.
-
-  #   Args:
-  #     prompts: A list of prompts to generate text from. If `apply_chat_template`
-  #       is True, this should be a list of conversations (each a list of
-  #       dictionaries with 'role' and 'content'). Otherwise, it should be a list
-  #       of strings.
-  #     apply_chat_template: Whether to apply chat template to the prompts.
-  #     mode: The mode of rollout, either TRAIN or EVAL.
-  #     micro_batch_size: The micro-batch size for generation. If None, no
-  #       micro-batching is performed.
-
-  #   Returns:
-  #     A `RolloutOutput` object containing the generated text and other info.
-  #   """
-  #   if apply_chat_template:
-  #     if self.tokenizer is None:
-  #       raise ValueError("Tokenizer must be initialized to use chat templates.")
-  #     string_prompts = [
-  #         self.tokenizer.apply_chat_template(
-  #             prompt,  # pytype: disable=wrong-arg-types
-  #             add_generation_prompt=True,
-  #             tokenize=False,
-  #             enable_thinking=False,
-  #         )
-  #         for prompt in prompts
-  #       ]
-  #     string_prompts = prompts  # pytype: disable=annotation-type-mismatch
-
-  #   if len(string_prompts) == 0:
-  #     raise ValueError("Cannot generate from an empty list of prompts.")
-  #   micro_batch_size = micro_batch_size or len(string_prompts)
-
-  #   with self.cluster_config.role_to_mesh[
-  #       Role.ROLLOUT
-  #   ] as mesh, self._get_logical_axis_rules_cm(Role.ROLLOUT):
-  #     model = self.rollout.model()
-  #     self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
-  #     if self.cluster_config.offload_to_cpu:
-  #       self.rollout.update_params(nnx.state(model))
-
-  #     if isinstance(self.cluster_config.rollout_config, dict):
-  #       rollout_config = self.cluster_config.rollout_config[mode]
-  #     else:
-  #       rollout_config = self.cluster_config.rollout_config
-
-  #     with self._perf.span("rollout", mesh.devices) as span:
-  #       outputs = [
-  #           self.rollout.generate(string_prompts[s], rollout_config)
-  #           for s in rl_utils.chunk_slices_by_size(
-  #               stop=len(string_prompts), step=micro_batch_size
-  #           )
-  #       ]
-  #       span.device_end([o.logits for o in outputs])
-
-  #     self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
-  #     if self.cluster_config.offload_to_cpu:
-  #       self.rollout.update_params(nnx.state(model))
-
-  #   texts = list(itertools.chain.from_iterable(out.text for out in outputs))
-
-  #   logprobs = None
-  #   if outputs[0].logprobs is not None:
-  #     logprobs = list(
-  #         itertools.chain.from_iterable(out.logprobs for out in outputs)
-  #     )
-
-  #   logits = None
-  #   if isinstance(outputs[0].logits, jnp.ndarray):
-  #     logits = jnp.concatenate([out.logits for out in outputs], axis=0)
-
-  #   return base_rollout.RolloutOutput(
-  #       text=texts,
-  #       logits=logits,
-  #       tokens=np.concatenate([out.tokens for out in outputs], axis=0),
-  #       left_padded_prompt_tokens=np.concatenate(
-  #           [out.left_padded_prompt_tokens for out in outputs], axis=0
-  #       ),
-  #       logprobs=logprobs,
-  #   )
   def generate(
       self,
       prompts: list[str] | list[list[dict[str, str]]],
@@ -882,55 +795,40 @@ class RLCluster:
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
   ) -> base_rollout.RolloutOutput:
-    """Generates text from the given prompts."""
-    
-    # 1. Handle Chat Templates (with Debugging added)
+    """Generates text from the given prompts.
+
+    Args:
+      prompts: A list of prompts to generate text from. If `apply_chat_template`
+        is True, this should be a list of conversations (each a list of
+        dictionaries with 'role' and 'content'). Otherwise, it should be a list
+        of strings.
+      apply_chat_template: Whether to apply chat template to the prompts.
+      mode: The mode of rollout, either TRAIN or EVAL.
+      micro_batch_size: The micro-batch size for generation. If None, no
+        micro-batching is performed.
+
+    Returns:
+      A `RolloutOutput` object containing the generated text and other info.
+    """
     if apply_chat_template:
       if self.tokenizer is None:
         raise ValueError("Tokenizer must be initialized to use chat templates.")
-      
-      string_prompts = []
-      # We iterate explicitly to catch the specific prompt causing the crash
-
-      for i, prompt in enumerate(prompts):
-        if isinstance(prompt, dict):
-            prompt = [prompt]
-        try:
-          rendered = self.tokenizer.apply_chat_template(
-              prompt, 
+      string_prompts = [
+          self.tokenizer.apply_chat_template(
+              prompt,  # pytype: disable=wrong-arg-types
               add_generation_prompt=True,
               tokenize=False,
               enable_thinking=False,
           )
-          string_prompts.append(rendered)
-        except Exception as e:
-          # --- DEBUGGING BLOCK START ---
-          import sys
-          import pprint
-          print(f"\n{'='*40}", file=sys.stderr)
-          print(f"!!! CRASH IN APPLY_CHAT_TEMPLATE (Index {i}) !!!", file=sys.stderr)
-          print(f"Error Type: {type(e).__name__}", file=sys.stderr)
-          print(f"Error Msg : {e}", file=sys.stderr)
-          print(f"Prompt Type: {type(prompt)}", file=sys.stderr)
-          print("-" * 20, file=sys.stderr)
-          print("Prompt Content:", file=sys.stderr)
-          # Use pprint to make the structure (lists vs dicts) obvious
-          pprint.pprint(prompt, stream=sys.stderr, indent=2)
-          print(f"{'='*40}\n", file=sys.stderr)
-          # --- DEBUGGING BLOCK END ---
-          raise e  # Re-raise so the program stops as expected
-
+          for prompt in prompts
+        ]
     else:
-      # This handles the case where apply_chat_template is False
-      # Note: Ensure this is in an 'else' block, otherwise it overwrites the work above!
-      string_prompts = prompts  # pytype: disable=annotation-type-mismatch
+      string_prompts = prompts  # pytype: disable=annotation-type-mismatch  
 
-    # 2. Validation
     if len(string_prompts) == 0:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    # 3. Rollout Execution
     with self.cluster_config.role_to_mesh[
         Role.ROLLOUT
     ] as mesh, self._get_logical_axis_rules_cm(Role.ROLLOUT):
@@ -957,7 +855,6 @@ class RLCluster:
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
 
-    # 4. Result Processing
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
     logprobs = None

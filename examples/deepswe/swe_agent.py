@@ -9,24 +9,24 @@ except ImportError:
 
 from tunix.rl.agentic.agents.agent_types import Action, Step, Trajectory
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
-from rllm.agents.system_prompts import SWE_SYSTEM_PROMPT, SWE_SYSTEM_PROMPT_FN_CALL, SWE_USER_PROMPT, SWE_USER_PROMPT_FN_CALL, SWEAGENT_SYSTEM_PROMPT, SWEAGENT_USER_PROMPT
+from system_prompts import SWE_SYSTEM_PROMPT, SWE_SYSTEM_PROMPT_FN_CALL, SWE_USER_PROMPT, SWE_USER_PROMPT_FN_CALL, SWEAGENT_SYSTEM_PROMPT, SWEAGENT_USER_PROMPT
 
 TOKEN_WARNING_THRESHOLD = 28000
 
 
 def parse_oai_response(response):
-    logging.info("Parsing OpenAI function-calling response.")
-    thought = response.choices[0].message.content
-    if not thought:
-        thought = ""
-    try:
-        function_name = response.choices[0].message.tool_calls[0].function.name
-        parameters = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
-        action = SWEAction(function_name, parameters)
-    except Exception:
-        action = SWEAction(function_name="", parameters={})
-    return thought, action
-
+    pattern = re.compile(r"(?s)(<function(?:=.*?)?>.*?</function>)")
+    match = pattern.search(response_text)
+    if match:
+        action_raw = match.group(1)
+        # Thought is everything before the very first function block
+        thought = response_text[:match.start()].strip()
+    else:
+        thought = response_text.strip()
+        action_raw = ""
+    
+    # Pass the first block to the Action constructor
+    action = SWEAction.from_string(action_raw)
 
 def parse_xml_response(response_text: str) -> tuple[str, SWEAction]:
     """
@@ -108,8 +108,6 @@ class SWEAgent(ConversationAgentBase):
             None
         """
         self._trajectory.steps.append(self.cur_step)
-        logging.info("update from model response()")
-        logging.info("use_fn_calling: %s", self.use_fn_calling)
         if self.use_fn_calling:
             thought, action = parse_oai_response(response)
         else:

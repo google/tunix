@@ -75,15 +75,6 @@ class SWEEnv(BaseTaskEnv):
             
         self.extra_kwargs["group_id"] = group_id
         
-    def _check_np_array(self):
-        print(f"DEBUG: entry type: {type(self.entry)}")
-        print(f"DEBUG: entry content: {self.entry}")
-        # for id, entry in enumerate(self.entry):
-        #     logging.info(f"Checking entry {entry} for numpy arrays",entry)
-        #     # for k,v in entry.items():
-            #     if isinstance(v, np.ndarray):
-            #         logging.info(f"Found numpy array in entry {entry['id']} key {k}, converting to list")
-                    
     def _initial_observation(self) -> Any:
         if not self.env:
             # Initialize environment if not created yet.
@@ -120,7 +111,7 @@ class SWEEnv(BaseTaskEnv):
         obs, reward, done, info = self.env.step(action_obj)
 
         self.total_steps += 1
-        sys.stdout.flush()
+
         return EnvStepResult(observation=str(obs), reward=reward, done=done, info=info)
 
 
@@ -132,6 +123,10 @@ class SWEEnv(BaseTaskEnv):
         if self.delete_image:
             docker_image = self.env.runtime.docker_image
             os.system(f"docker rmi {docker_image}")
+            
+    def compute_final_reward(self):
+        """Run tests in the Docker container and return reward (0 or 1)."""
+        return self.env.compute_reward()
 
     @staticmethod
     def from_dict(extra_info: dict | str) -> "SWEEnv":
