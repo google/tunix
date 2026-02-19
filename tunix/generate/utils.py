@@ -830,10 +830,28 @@ def _slice_scanned_param(
     return src_val
 
 
+def delete_pytree_buffers(pytree: Any) -> None:
+  """Deletes buffers of jax.Arrays in a pytree to save memory."""
+  logging.info('Deleting pytree buffers.')
+
+  def _delete_buffers(x):
+    if isinstance(x, nnx.Variable) and isinstance(x.value, jax.Array):
+      if not x.value.is_deleted():
+        x.value.delete()
+    elif isinstance(x, jax.Array):
+      if not x.is_deleted():
+        x.delete()
+    return x
+
+  jax.tree_util.tree_map(_delete_buffers, pytree)
+
+
 def transfer_state_directly(
     src_state: Mapping[str, Any],
     dst_state: Mapping[str, Any],
     reshard_fn: Callable[..., Mapping[str, Any]],
+    use_ifrt_reshard: bool = False,
+    delete_dst_mem: bool = False,
 ) -> None:
   """Transfers state directly by matching structure, stripping wrappers.
 
@@ -849,6 +867,11 @@ def transfer_state_directly(
     dst_state: The destination state to transfer to.
     reshard_fn: A function to shard the values.
   """
+
+  # Solution 3: delete the dst_state memory before resharding.
+  if delete_dst_mem:
+    delete_pytree_buffers(dst_state)
+    gc.collect()
 
   def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
     if isinstance(obj, dict):
@@ -984,6 +1007,7 @@ def transfer_state_directly(
   resharded_weights = reshard_fn(
       source=final_source,
       target=final_spec,
+      use_ifrt_reshard=use_ifrt_reshard,
   )
   nnx.update(dst_state, resharded_weights)
 

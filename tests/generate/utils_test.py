@@ -1078,7 +1078,7 @@ class UtilsTest(parameterized.TestCase):
         )
     )
 
-    mock_reshard = lambda source, target: source
+    mock_reshard = lambda source, target, use_ifrt_reshard=False: source
     utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
 
     np.testing.assert_array_equal(
@@ -1183,6 +1183,32 @@ class UtilsTest(parameterized.TestCase):
         jnp.array(200.0, dtype=jnp.bfloat16),
         atol=1e-2
     )
+
+  def test_delete_pytree_buffers(self):
+    """Tests that delete_pytree_buffers deletes jax.Array buffers."""
+    mesh = Mesh(jax.devices(), axis_names="x")
+    sharding = NamedSharding(mesh, PartitionSpec("x"))
+    state = nnx.State({
+        'a': nnx.Param(jax.device_put(jnp.arange(4.0), sharding)),
+        'b': nnx.Param(jax.device_put(jnp.arange(8.0), sharding)),
+        'c': nnx.Param(jax.device_put(jnp.arange(16.0), sharding)),
+    })
+
+    self.assertFalse(state.a.value.is_deleted())
+    self.assertFalse(state.b.value.is_deleted())
+    self.assertFalse(state.c.is_deleted())
+    self.assertEqual(state.a.value.sharding, sharding)
+    self.assertEqual(state.b.value.sharding, sharding)
+    self.assertEqual(state.c.sharding, sharding)
+
+    utils.delete_pytree_buffers(state)
+
+    self.assertTrue(state.a.value.is_deleted())
+    self.assertTrue(state.b.value.is_deleted())
+    self.assertTrue(state.c.is_deleted())
+    self.assertEqual(state.a.value.sharding, sharding)
+    self.assertEqual(state.b.value.sharding, sharding)
+    self.assertEqual(state.c.sharding, sharding)
 
 
 if __name__ == "__main__":
