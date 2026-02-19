@@ -271,7 +271,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
-            "expert_parallel_size": expert_parallel_size,
+            "expert_parallelism": expert_parallel_size,
             "device_indexes": device_indexes,
             "enable_dp_attention": config.enable_dp_attention,
         }
