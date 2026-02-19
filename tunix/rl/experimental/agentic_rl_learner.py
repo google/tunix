@@ -332,7 +332,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         yield micro_batch
 
   def _create_agent_env_pair(
-      self, single_example: TrainingInputT, group_id: int
+      self, single_example: TrainingInputT, group_id: int, pair_index: int
   ) -> tuple[base_agent.ConversationAgentBase, base_environment.BaseTaskEnv]:
     """Constructs an (agent, environment) pair for a single input sample.
 
@@ -340,8 +340,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     Args:
       single_example: A training input containing a single prompt.
-      group_id: An identifier to group generations from the same original
+      group_id: An identifier for group generations from the same original
         prompt.
+      pair_index: The index of the pair within the group.
 
     Returns:
       A tuple of agent and environment.
@@ -349,8 +350,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
     )  # if agent_kwargs contains "system_prompt", it will be honored.
+
+    assert "group_id" not in self.env_kwargs
+    assert "pair_index" not in self.env_kwargs
     env = self.env_class(
-        single_example, **{"group_id": group_id, **self.env_kwargs}
+        single_example,
+        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
     return agent, env
 
@@ -416,7 +421,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     async def pairs_stream_generator():
       """Yield (agent, env) pairs with unique group_id per original prompt."""
-      i = 0
+      # TODO (tsbao): fix the group id when we can resume from mid global step
+      # with mini-batch.
+      group_id = self.rl_cluster.global_steps * self._full_batch_size
       if is_async_iterator:
         async for single_example in prompt_iterator:
           # Create agent-env pairs in parallel for a group to handle potential
@@ -426,13 +433,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   None,
                   self._create_agent_env_pair,
                   copy.deepcopy(single_example),
-                  i,
+                  group_id,
+                  pair_index,
               )
-              for _ in range(num_generations)
+              for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
             yield agent, env
-          i += 1
+          group_id += 1
       else:
         for single_example in prompt_iterator:
           agent_env_pairs = await asyncio.gather(*[
@@ -440,13 +448,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   None,
                   self._create_agent_env_pair,
                   copy.deepcopy(single_example),
-                  i,
+                  group_id,
+                  pair_index,
               )
-              for _ in range(num_generations)
+              for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
             yield agent, env
-          i += 1
+          group_id += 1
 
     # Start producers in the background.
     producer_task = asyncio.create_task(
@@ -455,8 +464,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             group_size=self.algo_config.num_generations,
             group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
             collect_mode=collect_mode,
-            init_pair_index=self.rl_cluster.global_steps
-            * self._full_batch_size,
         )
     )
 
@@ -536,30 +543,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     raise NotImplementedError(
         "_generate_and_compute_advantage is not used in AgenticRLLearner"
     )
-
-  def _compute_trajectory_ids(
-      self, example: TrainingInputT, prompt_index: int
-  ) -> List[str]:
-    """Computes the trajectory ID for each prompt in the batch."""
-    batch_size = len(example["prompts"]) // self.algo_config.num_generations
-    if batch_size != 1:
-      raise ValueError(
-          "_compute_trajectory_ids expects inputs for a single prompt group,"
-          f" but got batch_size={batch_size}"
-      )
-    row_offset = prompt_index
-    row_offsets = np.repeat(
-        np.arange(row_offset, row_offset + batch_size),
-        self.algo_config.num_generations,
-        axis=0,
-    )
-    group_offsets = np.tile(
-        np.arange(self.algo_config.num_generations),
-        batch_size,
-    )
-    return [
-        f"{r_off}_{g_off}" for r_off, g_off in zip(row_offsets, group_offsets)
-    ]
 
   def _num_iterations(self) -> int:
     """Returns the number of iterations per batch."""

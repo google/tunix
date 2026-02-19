@@ -1327,8 +1327,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     original_fn = grpo_learner._create_agent_env_pair
 
-    def _patch_create_agent_env_pair(single_example, group_id):
-      agent, env = original_fn(single_example, group_id)
+    def _patch_create_agent_env_pair(single_example, group_id, pair_index):
+      agent, env = original_fn(single_example, group_id, pair_index)
       agents.append(agent)
       envs.append(env)
       return agent, env
