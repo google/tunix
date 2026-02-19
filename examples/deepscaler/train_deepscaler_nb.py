@@ -528,6 +528,8 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
+MAX_NUM_SEQS =768
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
