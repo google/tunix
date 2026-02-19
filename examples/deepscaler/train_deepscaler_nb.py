@@ -98,7 +98,7 @@ TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 8192
+MAX_RESPONSE_LENGTH = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -428,9 +428,8 @@ print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
 
 base_rollout_dict = {
-    "max_tokens_to_generate": TOTAL_GENERATION_STEPS,
     "max_prompt_length": MAX_PROMPT_LENGTH,
-    "kv_cache_size": MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+    "kv_cache_size": MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
@@ -507,6 +506,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 grpo_config = GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
+    max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
