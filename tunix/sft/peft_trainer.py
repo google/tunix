@@ -605,7 +605,7 @@ class PeftTrainer:
       self._pbar = progress_bar.ProgressBar(
           metrics_prefix=self.metrics_prefix,
           metrics_logger=self.metrics_logger,
-          initial_steps=self._train_steps,
+          initial_steps=self.global_steps,
           max_steps=self.config.max_steps,
           description=self.config.pbar_description,
       )
@@ -742,6 +742,11 @@ class PeftTrainer:
   @property
   def train_steps(self) -> int:
     """Returns the number of train steps taken."""
+    return self._train_steps
+
+  @property
+  def global_steps(self) -> int:
+    """Returns the number of global steps taken (same as train_steps for compatibility)."""
     return self._train_steps
 
   @property
