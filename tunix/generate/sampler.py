@@ -190,8 +190,9 @@ class Sampler(base_sampler.BaseSampler):
     """
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.cache_config = cache_config
-    self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)
-    self._transformer_state: list[statelib.State] = nnx.variables(transformer)
+    self._transformer_graphdef: graph.NodeDef
+    self._transformer_state: nnx.State
+    self._transformer_graphdef, self._transformer_state = nnx.split(transformer)
     self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
@@ -209,7 +210,7 @@ class Sampler(base_sampler.BaseSampler):
     )
 
   @property
-  def transformer_state(self) -> statelib.State:
+  def transformer_state(self) -> nnx.State:
     return self._transformer_state
 
   @transformer_state.setter
@@ -725,11 +726,11 @@ class Sampler(base_sampler.BaseSampler):
         beam_size=beam_size,
     )
     sampling_state = self._compiled_prefill_fn(
-        self._flattened_transformer_state, sampling_state
+        self._transformer_state, sampling_state
     )
 
     sampling_state = self._compiled_decode_fn(
-        self._flattened_transformer_state, sampling_state
+        self._transformer_state, sampling_state
     )
     token_buffers = sampling_state.token_buffer
     logits_buffers = sampling_state.logits_buffer
