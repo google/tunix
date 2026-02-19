@@ -32,11 +32,27 @@ Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
 
 
-def is_positive_integer(value: int | None, name: str):
-  """Checks if the value is positive."""
-  if value is not None and (not value.is_integer() or value <= 0):
-    raise ValueError(f"{name} must be a positive integer. Got: {value}")
+def is_integer_value(x):
+    """Checks if a value is effectively an integer (safe for all types)."""
+    # 1. Booleans are effectively integers (0/1) but we don't want them here.
+    if isinstance(x, bool):
+        return False
+        
+    # 2. Native Ints and Numpy Ints (The fix for #903/#953)
+    if isinstance(x, (int, np.integer)):
+        return True
+        
+    # 3. Floats that are actually integers (e.g. 5.0)
+    if isinstance(x, (float, np.floating)):
+        return x.is_integer()
+        
+    return False
 
+def is_positive_integer(value, name: str):
+    """Checks if the value is positive and integer-like."""
+    # Use the new helper instead of calling .is_integer() directly
+    if value is not None and (not is_integer_value(value) or value <= 0):
+        raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 def check_divisibility(
     small_size,
