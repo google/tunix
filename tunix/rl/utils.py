@@ -171,14 +171,6 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
 
   merged = {}
 
-  logging.info("Merging micro-batches: %d batches", len(batches))
-  for i, batch in enumerate(batches):
-        if batch is None:
-            # This will confirm if/where the None values are
-            logging.warning("Batch %d is None", i) 
-        else:
-            # Safe to print keys now
-            logging.info("Batch %d keys: %s", i, list(batch.keys()))
   for key in batches[0].keys():
     all_values = [item[key] for item in batches]
 

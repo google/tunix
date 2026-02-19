@@ -11,25 +11,28 @@ from orbax import checkpoint as ocp
 from kubernetes import client, config as k8s_config
 from transformers import AutoTokenizer
 from datasets import load_dataset
-
+from tunix.cli.utils import data as data_lib
+import datasets as datasets_lib 
+import grain
+import qwix
+from tunix.utils import compat
+Dataset = datasets_lib.Dataset
 # ==========================================
 # 1. Path Setup
 # ==========================================
-# Use the absolute path to the ROOT folder (the one containing the rllm package)
-rllm_root = os.path.expanduser('~/rllm')
+# Use the absolute path to the ROOT folder 
 pathways_root = os.path.expanduser('~/pathways-utils')
 r2egym_root = os.path.expanduser('~/r2egym')
 
-for root in [rllm_root, pathways_root, r2egym_root]:
+for root in [pathways_root, r2egym_root]:
     if root not in sys.path:
         sys.path.insert(0, root)
 
 # Verification
 try:
-    import rllm
     import pathwaysutils 
     import r2egym
-    print("✅ rllm, pathways-utils, r2egym are successfully mapped.")
+    print("✅ pathways-utils, r2egym are successfully mapped.")
 except ImportError as e:
     print(f"❌ Still missing a module: {e}")
 
@@ -45,7 +48,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.experimental import agentic_grpo_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from rllm.agents.system_prompts import (
+from system_prompts import (
     SWE_SYSTEM_PROMPT, 
     SWE_SYSTEM_PROMPT_FN_CALL, 
     SWE_USER_PROMPT, 
@@ -99,7 +102,8 @@ IDS = [f"task-{i}" for i in range(len(entries))]
 # 5. Model & Training Hyperparameters
 # ==========================================
 # MODEL_PATH = "/scratch/models/DeepSeek-R1-Distill-Qwen-1.5B/"
-MODEL_PATH = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+# MODEL_PATH = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+MODEL_PATH = os.path.expanduser("~/models/Qwen3-1.7B/")
 
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -113,10 +117,12 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-MESH = [(4, 2), ("fsdp", "tp")]
+# MESH = [(4, 2), ("fsdp", "tp")]
+
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
+# MAX_PROMPT_LENGTH = 32768
 MAX_PROMPT_LENGTH = 2048
 TOTAL_GENERATION_STEPS = 512
 TEMPERATURE = 0.6
@@ -165,7 +171,7 @@ GENERATION_CONFIGS = {
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = "vanilla" # one of "vanilla", "vllm" or "sglang_jax"
-CKPT_DIR = os.path.join("/tmp/cp", "deepswe_ckpt/01")
+CKPT_DIR = os.path.join("/tmp/cp", "deepswe_ckpt/00")
 
 # ==========================================
 # 6. JAX Device & Mesh Setup
@@ -182,11 +188,33 @@ train_mesh = Mesh(train_devices, axis_names=('fsdp', 'tp'))
 # 7. Model Initialization
 # ==========================================
 print("Initializing Model...")
-config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
+config = model_lib.ModelConfig.qwen3_1p7b()
 
-qwen_actor = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16)
+
 qwen_reference = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16)
+def get_lora_model(base_model, model_mesh):
+  lora_provider = qwix.LoraProvider(
+      module_path=(
+          ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
+          ".*attn_vec_einsum"
+      ),
+      rank=RANK,
+      alpha=ALPHA,
+  )
 
+  model_input = base_model.get_model_input()
+  lora_model = qwix.apply_lora_to_model(
+      base_model, lora_provider, **model_input
+  )
+
+  with compat.set_mesh(model_mesh):
+    state = nnx.state(lora_model)
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    nnx.update(lora_model, sharded_state)
+
+  return lora_model
+qwen_actor = get_lora_model(qwen_reference, train_mesh)
 sft_utils.show_hbm_usage()
 
 # ==========================================
@@ -279,6 +307,7 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
 def dummy_reward_fn(prompts, completions, **kwargs):
     return 0
 
+# with jax.default_device(train_mesh.local_devices[0]):
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=dummy_reward_fn,
@@ -292,17 +321,36 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 # ==========================================
 # 12. Execution (Train)
 # ==========================================
-batch_entries = entries[:16]  # just take the first batch for testing
-process = []
 
-for entry in batch_entries:
+
+# Data preprocessing 
+
+import json
+def transform_entry(entry):
     processed_entry = {}
     for k, v in entry.items():
-        if isinstance(v, list):
-            processed_entry[k] = [v]
+        new_key = 'prompts' if k == 'prompt' else k
+        
+        # If it's a list (and not the prompts), JSON encode it
+        if isinstance(v, list) and new_key != 'prompts':
+            # This turns [2 items] and [3 items] into simple strings
+            processed_entry[new_key] = json.dumps(v)
         else:
-            processed_entry[k] = v
-    process.append(processed_entry)
+            processed_entry[new_key] = v
+    return processed_entry
+
+
+grain_dataset = grain.MapDataset.source(entries).map(transform_entry)
+
+train_dataset, _ = data_lib.post_init_dataset(
+    grain_dataset, 
+    tokenizer, 
+    batch_size=BATCH_SIZE,
+    num_batches=NUM_BATCHES,
+    max_prompt_length=None, #TODO(sizhi):  Max prompt length filtering is applied but also used to calculate kv cache size 
+    fraction=TRAIN_FRACTION,
+    num_epochs=NUM_EPOCHS,
+)
 
 print("Starting training...")
-agentic_grpo_learner.train(train_dataset=process)
+agentic_grpo_learner.train(train_dataset=train_dataset)
