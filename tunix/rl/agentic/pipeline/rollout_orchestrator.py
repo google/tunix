@@ -21,13 +21,13 @@ groups them into batches for further processing.
 
 from __future__ import annotations
 
-import traceback
 import asyncio
 from collections.abc import Hashable
 import copy
-import logging
+import traceback
 from typing import Any, AsyncIterable, Callable, Dict, Iterable, List, Optional, Tuple, Type
 
+from absl import logging
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -85,8 +85,7 @@ class RolloutOrchestrator:
     self.max_concurrency = max_concurrency
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
-    self._logger = logging.getLogger(self.__class__.__name__)
-    self._manager: Optional[GroupQueueManager] = None
+    self._group_queue_manager: Optional[GroupQueueManager] = None
     self._rollout_sync_lock = rollout_sync_lock
 
   async def _collect_trajectory(
@@ -107,38 +106,34 @@ class RolloutOrchestrator:
 
   async def _run_and_queue_one_episode(
       self,
-      pair_idx: int,
-      episode_idx: int,
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
-      group_key: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
+      group_key_fn: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
       start_step_fn: Optional[Callable[[], int]],
       collect_mode: Optional[str],
   ):
     """Collects one trajectory and queues it."""
+    pair_idx = env.extra_kwargs["pair_index"]
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
-    gid = group_key(pair_idx, env, traj)
+    gid = group_key_fn(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
     item = TrajectoryItem(
         pair_index=pair_idx,
         group_id=gid,
-        episode_id=0,
         start_step=start_step,
         traj=traj,
-        metadata={"generation_id": episode_idx},
+        metadata={"generation_id": pair_idx},
     )
     await manager.put(item)
     return 1
 
   async def _runner(
       self,
-      i: int,
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       manager: GroupQueueManager,
-      group_key: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
-      num_episodes: int = 1,
+      group_key_fn: Callable[[int, BaseTaskEnv, Trajectory], Hashable],
       start_step_fn: Optional[Callable[[], int]] = None,
       collect_mode: Optional[str] = None,
   ):
@@ -150,55 +145,48 @@ class RolloutOrchestrator:
     `num_episodes` limit.
 
     Args:
-      i: The index of the agent-environment pair.
       agent: The ConversationAgentBase instance.
       env: The BaseTaskEnv instance.
       manager: The GroupQueueManager to put collected trajectories into.
-      group_key: A callable to determine the group ID for a trajectory.
-      num_episodes: The maximum number of episodes to collect for this pair,
-        defaults to 1.
+      group_key_fn: A callable to determine the group ID for a trajectory.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
       collect_mode: An optional string to select the collection mode.
     """
     episode_count = 0
-    self._logger.debug(
-        "Starting generating trajectories(_runner) for pair %d", i
+    logging.debug(
+        "Starting generating trajectories(_runner) for pair %d",
+        env.extra_kwargs["pair_index"],
     )
 
     try:
       # Parallel execution for the group
       self._rollout_sync_lock.acquire_rollout()
       try:
-        tasks = []
-        async with asyncio.TaskGroup() as tg:
-          for ep_id in range(num_episodes):
-            # TODO(b/462779884): Replace deepcopy with a factory pattern.
-            task = tg.create_task(
-                self._run_and_queue_one_episode(
-                    pair_idx=i,
-                    episode_idx=ep_id,
-                    agent=copy.deepcopy(agent),
-                    env=copy.deepcopy(env),
-                    manager=manager,
-                    group_key=group_key,
-                    start_step_fn=start_step_fn,
-                    collect_mode=collect_mode,
-                )
-            )
-            tasks.append(task)
-        results = [task.result() for task in tasks]
-        episode_count = sum(results)
+        episode_count = await self._run_and_queue_one_episode(
+            agent=agent,
+            env=env,
+            manager=manager,
+            group_key_fn=group_key_fn,
+            start_step_fn=start_step_fn,
+            collect_mode=collect_mode,
+        )
       finally:
         self._rollout_sync_lock.release_rollout()
     except ExceptionGroup as eg:
       for e in eg.exceptions:
-        self._logger.error("Fatal error in runner for pair %d: %s", i, e)
+        logging.error(
+            "Fatal error in runner for pair %d: %s",
+            env.extra_kwargs["pair_index"],
+            e,
+        )
       traceback.print_exc()
       raise eg.exceptions[0]
     finally:
-      self._logger.debug(
-          "Runner for pair %d completed with %d episodes", i, episode_count
+      logging.debug(
+          "Runner for pair %d completed with %d episodes",
+          env.extra_kwargs["pair_index"],
+          episode_count,
       )
 
   async def run_producers_from_stream(
@@ -209,12 +197,10 @@ class RolloutOrchestrator:
       ),
       *,
       group_size: int,
-      group_key: Callable[
+      group_key_fn: Callable[
           [int, BaseTaskEnv, Trajectory], Hashable
       ] = lambda i, _, __: i,
       collect_mode: Optional[str] = None,
-      num_episodes: int = 1,
-      max_open_groups: Optional[int] = None,
       start_step_fn: Optional[Callable[[], int]] = None,
   ):
     """Dynamically runs collectors from a stream of agent-env pairs.
@@ -230,7 +216,7 @@ class RolloutOrchestrator:
       pairs_stream: An iterable of tuples, where each tuple contains an
         ConversationAgentBase and a BaseTaskEnv instance.
       group_size: The number of trajectories to collect before forming a group.
-      group_key: A callable that takes `(pair_index, env, trajectory)` and
+      group_key_fn: A callable that takes `(pair_index, env, trajectory)` and
         returns a hashable group identifier. Using a callable allows for
         flexible grouping strategies. For example, trajectories can be grouped
         by task properties from the environment (`env`) or by outcomes within
@@ -238,35 +224,24 @@ class RolloutOrchestrator:
         agent-environment pair index.
       collect_mode: An optional string to select the collection mode for
         `TrajectoryCollectEngine`.
-      num_episodes: The maximum number of episodes to collect for each
-        agent-environment pair. If None, runs indefinitely until stopped.
-      max_open_groups: The maximum number of groups that can be open
-        simultaneously in the GroupQueueManager.
       start_step_fn: An optional callable to get the starting step for each
         trajectory item.
 
     Raises:
-      ValueError: If `num_episodes` is not a positive integer.
       ValueError: If `max_concurrency` is not set.
       RuntimeError: If the orchestrator is already running.
     """
-    if num_episodes <= 0:
-      raise ValueError(
-          f"num_episodes must be a positive integer, got {num_episodes}"
-      )
-    self._logger.info(
+    logging.info(
         "Starting run_producers_from_stream with %d concurrency",
         self.max_concurrency,
     )
 
     if not self.max_concurrency:
       raise ValueError("max_concurrency must be set to use start_producers.")
-    if self._manager:
+    if self._group_queue_manager:
       raise RuntimeError("Orchestrator is already running.")
 
-    self._manager = GroupQueueManager(
-        group_size=group_size, max_open_buckets=max_open_groups
-    )
+    self._group_queue_manager = GroupQueueManager(group_size=group_size)
     self._stop.clear()
     self._tasks.clear()
 
@@ -276,11 +251,10 @@ class RolloutOrchestrator:
     else:
       pairs_iterator = iter(pairs_stream)
     active_tasks: set[asyncio.Task] = set()
-    next_pair_index = 0
     stream_exhausted = False
 
     try:
-      self._logger.debug(
+      logging.debug(
           "Orchestrator producer loop starting with %d concurrency",
           self.max_concurrency,
       )
@@ -294,33 +268,30 @@ class RolloutOrchestrator:
             and not self._stop.is_set()
         ):
           try:
-            self._logger.debug("Getting one pair: %d", next_pair_index)
             if is_async_stream:
               agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:
               agent, env = next(pairs_iterator)
             task = asyncio.create_task(
                 self._runner(
-                    i=next_pair_index,
                     agent=agent,
                     env=env,
-                    manager=self._manager,
-                    group_key=group_key,
-                    num_episodes=num_episodes,
+                    manager=self._group_queue_manager,
+                    group_key_fn=group_key_fn,
                     start_step_fn=start_step_fn,
                     collect_mode=collect_mode,
                 )
             )
             active_tasks.add(task)
             self._tasks.append(task)
-            next_pair_index += 1
           except (StopIteration, StopAsyncIteration):
-            self._logger.debug("Pairs stream exhausted.")
+            logging.debug("Pairs stream exhausted.")
             stream_exhausted = True
             break
           except Exception as e:
-            self._logger.error(
-                "Error getting next trajectory pair %d: %s", next_pair_index, e
+            logging.error(
+                "Error getting next trajectory: %s",
+                e,
             )
             raise e
         # If no tasks are running and stream is exhausted, done.
@@ -347,20 +318,20 @@ class RolloutOrchestrator:
       if self._tasks:
         await asyncio.gather(*self._tasks, return_exceptions=True)
     except asyncio.CancelledError:
-      self._logger.debug("Producer task was cancelled.")
+      logging.debug("Producer task was cancelled.")
       # The consumer's `finally` block will handle cleanup.
       raise
     except Exception as e:
-      self._logger.error("Producer task failed: %s", e)
-      if self._manager:
-        await self._manager.put_exception(e)
+      logging.error("Producer task failed: %s", e)
+      if self._group_queue_manager:
+        await self._group_queue_manager.put_exception(e)
       raise
     finally:
       # Shield the final cleanup step to ensure it runs even if the producer
       # task is being cancelled. This prevents leaving the manager in an
       # inconsistent state.
-      if self._manager:
-        await asyncio.shield(self._manager.prepare_clear())
+      if self._group_queue_manager:
+        await asyncio.shield(self._group_queue_manager.prepare_clear())
 
   async def yield_batches(self, batch_size: int):
     """Yields batches of trajectories from the internal queue.
@@ -381,11 +352,11 @@ class RolloutOrchestrator:
       RuntimeError: If `run_producers_from_stream` has not been called to start
         the producers.
     """
-    if not self._manager:
+    if not self._group_queue_manager:
       raise RuntimeError("Producers have not been started.")
     try:
       while not self._stop.is_set():
-        batch = await self._manager.get_batch(batch_size)
+        batch = await self._group_queue_manager.get_batch(batch_size)
         if not batch:
           # If batch is empty, it means producers are done and queue is empty.
           break
@@ -394,7 +365,7 @@ class RolloutOrchestrator:
       # This is the normal shutdown path when the consumer stops listening.
       pass
     except Exception as e:
-      self._logger.error("Error yielding batches: %s", e)
+      logging.error("Error yielding batches: %s", e)
       raise
     finally:
       # This block executes when the consumer (the 'async for' loop) stops.
@@ -404,7 +375,7 @@ class RolloutOrchestrator:
       # (`run_producers_from_stream`) to handle the full cleanup, as it has
       # the correct context to await its child tasks.
       self._stop.set()
-      self._logger.debug("Consumer stopped; signaling producers to stop.")
+      logging.debug("Consumer stopped; signaling producers to stop.")
       for t in self._tasks:
         if not t.done():
           t.cancel()

@@ -22,13 +22,12 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 
 def _create_item(
-    group_id: str, episode_id: int, pair_index: int = 0
+    group_id: str, pair_index: int = 0
 ) -> agent_types.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
   return agent_types.TrajectoryItem(
       pair_index=pair_index,
       group_id=group_id,
-      episode_id=episode_id,
       start_step=0,
       traj=None,
   )
@@ -41,15 +40,13 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = group_queue_manager.GroupQueueManager(group_size=2)
-      item1 = _create_item("g1", 1)
+      item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
       await manager.put(item1)
-      self.assertEqual(manager._open_bucket_count(), 1)
       self.assertEmpty(manager._ready_groups)
 
       await manager.put(item2)
-      self.assertEqual(manager._open_bucket_count(), 0)
       self.assertLen(manager._ready_groups, 1)
 
       batch = await manager.get_batch(2)
@@ -63,7 +60,7 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = group_queue_manager.GroupQueueManager(group_size=2)
-      item1 = _create_item("g1", 1)
+      item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
       async def producer():
@@ -85,7 +82,7 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     async def _run_test():
       manager = group_queue_manager.GroupQueueManager(group_size=3)
-      items = [_create_item("g1", 1, i) for i in range(3)]
+      items = [_create_item("g1", i) for i in range(3)]
       for item in items:
         await manager.put(item)
 
@@ -103,32 +100,6 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
-  def test_max_open_buckets(self):
-    """Tests that put blocks when max_open_buckets is reached."""
-
-    async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(
-          group_size=2, max_open_buckets=1
-      )
-      item_g1 = _create_item("g1", 1)
-      item_g2 = _create_item("g2", 1)
-
-      await manager.put(item_g1)
-
-      put_task = asyncio.create_task(manager.put(item_g2))
-
-      await asyncio.sleep(0.01)
-      self.assertFalse(put_task.done())
-
-      await manager.put(_create_item("g1", 1))
-      await asyncio.sleep(0.01)
-
-      await put_task
-      self.assertEqual(manager._open_bucket_count(), 1)
-      self.assertIn(("g2", 1), manager._buckets)
-
-    asyncio.run(_run_test())
-
   def test_put_exception(self):
     """Tests that an exception is propagated to put and get calls."""
 
@@ -138,7 +109,7 @@ class GroupQueueManagerTest(absltest.TestCase):
       await manager.put_exception(exc)
 
       with self.assertRaises(ValueError):
-        await manager.put(_create_item("g1", 1))
+        await manager.put(_create_item("g1", 0))
 
       with self.assertRaises(ValueError):
         await manager.get_batch(1)

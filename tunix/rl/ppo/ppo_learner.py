@@ -17,13 +17,14 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Generic, Iterable, List, Sequence
+from typing import Iterable, List, Sequence
 
 import flax
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.generate import utils
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
@@ -243,6 +244,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     Returns:
       A `TrainExample` instance containing the processed input data for PPO.
     """
+    rollout_config = self.rl_cluster.cluster_config.rollout_config
+    if isinstance(rollout_config, dict):
+      rollout_config = rollout_config[mode]
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
 
@@ -252,22 +256,28 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # ===== Generation ======
     # Generate. We use `model`, i.e., the policy model for generating the
     # "experiences".
-    completion_output = self.rl_cluster.generate(
+    rollout_output = self.rl_cluster.generate(
         prompts=training_input["prompts"],
         micro_batch_size=self._rollout_micro_batch_size,
     )
-    completion_ids = completion_output.tokens
-    prompt_ids = jnp.array(completion_output.left_padded_prompt_tokens)
+    padded_completion_ids = np.array([
+        utils.pad_to_length(
+            completion_ids,
+            target_length=rollout_config.max_tokens_to_generate,
+            pad_value=pad_value,
+            left=False,
+        )
+        for completion_ids in rollout_output.tokens
+    ])
+    prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
 
-    batch_size = completion_ids.shape[0]
-    logits_to_keep = completion_ids.shape[1]
+    batch_size = padded_completion_ids.shape[0]
+    logits_to_keep = padded_completion_ids.shape[1]
     prompt_mask = (prompt_ids != pad_value).astype("int32")
-    completion_mask = common.np_make_completion_mask(
-        completion_ids, eos_tok=eos_value
-    )
+    completion_mask = np.not_equal(padded_completion_ids, pad_value)
 
     # Convert completion_ids and completion_mask to jax arrays
-    jax_completion_ids = jnp.array(completion_ids)
+    jax_completion_ids = jnp.array(padded_completion_ids)
     jax_completion_mask = jnp.array(completion_mask)
 
     eos_idx = jnp.max(
@@ -325,7 +335,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     else:
       last_token_scores = self._compute_rewards(
           prompts=training_input["prompts"],
-          completions=completion_output.text,
+          completions=rollout_output.text,
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )

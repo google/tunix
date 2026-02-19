@@ -579,7 +579,7 @@ class VisionExit(nnx.Module):
     output_length: The embed will be spatially avg-pooled to this output length.
   """
 
-  def __init__(self, *, output_length: int = 256, rngs: nnx.Rngs):  # pytype: disable=unused-argument
+  def __init__(self, *, output_length: int = 256, rngs: nnx.Rngs):  # pylint: disable=unused-argument
     self.output_length = output_length
 
   def __call__(

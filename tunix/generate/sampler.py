@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 import dataclasses
 from typing import Any, Optional
 import warnings
@@ -66,7 +66,7 @@ class _SamplingState:
   logits_buffer: jnp.ndarray | None  # [B, L, V]
 
   # List of tokens that are forbidden to be generated.
-  forbidden_token_ids: Sequence[int] | None
+  forbidden_token_ids: tuple[int, ...] | None
 
   # Random seed for sampling.
   seed: jax.Array
@@ -103,36 +103,33 @@ class CacheConfig:
   head_dim: int
 
 
-def _sample_top_p(
-    probs: jnp.ndarray, p: float, key: jax.Array, k: Optional[int] = None
+def sample_top_p(
+    logits: jnp.ndarray,
+    key: jax.Array,
+    temperature: float,
+    top_p: float,
+    top_k: int | None,
 ) -> jnp.ndarray:
   """Sample a token using top-p sampling."""
-  # Optimization: skip sorting if top_p is 1.0 and top_k is full vocab.
-  if p >= 1.0 and k is None:
-    return jax.random.categorical(key, logits=jnp.log(probs))
+  # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
+  next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
 
-  k = probs.shape[-1] if k is None else k
+  # Skip softmax and sorting if top_p is 1.0 and top_k is full vocab.
+  if top_p >= 1.0 and top_k is None:
+    return jax.random.categorical(key, logits=next_token_logits)
+
+  probs = jax.nn.softmax(next_token_logits, axis=-1)
+  k = probs.shape[-1] if top_k is None else top_k
+
   probs_sorted, indices = jax.lax.top_k(probs, k=k)
   cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
-  mask = cumsum_probs - probs_sorted > p
+  mask = cumsum_probs - probs_sorted > top_p
   probs_sorted = jnp.where(mask, 0.0, probs_sorted)
   probs_sorted /= jnp.sum(probs_sorted, axis=-1, keepdims=True)
 
   next_token = jax.random.categorical(key, logits=jnp.log(probs_sorted))
-
   next_token = jnp.take_along_axis(indices, next_token[..., None], axis=-1)
   next_token = jnp.squeeze(next_token, axis=-1)
-  return next_token
-
-
-def sample_top_p(
-    logits, key, temperature: float, top_p: float, top_k: Optional[int]
-):
-  """Sample a token using top-p sampling."""
-  # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
-  logits = logits[:, -1].astype(jnp.float32)
-  probs = jax.nn.softmax(logits / temperature, axis=-1)
-  next_token = _sample_top_p(probs, top_p, key, top_k)
   return next_token
 
 
@@ -314,7 +311,7 @@ class Sampler(base_sampler.BaseSampler):
       all_input_ids: jax.Array,
       total_sampling_steps: int,
       include_logits: bool,
-      forbidden_token_ids: Sequence[int] | None,
+      forbidden_token_ids: tuple[int, ...] | None,
       temperature: float,
       top_p: Optional[float],
       top_k: Optional[int],
@@ -644,7 +641,7 @@ class Sampler(base_sampler.BaseSampler):
       echo: bool = False,
       return_logits: bool = False,
       eos_tokens: Sequence[int] | None = None,
-      forbidden_tokens: Sequence[str] | None = None,
+      forbidden_tokens: Iterable[int] | None = None,
       temperature: float = 0.0,
       top_p: Optional[float] = None,
       top_k: Optional[int] = None,
@@ -668,8 +665,7 @@ class Sampler(base_sampler.BaseSampler):
       return_logits: whether to return per-step logits used during generation.
       eos_tokens: end of sequence tokens to stop generation. If None, the
         tokenizer's eos_id will be used.
-      forbidden_tokens: list of tokens that are forbidden to be generated. Each
-        token must map to a single token id in the vocab.
+      forbidden_tokens: Optional Iterable of token IDs that are disallowed.
       temperature: temperature for sampling.
       top_p: top-p sampling threshold.
       top_k: top-k sampling threshold.
@@ -689,17 +685,7 @@ class Sampler(base_sampler.BaseSampler):
         [input_strings] if isinstance(input_strings, str) else input_strings
     )
 
-    forbidden_token_ids = None
-    if forbidden_tokens is not None:
-      forbidden_token_ids = []
-      for token in forbidden_tokens:
-        token_id = self.tokenizer.encode(token)
-        if len(token_id) != 1:
-          raise ValueError(
-              'Forbidden tokens must map to single token ids in the vocab.'
-          )
-        forbidden_token_ids.extend(token_id)
-      forbidden_token_ids = tuple(forbidden_token_ids)
+    forbidden_token_ids = tuple(forbidden_tokens) if forbidden_tokens else None
 
     tokens = [self.tokenize(x) for x in input_strings]
     max_tokens_length = max(len(x) for x in tokens)
@@ -780,7 +766,6 @@ class Sampler(base_sampler.BaseSampler):
     else:
       out_tokens = []
       out_logits = []
-      lengths = []
       for i, token_buffer in enumerate(token_buffers):
         start_idx = (
             utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
@@ -796,7 +781,6 @@ class Sampler(base_sampler.BaseSampler):
         out_tokens.append(jax.device_get(token_buffer[start_idx:end_idx]))
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
-        lengths.append(end_idx - start_idx)
 
       decoded_outputs = [
           self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens

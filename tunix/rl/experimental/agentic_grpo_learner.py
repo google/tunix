@@ -46,6 +46,7 @@ from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.rl.experimental import agentic_rl_learner
+from tunix.utils import trajectory_logger
 
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
@@ -59,16 +60,23 @@ TrainExample = agentic_rl_learner.TrainExample
 class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   """Configuration for GRPO algorithm.
 
-  Parameters:
+  Attributes:
+    algo_variant: Algorithm variant name.
+    advantage_estimator: Name of the advantage estimator function.
+    policy_loss_fn: Name of the policy loss function.
+    loss_agg_mode: Method for aggregating the loss. Supported values:
+      "token-mean", "sequence-mean-token-mean", "sequence-mean-token-scale",
+      "sequence-mean-token-sum-norm".
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
     epsilon: PPO-style clipping epsilon.
+    epsilon_high: PPO-style clipping epsilon upper bound.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
-    off_policy_steps: Number of off-policy steps can be accepted before a
-      policy update.
+    off_policy_steps: Number of off-policy steps can be accepted before a policy
+      update.
   """
 
   algo_variant: str = "agentic_grpo"
@@ -165,6 +173,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
            ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
            ...       # ... }
       data_shuffle_seed: The seed used to shuffle the training data.
+      agent_class: The class of the agent to be used.
+      agent_kwargs: Keyword arguments to pass to the agent class.
+      env_class: The class of the environment to be used.
+      env_kwargs: Keyword arguments to pass to the environment class.
     """  # fmt: skip
     super().__init__(
         rl_cluster=rl_cluster,
@@ -178,6 +190,21 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         env_class=env_class,
         env_kwargs=env_kwargs,
     )
+
+    self._trajectory_logger = None
+    metrics_logger_options = (
+        self.rl_cluster.cluster_config.training_config.metrics_logging_options
+    )
+    metrics_log_dir = (
+        metrics_logger_options.log_dir if metrics_logger_options else None
+    )
+
+    if metrics_log_dir:
+      self._trajectory_logger = trajectory_logger.AsyncTrajectoryLogger(
+          metrics_log_dir
+      )
+    else:
+      logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
     # Workaround to pass loss fn with algorithm flag
     policy_loss_fn = function_registry.get_policy_loss_fn(
@@ -208,8 +235,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
   def _process_results(
       self,
-      results: List[Any],
-      training_input: TrainingInputT,
+      trajectories: List[Any],
       mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
       expected_step: int | None = None,
   ) -> List[TrainExample]:
@@ -226,8 +252,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     8. Constructs and returns a list of `TrainExample` objects.
 
     Args:
-      results: A list of trajectory results for a single GRPO group.
-      training_input: The merged training input for the group.
+      trajectories: A list of trajectory results for a single GRPO group.
       mode: The current mode (TRAIN or EVAL).
       expected_step: The expected training step.
 
@@ -236,7 +261,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       loss function.
     """
     logging.debug(
-        "Processing results to compute advantage for %d items.", len(results)
+        "Processing results to compute advantage for %d items.",
+        len(trajectories),
     )
     # With a full group, sorting by pair_index is not necessary as they all
     # originate from the same initial prompt.
@@ -245,9 +271,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # Extract completions and tokens from the group of G results.
     completion_texts = []
     completion_tokens_list = []
+    completion_masks_list = []
     policy_versions_list = []
+    trajectories_to_log = []
 
-    for item in results:
+    for item in trajectories:
+      trajectories_to_log.append(item.traj)
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(
           message["content"]
@@ -256,37 +285,52 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
       completion_texts.append(assistant_text)
       completion_tokens_list.append(item.traj.get("conversation_tokens"))
+      completion_masks_list.append(item.traj.get("conversation_masks"))
       policy_version = item.traj.get("policy_version")
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
 
+    # Log trajectory.
+    if self._trajectory_logger and trajectories_to_log:
+      for traj in trajectories_to_log:
+        self._trajectory_logger.log_item_async(traj)
+
     # All results in a group share the same prompt.
-    prompt_tokens = results[0].traj.get("prompt_tokens")
+    prompt_tokens = trajectories[0].traj.get("prompt_tokens")
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_cluster.cluster_config.rollout_config
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
-    max_prompt_length = rollout_config.max_prompt_length
-    max_tokens_to_generate = rollout_config.max_tokens_to_generate
-    all_padded_prompt_ids = []
-    all_padded_completion_ids = []
-    for completion_tokens in completion_tokens_list:
+    padded_prompt_ids = []
+    padded_completion_ids = []
+    padded_completion_masks = []
+
+    max_response_length = self.algo_config.max_response_length
+    for completion_tokens, completion_mask in zip(
+        completion_tokens_list, completion_masks_list
+    ):
       padded_prompt, padded_completion, _ = (
           agentic_utils.pad_prompt_and_completion(
               prompt_tokens,
               completion_tokens,
-              max_prompt_length,
-              max_tokens_to_generate,
+              rollout_config.max_prompt_length,
+              max_response_length,
               pad_value,
           )
       )
-      all_padded_prompt_ids.append(padded_prompt)
-      all_padded_completion_ids.append(padded_completion)
+      padded_prompt_ids.append(padded_prompt)
+      padded_completion_ids.append(padded_completion[:max_response_length])
+      padded_completion_masks.append(
+          agentic_utils.right_pad(completion_mask, max_response_length, 0)[
+              :max_response_length
+          ]
+      )
 
-    prompt_ids = jnp.asarray(all_padded_prompt_ids)
-    completion_ids = jnp.asarray(all_padded_completion_ids)
+    prompt_ids = jnp.asarray(padded_prompt_ids)
+    completion_ids = jnp.asarray(padded_completion_ids)
+    completion_mask = jnp.asarray(padded_completion_masks)
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
@@ -295,11 +339,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # Masks
     prompt_mask = prompt_ids != pad_value
-    completion_padding_mask = jnp.not_equal(completion_ids, pad_value)
-    completion_mask = common.make_completion_mask(
-        completion_ids, eos_tok=eos_value
-    )
-    completion_mask = completion_mask * completion_padding_mask
     if self.algo_config.beta != 0.0:
       ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
@@ -324,15 +363,20 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # Prepare arguments for reward computation by forwarding all training inputs
     # except for prompts, which is passed explicitly.
+    original_input = trajectories[0].traj["original_input"]
+    original_inputs = rl_utils.merge_micro_batches(
+        [original_input] * self.algo_config.num_generations
+    )
+
     reward_kwargs = {
-        key: value for key, value in training_input.items() if key != "prompts"
+        key: value for key, value in original_inputs.items() if key != "prompts"
     }
     # TODO: b/456528861 - Refactor reward computation to happen within the
     # environment during rollout, rather than as a post-processing step. This
     # would align with the standard agentic RL pattern and remove the need for
     # `dummy_reward`.
     rewards = self._compute_rewards(
-        prompts=training_input["prompts"],
+        prompts=original_inputs["prompts"],
         completions=completion_texts,
         mode=mode,
         **reward_kwargs,
@@ -370,13 +414,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
-          prompts=training_input["prompts"],
+          prompts=original_inputs["prompts"],
           completions=completion_texts,
           advantages=advantages,
           rewards=rewards,
           **{
               key: value
-              for key, value in training_input.items()
+              for key, value in original_inputs.items()
               if key != "prompts"
           },
       )

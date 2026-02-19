@@ -14,9 +14,9 @@
 
 """RL Environment for single-turn task-based agent interactions."""
 
-import logging
 from typing import Any, Dict
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward
@@ -52,10 +52,16 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
         compatibility with a common environment config interface.
     """
     if reward_fn is None:
-      logging.warning("No reward_fn provided, defaulting to dummy_reward().")
+      logging.log_first_n(
+          logging.WARNING,
+          "No reward_fn provided, defaulting to dummy_reward().",
+          1,
+      )
       reward_fn = reward.dummy_reward
 
-    super().__init__(task=single_example, reward_fn=reward_fn, max_steps=1, **kwargs)
+    super().__init__(
+        task=single_example, reward_fn=reward_fn, max_steps=1, **kwargs
+    )
 
   def _initial_observation(self) -> Dict[str, Any]:
     """Reset the environment and return the task as the initial observation."""

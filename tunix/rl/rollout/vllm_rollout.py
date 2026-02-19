@@ -43,24 +43,31 @@ class VllmRollout(base_rollout.BaseRollout):
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
-            max_model_len=cache_config_or_size,
-            mesh=mesh,
-            model_version=rollout_config.rollout_vllm_model_version,
-            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
+            server_mode=rollout_config.rollout_vllm_server_mode,
+            mapping_config=mapping_config,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
             tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
-            mapping_config=mapping_config,
-            lora_config=rollout_config.rollout_vllm_lora_config,
-            swap_space=rollout_config.rollout_vllm_swap_space_size_gb,
-            server_mode=rollout_config.rollout_vllm_server_mode,
-            async_scheduling=rollout_config.rollout_vllm_async_scheduling,
-            tensor_parallel_size=rollout_config.tensor_parallel_size,
-            data_parallel_size=rollout_config.data_parallel_size,
-            enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
-            max_num_batched_tokens=rollout_config.rollout_vllm_max_num_batched_tokens,
-            max_num_seqs=rollout_config.rollout_vllm_max_num_seqs,
-            hf_config_path=rollout_config.rollout_vllm_hf_config_path,
             additional_config=rollout_config.rollout_vllm_additional_config,
+            enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
+            lora_config=rollout_config.rollout_vllm_lora_config,
+            mesh=mesh,
+            engine_kwargs={
+                "model": rollout_config.rollout_vllm_model_version,
+                "max_model_len": cache_config_or_size,
+                "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
+                "async_scheduling": (
+                    rollout_config.rollout_vllm_async_scheduling
+                ),
+                "tensor_parallel_size": rollout_config.tensor_parallel_size,
+                "data_parallel_size": rollout_config.data_parallel_size,
+                "max_num_batched_tokens": (
+                    rollout_config.rollout_vllm_max_num_batched_tokens
+                ),
+                "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
+                "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
+                **rollout_config.rollout_vllm_kwargs,
+            },
         ),
     )
     state = nnx.state(model)
@@ -87,6 +94,7 @@ class VllmRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,
         echo=False,
         pad_output=True,
+        **kwargs,
     )
 
     return base_rollout.RolloutOutput(

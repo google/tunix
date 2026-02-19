@@ -15,11 +15,10 @@
 """Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
 
 import dataclasses
-import logging
 import math
-import re
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -82,9 +81,12 @@ class SglangJaxConfig:
   precompile_token_paddings: Optional[List[int]] = None
   precompile_bs_paddings: Optional[List[int]] = None
   chunked_prefill_size: Optional[int] = -1
-  page_size: int = 64
+  page_size: int = 128
   load_format: str = "auto"
   max_running_requests: int = None
+
+  # Logging knob to enable debugging at different verbosity levels.
+  log_level: str = "info"
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -101,6 +103,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self,
       tokenizer: Any,
       config: SglangJaxConfig,
+      **kwargs,
   ):
     """Initializes the SglangJaxSampler.
 
@@ -110,6 +113,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     """
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.args = self._sglang_jax_config(config)
+    if kwargs:
+      self.args.update(kwargs)
     self.engine = Engine(**self.args)
 
     self.to_hf_key_mappings = update_hf_key_mappings_with_lora(
@@ -128,9 +133,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           config.mapping_config.lora_to_hf_transpose_keys
       )
 
-    self._logger = logging.getLogger(self.__class__.__name__)
-
-    self._logger.debug(f"{self.to_hf_key_mappings=}")
+    logging.debug(f"{self.to_hf_key_mappings=}")
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -194,6 +197,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
 
+    args["log_level"] = config.log_level
     return args
 
   def _validate_config(self, config: SglangJaxConfig):
@@ -277,6 +281,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      **kwargs,
   ) -> base_sampler.SamplerOutput:
     # max_generation_steps: maximum number of tokens to generate
     if (
@@ -304,6 +309,24 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self.sampling_params.top_p = top_p
     if top_k is not None:
       self.sampling_params.top_k = top_k
+
+    if kwargs:
+      try:
+        self.sampling_params.update(**kwargs)
+        logging.log_first_n(
+            logging.INFO,
+            "Received additional kwargs that are not explicitly defined in the"
+            f" method signature: {kwargs}. These will be forwarded to the"
+            " underlying sampler, but please ensure that they are valid.",
+            1,
+        )
+      except Exception as e:
+        logging.log_first_n(
+            logging.INFO,
+            f"Failed to update sampling_params with kwargs: {kwargs}."
+            f" Error: {e}", 1
+        )
+
     sampling_params = [
         self.sampling_params.convert_to_dict() for _ in input_strings
     ]
@@ -340,15 +363,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
     all_output_ids = [
-        utils.pad_to_length(
-            np.array(x["output_ids"], dtype=np.int32),
-            target_length=max_generation_steps,
-            pad_value=self.tokenizer.pad_id(),
-            left=False,
-        )
-        for x in outputs
+        np.array(x["output_ids"], dtype=np.int32) for x in outputs
     ]
-    all_output_ids = jnp.array(all_output_ids)
     output_texts = [o["text"] for o in outputs]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(

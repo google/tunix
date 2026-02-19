@@ -45,15 +45,15 @@ class RolloutOutput:
   # Generated samples from the model.
   text: list[str]
 
-  # Per-step logits used during sampling.
+  # Unpadded per-step logits used during sampling.
   # TODO(tsbao): consider enforcing this to be np.ndarray as well,
   # but let's solve it as part of the IS effort.
-  logits: jax.Array
+  logits: list[jax.Array]
 
-  # Tokens corresponding to the generated samples.
+  # Unpadded tokens corresponding to the generated samples.
   # Since tokens need to be transfered to RAM for decoding, we use numpy array
   # here.
-  tokens: np.ndarray
+  tokens: list[np.ndarray]
 
   # Left padded prompt tokens.
   # TODO(tsbao): Reconcile with vLLM output and see if we should remove this
@@ -157,6 +157,9 @@ class RolloutConfig:
   # Maximum number of concurrent sequences allowed to be processed in vLLM.
   rollout_vllm_max_num_seqs: Optional[int] = None
 
+  # Additional keyword arguments forwarded directly to the vLLM sampler/engine.
+  rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
+
   # SG-Lang JAX specific rollout configs.
 
   # Model version for SG-Lang JAX rollout engine.
@@ -204,12 +207,21 @@ class RolloutConfig:
   rollout_sglang_jax_chunked_prefill_size: Optional[int] = -1
 
   # The number of tokens in a page
-  rollout_sglang_jax_page_size: int = 64
+  rollout_sglang_jax_page_size: int = 128
 
   # The format of the model weights to load.
   rollout_sglang_jax_load_format: str = "auto"
 
+  # The maximum number of running requests to accumulate batch
   rollout_sglang_jax_max_running_requests: Optional[int] = None
+
+  # The log level of sglang_jax
+  rollout_sglang_jax_log_level: Optional[str] = "info"
+
+  # Additional keyword arguments forwarded directly to the SG-Lang JAX sampler/engine.
+  rollout_sglang_jax_kwargs: dict[str, Any] = dataclasses.field(
+      default_factory=dict
+  )
 
 
 class BaseRollout(ABC):

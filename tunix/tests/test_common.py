@@ -28,11 +28,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-import sentencepiece as spm
 import tenacity
 from tunix.rl import reshard
 from tunix.utils import compat
 from tunix.utils import env_utils
+
+import sentencepiece as spm
 
 env_utils.setup_sharding_environment()
 
@@ -86,12 +87,16 @@ class Decoder(nnx.Module):
         out_features=32,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('fsdp', 'tp')),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros_init(), ('tp',)),
     )
     self.w2 = nnx.Linear(
         in_features=32,
         out_features=16,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('tp', 'fsdp')),
+        bias_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), ('fsdp',)
+        ),
     )
 
   def __call__(self, x):
@@ -187,33 +192,35 @@ def get_lora_model(
 class MockVocab(spm.SentencePieceProcessor):
   """Mock vocabulary for testing."""
 
-  def __init__(self):
+  DEFAULT_MAPPING = {
+      '<pad>': 0,
+      '<s>': 1,
+      '</s>': 2,
+      'input': 3,
+      'string': 4,
+      'hello': 5,
+      'world': 6,
+      'Hello': 7,
+      'there': 8,
+      '!': 9,
+      'My': 10,
+      'name': 11,
+      'is': 12,
+      'Morgane': 13,
+      'Tunix': 14,
+      'Parallax': 15,
+      'PT': 16,
+      'library': 17,
+      'distributed': 18,
+      'training': 19,
+      'optimizer': 20,
+      'quantization': 21,
+  }
+
+  def __init__(self, mapping_text_to_id: dict[str, int] | None = None):
     super().__init__()
     self._start_id = 3
-    self._mapping_text_to_id = {
-        '<pad>': 0,
-        '<s>': 1,
-        '</s>': 2,
-        'input': 3,
-        'string': 4,
-        'hello': 5,
-        'world': 6,
-        'Hello': 7,
-        'there': 8,
-        '!': 9,
-        'My': 10,
-        'name': 11,
-        'is': 12,
-        'Morgane': 13,
-        'Tunix': 14,
-        'Parallax': 15,
-        'PT': 16,
-        'library': 17,
-        'distributed': 18,
-        'training': 19,
-        'optimizer': 20,
-        'quantization': 21,
-    }
+    self._mapping_text_to_id = mapping_text_to_id or self.DEFAULT_MAPPING
     self._vocab_size = len(self._mapping_text_to_id)
 
   def pad_id(self) -> int:
@@ -234,11 +241,12 @@ class MockVocab(spm.SentencePieceProcessor):
 
   def EncodeAsIds(self, text: str, **kwargs) -> list[int]:  # pylint: disable=invalid-name
     words = text.split(' ')
-    return [
+    res = [
         self._mapping_text_to_id[word]
         for word in words
         if word in self._mapping_text_to_id
     ]
+    return res
 
 
 class ToyTransformerWithScoreHead(nnx.Module):

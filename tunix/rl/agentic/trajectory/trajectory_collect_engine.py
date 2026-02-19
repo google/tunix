@@ -56,15 +56,14 @@ class TrajectoryCollectEngine:
       env: BaseTaskEnv,
       *,
       model_call: Callable[Concatenate[Dict[str, str], P], str],
+      model_call_kwargs: Optional[Dict[str, Any]] = None,
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
-      max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
-      model_call_kwargs: Optional[Dict[str, Any]] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -75,18 +74,17 @@ class TrajectoryCollectEngine:
         model_call (Callable): Function that takes chat completions as first
           argument with optional kwargs and returns model response string.
           Handles the actual LLM inference.
+        model_call_kwargs (Optional[Dict[str, Any]]): Optional kwargs to pass to
+          model_call.
         final_reward_fn (Optional[Callable]): Optional function to compute
           additional reward at episode end. Takes (task, response) and returns
           float. Defaults to zero if not provided.
-        max_steps (int): Maximum number of interaction steps before forced
-          termination
-        gamma (float): Discount factor for return calculation (1.0 = no
+        gamma (float): Discount factor for MC reward calculation (1.0 = no
           discounting)
         timeout (float): Maximum episode duration in seconds before timeout
           termination
         tokenizer: Optional tokenizer for converting messages to token IDs
         chat_parser: Optional chat parser for formatting messages
-        model_call_kwargs: Optional kwargs to pass to model_call.
     """
     self.agent = agent
     self.env = env
@@ -95,7 +93,6 @@ class TrajectoryCollectEngine:
         lambda *_: reward_types.RewardOutput(reward=0.0)
     )
     self.model_call_kwargs = model_call_kwargs or {}
-    self.max_steps = max_steps
     self.gamma = gamma
     self.timeout = timeout
 
@@ -112,16 +109,17 @@ class TrajectoryCollectEngine:
     calculation, and resource cleanup.
 
     Args:
-        mode (str): Output format. Options: - "Trajectory": return full
-          Trajectory object. - "Token": return flattened tokenized dict for
-          training. - "Steps": return stepwise tokenized data only. -
-          "Conversation": return raw conversation messages (default).
+        mode (str): Output format. Options: 
+          - "Trajectory": return full Trajectory object. 
+          - "Token": return flattened tokenized dict for training.
+          - "Steps": return stepwise tokenized data only. 
+          - "Conversation": return raw conversation messages (default).
 
     Returns:
         Trajectory | dict | list: Depending on mode.
-    """
+    """  # fmt: skip
     await self._reset()
-    for _ in range(self.max_steps):
+    while True:
       done = await self._one_step()
       if done:
         break
@@ -199,7 +197,6 @@ class TrajectoryCollectEngine:
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
-      max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,
       mode: str = "Trajectory",
@@ -215,7 +212,6 @@ class TrajectoryCollectEngine:
           environment) pairs
         model_call (Callable): Shared model inference function for all pairs
         final_reward_fn (Optional[Callable]): Shared final reward function
-        max_steps (int): Maximum steps per episode
         gamma (float): Discount factor for return calculation
         timeout (float): Per-episode timeout in seconds
         mode (str): Output format. See `collect` method for options.
@@ -232,7 +228,6 @@ class TrajectoryCollectEngine:
           env,
           model_call=model_call,
           final_reward_fn=final_reward_fn,
-          max_steps=max_steps,
           gamma=gamma,
           timeout=timeout,
       )

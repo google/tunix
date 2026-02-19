@@ -111,9 +111,9 @@ class TrajectoryItem:
   """Represents an item within a Trajectory, potentially for pairing or grouping.
 
   Attributes:
-    pair_index: Index for pairing.
-    group_id: Identifier for grouping trajectories.
-    episode_id: Unique identifier for the episode.
+    pair_index: Index of the trajectory within a group.
+    group_id: Identifier for grouping trajectories. By default, this is the row
+      index in the full dataset.
     start_step: The starting step index within the full trajectory.
     traj: The Trajectory object itself.
     metadata: Additional metadata.
@@ -121,7 +121,6 @@ class TrajectoryItem:
 
   pair_index: int
   group_id: Hashable
-  episode_id: int
   start_step: int
   traj: Trajectory
   metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)

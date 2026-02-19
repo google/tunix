@@ -73,9 +73,6 @@ class MetricsBuffer:
 
 @dataclasses.dataclass(frozen=True)
 class PerfMetricsOptions:
-  # Whether to enable performance metrics. If False, all other options will be
-  # ignored.
-  enable_perf_metrics: bool = False
   # Directory to write the raw metrics/events to.
   log_dir: str = ""
   # Path to the custom export function. If set, the custom export function will
@@ -128,6 +125,12 @@ class PerfSpanQuery:
     query._select_timeline = self._select_timeline
     query._select_groups = self._select_groups.copy()
     return query
+
+  def get_main_thread_id(self) -> str:
+    return self._main_thread_id
+
+  def get_timeline_ids(self) -> list[str]:
+    return list(self._timelines.keys())
 
   def timeline(self, id: str) -> PerfSpanQuery:
     self._select_timeline = id

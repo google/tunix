@@ -15,7 +15,7 @@ Tunix supports the following models:
 | Llama 3.1 | 8B, 70B, 405B |
 | Llama 3.2 | 1B, 3B |
 | Qwen 2.5 | 0.5B, 1.5B, 3B, 7B |
-| Qwen 3 | 0.6B, 1.7B, 4B, 8B, 14B, 30B |
+| Qwen 3 | 0.6B, 1.7B, 4B, 8B, 14B, 30B, 32B |
 
 ### Model Sources
 
@@ -62,7 +62,7 @@ Adding the new model needs to following the naming convention that Tunix support
 ## AutoModel
 
 `AutoModel` provides a unified interface for instantiating Tunix models from
-pretrained checkpoints, similar to the Hugging Face `AutoModel` API. It allows
+pretrained checkpoints, similar to the Huggingface `AutoModel` API. It allows
 you to load a model simply by providing its `model_id`, handling the download
 and initialization for you.
 
@@ -70,7 +70,7 @@ and initialization for you.
 
 To load a model, use the `AutoModel.from_pretrained` method with the model
 identifier and your JAX sharding mesh. By default this will download the model
-from HuggingFace.
+from Huggingface.
 
 ```python
 from tunix.models.automodel import AutoModel
@@ -80,9 +80,9 @@ import jax
 mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
 
 # 2. Load the model
-# By default, this downloads from Hugging Face.
+# By default, this downloads from Huggingface.
 model, model_path = AutoModel.from_pretrained(
-  model_id="google/gemma-2-2b-it",
+  model_id="google/gemma-2-2b-it", # Using HF id as model_id
   mesh=mesh
 )
 
@@ -94,20 +94,19 @@ print(f"Model loaded from: {model_path}")
 You can load models from different sources (e.g., Kaggle, GCS, etc.) using the
 `model_source` argument.
 
-#### From HuggingFace:
+#### From Huggingface:
 
 This is the default choice (`ModelSource.HUGGINGFACE`) as shown in the
 example above.
 
 #### From Kaggle:
 
-For Kaggle, you must provide the `model_id` which is the Hugging Face identifier
-(to determine the model configuration) and the `model_path` which is the Kaggle
+For Kaggle, you must provide the `model_id` which is the Huggingface identifier or model_config_id (see [Naming Conventions](models.md#naming-conventions)) to determine the model configuration and the `model_path` which is the Kaggle
 Hub model identifier (used to download the model from Kaggle).
 
 ```python
 model, model_path = AutoModel.from_pretrained(
-    model_id="google/gemma2-2b-it",
+    model_id="gemma2_2b_it", # Using model_config_id as model_id
     mesh=mesh,
     model_source=ModelSource.KAGGLE,
     model_path="google/gemma-2/flax/gemma2-2b-it",
@@ -120,13 +119,12 @@ For example the `model_path` for the `google/gemma-2/flax/gemma2-2b-it` is extra
 
 #### From GCS:
 
-For GCS, you must provide the `model_id` which is the Hugging Face identifier
-(to determine the model configuration) and the `model_path` (the actual GCS
+For GCS, you must provide the `model_id` which is the Huggingface identifier or model_config_id (see [Naming Conventions](models.md#naming-conventions)) to determine the model configuration and the `model_path` (the actual GCS
 location).
 
 ```python
 model, model_path = AutoModel.from_pretrained(
-    model_id="google/gemma-2-2b-it",
+    model_id="gemma2_2b_it", # Using model_config_id as model_id
     mesh=mesh,
     model_source=ModelSource.GCS,
     model_path="gs://my-bucket/gemma-2-2b-it"
@@ -139,7 +137,7 @@ Optionally, you can also provide the `model_download_path` argument, which
 specifies where the model is to be downloaded to. Depending on the
 `model_source` the effect of specifying this variable is different:
 
-*   **Hugging Face**: Files are downloaded directly to this directory.
+*   **Huggingface**: Files are downloaded directly to this directory.
 *   **Kaggle**: Sets the `KAGGLEHUB_CACHE` environment variable to this path.
 *   **GCS**: No-op.
 *   **Internal**: Files are copied to this directory. If omitted, the model is loaded directly from the `model_path`. This mode (Internal) is not supported in OSS version.
@@ -148,21 +146,27 @@ specifies where the model is to be downloaded to. Depending on the
 
 This section outlines the naming conventions used within Tunix for model
 identification and configuration. These conventions ensure consistency when
-loading models from various sources like Hugging Face or Kaggle.
+loading models from various sources like Huggingface or Kaggle.
 
 The `ModelNaming` dataclass handles the parsing and standardization of model names.
 
-*   **`model_id`**: The full model name identifier (case sensitive), as it appears
-    on Hugging Face, including the parent directory. For example,
+*   **`model_id`**: This is a unique identifier used to identifty the model in mind and extract the family, version, and desired config from. Tunix support two identifiers as the `model_id`:
+    1. **Huggingface (HF) IDs:** The full model name identifier (case sensitive), as it appears
+    on Huggingface, including the parent directory. 
+      * **Extracting model_id from HF**: For example,
     `meta-llama/Llama-3.1-8B` is extracted as shown below:
-      ![Hugging Face extracting Model ID](images/model_id_huggingface.png){: width="75%"}
+      ![Huggingface extracting Model ID](images/model_id_huggingface.png){: width="75%"}
+   
+    2. **Native Tunix model_configs:** the `model_config_id` representing the exact config from the model class can be used directly as the `model_id`. In this case it will also be treated as the `model_name`.
+      * **Extracting model_id from model_config_id**: In this case, you would need to refer to the source code (`model.py`) for each model family and select the config id from the `ModelConfig` class, for example `llama3p1_8b` from the llama [model code](https://github.com/google/tunix/blob/main/models/llama3/model.py;bpv=1;bpt=1;l=138).
 
 
 *   **`model_name`**: The unique full name identifier of the model. This
     corresponds to the full name and should match exactly with the model name
     used in Hugging Face or Kaggle. It is typically all lowercase and formatted
-    as `<model-family>-<model-version>`.
-    *   *Example*: `gemma-2b`, `llama-3.1-8b`, `gemma2-2b-it`.
+    as `<model-family>-<model-version>` (when HF is used for model_id) or `<model-family>_<model-version>` (when model_config_id is used for model_id) .
+    *   *Example for HF as model_id*: `gemma-2b`, `llama-3.1-8b`, `gemma-2-2b-it`.
+    * *Example for model_config_id as model_id*: `gemma_2b`, `llama3p1_8b`, `gemma2_2b_it`.
 
 *   **`model_family`**: The standardized model family. Unnecessary hyphens are
     removed, and versions are standardized (e.g., replacing dot with `p`).

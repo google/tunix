@@ -180,6 +180,7 @@ class PeftTrainer:
       input.
     checkpoint_manager: The checkpoint manager to use.
     metrics_logger: The metrics logger to use.
+    metrics_prefix: The prefix for metric names for logging.
     is_managed_externally: Whether the trainer is managed externally.
     training_hooks: The training hooks to use.
     data_hooks: The data hooks to use.
@@ -204,6 +205,7 @@ class PeftTrainer:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
+
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
@@ -577,7 +579,7 @@ class PeftTrainer:
       logging.log_if(
           logging.INFO,
           f"Compiled train_step cache size: {cache_size}",
-          lambda: cache_size not in self._jit_cache,
+          condition=cache_size not in self._jit_cache,
       )
       self._jit_cache.add(cache_size)
 
