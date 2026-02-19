@@ -14,9 +14,9 @@ import optax
 import optax
 from orbax import checkpoint as ocp
 import qwix
-
-import math
+from tqdm.auto import tqdm
 import logging
+import math
 import sys
 from absl import logging as absl_logging
 
@@ -43,15 +43,31 @@ absl_logging.set_stderrthreshold('info')
 
 print("Logging configured at INFO level.")
 
-# from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-# from etils import ecolab
-import optax
-from orbax import checkpoint as ocp
 
-import pathwaysutils
-pathwaysutils.initialize()
+try:
+  import pathwaysutils
+  pathwaysutils.initialize()
+except:
+  pass
 
 print("jax devices: ", jax.devices())
+# import os
+# os.environ["WANDB_MODE"] = "online"
+
+# try:
+  # wandb.login()
+  # print("linchai: logged in to W&B")
+# except wandb.errors.UsageError as e:
+  # Handle the error, maybe disable W&B logging
+  # wandb.init(mode="disabled")
+
+
+# try:
+  # run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  # wandb.init(project="tunix", name=run_name, anonymous="allow")
+  # wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
+# except Exception as e:
+  # print(f"linchai: W&B initialization failed with error: {e}")
 
 try:
   from etils import ecolab
@@ -79,15 +95,9 @@ with cm:
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
   from tunix.utils import compat
+  from tunix.sft import profiler
   from tunix.cli.utils import data as data_lib
 
-try:
-  import pathwaysutils
-  pathwaysutils.initialize()
-except:
-  pass
-
-print("jax devices: ", jax.devices())
 
 # %%
 # ====== Data ======
@@ -194,7 +204,6 @@ if trainer_devices + rollout_devices > jax.device_count():
       " available."
   )
 
-
 if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
   rollout_device_list = jax._src.mesh_utils.create_device_mesh(
       ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
@@ -205,37 +214,24 @@ if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
     axis_names = ROLLOUT_MESH[1],
     axis_types = (jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
   )
-  # rollout_mesh = jax.make_mesh(
-  #     *ROLLOUT_MESH,
-  #     devices=jax.devices()[:rollout_devices],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-  # )
   print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
   trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
       TRAINER_MESH[0], jax.devices()[-trainer_devices:]
   )
-  # trainer_mesh = jax.make_mesh(
-  #     *TRAINER_MESH,
-  #     devices=jax.devices()[-trainer_devices:],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
-  # )
   trainer_mesh = jax.sharding.Mesh(
     trainer_devices_list,
     axis_names = TRAINER_MESH[1],
     axis_types = (jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
   )
 else:
-  rollout_mesh = mesh
-  trainer_mesh = mesh
+  rollout_mesh = jax.sharding.Mesh(
+      np.array(jax.devices())[:4].reshape(2, 2), ("fsdp", "tp")
+  )
+  trainer_mesh = jax.sharding.Mesh(
+      np.array(jax.devices())[4:].reshape(2, 2), ("fsdp", "tp")
+  )
 
-# %%
-try:
-  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
-  file_open = gfile.Open
-
-  NOTEBOOK_ENV = "g3"
-except Exception:
-  NOTEBOOK_ENV = "git"
+NOTEBOOK_ENV = "git"
 
   from google.cloud import storage
 
@@ -322,6 +318,7 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
 # %%
 train_dataset, test_dataset = create_datasets()
+
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
     tokenizer,
@@ -339,7 +336,6 @@ test_dataset, _ = data_lib.post_init_dataset(
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
 )
-
 # %%
 show_hbm_usage("Done with loading datasets")
 
@@ -347,6 +343,8 @@ show_hbm_usage("Done with loading datasets")
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
+else:
+  config.remat_config = model_lib.RematConfig.NONE
 
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
@@ -402,7 +400,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
+   log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
 )
 
 # %%
@@ -458,7 +456,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_disable_radix_cache": True,
     "rollout_sglang_jax_enable_deterministic_sampling": False,
     "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": 32,
+    "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
     "rollout_sglang_jax_page_size": 128,
 }
 
@@ -507,10 +505,17 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
         train_micro_batch_size=2,
         # metrics logging
-        metrics_logging_options=metrics_logging_options,
+        # metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
+        # profiler
+        # profiler_options = profiler.ProfilerOptions(
+          # profiler_steps=1,
+          # skip_first_n_steps=1,
+          # set_profile_options=False,
+          # log_dir=PROFILER_PATH,
+        # )
     ),
     rollout_config=rollout_engine_config,
 )
@@ -550,3 +555,9 @@ show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
+
+# try:
+  # wandb.finish()
+  # print("WandB session finished successfully")
+# except Exception as e:
+  # print(f"Warning: Failed to finish WandB session: {e}")

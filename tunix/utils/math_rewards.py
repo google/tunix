@@ -34,6 +34,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
   Returns:
     float: The calculated reward value based on math evaluation
   """
+  print(f"Calculating math rewards... with  answer: {answer}, completions: {completions},")
   rewards = []
   # Extract information from task_info
   for i, completion in enumerate(completions):
@@ -51,15 +52,16 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
       model_solution = model_response
 
     model_answer = math_utils.extract_answer(model_solution)
+    print(f"Extracted model answer: {model_answer} from model response: {model_response}")
     if model_answer is None:
-      # return RewardOutput(0.0, {"is_correct": False})
+      print("model_answer is None after extraction")
       rewards.append(0.0)
       continue
 
     # Process the ground truth(s)
     ground_truths = answer[i]
     if ground_truths is None:
-      # return RewardOutput(0.0, {"is_correct": False})
+      print("ground_truths is None")
       rewards.append(0.0)
       continue
 
@@ -79,6 +81,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
           processed_ground_truths.append(truth)
 
     if not processed_ground_truths:
+      print("No valid ground truths after processing")
       rewards.append(0.0)
       continue
 
@@ -94,6 +97,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
         #   reward_value += 0.5
         rewards.append(reward_value)
         continue
-
+    print("no possible correct answers matched")
     rewards.append(0.0)
+  print(f"Calculated rewards: {rewards}")
   return rewards
