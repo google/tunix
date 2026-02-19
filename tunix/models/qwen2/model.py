@@ -255,13 +255,6 @@ class Embedder(nnx.Module):
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     return jnp.dot(x, self.input_embedding.value.T)
 
-  @property
-  def embed_dim(self):
-    return self.input_embedding.value.shape[1]
-
-  @property
-  def num_embed(self):
-    return self.input_embedding.value.shape[0]
 
 def _generate_pos_embeddings(
     positions: jax.Array,
