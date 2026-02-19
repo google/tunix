@@ -233,11 +233,11 @@ else:
 
 NOTEBOOK_ENV = "git"
 
-  from google.cloud import storage
+from google.cloud import storage
 
-  import fsspec
+import fsspec
 
-  file_open = fsspec.open
+file_open = fsspec.open
 
 if NOTEBOOK_ENV == "g3":
   DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/data/"
@@ -465,7 +465,7 @@ MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    "rollout_vllm_hbm_utilization": 0.4,
+    "rollout_vllm_hbm_utilization": 0.3,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
@@ -507,7 +507,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=2,
+        train_micro_batch_size=1,
         # metrics logging
         # metrics_logging_options=metrics_logging_options,
         # checkpoint saving
