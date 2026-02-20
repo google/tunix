@@ -80,12 +80,9 @@ class VllmConfig:
     if engine_kwargs:
       for key, value in engine_kwargs.items():
         if hasattr(self, key):
-          logging.warning(
-              f"Engine kwargs contains key '{key}' which conflicts with an"
-              " existing attribute. The engine kwargs will be ignored for this"
-              " key."
+          logging.info(
+              "Engine kwargs setting key '%s' with value '%s'.", key, value
           )
-        else:
           setattr(self, key, value)
 
   enable_dp_attention: bool = False

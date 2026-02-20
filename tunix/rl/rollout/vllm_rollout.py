@@ -49,6 +49,7 @@ class VllmRollout(base_rollout.BaseRollout):
             tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
             additional_config=rollout_config.rollout_vllm_additional_config,
             enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            expert_parallel_size=rollout_config.expert_parallel_size,
             hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
             lora_config=rollout_config.rollout_vllm_lora_config,
             mesh=mesh,
