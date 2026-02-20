@@ -849,7 +849,7 @@ class RLCluster:
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
-        span.device_end([o.logits for o in outputs])
+        span.device_end([o.tokens for o in outputs])
 
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -863,11 +863,15 @@ class RLCluster:
           itertools.chain.from_iterable(out.logprobs for out in outputs)
       )
 
+    logits = None
+    if outputs[0].logits is not None:
+      logits = list(
+          itertools.chain.from_iterable(out.logits for out in outputs)
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
-        logits=list(
-            itertools.chain.from_iterable(out.logits for out in outputs)
-        ),
+        logits=logits,
         tokens=list(
             itertools.chain.from_iterable(out.tokens for out in outputs)
         ),
