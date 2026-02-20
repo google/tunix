@@ -463,7 +463,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     )
 
     max_tokens_length = max(len(x) for x in prompt_ids)
-
+    logging.info("vLLM output length: %d", len(out_tokens[0][0]))
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
     all_input_ids = [

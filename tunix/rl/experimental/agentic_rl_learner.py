@@ -775,7 +775,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      if (
+          micro_batches_since_last_sync
+          == micro_batches_per_full_batch * self.algo_config.off_policy_steps
+      ):
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()
