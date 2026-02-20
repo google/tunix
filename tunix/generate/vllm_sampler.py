@@ -76,14 +76,10 @@ class VllmConfig:
     self._processed_engine_kwargs = engine_kwargs
     if engine_kwargs:
       for key, value in engine_kwargs.items():
-        if hasattr(self, key):
-          logging.warning(
-              f"Engine kwargs contains key '{key}' which conflicts with an"
-              " existing attribute. The engine kwargs will be ignored for this"
-              " key."
-          )
-        else:
-          setattr(self, key, value)
+        logging.info(
+            "Engine kwargs setting key '%s' with value '%s'.", key, value
+        )
+        setattr(self, key, value)
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
