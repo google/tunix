@@ -54,7 +54,7 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
           Sequence Policy Optimization)
       -   [DAPO](https://arxiv.org/abs/2503.14476) (Direct Alignment via Preference
           Optimization)
-      -   [Dr.GRPO](https://arxiv.org/abs/2503.14476) (Distributionally Robust
+      -   [Dr.GRPO](https://arxiv.org/abs/2503.20783) (Distributionally Robust
           GRPO)
 -   **[Agentic RL](https://tunix.readthedocs.io/en/latest/agentic_rl.html)**:
     -   Multi-turn tool use
@@ -92,8 +92,8 @@ See [Models](https://tunix.readthedocs.io/en/latest/models.html) for a full list
 
 ## Contributing and Feedbacks
 We welcome contributions! As Tunix is in early development, the contribution
-process is still being formalized. A rough draft of the contribution process is
-present [here](https://github.com/google/tunix/blob/main/CONTRIBUTING.md). In
+process is still being formalized. The detailed contribution process is outlined
+[here](https://tunix.readthedocs.io/en/latest/contributing.html). In
 the meantime, you can make feature requests, report issues and ask questions in
 our
 [Tunix GitHub discussion forum](https://github.com/google/tunix/discussions).
