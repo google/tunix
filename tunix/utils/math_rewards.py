@@ -93,7 +93,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
         # if task_info.get("has_toolcall", False):
         #   reward_value += 0.5
         rewards.append(reward_value)
-        continue
+        break
 
     rewards.append(0.0)
   return rewards
