@@ -222,12 +222,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     def run_loop_forever():
       loop = agentic_utils.get_or_create_loop()
       loop.set_default_executor(
-          ThreadPoolExecutor(max_workers=algo_config.max_concurrency + 1)
+          ThreadPoolExecutor(max_workers=algo_config.max_concurrency + 100, thread_name_prefix="agentic-rl-learner")
       )
       loop_queue.put(loop)
       loop.run_forever()
 
-    loop_thread = threading.Thread(target=run_loop_forever, daemon=True)
+    loop_thread = threading.Thread(target=run_loop_forever, daemon=True, name="AgenticRLLearnerLoopThread")
     loop_thread.start()
     self.loop = loop_queue.get()
     self._global_step_start_time = time.time()
@@ -585,6 +585,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           for _ in range(iterations):
             for train_example in train_examples:
               train_data_queue.put(train_example)
+            print(f"YY {train_data_queue.qsize()=}")
         except Exception as e:
           if not isinstance(e, RuntimeError):
             logging.exception(
@@ -780,7 +781,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      if micro_batches_since_last_sync == micro_batches_per_full_batch * (
+          self.algo_config.off_policy_steps + 1
+      ):
+        print(f"YY {micro_batches_since_last_sync=}")
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
