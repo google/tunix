@@ -212,7 +212,7 @@ class ToolManager:
       return outputs
 
     # Parallel execution using thread pool for improved performance
-    with futures.ThreadPoolExecutor() as executor:
+    with futures.ThreadPoolExecutor(thread_name_prefix="ToolManager") as executor:
       future_to_id = {}
       for call in calls:
         cid = getattr(call, "id", None) or str(uuid.uuid4())

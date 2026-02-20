@@ -723,6 +723,10 @@ class PeftTrainer:
         self._prof.maybe_deactivate(self._iter_steps)
 
     self._throttler.wait_for_all()
+    logging.info(
+        "[Accurate] Train loop finished in: %.4f seconds",
+        time.perf_counter() - last_step_completion_time,
+    )
     if self.training_hooks:
       self.training_hooks.on_train_end(self)
     if not self.is_managed_externally:

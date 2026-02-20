@@ -30,6 +30,7 @@ The data flow is designed around an asynchronous producer-consumer pattern:
 from __future__ import annotations
 
 import dataclasses
+import time
 from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
@@ -39,6 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import common
 from tunix.rl import function_registry
+from tunix.rl import reshard
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
@@ -48,7 +50,6 @@ from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.rl.experimental import agentic_rl_learner
 from tunix.utils import trajectory_logger
-
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
@@ -341,6 +342,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # Masks
     prompt_mask = prompt_ids != pad_value
     if self.algo_config.beta != 0.0:
+      start = time.perf_counter()
       ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
@@ -348,6 +350,19 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           eos_id=eos_value,
           micro_batch_size=None,
       )
+      reshard.callback_on_ready(
+          ref_per_token_logps,
+          lambda: logging.info(
+              "ref_per_token_logps finished in %.2fs",
+              time.perf_counter() - start,
+          ),
+          lambda e: logging.error(
+              "ref_per_token_logps failed in %.2fs: %s",
+              time.perf_counter() - start,
+              e,
+          ),
+      )
+
     else:
       ref_per_token_logps = None
     logging.debug("Ref logps computed.")

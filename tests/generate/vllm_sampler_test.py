@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+from types import SimpleNamespace
 import concurrent.futures
 import functools
 import os
@@ -356,6 +357,174 @@ class VllmSamplerTest(absltest.TestCase):
             "expected out-of-order completions."
         ),
     )
+
+  def test_generate_async_llm_basic(self):
+        # Integration test for AsyncLLM server-mode behavior: instantiate
+        # VllmSampler with `server_mode=True` (inproc AsyncLLM) and run a
+        # short generation to exercise real async behavior.
+        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_path)
+        tunix_model, _ = self.load_llama3_model(
+            self.repo_id, enable_lora=self.enable_lora
+        )
+        mapping_config = mappings.MappingConfig.build(tunix_model)
+        vllm_config = vllm_sampler.VllmConfig(
+                mesh=self.mesh,
+                hbm_utilization=0.1,
+                init_with_random_weights=True,
+                tpu_backend_type="jax",
+                mapping_config=mapping_config,
+                server_mode=True,
+                engine_kwargs={
+                        "model": self.model_path,
+                        "max_model_len": 128,
+                },
+                use_async_llm_inproc=True,
+        )
+
+        vl_sampler = vllm_sampler.VllmSampler(
+                tokenizer=tokenizer, config=vllm_config
+        )
+        # Ensure we stop the sampler on test cleanup to release resources.
+        self.addCleanup(vl_sampler.stop)
+
+        # Load a small checkpoint (re-use tunix model from setup if available)
+        state = nnx.state(tunix_model)
+        vl_sampler.load_checkpoint(state)
+
+        # Run a short generation and verify non-empty output is returned.
+        inputs = tc.batch_templatize(["Hello world"], tokenizer)
+        out = vl_sampler(
+                input_strings=inputs,
+                max_generation_steps=8,
+                max_prompt_length=None,
+                temperature=0.0,
+                top_k=1,
+                seed=0,
+                echo=False,
+                pad_output=True,
+        )
+
+        self.assertIsNotNone(out)
+        self.assertTrue(hasattr(out, "text"))
+        self.assertGreater(len(out.text[0]), 0)
+
+  def test_generate_async_llm_out_of_order(self):
+                # Verify that multiple concurrent inputs return out-of-order
+                # completions when run through the server-mode AsyncLLM.
+                tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_path)
+                tunix_model, _ = self.load_llama3_model(
+                        self.repo_id, enable_lora=self.enable_lora
+                )
+                mapping_config = mappings.MappingConfig.build(tunix_model)
+                vllm_config = vllm_sampler.VllmConfig(
+                                mesh=self.mesh,
+                                hbm_utilization=0.1,
+                                init_with_random_weights=True,
+                                tpu_backend_type="jax",
+                                mapping_config=mapping_config,
+                                server_mode=True,
+                                engine_kwargs={
+                                                "model": self.model_path,
+                                                "max_model_len": 128,
+                                },
+                                use_async_llm_inproc=True,
+                )
+
+                vl_sampler = vllm_sampler.VllmSampler(
+                                tokenizer=tokenizer, config=vllm_config
+                )
+                self.addCleanup(vl_sampler.stop)
+
+                state = nnx.state(tunix_model)
+                vl_sampler.load_checkpoint(state)
+
+                base_prompts = [
+                  "Hello, my name is Tom.",
+                  "The capital of France is",
+                  "why is sky blue?",
+                  "Explain the theory of relativity in simple terms.",
+                  "List three benefits of regular exercise.",
+                  "Write a haiku about winter.",
+                  "Summarize the plot of Romeo and Juliet.",
+                  "Give me a recipe for pancakes.",
+                  "What is the boiling point of water at sea level?",
+                  "Share a motivational quote about perseverance.",
+                ]
+                templated = tc.batch_templatize(base_prompts, tokenizer)
+
+                delays = [0.02 * (len(templated) - i) for i in range(len(templated))]
+
+                # Use a dedicated executor to avoid sharing the default
+                # event-loop executor (prevents circular waits).
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(templated) + 1)
+                self.addCleanup(lambda: executor.shutdown(wait=True))
+
+                def _call_sampler(templated_prompt: str, delay: float):
+                    time.sleep(delay)
+                    return vl_sampler(
+                            input_strings=[templated_prompt],
+                            max_generation_steps=32,
+                            max_prompt_length=None,
+                            temperature=0.0,
+                            top_k=1,
+                            seed=0,
+                            echo=False,
+                            pad_output=True,
+                    )
+
+                async def __call_sampler_async(index: int, templated_prompt: str, delay: float):
+                            # Instead of running the synchronous sampler in an executor
+                            # (which may deadlock with the sampler's async loop), submit
+                            # the generation to the sampler's async loop and await the
+                            # returned concurrent.futures.Future via asyncio.wrap_future.
+                            sampling_params = (
+                                vl_sampler.async_llm.get_default_sampling_params()
+                            )
+                            # submit_async_generation returns a concurrent.futures.Future
+                            fut = vl_sampler.submit_async_generation(
+                                [TokensPrompt(prompt_token_ids=vl_sampler.tokenize(templated_prompt))],
+                                sampling_params,
+                            )
+                            async_future = asyncio.wrap_future(fut)
+                            results = await async_future
+                            # results is a list of RequestOutput
+                            return index, results[0]
+
+                async def dispatch_requests():
+                    loop = asyncio.get_running_loop()
+                    tasks = []
+                    for idx, templ in enumerate(templated):
+                        task = loop.create_task(__call_sampler_async(idx, templ, delays[idx]))
+                        tasks.append(task)
+
+                    completion_order = []
+                    results_by_idx = {}
+                    for task in asyncio.as_completed(tasks):
+                        idx, result = await task
+                        completion_order.append(idx)
+                        results_by_idx[idx] = result
+
+                    ordered_results = [results_by_idx[i] for i in range(len(tasks))]
+                    return ordered_results, completion_order
+
+                results, completion_order = asyncio.run(dispatch_requests())
+
+                # Ensure we got results for all prompts
+                self.assertLen(results, len(base_prompts))
+                # Each result should contain text
+                for r in results:
+                    # print(f"YY Result: {r}")
+                    self.assertTrue(hasattr(r, "text"))
+                    self.assertGreater(len(r.text[0]), 0)
+
+                expected_order = list(range(len(base_prompts)))
+                self.assertCountEqual(completion_order, expected_order)
+                # They should not all complete in submission order
+                self.assertNotEqual(
+                        completion_order,
+                        expected_order,
+                        msg=("Responses returned strictly in submission order; expected some out-of-order completions."),
+                )
 
 
 if __name__ == "__main__":
