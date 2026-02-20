@@ -687,7 +687,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     orchestrator = self._build_orchestrator()
 
     prompt_queue = queue.Queue()
-    initial_buffer_size = max(1, self.algo_config.off_policy_steps)
+    initial_buffer_size = self.algo_config.off_policy_steps + 1
     logging.info(
         "Prefilling prompt queue with %d batches.", initial_buffer_size
     )
