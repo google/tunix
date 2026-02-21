@@ -720,14 +720,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         break
       self._iter_steps += 1
 
-      # Filter out examples that are too old (off-policy).
-      filtered_train_micro_batch = self._filter_outdated_offpolicy_examples(
-          train_micro_batch
-      )
-      if not filtered_train_micro_batch:
-        continue
-      train_micro_batch = filtered_train_micro_batch
-
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
@@ -835,32 +827,4 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     else:
       prompt_queue.put(batch)
 
-  def _filter_outdated_offpolicy_examples(
-      self,
-      train_micro_batch: List[TrainExample],
-  ) -> List[TrainExample]:
-    """Filters out outdated off-policy examples."""
-    filtered_train_micro_batch = []
-    for train_example in train_micro_batch:
-      if train_example.policy_version is not None and (
-          train_example.policy_version[0] == -1
-          or (
-              self.policy_version - train_example.policy_version[0]
-              <= self.algo_config.off_policy_steps
-          )
-      ):
-        filtered_train_micro_batch.append(train_example)
-    if not filtered_train_micro_batch:
-      logging.warning(
-          "Skipping microbatch: all %d examples are too old."
-          " Current policy version: %d, data versions: %s,"
-          " off_policy_steps: %d",
-          len(train_micro_batch),
-          self.policy_version,
-          str([
-              train_example.policy_version[0]
-              for train_example in train_micro_batch
-          ]),
-          self.algo_config.off_policy_steps,
-      )
-    return filtered_train_micro_batch
+
