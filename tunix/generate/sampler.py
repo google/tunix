@@ -103,33 +103,36 @@ class CacheConfig:
   head_dim: int
 
 
-def sample_top_p(
-    logits: jnp.ndarray,
-    key: jax.Array,
-    temperature: float,
-    top_p: float,
-    top_k: int | None,
+def _sample_top_p(
+    probs: jnp.ndarray, p: float, key: jax.Array, k: Optional[int] = None
 ) -> jnp.ndarray:
   """Sample a token using top-p sampling."""
-  # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
-  next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
+  # Optimization: skip sorting if top_p is 1.0 and top_k is full vocab.
+  if p >= 1.0 and k is None:
+    return jax.random.categorical(key, logits=jnp.log(probs))
 
-  # Skip softmax and sorting if top_p is 1.0 and top_k is full vocab.
-  if top_p >= 1.0 and top_k is None:
-    return jax.random.categorical(key, logits=next_token_logits)
-
-  probs = jax.nn.softmax(next_token_logits, axis=-1)
-  k = probs.shape[-1] if top_k is None else top_k
-
+  k = probs.shape[-1] if k is None else k
   probs_sorted, indices = jax.lax.top_k(probs, k=k)
   cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
-  mask = cumsum_probs - probs_sorted > top_p
+  mask = cumsum_probs - probs_sorted > p
   probs_sorted = jnp.where(mask, 0.0, probs_sorted)
   probs_sorted /= jnp.sum(probs_sorted, axis=-1, keepdims=True)
 
   next_token = jax.random.categorical(key, logits=jnp.log(probs_sorted))
+
   next_token = jnp.take_along_axis(indices, next_token[..., None], axis=-1)
   next_token = jnp.squeeze(next_token, axis=-1)
+  return next_token
+
+
+def sample_top_p(
+    logits, key, temperature: float, top_p: float, top_k: Optional[int]
+):
+  """Sample a token using top-p sampling."""
+  # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
+  logits = logits[:, -1].astype(jnp.float32)
+  probs = jax.nn.softmax(logits / temperature, axis=-1)
+  next_token = _sample_top_p(probs, top_p, key, top_k)
   return next_token
 
 
@@ -335,7 +338,13 @@ class Sampler(base_sampler.BaseSampler):
     input_mask = input_mask.at[:, :num_input_tokens].set(
         all_input_ids != self.tokenizer.pad_id()
     )
-    positions = utils.build_positions_from_mask(input_mask)
+    if hasattr(self.transformer, 'get_positions_and_attention_mask'):
+      positions_and_mask = self.transformer.get_positions_and_attention_mask(
+          token_buffer, inputs_mask=input_mask
+      )
+      positions = positions_and_mask['positions']
+    else:
+      positions = utils.build_positions_from_mask(input_mask)
 
     done = jnp.zeros((batch_size,), dtype=jnp.bool_)
 
@@ -480,7 +489,10 @@ class Sampler(base_sampler.BaseSampler):
     )
 
   def _prefill_fn(
-      self, params: statelib.State, sampler_state: _SamplingState
+      self,
+      params: statelib.State,
+      sampler_state: _SamplingState,
+      images: jnp.ndarray | None = None,
   ) -> _SamplingState:
     """Performs prefill."""
     batch_size = sampler_state.token_buffer.shape[0]
@@ -501,16 +513,32 @@ class Sampler(base_sampler.BaseSampler):
     )
 
     input_mask = tokens != self.tokenizer.pad_id()
-    attention_mask = utils.make_causal_attn_mask(
-        input_mask, self.cache_config.cache_size
-    )
+
+    if hasattr(self.transformer, 'get_positions_and_attention_mask'):
+      attention_mask = self.transformer.get_positions_and_attention_mask(
+          tokens, inputs_mask=input_mask
+      )['attention_mask']
+      seq_len = attention_mask.shape[-1]
+      padding = self.cache_config.cache_size - seq_len
+      attention_mask = jnp.pad(
+          attention_mask,
+          (*((0, 0) for _ in range(attention_mask.ndim - 1)), (0, padding)),
+      )
+    else:
+      attention_mask = utils.make_causal_attn_mask(
+          input_mask, self.cache_config.cache_size
+      )
 
     transformer = nnx.merge(self._transformer_graphdef, params)
+    kwargs = {}
+    if images is not None:
+      kwargs['images'] = images
     logits, cache = transformer(
         tokens,
         step_positions,
         sampler_state.cache,
         attention_mask,
+        **kwargs,
     )
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
@@ -648,6 +676,13 @@ class Sampler(base_sampler.BaseSampler):
       beam_size: Optional[int] = None,
       seed: int | None = None,
       pad_output: bool = False,
+      images: (
+          str
+          | np.ndarray
+          | list[str | np.ndarray | list[str | np.ndarray] | None]
+          | None
+      ) = None,
+      image_processor: Any | None = None,
   ) -> base_sampler.SamplerOutput:
     """Samples a completion of the input string.
 
@@ -676,6 +711,10 @@ class Sampler(base_sampler.BaseSampler):
         otherwise it will be max_generation_steps + max_prompt_length. The
         padding now only supports right padding. Can modify to support left
         padding if needed.
+      images: input images to process. Can be a string/array, list of
+        strings/arrays, or list of list of strings/arrays depending on whether
+        there is one, multiple, or varying number of images per batch.
+      image_processor: image processor.
 
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
@@ -688,6 +727,12 @@ class Sampler(base_sampler.BaseSampler):
     forbidden_token_ids = tuple(forbidden_tokens) if forbidden_tokens else None
 
     tokens = [self.tokenize(x) for x in input_strings]
+
+    processed_images = None
+    if images is not None and image_processor is not None:
+      processed_images = image_processor(images)
+      processed_images = jnp.array(processed_images)
+
     max_tokens_length = max(len(x) for x in tokens)
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
@@ -725,7 +770,9 @@ class Sampler(base_sampler.BaseSampler):
         beam_size=beam_size,
     )
     sampling_state = self._compiled_prefill_fn(
-        self._flattened_transformer_state, sampling_state
+        self._flattened_transformer_state,
+        sampling_state,
+        processed_images,
     )
 
     sampling_state = self._compiled_decode_fn(
