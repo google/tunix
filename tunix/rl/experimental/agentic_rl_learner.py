@@ -375,7 +375,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
-    prompts = [[chat] for chat in chat_lists]
+    prompts = [chat_lists]
     result = self.rl_cluster.generate(
         prompts=prompts,
         apply_chat_template=False if self.chat_parser else True,
