@@ -141,6 +141,7 @@ def post_init_dataset(
     max_prompt_length: int | None,
     fraction: float = 1.0,
     num_epochs: int = 1,
+    prompt_key: Optional[str] = "prompts",
 ):
   """Applies post-initialization transformations to a dataset.
 
@@ -165,7 +166,7 @@ def post_init_dataset(
     def prompt_length_filter(x):
       if "prompt_length" in x:
         return x["prompt_length"] <= max_prompt_length
-      tokens = tokenizer.tokenize(x["prompts"])
+      tokens = tokenizer.tokenize(x[prompt_key])
       return len(tokens) <= max_prompt_length
 
     dataset = dataset.filter(prompt_length_filter)

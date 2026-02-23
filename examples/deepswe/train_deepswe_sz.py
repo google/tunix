@@ -17,7 +17,6 @@ import qwix
 from tunix.utils import compat
 Dataset = datasets_lib.Dataset
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # To suppress tokenizer parallelism warnings
 # ==========================================
 # 1. Path Setup
 # ==========================================
@@ -241,9 +240,9 @@ print("Loading Dataset...")
 dataset = load_dataset("R2E-Gym/R2E-Gym-V1", split="train", cache_dir=DATASET_CACHE)
 
 
-def transform_and_tokenize(entry):
+def transform(entry):
     # Rename 'prompt' to 'prompts'
-    entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
+    # entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
     # JSON encode lists (excluding the new 'prompts')
     for k, v in entry.items():
         if isinstance(v, list) and k != 'prompts':
@@ -251,16 +250,14 @@ def transform_and_tokenize(entry):
     
     # Pre-calculate token length for filtering later
     # This prevents redundant tokenization during the training loop
-    tokens = tokenizer.encode(entry["problem_statement"], add_special_tokens=False)
-    entry["prompt_length"] = len(tokens)
+    # tokens = tokenizer.encode(entry["problem_statement"], add_special_tokens=False)
+    # entry["prompt_length"] = len(tokens)
     
     return entry
 
 dataset = dataset.map(
-    transform_and_tokenize, 
-    num_proc=8, 
+    transform, 
     keep_in_memory=True,
-    desc="Transforming and Tokenizing"
 )
 
 # ==========================================
@@ -352,6 +349,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     env_class=SWEEnv,
     env_kwargs={"max_steps": MAX_TURNS}, 
     algo_config=grpo_config,
+    prompt_key="problem_statement",
 )
 
 # 2. Execute with num_proc=32 (This is where the real speedup happens)
@@ -385,6 +383,7 @@ train_dataset, _ = data_lib.post_init_dataset(
     max_prompt_length=MAX_PROMPT_LENGTH,
     fraction=TRAIN_FRACTION,
     num_epochs=NUM_EPOCHS,
+    prompt_key="problem_statement",
 )
 
 # entry = next(iter(train_dataset))

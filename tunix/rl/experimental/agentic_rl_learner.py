@@ -130,6 +130,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           base_environment.BaseTaskEnv
       ] = task_environment.TaskEnvironment,
       env_kwargs: Dict[str, Any] | None = None,
+      prompt_key: str | None = None,
   ):
     """Initializes the `AgenticRLLearner`.
 
@@ -174,6 +175,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.agent_kwargs = agent_kwargs or {}
     self.env_class = env_class
     self.env_kwargs = env_kwargs or {}
+    self.prompt_key = prompt_key or "prompts"
 
     self._training_config = self.rl_cluster.cluster_config.training_config
 
@@ -639,7 +641,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    full_batch_size = len(first_item["prompts"])
+    full_batch_size = len(first_item[self.prompt_key])
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -823,11 +825,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue: The queue to put the batch into.
       batch: The batch of prompts (TrainingInputT).
     """
-    if len(batch["prompts"]) != self._full_batch_size:
+    if len(batch[self.prompt_key]) != self._full_batch_size:
       logging.warning(
           "partial batch %d vs %d detected. The rest of the batch will be"
           " skipped.",
-          len(batch["prompts"]),
+          len(batch[self.prompt_key]),
           self._full_batch_size,
       )
       prompt_queue.put(None)

@@ -72,13 +72,6 @@ class SWEAgent(ConversationAgentBase):
         self.user_prompt_template = SWE_USER_PROMPT_FN_CALL if use_fn_calling else SWE_USER_PROMPT
         if scaffold == "sweagent":
             self.user_prompt_template = SWEAGENT_USER_PROMPT
-        # if system_prompt is None:
-        #     system_prompt = SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
-        #     if scaffold == "sweagent":
-        #         system_prompt = SWEAGENT_SYSTEM_PROMPT
-        # self.user_prompt_template = SWE_USER_PROMPT_FN_CALL if use_fn_calling else SWE_USER_PROMPT
-        # if scaffold == "sweagent":
-        #     self.user_prompt_template = SWEAGENT_USER_PROMPT
         super().__init__(system_prompt)
 
     def update_from_env(self, observation, reward, done, info):
