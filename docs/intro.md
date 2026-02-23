@@ -1,6 +1,6 @@
 <!-- DO NOT REMOVE! Placeholder for TOC. -->
 
-# Tunix: A JAX-native LLM Post-Training Library
+# Tunix: A Lightweight LLM Post-Training Library
 
 **Tunix (Tune-in-JAX)** is a JAX based library designed to streamline the
 post-training of Large Language Models. It provides efficient and scalable
@@ -53,7 +53,7 @@ See [Design Overview](design.md) for more details on the architecture.
           Sequence Policy Optimization)
       -   [DAPO](https://arxiv.org/abs/2503.14476) (Direct Alignment via Preference
           Optimization)
-      -   [Dr.GRPO](https://arxiv.org/abs/2503.14476) (Distributionally Robust
+      -   [Dr.GRPO](https://arxiv.org/abs/2503.20783) (Distributionally Robust
           GRPO)
 -   **[Agentic RL](agentic_rl.md)**:
     -   Multi-turn tool use

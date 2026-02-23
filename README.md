@@ -1,4 +1,4 @@
-# Tunix: A JAX-native LLM Post-Training Library
+# Tunix: A Lightweight LLM Post-Training Library
 
 <div align="left">
 
