@@ -40,6 +40,7 @@ class SWEEnv(BaseTaskEnv):
         self,
         entry: dict,
         group_id: int | None = None,
+        pair_index: int | None = None,
         step_timeout: int = 90,
         reward_timeout: int = 300,
         backend: str = "kubernetes",
@@ -51,13 +52,15 @@ class SWEEnv(BaseTaskEnv):
         """Initialize the SWE environment.
 
         Args:
-            dataset: Dataset containing the tasks. If None, uses default dataset.
-            idx: Index of the task to use. If None, selects a random task.
-            timeout: Timeout for each step in seconds.
+            entry: Dataset containing the tasks. If None, uses default dataset.
+            group_id: ID of the group to which the task belongs.
+            pair_index: Index of the pair to use. If None, selects a random pair.
+            step_timeout: Timeout for each step in seconds.
+            reward_timeout: Timeout for reward computation in seconds.
+            backend: Backend to use for the environment.
             delete_image: Whether to delete the Docker image after closing.
         """
         self.entry = entry
-        self.group_id = group_id
         self.step_timeout = step_timeout
         self.reward_timeout = reward_timeout
         self.total_steps = 0
@@ -74,14 +77,32 @@ class SWEEnv(BaseTaskEnv):
             self.extra_kwargs = {}
             
         self.extra_kwargs["group_id"] = group_id
+        self.extra_kwargs["pair_index"] = pair_index
+
+    def _prepare_entry(self, example: dict) -> dict:
+        single_example = {}
+        json_keys = {'modified_files', 'relevant_files', 'modified_entity_summaries'}
+        for k, v in self.entry.items():
+            if k == 'prompts':
+                continue
+            if isinstance(v, (list, np.ndarray)) and len(v) > 0:
+                val = v[0]
+            else:
+                val= v
+
+            if k in json_keys:
+                single_example[k] = json.loads(str(val))
+            else:
+                if  hasattr(val, "item"):
+                    single_example[k] = val.item()
+                else:
+                    single_example[k] = val
+        return single_example
         
     def _initial_observation(self) -> Any:
         if not self.env:
             # Initialize environment if not created yet.
-            single_example = {}
-            for k, v in self.entry.items():
-                single_example[k] = v[0] if isinstance(v, list) else v
-            env_args = EnvArgs(ds=single_example)
+            env_args = EnvArgs(ds=self._prepare_entry(self.entry))
             self.env = RepoEnv(env_args, backend=self.backend, step_timeout=self.step_timeout, reward_timeout=self.reward_timeout, verbose=self.verbose)
         else:
             self.env.reset()
@@ -114,6 +135,11 @@ class SWEEnv(BaseTaskEnv):
 
         return EnvStepResult(observation=str(obs), reward=reward, done=done, info=info)
 
+    def compute_final_reward(self) -> float:
+        os.write(1, b"computing final reward\n")
+        reward = self.env.compute_reward()
+        os.write(1, f"final reward: {reward}\n".encode())
+        return reward
 
     def close(self) -> None:
         """Close the environment and clean up resources."""

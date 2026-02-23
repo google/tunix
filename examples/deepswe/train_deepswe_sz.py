@@ -1,22 +1,23 @@
+
+
+# [WIP] Reproduction of [DeepSWE](https://www.together.ai/blog/deepswe) with Multi-turn Agentic framework.
 import sys
 import os
 import logging
 import numpy as np
-import jax
-import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from flax import nnx
 import optax
 from orbax import checkpoint as ocp
 from kubernetes import client, config as k8s_config
 from transformers import AutoTokenizer
-from datasets import load_dataset
 from tunix.cli.utils import data as data_lib
 import datasets as datasets_lib 
-import grain
 import qwix
 from tunix.utils import compat
 Dataset = datasets_lib.Dataset
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # To suppress tokenizer parallelism warnings
 # ==========================================
 # 1. Path Setup
 # ==========================================
@@ -64,8 +65,8 @@ from swe_env import SWEEnv
 # ==========================================
 # 3. Environment Configuration
 # ==========================================
-DATASET_CACHE = os.getenv('DATASET_CACHE', '/tmp/dataset_cache')
-TASKS_TO_PROCESS = 100
+DATASET_CACHE = os.getenv('DATASET_CACHE', '/home/sizhi_google_com/dataset_cache')
+os.makedirs(DATASET_CACHE, exist_ok=True)
 
 os.environ["KUBECONFIG"] = "~/.kube/config"
 os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
@@ -82,21 +83,21 @@ except Exception as e:
 # ==========================================
 # 4. Data Loading
 # ==========================================
-print("Loading Dataset...")
-dataset = load_dataset("R2E-Gym/R2E-Gym-V1", split="train", cache_dir=DATASET_CACHE, num_proc=32)
-entries = []
-unique_images = set()
 
-for i, entry in enumerate(dataset):
-    if "docker_image" in entry:
-        unique_images.add(entry["docker_image"])
-        entries.append(entry)
-    if i >= TASKS_TO_PROCESS - 1:
-        break
 
-unique_images = list(unique_images)
-print(f"Found {len(unique_images)} unique Docker images to download")
-IDS = [f"task-{i}" for i in range(len(entries))]
+# entries = []
+# unique_images = set()
+
+# for i, entry in enumerate(dataset):
+#     if "docker_image" in entry:
+#         unique_images.add(entry["docker_image"])
+#         entries.append(entry)
+#     if i >= TASKS_TO_PROCESS - 1:
+#         break
+
+# unique_images = list(unique_images)
+# print(f"Found {len(unique_images)} unique Docker images to download")
+# IDS = [f"task-{i}" for i in range(len(entries))]
 
 # ==========================================
 # 5. Model & Training Hyperparameters
@@ -123,8 +124,8 @@ TRAIN_WITH_LORA = False
 # ====== GRPO ======
 # === Generation during GRPO training ===
 # MAX_PROMPT_LENGTH = 32768
-MAX_PROMPT_LENGTH = 2048
-TOTAL_GENERATION_STEPS = 512
+MAX_PROMPT_LENGTH = 4096
+MAX_RESPONSE_LENGTH = 512
 TEMPERATURE = 0.6
 TOP_P = 0.95
 TOP_K = 50
@@ -148,6 +149,9 @@ NUM_EPOCHS = 100
 
 # Number of training steps.
 MAX_STEPS = 10
+
+# Max turns in mult-agent interaction (set to 1 for single-turn)
+MAX_TURNS = 3
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -176,6 +180,8 @@ CKPT_DIR = os.path.join("/tmp/cp", "deepswe_ckpt/00")
 # ==========================================
 # 6. JAX Device & Mesh Setup
 # ==========================================
+import jax
+import jax.numpy as jnp
 devices = jax.devices()
 split = int(len(devices) / 2)
 rollout_devices = np.array(devices[:split]).reshape(2,2)
@@ -228,6 +234,35 @@ tokenizer = AutoTokenizer.from_pretrained(
 
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
+from datasets import load_dataset
+import json
+print("Loading Dataset...")
+
+dataset = load_dataset("R2E-Gym/R2E-Gym-V1", split="train", cache_dir=DATASET_CACHE)
+
+
+def transform_and_tokenize(entry):
+    # Rename 'prompt' to 'prompts'
+    entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
+    # JSON encode lists (excluding the new 'prompts')
+    for k, v in entry.items():
+        if isinstance(v, list) and k != 'prompts':
+            entry[k] = json.dumps(v)
+    
+    # Pre-calculate token length for filtering later
+    # This prevents redundant tokenization during the training loop
+    tokens = tokenizer.encode(entry["problem_statement"], add_special_tokens=False)
+    entry["prompt_length"] = len(tokens)
+    
+    return entry
+
+dataset = dataset.map(
+    transform_and_tokenize, 
+    num_proc=8, 
+    keep_in_memory=True,
+    desc="Transforming and Tokenizing"
+)
+
 # ==========================================
 # 9. Optimizer & Checkpointing
 # ==========================================
@@ -265,7 +300,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     training_config=rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
-        max_steps=10, # Note: Overridden locally to 20 in config vs MAX_STEPS above
+        max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
         train_micro_batch_size=1,
         metrics_logging_options=metrics_logging_options,
@@ -273,9 +308,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         checkpointing_options=checkpointing_options,
     ),
     rollout_config=base_rollout.RolloutConfig(
-        max_tokens_to_generate=TOTAL_GENERATION_STEPS,
         max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+        kv_cache_size=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
@@ -295,6 +329,8 @@ rl_cluster = rl_cluster_lib.RLCluster(
 # ==========================================
 grpo_config = agentic_grpo_learner.GRPOConfig(
     num_generations=NUM_GENERATIONS,
+    num_iterations=NUM_ITERATIONS,
+    max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
     epsilon=EPSILON,
     system_prompt=SWE_SYSTEM_PROMPT,
@@ -314,43 +350,51 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     agent_class=SWEAgent,
     agent_kwargs={},
     env_class=SWEEnv,
-    env_kwargs={"max_steps": 3}, 
+    env_kwargs={"max_steps": MAX_TURNS}, 
     algo_config=grpo_config,
 )
 
-# ==========================================
-# 12. Execution (Train)
-# ==========================================
+# 2. Execute with num_proc=32 (This is where the real speedup happens)
 
 
-# Data preprocessing 
+# 3. Pass the pre-processed HF dataset to Grain
+import grain
+grain_dataset = grain.MapDataset.source(dataset)
 
-import json
-def transform_entry(entry):
-    processed_entry = {}
-    for k, v in entry.items():
-        new_key = 'prompts' if k == 'prompt' else k
+# def transform_entry(entry):
+#     processed_entry = {}
+#     for k, v in entry.items():
+#         new_key = 'prompts' if k == 'prompt' else k
         
-        # If it's a list (and not the prompts), JSON encode it
-        if isinstance(v, list) and new_key != 'prompts':
-            # This turns [2 items] and [3 items] into simple strings
-            processed_entry[new_key] = json.dumps(v)
-        else:
-            processed_entry[new_key] = v
-    return processed_entry
+#         # If it's a list (and not the prompts), JSON encode it
+#         if isinstance(v, list) and new_key != 'prompts':
+#             # This turns [2 items] and [3 items] into simple strings
+#             processed_entry[new_key] = json.dumps(v)
+#         else:
+#             processed_entry[new_key] = v
+#     return processed_entry
 
 
-grain_dataset = grain.MapDataset.source(entries).map(transform_entry)
+# grain_dataset = grain.MapDataset.source(dataset).map(transform_entry)
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset, 
     tokenizer, 
     batch_size=BATCH_SIZE,
     num_batches=NUM_BATCHES,
-    max_prompt_length=None, #TODO(sizhi):  Max prompt length filtering is applied but also used to calculate kv cache size 
+    max_prompt_length=MAX_PROMPT_LENGTH,
     fraction=TRAIN_FRACTION,
     num_epochs=NUM_EPOCHS,
 )
 
+# entry = next(iter(train_dataset))
+# print(entry.keys())
+# print([type(v) for v in entry.values()])
 print("Starting training...")
 agentic_grpo_learner.train(train_dataset=train_dataset)
+
+# if __name__ == "__main__":
+#     # This is just to keep the script running for demonstration purposes
+#     import time
+#     while True:
+#         time.sleep(60)

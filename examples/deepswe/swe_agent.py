@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from typing import Any, Dict
 import traceback
 try:
     from r2egym.agenthub.action import Action as SWEAction
@@ -65,13 +66,19 @@ class SWEAgent(ConversationAgentBase):
         self.use_fn_calling = use_fn_calling
         self.format_model_response = format_model_response
         assert scaffold in ["r2egym", "sweagent"], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
-        if system_prompt is None:
-            system_prompt = SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
-            if scaffold == "sweagent":
-                system_prompt = SWEAGENT_SYSTEM_PROMPT
+        system_prompt = SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
+        if scaffold == "sweagent":
+            system_prompt = SWEAGENT_SYSTEM_PROMPT
         self.user_prompt_template = SWE_USER_PROMPT_FN_CALL if use_fn_calling else SWE_USER_PROMPT
         if scaffold == "sweagent":
             self.user_prompt_template = SWEAGENT_USER_PROMPT
+        # if system_prompt is None:
+        #     system_prompt = SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
+        #     if scaffold == "sweagent":
+        #         system_prompt = SWEAGENT_SYSTEM_PROMPT
+        # self.user_prompt_template = SWE_USER_PROMPT_FN_CALL if use_fn_calling else SWE_USER_PROMPT
+        # if scaffold == "sweagent":
+        #     self.user_prompt_template = SWEAGENT_USER_PROMPT
         super().__init__(system_prompt)
 
     def update_from_env(self, observation, reward, done, info):
@@ -91,8 +98,12 @@ class SWEAgent(ConversationAgentBase):
         if cur_tokens is not None and cur_tokens >= TOKEN_WARNING_THRESHOLD:
             observation += "\nYou are running out of tokens. Please submit your answer NOW."
 
-        self._messages.append({"role": "user", "content": observation})
+        super().update_from_env(observation, reward, done, info)
         self.cur_step = Step(observation=observation)
+
+    def _observation_to_messages(self, observation: Any, reward: float, done: bool, info: dict[str, Any]) -> None:
+        
+        self._messages.append({"role": "user", "content": str(observation)})
 
     def update_from_model(self, response: str, **kwargs):
         """

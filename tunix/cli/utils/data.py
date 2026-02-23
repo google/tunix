@@ -4,7 +4,8 @@ import ast
 import functools
 import importlib
 import os
-from typing import Any
+from typing import Any, Optional
+import grain.python as grain
 
 from tunix.generate import tokenizer_adapter
 
@@ -162,6 +163,8 @@ def post_init_dataset(
   if max_prompt_length is not None and max_prompt_length > 0:
 
     def prompt_length_filter(x):
+      if "prompt_length" in x:
+        return x["prompt_length"] <= max_prompt_length
       tokens = tokenizer.tokenize(x["prompts"])
       return len(tokens) <= max_prompt_length
 
@@ -192,3 +195,99 @@ def post_init_dataset(
     )
 
   return first_segment_dataset, second_segment_dataset
+
+# class PromptLengthFilterOp(grain.FilterTransform):
+#     def __init__(self, tokenizer, max_prompt_length, prompt_key="prompts", prompt_len_key="prompt_length"):
+#         self.tokenizer = tokenizer
+#         self.max_length = max_prompt_length
+#         self.prompt_key = prompt_key
+#         self.prompt_len_key = prompt_len_key
+
+#     def filter(self, entry):
+#       if self.prompt_len_key in entry:
+#         return entry[self.prompt_len_key] <= self.max_length
+
+#       if self.tokenizer is None:
+#         raise ValueError("Tokenizer is required for prompt length filtering.")
+      
+#       tokens = self.tokenizer.encode(entry[self.prompt_key])
+#       return len(tokens) <= self.max_length
+
+# def post_init_dataset(
+#     dataset,
+#     tokenizer: Tokenizer,
+#     batch_size: int,
+#     num_batches: int | None,
+#     max_prompt_length: int | None,
+#     fraction: float = 1.0,
+#     num_epochs: int = 1,
+#     worker_count: int = 1,
+#     prompt_key: Optional[str] = "prompts",
+#     prompt_len_key: Optional[str] = "prompt_length",
+# ):
+#   """Applies parallel streaming post-initialization transformations to a dataset.
+
+#   This function filters, batches, and optionally limits the number of batches
+#   in a dataset.
+
+#   Args:
+#     dataset: The input dataset.
+#     tokenizer: The tokenizer used for prompt length filtering.
+#     batch_size: The size of each batch.
+#     num_batches: If not None, the maximum number of batches to yield.
+#     max_prompt_length: If not None and greater than 0, prompts longer than this
+#       will be filtered out.
+#     fraction: Fraction of the dataset to use (between 0.0 and 1.0), commonly
+#       used for splitting training and validation sets.
+#     num_epochs: Number of times to repeat the dataset.
+#     worker_count: The number of background workers to use for data loading.
+#     prompt_key: The key in the dataset entries that contains the prompts to be tokenized and filtered based on length.
+#     prompt_len_key: The key to store the computed prompt length if max_prompt_length is used.
+#   Returns:
+#     The processed dataset.
+#   """
+
+#   if num_batches is not None:
+#     target_size = min(num_batches * batch_size, len(dataset))
+#     dataset = dataset[:target_size]
+
+#   if fraction < 1.0 and fraction > 0.0:
+#     first_segment_size = int(len(dataset) * fraction)
+#     first_segment_dataset = dataset[:first_segment_size]
+#     second_segment_dataset = dataset[first_segment_size:]
+#   else:
+#     first_segment_dataset = dataset
+#     second_segment_dataset = None
+
+      
+#   def build_dataloader(segment_ds, num_epochs=num_epochs):
+#     operations = []
+    
+#     # Add parallel tokenization filter if max_length is provided
+#     if max_prompt_length is not None and max_prompt_length > 0:
+#         operations.append(
+#           PromptLengthFilterOp(tokenizer=tokenizer, max_prompt_length=max_prompt_length, prompt_key=prompt_key, prompt_len_key=prompt_len_key))
+        
+#     # Add repetition and batching
+#     operations.append(grain.Batch(batch_size, drop_remainder=True))
+    
+#     # The DataLoader orchestrates the background workers
+#     sampler = grain.IndexSampler(
+#         num_records=len(segment_ds),
+#         num_epochs=num_epochs,
+#         shard_options=grain.ShardOptions(shard_index=0, shard_count=1)
+#     )
+#     return grain.DataLoader(
+#             data_source=segment_ds, # Changed from `dataset=` to `data_source=`
+#             operations=operations,
+#             sampler=sampler,        # Pass the sampler here
+#             worker_count=worker_count,  
+#         )
+#   first_segment_loader = build_dataloader(first_segment_dataset,num_epochs=num_epochs)
+  
+#   second_segment_loader = None
+#   if second_segment_dataset is not None:
+#     second_segment_loader = build_dataloader(second_segment_dataset,num_epochs=1)
+
+
+#   return first_segment_loader, second_segment_loader

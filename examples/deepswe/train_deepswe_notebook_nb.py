@@ -66,8 +66,8 @@ import os
 
 from datasets import load_dataset
 
-DATASET_CACHE = os.getenv("DATASET_CACHE", "/scratch/dataset_cache")
-TASKS_TO_PROCESS = 100
+DATASET_CACHE = os.getenv('DATASET_CACHE', '/home/sizhi_google_com/dataset_cache')
+os.makedirs(DATASET_CACHE, exist_ok=True)
 
 if os.getenv("JAX_PLATFORMS", None) == "proxy":
   import pathwaysutils

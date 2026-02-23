@@ -314,7 +314,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       for key, values in large_batch.items():
         if key not in buffer:
           buffer[key] = []
-
         if isinstance(values, (np.ndarray, jax.Array)):
           buffer[key].extend(list(values.flatten()))
         elif isinstance(values, (list, tuple)):
@@ -367,16 +366,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     if env:
       env.task["policy_version"] = version
-
+    
     if self.chat_parser:
       chat_lists = self.chat_parser.parse(
           messages=chat_lists,
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
-
+    prompts = [[chat] for chat in chat_lists]
     result = self.rl_cluster.generate(
-        prompts=chat_lists,
+        prompts=prompts,
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
     )
@@ -864,3 +863,4 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self.algo_config.off_policy_steps,
       )
     return filtered_train_micro_batch
+    
