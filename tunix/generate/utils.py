@@ -949,16 +949,42 @@ def transfer_state_directly(
         candidate_b.pop(match_index)
 
         found_candidate = None
+        scan_idx = layer_idx
+
         for cand in [tuple(candidate_a), tuple(candidate_b)]:
           if cand in src_flat:
             found_candidate = cand
             break
 
+        # Candidate C: Inhomogeneous Scan (GPT-OSS 120B / Interleaved Layers)
+        if not found_candidate:
+          # Check if layers_0 exists, which implies interleaved/inhomogeneous scanning
+          candidate_c_probe = list(key_tuple)
+          candidate_c_probe[match_index] = 'layers_0'
+          if tuple(candidate_c_probe) in src_flat:
+            # Determine cycle length by probing layers_0, layers_1, ...
+            cycle = 0
+            while True:
+              candidate_c_probe[match_index] = f'layers_{cycle}'
+              if tuple(candidate_c_probe) in src_flat:
+                cycle += 1
+              else:
+                break
+
+            if cycle > 0:
+              src_layer_idx = layer_idx % cycle
+              scan_idx = layer_idx // cycle
+
+              candidate_c = list(key_tuple)
+              candidate_c[match_index] = f'layers_{src_layer_idx}'
+              if tuple(candidate_c) in src_flat:
+                found_candidate = tuple(candidate_c)
+
         if found_candidate:
           src_val = src_flat[found_candidate]
           # Slice the scanned parameter
           sliced_val = _slice_scanned_param(
-              src_val, tgt_val, layer_idx, str(key_tuple)
+              src_val, tgt_val, scan_idx, str(key_tuple)
           )
           sliced_val = _apply_dtype_cast(
               sliced_val, tgt_val.dtype, str(key_tuple)
