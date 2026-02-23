@@ -24,6 +24,7 @@ from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
 from tunix.perf import export as perf_export
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.perf import metrics as perf_metrics
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
@@ -109,6 +110,21 @@ class GrpoPipeline(config.HyperParameters):
     else:
       perf_config.custom_export_fn = (
           perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+      )
+
+    custom_export_fn_path_v2 = perf_metrics_options.custom_export_fn_path_v2
+    if custom_export_fn_path_v2:
+      perf_config.custom_export_fn_v2 = self._get_function_from_path(
+          custom_export_fn_path_v2
+      )
+      if perf_config.custom_export_fn_v2 is None:
+        raise ValueError(
+            "Could not load custom export function v2 from"
+            f" {custom_export_fn_path_v2}"
+        )
+    else:
+      perf_config.custom_export_fn_v2 = (
+          perf_export_v2.DebugMetricsExport.log_export_fn
       )
     return perf_config
 
