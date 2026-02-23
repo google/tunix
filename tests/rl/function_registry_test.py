@@ -77,13 +77,24 @@ class FunctionRegistryTest(parameterized.TestCase):
     self.assertIs(retrieved_func, func)
     self.assertEqual(self.registry.list_functions(category), [name])
 
-  def test_register_duplicate_name_fails_default(self):
+  def test_register_duplicate_name_logs_warning(self):
     self.registry.register("policy_loss_fn", "my_func")(dummy_func_a)
-    with self.assertRaisesRegex(
-        ValueError,
-        "'my_func' is already registered in category 'policy_loss_fn'",
-    ):
+
+    with self.assertLogs(level="WARNING") as cm:
       self.registry.register("policy_loss_fn", "my_func")(dummy_func_b)
+
+    self.assertTrue(
+        any(
+            "Function 'my_func' is already registered in category"
+            " 'policy_loss_fn'"
+            in output
+            for output in cm.output
+        )
+    )
+
+    self.assertEqual(
+        self.registry.get("policy_loss_fn", "my_func"), dummy_func_b
+    )
 
   def test_custom_categories_behavior(self):
     custom_cats = ["custom1", "custom2"]

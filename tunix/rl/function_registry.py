@@ -15,6 +15,7 @@
 
 import threading
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from absl import logging
 
 _POLICY_LOSS_FN_CATEGORY = "policy_loss_fn"
 _ADVANTAGE_ESTIMATOR_CATEGORY = "advantage_estimator"
@@ -74,9 +75,11 @@ class FunctionRegistry:
           self._registry[category] = {}
 
         if name in self._registry[category]:
-          raise ValueError(
-              f"Function '{name}' is already registered in category"
-              f" '{category}'."
+          logging.warning(
+              "Function '%s' is already registered in category '%s'. "
+              "Overwriting with new function.",
+              name,
+              category,
           )
         self._registry[category][name] = func
       return func
