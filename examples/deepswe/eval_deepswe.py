@@ -37,9 +37,9 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-4B-Instruct-2507")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 # Evaluation
-MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "1"))
 MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "512"))
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "8"))
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "1"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
 
@@ -77,7 +77,6 @@ dataset = load_dataset(
     split=DATASET_SPLIT,
     cache_dir=DATASET_CACHE,
     num_proc=32,
-    trust_remote_code=True,
 )
 
 entries = [e for e in dataset if "docker_image" in e]
@@ -93,7 +92,7 @@ logger.info(
 
 os.environ.setdefault("KUBECONFIG", "~/.kube/config")
 os.environ.setdefault("NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool")
-os.environ.setdefault("NODE_SELECTOR_VAL", "lance-cpu-pool")
+os.environ.setdefault("NODE_SELECTOR_VAL", "haoyugao-cpu-pool")
 
 from kubernetes import client, config as k8s_config
 
