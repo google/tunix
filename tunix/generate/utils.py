@@ -718,6 +718,54 @@ def _apply_dtype_cast(
   return val
 
 
+def _has_explicit_lm_head_mapping(key_mappings: Mapping[str, Any]) -> bool:
+  for mapping in key_mappings.values():
+    if not isinstance(mapping, tuple) or not mapping:
+      continue
+    target_key = mapping[0]
+    if isinstance(target_key, str) and 'lm_head' in target_key:
+      return True
+  return False
+
+
+def _sync_tied_lm_head_if_needed(
+    tgt_flat_list: List[Tuple[Tuple[str, ...], Any]],
+    key_mappings: Mapping[str, Any],
+) -> None:
+  """Mirrors embed weights into lm_head when the target implies a tied head.
+
+  Some JAX/vLLM state layouts materialize `lm_head` as a separate destination
+  leaf even when the module graph ties it to `embed.embedding`. If the mapping
+  updates only `embed.embedding`, keep `lm_head` in sync unless the caller also
+  provided an explicit `lm_head` mapping.
+
+  Args:
+    tgt_flat_list: A list of tuples, where each tuple contains the nested keys
+      and the corresponding target parameter.
+    key_mappings: A dictionary defining how to map keys from the source state to
+      the target state.
+  """
+  if _has_explicit_lm_head_mapping(key_mappings):
+    return
+
+  embed_param = None
+  lm_head_param = None
+  for flat_key, tgt_param in tgt_flat_list:
+    if flat_key[-1:] == ('embedding',):
+      embed_param = tgt_param
+    elif flat_key[-1:] == ('lm_head',):
+      lm_head_param = tgt_param
+
+  if embed_param is None or lm_head_param is None:
+    return
+  if not hasattr(embed_param, 'value') or not hasattr(lm_head_param, 'value'):
+    return
+  if embed_param.value.shape != lm_head_param.value.shape:
+    return
+
+  lm_head_param.value = embed_param.value
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
@@ -792,6 +840,9 @@ def transfer_state_with_mappings(
 
     # Assign transformed value
     tgt_param.value = val
+
+  # Target rollout engine might have different implementation and have materialized lm_head
+  _sync_tied_lm_head_if_needed(tgt_flat_list, key_mappings)
 
   # Clean up memory
   del unscanned_src_to_tgt_flat
