@@ -109,11 +109,17 @@ jobs:
       run: |
         python -m pytest tests/distillation/ -v --tb=short
 
-    - name: Run tunix RL tests
+    - name: Run tunix RL tests (in parallel)
       run: |
         # RL common tests that passed
         # b/448133814: test_grpo_with_lora_model fails
-        python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/experimental/agentic
+        python -m pytest -n auto -v --tb=short -k "not test_grpo_with_lora_model" tests/rl/ --ignore=tests/rl/experimental/agentic --ignore=tests/rl/rl_utils_test.py --ignore=tests/rl/ppo/ppo_helpers_test.py --ignore=tests/rl/rl_learner_test.py --ignore=tests/rl/common_test.py --ignore=tests/rl/agentic/trajectory/trajectory_collect_engine_test.py --ignore=tests/rl/ppo/ppo_learner_test.py --ignore=tests/rl/grpo/grpo_helpers_test.py --ignore=tests/rl/rl_cluster_test.py --ignore=tests/rl/grpo/grpo_learner_test.py --ignore=tests/rl/experimental/agentic_grpo_learner_test.py
+
+    - name: Run tunix RL tests (in sequence)
+      run: |
+        # RL common tests that passed
+        # b/448133814: test_grpo_with_lora_model fails
+        python -m pytest -v --tb=short -k "not test_grpo_with_lora_model" tests/rl/rl_utils_test.py tests/rl/ppo/ppo_helpers_test.py tests/rl/rl_learner_test.py tests/rl/common_test.py tests/rl/agentic/trajectory/trajectory_collect_engine_test.py tests/rl/ppo/ppo_learner_test.py tests/rl/grpo/grpo_helpers_test.py tests/rl/rl_cluster_test.py tests/rl/grpo/grpo_learner_test.py tests/rl/experimental/agentic_grpo_learner_test.py
 
     - name: Run tunix tests not covered by the above categories
       run: |
