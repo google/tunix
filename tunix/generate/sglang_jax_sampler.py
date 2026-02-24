@@ -255,17 +255,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
   def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
-    bos_tok = (
-        [self.tokenizer.bos_id()]
-        if (self.tokenizer.bos_id() and input_ids[0] != self.tokenizer.bos_id())
-        else []
-    )
-    eos_tok = (
-        [self.tokenizer.eos_id()]
-        if input_ids[-1] != self.tokenizer.eos_id()
-        else []
-    )
-    return bos_tok + input_ids + eos_tok
+    bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
+    return self.tokenizer.dedup_bos_ids(bos_tok + input_ids)
 
   def __call__(
       self,
