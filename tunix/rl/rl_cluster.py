@@ -408,13 +408,18 @@ class RLCluster:
         raise ValueError("Rollout vllm model version or path is missing!")
 
       # TODO(linchai): maybe support offloading for vllm rollout.
-      self._rollout = vllm_rollout.VllmRollout(
-          self.rollout_actor,
-          self.tokenizer,
-          cache_config_or_size=max_kv_cache_size,
-          mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=loaded_vllm_config,
-      )
+      # vLLM handles model initialization and loading internally, so we need to provide
+      # logical axis rules for vLLM to correctly shard the model on the rollout mesh.
+      # This is important for out-of-tree models in vLLM that are implemented with custom
+      # logical axis rules, like is the case for MaxText models.
+      with self._get_logical_axis_rules_cm(Role.ROLLOUT):
+        self._rollout = vllm_rollout.VllmRollout(
+            self.rollout_actor,
+            self.tokenizer,
+            cache_config_or_size=max_kv_cache_size,
+            mesh=self.r2m[Role.ROLLOUT],
+            rollout_config=loaded_vllm_config,
+        )
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
@@ -499,16 +504,19 @@ class RLCluster:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
         )
-      self._critic_trainer = rl_trainer.Trainer(
-          model=self.critic,
-          optimizer=self.cluster_config.training_config.critic_optimizer,
-          training_config=critic_config,
-          custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-          metrics_logger=self._rl_metrics_logger,
-          perf_tracer=self._perf,
-      )
+      with self.cluster_config.role_to_mesh[
+        Role.CRITIC
+      ], self._get_logical_axis_rules_cm(Role.CRITIC):
+        self._critic_trainer = rl_trainer.Trainer(
+            model=self.critic,
+            optimizer=self.cluster_config.training_config.critic_optimizer,
+            training_config=critic_config,
+            custom_checkpoint_metadata_fn=lambda: {
+                "global_step": self.global_steps + 1
+            },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+            metrics_logger=self._rl_metrics_logger,
+            perf_tracer=self._perf,
+        )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
 
@@ -520,16 +528,19 @@ class RLCluster:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
-    self._actor_trainer = rl_trainer.Trainer(
-        model=self.train_actor,
-        optimizer=self.cluster_config.training_config.actor_optimizer,
-        training_config=actor_config,
-        custom_checkpoint_metadata_fn=lambda: {
-            "global_step": self.global_steps + 1
-        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-        metrics_logger=self._rl_metrics_logger,
-        perf_tracer=self._perf,
-    )
+    with self.cluster_config.role_to_mesh[
+        Role.ACTOR
+    ], self._get_logical_axis_rules_cm(Role.ACTOR):
+      self._actor_trainer = rl_trainer.Trainer(
+          model=self.train_actor,
+          optimizer=self.cluster_config.training_config.actor_optimizer,
+          training_config=actor_config,
+          custom_checkpoint_metadata_fn=lambda: {
+              "global_step": self.global_steps + 1
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          metrics_logger=self._rl_metrics_logger,
+          perf_tracer=self._perf,
+      )
     del self.rollout_actor
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -1031,6 +1042,7 @@ class RLCluster:
           eos_id,
       )
 
+  # TODO(b/487384811): Combine mesh and logical axis rules into a single context manager.
   def _get_logical_axis_rules_cm(self, role: Role):
     """Returns a context manager for the logical axis rules.
 
