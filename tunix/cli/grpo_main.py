@@ -13,6 +13,8 @@
 # limitations under the License.
 
 """Main entry point for GRPO training."""
+
+import dataclasses
 from absl import app
 from absl import flags
 from absl import logging
@@ -41,16 +43,33 @@ class GrpoPipeline(config.HyperParameters):
 
   def create_rollout_config(self):
     rollout_config = self.config["rollout_config"]
-    return base_rollout.RolloutConfig(
-        max_tokens_to_generate=rollout_config["total_generation_steps"],
-        max_prompt_length=rollout_config["max_prompt_length"],
-        kv_cache_size=rollout_config["max_prompt_length"]
-        + rollout_config["total_generation_steps"]
-        + 256,
-        temperature=rollout_config["temperature"],
-        top_p=rollout_config["top_p"],
-        top_k=rollout_config["top_k"],
-    )
+
+    # Get all valid field names from RolloutConfig
+    valid_fields = {
+        f.name for f in dataclasses.fields(base_rollout.RolloutConfig)
+    }
+
+    # Filter rollout_config to only include valid keys
+    filtered_config = {
+        k: v for k, v in rollout_config.items() if k in valid_fields
+    }
+
+    # Apply explicit recomputed/renamed values
+    if "total_generation_steps" in rollout_config:
+      filtered_config["max_tokens_to_generate"] = rollout_config[
+          "total_generation_steps"
+      ]
+    if (
+        "max_prompt_length" in rollout_config
+        and "total_generation_steps" in rollout_config
+    ):
+      filtered_config["kv_cache_size"] = (
+          rollout_config["max_prompt_length"]
+          + rollout_config["total_generation_steps"]
+          + 256
+      )
+
+    return base_rollout.RolloutConfig(**filtered_config)
 
   def create_role_to_mesh(self):
     default_mesh = self.create_mesh("actor_model_config")
