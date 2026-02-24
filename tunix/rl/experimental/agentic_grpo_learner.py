@@ -345,7 +345,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-          micro_batch_size=1,
+          micro_batch_size=self._compute_logps_micro_batch_size,
       )
     else:
       ref_per_token_logps = None
@@ -354,7 +354,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
-          micro_batch_size=1,
+          micro_batch_size=self._compute_logps_micro_batch_size,
       )
     else:
       old_per_token_logps = None

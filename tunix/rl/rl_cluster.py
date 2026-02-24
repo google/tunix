@@ -102,7 +102,7 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   mini_batch_size: int | None = None
   train_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
-  compute_logps_micro_batch_size: int | None = None
+  compute_logps_micro_batch_size: int = 1
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
