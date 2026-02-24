@@ -131,7 +131,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly-a9f13e53dc3511599e873225f0e5adbda07f3993
+      image: vllm/vllm-tpu:nightly-20260220-045de52-f5432e3
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
