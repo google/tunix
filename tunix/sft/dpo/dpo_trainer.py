@@ -120,6 +120,8 @@ def compute_logps(
       attn_mask=attention_mask,
       logits_to_keep=logits_to_keep,
   )
+
+  # YY add some comments.
   token_logps = (token_logps * completion_mask).sum(axis=-1)
 
   batch_size = token_logps.shape[0]
