@@ -133,6 +133,17 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           config.mapping_config.lora_to_hf_transpose_keys
       )
 
+    self.num_kv_heads = (
+        None
+        if not self._model_runner
+        else self._model_runner.model_config.get_total_num_kv_heads()
+    )
+    self.head_dim = (
+        None
+        if not self._model_runner
+        else self._model_runner.model_config.head_dim
+    )
+
     logging.debug(f"{self.to_hf_key_mappings=}")
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
@@ -150,6 +161,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
         rollout_engine="sglang_jax",
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
     )
     new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
     self._model_runner.model_state_leaves = new_model_state_leaves
@@ -197,7 +210,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
 
-    args["log_level"] = "debug"
+    args["log_level"] = config.log_level
     return args
 
   def _validate_config(self, config: SglangJaxConfig):
@@ -324,7 +337,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         logging.log_first_n(
             logging.INFO,
             f"Failed to update sampling_params with kwargs: {kwargs}."
-            f" Error: {e}", 1
+            f" Error: {e}",
+            1,
         )
 
     sampling_params = [
@@ -348,6 +362,12 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     )
 
     max_tokens_length = max(len(x) for x in prompt_ids)
+    for idx, _ in enumerate(prompt_ids):
+      print(
+          f"{input_strings[idx]=}, \t\t{sampling_params[idx]=},"
+          f" \t\t{outputs[idx]['text']=}",
+          flush=True,
+      )
 
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)

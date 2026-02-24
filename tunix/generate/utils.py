@@ -18,11 +18,11 @@
 from collections import abc
 import functools
 import gc
-from absl import logging
 import math
 import re
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
+from absl import logging
 from flax import nnx
 from flax import traverse_util
 import jax
@@ -524,7 +524,12 @@ def _apply_transpose(
 
 
 def _align_shape(
-    val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
+    val: jnp.ndarray,
+    tgt_shape: Tuple[int, ...],
+    src_key: str,
+    rollout_engine: str = None,
+    num_kv_heads: Optional[int] = None,
+    head_dim: Optional[int] = None,
 ) -> jnp.ndarray:
   """Align source value shape to target shape through padding or repeating.
 
@@ -532,6 +537,10 @@ def _align_shape(
       val: Source value.
       tgt_shape: Target shape.
       src_key: Source key for error messages.
+      num_kv_heads: Number of KV heads in the source model.  Used to correctly
+        replicate collapsed 1-D KV biases (shape ``[num_kv_heads * head_dim]``)
+        instead of zero-padding them.
+      head_dim: Head dimension.  Must be provided together with ``num_kv_heads``.
 
   Returns:
       Shape-aligned value.
@@ -541,6 +550,34 @@ def _align_shape(
   """
   if val.shape == tgt_shape:
     return val
+
+  # Special case: 1-D collapsed KV bias [num_kv_heads * head_dim] that needs
+  # per-head replication (not zero-padding) when tp_size > num_kv_heads.
+  # E.g. (256,) -> (512,) with num_kv_heads=2, head_dim=128:
+  #   reshape to (2, 128), repeat axis-0 by 2 -> (4, 128), reshape to (512,).
+  # Condition: num_key_value_heads = 2, prod(rollout_mesh.shape) = 4, engine = sglang_jax
+  if (
+      rollout_engine == 'sglang_jax'
+      and len(val.shape) == 1
+      and len(tgt_shape) == 1
+      and re.compile(r'layers\..*\.attn\.(k|v)_bias').match(src_key)
+      and num_kv_heads is not None
+      and head_dim is not None
+      and val.shape[0] == num_kv_heads * head_dim
+      and tgt_shape[0] > val.shape[0]
+      and tgt_shape[0] % val.shape[0] == 0
+  ):
+    repeat_factor = tgt_shape[0] // val.shape[0]
+    logging.info(
+        'Replicating 1-D KV bias on %s: %s -> %s (repeat x%d per head)',
+        src_key,
+        val.shape,
+        tgt_shape,
+        repeat_factor,
+    )
+    val_2d = jnp.reshape(val, (num_kv_heads, head_dim))
+    val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
+    return jnp.reshape(val_2d, tgt_shape)
 
   additional_reshape = False
   new_tgt_shape = tgt_shape
@@ -640,10 +677,14 @@ def _align_shape(
       pad_width.append((0, 0))
 
   logging.info(
-      'Resolved shape mismatch on %s: %s -> %s',
+      'Resolved shape mismatch on %s: %s -> %s, new_tgt_shape: %s, repeat_ops:'
+      ' %s, pad_width: %s',
       src_key,
       original_shape,
       tgt_shape,
+      new_tgt_shape,
+      repeat_ops,
+      pad_width,
   )
 
   for axis, repeat_factor in repeat_ops:
@@ -680,6 +721,8 @@ def transfer_state_with_mappings(
     transpose_keys=None,
     reshard_fn=None,
     rollout_engine=None,
+    num_kv_heads=None,
+    head_dim=None,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
 
@@ -695,6 +738,10 @@ def transfer_state_with_mappings(
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
+    num_kv_heads: Number of KV heads in the source model.  Passed to
+      ``_align_shape`` to enable correct per-head replication of collapsed 1-D
+      KV biases instead of zero-padding.
+    head_dim: Head dimension.  Must be provided together with ``num_kv_heads``.
 
   Returns:
     The target state with the transferred values.
@@ -734,7 +781,14 @@ def transfer_state_with_mappings(
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
-    val = _align_shape(val, tgt_param.value.shape, flat_src_key)
+    val = _align_shape(
+        val,
+        tgt_param.value.shape,
+        flat_src_key,
+        rollout_engine=rollout_engine,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
 
     # Cast to target dtype
     val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
@@ -814,7 +868,9 @@ def _slice_scanned_param(
     logging.warning(
         "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
         ' determine scan axis.',
-        key_path, src_shape, tgt_shape,
+        key_path,
+        src_shape,
+        tgt_shape,
     )
 
   # Fallback to direct slicing if the above logic fails, which may work for simple cases
@@ -824,8 +880,10 @@ def _slice_scanned_param(
   except (IndexError, TypeError) as e:
     logging.debug(
         "Direct slicing fallback failed for '%s' (slice_idx=%d). "
-        "Error: %s. Using original value.",
-        key_path, slice_idx, e
+        'Error: %s. Using original value.',
+        key_path,
+        slice_idx,
+        e,
     )
     return src_val
 
@@ -857,16 +915,12 @@ def transfer_state_directly(
     return hasattr(obj, key)
 
   # Unwrap Source (Remove 'base' wrapper from MaxText)
-  if isinstance(src_state, abc.Mapping) and safe_has_key(
-      src_state, 'base'
-  ):
+  if isinstance(src_state, abc.Mapping) and safe_has_key(src_state, 'base'):
     logging.info("Unwrapping 'base' key from source state.")
     src_state = src_state['base']
 
   # Unwrap Target (Remove nested 'model' wrappers from vLLM)
-  while isinstance(dst_state, abc.Mapping) and safe_has_key(
-      dst_state, 'model'
-  ):
+  while isinstance(dst_state, abc.Mapping) and safe_has_key(dst_state, 'model'):
     logging.info("Unwrapping nested 'model' key from target state.")
     dst_state = dst_state['model']
 
@@ -898,7 +952,9 @@ def transfer_state_directly(
     Uses flat dictionary traversal for efficiency.
     """
     # Fast path for non-dict inputs (leaves)
-    if not isinstance(src, abc.Mapping) or not isinstance(tgt_spec, abc.Mapping):
+    if not isinstance(src, abc.Mapping) or not isinstance(
+        tgt_spec, abc.Mapping
+    ):
       return src, tgt_spec
 
     # Flatten both structures to (path_tuple) -> value

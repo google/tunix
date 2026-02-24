@@ -3,22 +3,21 @@
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
 
 import contextlib
+import logging
+import math
 import os
+import sys
 
+from absl import logging as absl_logging
 # from etils import ecolab
 from flax import nnx
 import grain
 import jax
 from jax import numpy as jnp
 import optax
-import optax
 from orbax import checkpoint as ocp
 import qwix
 from tqdm.auto import tqdm
-import logging
-import math
-import sys
-from absl import logging as absl_logging
 
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
@@ -30,22 +29,23 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    force=True
+    force=True,
 )
 
 # 3. Explicitly set levels for relevant loggers
 logging.getLogger().setLevel(logging.INFO)
-logging.getLogger('absl').setLevel(logging.INFO)
+logging.getLogger("absl").setLevel(logging.INFO)
 
 # 4. Set absl verbosity
 absl_logging.set_verbosity(absl_logging.INFO)
-absl_logging.set_stderrthreshold('info')
+absl_logging.set_stderrthreshold("info")
 
 print("Logging configured at INFO level.")
 
 
 try:
   import pathwaysutils
+
   pathwaysutils.initialize()
 except:
   pass
@@ -55,48 +55,51 @@ print("jax devices: ", jax.devices())
 # os.environ["WANDB_MODE"] = "online"
 
 # try:
-  # wandb.login()
-  # print("linchai: logged in to W&B")
+# wandb.login()
+# print("linchai: logged in to W&B")
 # except wandb.errors.UsageError as e:
-  # Handle the error, maybe disable W&B logging
-  # wandb.init(mode="disabled")
+# Handle the error, maybe disable W&B logging
+# wandb.init(mode="disabled")
 
 
 # try:
-  # run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  # wandb.init(project="tunix", name=run_name, anonymous="allow")
-  # wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
+# run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+# wandb.init(project="tunix", name=run_name, anonymous="allow")
+# wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
 # except Exception as e:
-  # print(f"linchai: W&B initialization failed with error: {e}")
+# print(f"linchai: W&B initialization failed with error: {e}")
 
 try:
   from etils import ecolab
+
   cm = ecolab.adhoc(
       source=ecolab.FROM_NOTEBOOK_OR_HEAD,
-      reload='tunix',
-      behavior='preferred',
+      reload="tunix",
+      behavior="preferred",
       cell_autoreload=True,
   )
 except:
   import contextlib
+
   cm = contextlib.nullcontext()
 
 with cm:
-  from tunix.models.qwen2 import params as params_lib
+  from tunix.cli.utils import data as data_lib
   from tunix.models.qwen2 import model as model_lib
-  from tunix.sft import metrics_logger
+  from tunix.models.qwen2 import params as params_lib
+  from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.agentic.agents import model_agent
   from tunix.rl.agentic.environments import task_environment
-  from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
-  from tunix.rl import rl_cluster as rl_cluster_lib
+  from tunix.rl.agentic.trajectory import trajectory_collect_engine
+  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig
+  from tunix.rl.experimental.agentic_grpo_learner import GRPOLearner
   from tunix.rl.rollout import base_rollout
-  from tunix.sft import utils as sft_utils
-  from tunix.utils import math_rewards
-  from tunix.utils import compat
+  from tunix.sft import metrics_logger
   from tunix.sft import profiler
-  from tunix.cli.utils import data as data_lib
+  from tunix.sft import utils as sft_utils
+  from tunix.utils import compat
+  from tunix.utils import math_rewards
 
 
 # %%
@@ -210,18 +213,18 @@ if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
   )
 
   rollout_mesh = jax.sharding.Mesh(
-    rollout_device_list,
-    axis_names = ROLLOUT_MESH[1],
-    axis_types = (jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+      rollout_device_list,
+      axis_names=ROLLOUT_MESH[1],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
   )
   print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
   trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
       TRAINER_MESH[0], jax.devices()[-trainer_devices:]
   )
   trainer_mesh = jax.sharding.Mesh(
-    trainer_devices_list,
-    axis_names = TRAINER_MESH[1],
-    axis_types = (jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
+      trainer_devices_list,
+      axis_names=TRAINER_MESH[1],
+      axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
   )
 else:
   rollout_mesh = jax.sharding.Mesh(
@@ -233,9 +236,8 @@ else:
 
 NOTEBOOK_ENV = "git"
 
-from google.cloud import storage
-
 import fsspec
+from google.cloud import storage
 
 file_open = fsspec.open
 
@@ -244,9 +246,9 @@ if NOTEBOOK_ENV == "g3":
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
-  CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
+  DATA_PATH_PREFIX = "gs://aolemila/rl/data"  # gs://tunix/data
+  MODEL_PATH_PREFIX = "gs://aolemila/rl/models"  # gs://tunix/models
+  CKPT_DIR_PREFIX = "gs://aolemila/rl/checkpoints"  # gs://tunix/rl/checkpoints
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
@@ -257,21 +259,26 @@ MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
+import datasets as datasets_lib
 # %%
 import pandas as pd
-import datasets as datasets_lib
 import transformers
 
 Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
 
 
-DEEPSCALER_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json")
-AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+DEEPSCALER_DATA_PATH = os.path.join(
+    DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json"
+)
+AIME_2024_DATA_PATH = os.path.join(
+    DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet"
+)
+
 
 def create_datasets(
     train_ds_path: str = DEEPSCALER_DATA_PATH,
-    test_ds_path: str = AIME_2024_DATA_PATH
+    test_ds_path: str = AIME_2024_DATA_PATH,
 ):
   def preprocess_fn(example, index):
     return {
@@ -280,7 +287,11 @@ def create_datasets(
         "data_source": "math",
     }
 
-  with file_open(train_ds_path) as train_f, file_open(test_ds_path, 'rb') as test_f:
+  print(f"[create_dataset] {train_ds_path=}, {test_ds_path=}", flush=True)
+
+  with file_open(train_ds_path) as train_f, file_open(
+      test_ds_path, "rb"
+  ) as test_f:
     train_df = pd.read_json(train_f)
     test_df = pd.read_parquet(test_f)
 
@@ -297,7 +308,9 @@ def create_datasets(
     prompt = f"{question} {instruction}"
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
-        tokenize=False, add_generation_prompt=True)
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
     return {
         "prompts": prompt,
@@ -308,6 +321,7 @@ def create_datasets(
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
   test_ds = grain.MapDataset.source(test_ds).map(process_item)
   return train_ds, test_ds
+
 
 # %%
 
@@ -376,6 +390,7 @@ def get_lora_model(base_model, model_mesh):
 
   return lora_model
 
+
 # %%
 if TRAIN_WITH_LORA:
   qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
@@ -400,7 +415,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-   log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
+    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
 )
 
 # %%
@@ -458,10 +473,12 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_chunked_prefill_size": 2048,
     "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
     "rollout_sglang_jax_page_size": 128,
+    "rollout_sglang_jax_precompile_token_paddings": [2048],
+    "rollout_sglang_jax_precompile_bs_paddings": [128],
 }
 
-MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
+MAX_NUM_SEQS = 768
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4  # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
@@ -473,7 +490,11 @@ vllm_rollout_dict = {
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": MAX_BATCHED_TOKENS,
-    "rollout_vllm_kwargs": {"kv_cache_metrics": True, "disable_log_stats": False, "enable_prefix_caching": True},
+    "rollout_vllm_kwargs": {
+        "kv_cache_metrics": True,
+        "disable_log_stats": False,
+        "enable_prefix_caching": True,
+    },
 }
 
 if ROLLOUT_ENGINE == "sglang_jax":
@@ -515,10 +536,10 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # checkpointing_options=checkpointing_options,
         # profiler
         # profiler_options = profiler.ProfilerOptions(
-          # profiler_steps=1,
-          # skip_first_n_steps=1,
-          # set_profile_options=False,
-          # log_dir=PROFILER_PATH,
+        # profiler_steps=1,
+        # skip_first_n_steps=1,
+        # set_profile_options=False,
+        # log_dir=PROFILER_PATH,
         # )
     ),
     rollout_config=rollout_engine_config,
@@ -561,7 +582,7 @@ show_hbm_usage("after GRPOLearner creation")
 grpo_trainer.train(train_dataset)
 
 # try:
-  # wandb.finish()
-  # print("WandB session finished successfully")
+# wandb.finish()
+# print("WandB session finished successfully")
 # except Exception as e:
-  # print(f"Warning: Failed to finish WandB session: {e}")
+# print(f"Warning: Failed to finish WandB session: {e}")
