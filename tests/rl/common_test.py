@@ -123,8 +123,10 @@ class CommonTest(parameterized.TestCase):
     completion_tokens = jnp.array(
         [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
     )
+    graphdef, state = nnx.split(model)
     per_token_logps = common.compute_per_token_logps(
-        model,
+        graphdef,
+        state,
         prompt_tokens,
         completion_tokens,
         pad_id=0,
@@ -142,7 +144,8 @@ class CommonTest(parameterized.TestCase):
         rtol=1e-2,
     )
     _, logits = common.compute_per_token_logps(
-        model,
+        graphdef,
+        state,
         prompt_tokens,
         completion_tokens,
         pad_id=0,

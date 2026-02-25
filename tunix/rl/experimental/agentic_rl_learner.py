@@ -58,7 +58,7 @@ MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
-  policy_version: jax.Array | None = None
+  policy_version: np.ndarray | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -705,7 +705,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue, train_micro_batch_size * self._num_generations()
+        train_data_queue, train_micro_batch_size
     )
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
@@ -720,13 +720,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         break
       self._iter_steps += 1
 
+      # TODO(tsbao): Re-enable this once off-policy filtering is needed.
       # Filter out examples that are too old (off-policy).
-      filtered_train_micro_batch = self._filter_outdated_offpolicy_examples(
-          train_micro_batch
-      )
-      if not filtered_train_micro_batch:
-        continue
-      train_micro_batch = filtered_train_micro_batch
+      # filtered_train_micro_batch = self._filter_outdated_offpolicy_examples(
+      #     train_micro_batch
+      # )
+      # if not filtered_train_micro_batch:
+      #   continue
+      # train_micro_batch = filtered_train_micro_batch
 
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
@@ -770,7 +771,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       if hasattr(self.rl_cluster, "critic_trainer"):
         self.rl_cluster.update_critic(
-            train_micro_batch, current_eval_dataset, skip_jit
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
 
       # --- Weight Sync Logic ---

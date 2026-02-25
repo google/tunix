@@ -586,8 +586,10 @@ def ppo_policy_loss_fn(
   use_dual_clip_ppo = epsilon_c is not None
 
   # Get log probs.
+  graphdef, state = nnx.split(model)
   per_token_logps, logits = common.compute_per_token_logps(
-      model,
+      graphdef,
+      state,
       prompt_tokens=prompt_ids,
       completion_tokens=completion_ids,
       pad_id=pad_id,

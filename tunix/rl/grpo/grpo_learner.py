@@ -20,6 +20,7 @@ import dataclasses
 from typing import Iterable, List, Sequence, TypeVar
 
 import flax
+from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -455,8 +456,10 @@ def grpo_loss_fn(
 
   # TODO(yangmu): trace this part as "actor_inference_and_training".
   # with perf_tracer.span("...", list(completion_ids.devices())):
+  graphdef, state = nnx.split(model)
   per_token_logps = common.compute_per_token_logps(
-      model,
+      graphdef,
+      state,
       prompt_tokens=train_example.prompt_ids,
       completion_tokens=completion_ids,
       pad_id=pad_id,
