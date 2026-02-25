@@ -759,6 +759,13 @@ class RLCluster:
 
     cur_metrics = buffered_metrics[-1]
     for metric_name, (value, op) in metrics.items():
+      if metric_name.find("completion") != -1:
+        logging.info(
+            "Buffering metric %s with value %s at step %d",
+            metric_name,
+            value,
+            step,
+        )
       if metric_name not in cur_metrics.metrics:
         cur_metrics.metrics[metric_name] = (
             [value],
@@ -875,11 +882,10 @@ class RLCluster:
       )
 
     logits = None
-    if outputs[0].logits is not None:
+    if all(o.logits is not None for o in outputs):
       logits = list(
           itertools.chain.from_iterable(out.logits for out in outputs)
       )
-
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,

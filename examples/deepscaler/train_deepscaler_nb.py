@@ -20,6 +20,8 @@ import math
 import sys
 from absl import logging as absl_logging
 
+import wandb
+
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
 absl_logging.use_python_logging()
@@ -54,20 +56,20 @@ print("jax devices: ", jax.devices())
 # import os
 # os.environ["WANDB_MODE"] = "online"
 
-# try:
-  # wandb.login()
-  # print("linchai: logged in to W&B")
-# except wandb.errors.UsageError as e:
+try:
+  wandb.login()
+  print("linchai: logged in to W&B")
+except wandb.errors.UsageError as e:
   # Handle the error, maybe disable W&B logging
-  # wandb.init(mode="disabled")
+  wandb.init(mode="disabled")
 
 
-# try:
-  # run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  # wandb.init(project="tunix", name=run_name, anonymous="allow")
+try:
+  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  wandb.init(project="tunix", name=run_name, anonymous="allow")
   # wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
-# except Exception as e:
-  # print(f"linchai: W&B initialization failed with error: {e}")
+except Exception as e:
+  print(f"linchai: W&B initialization failed with error: {e}")
 
 try:
   from etils import ecolab
@@ -113,7 +115,7 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
+ROLLOUT_MESH = [(2, 1), ("fsdp", "tp")]
 TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -143,8 +145,8 @@ EPSILON = 0.2
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 128
+BATCH_SIZE = 64
+MINI_BATCH_SIZE = 64
 NUM_BATCHES = 1250
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -336,6 +338,9 @@ test_dataset, _ = data_lib.post_init_dataset(
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
 )
+for s in train_dataset:
+  print(s)
+  break
 # %%
 show_hbm_usage("Done with loading datasets")
 
@@ -400,7 +405,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-   log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
+   log_dir="gs://linchai-bucket-dev/tensorboard/grpo", flush_every_n_steps=20
 )
 
 # %%
@@ -506,9 +511,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=1,
+        train_micro_batch_size=2,
         # metrics logging
-        # metrics_logging_options=metrics_logging_options,
+        metrics_logging_options=metrics_logging_options,
         # checkpoint saving
         # checkpoint_root_directory=CKPT_DIR,
         # checkpointing_options=checkpointing_options,
@@ -530,7 +535,7 @@ grpo_config = GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt="",
-    max_concurrency=MAX_NUM_SEQS,
+    max_concurrency=BATCH_SIZE,
 )
 
 # %%
@@ -560,8 +565,8 @@ show_hbm_usage("after GRPOLearner creation")
 # %%
 grpo_trainer.train(train_dataset)
 
-# try:
-  # wandb.finish()
-  # print("WandB session finished successfully")
-# except Exception as e:
-  # print(f"Warning: Failed to finish WandB session: {e}")
+try:
+  wandb.finish()
+  print("WandB session finished successfully")
+except Exception as e:
+  print(f"Warning: Failed to finish WandB session: {e}")

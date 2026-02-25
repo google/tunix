@@ -197,7 +197,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
 
-    args["log_level"] = "debug"
+    args["log_level"] = "info"
     return args
 
   def _validate_config(self, config: SglangJaxConfig):

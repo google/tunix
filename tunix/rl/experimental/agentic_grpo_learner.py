@@ -383,6 +383,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         **reward_kwargs,
         expected_step=expected_step,
     )
+    print(f"Rewards computed: {rewards}, expected_step: {expected_step}")
 
     advantage_estimator = function_registry.get_advantage_estimator(
         self.algo_config.advantage_estimator

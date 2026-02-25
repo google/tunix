@@ -148,6 +148,7 @@ class SequenceRewardManager(AbstractRewardManager):
 
     # Sum rewards across all reward functions for each prompt.
     sum_rewards = np.nansum(rewards, axis=1)
+    print(f"Rewards for prompts: {sum_rewards}")
 
     # Prepare metrics for logging.
     log_metrics = self._prepare_log_metrics(
