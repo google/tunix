@@ -78,8 +78,10 @@ class VanillaRollout(base_rollout.BaseRollout):
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
+    graphdef, state = self._sampler.model_def_and_state()
     return common.compute_per_token_logps(
-        self.model(),
+        graphdef,
+        state,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         pad_id=self.pad_id(),

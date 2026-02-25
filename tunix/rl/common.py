@@ -13,6 +13,7 @@
 # limitations under the License.
 """Common RL helper classes and functions."""
 
+from functools import partial  # pylint: disable=g-importing-member
 from typing import Any, Iterable
 
 import flax
@@ -177,7 +178,7 @@ def get_per_token_logps(
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@nnx.jit(static_argnames=("pad_id", "eos_id"))
+@partial(jax.jit, static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
@@ -202,9 +203,13 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask
 
 
-@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"))
+@partial(
+    jax.jit,
+    static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"),
+)
 def compute_per_token_logps(
-    model: nnx.Module,
+    graphdef,
+    state,
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
     pad_id: int,
@@ -214,6 +219,7 @@ def compute_per_token_logps(
     return_logits: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
+  model = nnx.merge(graphdef, state)
   input_tokens, positions, attn_mask = process_ids(
       prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )

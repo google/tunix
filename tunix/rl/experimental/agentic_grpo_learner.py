@@ -33,6 +33,7 @@ import dataclasses
 from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
+from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -345,7 +346,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-          micro_batch_size=1,
+          micro_batch_size=None,
       )
     else:
       ref_per_token_logps = None
@@ -390,7 +391,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         rewards=rewards, num_generations=self.algo_config.num_generations
     )
 
-    policy_versions = jnp.array(policy_versions_list, dtype=jnp.int32)
+    policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
@@ -439,10 +440,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
     )
-    return [
-        rl_utils.get_batch_slice(combined_batch, slice(i, i + 1))
-        for i in range(self.algo_config.num_generations)
-    ]
+    return [combined_batch]
 
 
 @function_registry.register_policy_loss_fn("agentic_grpo")
@@ -486,10 +484,11 @@ def grpo_loss_fn(
       train_example.completion_mask,
   )
 
-  # TODO(yangmu): trace this part as "actor_inference_and_training".
-  # with perf_tracer.span("...", list(completion_ids.devices())):
+  # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
+  graphdef, state = nnx.split(model)
   per_token_logps = common.compute_per_token_logps(
-      model,
+      graphdef,
+      state,
       prompt_tokens=train_example.prompt_ids,
       completion_tokens=completion_ids,
       pad_id=pad_id,

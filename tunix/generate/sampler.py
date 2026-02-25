@@ -202,6 +202,10 @@ class Sampler(base_sampler.BaseSampler):
     self._compiled_decode_fn = jax.jit(self._decode_fn)
     self._compiled_prefill_fn = jax.jit(self._prefill_fn)
 
+  def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
+    """Returns the transformer graphdef and state."""
+    return self._transformer_graphdef, self._flattened_transformer_state
+
   @property
   def transformer(self) -> nnx.Module:
     return nnx.merge(
