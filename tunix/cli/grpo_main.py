@@ -27,6 +27,7 @@ from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
@@ -129,6 +130,24 @@ class GrpoPipeline(config.HyperParameters):
       perf_config.custom_export_fn = (
           perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
       )
+
+    custom_export_fn_path_v2 = perf_metrics_options.custom_export_fn_path_v2
+    if custom_export_fn_path_v2:
+      perf_config.custom_export_fn_v2 = self._get_function_from_path(
+          custom_export_fn_path_v2
+      )
+      if perf_config.custom_export_fn_v2 is None:
+        raise ValueError(
+            "Could not load custom export function v2 from"
+            f" {custom_export_fn_path_v2}"
+        )
+    else:
+      # TODO(noghabi): would it be better to have a abstract class with a
+      # specific interface for export functions?
+      perf_config.custom_export_fn_v2 = perf_export_v2.PerfMetricsExport(
+          perf_metrics_options.log_dir if perf_metrics_options.log_dir else None
+      ).export_metrics
+      # perf_config.custom_export_fn_v2 = perf_export_v2.BasicMetricsExport.log_query
     return perf_config
 
   def create_rl_cluster(self):
