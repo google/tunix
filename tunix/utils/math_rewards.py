@@ -85,6 +85,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
       rewards.append(0.0)
       continue
 
+    found_correct = False
     # Check against all possible correct answers
     found_correct_answer = False
     for ground_truth in processed_ground_truths:
