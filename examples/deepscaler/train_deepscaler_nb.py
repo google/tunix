@@ -346,7 +346,7 @@ if NOTEBOOK_ENV == "g3":
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
   DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
+  MODEL_PATH_PREFIX = "gs://tunix/models"
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
@@ -405,7 +405,7 @@ def create_datasets(
     answer = item["answer"]
 
     instruction = (
-        "Let's think step by step, and put your final answer within \\boxed{}."
+        "Let's think step by step, and very importantly you MUST put your final answer within \\boxed{}."
     )
     prompt = f"{question} {instruction}"
 
@@ -565,7 +565,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_disable_radix_cache": True,
     "rollout_sglang_jax_enable_deterministic_sampling": False,
     "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
+    "rollout_sglang_jax_max_running_requests": 1,
     "rollout_sglang_jax_page_size": 128,
 }
 
