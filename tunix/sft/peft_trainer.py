@@ -274,7 +274,7 @@ class PeftTrainer:
     """Clears the JIT cache of the train and eval step functions.
 
     This function should be called when the trainer is being reused after
-    overiding the training related states, for example, the loss function.
+    overriding the training related states, for example, the loss function.
     """
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
