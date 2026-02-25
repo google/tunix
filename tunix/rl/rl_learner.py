@@ -26,6 +26,7 @@ from absl import logging
 import jax
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
@@ -382,7 +383,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        with self.rl_cluster.perf.span("data_loading"):
+        with self.rl_cluster.perf.span(
+            "data_loading"
+        ), self.rl_cluster.perf_v2.span(
+            perf_constants.DATA_LOADING,
+            tags={
+                perf_constants.GLOBAL_STEP: self.rl_cluster.global_steps,
+            },
+        ):
           # Fetch one training micro-batch
           example = next(iterator)
           cur_batch_size = len(example["prompts"])
@@ -587,6 +595,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             )
             with self.rl_cluster.perf.span(
                 "weight_sync", self.rl_cluster.perf.all_devices
+            ), self.rl_cluster.perf_v2.span(
+                perf_constants.WEIGHT_SYNC,
+                self.rl_cluster.perf_v2.all_devices,
+                tags={
+                    perf_constants.GLOBAL_STEP: self.rl_cluster.global_steps,
+                },
             ):
               with jax.profiler.StepTraceAnnotation(
                   "sync_sampler_weights", step_num=initial_steps
@@ -599,6 +613,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf.export(),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf_v2.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
 

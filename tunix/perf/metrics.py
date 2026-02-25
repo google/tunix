@@ -78,11 +78,13 @@ class PerfMetricsOptions:
   # Path to the custom export function. If set, the custom export function will
   # be loaded from the path instead of being created by PerfMetricsExport.
   custom_export_fn_path: str = ""
+  custom_export_fn_path_v2: str = ""
 
 
 class PerfMetricsConfig:
   # (query, epoch) -> metrics
   custom_export_fn: Callable[[PerfSpanQuery], MetricsT] | None = None
+  custom_export_fn_v2: Callable[[Any], MetricsT] | None = None
 
 
 class PerfSpanQuery:

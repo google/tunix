@@ -154,6 +154,7 @@ class GRPOLearnerTest(parameterized.TestCase):
             ),
             buffer_metrics=lambda x, mode: None,
             perf=trace_lib.NoopTracer(),
+            perf_v2=trace_lib.NoopTracer(),
         )
         self._rollout_micro_batch_size = 1
         self._compute_logps_micro_batch_size = 1
@@ -1158,7 +1159,6 @@ class GRPOLearnerTest(parameterized.TestCase):
         [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
     )
     np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
-
 
 
 if __name__ == '__main__':
