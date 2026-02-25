@@ -145,8 +145,8 @@ EPSILON = 0.2
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 64
-MINI_BATCH_SIZE = 64
+BATCH_SIZE = 2
+MINI_BATCH_SIZE = 2
 NUM_BATCHES = 1250
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -248,7 +248,7 @@ if NOTEBOOK_ENV == "g3":
 else:
   DATA_PATH_PREFIX = "gs://tunix/data"
   MODEL_PATH_PREFIX = "gs://tunix/models"
-  CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
+  CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
@@ -294,7 +294,7 @@ def create_datasets(
     answer = item["answer"]
 
     instruction = (
-        "Let's think step by step, and put your final answer within \\boxed{}."
+        "Let's think step by step, and very importantly you MUST put your final answer within \\boxed{}."
     )
     prompt = f"{question} {instruction}"
     prompt = tokenizer.apply_chat_template(
@@ -460,7 +460,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_disable_radix_cache": True,
     "rollout_sglang_jax_enable_deterministic_sampling": False,
     "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
+    "rollout_sglang_jax_max_running_requests": 1,
     "rollout_sglang_jax_page_size": 128,
 }
 
@@ -515,8 +515,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
         # profiler
         # profiler_options = profiler.ProfilerOptions(
           # profiler_steps=1,
