@@ -991,6 +991,50 @@ def transfer_state_directly(
   gc.collect()
 
 
+def resolve_parallelism_sizes(
+    mesh: jax.sharding.Mesh,
+    tensor_parallel_size: int = -1,
+    data_parallel_size: int = -1,
+    expert_parallel_size: int = 1,
+) -> tuple[int, int, int]:
+  """Resolves tensor, data, and expert parallelism sizes from the mesh.
+
+  Any size passed as -1 is inferred from the total number of mesh devices and
+  the other sizes. Raises ValueError if the mesh size is not divisible by
+  expert_parallel_size.
+
+  Args:
+    mesh: The JAX device mesh.
+    tensor_parallel_size: Desired tensor parallelism degree, or -1 to infer.
+    data_parallel_size: Desired data parallelism degree, or -1 to infer.
+    expert_parallel_size: Desired expert parallelism degree.
+
+  Returns:
+    A tuple of (tensor_parallel_size, data_parallel_size, expert_parallel_size).
+  """
+  total_mesh_devices = math.prod(mesh.shape.values())
+
+  if total_mesh_devices % expert_parallel_size != 0:
+    raise ValueError(
+        f"Total mesh devices ({total_mesh_devices}) must be divisible by"
+        f" expert_parallel_size ({expert_parallel_size})."
+    )
+
+  if tensor_parallel_size == -1 and data_parallel_size == -1:
+    tensor_parallel_size = total_mesh_devices // expert_parallel_size
+    data_parallel_size = 1
+  elif tensor_parallel_size == -1:
+    tensor_parallel_size = (
+        total_mesh_devices // (data_parallel_size * expert_parallel_size)
+    )
+  elif data_parallel_size == -1:
+    data_parallel_size = (
+        total_mesh_devices // (tensor_parallel_size * expert_parallel_size)
+    )
+
+  return tensor_parallel_size, data_parallel_size, expert_parallel_size
+
+
 def verify_state_closeness(golden_state, state, atol=1e-2):
   """Check if the golden NNX state is close to the other NNX state.
 

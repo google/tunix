@@ -20,6 +20,7 @@ import jax
 from jax import sharding
 import jax.numpy as jnp
 import numpy as np
+from unittest import mock
 from tunix.generate import utils
 from tunix.rl import reshard
 
@@ -1183,6 +1184,48 @@ class UtilsTest(parameterized.TestCase):
         jnp.array(200.0, dtype=jnp.bfloat16),
         atol=1e-2
     )
+
+
+class ResolveParallelismSizesTest(parameterized.TestCase):
+
+  def _make_mesh(self, total_devices):
+    """Returns a mock mesh with the given total device count."""
+    mesh = mock.MagicMock()
+    mesh.shape = {"axis": total_devices}
+    return mesh
+
+  @parameterized.named_parameters(
+      ("tp_and_dp_inferred_no_ep", 8, -1, -1, 1, 8, 1, 1),
+      ("tp_and_dp_inferred_with_ep", 8, -1, -1, 2, 4, 1, 2),
+      ("tp_inferred_with_ep", 8, -1, 2, 2, 2, 2, 2),
+      ("dp_inferred_with_ep", 8, 2, -1, 2, 2, 2, 2),
+      ("all_explicit", 8, 4, 2, 1, 4, 2, 1),
+  )
+  def test_resolve_parallelism_sizes(
+      self,
+      total_devices,
+      tp_in,
+      dp_in,
+      ep_in,
+      expected_tp,
+      expected_dp,
+      expected_ep,
+  ):
+    mesh = self._make_mesh(total_devices)
+    tp, dp, ep = utils.resolve_parallelism_sizes(
+        mesh=mesh,
+        tensor_parallel_size=tp_in,
+        data_parallel_size=dp_in,
+        expert_parallel_size=ep_in,
+    )
+    self.assertEqual(tp, expected_tp)
+    self.assertEqual(dp, expected_dp)
+    self.assertEqual(ep, expected_ep)
+
+  def test_resolve_parallelism_sizes_indivisible_ep_raises(self):
+    mesh = self._make_mesh(8)
+    with self.assertRaisesRegex(ValueError, "expert_parallel_size"):
+      utils.resolve_parallelism_sizes(mesh=mesh, expert_parallel_size=3)
 
 
 if __name__ == "__main__":
