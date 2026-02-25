@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import psutil
 from sgl_jax.srt.entrypoints.engine import Engine
 from sgl_jax.srt.utils.common_utils import SUPPORTED_LORA_TARGET_MODULES
 from tunix.generate import base_sampler
@@ -133,7 +134,18 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           config.mapping_config.lora_to_hf_transpose_keys
       )
 
+    self.counter = 0
+    import threading
+
+    self.lock = threading.Lock()
+
     logging.debug(f"{self.to_hf_key_mappings=}")
+
+  def get_and_add(self):
+    with self.lock:
+      tmp = self.counter
+      self.counter = tmp + 1
+      return tmp
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -143,6 +155,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
+    begin_memory = psutil.virtual_memory()
     new_state = utils.transfer_state_with_mappings(
         src_state=updated_weights,
         dst_state=self.transformer_state,
@@ -153,6 +166,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     )
     new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
     self._model_runner.model_state_leaves = new_model_state_leaves
+    end_memory = psutil.virtual_memory()
+    # print(f"[cpu_memory_eval][transfer_state_with_mappings] begin/end/diff_used: {begin_memory.used / (1024 ** 2):.2f}/{end_memory.used / (1024 ** 2):.2f}/{(end_memory.used-begin_memory.used)/(1024 ** 2):.2f}MB", flush=True)
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -197,7 +212,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
 
-    args["log_level"] = "debug"
+    args["log_level"] = config.log_level
     return args
 
   def _validate_config(self, config: SglangJaxConfig):
@@ -324,7 +339,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         logging.log_first_n(
             logging.INFO,
             f"Failed to update sampling_params with kwargs: {kwargs}."
-            f" Error: {e}", 1
+            f" Error: {e}",
+            1,
         )
 
     sampling_params = [
@@ -367,6 +383,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     ]
     output_texts = [o["text"] for o in outputs]
     # To support multisampling, just return the whole list of SamplerOutput
+
     return base_sampler.SamplerOutput(
         text=output_texts,
         logits=None,
@@ -389,14 +406,19 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     loop = get_or_create_event_loop()
 
     if not loop.is_running():
-      res = loop.run_until_complete(coro)
-      return res
+      try:
+        return loop.run_until_complete(coro)
+      finally:
+        loop.close()
 
     import concurrent
 
     def wrap_generate():
       loop = get_or_create_event_loop()
-      return loop.run_until_complete(coro)
+      try:
+        return loop.run_until_complete(coro)
+      finally:
+        loop.close()
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
       future = executor.submit(wrap_generate)

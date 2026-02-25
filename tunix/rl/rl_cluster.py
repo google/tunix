@@ -863,14 +863,22 @@ class RLCluster:
           itertools.chain.from_iterable(out.logprobs for out in outputs)
       )
 
+    logits = None
+    if outputs[0].logits is not None:
+      logits = list(
+          itertools.chain.from_iterable(out.logits for out in outputs)
+      )
+
+    tokens = None
+    if outputs[0].tokens is not None:
+      tokens = list(
+          itertools.chain.from_iterable(out.tokens for out in outputs)
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
-        logits=list(
-            itertools.chain.from_iterable(out.logits for out in outputs)
-        ),
-        tokens=list(
-            itertools.chain.from_iterable(out.tokens for out in outputs)
-        ),
+        logits=logits,
+        tokens=tokens,
         left_padded_prompt_tokens=np.concatenate(
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),

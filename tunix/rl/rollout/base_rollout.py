@@ -48,12 +48,12 @@ class RolloutOutput:
   # Unpadded per-step logits used during sampling.
   # TODO(tsbao): consider enforcing this to be np.ndarray as well,
   # but let's solve it as part of the IS effort.
-  logits: list[jax.Array]
+  logits: list[jax.Array] | None
 
   # Unpadded tokens corresponding to the generated samples.
   # Since tokens need to be transfered to RAM for decoding, we use numpy array
   # here.
-  tokens: list[np.ndarray]
+  tokens: list[np.ndarray] | None
 
   # Left padded prompt tokens.
   # TODO(tsbao): Reconcile with vLLM output and see if we should remove this

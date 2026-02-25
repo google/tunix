@@ -14,17 +14,18 @@
 
 from typing import Any, Callable, Dict, List
 
-from tunix.utils import math_utils
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.rewards import reward_types
-
+from tunix.utils import math_utils
 
 THOUGHT_DELIMITER_END = "</think>"
 RewardOutput = reward_types.RewardOutput
 
 
 @reward.register("deepscaler_math")
-def math_reward(prompts: List[str], completions: List[str], answer: List[str], **kwargs):
+def math_reward(
+    prompts: List[str], completions: List[str], answer: List[str], **kwargs
+):
   """
   A reward function for math tasks that implements the RewardFunction protocol.
   Args:
@@ -34,7 +35,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
   Returns:
     float: The calculated reward value based on math evaluation
   """
-  print(f"Calculating math rewards... with  answer: {answer}, completions: {completions},")
+  # print(f"Calculating math rewards... with  answer: {answer}, completions: {completions},")
   rewards = []
   # Extract information from task_info
   for i, completion in enumerate(completions):
@@ -52,9 +53,9 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
       model_solution = model_response
 
     model_answer = math_utils.extract_answer(model_solution)
-    print(f"Extracted model answer: {model_answer} from model response: {model_response}")
+    # print(f"Extracted model answer: {model_answer} from model response: {model_response}")
     if model_answer is None:
-      print("model_answer is None after extraction")
+      # print("model_answer is None after extraction")
       rewards.append(0.0)
       continue
 
@@ -81,7 +82,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
           processed_ground_truths.append(truth)
 
     if not processed_ground_truths:
-      print("No valid ground truths after processing")
+      # print("No valid ground truths after processing")
       rewards.append(0.0)
       continue
 
@@ -97,7 +98,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
         #   reward_value += 0.5
         rewards.append(reward_value)
         continue
-    print("no possible correct answers matched")
+    # print("no possible correct answers matched")
     rewards.append(0.0)
-  print(f"Calculated rewards: {rewards}")
+  # print(f"Calculated rewards: {rewards}")
   return rewards
