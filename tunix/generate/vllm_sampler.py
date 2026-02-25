@@ -17,7 +17,6 @@
 import atexit
 import dataclasses
 from itertools import count
-import math
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -64,6 +63,7 @@ class VllmConfig:
   mesh: jax.sharding.Mesh = None
   data_parallel_size: int = -1
   tensor_parallel_size: int = -1
+  expert_parallel_size: int = 1
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -199,29 +199,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise NotImplementedError("Only support in memory weight sync as of now.")
 
-  def _find_total_size(self, mesh: jax.sharding.Mesh) -> int:
-    """Finds the tensor parallel size from the mesh."""
-    # since vllm doesn't support DP yet, simply return the total rank size.
-    return math.prod(mesh.shape.values())
-
   def _vllm_config(self, config: VllmConfig):
     """Setup vllm config from Tunix Vllm config."""
     args = config._processed_engine_kwargs.copy()
-
-    tensor_parallel_size = config.tensor_parallel_size
-    data_parallel_size = config.data_parallel_size
-    total_mesh_devices = self._find_total_size(config.mesh)
-
-    if config.tensor_parallel_size == -1 and config.data_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices
-      data_parallel_size = 1
-    elif config.tensor_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices // data_parallel_size
-    elif config.data_parallel_size == -1:
-      data_parallel_size = total_mesh_devices // tensor_parallel_size
-
-    args["data_parallel_size"] = data_parallel_size
-    args["tensor_parallel_size"] = tensor_parallel_size
 
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on
@@ -235,10 +215,19 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
 
-    device_indexes = config.mesh.device_ids.flatten().tolist()
+    tp, dp, ep = utils.resolve_parallelism_sizes(
+        mesh=config.mesh,
+        tensor_parallel_size=config.tensor_parallel_size,
+        data_parallel_size=config.data_parallel_size,
+        expert_parallel_size=config.expert_parallel_size,
+    )
+    args["tensor_parallel_size"] = tp
+    args["data_parallel_size"] = dp
 
+    device_indexes = config.mesh.device_ids.flatten().tolist()
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
+            "expert_parallelism": ep,
             "device_indexes": device_indexes,
             "enable_dp_attention": config.enable_dp_attention,
         }
@@ -414,7 +403,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.top_p = top_p
       if top_k is not None:
         sampling_params.top_k = top_k
-
       if seed is not None:
         sampling_params.seed = seed
 
