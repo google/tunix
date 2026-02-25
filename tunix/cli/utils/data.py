@@ -142,6 +142,7 @@ def post_init_dataset(
     fraction: float = 1.0,
     num_epochs: int = 1,
     prompt_key: Optional[str] = "prompts",
+    custom_batch_fn: Optional[callable] = None,
 ):
   """Applies post-initialization transformations to a dataset.
 
@@ -186,13 +187,13 @@ def post_init_dataset(
   first_segment_dataset = (
       first_segment_dataset.repeat(num_epochs)
       .to_iter_dataset()
-      .batch(batch_size)
+      .batch(batch_size, batch_fn=custom_batch_fn)
   )
   if second_segment_dataset is not None:
     second_segment_dataset = (
         second_segment_dataset.repeat(num_epochs)
         .to_iter_dataset()
-        .batch(batch_size)
+        .batch(batch_size, batch_fn=custom_batch_fn)
     )
 
   return first_segment_dataset, second_segment_dataset

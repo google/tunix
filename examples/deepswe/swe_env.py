@@ -5,6 +5,7 @@ from typing import Any
 from absl import logging 
 import sys
 import numpy as np
+
 try:
     import r2egym
     from r2egym.agenthub.action import Action
@@ -16,6 +17,7 @@ except ImportError:
     Action = None
 
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
+from tunix.rl.agentic.rewards import reward_types
 
 R2EGYM_PATH = os.path.dirname(r2egym.__file__)
 # List of tools to be used in the environment.
@@ -79,30 +81,30 @@ class SWEEnv(BaseTaskEnv):
         self.extra_kwargs["group_id"] = group_id
         self.extra_kwargs["pair_index"] = pair_index
 
-    def _prepare_entry(self, example: dict) -> dict:
-        single_example = {}
-        json_keys = {'modified_files', 'relevant_files', 'modified_entity_summaries'}
-        for k, v in self.entry.items():
-            if k == 'prompts':
-                continue
-            if isinstance(v, (list, np.ndarray)) and len(v) > 0:
-                val = v[0]
-            else:
-                val= v
+    # def _prepare_entry(self, example: dict) -> dict:
+    #     single_example = {}
+    #     json_keys = {'modified_files', 'relevant_files', 'modified_entity_summaries'}
+    #     for k, v in self.entry.items():
+    #         if k == 'prompts':
+    #             continue
+    #         if isinstance(v, (list, np.ndarray)) and len(v) > 0:
+    #             val = v[0]
+    #         else:
+    #             val= v
 
-            if k in json_keys:
-                single_example[k] = json.loads(str(val))
-            else:
-                if  hasattr(val, "item"):
-                    single_example[k] = val.item()
-                else:
-                    single_example[k] = val
-        return single_example
+    #         if k in json_keys:
+    #             single_example[k] = json.loads(str(val))
+    #         else:
+    #             if  hasattr(val, "item"):
+    #                 single_example[k] = val.item()
+    #             else:
+    #                 single_example[k] = val
+    #     return single_example
         
     def _initial_observation(self) -> Any:
         if not self.env:
             # Initialize environment if not created yet.
-            env_args = EnvArgs(ds=self._prepare_entry(self.entry))
+            env_args = EnvArgs(ds=self.entry)
             self.env = RepoEnv(env_args, backend=self.backend, step_timeout=self.step_timeout, reward_timeout=self.reward_timeout, verbose=self.verbose)
         else:
             self.env.reset()
@@ -135,12 +137,6 @@ class SWEEnv(BaseTaskEnv):
 
         return EnvStepResult(observation=str(obs), reward=reward, done=done, info=info)
 
-    def compute_final_reward(self) -> float:
-        os.write(1, b"computing final reward\n")
-        reward = self.env.compute_reward()
-        os.write(1, f"final reward: {reward}\n".encode())
-        return reward
-
     def close(self) -> None:
         """Close the environment and clean up resources."""
         if self.env is not None:
@@ -150,9 +146,14 @@ class SWEEnv(BaseTaskEnv):
             docker_image = self.env.runtime.docker_image
             os.system(f"docker rmi {docker_image}")
             
-    def compute_final_reward(self):
-        """Run tests in the Docker container and return reward (0 or 1)."""
-        return self.env.compute_reward()
+    def compute_final_reward(self, *args):
+        """Run tests in the Docker container and return reward wrapped in an object."""
+        # Get the raw float/int reward
+        reward_val = float(self.env.compute_reward())
+        os.write(1, f"final reward: {reward_val}\n".encode())
+        
+        # Return it wrapped in the object the engine expects
+        return reward_types.RewardOutput(reward=reward_val)
 
     @staticmethod
     def from_dict(extra_info: dict | str) -> "SWEEnv":

@@ -245,7 +245,7 @@ def transform(entry):
     # entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
     # JSON encode lists (excluding the new 'prompts')
     for k, v in entry.items():
-        if isinstance(v, list) and k != 'prompts':
+        if isinstance(v, list):
             entry[k] = json.dumps(v)
     
     # Pre-calculate token length for filtering later
@@ -349,7 +349,6 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     env_class=SWEEnv,
     env_kwargs={"max_steps": MAX_TURNS}, 
     algo_config=grpo_config,
-    prompt_key="problem_statement",
 )
 
 # 2. Execute with num_proc=32 (This is where the real speedup happens)
@@ -374,6 +373,31 @@ grain_dataset = grain.MapDataset.source(dataset)
 
 
 # grain_dataset = grain.MapDataset.source(dataset).map(transform_entry)
+def mixed_type_batch_fn(elements):
+    """
+    elements: A list of dicts. 
+    """
+    batched_data = {}
+    str_set = {'repo_name', 'docker_image', 'commit_hash', 'parsed_commit_content', 'execution_result_content'}
+    dict_set = {'modified_files', 'relevant_files', 'modified_entity_summaries'}
+    int_set = {'num_non_test_files', 'num_non_test_func_methods', 'num_non_test_lines', 'prompt', 'problem_statement', 'expected_output_json'}
+    keys = elements[0].keys()
+
+    for key in keys:
+        if key in str_set or key in dict_set:
+            # Keep these as standard Python lists
+            batched_data[key] = [item[key] for item in elements]
+            
+        elif key in int_set:
+            # Convert these to NumPy arrays. 
+            # np.array() safely handles both single integers and lists of integers.
+            batched_data[key] = np.array([item[key] for item in elements])
+            
+        else:
+            # Fallback for any unexpected keys (defaulting to lists is usually safest)
+            batched_data[key] = [item[key] for item in elements]
+    
+    return batched_data
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset, 
@@ -384,6 +408,7 @@ train_dataset, _ = data_lib.post_init_dataset(
     fraction=TRAIN_FRACTION,
     num_epochs=NUM_EPOCHS,
     prompt_key="problem_statement",
+    custom_batch_fn=mixed_type_batch_fn,  # Disable automatic batching in Grain
 )
 
 # entry = next(iter(train_dataset))

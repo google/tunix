@@ -130,7 +130,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           base_environment.BaseTaskEnv
       ] = task_environment.TaskEnvironment,
       env_kwargs: Dict[str, Any] | None = None,
-      prompt_key: str | None = None,
   ):
     """Initializes the `AgenticRLLearner`.
 
@@ -175,7 +174,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.agent_kwargs = agent_kwargs or {}
     self.env_class = env_class
     self.env_kwargs = env_kwargs or {}
-    self.prompt_key = prompt_key or "prompts"
 
     self._training_config = self.rl_cluster.cluster_config.training_config
 
@@ -327,7 +325,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         micro_batch = {}
         for key in buffer:
           micro_batch_list_slice = buffer[key][:micro_batch_size]
-          micro_batch[key] = np.array(micro_batch_list_slice)
+          micro_batch[key] = micro_batch_list_slice
           buffer[key] = buffer[key][micro_batch_size:]
 
         yield micro_batch
@@ -348,6 +346,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A tuple of agent and environment.
     """
+    unpacked_example = {}
+    for k, v in single_example.items():
+        if hasattr(v, '__len__') and len(v) == 1 and not isinstance(v, str):
+            unpacked_example[k] = v[0]
+        else:
+            unpacked_example[k] = v
+
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
     )  # if agent_kwargs contains "system_prompt", it will be honored.
@@ -355,7 +360,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     assert "group_id" not in self.env_kwargs
     assert "pair_index" not in self.env_kwargs
     env = self.env_class(
-        single_example,
+        unpacked_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
     return agent, env
@@ -640,8 +645,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       logging.warning("Training dataset is empty.")
       self.rl_cluster.close()
       return
-
-    full_batch_size = len(first_item[self.prompt_key])
+    full_batch_size = len(next(iter(first_item.values())))  
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -825,11 +829,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue: The queue to put the batch into.
       batch: The batch of prompts (TrainingInputT).
     """
-    if len(batch[self.prompt_key]) != self._full_batch_size:
+    # Grab the length of the first available value in the batch dictionary
+    current_batch_size = len(next(iter(batch.values())))
+    if current_batch_size != self._full_batch_size:
       logging.warning(
           "partial batch %d vs %d detected. The rest of the batch will be"
           " skipped.",
-          len(batch[self.prompt_key]),
+          current_batch_size,
           self._full_batch_size,
       )
       prompt_queue.put(None)

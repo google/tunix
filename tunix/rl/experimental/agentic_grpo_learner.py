@@ -147,7 +147,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           base_environment.BaseTaskEnv
       ] = task_environment.TaskEnvironment,
       env_kwargs: Dict[str, Any] | None = None,
-      prompt_key: str | None = None,
   ):
     """Initializes the `GRPOTrainer`.
 
@@ -190,7 +189,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         agent_kwargs=agent_kwargs,
         env_class=env_class,
         env_kwargs=env_kwargs,
-        prompt_key=prompt_key,
     )
 
     self._trajectory_logger = None
