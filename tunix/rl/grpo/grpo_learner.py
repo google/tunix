@@ -55,8 +55,9 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
     loss_algo: The loss algorithm to use. To be deprecated.
     num_generations: The number of times the policy generates multiple responses
       for a given prompt within a single training step. This corresponds to 'G'
-      in Algorithm 1 in the paper. A higher value means more samples are used to
-      compute relative advantages.
+      in Algorithm 1 in the `paper
+      <https://arxiv.org/abs/2402.03300>`_.
+      A higher value means more samples are used to compute relative advantages.
     num_iterations: The number of iterations per batch (𝜇 in GRPO algo 1).
     beta: The coefficient for the KL divergence penalty (𝛽) in the GRPO loss
       function. This term prevents policy updates from deviating too far from
