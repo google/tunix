@@ -559,6 +559,34 @@ def _align_shape(
   if val.shape == tgt_shape:
     return val
 
+  # Special case: 1-D collapsed KV bias [num_kv_heads * head_dim] that needs
+  # per-head replication (not zero-padding) when tp_size > num_kv_heads.
+  # E.g. (256,) -> (512,) with num_kv_heads=2, head_dim=128:
+  #   reshape to (2, 128), repeat axis-0 by 2 -> (4, 128), reshape to (512,).
+  # Condition: num_key_value_heads = 2, prod(rollout_mesh.shape) = 4, engine = sglang_jax
+  if (
+      rollout_engine == 'sglang_jax'
+      and len(val.shape) == 1
+      and len(tgt_shape) == 1
+      and re.compile(r'layers\..*\.attn\.(k|v)_bias').match(src_key)
+      and num_kv_heads is not None
+      and head_dim is not None
+      and val.shape[0] == num_kv_heads * head_dim
+      and tgt_shape[0] > val.shape[0]
+      and tgt_shape[0] % val.shape[0] == 0
+  ):
+    repeat_factor = tgt_shape[0] // val.shape[0]
+    logging.info(
+        'Replicating 1-D KV bias on %s: %s -> %s (repeat x%d per head)',
+        src_key,
+        val.shape,
+        tgt_shape,
+        repeat_factor,
+    )
+    val_2d = jnp.reshape(val, (num_kv_heads, head_dim))
+    val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
+    return jnp.reshape(val_2d, tgt_shape)
+
   additional_reshape = False
   new_tgt_shape = tgt_shape
   # Handle rank mismatch
@@ -684,10 +712,14 @@ def _align_shape(
       pad_width.append((0, 0))
 
   logging.info(
-      'Resolved shape mismatch on %s: %s -> %s',
+      'Resolved shape mismatch on %s: %s -> %s, new_tgt_shape: %s, repeat_ops:'
+      ' %s, pad_width: %s',
       src_key,
       original_shape,
       tgt_shape,
+      new_tgt_shape,
+      repeat_ops,
+      pad_width,
   )
 
   for axis, repeat_factor in repeat_ops:
