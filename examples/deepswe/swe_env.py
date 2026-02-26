@@ -62,7 +62,7 @@ class SWEEnv(BaseTaskEnv):
             backend: Backend to use for the environment.
             delete_image: Whether to delete the Docker image after closing.
         """
-        self.entry = entry
+        self.entry = self._unpack_entry(entry)
         self.step_timeout = step_timeout
         self.reward_timeout = reward_timeout
         self.total_steps = 0
@@ -80,6 +80,21 @@ class SWEEnv(BaseTaskEnv):
             
         self.extra_kwargs["group_id"] = group_id
         self.extra_kwargs["pair_index"] = pair_index
+
+    @staticmethod
+    def _unpack_entry(entry: dict) -> dict:
+        """Utility to clean up and unpack the dataset entry."""
+        unpacked_entry = {}
+        for k, v in entry.items():
+            if isinstance(v, np.ndarray):
+                unpacked_entry[k] = v.item()
+            elif isinstance(v, list):
+                if len(v) != 1:
+                    raise ValueError(f"Can only convert a list of size 1; got size {len(v)}")
+                unpacked_entry[k] = v[0]
+            else:
+                unpacked_entry[k] = v
+        return unpacked_entry
 
     # def _prepare_entry(self, example: dict) -> dict:
     #     single_example = {}

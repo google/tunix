@@ -1,4 +1,3 @@
-
 # [WIP] Reproduction of [DeepSWE](https://www.together.ai/blog/deepswe) with Multi-turn Agentic framework.
 import sys
 import os
@@ -74,6 +73,7 @@ from system_prompts import (
 # Assumed custom imports based on usage
 from swe_agent import SWEAgent
 from swe_env import SWEEnv
+from tunix.rl import reshard
 
 # ==========================================
 # 3. Environment Configuration
@@ -212,6 +212,9 @@ config = model_lib.ModelConfig.qwen3_32b()
 
 
 qwen_reference = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh)
+
+gc.collect()
+
 def get_lora_model(base_model, model_mesh):
   lora_provider = qwix.LoraProvider(
       module_path=(
@@ -220,6 +223,7 @@ def get_lora_model(base_model, model_mesh):
       ),
       rank=RANK,
       alpha=ALPHA,
+      dtype=jnp.bfloat16
   )
 
   model_input = base_model.get_model_input()
@@ -227,12 +231,13 @@ def get_lora_model(base_model, model_mesh):
       base_model, lora_provider, **model_input
   )
 
-  with compat.set_mesh(model_mesh):
-    state = nnx.state(lora_model)
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    nnx.update(lora_model, sharded_state)
-
+#   with compat.set_mesh(model_mesh):
+#     state = nnx.state(lora_model)
+#     pspecs = nnx.get_partition_spec(state)
+#     sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+#     nnx.update(lora_model, sharded_state)
+  lora_model = reshard.reshard_model_to_mesh(lora_model, model_mesh)
+    
   return lora_model
 print("bypass 237")
 qwen_actor = get_lora_model(qwen_reference, train_mesh)

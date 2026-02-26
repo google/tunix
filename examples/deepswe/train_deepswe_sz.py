@@ -244,6 +244,7 @@ def transform(entry):
     # Rename 'prompt' to 'prompts'
     # entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
     # JSON encode lists (excluding the new 'prompts')
+    
     for k, v in entry.items():
         if isinstance(v, list):
             entry[k] = json.dumps(v)

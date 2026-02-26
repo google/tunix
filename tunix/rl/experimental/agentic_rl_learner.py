@@ -346,12 +346,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A tuple of agent and environment.
     """
-    unpacked_example = {}
-    for k, v in single_example.items():
-        if hasattr(v, '__len__') and len(v) == 1 and not isinstance(v, str):
-            unpacked_example[k] = v[0]
-        else:
-            unpacked_example[k] = v
+    # unpacked_example = {}
+    # for k, v in single_example.items():
+    #     if hasattr(v, '__len__') and len(v) == 1 and not isinstance(v, str):
+    #         unpacked_example[k] = v[0]
+    #     else:
+    #         unpacked_example[k] = v
 
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
@@ -360,7 +360,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     assert "group_id" not in self.env_kwargs
     assert "pair_index" not in self.env_kwargs
     env = self.env_class(
-        unpacked_example,
+        single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
     return agent, env
