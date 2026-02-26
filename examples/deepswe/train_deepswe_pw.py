@@ -3,18 +3,6 @@
 import sys
 import os
 import logging
-import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from flax import nnx
-import optax
-from orbax import checkpoint as ocp
-from kubernetes import client, config as k8s_config
-from transformers import AutoTokenizer
-from tunix.cli.utils import data as data_lib
-import datasets as datasets_lib 
-import qwix
-from tunix.utils import compat
-Dataset = datasets_lib.Dataset
 
 
 # ==========================================
@@ -42,6 +30,25 @@ if os.getenv("JAX_PLATFORMS", None) == "proxy":
 
   pathwaysutils.initialize()
 
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+import tunix
+print(f"🕵️ TUNIX LOCATION: {tunix.__file__}")
+
+import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from flax import nnx
+import optax
+from orbax import checkpoint as ocp
+from kubernetes import client, config as k8s_config
+from transformers import AutoTokenizer
+from tunix.cli.utils import data as data_lib
+import datasets as datasets_lib 
+import qwix
+from tunix.utils import compat
+Dataset = datasets_lib.Dataset
 
 # ==========================================
 # 2. Imports from Custom Modules
@@ -111,7 +118,7 @@ except Exception as e:
 # ==========================================
 # MODEL_PATH = "/scratch/models/DeepSeek-R1-Distill-Qwen-1.5B/"
 # MODEL_PATH = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
-MODEL_PATH = os.path.expanduser("~/models/Qwen3-1.7B/")
+MODEL_PATH = MODEL_PATH = "gs://sizhi-dev-europe-west4/models/Qwen3-32B/"
 
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -201,10 +208,10 @@ train_mesh = Mesh(train_devices, axis_names=('fsdp', 'tp'))
 # 7. Model Initialization
 # ==========================================
 print("Initializing Model...")
-config = model_lib.ModelConfig.qwen3_1p7b()
+config = model_lib.ModelConfig.qwen3_32b()
 
 
-qwen_reference = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16)
+qwen_reference = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh)
 def get_lora_model(base_model, model_mesh):
   lora_provider = qwix.LoraProvider(
       module_path=(
@@ -227,8 +234,10 @@ def get_lora_model(base_model, model_mesh):
     nnx.update(lora_model, sharded_state)
 
   return lora_model
+print("bypass 237")
 qwen_actor = get_lora_model(qwen_reference, train_mesh)
 sft_utils.show_hbm_usage()
+print("bypass 239")
 
 # ==========================================
 # 8. Tokenizer & Parser
