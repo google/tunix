@@ -89,6 +89,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ('obs2', 2.0, True, {}),
     ]
     self.mock_env.task = {'some': 'task'}
+    self.mock_env.extra_kwargs = {'group_id': 1}
 
     # Configure mock model call
     self.mock_model_call.side_effect = ['response1', 'response2']
@@ -176,7 +177,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'trajectory_reward': 3.0,  # 1.0 + 2.0
         'policy_version': None,
         'original_input': None,
-        'group_id': None,
+        'group_id': 1,
     }
     self.assertEqual(token_data, expected_tokens)
 

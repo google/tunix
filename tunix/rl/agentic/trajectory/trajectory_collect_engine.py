@@ -183,7 +183,7 @@ class TrajectoryCollectEngine:
           "trajectory_reward": self.agent.trajectory.reward,
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
-          "group_id": self.env.task.get("group_id"),
+          "group_id": self.env.extra_kwargs.get("group_id"),
       }
     elif mode == "Conversation":
       # return raw conversation history
