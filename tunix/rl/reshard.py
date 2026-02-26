@@ -366,7 +366,7 @@ def _get_reshard_fn_pathwaysutils(
           )
 
       # TODO(b/476149699): Migrate to new API once it's verified.
-      return experimental_reshard._reshard_with_sidechannel(
+      return experimental_reshard.reshard(
           x,
           sharding,
           donate=donate,
