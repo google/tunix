@@ -176,7 +176,7 @@ class ConversationAgentBase(LLMBaseAgent):
       )
     elif isinstance(observation, dict) and "question" in observation:
       self._messages.append(
-          {"role": "user", "content": observation["question"]}
+          {"role": "user", "content": observation["prompts"]}
       )
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})
