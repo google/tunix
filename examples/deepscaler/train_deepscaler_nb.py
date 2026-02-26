@@ -142,11 +142,12 @@ BETA = 0.001
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 EPSILON = 0.2
+EPSILON_HIGH = 0.28
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 2
-MINI_BATCH_SIZE = 2
+BATCH_SIZE = 64
+MINI_BATCH_SIZE = 64
 NUM_BATCHES = 1250
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -157,6 +158,8 @@ NUM_EPOCHS = 100  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+
+MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -174,7 +177,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 0.1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 500
+SAVE_INTERVAL_STEPS = 10
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -251,7 +254,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/02")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
@@ -297,10 +300,6 @@ def create_datasets(
         "Let's think step by step, and very importantly you MUST put your final answer within \\boxed{}."
     )
     prompt = f"{question} {instruction}"
-    prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
-        tokenize=False, add_generation_prompt=True)
-
     return {
         "prompts": prompt,
         "question": question,
@@ -316,7 +315,7 @@ def create_datasets(
 tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 
-chat_parser = parser.QwenChatTemplateParser(tokenizer)
+chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 
 # %%
 train_dataset, test_dataset = create_datasets()
@@ -353,7 +352,7 @@ else:
 
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=jnp.bfloat16
+    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 
 
@@ -386,7 +385,7 @@ if TRAIN_WITH_LORA:
   qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
 else:
   qwen2_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=jnp.float32
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
 
 # %%
@@ -460,7 +459,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_disable_radix_cache": True,
     "rollout_sglang_jax_enable_deterministic_sampling": False,
     "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": 1,
+    "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
     "rollout_sglang_jax_page_size": 128,
 }
 
@@ -534,6 +533,7 @@ grpo_config = GRPOConfig(
     max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
     epsilon=EPSILON,
+    epsilon_high=EPSILON_HIGH,
     system_prompt="",
     max_concurrency=BATCH_SIZE,
 )

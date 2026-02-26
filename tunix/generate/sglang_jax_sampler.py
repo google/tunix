@@ -14,6 +14,8 @@
 
 """Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
 
+import asyncio
+import concurrent
 import dataclasses
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -380,22 +382,23 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     loop = get_or_create_event_loop()
 
     if not loop.is_running():
-      res = loop.run_until_complete(coro)
-      return res
+      try:
+        return loop.run_until_complete(coro)
+      finally:
+        loop.close()
 
     import concurrent
 
     def wrap_generate():
       loop = get_or_create_event_loop()
-      return loop.run_until_complete(coro)
+      try:
+        return loop.run_until_complete(coro)
+      finally:
+        loop.close()
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
       future = executor.submit(wrap_generate)
       return future.result()
-
-
-import asyncio
-
 
 def get_or_create_event_loop():
   try:

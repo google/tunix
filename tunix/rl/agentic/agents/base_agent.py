@@ -168,9 +168,9 @@ class ConversationAgentBase(LLMBaseAgent):
       info: Additional information from the environment.
     """
     del reward, done, info  # Unused in default implementation.
-    if isinstance(observation, dict) and "question" in observation:
+    if isinstance(observation, dict) and "prompts" in observation:
       self._messages.append(
-          {"role": "user", "content": observation["question"]}
+          {"role": "user", "content": observation["prompts"]}
       )
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})

@@ -77,8 +77,8 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
         processed_truth = math_utils.extract_answer(truth)
         if processed_truth is not None:
           processed_ground_truths.append(processed_truth)
-        else:
-          processed_ground_truths.append(truth)
+      else:
+        processed_ground_truths.append(truth)
 
     if not processed_ground_truths:
       print("No valid ground truths after processing")
