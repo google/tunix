@@ -66,7 +66,9 @@ def create_dummy_model(
 
   @partial(nnx.jit, static_argnums=(2, 3,))
   def make_param(rngs, scale, shape, dt):
-    return scale * rngs.params.normal(shape, dt)
+    # Call the stream to get a unique JAX key, then use jax.random
+    key = rngs.params() 
+    return scale * jax.random.normal(key, shape, dtype=dt)
 
   def make_random_tensor(path, param, shard=None):
     shape = param.shape

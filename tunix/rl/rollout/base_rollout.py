@@ -158,8 +158,11 @@ class RolloutConfig:
   # Maximum number of concurrent sequences allowed to be processed in vLLM.
   rollout_vllm_max_num_seqs: Optional[int] = None
 
-  # Additional keyword arguments forwarded directly to the vLLM sampler/engine.
+  # Additional keyword arguments forwarded directly to the vLLM engine constructor.
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  # Additional keyword arguments forwarded directly to the vLLM sampling params.
+  rollout_vllm_sampling_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   # SG-Lang JAX specific rollout configs.
 
