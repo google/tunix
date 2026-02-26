@@ -1092,7 +1092,10 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertEqual(
         grpo_learner2.rl_cluster.actor_trainer._restored_custom_metadata,
-        {'global_step': grpo_learner.rl_cluster.global_steps},
+        {
+            'global_step': grpo_learner.rl_cluster.global_steps,
+            'role': rl_cluster_lib.Role.ACTOR.value,
+        },
     )
     # double the batch size it should also work with checkpoint resumption.
     batch_size *= 2
@@ -1159,7 +1162,6 @@ class GRPOLearnerTest(parameterized.TestCase):
         [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
     )
     np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
-
 
 
 if __name__ == '__main__':
