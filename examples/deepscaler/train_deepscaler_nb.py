@@ -304,11 +304,6 @@ def create_datasets(
         "Let's think step by step, and put your final answer within \\boxed{}."
     )
     prompt = f"{question} {instruction}"
-    prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
 
     return {
         "prompts": prompt,
@@ -326,7 +321,7 @@ def create_datasets(
 tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 
-chat_parser = parser.QwenChatTemplateParser(tokenizer)
+chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 
 # %%
 train_dataset, test_dataset = create_datasets()
