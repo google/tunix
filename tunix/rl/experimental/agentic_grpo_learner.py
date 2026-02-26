@@ -37,6 +37,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -341,22 +342,40 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # Masks
     prompt_mask = prompt_ids != pad_value
     if self.algo_config.beta != 0.0:
-      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
-          micro_batch_size=None,
-      )
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
+      with self.rl_cluster.perf_v2.span(
+          perf_constants.REFERENCE_INFERENCE,
+          devices,
+          tags={
+              perf_constants.GLOBAL_STEP: self.rl_cluster.global_steps,
+          },
+      ) as interval_v2:
+        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            pad_id=pad_value,
+            eos_id=eos_value,
+            micro_batch_size=None,
+        )
+        interval_v2.async_end([ref_per_token_logps])
     else:
       ref_per_token_logps = None
     logging.debug("Ref logps computed.")
     if self.algo_config.num_iterations > 1:
-      old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          micro_batch_size=1,
-      )
+      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
+      with self.rl_cluster.perf_v2.span(
+          perf_constants.OLD_ACTOR_INFERENCE,
+          devices,
+          tags={
+              perf_constants.GLOBAL_STEP: self.rl_cluster.global_steps,
+          },
+      ) as interval_v2:
+        old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            micro_batch_size=1,
+        )
+        interval_v2.async_end([old_per_token_logps])
     else:
       old_per_token_logps = None
     logging.debug("Old logps computed.")
@@ -376,20 +395,26 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # environment during rollout, rather than as a post-processing step. This
     # would align with the standard agentic RL pattern and remove the need for
     # `dummy_reward`.
-    rewards = self._compute_rewards(
-        prompts=original_inputs["prompts"],
-        completions=completion_texts,
-        mode=mode,
-        **reward_kwargs,
-        expected_step=expected_step,
-    )
+    with self.rl_cluster.perf_v2.span(
+        perf_constants.ADVANTAGE_COMPUTATION,
+        tags={
+            perf_constants.GLOBAL_STEP: self.rl_cluster.global_steps,
+        },
+    ):
+      rewards = self._compute_rewards(
+          prompts=original_inputs["prompts"],
+          completions=completion_texts,
+          mode=mode,
+          **reward_kwargs,
+          expected_step=expected_step,
+      )
 
-    advantage_estimator = function_registry.get_advantage_estimator(
-        self.algo_config.advantage_estimator
-    )
-    advantages = advantage_estimator(
-        rewards=rewards, num_generations=self.algo_config.num_generations
-    )
+      advantage_estimator = function_registry.get_advantage_estimator(
+          self.algo_config.advantage_estimator
+      )
+      advantages = advantage_estimator(
+          rewards=rewards, num_generations=self.algo_config.num_generations
+      )
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
