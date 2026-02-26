@@ -164,11 +164,12 @@ BETA = 0.001
 # stable updates.
 EPSILON = 0.2
 EPSILON_HIGH = 0.28
+EPSILON_HIGH = 0.28
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 2
-MINI_BATCH_SIZE = 2
+BATCH_SIZE = 64
+MINI_BATCH_SIZE = 64
 NUM_BATCHES = 1250
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -204,7 +205,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 0.1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 500
+SAVE_INTERVAL_STEPS = 10
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -285,7 +286,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/02")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
@@ -500,7 +501,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_disable_radix_cache": True,
     "rollout_sglang_jax_enable_deterministic_sampling": False,
     "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": 1,
+    "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
     "rollout_sglang_jax_page_size": 128,
 }
 
