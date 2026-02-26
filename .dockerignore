@@ -1,0 +1,37 @@
+# --- Version Control ---
+.git
+.gitignore
+.gitattributes
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.env
+.venv/
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- TPU/ML Specific ---
+# Exclude large local datasets (assuming they live in 'data' or 'datasets')
+data/
+datasets/
+*.pod             # TPU pod config files if any
+*.pyc
+
+# --- Build & Logs ---
+*.log
+dist/
+build/
+.cache/
+.google/          # Google Cloud specific temp files
+*.swp             # Vim temp files
+.DS_Store         # macOS noise
+
+# --- Docker ---
+Dockerfile
+Dockerfile.*
+.dockerignore

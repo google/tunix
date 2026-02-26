@@ -1,0 +1,3 @@
+FROM gcr.io/cloud-tpu-multipod-dev/sizhi-deepswe-dev-image:v1
+WORKDIR /app
+COPY . .
