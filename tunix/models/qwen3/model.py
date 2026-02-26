@@ -576,6 +576,7 @@ class MLP(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.shd_config = config.shd_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
@@ -606,12 +607,21 @@ class MLP(nnx.Module):
         ),
     )
 
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def block(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
     activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
     return outputs
+
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.config.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block.__func__)(self, x)
+    else:
+      return self.block(x)
 
 
 class DecoderLayer(nnx.Module):
