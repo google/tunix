@@ -70,6 +70,7 @@ class SWEEnv(BaseTaskEnv):
   ):
     """Initialize the SWE environment.
 
+<<<<<<< HEAD
     Args:
         entry: Dataset containing the tasks. If None, uses default dataset.
         group_id: ID of the group to which the task belongs.
@@ -93,12 +94,63 @@ class SWEEnv(BaseTaskEnv):
         "sweagent",
     ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
     super().__init__(max_steps=max_steps)
+=======
+        Args:
+            entry: Dataset containing the tasks. If None, uses default dataset.
+            group_id: ID of the group to which the task belongs.
+            pair_index: Index of the pair to use. If None, selects a random pair.
+            step_timeout: Timeout for each step in seconds.
+            reward_timeout: Timeout for reward computation in seconds.
+            backend: Backend to use for the environment.
+            delete_image: Whether to delete the Docker image after closing.
+        """
+        self.entry = self._unpack_entry(entry)
+        self.step_timeout = step_timeout
+        self.reward_timeout = reward_timeout
+        self.total_steps = 0
+        self.delete_image = delete_image
+        self.backend = backend
+        self.env = None
+        self.verbose = verbose
+        self.scaffold = scaffold
+        assert scaffold in ["r2egym", "sweagent"], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
+        os.write(1, f"SWEEnv is initialized with: {max_steps}\n".encode())
+        super().__init__(max_steps=max_steps)
+>>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
 
     if not hasattr(self, "extra_kwargs"):
       self.extra_kwargs = {}
 
+<<<<<<< HEAD
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
+=======
+    @staticmethod
+    def _unpack_entry(entry: dict) -> dict:
+        """Utility to clean up and unpack the dataset entry."""
+        unpacked_entry = {}
+        for k, v in entry.items():
+            if isinstance(v, np.ndarray):
+                unpacked_entry[k] = v.item()
+            elif isinstance(v, list):
+                if len(v) != 1:
+                    raise ValueError(f"Can only convert a list of size 1; got size {len(v)}")
+                unpacked_entry[k] = v[0]
+            else:
+                unpacked_entry[k] = v
+        return unpacked_entry
+
+    # def _prepare_entry(self, example: dict) -> dict:
+    #     single_example = {}
+    #     json_keys = {'modified_files', 'relevant_files', 'modified_entity_summaries'}
+    #     for k, v in self.entry.items():
+    #         if k == 'prompts':
+    #             continue
+    #         if isinstance(v, (list, np.ndarray)) and len(v) > 0:
+    #             val = v[0]
+    #         else:
+    #             val= v
+>>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
 
   def _initial_observation(self) -> Any:
     if not self.env:

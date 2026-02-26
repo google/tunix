@@ -349,6 +349,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A tuple of agent and environment.
     """
+<<<<<<< HEAD
+=======
+    # unpacked_example = {}
+    # for k, v in single_example.items():
+    #     if hasattr(v, '__len__') and len(v) == 1 and not isinstance(v, str):
+    #         unpacked_example[k] = v[0]
+    #     else:
+    #         unpacked_example[k] = v
+>>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
 
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
