@@ -68,6 +68,7 @@ class VllmRollout(base_rollout.BaseRollout):
                 "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
                 **rollout_config.rollout_vllm_kwargs,
             },
+            sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
     )
     state = nnx.state(model)
