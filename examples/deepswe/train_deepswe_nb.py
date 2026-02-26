@@ -253,12 +253,29 @@ dataset = datasets.load_dataset(
 
 
 def transform(entry):
+<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
   for k, v in entry.items():
     if isinstance(v, list):
       entry[k] = json.dumps(v)
 
   return entry
 
+=======
+    # Rename 'prompt' to 'prompts'
+    # entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
+    # JSON encode lists (excluding the new 'prompts')
+    
+    for k, v in entry.items():
+        if isinstance(v, list):
+            entry[k] = json.dumps(v)
+    
+    # Pre-calculate token length for filtering later
+    # This prevents redundant tokenization during the training loop
+    # tokens = tokenizer.encode(entry["problem_statement"], add_special_tokens=False)
+    # entry["prompt_length"] = len(tokens)
+    
+    return entry
+>>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script):examples/deepswe/train_deepswe_sz.py
 
 dataset = dataset.map(
     transform,
