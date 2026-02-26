@@ -408,11 +408,12 @@ class RLCluster:
         raise ValueError("Rollout vllm model version or path is missing!")
 
       # TODO(linchai): maybe support offloading for vllm rollout.
-      # vLLM handles model initialization and loading internally, so we need to provide
-      # logical axis rules for vLLM to correctly shard the model on the rollout mesh.
-      # This is important for out-of-tree models in vLLM that are implemented with custom
-      # logical axis rules, like is the case for MaxText models.
-      with self._get_logical_axis_rules_cm(Role.ROLLOUT):
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+        # vLLM handles model initialization and loading internally, so we need
+        # to provide logical axis rules for vLLM to correctly shard the model on
+        # the rollout mesh. This is important for out-of-tree models in vLLM
+        # that are implemented with custom logical axis rules, like is the case
+        # for MaxText models.
         self._rollout = vllm_rollout.VllmRollout(
             self.rollout_actor,
             self.tokenizer,
@@ -504,9 +505,7 @@ class RLCluster:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
         )
-      with self.cluster_config.role_to_mesh[
-        Role.CRITIC
-      ], self._get_logical_axis_rules_cm(Role.CRITIC):
+      with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
         self._critic_trainer = rl_trainer.Trainer(
             model=self.critic,
             optimizer=self.cluster_config.training_config.critic_optimizer,
@@ -528,9 +527,7 @@ class RLCluster:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
-    with self.cluster_config.role_to_mesh[
-        Role.ACTOR
-    ], self._get_logical_axis_rules_cm(Role.ACTOR):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
       self._actor_trainer = rl_trainer.Trainer(
           model=self.train_actor,
           optimizer=self.cluster_config.training_config.actor_optimizer,
@@ -782,18 +779,14 @@ class RLCluster:
         self._log_metrics(m)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[
-        Role.ACTOR
-    ] as _, self._get_logical_axis_rules_cm(Role.ACTOR):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[
-        Role.CRITIC
-    ] as _, self._get_logical_axis_rules_cm(Role.CRITIC):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
       with self._perf.span_group("critic_training"):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
@@ -840,9 +833,7 @@ class RLCluster:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    with self.cluster_config.role_to_mesh[
-        Role.ROLLOUT
-    ] as mesh, self._get_logical_axis_rules_cm(Role.ROLLOUT):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -909,9 +900,7 @@ class RLCluster:
       )
     micro_batch_size = micro_batch_size or batch_size
 
-    reference_mesh = self.cluster_config.role_to_mesh[Role.REFERENCE]
-
-    with reference_mesh, self._get_logical_axis_rules_cm(Role.REFERENCE):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
       # This assumes reference model shards same data sharding as actor, which
       # should be true as ref model and policy model shares same architecture.
       dest_prompt_tokens = sharding_utils.shard_input(
@@ -959,9 +948,7 @@ class RLCluster:
       raise ValueError("Cannot get old log probabilities from an empty batch.")
     micro_batch_size = micro_batch_size or batch_size
 
-    with self.cluster_config.role_to_mesh[
-        Role.ROLLOUT
-    ], self._get_logical_axis_rules_cm(Role.ROLLOUT):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -1014,9 +1001,7 @@ class RLCluster:
       eos_id: int,
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    with self.cluster_config.role_to_mesh[
-        Role.CRITIC
-    ], self._get_logical_axis_rules_cm(Role.CRITIC):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       return self.inference_worker.get_values(
           prompt_tokens,
           completion_tokens,
@@ -1032,9 +1017,7 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    with self.cluster_config.role_to_mesh[
-        Role.REWARD
-    ], self._get_logical_axis_rules_cm(Role.REWARD):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REWARD):
       return self.inference_worker.get_rewards(
           prompt_tokens,
           completion_tokens,
@@ -1042,9 +1025,9 @@ class RLCluster:
           eos_id,
       )
 
-  # TODO(b/487384811): Combine mesh and logical axis rules into a single context manager.
-  def _get_logical_axis_rules_cm(self, role: Role):
-    """Returns a context manager for the logical axis rules.
+  @contextlib.contextmanager
+  def _get_mesh_and_logical_axis_rules_cm(self, role: Role):
+    """Returns a context manager for the mesh and logical axis rules.
 
     This is used for models that uses logical sharding, so XLA can generate the
     correct graph based on physical mesh.
@@ -1053,8 +1036,13 @@ class RLCluster:
       role: The role of the model (e.g., ACTOR, CRITIC, REFERENCE, etc.).
     """
     role_logical_axis_rule = self.cluster_config.role_to_logical_axis_rule
-    if role_logical_axis_rule is None or role not in role_logical_axis_rule:
-      return contextlib.nullcontext()
-    cm = contextlib.ExitStack()
-    cm.enter_context(nn_partitioning.axis_rules(role_logical_axis_rule[role]))
-    return cm
+    logical_axis_rule_ctx = contextlib.nullcontext()
+    if role_logical_axis_rule and role in role_logical_axis_rule:
+      logical_axis_rule_ctx = nn_partitioning.axis_rules(
+          role_logical_axis_rule[role]
+      )
+    with contextlib.ExitStack() as stack:
+      yield (
+          stack.enter_context(self.cluster_config.role_to_mesh[role]),
+          stack.enter_context(logical_axis_rule_ctx),
+      )
