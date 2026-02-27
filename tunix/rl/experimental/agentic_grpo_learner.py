@@ -292,11 +292,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
 
-    # Log trajectory.
-    if self._trajectory_logger and trajectories_to_log:
-      for traj in trajectories_to_log:
-        self._trajectory_logger.log_item_async(traj)
-
     # All results in a group share the same prompt.
     prompt_tokens = trajectories[0].traj.get("prompt_tokens")
 
@@ -383,6 +378,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         **reward_kwargs,
         expected_step=expected_step,
     )
+
+    # Log trajectory and rewards. `trajectories_to_log` and `completion_texts`
+    # are updated in the same order.
+    if self._trajectory_logger and trajectories_to_log:
+      for traj, reward in trajectories_to_log, rewards:
+        traj.reward = reward
+        self._trajectory_logger.log_item_async(traj)
 
     advantage_estimator = function_registry.get_advantage_estimator(
         self.algo_config.advantage_estimator
