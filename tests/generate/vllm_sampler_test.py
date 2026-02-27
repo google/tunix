@@ -358,5 +358,58 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
 
+class VllmSamplerConfigTest(absltest.TestCase):
+  """Unit tests for VllmSampler config plumbing (no hardware required)."""
+
+  def _make_mock_mesh(self, total_devices):
+    mesh = mock.MagicMock()
+    mesh.shape = {"axis": total_devices}
+    mesh.device_ids.flatten.return_value.tolist.return_value = list(
+        range(total_devices)
+    )
+    return mesh
+
+  def _make_sampler(self, config):
+    with mock.patch("tunix.generate.vllm_sampler.LLM"), mock.patch(
+        "tunix.generate.vllm_sampler.tok_adapter.TokenizerAdapter"
+    ):
+      return vllm_sampler.VllmSampler(
+          tokenizer=mock.MagicMock(), config=config
+      )
+
+  def test_expert_parallel_size_plumbed_to_sharding(self):
+    mesh = self._make_mock_mesh(8)
+    config = vllm_sampler.VllmConfig(
+        mesh=mesh,
+        expert_parallel_size=2,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    # EP=2 should appear in the sharding strategy passed to vLLM.
+    self.assertEqual(sharding_strategy["expert_parallelism"], 2)
+    # With 8 total devices and EP=2, TP should be inferred as 4 and DP as 1.
+    self.assertEqual(sampler.args["tensor_parallel_size"], 4)
+    self.assertEqual(sampler.args["data_parallel_size"], 1)
+
+  def test_default_expert_parallel_size_is_one(self):
+    mesh = self._make_mock_mesh(8)
+    config = vllm_sampler.VllmConfig(
+        mesh=mesh,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    self.assertEqual(sharding_strategy["expert_parallelism"], 1)
+    self.assertEqual(sampler.args["tensor_parallel_size"], 8)
+    self.assertEqual(sampler.args["data_parallel_size"], 1)
+
+
 if __name__ == "__main__":
   absltest.main()

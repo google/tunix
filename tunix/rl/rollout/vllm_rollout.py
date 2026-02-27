@@ -61,6 +61,7 @@ class VllmRollout(base_rollout.BaseRollout):
                 ),
                 "tensor_parallel_size": rollout_config.tensor_parallel_size,
                 "data_parallel_size": rollout_config.data_parallel_size,
+                "expert_parallel_size": rollout_config.expert_parallel_size,
                 "max_num_batched_tokens": (
                     rollout_config.rollout_vllm_max_num_batched_tokens
                 ),

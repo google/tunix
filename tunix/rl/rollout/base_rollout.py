@@ -111,6 +111,7 @@ class RolloutConfig:
   # Parallelism configs.
   tensor_parallel_size: int = -1
   data_parallel_size: int = -1
+  expert_parallel_size: int = 1
 
   # vLLM specific rollout configs.
 
