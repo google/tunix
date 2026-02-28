@@ -17,4 +17,4 @@
 from tunix.models.qwen3vl import model
 from tunix.models.qwen3vl import params
 
-__all__ = ['BACKEND_MAPPINGS', 'model', 'params']
+__all__ = ['model', 'params']

@@ -493,6 +493,12 @@ class Qwen3VLVisionParamsTest(absltest.TestCase):
           decimal=6,
           err_msg=f'deepstack_mergers[{i}].norm.scale mismatch',
       )
+      np.testing.assert_array_almost_equal(
+          np.array(orig.norm.bias.value),
+          np.array(loaded.norm.bias.value),
+          decimal=6,
+          err_msg=f'deepstack_mergers[{i}].norm.bias mismatch',
+      )
 
 
 if __name__ == '__main__':
