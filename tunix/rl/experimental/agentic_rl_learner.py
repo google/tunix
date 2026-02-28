@@ -511,10 +511,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
-    num_generations = self.algo_config.num_generations
-    prompt_index = batch_results[0].pair_index // num_generations
-    if mode == rl_cluster_lib.Mode.TRAIN and self._full_batch_size:
-      expected_step = prompt_index // self._full_batch_size
+    if mode == rl_cluster_lib.Mode.TRAIN:
+      expected_step = batch_results[0].group_id // self._full_batch_size
     else:
       expected_step = self.rl_cluster.global_steps
 
