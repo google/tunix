@@ -1123,10 +1123,12 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
             (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
         ),
         'positions': jnp.ones(
-            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+            (3, dummy_batch_size, dummy_seq_len), dtype=jnp.int32
         ),
+        'pixel_values': None,
+        'vision_precomputed': None,
         'cache': None,
         'attention_mask': jnp.ones(
-            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.bool
         ),
     }
