@@ -14,6 +14,7 @@
 
 """Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
 
+import asyncio
 import dataclasses
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -150,6 +151,16 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
         rollout_engine="sglang_jax",
+        num_kv_heads=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_total_num_kv_heads()
+        ),
+        head_dim=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.head_dim
+        ),
     )
     new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
     self._model_runner.model_state_leaves = new_model_state_leaves
@@ -392,9 +403,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     with concurrent.futures.ThreadPoolExecutor() as executor:
       future = executor.submit(wrap_generate)
       return future.result()
-
-
-import asyncio
 
 
 def get_or_create_event_loop():
