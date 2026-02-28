@@ -705,18 +705,14 @@ class DecoderLayer(nnx.Module):
         shd_config=shd_config,
         param_dtype=config.param_dtype,
     )
-    if config.num_experts is None:
-      self.mlp = MLP(
-          config=config,
-          rngs=rngs,
-          param_dtype=config.param_dtype,
-      )
-    else:
-      self.mlp = MoELayer(
-          config=config,
-          rngs=rngs,
-          param_dtype=config.param_dtype,
-      )
+    if config.num_experts is not None:
+      raise ValueError('MoE layers are not yet implemented for Qwen3-VL')
+
+    self.mlp = MLP(
+        config=config,
+        rngs=rngs,
+        param_dtype=config.param_dtype,
+    )
 
   def __call__(
       self,
@@ -866,6 +862,12 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
       x = jax.vmap(_inject)(x, input_tokens, vision_embeds.tokens)
 
     deepstack = vision_embeds.deepstack if vision_embeds else ()
+    deepstack_indexes = (
+        self.config.vision_config.deepstack_visual_indexes
+        if self.config.vision_config
+        else ()
+    )
+    deepstack_map = dict(zip(deepstack_indexes, deepstack))
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
@@ -877,8 +879,8 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
       )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
-      if deepstack and i < len(deepstack) and visual_mask is not None:
-        x = self._apply_deepstack(x, visual_mask, deepstack[i])
+      if i in deepstack_map and visual_mask is not None:
+        x = self._apply_deepstack(x, visual_mask, deepstack_map[i])
 
     x = self.final_norm(x)
     if output_hidden_states:

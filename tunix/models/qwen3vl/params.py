@@ -63,7 +63,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
       # vision: pos embed
       r'model\.visual\.pos_embed.weight': (
           r'visual.pos_embed.embedding',
-          None,  # TODO: (2304, 1024) - transpose?
+          None,
       ),
       # vision: attention
       r'model\.visual\.blocks\.([0-9]+)\.attn.qkv.weight': (
@@ -97,14 +97,6 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
       ),
       r'model\.visual\.blocks\.([0-9]+)\.mlp.linear_fc2.bias': (
           r'visual.blocks.\1.mlp.linear2.bias',
-          None,
-      ),
-      r'model\.visual\.blocks\.([0-9]+)\.mlp.linear_fc3.weight': (
-          r'visual.blocks.\1.mlp.linear3.kernel',
-          ((1, 0), None),
-      ),
-      r'model\.visual\.blocks\.([0-9]+)\.mlp.linear_fc3.bias': (
-          r'visual.blocks.\1.mlp.linear3.bias',
           None,
       ),
       # vision: norm
