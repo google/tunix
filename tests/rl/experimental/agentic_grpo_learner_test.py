@@ -257,11 +257,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     self.assertEqual([len(batch["prompts"]) for batch in micro_batches], [2, 2, 1])
     self.assertEqual(
-        [x for batch in micro_batches for x in batch["prompts"].tolist()],
+        np.concatenate([batch["prompts"] for batch in micro_batches]).tolist(),
         ["p0", "p1", "p2", "p3", "p4"],
     )
     self.assertEqual(
-        [x for batch in micro_batches for x in batch["answer"].tolist()],
+        np.concatenate([batch["answer"] for batch in micro_batches]).tolist(),
         ["a0", "a1", "a2", "a3", "a4"],
     )
 

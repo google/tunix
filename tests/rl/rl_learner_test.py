@@ -153,7 +153,7 @@ class RLLearnerTest(parameterized.TestCase):
 
     self.assertEqual([len(batch["prompts"]) for batch in micro_batches], expected_sizes)
     self.assertEqual(
-        [x for batch in micro_batches for x in batch["prompts"].tolist()],
+        np.concatenate([batch["prompts"] for batch in micro_batches]).tolist(),
         prompts,
     )
 
