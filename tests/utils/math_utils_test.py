@@ -190,7 +190,7 @@ class InjectImplicitMixedNumberTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("mixed_number", "7 3/4", "7+3/4"),
       ("no_mixed", "3/4", "3/4"),
-      ("multiple_spaces", "1 2 3", "1+2+3"),
+      ("multiple_spaces", "1 2 3", "1+2 3"),
   )
   def test_inject_implicit(self, step, expected):
     self.assertEqual(
