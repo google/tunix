@@ -509,6 +509,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
         yield micro_batch
 
+    # Keep the final partial batch on iterator exhaustion to avoid silent
+    # sample loss.
+    if get_buffer_len(buffer) > 0:
+      yield {key: np.array(values) for key, values in buffer.items()}
+
   def train(
       self,
       train_ds: Iterable[TrainingInputT],

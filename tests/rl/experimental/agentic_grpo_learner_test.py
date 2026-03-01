@@ -237,6 +237,34 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     prompt_ids = [r.prompt_ids[0] for r in results]
     self.assertEqual(prompt_ids, [0, 0, 0, 0, 1, 1, 1, 1])
 
+  def test_create_micro_batch_iterator_preserves_tail_samples(self):
+    class _MockTrainer(agentic_grpo_learner.GRPOLearner):
+
+      def __init__(self):
+        pass
+
+    trainer = _MockTrainer()
+    full_batch_iterator = iter(
+        [
+            {
+                "prompts": np.array(["p0", "p1", "p2", "p3", "p4"]),
+                "answer": np.array(["a0", "a1", "a2", "a3", "a4"]),
+            }
+        ]
+    )
+
+    micro_batches = list(trainer._create_micro_batch_iterator(full_batch_iterator, 2))
+
+    self.assertEqual([len(batch["prompts"]) for batch in micro_batches], [2, 2, 1])
+    self.assertEqual(
+        [x for batch in micro_batches for x in batch["prompts"].tolist()],
+        ["p0", "p1", "p2", "p3", "p4"],
+    )
+    self.assertEqual(
+        [x for batch in micro_batches for x in batch["answer"].tolist()],
+        ["a0", "a1", "a2", "a3", "a4"],
+    )
+
   def test_grpo_config_validation(self):
     with self.assertRaisesRegex(
         ValueError, "num_generations must be greater than 1"

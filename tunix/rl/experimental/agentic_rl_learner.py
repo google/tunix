@@ -331,6 +331,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
         yield micro_batch
 
+    # Keep the final partial batch on iterator exhaustion to avoid silent
+    # sample loss.
+    if get_buffer_len(buffer) > 0:
+      yield {key: np.array(values) for key, values in buffer.items()}
+
   def _create_agent_env_pair(
       self, single_example: TrainingInputT, group_id: int, pair_index: int
   ) -> tuple[base_agent.ConversationAgentBase, base_environment.BaseTaskEnv]:
