@@ -34,6 +34,8 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
@@ -194,6 +196,7 @@ class PeftTrainer:
       training_config: TrainingConfig,
       metrics_logger: Optional[MetricsLogger] = None,
       perf_tracer: Optional[perf_trace.Tracer] = None,
+      perf_tracer_v2: Optional[perf_tracer_lib.Tracer] = None,
   ):
     self.model = model
     self.config = training_config
@@ -223,6 +226,11 @@ class PeftTrainer:
     self.is_managed_externally = False
     self._perf_tracer = (
         perf_tracer if perf_tracer is not None else perf_trace.NoopTracer()
+    )
+    self._perf_tracer_v2 = (
+        perf_tracer_v2
+        if perf_tracer_v2 is not None
+        else perf_tracer_lib.NoopTracer()
     )
 
     self._train_steps = 0  # represent # of times model has been updated
@@ -681,11 +689,28 @@ class PeftTrainer:
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
 
+          # Collect tags for the span
+          metadata = self.custom_checkpoint_metadata()
+          global_step = metadata.get("global_step")
+          tags = {
+              # Offset by 1 since global_step is incremented for checkpointing.
+              perf_constants.GLOBAL_STEP: (
+                  global_step - 1 if global_step is not None else None
+              ),
+              perf_constants.ROLE: metadata.get("role"),
+          }
+
           with self._perf_tracer.span(
-              "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
-          ) as span:
+              "peft_train_step",
+              pxla.thread_resources.env.physical_mesh.devices,
+          ) as span, self._perf_tracer_v2.span(
+              perf_constants.PEFT_TRAIN_STEP,
+              pxla.thread_resources.env.physical_mesh.devices,
+              tags=tags,
+          ) as span_v2:
             train_loss, aux = train_step(train_example)
             span.device_end([train_loss])
+            span_v2.async_end([train_loss])
 
           current_time = time.perf_counter()
           step_time_delta = current_time - last_step_completion_time

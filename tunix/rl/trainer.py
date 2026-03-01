@@ -22,6 +22,7 @@ import optax
 from tunix.sft import peft_trainer
 from typing_extensions import override
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-import
 
 
@@ -36,6 +37,7 @@ class Trainer(peft_trainer.PeftTrainer):
       custom_checkpoint_metadata_fn: Callable[[], dict[str, Any]],
       metrics_logger: Optional[MetricsLogger] = None,
       perf_tracer: Optional[perf_trace.Tracer] = None,
+      perf_tracer_v2: Optional[perf_tracer_lib.Tracer] = None,
   ):
     super().__init__(
         model,
@@ -43,6 +45,7 @@ class Trainer(peft_trainer.PeftTrainer):
         training_config,
         metrics_logger,
         perf_tracer,
+        perf_tracer_v2,
     )
     self.rl_metrics_to_log = {}  # Metric name -> key in aux.
     self.tqdm_metrics_to_display = []

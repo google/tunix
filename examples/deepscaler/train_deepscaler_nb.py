@@ -70,6 +70,8 @@ with cm:
   from tunix.utils import math_rewards
   from tunix.utils import compat
   from tunix.cli.utils import data as data_lib
+  from tunix import PerfMetricsConfig
+  from tunix.perf.experimental.export import PerfMetricsExport
 
 try:
   import pathwaysutils
@@ -109,7 +111,7 @@ TOP_K = 50
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
 # paper. The "group" in GRPO comes from here.
-NUM_GENERATIONS = 8
+NUM_GENERATIONS = 2
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -125,15 +127,15 @@ EPSILON_HIGH = 0.28
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
+BATCH_SIZE = 4
+MINI_BATCH_SIZE = 2
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
 
-EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 100  # can potentially train for more epochs
+EVAL_EVERY_N_STEPS = 50  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+NUM_EPOCHS = 10  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
@@ -529,6 +531,12 @@ grpo_config = GRPOConfig(
     max_concurrency=MAX_CONCURRENCY,
 )
 
+# Perf Metrics logging
+perf_metrics_config = PerfMetricsConfig()
+perf_metrics_config.custom_export_fn_v2 = PerfMetricsExport(
+    "/tmp/agentic_perf"
+).export_metrics
+
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
@@ -536,6 +544,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     reference=qwen2_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_metrics_config,
 )
 
 show_hbm_usage("after RLCluster creation")
