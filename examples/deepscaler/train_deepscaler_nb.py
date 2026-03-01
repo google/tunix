@@ -18,6 +18,25 @@ import optax
 from orbax import checkpoint as ocp
 import qwix
 
+import faulthandler, signal, time, os, sys, logging
+def dump_all_threads(signum, frame):
+    path = f"/tmp/py_traceback_{os.getpid()}_{int(time.time())}.log"
+    with open(path, "w") as f:
+        faulthandler.dump_traceback(all_threads=True, file=f)
+    logging.info("Wrote faulthandler thread dump to %s", path)
+
+signal.signal(signal.SIGUSR1, dump_all_threads)
+
+
+DEBUG_LEVEL=os.getenv("DEBUG_LEVEL", "info").lower()
+
+if DEBUG_LEVEL == "debug":
+  logging_level = logging.DEBUG
+  absl_logging_level = absl_logging.DEBUG
+else:
+  logging_level = logging.INFO
+  absl_logging_level = absl_logging.INFO
+
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
 absl_logging.use_python_logging()
@@ -25,21 +44,21 @@ absl_logging.use_python_logging()
 # 2. Configure the root logger
 logging.basicConfig(
     stream=sys.stdout,
-    level=logging.INFO,
+    level=logging_level,
     format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     force=True,
 )
 
 # 3. Explicitly set levels for relevant loggers
-logging.getLogger().setLevel(logging.INFO)
-logging.getLogger("absl").setLevel(logging.INFO)
+logging.getLogger().setLevel(logging_level)
+logging.getLogger("absl").setLevel(absl_logging_level)
 
 # 4. Set absl verbosity
-absl_logging.set_verbosity(absl_logging.INFO)
-absl_logging.set_stderrthreshold("info")
+absl_logging.set_verbosity(absl_logging_level)
+absl_logging.set_stderrthreshold(absl_logging_level)
 
-print("Logging configured at INFO level.")
+print(f"Logging configured at {DEBUG_LEVEL.upper()} level.")
 
 try:
   from etils import ecolab
@@ -101,8 +120,10 @@ TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 512
-TOTAL_GENERATION_STEPS = 512
+# MAX_PROMPT_LENGTH = 512
+# TOTAL_GENERATION_STEPS = 512
+MAX_PROMPT_LENGTH = 2048
+TOTAL_GENERATION_STEPS = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -127,10 +148,10 @@ EPSILON_HIGH = 0.28
 
 # ====== Training ======
 ENABLE_REMAT = True
-# BATCH_SIZE = 128
-# MINI_BATCH_SIZE = 128
-BATCH_SIZE = 16
-MINI_BATCH_SIZE = 16
+BATCH_SIZE = 128
+MINI_BATCH_SIZE = 128
+# BATCH_SIZE = 16
+# MINI_BATCH_SIZE = 16
 MICRO_BATCH_SIZE = 2
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
@@ -475,9 +496,9 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
-# MAX_NUM_SEQS = 768
-MAX_NUM_SEQS = 1
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 1 * 1024 // 4  # 128 * 1k
+MAX_NUM_SEQS = 768
+# MAX_NUM_SEQS = 1
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8  # Divide by 8 for on policy, 1 step off divide by 4
 OFF_POLICY_STEPS = 0
 vllm_rollout_dict = {
     # vllm-tpu specific configs
@@ -515,9 +536,9 @@ if ENABLE_PROFILER:
   from tunix.sft import profiler
   profiler_options = profiler.ProfilerOptions(
       profiler_steps=3,
-      skip_first_n_steps=5,
+      skip_first_n_steps=2,
       set_profile_options=False,
-      log_dir="gs://lancewang-dev-supercomputer-testing/tunix/v6e/xprof_traces",
+      log_dir="gs://lancewang-dev-supercomputer-testing/tunix/pw/xprof_traces",
   )
 
 cluster_config = rl_cluster_lib.ClusterConfig(

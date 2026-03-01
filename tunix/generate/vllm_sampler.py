@@ -42,6 +42,7 @@ from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sampling_params import SamplingParams
+from concurrent.futures import ThreadPoolExecutor
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -148,9 +149,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         def _start_async_loop(q: _queue.Queue):
           # Create and set a new event loop for this background thread.
           loop = asyncio.new_event_loop()
+          loop.set_default_executor(
+              ThreadPoolExecutor(max_workers=1024, thread_name_prefix="vLLM-AsyncLoop")
+          )
           asyncio.set_event_loop(loop)
+          logging.debug("AsyncLLM: created new event loop in thread %s", threading.current_thread().name)
           q.put(loop)
-          loop.run_forever()
+          logging.debug("AsyncLLM: event loop put on queue; entering run_forever")
+          try:
+            loop.run_forever()
+          finally:
+            logging.debug("AsyncLLM: event loop has exited run_forever")
 
         self._async_loop_thread = threading.Thread(
             target=_start_async_loop, args=(self._async_loop_q,), daemon=True
@@ -158,7 +167,27 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         self._async_loop_thread.start()
         # Wait for loop to be ready and store it
         self._async_loop = self._async_loop_q.get()
+        logging.debug(
+          "AsyncLLM: obtained async loop=%s; thread_alive=%s",
+          self._async_loop,
+          bool(self._async_loop_thread and self._async_loop_thread.is_alive()),
+        )
         atexit.register(self.stop)
+
+        async def _log_async_tasks():
+            import asyncio, logging
+            while True:
+                try:
+                    tasks = asyncio.all_tasks(self._async_loop)
+                    logging.debug("Async loop tasks count=%d", len(tasks))
+                    for t in list(tasks):
+                        logging.debug("task=%r state=%s coro=%r", t, getattr(t, "_state", None), t.get_coro())
+                except Exception:
+                    logging.exception("Error while logging async tasks")
+                await asyncio.sleep(10)
+
+        # schedule it on the created loop
+        self._async_loop.create_task(_log_async_tasks())
       else:
         self._driver = self._create_driver()
         atexit.register(self.stop)
@@ -461,10 +490,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     # Schedule using the centralized submit helper to keep scheduling logic
     # in one place and return the synchronous result for compatibility.
-    print(f"YY {prompts=}")
+    logging.debug("AsyncLLM: scheduling async generation for %d prompts", len(prompts))
     fut: concurrent.futures.Future = self.submit_async_generation(
-        prompts, sampling_params
+      prompts, sampling_params
     )
+    logging.debug("AsyncLLM: submitted coroutine, waiting for result")
     return fut.result()
 
   def _generate_async_llm_coroutine(
@@ -477,17 +507,19 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     async def _collect_wrapper():
       async def collect_one(prompt: TokensPrompt) -> RequestOutput:
         request_id = str(next(self._request_counter))
-        collected: List[RequestOutput] = []
+        print(f"YY {request_id=}")
+        final_out: RequestOutput | None = None
+        # Only keep the final output (when finished==True). Ignore intermediate
+        # streaming outputs to avoid partial/unfinished results and reduce memory.
         async for out in self.async_llm.generate(
             prompt, sampling_params, request_id=request_id
         ):
-          print(f"YY {out=}")
-          collected.append(out)
-        if not collected:
-          raise RuntimeError(f"No output produced for request {request_id}")
-        final_out = collected[0]
-        for part in collected[1:]:
-          final_out.add(part, aggregate=True)
+          if getattr(out, "finished", False):
+            final_out = out
+            break
+
+        if final_out is None:
+          raise RuntimeError(f"No finished output produced for request {request_id}")
         return final_out
 
       tasks = [collect_one(p) for p in prompts]
@@ -504,10 +536,27 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     `asyncio.wrap_future` in their event loop to avoid blocking executor
     threads."""
     if getattr(self, "_async_loop", None) is None:
+      logging.error(
+        "submit_async_generation: async loop is None; _async_loop_thread=%s",
+        getattr(self, "_async_loop_thread", None),
+      )
       raise RuntimeError("Async loop not initialized for AsyncLLM")
-    return asyncio.run_coroutine_threadsafe(
-        self._generate_async_llm_coroutine(prompts, sampling_params), self._async_loop
+
+    thread_alive = bool(getattr(self, "_async_loop_thread", None) and self._async_loop_thread.is_alive())
+    logging.debug(
+      "submit_async_generation: scheduling on loop=%s thread_alive=%s prompts=%d",
+      self._async_loop,
+      thread_alive,
+      len(prompts),
     )
+
+    fut = asyncio.run_coroutine_threadsafe(
+      self._generate_async_llm_coroutine(prompts, sampling_params), self._async_loop
+    )
+    logging.debug("submit_async_generation: returned future %s", fut)
+
+
+    return fut
 
 
   def __call__(
@@ -602,7 +651,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       if getattr(self, "async_llm", None) is not None:
         outputs = self._generate_async_llm(prompt_objects, self.sampling_params)
-        print(f"YY outputs={outputs}")
       else:
         outputs = self.llm.generate(
             prompts=prompt_objects,
@@ -633,6 +681,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     # To support multisampling, just return the whole list of SamplerOutput
     # print("Decoded outputs: ", decoded_outputs[0])
+    # print(f"YY {decoded_outputs[0]=}", flush=True)
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
         logits=None,
