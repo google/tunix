@@ -83,7 +83,6 @@ class PerfMetricsExport:
       role_to_devices: A dictionary mapping role names to a list of device
         identifiers.
       trace_writer: An optional PerfettoTraceWriter to log performance traces.
-        If None, a default writer is created.
       log_rollout_time_at_micro_batch_level: Whether to log rollout time at the
         micro batch level. This is a temporary flag. It will be removed once
         metrics are exported at the micro batch.
@@ -94,11 +93,6 @@ class PerfMetricsExport:
     Returns:
       A callable function that takes a PerfSpanQuery and returns MetricsT.
     """
-
-    if trace_writer is None:
-      # If no trace writer is provided, create a default one.
-      logging.info("Creating a default trace writer for metrics export.")
-      trace_writer = PerfettoTraceWriter(None)
 
     r2d = role_to_devices
     if r2d["rollout"] == r2d["actor"] == r2d["refer"]:
@@ -169,11 +163,17 @@ class PerfMetricsExport:
         trace.create_device_timeline_id, refer_mesh.devices.flatten().tolist()
     )
 
-    export_dir = (
-        cluster_config.training_config.perf_metrics_options.log_dir
-        if cluster_config.training_config.perf_metrics_options
-        else None  # A default directory will be used in this case.
-    )
+    perf_metrics_options = cluster_config.training_config.perf_metrics_options
+    if (
+        perf_metrics_options is not None
+        and perf_metrics_options.enable_trace_writer
+    ):
+      # Setting export_dir to None will cause the trace writer to use a
+      # default directory.
+      export_dir = perf_metrics_options.log_dir or None
+      trace_writer = PerfettoTraceWriter(export_dir)
+    else:
+      trace_writer = None
 
     return PerfMetricsExport.from_role_to_devices(
         role_to_devices={
@@ -181,7 +181,7 @@ class PerfMetricsExport:
             "actor": list(actor_devices),
             "refer": list(refer_devices),
         },
-        trace_writer=PerfettoTraceWriter(export_dir),
+        trace_writer=trace_writer,
         log_rollout_time_at_micro_batch_level=log_rollout_time_at_micro_batch_level,
         log_actor_train_time_at_micro_batch_level=log_actor_train_time_at_micro_batch_level,
     )
@@ -196,7 +196,7 @@ class PerfMetricsExport:
   @staticmethod
   def _grpo_metrics_colocated(
       extract_spans_fn: _GrpoExtractSpansFn,
-      trace_writer: PerfettoTraceWriter,
+      trace_writer: PerfettoTraceWriter | None,
       query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are colocated on the same mesh.
@@ -251,12 +251,13 @@ class PerfMetricsExport:
         span.duration for span in actor_train_step_spans
     ]
 
-    trace_writer.log_trace(
-        global_step_groups,
-        rollout_spans,
-        refer_inference_spans,
-        actor_train_groups,
-    )
+    if trace_writer is not None:
+      trace_writer.log_trace(
+          global_step_groups,
+          rollout_spans,
+          refer_inference_spans,
+          actor_train_groups,
+      )
 
     # pyformat: disable
     return {
@@ -276,7 +277,7 @@ class PerfMetricsExport:
   @staticmethod
   def _grpo_metrics_rollout_1_actor_2_reference_2(
       extract_spans_fn: _GrpoExtractSpansFn,
-      trace_writer: PerfettoTraceWriter,
+      trace_writer: PerfettoTraceWriter | None,
       query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: actor and reference are on the same mesh,rollout is on a different mesh.
@@ -343,12 +344,13 @@ class PerfMetricsExport:
         for a, b in zip(actor_train_groups[:-1], refer_inference_spans[1:])
     ] + [0.0]
 
-    trace_writer.log_trace(
-        global_step_groups,
-        rollout_spans,
-        refer_inference_spans,
-        actor_train_groups,
-    )
+    if trace_writer is not None:
+      trace_writer.log_trace(
+          global_step_groups,
+          rollout_spans,
+          refer_inference_spans,
+          actor_train_groups,
+      )
 
     # pyformat: disable
     return {
@@ -372,7 +374,7 @@ class PerfMetricsExport:
   @staticmethod
   def _grpo_metrics_fully_disaggregated(
       extract_spans_fn: _GrpoExtractSpansFn,
-      trace_writer: PerfettoTraceWriter,
+      trace_writer: PerfettoTraceWriter | None,
       query: PerfSpanQuery,
   ) -> MetricsT:
     """GRPO workflow: rollout, actor and reference are all on different meshes.
@@ -442,12 +444,13 @@ class PerfMetricsExport:
         for a, b in zip(actor_train_groups[:-1], actor_train_groups[1:])
     ] + [0.0]
 
-    trace_writer.log_trace(
-        global_step_groups,
-        rollout_spans,
-        refer_inference_spans,
-        actor_train_groups,
-    )
+    if trace_writer is not None:
+      trace_writer.log_trace(
+          global_step_groups,
+          rollout_spans,
+          refer_inference_spans,
+          actor_train_groups,
+      )
 
     # pyformat: disable
     return {
