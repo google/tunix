@@ -33,7 +33,7 @@ dependencies = [
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
-  "qwix",
+  "qwix>=0.1.5",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
