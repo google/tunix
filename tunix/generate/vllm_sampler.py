@@ -71,6 +71,9 @@ class VllmConfig:
       init=False, default_factory=dict
   )
 
+  # vLLM sampling args that can be directly passed in without additional processing, e.g. temperature, stop etc.
+  sampling_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
+
   def __post_init__(self, engine_kwargs: Optional[Dict[str, Any]]):
     engine_kwargs = engine_kwargs or {}
     self._processed_engine_kwargs = engine_kwargs
@@ -406,20 +409,25 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if seed is not None:
         sampling_params.seed = seed
 
-      if kwargs:
+      self.config.sampling_kwargs.update(kwargs)
+      if self.config.sampling_kwargs:     
         try:
-          sampling_params.update(**kwargs)
           logging.log_first_n(
               logging.INFO,
               "Received additional kwargs that are not explicitly defined in"
-              f" the method signature: {kwargs}. These will be forwarded to the"
+              f" the method signature: {self.config.sampling_kwargs}. These will be forwarded to the"
               " underlying sampler, but please ensure that they are valid.",
               1,
-          )
-        except Exception as e:
+          )   
+          for key, value in self.config.sampling_kwargs.items():
+            logging.debug(
+                "Sampler kwargs setting key '%s' with value '%s'.", key, value
+            )
+            setattr(sampling_params, key, value)
+        except (AttributeError, TypeError) as e:
           logging.log_first_n(
               logging.INFO,
-              f"Failed to update sampling_params with kwargs: {kwargs}."
+              f"Failed to update sampling_params with kwargs: {self.config.sampling_kwargs}."
               f" Error: {e}",
               1,
           )
