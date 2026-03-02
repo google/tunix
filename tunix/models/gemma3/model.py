@@ -115,7 +115,7 @@ class ModelConfig:
       QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM
   )
 
-  siglip_config: vision.SigLIPConfig | None = None
+  vision_config: vision.SigLIPConfig | None = None
 
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
@@ -203,7 +203,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -245,7 +245,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -287,7 +287,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -911,9 +911,9 @@ class Gemma3(nnx.Module):
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
 
-    if config.siglip_config is not None:
+    if config.vision_config is not None:
       self.vision_encoder = vision.SigLiP(
-          config=config.siglip_config,
+          config=config.vision_config,
           shd_config=config.shd_config.siglip,
           rngs=rngs,
       )
@@ -1009,7 +1009,7 @@ class Gemma3(nnx.Module):
       images: jaxtyping.Array | None = None,  # (B, H, W, C) or (B, N, H, W, C)
   ) -> jaxtyping.Array:
     """Encode the text tokens, eventually including the vision embeddings."""
-    if images is not None:
+    if self.config.vision_config is not None and images is not None:
       self._assert_support_mm()
       if len(images.shape) == 4:  # If num_images is 1, add an axis.
         images = einops.rearrange(images, 'b h w c -> b 1 h w c')
@@ -1048,7 +1048,7 @@ class Gemma3(nnx.Module):
     merged_embeddings = merge_embeddings_lib.merge_embeddings(
         text_embeddings=embeddings,
         vision_embeddings=soft_embeddings,
-        mask=tokens == vision.TOKEN_PLACEHOLDER,
+        mask=tokens == self.config.vision_config.soft_token_placeholder_id,  # pytype: disable=attribute-error
     )
 
     return merged_embeddings

@@ -17,7 +17,9 @@ from absl.testing import parameterized
 import jax.numpy as jnp
 import numpy as np
 from tunix.models.gemma3 import utils
-from tunix.models.gemma3 import vision
+
+
+_TOKEN_PLACEHOLDER = 219
 
 
 class UtilsTest(parameterized.TestCase):
@@ -46,8 +48,8 @@ class UtilsTest(parameterized.TestCase):
     tokens = jnp.array([[
         1,
         2,
-        vision.TOKEN_PLACEHOLDER,
-        vision.TOKEN_PLACEHOLDER,
+        _TOKEN_PLACEHOLDER,
+        _TOKEN_PLACEHOLDER,
         3,
         utils._PADDING_ID,
     ]])
