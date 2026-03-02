@@ -1154,7 +1154,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         chat_parser=MockChatParser(),
     )
     self.assertTrue(grpo_learner.should_sync_weights)
-    train_ds = _dummy_dataset(batch_size=2)
+    train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
     with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
       grpo_learner.train(train_ds, None)
 

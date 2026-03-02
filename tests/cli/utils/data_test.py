@@ -72,7 +72,11 @@ class _IterDataset:
   def __init__(self, records):
     self._records = list(records)
 
-  def batch(self, batch_size: int):
+  def batch(self, batch_size: int, *, batch_fn=None):
+    if batch_fn:
+      # In this mock, we don't fully implement custom batch_fn,
+      # but we allow it to be passed.
+      pass
     return _BatchedDataset(self._records, batch_size)
 
 
@@ -98,7 +102,7 @@ class PostInitDatasetTest(absltest.TestCase):
 
     first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=2,
         num_batches=None,
         max_prompt_length=2,  # only the first record should remain
@@ -117,7 +121,7 @@ class PostInitDatasetTest(absltest.TestCase):
 
     first, _ = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=3,
         num_batches=2,  # keep at most 2 batches * 3 = 6 examples
         max_prompt_length=None,
@@ -137,7 +141,7 @@ class PostInitDatasetTest(absltest.TestCase):
 
     first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=2,
         num_batches=None,
         max_prompt_length=None,
@@ -161,7 +165,7 @@ class PostInitDatasetTest(absltest.TestCase):
 
     first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=1,
         num_batches=None,
         max_prompt_length=None,

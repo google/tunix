@@ -347,6 +347,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A tuple of agent and environment.
     """
+
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
     )  # if agent_kwargs contains "system_prompt", it will be honored.
@@ -357,6 +358,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
+
     return agent, env
 
   def _model_call(
@@ -374,7 +376,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
-
     result = self.rl_cluster.generate(
         prompts=chat_lists,
         apply_chat_template=False if self.chat_parser else True,
@@ -638,7 +639,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    full_batch_size = len(first_item["prompts"])
+    full_batch_size = len(next(iter(first_item.values())))
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
@@ -823,11 +824,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue: The queue to put the batch into.
       batch: The batch of prompts (TrainingInputT).
     """
-    if len(batch["prompts"]) != self._full_batch_size:
+    current_batch_size = len(next(iter(batch.values())))
+    if current_batch_size != self._full_batch_size:
       logging.warning(
           "partial batch %d vs %d detected. The rest of the batch will be"
           " skipped.",
-          len(batch["prompts"]),
+          current_batch_size,
           self._full_batch_size,
       )
       prompt_queue.put(None)

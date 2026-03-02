@@ -248,6 +248,11 @@ class TrajectoryCollectEngine:
     obs, _ = await asyncio.get_event_loop().run_in_executor(
         None, self.env.reset
     )
+    if hasattr(self.env, 'compute_final_reward') and callable(
+        self.env.compute_final_reward
+    ):
+      self.final_reward_fn = self.env.compute_final_reward
+
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
