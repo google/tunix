@@ -4,7 +4,7 @@ import ast
 import functools
 import importlib
 import os
-from typing import Any
+from typing import Any, Callable, Optional, Union
 
 from tunix.generate import tokenizer_adapter
 
@@ -136,10 +136,12 @@ def post_init_dataset(
     dataset,
     tokenizer: Tokenizer,
     batch_size: int,
-    num_batches: int | None,
-    max_prompt_length: int | None,
+    num_batches: Optional[int],
+    max_prompt_length: Optional[int],
     fraction: float = 1.0,
     num_epochs: int = 1,
+    prompt_key: str = "prompts",
+    custom_batch_fn: Optional[Callable] = None,
 ):
   """Applies post-initialization transformations to a dataset.
 
@@ -162,7 +164,7 @@ def post_init_dataset(
   if max_prompt_length is not None and max_prompt_length > 0:
 
     def prompt_length_filter(x):
-      tokens = tokenizer.tokenize(x["prompts"])
+      tokens = tokenizer.tokenize(x[prompt_key])
       return len(tokens) <= max_prompt_length
 
     dataset = dataset.filter(prompt_length_filter)
@@ -182,13 +184,13 @@ def post_init_dataset(
   first_segment_dataset = (
       first_segment_dataset.repeat(num_epochs)
       .to_iter_dataset()
-      .batch(batch_size)
+      .batch(batch_size, batch_fn=custom_batch_fn)
   )
   if second_segment_dataset is not None:
     second_segment_dataset = (
         second_segment_dataset.repeat(num_epochs)
         .to_iter_dataset()
-        .batch(batch_size)
+        .batch(batch_size, batch_fn=custom_batch_fn)
     )
 
   return first_segment_dataset, second_segment_dataset
