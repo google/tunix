@@ -159,6 +159,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+      self.llm.collective_rpc("delete_kv_cache") # will free hbm
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+      self._driver.llm_engine.collective_rpc("delete_kv_cache")
 
     if self.to_hf_key_mappings:
       # Mapped Weight Sync (e.g. Vanilla -> vLLM)
@@ -191,6 +197,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
       )
+
+    if self.llm is not None:
+      self.llm.collective_rpc("reinitialize_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
