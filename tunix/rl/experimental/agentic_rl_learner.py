@@ -709,7 +709,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
     for train_micro_batch in train_data_gen:
-      if self.rl_cluster.global_steps >= self._training_config.max_steps:
+      if (
+          self._training_config.max_steps
+          and self.rl_cluster.global_steps >= self._training_config.max_steps
+      ):
         logging.info(
             "Reached max_steps: %d >= %d",
             self.rl_cluster.global_steps,
@@ -825,7 +828,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       batch: The batch of prompts (TrainingInputT).
     """
     current_batch_size = len(next(iter(batch.values())))
-    if current_batch_size != self._full_batch_size:
+    if (
+        self._training_config.max_steps
+        and self.rl_cluster.global_steps >= self._training_config.max_steps
+    ):
+      logging.info(
+          "Reached max_steps: %d >= %d",
+          self.rl_cluster.global_steps,
+          self._training_config.max_steps,
+      )
+      prompt_queue.put(None)
+    elif current_batch_size != self._full_batch_size:
       logging.warning(
           "partial batch %d vs %d detected. The rest of the batch will be"
           " skipped.",
