@@ -124,7 +124,7 @@ jobs:
         pip list | egrep 'jax|flax|libtpu'
         cd ..
         git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
-        pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24
+        # pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24, this line is used to debug accuracy issue, and now annotate it due to https://github.com/google/tunix/issues/995
         pip list | egrep 'jax|flax|libtpu'
         cd tunix
         
