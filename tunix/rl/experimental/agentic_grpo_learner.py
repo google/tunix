@@ -309,9 +309,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     padded_completion_masks = []
 
     max_response_length = self.algo_config.max_response_length
+    clipped_completion_count = 0
     for completion_tokens, completion_mask in zip(
         completion_tokens_list, completion_masks_list
     ):
+      if (
+          len(completion_tokens) >= max_response_length
+          and completion_mask[-1] != eos_value
+      ):
+        clipped_completion_count += 1
       padded_prompt, padded_completion, _ = (
           agentic_utils.pad_prompt_and_completion(
               prompt_tokens,
@@ -369,6 +375,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         [original_input] * self.algo_config.num_generations
     )
 
+    prompt_token_len = len(prompt_tokens)
+    self.rl_cluster.buffer_metrics_async(
+        {
+            "prompts/mean_length": (prompt_token_len, np.mean),
+            "prompts/max_length": (prompt_token_len, np.max),
+            "prompts/min_length": (prompt_token_len, np.min),
+        },
+        mode=mode,
+        step=expected_step,
+    )
+
     reward_kwargs = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
@@ -408,6 +425,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "completions/min_length": (
                 np.min(agg_completion_mask),
                 np.min,
+            ),
+            "completions/clip_ratio": (
+                clipped_completion_count / len(trajectories),
+                np.mean,
             ),
         },
         mode=mode,
