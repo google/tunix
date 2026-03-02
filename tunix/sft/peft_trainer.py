@@ -37,6 +37,7 @@ from tunix.perf import trace as perf_trace
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
+from tunix.sft import losses
 from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
@@ -207,8 +208,8 @@ class PeftTrainer:
     else:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
 
-    self.loss_fn = _default_loss_fn
-    self.eval_loss_fn = _default_loss_fn
+    self.loss_fn = losses.cross_entropy_loss_fn
+    self.eval_loss_fn = losses.cross_entropy_loss_fn
     self.gen_model_input_fn = lambda x: x
     self.checkpoint_manager = checkpoint_manager.CheckpointManager(
         root_directory=self.config.checkpoint_root_directory,
@@ -827,32 +828,3 @@ class PeftTrainer:
       self._buffered_eval_metrics = None
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)
-
-
-def _default_loss_fn(
-    model: nnx.Module,
-    input_tokens: jax.Array,
-    input_mask: jax.Array,
-    positions: jax.Array,
-    attention_mask: jax.Array,
-) -> ArrayLike:
-  """Default loss function for PEFT training."""
-  logits, _ = model(input_tokens, positions, None, attention_mask)
-
-  # Exclude the last step as it does not appear in the targets.
-  logits = logits[:, :-1, :]
-  target_tokens = input_tokens[:, 1:]
-  target_mask = input_mask[:, 1:]
-
-  # Convert the target labels to one-hot encoded vectors.
-  one_hot = jax.nn.one_hot(target_tokens, logits.shape[-1])
-
-  # Don't update on unwanted tokens.
-  one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
-
-  # Define the normalization factor.
-  norm_factor = 1 / (jnp.sum(target_mask) + 1e-8)
-
-  # Return the negative log likelihood (NLL) loss.
-  # Equivalent to: optax.softmax_cross_entropy(logits, one_hot).mean()
-  return -jnp.sum(jax.nn.log_softmax(logits) * one_hot) * norm_factor
