@@ -71,8 +71,26 @@ class VllmConfig:
       init=False, default_factory=dict
   )
 
+  # VllmConfig fields that require special processing before being passed to
+  # vLLM and must not be passed via engine_kwargs, which is a raw pass-through
+  # to vLLM EngineArgs.
+  _RESERVED_KEYS: frozenset[str] = dataclasses.field(
+      default=frozenset(
+          {"tensor_parallel_size", "data_parallel_size", "expert_parallel_size"}
+      ),
+      init=False,
+      repr=False,
+      compare=False,
+  )
+
   def __post_init__(self, engine_kwargs: Optional[Dict[str, Any]]):
     engine_kwargs = engine_kwargs or {}
+    illegal = self._RESERVED_KEYS & engine_kwargs.keys()
+    if illegal:
+      raise ValueError(
+          f"VllmConfig fields must be set directly on VllmConfig, not passed"
+          f" via engine_kwargs: {sorted(illegal)}"
+      )
     self._processed_engine_kwargs = engine_kwargs
     if engine_kwargs:
       for key, value in engine_kwargs.items():
