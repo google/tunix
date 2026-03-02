@@ -524,14 +524,31 @@ def _apply_transpose(
 
 
 def _align_shape(
-    val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
+    val: jnp.ndarray,
+    tgt_shape: Tuple[int, ...],
+    src_key: str,
+    rollout_engine: Optional[str] = None,
+    **kwargs,
 ) -> jnp.ndarray:
   """Align source value shape to target shape through padding or repeating.
+
+  This function attempts to align the shape of a source JAX array (`val`) to a
+  target shape (`tgt_shape`). It supports alignment by:
+  1.  Reshaping: If the product of dimensions matches, especially for attention
+      biases and projections.
+  2.  Padding/Repeating: For attention-related weights, it can pad the head
+      dimension or repeat along the number of heads dimension.
+  3.  Special Handling: Includes specific logic for 1-D KV biases in
+      'sglang_jax' rollout.
 
   Args:
       val: Source value.
       tgt_shape: Target shape.
       src_key: Source key for error messages.
+      rollout_engine: Optional string indicating the rollout engine, used for
+        special-casing certain alignments (e.g., 'sglang_jax').
+      **kwargs: Additional keyword arguments, potentially containing metadata
+        like 'num_kv_heads' and 'head_dim' for specific alignment logic.
 
   Returns:
       Shape-aligned value.
@@ -596,6 +613,27 @@ def _align_shape(
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
       )
+  elif rollout_engine == 'sglang_jax' and re.compile(
+      r'layers\..*\.attn\.(k|v)_bias'
+  ).match(src_key):
+    logging.debug(
+        'Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key
+    )
+    assert tgt_shape[0] > val.shape[0] and tgt_shape[0] % val.shape[0] == 0, (
+        f'Unexpected attention bias shape: {val.shape} and target shape:'
+        f' {tgt_shape}'
+    )
+    repeat_factor = tgt_shape[0] // val.shape[0]
+    logging.debug(
+        'Replicating 1-D KV bias on %s: %s -> %s (repeat x%d per head)',
+        src_key,
+        val.shape,
+        tgt_shape,
+        repeat_factor,
+    )
+    val_2d = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
+    val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
+    return jnp.reshape(val_2d, tgt_shape)
 
   attention_patterns = [
       r'.*(q|k|v|o)_proj.*',
@@ -680,6 +718,7 @@ def transfer_state_with_mappings(
     transpose_keys=None,
     reshard_fn=None,
     rollout_engine=None,
+    **kwargs,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
 
@@ -695,6 +734,8 @@ def transfer_state_with_mappings(
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
+    rollout_engine: The name of the rollout engine being used.
+    **kwargs: Additional keyword arguments.
 
   Returns:
     The target state with the transferred values.
@@ -722,7 +763,7 @@ def transfer_state_with_mappings(
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
 
   # Transfer values with transformations
-  for (flat_src_key, tgt_key), (
+  for (flat_src_key, _), (
       val,
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
@@ -734,7 +775,9 @@ def transfer_state_with_mappings(
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
-    val = _align_shape(val, tgt_param.value.shape, flat_src_key)
+    val = _align_shape(
+        val, tgt_param.value.shape, flat_src_key, rollout_engine, **kwargs
+    )
 
     # Cast to target dtype
     val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)

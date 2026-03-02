@@ -1185,6 +1185,29 @@ class UtilsTest(parameterized.TestCase):
         atol=1e-2
     )
 
+  def test_sglang_jax_1d_kv_bias_alignment(self):
+    """Test 1-D KV bias alignment for sglang_jax rollout engine."""
+    src_key = "layers.0.attn.k_bias"
+    src_k_bias = jnp.arange(128, dtype=jnp.float32)
+    src = MockState({src_key: MockParam(src_k_bias)})
+    dst = MockState(
+        {src_key: MockParam(jnp.zeros((1024,), dtype=jnp.float32))}
+    )
+    mappings = {src_key: (src_key, None)}
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        mappings,
+        rollout_engine="sglang_jax",
+        num_kv_heads=1,
+        head_dim=128,
+    )
+
+    self.assertEqual(result.params[src_key].shape, (1024,))
+    expected = jnp.tile(src_k_bias, 8)
+    self.assertTrue(jnp.allclose(result.params[src_key], expected))
+
 
 class ResolveParallelismSizesTest(parameterized.TestCase):
 
