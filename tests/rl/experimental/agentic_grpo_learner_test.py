@@ -22,7 +22,6 @@ import shutil
 import tempfile
 import types
 from typing import Any, AsyncIterable, Iterable
-import unittest
 from unittest import mock
 
 from absl.testing import absltest
@@ -74,6 +73,7 @@ _MOCK_RESPONSES = [
     "Reinforcement learning can be used to train agents.",
     "Hello there! How can I help you today?",
     "This is a sample response from the model.",
+    "This is a very long sentence that will be used for testing clipped ratio.",
 ]
 
 
@@ -85,13 +85,59 @@ def _mock_generate(
 ) -> base_rollout.RolloutOutput:
   del apply_chat_template, mode, micro_batch_size
   batch_size = len(prompts)
+  text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
+  tokens = [
+      np.arange(len(text[i].split()), dtype=np.int32) for i in range(batch_size)
+  ]
   return base_rollout.RolloutOutput(
-      text=[random.choice(_MOCK_RESPONSES) for _ in range(batch_size)],
-      tokens=np.ones((batch_size, 10), dtype=np.int32),
+      text=text,
+      tokens=tokens,
       left_padded_prompt_tokens=np.ones((batch_size, 8), dtype=np.int32),
       logits=None,
       logprobs=None,
   )
+
+
+def _mock_vocab():
+  unique_words = {word for line in _MOCK_RESPONSES for word in line.split()}
+  words = [
+      "<pad>",
+      "<s>",
+      "</s>",
+      "System:",
+      "User:",
+      "Assistant:",
+      "Initial",
+      "prompt.",
+      "System",
+      "Observation",
+      "after",
+      "step",
+      "Steps",
+      "Remaining:",
+      "You",
+      "have",
+      "reached",
+      "the",
+      "maximum",
+      "number",
+      "of",
+      "steps.",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+  ]
+  words.extend(sorted(unique_words))
+  mapping_text_to_id = {word: i for i, word in enumerate(words)}
+  vocab = test_common.MockVocab(mapping_text_to_id=mapping_text_to_id)
+  return vocab
 
 
 class MySource(grain.RandomAccessDataSource):
@@ -752,7 +798,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       ),
   )
   def test_grpo_learner(self, reward_fns, loss_algo):
-    vocab = test_common.MockVocab()
+    vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
         config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
@@ -832,9 +878,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     for metric_name in [
         "rewards/sum",
         *rewards_metrics,
+        "prompts/mean_length",
+        "prompts/max_length",
+        "prompts/min_length",
         "completions/mean_length",
         "completions/max_length",
         "completions/min_length",
+        "completions/clip_ratio",
+        "time/global_step",
         "test_metric",
     ]:
       if metric_name == "rewards/reward_fn_2" and not isinstance(
@@ -852,11 +903,17 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           grpo_learner.rl_cluster.global_steps,
           msg=f"metric_name: {metric_name}",
       )
-      self.assertLen(
-          rl_metric_logger.get_metric_history("global", metric_name, "eval"),
-          10,
-          msg=f"metric_name: {metric_name}",
-      )
+
+      if metric_name != "time/global_step":
+        self.assertLen(
+            rl_metric_logger.get_metric_history("global", metric_name, "eval"),
+            10,
+            msg=f"metric_name: {metric_name}",
+        )
+    clip_ratio_history = rl_metric_logger.get_metric_history(
+        "global", "completions/clip_ratio", "train"
+    )
+    self.assertGreater(np.sum(clip_ratio_history), 0)
 
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
     for metric_name in ["loss", "kl"]:
@@ -886,7 +943,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       ),
   )
   def test_on_off_policy_training(self, offpolicy_steps):
-    vocab = test_common.MockVocab()
+    vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
         config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
@@ -1011,7 +1068,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
   def test_trajectory_logging(self):
     log_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, log_dir)
-    vocab = test_common.MockVocab()
+    vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
         config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
@@ -1101,7 +1158,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ).reshape(1, split_index),
         ("fsdp", "tp"),
     )
-    vocab = test_common.MockVocab()
+    vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     ref_model = test_common.ToyTransformer(
         config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
@@ -1226,45 +1283,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         self.step += 1
         return Action(action=step.action)
 
-    unique_words = {word for line in _MOCK_RESPONSES for word in line.split()}
-    words = [
-        "<pad>",
-        "<s>",
-        "</s>",
-        "System:",
-        "User:",
-        "Assistant:",
-        "Initial",
-        "prompt.",
-        "System",
-        "Observation",
-        "after",
-        "step",
-        "Steps",
-        "Remaining:",
-        "You",
-        "have",
-        "reached",
-        "the",
-        "maximum",
-        "number",
-        "of",
-        "steps.",
-        "1",
-        "2",
-        "3",
-        "4",
-        "5",
-        "6",
-        "7",
-        "8",
-        "9",
-        "10",
-    ]
-    words.extend(sorted(unique_words))
-    mapping_text_to_id = {word: i for i, word in enumerate(words)}
-
-    vocab = test_common.MockVocab(mapping_text_to_id=mapping_text_to_id)
+    vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
         config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
