@@ -25,6 +25,7 @@ from absl import logging
 from etils import epath
 from google.protobuf import json_format
 from google.protobuf import message
+import numpy as np
 import pandas as pd
 
 def _make_serializable(item: Any) -> Any:
@@ -39,6 +40,16 @@ def _make_serializable(item: Any) -> Any:
     return _make_serializable(dataclasses.asdict(item))
   elif isinstance(item, message.Message):
     return json_format.MessageToDict(item)
+  elif isinstance(item, np.ndarray):
+    return _make_serializable(item.tolist())
+  elif isinstance(item, np.integer):
+    return int(item)
+  elif isinstance(item, np.floating):
+    return float(item)
+  elif isinstance(item, np.bool_):
+    return bool(item)
+  elif isinstance(item, np.str_):
+    return str(item)
   elif isinstance(item, (float, int, bool, str)):
     return item
   else:

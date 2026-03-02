@@ -3,6 +3,7 @@ import tempfile
 from typing import TypedDict
 
 from absl.testing import absltest
+import numpy as np
 import pandas as pd
 from tunix.utils import trajectory_logger
 
@@ -52,6 +53,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
         trajectory_id='t0',
         completion='c0',
         prompt='p0',
+        value=np.int32(0),
     )
     trajectory_logger.log_item(temp_dir, item1)
 
@@ -63,6 +65,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
         trajectory_id='t1',
         completion='c1|pipe',
         prompt='p1</reasoning>',
+        value=np.int32(1),
     )
     trajectory_logger.log_item(temp_dir, item2)
 
@@ -71,6 +74,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
         trajectory_id='t2',
         completion='a, "b", c',
         prompt='a prompt with\na newline',
+        value=np.int32(2),
     )
     trajectory_logger.log_item(temp_dir, item3)
 
@@ -80,6 +84,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
       self.assertEqual(df['trajectory_id'].tolist(), ['t0', 't1', 't2'])
       self.assertEqual(df['completion'][2], 'a, "b", c')
       self.assertEqual(df['prompt'][2], 'a prompt with\na newline')
+      self.assertEqual(df['value'].tolist(), [0, 1, 2])
 
 
 if __name__ == '__main__':
