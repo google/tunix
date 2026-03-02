@@ -212,7 +212,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     self.chat_parser = chat_parser
     self.tokenizer = rl_cluster.tokenizer
-    self.policy_version = 0
+    self.policy_version = self.rl_cluster.global_steps
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
     self._full_batch_size = 0
 
