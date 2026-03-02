@@ -73,10 +73,19 @@ class MetricsBuffer:
 
 @dataclasses.dataclass(frozen=True)
 class PerfMetricsOptions:
-  # Directory to write the raw metrics/events to.
+  """Options for configuring performance metrics.
+
+  Attributes:
+    enable_trace_writer: Whether to enable the trace writer. By default, it is
+      enabled when perf metrics are enabled. If False, the trace will not be
+      written out.
+    log_dir: Directory to write the raw metrics/events to.
+    custom_export_fn_path: Path to the custom export function. If set, the
+      custom export function will be loaded from the path instead of being
+      created by PerfMetricsExport.
+  """
+  enable_trace_writer: bool = True
   log_dir: str = ""
-  # Path to the custom export function. If set, the custom export function will
-  # be loaded from the path instead of being created by PerfMetricsExport.
   custom_export_fn_path: str = ""
 
 
