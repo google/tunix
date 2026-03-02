@@ -29,8 +29,9 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 import tenacity
+from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
+from tunix.models.gemma3 import utils as gemma_utils
 from tunix.rl import reshard
-from tunix.utils import compat
 from tunix.utils import env_utils
 
 import sentencepiece as spm
@@ -107,6 +108,17 @@ class Decoder(nnx.Module):
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
+class VisionConfig:
+  """Vision config for testing."""
+
+  num_mm_tokens_per_image: int = 4
+  soft_token_placeholder: int = 22
+  start_of_image_token: int = 23
+  end_of_image_token: int = 24
+  double_new_line_token: int = 25
+
+
+@dataclasses.dataclass(kw_only=True, frozen=True)
 class ModelConfig:
   """Model config for testing."""
 
@@ -114,6 +126,7 @@ class ModelConfig:
   num_kv_heads: int = 4
   head_dim: int = 16
   vocab_size: int = 256
+  vision_config: VisionConfig | None = None
 
 
 class ToyTransformer(nnx.Module):
@@ -127,7 +140,7 @@ class ToyTransformer(nnx.Module):
   ):
     self.config = config
     self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
-    self.layers = compat.ModuleList(
+    self.layers = nnx.List(
         [Decoder(rngs=rngs) for _ in range(config.num_layers)]
     )
     self.lm_head = nnx.Linear(
@@ -137,9 +150,35 @@ class ToyTransformer(nnx.Module):
     self.head_dim = 16
 
   def __call__(
-      self, x, positions, cache, attention_mask, output_hidden_states=False
+      self,
+      x,
+      positions,
+      cache,
+      attention_mask,
+      output_hidden_states=False,
+      images=None,
   ):
-    x = self.emb(x)
+    tokens = x
+    x = self.emb(tokens)
+    if images is not None:
+      num_images = images.shape[1]
+      vision_embs = jax.random.normal(
+          key=jax.random.key(2),
+          shape=(
+              x.shape[0],
+              num_images,
+              self.config.vision_config.num_mm_tokens_per_image,  # pytype: disable=attribute-error
+              x.shape[-1],
+          ),
+          dtype=x.dtype,
+      )
+      # Merge the soft tokens back with the text embeddings.
+      x = merge_embeddings_lib.merge_embeddings(
+          text_embeddings=x,
+          vision_embeddings=vision_embs,
+          mask=tokens == self.config.vision_config.soft_token_placeholder,  # pytype: disable=attribute-error
+      )
+
     for layer in self.layers:
       x = layer(x)
     if output_hidden_states:
@@ -153,6 +192,18 @@ class ToyTransformer(nnx.Module):
   @property
   def num_embed(self) -> int:
     return self.emb.num_embeddings
+
+  def get_positions_and_attention_mask(self, tokens, inputs_mask=None):
+    token_placeholder_id = (
+        None
+        if self.config.vision_config is None
+        else self.config.vision_config.soft_token_placeholder
+    )
+    return gemma_utils.get_positions_and_attention_mask(
+        tokens,
+        inputs_mask=inputs_mask,
+        token_placeholder_id=token_placeholder_id,
+    )
 
   def get_model_input(self):
     return get_dummy_inputs_for_lora_toy_transformer_tests()
@@ -217,9 +268,19 @@ class MockVocab(spm.SentencePieceProcessor):
       'quantization': 21,
   }
 
-  def __init__(self, mapping_text_to_id: dict[str, int] | None = None):
+  def __init__(
+      self, mapping_text_to_id: dict[str, int] | None = None,
+      is_multimodal=False
+  ):
     super().__init__()
     self._start_id = 3
+    if is_multimodal:
+      self.DEFAULT_MAPPING.update({
+          '<img>': 22,
+          '<soi>': 23,
+          '<eoi>': 24,
+          '<doubleline>': 25,
+      })
     self._mapping_text_to_id = mapping_text_to_id or self.DEFAULT_MAPPING
     self._vocab_size = len(self._mapping_text_to_id)
 

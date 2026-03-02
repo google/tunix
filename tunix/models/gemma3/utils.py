@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import jaxtyping
-from tunix.models.gemma3 import vision
 
 _PADDING_ID = 0
 
@@ -27,6 +26,7 @@ def get_positions_and_attention_mask(
     tokens: jaxtyping.ArrayLike,  # (B, L)
     *,
     inputs_mask: jaxtyping.ArrayLike | None = None,  # (B, L, L')
+    token_placeholder_id: int | None = None,
 ):
   """Returns the positions and attention mask for the transformer."""
   # Compute the mask
@@ -35,16 +35,14 @@ def get_positions_and_attention_mask(
   positions = _build_positions_from_mask(inputs_mask)
 
   # The image tokens have bidirectional attention within themselves.
-  bidirectional_mask = tokens == vision.TOKEN_PLACEHOLDER
+  bidirectional_mask = None
+  if token_placeholder_id is not None:
+    bidirectional_mask = tokens == token_placeholder_id
   attention_mask = make_causal_bidirectional_attention_mask(
       inputs_mask,
       bidirectional_mask=bidirectional_mask,
   )
-
-  return {
-      'positions': positions,
-      'attention_mask': attention_mask,
-  }
+  return positions, attention_mask
 
 
 def make_causal_bidirectional_attention_mask(
