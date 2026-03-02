@@ -20,7 +20,6 @@ from typing import Any
 
 from etils import epath
 import numpy as np
-
 import sentencepiece as spm
 
 
@@ -219,6 +218,7 @@ class Tokenizer(TokenizerAdapter):
       add_bos: bool | None = True,
       add_eos: bool | None = True,
       hf_access_token: str | None = None,
+      special_eos_token: str | None = None,
   ):
 
     self.tokenizer_type = tokenizer_type
@@ -248,11 +248,26 @@ class Tokenizer(TokenizerAdapter):
       raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
     super().__init__(tokenizer)
 
+    self._special_eos_id = None
+    if special_eos_token:
+      if tokenizer_type == 'huggingface':
+        self._special_eos_id = tokenizer.convert_tokens_to_ids(
+            special_eos_token
+        )
+      elif tokenizer_type == 'sentencepiece':
+        self._special_eos_id = tokenizer.PieceToId(special_eos_token)
+
+  def eos_id(self) -> int:
+    if self._special_eos_id is not None:
+      return self._special_eos_id
+    return super().eos_id()
+
   def tokenize(
       self,
       example: str,
       prefix: str = '',
       suffix: str = '',
+      add_bos: bool = True,
       add_eos: bool = True,
   ) -> np.ndarray:
     """The tokenization function.
@@ -261,6 +276,8 @@ class Tokenizer(TokenizerAdapter):
       example: Input string to tokenize.
       prefix:  Prefix to add to the input string.
       suffix:  Suffix to add to the input string.
+      add_bos: If True, add a "beginning of sentence" token at the start of the
+        output sequence.
       add_eos: If True, add an "end of sentence" token at the end of the output
         sequence.
 
@@ -268,15 +285,25 @@ class Tokenizer(TokenizerAdapter):
       Tokens corresponding to the input string.
     """
     int_list = []
-    if self.bos_id():
-      int_list.append(self.bos_id())
-    if self.tokenizer_type == 'huggingface':
-      int_list.extend(
-          self.encode(prefix + example + suffix, add_special_tokens=False)
-      )
+    bos_id = self.bos_id()
+    if add_bos and bos_id is not None:
+      int_list.append(bos_id)
+
+    text = prefix + example + suffix
+    if self._tokenizer_type == TokenizerType.HF:
+      int_list.extend(self.encode(text, add_special_tokens=False))
     else:
-      # sentencepiece
-      int_list.extend(self.tokenizer.EncodeAsIds(prefix + example + suffix))
+      int_list.extend(self.encode(text))
+
+    if bos_id is not None:
+      if add_bos:
+        # Deduplicate BOS tokens if the tokenizer added one and we added one.
+        int_list = self.dedup_bos_ids(int_list)
+      else:
+        # Remove BOS token if the tokenizer added one.
+        while int_list and int_list[0] == bos_id:
+          int_list.pop(0)
+
     if add_eos:
       int_list.append(self.eos_id())
     return np.array(int_list, dtype=np.int32)
