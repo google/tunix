@@ -652,6 +652,35 @@ class PeftTrainerTest(parameterized.TestCase):
         TEST_LEARNING_RATE,
     )
 
+  def test_input_processing_order(self):
+    """Tests that gen_model_input_fn is called before sharding."""
+    # Create raw dataset that would fail sharding (strings are not valid JAX types)
+    raw_train_ds = [{"raw_text": "hello raw world"}] * 4
+
+    def raw_to_model_input(x):
+      # Assert that we receive the raw input here
+      if isinstance(x, dict) and "raw_text" in x:
+        # Convert to valid model input (dict of arrays)
+        # We use dimensions compatible with ToyTransformer
+        return {
+            "input_tokens": jnp.ones((1, 16), dtype=jnp.int32),
+            "input_mask": jnp.ones((1, 16), dtype=jnp.int32),
+            "positions": jnp.arange(16, dtype=jnp.int32),
+            "attention_mask": jnp.ones((1, 16), dtype=jnp.int32),
+        }
+      return x
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=2)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(raw_to_model_input)
+
+    # If sharding happened before gen_model_input_fn, this would crash
+    # with TypeError because sharding_utils cannot handle raw strings.
+    trainer.train(raw_train_ds)
+
+
 
 if __name__ == '__main__':
   absltest.main()

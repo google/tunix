@@ -325,8 +325,6 @@ class PeftTrainer:
     Returns:
       The loss and auxiliary data if has_aux is True, otherwise the loss.
     """
-    inputs = self.gen_model_input_fn(inputs)
-
     grad_fn = nnx.value_and_grad(
         self.loss_fn,
         argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
@@ -343,7 +341,6 @@ class PeftTrainer:
   def _eval_step(
       self, model: nnx.Module, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
-    inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if self._has_aux:
       loss, aux = out
@@ -655,6 +652,7 @@ class PeftTrainer:
             break
 
           train_example = self._prepare_inputs(train_example)
+          train_example = self.gen_model_input_fn(train_example)
           train_example = sharding_utils.shard_input(
               train_example, self.config.data_sharding_axis
           )
@@ -793,6 +791,7 @@ class PeftTrainer:
         if eval_example is None:
           break
         eval_example = self._prepare_inputs(eval_example)
+        eval_example = self.gen_model_input_fn(eval_example)
         eval_example = sharding_utils.shard_input(
             eval_example, self.config.data_sharding_axis
         )
