@@ -52,6 +52,9 @@ class VllmRollout(base_rollout.BaseRollout):
             hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
             lora_config=rollout_config.rollout_vllm_lora_config,
             mesh=mesh,
+            tensor_parallel_size=rollout_config.tensor_parallel_size,
+            data_parallel_size=rollout_config.data_parallel_size,
+            expert_parallel_size=rollout_config.expert_parallel_size,
             engine_kwargs={
                 "model": rollout_config.rollout_vllm_model_version,
                 "max_model_len": cache_config_or_size,
@@ -59,9 +62,6 @@ class VllmRollout(base_rollout.BaseRollout):
                 "async_scheduling": (
                     rollout_config.rollout_vllm_async_scheduling
                 ),
-                "tensor_parallel_size": rollout_config.tensor_parallel_size,
-                "data_parallel_size": rollout_config.data_parallel_size,
-                "expert_parallel_size": rollout_config.expert_parallel_size,
                 "max_num_batched_tokens": (
                     rollout_config.rollout_vllm_max_num_batched_tokens
                 ),
