@@ -395,6 +395,21 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sampler.args["tensor_parallel_size"], 4)
     self.assertEqual(sampler.args["data_parallel_size"], 1)
 
+  def test_reserved_keys_in_engine_kwargs_raise_value_error(self):
+    # Reserved VllmConfig fields (e.g. tp, dp, ep) must be set directly on
+    # VllmConfig, not smuggled through engine_kwargs. Passing them via
+    # engine_kwargs should raise a ValueError at config construction time
+    # before any vLLM engine args are assembled.
+    mesh = self._make_mock_mesh(8)
+    for key in ("expert_parallel_size", "tensor_parallel_size", "data_parallel_size"):
+      with self.subTest(key=key):
+        with self.assertRaisesRegex(ValueError, key):
+          vllm_sampler.VllmConfig(
+              mesh=mesh,
+              init_with_random_weights=False,
+              engine_kwargs={key: 2},
+          )
+
   def test_default_expert_parallel_size_is_one(self):
     mesh = self._make_mock_mesh(8)
     config = vllm_sampler.VllmConfig(
