@@ -39,8 +39,7 @@ from vllm.engine.arg_utils import EngineArgs, AsyncEngineArgs
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import BeamSearchParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams, RequestOutputKind
 from concurrent.futures import ThreadPoolExecutor
 
 # Colocate vllm engine and worker in the main process
@@ -587,12 +586,16 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         async for out in self.async_llm.generate(
             prompt, sampling_params, request_id=request_id
         ):
-          if getattr(out, "finished", False):
-            final_out = out
-            break
+          # if getattr(out, "finished", False):
+            # final_out = out
+            # break
+          final_out = out
 
         if final_out is None:
           raise RuntimeError(f"No finished output produced for request {request_id}")
+
+        if getattr(out, "finished", False) is False:
+          logging.warning(f"Output for request {request_id} is not marked finished. Returning last output anyway.")
         return final_out
 
       tasks = [collect_one(p) for p in prompts]
@@ -688,6 +691,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.prompt_logprobs = 0  # b/428730696
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
+      # Only keep the final output (disable intermediate streaming).
+      sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
 
       if top_p is not None:
         sampling_params.top_p = top_p
