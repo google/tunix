@@ -170,7 +170,7 @@ class VisionAttention(nnx.Module):
         param_dtype=dtype_mm,
         rngs=rngs,
     )
-    self.dropout = nnx.Dropout(rate=dropout)
+    self.dropout = nnx.Dropout(rate=dropout, deterministic=False)
 
     self.shd_config = shd_config
 
@@ -246,7 +246,7 @@ class MlpBlock(nnx.Module):
         param_dtype=self.dtype_mm,
         rngs=rngs,
     )
-    self.dropout = nnx.Dropout(rate=self.dropout_rate)
+    self.dropout = nnx.Dropout(rate=self.dropout_rate, deterministic=False)
     self.fc2 = nnx.Linear(
         mlp_dim,
         self.width,
@@ -328,7 +328,7 @@ class Encoder1DBlock(nnx.Module):
         dtype_mm=dtype_mm,
         rngs=rngs,
     )
-    self.dropout = nnx.Dropout(rate=dropout)
+    self.dropout = nnx.Dropout(rate=dropout, deterministic=False)
     self.ln2 = nnx.LayerNorm(
         num_features=width,
         epsilon=1e-6,
@@ -511,7 +511,7 @@ class ViTModel(nnx.Module):
         sharding=shd_config.emb_pos_kernel if shd_config else (),
     )
 
-    self.dropout = nnx.Dropout(rate=dropout)
+    self.dropout = nnx.Dropout(rate=dropout, deterministic=False)
 
     self.transformer = Encoder(
         width=width,
