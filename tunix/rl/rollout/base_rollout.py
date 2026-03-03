@@ -159,6 +159,14 @@ class RolloutConfig:
   rollout_vllm_max_num_seqs: Optional[int] = None
 
   # Additional keyword arguments forwarded directly to the vLLM engine constructor.
+  # The ordering to use when assigning layers to scan groups in vLLM rollout engine.
+  # "interleaved" means layers are assigned to groups in a round-robin fashion,
+  # while "sequential" means layers are assigned to groups in contiguous blocks.
+  # This is used when transferring weights from a MaxText / out-of-tree vLLM model
+  # to the rollout engine, to ensure that layers are assigned to the same scan group in both models.
+  rollout_vllm_scan_group_ordering: str = "sequential"
+
+  # Additional keyword arguments forwarded directly to the vLLM engine constructor.
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   # Additional keyword arguments forwarded directly to the vLLM sampling params.
