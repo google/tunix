@@ -194,6 +194,50 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         )
         atexit.register(self.stop)
 
+        # Start a background log thread to call engine's do_log_stats()
+        # (AsyncLLM doesn't start the same log loop as VLLMInProcessDriver).
+        self._async_llm_log_stop = threading.Event()
+        def _find_do_log_stats_target(obj):
+          # Try common attribute paths to find an object with do_log_stats()
+          if obj is None:
+            return None
+          if hasattr(obj, "do_log_stats"):
+            return obj
+          for name in ("engine_core", "engine", "llm_engine"):
+            child = getattr(obj, name, None)
+            if child is not None and hasattr(child, "do_log_stats"):
+              return child
+          # try nested engine_core.engine_core
+          child = getattr(obj, "engine_core", None)
+          if child is not None:
+            inner = getattr(child, "engine_core", None)
+            if inner is not None and hasattr(inner, "do_log_stats"):
+              return inner
+          return None
+
+        log_target = _find_do_log_stats_target(self.async_llm)
+        if log_target is not None:
+          def _async_llm_log_loop():
+            try:
+              while not self._async_llm_log_stop.is_set():
+                try:
+                  log_target.do_log_stats()
+                except Exception:
+                  logging.exception("AsyncLLM log_stats failed")
+                # Match VLLMInProcessDriver default cadence (10s)
+                self._async_llm_log_stop.wait(10.0)
+            finally:
+              logging.debug("AsyncLLM log loop exiting")
+
+          self._async_llm_log_thread = threading.Thread(
+              target=_async_llm_log_loop,
+              name="AsyncLLMLogLoop",
+              daemon=True,
+          )
+          self._async_llm_log_thread.start()
+        else:
+          self._async_llm_log_thread = None
+
         async def _log_async_tasks():
             import asyncio, logging
             while True:
@@ -351,6 +395,16 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       except Exception:
         logging.exception("Error shutting down AsyncLLM.")
       self.async_llm = None
+    # Stop async loop log thread if it exists
+    if getattr(self, "_async_llm_log_stop", None) is not None:
+      try:
+        self._async_llm_log_stop.set()
+        if getattr(self, "_async_llm_log_thread", None) is not None:
+          self._async_llm_log_thread.join(timeout=1.0)
+      except Exception:
+        logging.exception("Error stopping AsyncLLM log thread.")
+      self._async_llm_log_thread = None
+      self._async_llm_log_stop = None
     # Stop async loop thread if it exists
     if getattr(self, "_async_loop", None) is not None:
       try:
