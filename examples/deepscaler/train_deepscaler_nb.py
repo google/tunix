@@ -168,6 +168,7 @@ MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 MAX_CONCURRENCY = 1
 
 MODEL_DTYPE = jnp.float32
+# MODEL_DTYPE = jnp.bfloat16
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -530,7 +531,7 @@ profiler_options = None
 if ENABLE_PROFILER:
   from tunix.sft import profiler
   profiler_options = profiler.ProfilerOptions(
-      profiler_steps=3,
+      profiler_steps=2,
       skip_first_n_steps=2,
       set_profile_options=False,
       log_dir="gs://lancewang-dev-supercomputer-testing/tunix/pw/xprof_traces",
