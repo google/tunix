@@ -666,8 +666,12 @@ class RLCluster:
         if agg_value.size > 0:
           agg_value = op(agg_value)
 
+      if "/" in metric_name:
+        prefix, metric_name = metric_name.split("/", maxsplit=1)
+      else:
+        prefix = "global"
       self._rl_metrics_logger.log(
-          "global",
+          prefix,
           metric_name,
           agg_value,
           metrics_buffer.mode,
