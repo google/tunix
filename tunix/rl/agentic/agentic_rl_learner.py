@@ -52,6 +52,7 @@ from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
+import os 
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -365,15 +366,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A tuple of agent and environment.
     """
-<<<<<<< HEAD
-=======
-    # unpacked_example = {}
-    # for k, v in single_example.items():
-    #     if hasattr(v, '__len__') and len(v) == 1 and not isinstance(v, str):
-    #         unpacked_example[k] = v[0]
-    #     else:
-    #         unpacked_example[k] = v
->>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
 
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
@@ -401,6 +393,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
+<<<<<<< HEAD:tunix/rl/agentic/agentic_rl_learner.py
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
       if "group_id" in env.extra_kwargs:
@@ -412,6 +405,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
+=======
+<<<<<<< HEAD
+=======
+    os.write(1, b'chat_lists \n'.encode('utf-8'))
+    byte_data = (json.dumps(chat_lists, indent=2) + "\n").encode('utf-8')
+    os.write(1, byte_data)
+>>>>>>> 2e50687 (more logging, docker command, update pw train script)
+>>>>>>> ef3dc9d (more logging, docker command, update pw train script):tunix/rl/experimental/agentic_rl_learner.py
     result = self.rl_cluster.generate(
         prompts=chat_lists,
         apply_chat_template=False if self.chat_parser else True,
