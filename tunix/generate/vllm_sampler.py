@@ -187,6 +187,16 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,
           reshard_fn=reshard.reshard_pytree,
+          num_kv_heads=(
+              None
+              if not self._model_runner
+              else self._model_runner.model_config.get_total_num_kv_heads()
+          ),
+          head_dim=(
+              None
+              if not self._model_runner
+              else self._model_runner.model_config.get_head_size()
+          ),
       )
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
