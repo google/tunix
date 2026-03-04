@@ -787,7 +787,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f" {global_step_time:.2f} seconds."
         )
         self.rl_cluster.buffer_metrics_async(
-            {"time/global_step": (global_step_time, np.mean)},
+            {"perf/global_step_time": (global_step_time, np.mean)},
             mode=rl_cluster_lib.Mode.TRAIN,
             step=self.rl_cluster.global_steps,
         )

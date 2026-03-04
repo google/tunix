@@ -378,9 +378,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     # Log raw scores from the reward model fn
     self.rl_cluster.buffer_metrics(
         {
-            "score/mean": (np.mean(last_token_scores), np.mean),
-            "score/max": (np.max(last_token_scores), np.max),
-            "score/min": (np.min(last_token_scores), np.min),
+            "rewards/score/mean": (np.mean(last_token_scores), np.mean),
+            "rewards/score/max": (np.max(last_token_scores), np.max),
+            "rewards/score/min": (np.min(last_token_scores), np.min),
         },
         mode=mode,
     )
@@ -389,9 +389,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     sequence_rewards = jax.device_get(rewards.sum(-1))
     self.rl_cluster.buffer_metrics(
         {
-            "reward/mean": (np.mean(sequence_rewards), np.mean),
-            "reward/max": (np.max(sequence_rewards), np.max),
-            "reward/min": (np.min(sequence_rewards), np.min),
+            "rewards/reward/mean": (np.mean(sequence_rewards), np.mean),
+            "rewards/reward/max": (np.max(sequence_rewards), np.max),
+            "rewards/reward/min": (np.min(sequence_rewards), np.min),
         },
         mode=mode,
     )
@@ -402,7 +402,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
       )
       self.rl_cluster.buffer_metrics(
           {
-              "reward_kl_penalty": (
+              "rewards/reward_kl_penalty": (
                   jax.device_get(per_sequence_mean_kl.mean()),
                   np.mean,
               ),
@@ -414,15 +414,15 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     agg_completion_mask = completion_mask.sum(axis=-1)
     self.rl_cluster.buffer_metrics(
         {
-            "completions/mean_length": (
+            "generation/completions/mean_length": (
                 np.mean(agg_completion_mask),
                 np.mean,
             ),
-            "completions/max_length": (
+            "generation/completions/max_length": (
                 np.max(agg_completion_mask),
                 np.max,
             ),
-            "completions/min_length": (
+            "generation/completions/min_length": (
                 np.min(agg_completion_mask),
                 np.min,
             ),
@@ -449,9 +449,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     )
     self.rl_cluster.buffer_metrics(
         {
-            "returns/mean": (valid_returns.mean(), np.mean),
-            "returns/max": (valid_returns.max(), np.max),
-            "returns/min": (valid_returns.min(), np.min),
+            "advantages/returns/mean": (valid_returns.mean(), np.mean),
+            "advantages/returns/max": (valid_returns.max(), np.max),
+            "advantages/returns/min": (valid_returns.min(), np.min),
         },
         mode=mode,
     )
@@ -462,9 +462,9 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     )
     self.rl_cluster.buffer_metrics(
         {
-            "old_values/mean": (valid_values.mean(), np.mean),
-            "old_values/max": (valid_values.max(), np.max),
-            "old_values/min": (valid_values.min(), np.min),
+            "advantages/old_values/mean": (valid_values.mean(), np.mean),
+            "advantages/old_values/max": (valid_values.max(), np.max),
+            "advantages/old_values/min": (valid_values.min(), np.min),
         },
         mode=mode,
     )

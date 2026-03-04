@@ -878,15 +878,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     for metric_name in [
         "rewards/sum",
         *rewards_metrics,
-        "prompts/mean_length",
-        "prompts/max_length",
-        "prompts/min_length",
-        "completions/mean_length",
-        "completions/max_length",
-        "completions/min_length",
-        "completions/clip_ratio",
-        "time/global_step",
-        "test_metric",
+        "generation/prompts/mean_length",
+        "generation/prompts/max_length",
+        "generation/prompts/min_length",
+        "generation/completions/mean_length",
+        "generation/completions/max_length",
+        "generation/completions/min_length",
+        "generation/completions/clip_ratio",
+        "perf/global_step_time",
+        "global/test_metric",
     ]:
       if metric_name == "rewards/reward_fn_2" and not isinstance(
           reward_fns, list
@@ -894,24 +894,27 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         continue
       # We log metrics per step, and sometimes one extra step is logged due to
       # buffer flushing. So we check if length is close to global_steps.
+      prefix, metric_name = metric_name.split("/", maxsplit=1)
       self.assertGreaterEqual(
           len(
               rl_metric_logger.get_metric_history(
-                  "global", metric_name, "train"
+                  prefix, metric_name, "train"
               )
           ),
           grpo_learner.rl_cluster.global_steps,
           msg=f"metric_name: {metric_name}",
       )
 
-      if metric_name != "time/global_step":
+      if metric_name != "global_step_time":
         self.assertLen(
-            rl_metric_logger.get_metric_history("global", metric_name, "eval"),
+            rl_metric_logger.get_metric_history(
+                prefix, metric_name, "eval"
+            ),
             10,
             msg=f"metric_name: {metric_name}",
         )
     clip_ratio_history = rl_metric_logger.get_metric_history(
-        "global", "completions/clip_ratio", "train"
+        "generation", "completions/clip_ratio", "train"
     )
     self.assertGreater(np.sum(clip_ratio_history), 0)
 
