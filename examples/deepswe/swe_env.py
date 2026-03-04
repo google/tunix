@@ -33,19 +33,7 @@ SWEAGENT_COMMAND_FILES = [
     os.path.join(R2EGYM_PATH, "agenthub/tools/execute_bash.py"),
     os.path.join(R2EGYM_PATH, "agenthub/tools/submit.py"),
 ]
-def _unpack_entry(entry: dict) -> dict:
-    """Utility to clean up and unpack the dataset entry."""
-    unpacked_entry = {}
-    for k, v in entry.items():
-        if isinstance(v, np.ndarray):
-            unpacked_entry[k] = v.item()
-        elif isinstance(v, list):
-            if len(v) != 1:
-                raise ValueError(f"Can only convert a list of size 1; got size {len(v)}")
-            unpacked_entry[k] = v[0]
-        else:
-            unpacked_entry[k] = v
-    return unpacked_entry
+
 
 def _unpack_entry(entry: dict) -> dict:
   """Utility to clean up and unpack the dataset entry."""
@@ -82,7 +70,6 @@ class SWEEnv(BaseTaskEnv):
   ):
     """Initialize the SWE environment.
 
-<<<<<<< HEAD
     Args:
         entry: Dataset containing the tasks. If None, uses default dataset.
         group_id: ID of the group to which the task belongs.
@@ -106,64 +93,13 @@ class SWEEnv(BaseTaskEnv):
         "sweagent",
     ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
     super().__init__(max_steps=max_steps)
-=======
-        Args:
-            entry: Dataset containing the tasks. If None, uses default dataset.
-            group_id: ID of the group to which the task belongs.
-            pair_index: Index of the pair to use. If None, selects a random pair.
-            step_timeout: Timeout for each step in seconds.
-            reward_timeout: Timeout for reward computation in seconds.
-            backend: Backend to use for the environment.
-            delete_image: Whether to delete the Docker image after closing.
-        """
-        self.entry = _unpack_entry(entry)
-        self.step_timeout = step_timeout
-        self.reward_timeout = reward_timeout
-        self.total_steps = 0
-        self.delete_image = delete_image
-        self.backend = backend
-        self.env = None
-        self.verbose = verbose
-        self.scaffold = scaffold
-        assert scaffold in ["r2egym", "sweagent"], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
-        os.write(1, f"SWEEnv is initialized with: {max_steps}\n".encode())
-        super().__init__(max_steps=max_steps)
->>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
 
-<<<<<<< HEAD
     if not hasattr(self, "extra_kwargs"):
       self.extra_kwargs = {}
 
-<<<<<<< HEAD
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
-=======
-    @staticmethod
-    def _unpack_entry(entry: dict) -> dict:
-        """Utility to clean up and unpack the dataset entry."""
-        unpacked_entry = {}
-        for k, v in entry.items():
-            if isinstance(v, np.ndarray):
-                unpacked_entry[k] = v.item()
-            elif isinstance(v, list):
-                if len(v) != 1:
-                    raise ValueError(f"Can only convert a list of size 1; got size {len(v)}")
-                unpacked_entry[k] = v[0]
-            else:
-                unpacked_entry[k] = v
-        return unpacked_entry
-
-    # def _prepare_entry(self, example: dict) -> dict:
-    #     single_example = {}
-    #     json_keys = {'modified_files', 'relevant_files', 'modified_entity_summaries'}
-    #     for k, v in self.entry.items():
-    #         if k == 'prompts':
-    #             continue
-    #         if isinstance(v, (list, np.ndarray)) and len(v) > 0:
-    #             val = v[0]
-    #         else:
-    #             val= v
->>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
+    os.write(1, f"Initialized SWEEnv group_id: {group_id} pair_index: {pair_index}\n".encode('utf-8'))
 
   def _initial_observation(self) -> Any:
     if not self.env:
@@ -184,66 +120,38 @@ class SWEEnv(BaseTaskEnv):
     else:
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
     self.total_steps = 0
-=======
-        if not hasattr(self, "extra_kwargs"):
-            self.extra_kwargs = {}
-            
-        self.extra_kwargs["group_id"] = group_id
-        self.extra_kwargs["pair_index"] = pair_index
-        
-    def _initial_observation(self) -> Any:
-        if not self.env:
-            # Initialize environment if not created yet.
-            env_args = EnvArgs(ds=self.entry)
-            self.env = RepoEnv(env_args, backend=self.backend, step_timeout=self.step_timeout, reward_timeout=self.reward_timeout, verbose=self.verbose)
-        else:
-            self.env.reset()
-        if self.scaffold == "r2egym":
-            self.env.add_commands(R2EGYM_COMMAND_FILES)
-        else:
-            self.env.add_commands(SWEAGENT_COMMAND_FILES)
-        self.total_steps = 0
->>>>>>> 2e50687 (more logging, docker command, update pw train script)
 
     # Polls docker runtime to get task instruction.
     return self.env.get_task_instruction()
 
-<<<<<<< HEAD
   def _step_impl(self, action: Any) -> EnvStepResult:
+    os.write(1, f"Step {self.total_steps} group_id: {self.extra_kwargs.get('group_id', 'None')} pair_index: {self.extra_kwargs.get('pair_index', 'None')}\n".encode('utf-8'))
     if isinstance(action, str):
+      os.write(1, f"Received action string: {action}\n".encode('utf-8'))
       action_obj = Action.from_string(action)
     else:
       action_obj = action
-=======
-    def _step_impl(self, action: Any) -> EnvStepResult:
-        os.write(1, f"group id: {self.group_id} pair id: {self.pair_id}\n".encode())
-        os.write(1, b"SWEEnv step impl called\n")
-        if isinstance(action, str):
-            os.write(1, f"action string: {action}\n".encode())
-            action_obj: Action = Action.from_string(action)
-        else:
-            action_obj = action
->>>>>>> 2e50687 (more logging, docker command, update pw train script)
 
     if not action_obj.function_name:
+      os.write(1,b"didn't find any function to call\n")
       return EnvStepResult(observation="", reward=0, done=False, info={})
 
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
       raise ValueError("Environment not initialized")
+    os.write(1,b"call r2egym env\n")
     obs, reward, done, info = self.env.step(action_obj)
-
-<<<<<<< HEAD
+    os.write(1, f"Step result - obs: {obs} \n, reward: {reward}, done: {done}, info: {info}\n".encode('utf-8'))
     self.total_steps += 1
 
+    os.write(1, f"observation: {obs}\n".encode())
+    if reward != 0:
+        os.write(1,f"getting non-zero reward: {reward}")
+    if done == true:
+        os.write(1,f'signal done from r2egym env')
     return EnvStepResult(
         observation=str(obs), reward=reward, done=done, info=info
     )
-=======
-        self.total_steps += 1
-        os.write(1, f"observation: {obs}\n".encode())
-        return EnvStepResult(observation=str(obs), reward=reward, done=done, info=info)
->>>>>>> 2e50687 (more logging, docker command, update pw train script)
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
