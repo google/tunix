@@ -882,7 +882,7 @@ class RLCluster:
         self.rollout.update_params(nnx.state(model))
 
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
-
+    
     logprobs = None
     if outputs[0].logprobs is not None:
       logprobs = list(
