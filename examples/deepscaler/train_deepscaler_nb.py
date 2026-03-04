@@ -71,8 +71,8 @@ except wandb.errors.UsageError as e:
 
 try:
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb.init(project="tunix", name=run_name, anonymous="allow")
-  # wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
+  wandb.init(project="tunix", name=run_name)
+  # wandb.init(project="tunix", name=run_name, id="q0djft6p", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -252,7 +252,7 @@ GENERATION_CONFIGS = {
 }
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "sglang_jax"
+    "ROLLOUT_ENGINE", "vllm"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
 # mesh = jax.make_mesh(
@@ -318,7 +318,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/02")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm/01")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
@@ -550,7 +550,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_use_sort_for_toppk_minp": False,
 }
 
-MAX_NUM_SEQS =768
+MAX_NUM_SEQS =512
 MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
@@ -570,6 +570,7 @@ vllm_rollout_dict = {
     },
 }
 
+print(f"Rollout engine: {ROLLOUT_ENGINE}")
 if ROLLOUT_ENGINE == "sglang_jax":
   rollout_engine_config = base_rollout.RolloutConfig(
       **base_rollout_dict, **sglang_jax_rollout_dict
