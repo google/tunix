@@ -1,0 +1,19 @@
+[XPK] Starting xpk
+[XPK] Working on cloud-tpu-multipod-dev and europe-west4
+[XPK] Try 1: get-credentials to cluster linchai-6-v5p-16-pw
+[XPK] Task: `get-credentials to cluster linchai-6-v5p-16-pw` is implemented by the following command not running since it is a dry run. 
+gcloud container clusters get-credentials linchai-6-v5p-16-pw --region=europe-west4 --project=cloud-tpu-multipod-dev && kubectl config view && kubectl config set-context --current --namespace=default
+[XPK] Project number for project: cloud-tpu-multipod-dev is 735972712744
+[XPK] Creating a new service account: xpk-sa
+[XPK] Service account: xpk-sa already exists. Skipping its creation
+[XPK] Attempting to create Role: pod-reader in namespace: default
+[XPK] Role: pod-reader already exists. Skipping its creation.
+[XPK] Attempting to create RoleBinding: default-pod-reader-binding for Service Account: xpk-sa to Role: pod-reader in namespace: default
+[XPK] RoleBinding: default-pod-reader-binding already exists. Skipping its creation.
+[XPK] Attempting to create RoleBinding: xpk-sa-pod-reader-binding for Service Account: xpk-sa to Role: pod-reader in namespace: default
+[XPK] RoleBinding: xpk-sa-pod-reader-binding already exists. Skipping its creation.
+[XPK] Task: `Check if Workload Already Exists` is implemented by the following command not running since it is a dry run. 
+kubectl get workloads -o=custom-columns='Jobset:.metadata.ownerReferences[0].name'
+[XPK] Starting workload create
+[XPK] Task: `GKE Cluster Get ConfigMap` is implemented by the following command not running since it is a dry run. 
+kubectl get configmap linchai-6-v5p-16-pw-resources-configmap -o=custom-columns="ConfigData:data" --no-headers=true

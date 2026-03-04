@@ -16,6 +16,10 @@
 
 import atexit
 import dataclasses
+import asyncio
+import threading
+import concurrent.futures
+import queue as _queue
 from itertools import count
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -31,11 +35,12 @@ from tunix.generate.mappings import MappingConfig
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver
 from tunix.rl import reshard
 from vllm import LLM
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import EngineArgs, AsyncEngineArgs
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import BeamSearchParams
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams, RequestOutputKind
+from concurrent.futures import ThreadPoolExecutor
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -51,6 +56,8 @@ class VllmConfig:
       default_factory=MappingConfig
   )
   return_logprobs: bool = False
+  # Use AsyncLLM in-process (creates AsyncLLM with use_uniproc_engine_core=True)
+  use_async_llm_inproc: bool = True
 
   # vLLM Env vars
   init_with_random_weights: bool = True
@@ -144,12 +151,112 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self.config = config
     self.args = self._vllm_config(config)
     self._driver: VLLMInProcessDriver | None = None
-    self.llm: LLM | None = None
+    self.llm: LLM | AsyncLLM | None = None
     self._request_counter = count()
-
+    self.async_llm: AsyncLLM | None = None
     if config.server_mode:
-      self._driver = self._create_driver()
-      atexit.register(self.stop)
+      if self.config.use_async_llm_inproc:
+        engine_args = AsyncEngineArgs(**self.args)
+        self.async_llm = AsyncLLM.from_engine_args(
+            engine_args, use_uniproc_engine_core=True
+        )
+        # Create a dedicated event loop running in a background thread
+        # for driving AsyncLLM coroutines. This avoids calling
+        # `asyncio.run` from multiple worker threads which can lead to
+        # nested/competing event loops and deadlocks.
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_loop_thread: threading.Thread | None = None
+        self._async_loop_q: _queue.Queue = _queue.Queue()
+
+        def _start_async_loop(q: _queue.Queue):
+          # Create and set a new event loop for this background thread.
+          loop = asyncio.new_event_loop()
+          loop.set_default_executor(
+              ThreadPoolExecutor(max_workers=1024, thread_name_prefix="vLLM-AsyncLoop")
+          )
+          asyncio.set_event_loop(loop)
+          logging.debug("AsyncLLM: created new event loop in thread %s", threading.current_thread().name)
+          q.put(loop)
+          logging.debug("AsyncLLM: event loop put on queue; entering run_forever")
+          try:
+            loop.run_forever()
+          finally:
+            logging.debug("AsyncLLM: event loop has exited run_forever")
+
+        self._async_loop_thread = threading.Thread(
+            target=_start_async_loop, args=(self._async_loop_q,), daemon=True
+        )
+        self._async_loop_thread.start()
+        # Wait for loop to be ready and store it
+        self._async_loop = self._async_loop_q.get()
+        logging.debug(
+          "AsyncLLM: obtained async loop=%s; thread_alive=%s",
+          self._async_loop,
+          bool(self._async_loop_thread and self._async_loop_thread.is_alive()),
+        )
+        atexit.register(self.stop)
+
+        # Start a background log thread to call engine's do_log_stats()
+        # (AsyncLLM doesn't start the same log loop as VLLMInProcessDriver).
+        self._async_llm_log_stop = threading.Event()
+        def _find_do_log_stats_target(obj):
+          # Try common attribute paths to find an object with do_log_stats()
+          if obj is None:
+            return None
+          if hasattr(obj, "do_log_stats"):
+            return obj
+          for name in ("engine_core", "engine", "llm_engine"):
+            child = getattr(obj, name, None)
+            if child is not None and hasattr(child, "do_log_stats"):
+              return child
+          # try nested engine_core.engine_core
+          child = getattr(obj, "engine_core", None)
+          if child is not None:
+            inner = getattr(child, "engine_core", None)
+            if inner is not None and hasattr(inner, "do_log_stats"):
+              return inner
+          return None
+
+        log_target = _find_do_log_stats_target(self.async_llm)
+        if log_target is not None:
+          def _async_llm_log_loop():
+            try:
+              while not self._async_llm_log_stop.is_set():
+                try:
+                  log_target.do_log_stats()
+                except Exception:
+                  logging.exception("AsyncLLM log_stats failed")
+                # Match VLLMInProcessDriver default cadence (10s)
+                self._async_llm_log_stop.wait(10.0)
+            finally:
+              logging.debug("AsyncLLM log loop exiting")
+
+          self._async_llm_log_thread = threading.Thread(
+              target=_async_llm_log_loop,
+              name="AsyncLLMLogLoop",
+              daemon=True,
+          )
+          self._async_llm_log_thread.start()
+        else:
+          self._async_llm_log_thread = None
+
+        async def _log_async_tasks():
+            import asyncio, logging
+            while True:
+                try:
+                    tasks = asyncio.all_tasks(self._async_loop)
+                    logging.debug("Async loop tasks count=%d", len(tasks))
+                    for t in list(tasks):
+                        logging.debug("task=%r state=%s coro=%r", t, getattr(t, "_state", None), t.get_coro())
+                except Exception:
+                    logging.exception("Error while logging async tasks")
+                await asyncio.sleep(10)
+
+        # schedule it on the created loop
+        self._async_loop.create_task(_log_async_tasks())
+      else:
+        self._driver = self._create_driver()
+        atexit.register(self.stop)
     else:
       self.llm = LLM(**self.args)
 
@@ -284,6 +391,42 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       self._driver.shutdown()
       self._driver = None
+    if self.async_llm is not None:
+      try:
+        self.async_llm.shutdown()
+      except Exception:
+        logging.exception("Error shutting down AsyncLLM.")
+      self.async_llm = None
+    # Stop async loop log thread if it exists
+    if getattr(self, "_async_llm_log_stop", None) is not None:
+      try:
+        self._async_llm_log_stop.set()
+        if getattr(self, "_async_llm_log_thread", None) is not None:
+          self._async_llm_log_thread.join(timeout=1.0)
+      except Exception:
+        logging.exception("Error stopping AsyncLLM log thread.")
+      self._async_llm_log_thread = None
+      self._async_llm_log_stop = None
+    # Stop async loop thread if it exists
+    if getattr(self, "_async_loop", None) is not None:
+      try:
+        self._async_loop.call_soon_threadsafe(self._async_loop.stop)
+      except Exception:
+        logging.exception("Error stopping AsyncLLM event loop.")
+      self._async_loop = None
+    if getattr(self, "_async_loop_thread", None) is not None:
+      try:
+        # Thread is daemon; joining is optional. Attempt a short join.
+        self._async_loop_thread.join(timeout=1.0)
+      except Exception:
+        pass
+      self._async_loop_thread = None
+    if self.llm is not None:
+      try:
+        self.llm.shutdown()
+      except Exception:
+        logging.exception("Error shutting down LLM.")
+      self.llm = None
 
   @property
   def _model_runner(self):
@@ -291,6 +434,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return self.llm.llm_engine.model_executor.driver_worker.model_runner
     if self._driver is not None:
       return self._driver.llm_engine.model_executor.driver_worker.model_runner
+    if self.async_llm is not None:
+      return (
+          self.async_llm.engine_core.engine_core.model_executor.driver_worker.worker.model_runner
+      )
     raise RuntimeError("vLLM engine is not initialized.")
 
   @property
@@ -377,6 +524,120 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
+  def _generate_async_llm(
+      self, prompts: List[TokensPrompt], sampling_params: SamplingParams
+  ) -> List[RequestOutput]:
+    """Generate using `AsyncLLM` in-process. Runs the async generator to
+    completion and returns a list of final `RequestOutput` objects (one per
+    prompt)."""
+    if self.async_llm is None:
+      raise RuntimeError("AsyncLLM not initialized")
+
+    # async def _collect():
+    #   async def collect_one(prompt: TokensPrompt) -> RequestOutput:
+    #     request_id = str(next(self._request_counter))
+    #     collected: List[RequestOutput] = []
+    #     async for out in self.async_llm.generate(
+    #         prompt, sampling_params, request_id=request_id
+    #     ):
+    #       collected.append(out)
+    #     if not collected:
+    #       raise RuntimeError(f"No output produced for request {request_id}")
+    #     # Merge outputs into a single RequestOutput (aggregate token deltas)
+    #     final_out = collected[0]
+    #     for part in collected[1:]:
+    #       final_out.add(part, aggregate=True)
+    #     return final_out
+
+    #   # Start all prompt collectors concurrently so the engine can batch them.
+    #   tasks = [collect_one(p) for p in prompts]
+    #   results = await asyncio.gather(*tasks)
+    #   return list(results)
+
+    # Run the async collector and return results. Use the dedicated async
+    # event loop thread created at initialization to drive AsyncLLM
+    # coroutines. This avoids creating many ephemeral event loops which can
+    # cause deadlocks or resource exhaustion.
+    # if getattr(self, "_async_loop", None) is None:
+    #   # Fallback to creating a temporary loop if the loop thread isn't
+    #   # available for some reason.
+    #   return asyncio.run(_collect())
+
+    # Schedule using the centralized submit helper to keep scheduling logic
+    # in one place and return the synchronous result for compatibility.
+    logging.debug("AsyncLLM: scheduling async generation for %d prompts", len(prompts))
+    fut: concurrent.futures.Future = self.submit_async_generation(
+      prompts, sampling_params
+    )
+    logging.debug("AsyncLLM: submitted coroutine, waiting for result")
+    return fut.result()
+
+  def _generate_async_llm_coroutine(
+      self, prompts: List[TokensPrompt], sampling_params: SamplingParams
+  ):
+    """Return coroutine performing async generation for use by the
+    dedicated async loop. This allows callers to schedule the coroutine
+    with `asyncio.run_coroutine_threadsafe` and await it without blocking
+    shared executors."""
+    async def _collect_wrapper():
+      async def collect_one(prompt: TokensPrompt) -> RequestOutput:
+        request_id = str(next(self._request_counter))
+        print(f"YY {request_id=}")
+        final_out: RequestOutput | None = None
+        # Only keep the final output (when finished==True). Ignore intermediate
+        # streaming outputs to avoid partial/unfinished results and reduce memory.
+        async for out in self.async_llm.generate(
+            prompt, sampling_params, request_id=request_id
+        ):
+          # if getattr(out, "finished", False):
+            # final_out = out
+            # break
+          final_out = out
+
+        if final_out is None:
+          raise RuntimeError(f"No finished output produced for request {request_id}")
+
+        if getattr(out, "finished", False) is False:
+          logging.warning(f"Output for request {request_id} is not marked finished. Returning last output anyway.")
+        return final_out
+
+      tasks = [collect_one(p) for p in prompts]
+      results = await asyncio.gather(*tasks)
+      return list(results)
+
+    return _collect_wrapper()
+
+  def submit_async_generation(
+      self, prompts: List[TokensPrompt], sampling_params: SamplingParams
+  ) -> "concurrent.futures.Future":
+    """Schedule async generation on the dedicated async loop and return
+    a concurrent.futures.Future. Callers can await it using
+    `asyncio.wrap_future` in their event loop to avoid blocking executor
+    threads."""
+    if getattr(self, "_async_loop", None) is None:
+      logging.error(
+        "submit_async_generation: async loop is None; _async_loop_thread=%s",
+        getattr(self, "_async_loop_thread", None),
+      )
+      raise RuntimeError("Async loop not initialized for AsyncLLM")
+
+    thread_alive = bool(getattr(self, "_async_loop_thread", None) and self._async_loop_thread.is_alive())
+    logging.debug(
+      "submit_async_generation: scheduling on loop=%s thread_alive=%s prompts=%d",
+      self._async_loop,
+      thread_alive,
+      len(prompts),
+    )
+
+    fut = asyncio.run_coroutine_threadsafe(
+      self._generate_async_llm_coroutine(prompts, sampling_params), self._async_loop
+    )
+    logging.debug("submit_async_generation: returned future %s", fut)
+
+
+    return fut
+
+
   def __call__(
       self,
       input_strings: str | List[str],
@@ -421,6 +682,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           sampling_params = SamplingParams.from_optional(**diff_params)
         else:
           sampling_params = SamplingParams()
+      elif self.async_llm is not None:
+        sampling_params = self.async_llm.get_default_sampling_params()
       else:
         sampling_params = self.llm.get_default_sampling_params()
       sampling_params.detokenize = False
@@ -435,6 +698,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.prompt_logprobs = 0
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
+      # Only keep the final output (disable intermediate streaming).
+      sampling_params.output_kind = RequestOutputKind.FINAL_ONLY
 
       if top_p is not None:
         sampling_params.top_p = top_p
@@ -475,11 +740,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, self.sampling_params)
     else:
-      outputs = self.llm.generate(
-          prompts=prompt_objects,
-          sampling_params=self.sampling_params,
-          use_tqdm=True,
-      )
+      if getattr(self, "async_llm", None) is not None:
+        outputs = self._generate_async_llm(prompt_objects, self.sampling_params)
+      else:
+        outputs = self.llm.generate(
+            prompts=prompt_objects,
+            sampling_params=self.sampling_params,
+            use_tqdm=True,
+        )
     decoded_outputs, out_logprobs, out_tokens = self.detokenize(
         input_strings, outputs
     )
@@ -489,6 +757,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       raise ValueError("Logprobs are not returned from the vLLM.")
 
     max_tokens_length = max(len(x) for x in prompt_ids)
+
+    for token in out_tokens[0]:
+      logging.info("vLLM output length: %d", len(token))
 
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
@@ -504,6 +775,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
     # To support multisampling, just return the whole list of SamplerOutput
+    # print("Decoded outputs: ", decoded_outputs[0])
+    # print(f"YY {decoded_outputs[0]=}", flush=True)
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
         logits=None,
