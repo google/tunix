@@ -276,6 +276,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
+    kwargs["log_prompts_completions"] = False
 
     rewards_info = self.reward_manager(
         prompts=prompts,
