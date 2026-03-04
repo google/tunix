@@ -324,17 +324,18 @@ class GRPOLearnerTest(parameterized.TestCase):
         'rewards/min',
         'rewards/max',
         *rewards_metrics,
-        'test_metric',
+        'global/test_metric',
     ]:
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
+      prefix, metric_name = metric_name.split('/', maxsplit=1)
       self.assertLen(
-          rl_metric_logger.get_metric_history('global', metric_name, 'train'),
+          rl_metric_logger.get_metric_history(prefix, metric_name, 'train'),
           grpo_learner.rl_cluster.global_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
-          rl_metric_logger.get_metric_history('global', metric_name, 'eval'),
+          rl_metric_logger.get_metric_history(prefix, metric_name, 'eval'),
           grpo_learner.rl_cluster.actor_trainer.train_steps
           / kwargs['eval_every_n_steps'],
           msg=f'metric_name: {metric_name}',
