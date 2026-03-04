@@ -45,25 +45,25 @@ COPY . .
 # Install the project in editable mode
 RUN pip install  --force-reinstall .
 
-# # Set a directory to clone sglang-jax into
-# WORKDIR /usr/src
-# # Clone the repository using HTTPS
-# RUN rm -rf sglang-jax && git clone https://github.com/sgl-project/sglang-jax.git 
-# WORKDIR /usr/src
-# # Install the package in editable mode
-# # The -e flag means the installation links to the source code in /usr/src/sglang-jax
-# RUN cd sglang-jax/python && pip install --force-reinstall --no-cache-dir  .
+# Set a directory to clone sglang-jax into
+WORKDIR /usr/src
+# Clone the repository using HTTPS
+RUN rm -rf sglang-jax && git clone https://github.com/sgl-project/sglang-jax.git 
+WORKDIR /usr/src
+# Install the package in editable mode
+# The -e flag means the installation links to the source code in /usr/src/sglang-jax
+RUN cd sglang-jax/python && pip install --force-reinstall --no-cache-dir  .
 
 # # Install vllm
 # RUN pip install vllm-tpu
 # vllm dependencies
 # RUN pip install vllm==0.15.1
-WORKDIR /usr/src
-RUN rm -rf vllm && git clone https://github.com/wang2yn84/vllm.git && git checkout lance-ds
-RUN cd vllm && pip uninstall torch torch-xla -y && pip install -r requirements/tpu.txt && VLLM_TARGET_DEVICE="tpu" python -m pip install -e .  
-WORKDIR /usr/src
-RUN rm -rf tpu-inference && git clone https://github.com/vllm-project/tpu-inference.git
-RUN cd tpu-inference && git checkout lance-ds && pip install -e .
+# WORKDIR /usr/src
+# RUN rm -rf vllm && git clone https://github.com/wang2yn84/vllm.git && git checkout lance-ds
+# RUN cd vllm && pip uninstall torch torch-xla -y && pip install -r requirements/tpu.txt && VLLM_TARGET_DEVICE="tpu" python -m pip install -e .  
+# WORKDIR /usr/src
+# RUN rm -rf tpu-inference && git clone https://github.com/vllm-project/tpu-inference.git
+# RUN cd tpu-inference && git checkout lance-ds && pip install -e .
 
 WORKDIR /app
 RUN pip install --force-reinstall protobuf==6.33.5
