@@ -15,7 +15,8 @@
 """Base class for Agentic RL Learners."""
 
 from __future__ import annotations
-
+import os
+import json
 import abc
 import time
 import asyncio
@@ -50,7 +51,6 @@ from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
-import os 
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -82,7 +82,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   system_prompt: str = ""
   # TODO(tsbao): we need to update the scripts that uses max_tokens_to_generate
   # once this new agentic_rl_learner is used.
-  max_response_length: int = 8192
+  max_response_length: int = 1024
   max_concurrency: int = 32
   off_policy_steps: int = 0
   num_generations: int = 1
@@ -350,15 +350,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Returns:
       A tuple of agent and environment.
     """
-<<<<<<< HEAD
-=======
-    # unpacked_example = {}
-    # for k, v in single_example.items():
-    #     if hasattr(v, '__len__') and len(v) == 1 and not isinstance(v, str):
-    #         unpacked_example[k] = v[0]
-    #     else:
-    #         unpacked_example[k] = v
->>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
 
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
@@ -388,12 +379,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
-<<<<<<< HEAD
-=======
-    os.write(1, b'chat_lists \n'.encode('utf-8'))
+
+    os.write(1,b"chat lists\n")
     byte_data = (json.dumps(chat_lists, indent=2) + "\n").encode('utf-8')
     os.write(1, byte_data)
->>>>>>> 2e50687 (more logging, docker command, update pw train script)
+
     result = self.rl_cluster.generate(
         prompts=chat_lists,
         apply_chat_template=False if self.chat_parser else True,

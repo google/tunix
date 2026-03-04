@@ -156,7 +156,7 @@ TRAIN_WITH_LORA = False
 # === Generation during GRPO training ===
 # MAX_PROMPT_LENGTH = 32768
 MAX_PROMPT_LENGTH = 4096
-MAX_RESPONSE_LENGTH = 512
+MAX_RESPONSE_LENGTH = 1024
 TEMPERATURE = 0.6
 TOP_P = 0.95
 TOP_K = 50
@@ -182,7 +182,7 @@ NUM_EPOCHS = 100
 MAX_STEPS = 10
 
 # Max turns in mult-agent interaction (set to 1 for single-turn)
-MAX_TURNS = 3
+MAX_TURNS = 10
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -339,7 +339,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
+        kv_cache_size=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH*MAX_TURNS + 256,
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
