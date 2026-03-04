@@ -80,12 +80,12 @@ RUN pip install --force-reinstall protobuf==6.33.5
 # RUN pip install vllm-tpu
 # vllm dependencies
 # RUN pip install vllm==0.15.1
-WORKDIR /usr/src
-RUN rm -rf vllm && git clone https://github.com/wang2yn84/vllm.git && git checkout lance-ds
-RUN cd vllm && pip uninstall torch torch-xla -y && pip install -r requirements/tpu.txt && VLLM_TARGET_DEVICE="tpu" python -m pip install -e .  
-WORKDIR /usr/src
-RUN rm -rf tpu-inference && git clone https://github.com/vllm-project/tpu-inference.git
-RUN cd tpu-inference && git checkout lance-ds && pip install -e .
+# WORKDIR /usr/src
+# RUN rm -rf vllm && git clone https://github.com/wang2yn84/vllm.git && git checkout lance-ds
+# RUN cd vllm && pip uninstall torch torch-xla -y && pip install -r requirements/tpu.txt && VLLM_TARGET_DEVICE="tpu" python -m pip install -e .  
+# WORKDIR /usr/src
+# RUN rm -rf tpu-inference && git clone https://github.com/vllm-project/tpu-inference.git
+# RUN cd tpu-inference && git checkout lance-ds && pip install -e .
 
 WORKDIR /app
 RUN pip install --force-reinstall protobuf==6.33.5
