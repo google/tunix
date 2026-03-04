@@ -4,12 +4,14 @@ import os
 import logging
 
 
+
 # ==========================================
 # 1. Path Setup
 # ==========================================
 # Use the absolute path to the ROOT folder 
 pathways_root = os.path.expanduser('~/pathways-utils')
 r2egym_root = os.path.expanduser('~/r2egym')
+
 
 for root in [pathways_root, r2egym_root]:
     if root not in sys.path:
@@ -22,7 +24,6 @@ try:
     print("✅ pathways-utils, r2egym are successfully mapped.")
 except ImportError as e:
     print(f"❌ Still missing a module: {e}")
-
 
 if os.getenv("JAX_PLATFORMS", None) == "proxy":
   import pathwaysutils
@@ -49,6 +50,7 @@ import qwix
 from tunix.utils import compat
 Dataset = datasets_lib.Dataset
 
+
 # ==========================================
 # 2. Imports from Custom Modules
 # ==========================================
@@ -74,7 +76,6 @@ from system_prompts import (
 from swe_agent import SWEAgent
 from swe_env import SWEEnv
 from tunix.rl import reshard
-
 # ==========================================
 # 3. Environment Configuration
 # ==========================================
@@ -83,8 +84,7 @@ os.makedirs(DATASET_CACHE, exist_ok=True)
 
 os.environ["KUBECONFIG"] = "~/.kube/config"
 os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
-os.environ["NODE_SELECTOR_VAL"] = "deepswe-worker-pool" # NB: change based on your node pool name
-
+os.environ["NODE_SELECTOR_VAL"] = "lance-cpu-pool" # NB: change based on your node pool name
 
 # Kubernetes Setup
 try:
@@ -118,8 +118,25 @@ except Exception as e:
 # ==========================================
 # MODEL_PATH = "/scratch/models/DeepSeek-R1-Distill-Qwen-1.5B/"
 # MODEL_PATH = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
-MODEL_PATH = MODEL_PATH = "gs://sizhi-dev-europe-west4/models/Qwen3-32B/"
 
+import os
+from huggingface_hub import snapshot_download
+
+# Point directly to the big drive
+target_dir = "/models/Qwen3-4B-Instruct-2507"
+MODEL_PATH= os.path.expanduser("/models/Qwen3-4B-Instruct-2507")
+os.makedirs(target_dir, exist_ok=True)
+
+
+print(f"Starting download to {target_dir}...")
+
+snapshot_download(
+    repo_id="Qwen/Qwen3-4B-Instruct-2507",
+    local_dir=target_dir,
+    local_dir_use_symlinks=False
+)
+
+print("Download complete!")
 # ====== Data ======
 TRAIN_FRACTION = 1.0
 
@@ -198,8 +215,8 @@ import jax
 import jax.numpy as jnp
 devices = jax.devices()
 split = int(len(devices) / 2)
-rollout_devices = np.array(devices[:split]).reshape(2,4)
-train_devices = np.array(devices[split:]).reshape(2,4)
+rollout_devices = np.array(devices[:split]).reshape(2,2)
+train_devices = np.array(devices[split:]).reshape(2,2)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=('fsdp', 'tp'))
 train_mesh = Mesh(train_devices, axis_names=('fsdp', 'tp'))
@@ -208,41 +225,34 @@ train_mesh = Mesh(train_devices, axis_names=('fsdp', 'tp'))
 # 7. Model Initialization
 # ==========================================
 print("Initializing Model...")
-config = model_lib.ModelConfig.qwen3_32b()
+config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
 
 
-qwen_reference = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh)
+qwen_reference = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16)
+# def get_lora_model(base_model, model_mesh):
+#   lora_provider = qwix.LoraProvider(
+#       module_path=(
+#           ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
+#           ".*attn_vec_einsum"
+#       ),
+#       rank=RANK,
+#       alpha=ALPHA,
+#   )
 
-gc.collect()
-
-def get_lora_model(base_model, model_mesh):
-  lora_provider = qwix.LoraProvider(
-      module_path=(
-          ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
-          ".*attn_vec_einsum"
-      ),
-      rank=RANK,
-      alpha=ALPHA,
-      dtype=jnp.bfloat16
-  )
-
-  model_input = base_model.get_model_input()
-  lora_model = qwix.apply_lora_to_model(
-      base_model, lora_provider, **model_input
-  )
+#   model_input = base_model.get_model_input()
+#   lora_model = qwix.apply_lora_to_model(
+#       base_model, lora_provider, **model_input
+#   )
 
 #   with compat.set_mesh(model_mesh):
 #     state = nnx.state(lora_model)
 #     pspecs = nnx.get_partition_spec(state)
 #     sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
 #     nnx.update(lora_model, sharded_state)
-  lora_model = reshard.reshard_model_to_mesh(lora_model, model_mesh)
-    
-  return lora_model
-print("bypass 237")
-qwen_actor = get_lora_model(qwen_reference, train_mesh)
+
+#   return lora_model
+qwen_actor = qwen_reference
 sft_utils.show_hbm_usage()
-print("bypass 239")
 
 # ==========================================
 # 8. Tokenizer & Parser
@@ -266,6 +276,7 @@ def transform(entry):
     # Rename 'prompt' to 'prompts'
     # entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
     # JSON encode lists (excluding the new 'prompts')
+    
     for k, v in entry.items():
         if isinstance(v, list):
             entry[k] = json.dumps(v)
@@ -371,6 +382,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     env_class=SWEEnv,
     env_kwargs={"max_steps": MAX_TURNS}, 
     algo_config=grpo_config,
+    chat_parser=chat_parser,
 )
 
 # 2. Execute with num_proc=32 (This is where the real speedup happens)

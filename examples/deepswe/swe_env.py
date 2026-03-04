@@ -33,7 +33,19 @@ SWEAGENT_COMMAND_FILES = [
     os.path.join(R2EGYM_PATH, "agenthub/tools/execute_bash.py"),
     os.path.join(R2EGYM_PATH, "agenthub/tools/submit.py"),
 ]
-
+def _unpack_entry(entry: dict) -> dict:
+    """Utility to clean up and unpack the dataset entry."""
+    unpacked_entry = {}
+    for k, v in entry.items():
+        if isinstance(v, np.ndarray):
+            unpacked_entry[k] = v.item()
+        elif isinstance(v, list):
+            if len(v) != 1:
+                raise ValueError(f"Can only convert a list of size 1; got size {len(v)}")
+            unpacked_entry[k] = v[0]
+        else:
+            unpacked_entry[k] = v
+    return unpacked_entry
 
 def _unpack_entry(entry: dict) -> dict:
   """Utility to clean up and unpack the dataset entry."""
@@ -104,7 +116,7 @@ class SWEEnv(BaseTaskEnv):
             backend: Backend to use for the environment.
             delete_image: Whether to delete the Docker image after closing.
         """
-        self.entry = self._unpack_entry(entry)
+        self.entry = _unpack_entry(entry)
         self.step_timeout = step_timeout
         self.reward_timeout = reward_timeout
         self.total_steps = 0
@@ -118,6 +130,7 @@ class SWEEnv(BaseTaskEnv):
         super().__init__(max_steps=max_steps)
 >>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script)
 
+<<<<<<< HEAD
     if not hasattr(self, "extra_kwargs"):
       self.extra_kwargs = {}
 
@@ -170,15 +183,46 @@ class SWEEnv(BaseTaskEnv):
     else:
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
     self.total_steps = 0
+=======
+        if not hasattr(self, "extra_kwargs"):
+            self.extra_kwargs = {}
+            
+        self.extra_kwargs["group_id"] = group_id
+        self.extra_kwargs["pair_index"] = pair_index
+        
+    def _initial_observation(self) -> Any:
+        if not self.env:
+            # Initialize environment if not created yet.
+            env_args = EnvArgs(ds=self.entry)
+            self.env = RepoEnv(env_args, backend=self.backend, step_timeout=self.step_timeout, reward_timeout=self.reward_timeout, verbose=self.verbose)
+        else:
+            self.env.reset()
+        if self.scaffold == "r2egym":
+            self.env.add_commands(R2EGYM_COMMAND_FILES)
+        else:
+            self.env.add_commands(SWEAGENT_COMMAND_FILES)
+        self.total_steps = 0
+>>>>>>> 2e50687 (more logging, docker command, update pw train script)
 
     # Polls docker runtime to get task instruction.
     return self.env.get_task_instruction()
 
+<<<<<<< HEAD
   def _step_impl(self, action: Any) -> EnvStepResult:
     if isinstance(action, str):
       action_obj = Action.from_string(action)
     else:
       action_obj = action
+=======
+    def _step_impl(self, action: Any) -> EnvStepResult:
+        os.write(1, f"group id: {self.group_id} pair id: {self.pair_id}\n".encode())
+        os.write(1, b"SWEEnv step impl called\n")
+        if isinstance(action, str):
+            os.write(1, f"action string: {action}\n".encode())
+            action_obj: Action = Action.from_string(action)
+        else:
+            action_obj = action
+>>>>>>> 2e50687 (more logging, docker command, update pw train script)
 
     if not action_obj.function_name:
       return EnvStepResult(observation="", reward=0, done=False, info={})
@@ -188,11 +232,17 @@ class SWEEnv(BaseTaskEnv):
       raise ValueError("Environment not initialized")
     obs, reward, done, info = self.env.step(action_obj)
 
+<<<<<<< HEAD
     self.total_steps += 1
 
     return EnvStepResult(
         observation=str(obs), reward=reward, done=done, info=info
     )
+=======
+        self.total_steps += 1
+        os.write(1, f"observation: {obs}\n".encode())
+        return EnvStepResult(observation=str(obs), reward=reward, done=done, info=info)
+>>>>>>> 2e50687 (more logging, docker command, update pw train script)
 
   def close(self) -> None:
     """Close the environment and clean up resources."""

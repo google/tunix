@@ -26,9 +26,15 @@ Dataset = datasets.Dataset
 # ==========================================
 # 1. Path Setup
 # ==========================================
+<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
 # Use the absolute path to the ROOT folder
 pathways_root = os.path.expanduser("~/pathways-utils")
 r2egym_root = os.path.expanduser("~/r2egym")
+=======
+# Use the absolute path to the ROOT folder 
+pathways_root = os.path.expanduser('~/deepswe/pathways-utils')
+r2egym_root = os.path.expanduser('~/deepswe/r2egym')
+>>>>>>> 2e50687 (more logging, docker command, update pw train script):examples/deepswe/train_deepswe_sz.py
 
 for root in [pathways_root, r2egym_root]:
   if root not in sys.path:
@@ -101,7 +107,7 @@ except Exception as e:
 # ==========================================
 # MODEL_PATH = "/scratch/models/DeepSeek-R1-Distill-Qwen-1.5B/"
 # MODEL_PATH = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
-MODEL_PATH = os.path.expanduser("~/models/Qwen3-1.7B/")
+MODEL_PATH = os.path.expanduser("~/deepswe/models/Qwen3-1.7B/")
 
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -122,7 +128,7 @@ TRAIN_WITH_LORA = False
 # === Generation during GRPO training ===
 # MAX_PROMPT_LENGTH = 32768
 MAX_PROMPT_LENGTH = 4096
-MAX_RESPONSE_LENGTH = 512
+MAX_RESPONSE_LENGTH = 1024
 TEMPERATURE = 0.6
 TOP_P = 0.95
 TOP_K = 50
@@ -388,7 +394,11 @@ import grain
 
 grain_dataset = grain.MapDataset.source(dataset)
 
+<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
 
+=======
+# grain_dataset = grain.MapDataset.source(dataset).map(transform_entry)
+>>>>>>> 2e50687 (more logging, docker command, update pw train script):examples/deepswe/train_deepswe_sz.py
 def mixed_type_batch_fn(elements):
   """elements: A list of dicts."""
   batched_data = {}
@@ -442,6 +452,9 @@ train_dataset, _ = data_lib.post_init_dataset(
 
 print("Starting training...")
 agentic_grpo_learner.train(train_dataset=train_dataset)
+<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
 
 
 # %%
+=======
+>>>>>>> 2e50687 (more logging, docker command, update pw train script):examples/deepswe/train_deepswe_sz.py

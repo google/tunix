@@ -50,6 +50,7 @@ from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
+import os 
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -81,7 +82,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   system_prompt: str = ""
   # TODO(tsbao): we need to update the scripts that uses max_tokens_to_generate
   # once this new agentic_rl_learner is used.
-  max_response_length: int = 1024
+  max_response_length: int = 8192
   max_concurrency: int = 32
   off_policy_steps: int = 0
   num_generations: int = 1
@@ -387,6 +388,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
+<<<<<<< HEAD
+=======
+    os.write(1, b'chat_lists \n'.encode('utf-8'))
+    byte_data = (json.dumps(chat_lists, indent=2) + "\n").encode('utf-8')
+    os.write(1, byte_data)
+>>>>>>> 2e50687 (more logging, docker command, update pw train script)
     result = self.rl_cluster.generate(
         prompts=chat_lists,
         apply_chat_template=False if self.chat_parser else True,
