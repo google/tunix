@@ -109,7 +109,7 @@ import os
 # os.getenv("NODE_SELECTOR_VAL", "lance-cpu-pool") # NB: change based on your node pool name
 os.environ["KUBECONFIG"] = "~/.kube/config"
 os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
-os.environ["NODE_SELECTOR_VAL"] = "lance-cpu-pool"
+# os.environ["NODE_SELECTOR_VAL"] = "lance-cpu-pool"
 
 from kubernetes import client
 from kubernetes import config
@@ -336,14 +336,14 @@ res = asyncio.run(_collect_trajectory())
 # In[14]:
 
 
-# print(env.total_steps)
+print(f"{env.total_steps=}")
 
-STEP = 9
-print(f"Step {STEP} ###################")
-print(f"Observation ###################")
-print(res.steps[STEP].observation)
-print(f"Model Response ###################")
-print(res.steps[STEP].model_response)
+for step in range(env.total_steps):
+  print(f"Step {step} ###################")
+  print(f"Observation ###################")
+  print(res.steps[step].observation)
+  print(f"Model Response ###################")
+  print(res.steps[step].model_response)
 
 agent._messages
 
