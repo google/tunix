@@ -554,6 +554,8 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.up_proj = nnx.Linear(
         in_features=config.embed_dim,
@@ -565,6 +567,8 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.down_proj = nnx.Linear(
         in_features=config.hidden_dim,
@@ -576,6 +580,8 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_fd
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
   def block(
