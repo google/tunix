@@ -66,8 +66,8 @@ except wandb.errors.UsageError as e:
 
 try:
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb.init(project="tunix", name=run_name, anonymous="allow")
-  # wandb.init(project="tunix", name=run_name, anonymous="allow", id="lys9lbvw", resume="allow",)
+  wandb.init(project="tunix", name=run_name)
+  # wandb.init(project="tunix", name=run_name, id="q0djft6p", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -125,8 +125,8 @@ MAX_RESPONSE_LENGTH = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
-TOP_P = 0.95
-TOP_K = 50
+TOP_P = 1
+TOP_K = None
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
 # paper. The "group" in GRPO comes from here.
@@ -148,13 +148,13 @@ EPSILON_HIGH = 0.28
 ENABLE_REMAT = True
 BATCH_SIZE = 64
 MINI_BATCH_SIZE = 64
-NUM_BATCHES = 1250
+NUM_BATCHES = 625
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
 
 EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 100  # can potentially train for more epochs
+NUM_EPOCHS = 3  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
@@ -162,10 +162,10 @@ MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
-LEARNING_RATE = 1e-6
+LEARNING_RATE = 5e-6
 B1 = 0.9  # Adam beta1
 B2 = 0.99  # Adam beta2
-WEIGHT_DECAY = 0.1
+WEIGHT_DECAY = 0.01
 # == Cosine decay with warmup scheduler ==
 # Linearly increase learning rate from 0. to 5e-6 in the first 10% training
 # steps, and then gradually decrease the learning rate to 0 using cosine
@@ -174,7 +174,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.1
+MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 10
@@ -192,7 +192,7 @@ GENERATION_CONFIGS = {
 }
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "sglang_jax"
+    "ROLLOUT_ENGINE", "vllm"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
 # mesh = jax.make_mesh(
@@ -254,7 +254,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/02")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm/01")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
@@ -463,7 +463,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
-MAX_NUM_SEQS =768
+MAX_NUM_SEQS =512
 MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
@@ -479,6 +479,7 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {"kv_cache_metrics": True, "disable_log_stats": False, "enable_prefix_caching": True},
 }
 
+print(f"Rollout engine: {ROLLOUT_ENGINE}")
 if ROLLOUT_ENGINE == "sglang_jax":
   rollout_engine_config = base_rollout.RolloutConfig(
       **base_rollout_dict, **sglang_jax_rollout_dict

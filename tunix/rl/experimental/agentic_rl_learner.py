@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import abc
+import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
@@ -229,6 +230,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     loop_thread = threading.Thread(target=run_loop_forever, daemon=True)
     loop_thread.start()
     self.loop = loop_queue.get()
+    self._global_step_start_time = time.time()
 
   def _patch_rollout_config(self):
     rollout_config = self.rl_cluster.cluster_config.rollout_config
@@ -267,6 +269,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if "mode" in kwargs:
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
+    kwargs["log_prompts_completions"] = False
 
     rewards_info = self.reward_manager(
         prompts=prompts,
@@ -511,10 +514,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
-    num_generations = self.algo_config.num_generations
-    prompt_index = batch_results[0].pair_index // num_generations
     if mode == rl_cluster_lib.Mode.TRAIN and self._full_batch_size:
-      expected_step = prompt_index // self._full_batch_size
+      expected_step = batch_results[0].group_id // self._full_batch_size
     else:
       expected_step = self.rl_cluster.global_steps
 
@@ -777,6 +778,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
       if micro_batches_since_last_sync == micro_batches_per_full_batch:
+        global_step_time = time.time() - self._global_step_start_time
+        logging.info(
+            f"Global step {self.rl_cluster.global_steps} completed in"
+            f" {global_step_time:.2f} seconds."
+        )
+        self.rl_cluster.buffer_metrics_async(
+            {"time/global_step": (global_step_time, np.mean)},
+            mode=rl_cluster_lib.Mode.TRAIN,
+            step=self.rl_cluster.global_steps,
+        )
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()
@@ -806,6 +817,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           except StopIteration:
             prompt_queue.put(None)
         micro_batches_since_last_sync = 0
+        self._global_step_start_time = time.time()
 
     _ = producer_future.result()
     self.rl_cluster.close()

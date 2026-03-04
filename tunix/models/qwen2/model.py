@@ -99,6 +99,8 @@ class ModelConfig:
   use_tied_embedding: bool = False
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
+  dtype: jnp.dtype = jnp.bfloat16 # activation dtype.
+  param_dtype: jnp.dtype = jnp.float32 # parameter dtype.
 
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
@@ -216,16 +218,22 @@ class Einsum(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: Tuple[str | None, ...],
+      config: ModelConfig,
   ):
     self.einsum_str = einsum_str
     self.shape = shape
+    self.config = config
     self.w = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+      nnx.initializers.normal()(rngs.params(), shape),
+      sharding=sharding,
+      dtype=config.dtype,
+      param_dtype=config.param_dtype,
     )
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
+    out = jnp.einsum(self.einsum_str, x, self.w.value)
+    return out.astype(self.config.dtype)
 
 
 class Embedder(nnx.Module):
@@ -238,12 +246,16 @@ class Embedder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      config: ModelConfig,
   ):
     self.input_embedding = nnx.Param(
         nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
         sharding=shd_config.emb_vd,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.shd_config = shd_config
+    self.config = config
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
@@ -253,7 +265,8 @@ class Embedder(nnx.Module):
 
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.dot(x, self.input_embedding.value.T)
+    out = jnp.dot(x, self.input_embedding.value.T)
+    return out.astype(self.config.dtype)
 
 
 def _generate_pos_embeddings(
@@ -353,24 +366,28 @@ class Attention(nnx.Module):
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.q_weight_dnh,
+        config=config,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        config=config,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        config=config,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
         sharding=self.shd_config.o_weight_nhd,
+        config=config,
     )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
@@ -379,18 +396,24 @@ class Attention(nnx.Module):
             rngs.params(), config.num_heads * config.head_dim
         ),
         sharding=self.shd_config.qkv_bias,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.k_bias = nnx.Param(
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_kv_heads * config.head_dim
         ),
         sharding=self.shd_config.qkv_bias,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.v_bias = nnx.Param(
         nnx.initializers.zeros_init()(
             rngs.params(), config.num_kv_heads * config.head_dim
         ),
         sharding=self.shd_config.qkv_bias,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
   def block(
@@ -514,6 +537,7 @@ class MLP(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.shd_config = config.shd_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
@@ -524,6 +548,8 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.up_proj = nnx.Linear(
         in_features=config.embed_dim,
@@ -533,6 +559,8 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.down_proj = nnx.Linear(
         in_features=config.hidden_dim,
@@ -542,14 +570,25 @@ class MLP(nnx.Module):
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_fd
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def block(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
     activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
     return outputs
+
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.config.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block.__func__)(self, x)
+    else:
+      return self.block(x)
 
 
 class DecoderLayer(nnx.Module):
@@ -622,6 +661,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
         embed_dim=config.embed_dim,
         rngs=rngs,
         shd_config=shd_config,
+        config=config,
     )
     self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs) for _ in range(config.num_layers)
@@ -638,6 +678,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,
           sharding=shd_config.emb_dv,
+          config=config,
       )
 
   def __call__(

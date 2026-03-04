@@ -122,5 +122,5 @@ class TrajectoryItem:
   pair_index: int
   group_id: Hashable
   start_step: int
-  traj: Trajectory
+  traj: Trajectory | Dict[str, Any]
   metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)
