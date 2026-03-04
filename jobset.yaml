@@ -1,80 +1,10 @@
-#!/bin/bash
-set -euo pipefail
-# Usage:
-#   CLUSTER_NAME=<cluster> JOB_NAME=<job> TPU_TYPE=<tpu> TOPOLOGY=<topo> ./run_remote_pw.sh
-# Examples:
-#   ./run_remote_pw.sh                    # uses defaults
-#   CLUSTER_NAME=lance-v5p-16 JOB_NAME=lancewang-v5p-pw-3 \
-#     JOB_NAME=lancewang-v5p-pw-3 TPU_TYPE=v5p TOPOLOGY=2x2x4 PROXY_MEMORY_LIMIT=320G PROXY_CPU_LIMIT=50 \
-#     ./run_remote_pw.sh
-
-CLUSTER_NAME=${CLUSTER_NAME:-tunix-v5p-16}
-
-JOB_NAME=${JOB_NAME:-tunix-${USER}-${TPU_TYPE}-${TOPOLOGY}-pw-0}
-
-# https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus
-TPU_ARG=${TPU_TYPE:-v5p}
-TPU_TYPE=${TPU_ARG}
-declare -A TPU_TYPE_MAP=(
-  ["v5e"]="ct5lp-hightpu-1t"
-  ["v5p"]="ct5p-hightpu-4t"
-  ["v6e"]="ct6e-standard-1t"
-  ["v7x"]="tpu7x-standard-4t"
-)
-# TPU_TYPE is what some tooling may expect; TPU_ARG retains the short form (v5p, v7x)
-TPU_API_NAME=${TPU_TYPE_MAP[$TPU_ARG]:-$TPU_ARG}
-
-TOPOLOGY=${TOPOLOGY:-2x2x2}
-TPU_SLICE="tpu-${TPU_ARG}-slice"
-
-# Number of TPU chips per worker pod (`google.com/tpu: 4` below).
-CHIPS_PER_WORKER=${CHIPS_PER_WORKER:-4}
-
-# Parse TOPOLOGY (e.g. 2x2x2) into components TOPO_X, TOPO_Y, TOPO_Z
-# Provide safe defaults of 1 when parts are missing.
-IFS='x' read -r TOPO_X TOPO_Y TOPO_Z <<< "${TOPOLOGY}"
-TOPO_X=${TOPO_X:-1}
-TOPO_Y=${TOPO_Y:-1}
-TOPO_Z=${TOPO_Z:-1}
-
-# Compute total number of TPU chips.
-TOTAL_TPU_CHIPS=$(( TOPO_X * TOPO_Y * TOPO_Z ))
-
-# Compute worker pods from topology and chips per worker request.
-# Example: 2x2x2 => 8 chips, CHIPS_PER_WORKER=4 => 2 worker pods.
-if (( TOTAL_TPU_CHIPS % CHIPS_PER_WORKER != 0 )); then
-  echo "ERROR: TOPOLOGY=${TOPOLOGY} yields ${TOTAL_TPU_CHIPS} chips, which is not divisible by CHIPS_PER_WORKER=${CHIPS_PER_WORKER}." >&2
-  exit 1
-fi
-WORKER_PODS=${WORKER_PODS:-$((TOTAL_TPU_CHIPS / CHIPS_PER_WORKER))}
-
-ZONE=${ZONE:-europe-west4-b}
-REGION=${REGION:-europe-west4}
-PROJECT=${PROJECT:-cloud-tpu-multipod-dev}
-
-GITHUB_PATH=${GITHUB_PATH:-/github} # Specify your repos are in github folder
-TEMP_BUCKET=${TEMP_BUCKET:-lancewang-dev-supercomputer-testing/tunix/pw}
-
-PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
-PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
-PROXY_CPU_LIMIT=${PROXY_CPU_LIMIT:-50}
-PROXY_MEMORY_LIMIT=${PROXY_MEMORY_LIMIT:-320G}
-JAX_CPU_LIMIT=${JAX_CPU_LIMIT:-50}
-JAX_MEMORY_LIMIT=${JAX_MEMORY_LIMIT:-300G}
-
-if [ ! -d "${GITHUB_PATH}/experimental/.git" ]; then
-  git clone sso://user/abhinavsing/experimental "${GITHUB_PATH}/experimental"
-fi
-
-
-cat > jobset.yaml <<EOF
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: ${JOB_NAME}
+  name: lancewang-v5p-js-32b
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
-    xpk.google.com/workload: ${JOB_NAME}
+    xpk.google.com/workload: lancewang-v5p-js-32b
 spec:
   coordinator:
     replicatedJob: pathways-head
@@ -118,17 +48,15 @@ spec:
                     type: DirectoryOrCreate
               initContainers:
                 - name: pathways-rm
-                  image: ${PATHWAYS_SERVER_IMAGE}
+                  image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
                   imagePullPolicy: Always
                   args:
                     - --server_port=29001
                     - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
                     - --node_type=resource_manager
                     - --instance_count=1
-                    - --instance_type=tpuv5:${TOPOLOGY}
+                    - --instance_type=tpuv5:2x2x4
                   env:
-                    - name: ENABLE_PATHWAYS_PERSISTENCE
-                      value: "1"
                     - name: REPLICATED_JOB_NAME
                       valueFrom:
                         fieldRef:
@@ -152,15 +80,13 @@ spec:
                       memory: 16G
                   restartPolicy: Always
                 - name: pathways-proxy
-                  image: ${PATHWAYS_PROXY_IMAGE}
+                  image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
                   imagePullPolicy: Always
                   args:
                     - --server_port=29000
-                    - --resource_manager_address=\$(PATHWAYS_HEAD):29001
+                    - --resource_manager_address=$(PATHWAYS_HEAD):29001
                     - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
                   env:
-                    - name: ENABLE_PATHWAYS_PERSISTENCE
-                      value: "1"
                     - name: PATHWAYS_HEAD
                       valueFrom:
                         fieldRef:
@@ -169,8 +95,8 @@ spec:
                     - containerPort: 29000
                   resources:
                     limits:
-                      cpu: "${PROXY_CPU_LIMIT}"
-                      memory: ${PROXY_MEMORY_LIMIT}
+                      cpu: "50"
+                      memory: 320G
                   restartPolicy: Always
               containers:
                 - name: jax-tpu
@@ -182,8 +108,6 @@ spec:
                     - |
                       (while true; do echo "This loop runs forever"; done)
                   env:
-                    - name: ENABLE_PATHWAYS_PERSISTENCE
-                      value: "1"
                     - name: PATHWAYS_HEAD
                       valueFrom:
                         fieldRef:
@@ -193,11 +117,11 @@ spec:
                     - name: XCLOUD_ENVIRONMENT
                       value: GCP
                     - name: JAX_BACKEND_TARGET
-                      value: grpc://\$(PATHWAYS_HEAD):29000
+                      value: grpc://$(PATHWAYS_HEAD):29000
                   resources:
                     limits:
-                      cpu: "${JAX_CPU_LIMIT}"
-                      memory: ${JAX_MEMORY_LIMIT}
+                      cpu: "50"
+                      memory: 200G
                   securityContext:
                     privileged: true
                   volumeMounts:
@@ -206,12 +130,18 @@ spec:
     - name: worker
       replicas: 1
       template:
+        metadata:
+          annotations:
+            alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
         spec:
           backoffLimit: 16
           completionMode: Indexed
-          completions: ${WORKER_PODS}
-          parallelism: ${WORKER_PODS}
+          completions: 4
+          parallelism: 4
           template:
+            metadata:
+              annotations:
+                alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
             spec:
               hostNetwork: true
               dnsPolicy: ClusterFirstWithHostNet
@@ -219,8 +149,8 @@ spec:
               restartPolicy: OnFailure
               terminationGracePeriodSeconds: 30
               nodeSelector:
-                cloud.google.com/gke-tpu-accelerator: ${TPU_SLICE}
-                cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+                cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+                cloud.google.com/gke-tpu-topology: 2x2x4
               volumes:
                 - name: shared-tmp
                   hostPath:
@@ -228,15 +158,13 @@ spec:
                     type: DirectoryOrCreate
               containers:
                 - name: pathways-worker
-                  image: ${PATHWAYS_SERVER_IMAGE}
+                  image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
                   imagePullPolicy: Always
                   args:
                     - --server_port=29005
-                    - --resource_manager_address=\$(PATHWAYS_HEAD):29001
+                    - --resource_manager_address=$(PATHWAYS_HEAD):29001
                     - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
                   env:
-                    - name: ENABLE_PATHWAYS_PERSISTENCE
-                      value: "1"
                     - name: TPU_MIN_LOG_LEVEL
                       value: "0"
                     - name: TF_CPP_MIN_LOG_LEVEL
@@ -276,12 +204,7 @@ spec:
                     - containerPort: 8080
                   resources:
                     limits:
-                      google.com/tpu: ${CHIPS_PER_WORKER}
+                      google.com/tpu: "4"
                   volumeMounts:
                     - mountPath: /tmp
                       name: shared-tmp
-EOF
-
-kubectl get pods; kubectl delete pathwaysjob "$JOB_NAME" --ignore-not-found; until ! kubectl get pathwaysjob "$JOB_NAME" >/dev/null 2>&1; do      echo "waiting for pathwaysjob $JOB_NAME to be removed...";     sleep 5; done; kubectl delete jobset "$JOB_NAME" --ignore-not-found; until ! kubectl get jobset "$JOB_NAME" >/dev/null 2>&1; do      echo "waiting for jobset $JOB_NAME to be removed...";     sleep 5; done; kubectl apply -f jobset.yaml; until kubectl get pod | grep "$JOB_NAME-pathways-head-0-0" | grep -q Running; do     echo "waiting for head pod...";        sleep 5; done; kubectl get pod; python3 $GITHUB_PATH/experimental/pathways_dev/remote-ide.py -w "$JOB_NAME" -m "vscode" -b "$TEMP_BUCKET" --check-active-session
-
-
