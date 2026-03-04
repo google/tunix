@@ -2,7 +2,7 @@ name: Auto-assign issues and PRs
 on:
   issues:
     types: [opened, reopened]
-  pull_request:
+  pull_request_target:
     types: [opened, reopened]
 
 permissions:
