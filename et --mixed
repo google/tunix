@@ -1,0 +1,1136 @@
+[33mcb23ced[m[33m ([m[1;36mHEAD -> [m[1;32mdeepswe-eval[m[33m, [m[1;31morigin/deepswe-eval[m[33m)[m Update code (removed sensitive info)
+[33m65e7933[m remote update
+[33m5862f95[m update from vm
+[33maeeedc0[m remote update
+[33mcddf404[m remote update
+[33m88022b8[m remote update
+[33ma39060b[m remote update
+[33mb3ca474[m remote update
+[33m460f214[m remote update
+[33m509807d[m update
+[33m545fc6f[m update
+[33mdec8f89[m remote update
+[33m1e10c67[m update
+[33m1c105c9[m update
+[33m43778f3[m Add SWE-bench evaluation script for tunix.
+[33mb674b8c[m Converts the colab to script and make it work.
+[33m8224f24[m squash
+[33md96113b[m remote update
+[33m615934a[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Merge pull request #1169 from google:nicogrande/add-vllm-sampler-kwargs
+[33m0581c0b[m[33m ([m[1;31morigin/nicogrande/add-vllm-sampler-kwargs[m[33m)[m adding support for vllm sampler kwargs.
+[33m933e9fb[m split metric prefix
+[33md1939f8[m [Tunix] Reduce log spam from type mismatch warnings.
+[33mbea7eae[m Enable pr from user's fork to auto assign issues correctly.
+[33m3ec99b5[m [Tunix] Add support for aligning 1D KV biases in sglang_jax.
+[33m50439ed[m Merge pull request #1151 from google:fix/sglangjax-cpu-oom
+[33mb39d48b[m Code update
+[33md55b500[m remove tflops measurement
+[33m5315406[m measure global step time, prompt len and clip ratio
+[33ma08842a[m Merge pull request #1181 from google:mohit/ep_Fix
+[33mb17865f[m remove unnecessary rollout round
+[33mb8d95e2[m[33m ([m[1;31morigin/mohit/ep_Fix[m[33m)[m move sharding parallelism keys outside of engine kwargs
+[33m6c3a55e[m make trace writing a configurable option
+[33md9fdfc7[m [Tunix] Initialize policy version from global steps.
+[33md77f6a8[m [Tunix] improve trajectory logging to suppor numpy array and scalar types.
+[33m6a9ef6f[m Merge pull request #1160 from rajasekharporeddy:qlora_llama3
+[33ma3389dc[m Add DeepSWE train script.
+[33m0eb6763[m fix metric logging step
+[33mdf627a6[m Merge pull request #1099 from google:mohit/dev
+[33ma512490[m[33m ([m[1;31morigin/mohit/dev[m[33m)[m expert parallelism config
+[33mfdef654[m Update the qlora_llama3_gpu.ipynb notebook
+[33mefb4913[m [Tunix] Update `BaseAgent` to accept observations with a "prompts" key rather than "question".
+[33m38d3834[m some BE work
+[33mf2dcd33[m speedup trainer for RL
+[33m31720ac[m [Tunix] Add vLLM sampler for math eval.
+[33m52a611c[m Move ifrt based reshard out of experimental. Leaving intermediate resharding and sidechannel resharding in experimental.
+[33mea5a0e6[m fix deepscaler notebook
+[33m1b31e2b[m Code update
+[33m791d90c[m fix group_id
+[33m8d1b212[m remat MLP block
+[33mb2fa837[m [Tunix] Another minor fix for extracting ground truth. We should evaluated against a ground truth without `boxed` formatted always.
+[33m062f958[m Merge pull request #800 from rajasekharporeddy:broken_links
+[33m99a99d6[m Minor Doc Fixes: Correct a typo, add a hyperlink
+[33m1fd2104[m[33m ([m[1;31morigin/fix/sglangjax-cpu-oom[m[33m)[m fix oom due to missing closing loop
+[33mb121235[m Code update
+[33me1d4836[m Merge pull request #1140 from precur-ai:fix_cli_rollout_config
+[33m7a1ae80[m Merge pull request #1148 from precur-ai:fix_eos_issue_sgl_vllm
+[33m20bf4c9[m Merge branch 'main' into fix_eos_issue_sgl_vllm
+[33m27bcfe8[m Merge pull request #1143 from google:nicogrande/fix_logical_axis_cm
+[33mf19d0ae[m[33m ([m[1;31morigin/nicogrande/fix_logical_axis_cm[m[33m)[m adding fix to logical axis cm for RL.
+[33m7e57b8f[m [Tunix] Fixes a bug in `math_rewards.py` where multiple rewards could be added for a single sample.
+[33m53a4c11[m remove the eos when formatting the input during sgl/vllm generation
+[33me543f21[m Chore: trigger presubmit with new permissions
+[33mba8ef5d[m allow passing rollout configs from sglang/vllm through cli
+[33mc8db4ca[m update
+[33ma09a609[m Match changes in README
+[33mec7437b[m Merge pull request #1089 from rajasekharporeddy:auto_assign
+[33mf2bfcc6[m Change duplicate function registration to log a warning instead of raising an error.
+[33mac0f4c4[m [Tunix] Handles None logits from vLLM.
+[33m6d961cb[m [Tunix] Minor fix on rewards
+[33m03f160d[m Fix auto-assignment of github issues and pull requests to the engineers on weekly rotation
+[33mddded39[m [Tunix] Engine kwargs overwrite predefined config keys.
+[33m7ec3eaf[m Update links in Tunix OSS README.
+[33ma22e6a1[m fix offpolicy step
+[33m4074a97[m use max_response_len for deepscaler
+[33mb3e3ffc[m [Tunix] mprove GCS CSV writing.
+[33macb5eb4[m Merge pull request #1122 from rajasekharporeddy:colab_badge
+[33mfb9c752[m Add Colab and Kaggle badges to qlora_llam3_gpu example tutorial
+[33m4376cf0[m fix group_id and pair_idx in traj
+[33m707db58[m simplify trajectory result processing
+[33md3f81ac[m forbidden_tokens in sampler call accepts token IDs instead of strings.
+[33m6314324[m Merge pull request #1110 from google:lance-refactor-initvar
+[33m7534565[m [Tunix] This change adds unique metadata IDs to each cell in the Jupyter Notebook.
+[33m769f42f[m add comment clarifying micro batch has to be 1
+[33mee8a07c[m Allow config_id as an alternative model_id to automodel
+[33mb4ff700[m Merge pull request #1111 from google:lance-fix-concurrency
+[33m6808337[m[33m ([m[1;31morigin/lance-fix-concurrency[m[33m)[m Set the max worker number in asyncio loop.
+[33m62a5d5e[m[33m ([m[1;31morigin/lance-refactor-initvar[m[33m)[m Refactor.
+[33m5454984[m fix loss mask for agentic learner
+[33m0f80da8[m Merge pull request #1108 from google:lance-vllm-logging1
+[33m21d9ce8[m[33m ([m[1;31morigin/lance-vllm-logging1[m[33m)[m Use Exception instead BaseException
+[33m14e9676[m Merge pull request #1107 from google:lance-vllm-logging
+[33mc81a5c1[m Adds vllm logging capability to vllm async driver.
+[33mea6951b[m Merge pull request #1105 from katjasrz:main
+[33m50b81a6[m Added a GPU demo for PEFT with QLoRA on Llama 3_1
+[33m7c73390[m minor update
+[33mec0a820[m disable perf metrics by default in the cli.
+[33m9f2ac84[m [Tunix] Refactor DeepScaler training script to support different rollout engines and mesh configurations.
+[33m2c5f81b[m [Tunix]: Skip the already trained data on job resume.
+[33m0a19790[m Merge pull request #1095 from google:lance-fix-kwargs
+[33m2567514[m Copybara import of the project:
+[33mb46a716[m[33m ([m[1;31morigin/lance-fix-kwargs[m[33m)[m Supports padding kwargs for samplers.
+[33m2fa731e[m update doc string and error message
+[33mea538fd[m fix potential race condition on dictionary update
+[33mbbba936[m Merge pull request #1090 from google:tiny/update-sglangjax-arguments
+[33md19ecbb[m[33m ([m[1;31morigin/tiny/update-sglangjax-arguments[m[33m)[m add log_level in SglangJaxConfig and update default page_size from 64 to 128
+[33m30e37dc[m Merge pull request #1082 from gurusai-voleti:ai-gsutil-migration-4bd80d06363c4d768864a0e8da88b064
+[33m035373c[m Remove max_open_buckets from GroupQueueManager
+[33mf739ee6[m [Tunix] Pad the number of heads for projection bias.
+[33m556414b[m update
+[33m0a98e91[m Copybara import of the project:
+[33m7141c9f[m chore: Migrate gsutil usage to gcloud storage
+[33m98da0b4[m remote update
+[33m93b09a8[m update
+[33m6a4c895[m update
+[33m88f08c6[m Refactor GRPO rollout to simplify grouping and avoid deepcopy
+[33mf43c85a[m [Tunix] Remove upper bound on JAX version in tunix prod dependencies.
+[33mcc3a8d6[m Add SWE-bench evaluation script for tunix.
+[33m5e54d57[m Code update
+[33m47a9f25[m feat: log rollout and train time at micro batch level.
+[33m279b975[m use absl logging across the repo
+[33me06c593[m remove max_steps from trajectory_collect_engine
+[33m436b6ff[m Converts the colab to script and make it work.
+[33m84b7f82[m [Tunix] Add trajectory logging to agentic GRPO learner.
+[33me06c7ed[m [Tunix] Add log_level config to SglangJaxSampler.
+[33m9683d6e[m fix optimizer CP restore
+[33mb6f7abd[m squash
+[33m1512da7[m Code update
+[33m3e52564[m Code update
+[33m6423505[m [Tunix] Add Qwen3 32B model configuration.
+[33md7f4e8a[m Log the computed score in GSM8K reward function
+[33ma4ab53f[m Refactor tunix Gemma3-4b SFT script to use new config structure.
+[33m04b71f4[m Skip softmax and sorting of probabilities when top_p == 1.0 and top_k is None.
+[33m9e55896[m Add logging for perf metric mode
+[33m407a80e[m Fix spacing in algorithm diagram.
+[33m36f9926[m Merge pull request #1060 from google:lance-fix-mesh
+[33m8323ac7[m[33m ([m[1;31morigin/lance-fix-mesh[m[33m)[m Use the rollout engine construct mesh.
+[33mf9d12b5[m Code update
+[33m20eaf6c[m Add timeline visualization of perf metrics
+[33m0c0fe46[m update README file in tunix
+[33mc092613[m Code update
+[33med065ff[m increase episode timeout
+[33m8e10ebb[m Cast logits to float32 in sample_top_p.
+[33m6921c6a[m internal
+[33me3a1a1e[m [Tunix] Add `convert_messages_to_string` to handle numpy array content in messages.
+[33mdde3775[m [Tunix] Add trajectory data logging to disk for further analysis and visualization.
+[33m6ae9b88[m [Tunix] Use single shared loop for producer.
+[33m4aabd5d[m Clean up and update the deepscaler training script with sglang configurations.
+[33m7edbca4[m properly set LoRA alpha
+[33m996948d[m support customized agent and env impl in agentic_rl_learner
+[33m2ae66d5[m feat: add multi-rollout engine interfaces.
+[33m778df9c[m Code update
+[33m42f323e[m [Tunix] Fix Qwen2/3 vLLM to JAX lm_head mapping.
+[33mf87f213[m move scrubber after transformation for it to locate code in github
+[33m9d89409[m Add Gemini Code Assist style guide for PR reviews
+[33m436dbf4[m fix model_call in agentic_rl_learner
+[33m4ee3e5d[m retry on hf download and list to prevent gateway error that cause presubmit timeout
+[33mf237d7c[m reduce log
+[33m3d13597[m Explicitly handle single string inputs in samplers.
+[33m93a96b0[m [Tunix] Adds a check to ensure that arrays are still live before accessing their shards.
+[33ma447f43[m [Tunix] Add _put_prompts_to_queue to handle dataset iteration and partial batches.
+[33ma81c8fd[m [Tunix] Installs the latest qwix for sglang tests.
+[33m00e0041[m Merge pull request #1006 from google:nicogrande/update-train-rl-args
+[33mddca7d7[m add new sglangjaxsampler generation
+[33m32dd497[m adding sharding and performance args for vllm.
+[33m98fa9d3[m [Tunix] Fix Qwen2 vLLM to JAX embedding mapping.
+[33mede261a[m Merge pull request #1009 from google:lance-qwen3
+[33m998c410[m Merge pull request #991 from google:agagik-top-k-distill
+[33m3e29dc2[m[33m ([m[1;31morigin/agagik-top-k-distill[m[33m)[m Enhance Logit Distillation Strategy with Top-K filtering and metric handling
+[33mecc46ed[m bug: fix grpo_main.
+[33m126fd50[m[33m ([m[1;31morigin/lance-qwen3[m[33m)[m Add qwen3 vllm/sglang mapping support.
+[33mdce7573[m Code update
+[33mca9aa00[m Add build-docs to both github actions and import pr checks.
+[33m8c7ee2e[m Allow single str input
+[33mae6b233[m Code update
+[33mb924919[m enable Sphinx to fix slug for every header
+[33m671c77b[m Code update
+[33meb2dc19[m Improve HBM usage tracking by avoiding double counting
+[33mb2be968[m Code update
+[33mdd833a9[m Unify to HF as the single model_id
+[33m22e1c1f[m handling shape and rank mismatch for sglang-jax
+[33me721c5f[m Add support for interleaved layer mappings and enhanced key mapping regex.
+[33m45e3689[m fix math util parsing
+[33m8de77e3[m Code update
+[33meb5a07e[m minor resharding updates.
+[33m059cfb0[m Fix Gemma 3 safetensor loading
+[33m3c72781[m Add an multi-turn RL example notebook.
+[33mf71f2f7[m Merge pull request #826 from google:feat/add-lora-for-sglangjax
+[33m099babd[m Internal change
+[33mf6b6955[m Code update
+[33mf55e0a0[m Add overlong reward shaping for DAPO. Refactor rl_learner.compute_reward to use reward_manager Enable logging `algo_config` at learner init.
+[33meffe4a6[m Merge pull request #982 from selamw1:main
+[33mb516523[m[33m ([m[1;31morigin/feat/add-lora-for-sglangjax[m[33m)[m complete LoRA codes for SGLangJax, and pass tests
+[33m6f1eb71[m [Tunix] Fix the logic to handle multiple intermetidate mesh.
+[33mebd526b[m remove .vscode/settings.json
+[33m5993406[m Fix Gemma 3 model loading and import Gemma 3
+[33m5a4ae75[m Fix Gemma 3 model loading
+[33mebff6ec[m Update Gemma 3 config calls to use public API
+[33m812b96d[m [Tunix] Updates the split_by_mesh_axis access pattern.
+[33mfb70ac7[m Merge pull request #971 from google:lance-fix-transpose
+[33mb778b6c[m [Tunix] replaces a print statement with logging.vlog and other minor nits.
+[33m48011b4[m extend support for gemma1.1 in automodel
+[33m1cb4ac3[m make explicit copy to create actor model
+[33m796bdc3[m Add gcsfs.
+[33m687c81c[m[33m ([m[1;31morigin/lance-fix-transpose[m[33m)[m Apply transpose rule to safetensor saver function.
+[33mf76f9f4[m Code update
+[33ma06224c[m adding missing test case variant
+[33m6e3d16f[m Code update
+[33m34d1184[m Merge pull request #960 from google:lance-fix-cli
+[33m6e44aa0[m[33m ([m[1;31morigin/lance-fix-cli[m[33m)[m Fix the cli to have the proper model config over written.
+[33md8d0732[m Merge pull request #938 from SarveshMahalingam:fix-cli-readme-broken-links
+[33mfa73cd7[m Path fix implemented in README.md
+[33ma8a6994[m [Internal] Adding naming conventions documentation
+[33m315727c[m Code update
+[33m4421858[m use taskgroup for batch of async tasks
+[33m93559b5[m Merge pull request #935 from precur-ai:add_llama3p2i_config
+[33m9eee298[m Code update
+[33m04f17e0[m Merge pull request #940 from precur-ai:properly_display_lr
+[33mb8dc72e[m remove type indirection
+[33m7437ec5[m Remove `_obs_cache`
+[33m86becc3[m Adding dataclass to naming
+[33ma35cf37[m remove type indirection
+[33meb07bf8[m Introduce prompt queue to support off-policy
+[33mcd9c339[m checkpoint opt state
+[33m10ebf0b[m Enable padding for attention qkv biases.
+[33mcc342e2[m remove mesh cm from example
+[33m49cdc47[m enable proper report for learning rate during training
+[33m92d37fe[m add llama 3.2 1b/3b-instruct model config; add naming and automodel test related to llama3.2 instruct models
+[33m3b55852[m add metric first_micro_batch_rollout_time in fully diagg mode.
+[33m9c82596[m Merge pull request #936 from google:lance-dataset
+[33m8201a54[m[33m ([m[1;31morigin/lance-dataset[m[33m)[m Fix the dataset creation.
+[33me165692[m Code update
+[33m262e487[m Fix broken example script references in CLI README
+[33mc948ebe[m Code update
+[33mdb21d5f[m Code update
+[33m39e1e94[m add train step time metric.
+[33m9928c80[m Merge pull request #853 from precur-ai:allow_user_datamodule_spec
+[33m1e1f3d8[m allow users to specify data module outside of tunix; refactor existing impl a bit
+[33m05715da[m Validation tests for model id to exist on HF
+[33m855b18d[m update gemma-3 models ids to match HF
+[33m04fd05d[m Merge pull request #915 from google:fix/sglang-perf
+[33m9c0225b[m Code update
+[33m71e0331[m Merge pull request #841 from google:nicogrande/maxtext-vllm-tunix-integration
+[33m7fb1c7d[m[33m ([m[1;31morigin/fix/sglang-perf[m[33m)[m fix perf
+[33mf24c5fa[m Merge pull request #888 from ev-br:doc_ci_check
+[33m1230131[m Merge pull request #893 from rajasekharporeddy:examples
+[33m03f8ca7[m linter does linter
+[33mae12b2c[m Fix remaining warnings
+[33m08cf9ff[m Revert "REVERT: check silencing warnings from _collections"
+[33m2d2c86c[m REVERT: check silencing warnings from _collections
+[33m7c72bd5[m CI: add a build_docs workflow
+[33mb41a978[m MAINT: remove an unused warning/logging filter
+[33m83a3e74[m DOC: suppress a wall of "WARNING: duplicate object description"
+[33mbfbd710[m DOC: fix the GRPOConfig docstring
+[33m0e34768[m MAINT/DOC: remove an unused sphinx extension
+[33m4483310[m Code update
+[33m1ccb62c[m [Tunix] Make `chat_parser` optional in `AgenticGrpoLearner`.
+[33md8cd0ca[m [Tunix] Use `jnp.concatenate` instead of `np.concatenate` for merging micro-batches.
+[33m0c54a8e[m fix llama run script model name
+[33mec710b3[m Model creation smoke test
+[33m8d0930b[m [Tunix]Make chat_parser optional in AgenticRLLearner.
+[33m55c74ac[m[33m ([m[1;31morigin/nicogrande/maxtext-vllm-tunix-integration[m[33m)[m Support custom MaxText (vLLM) models in sampler and rollout.
+[33m6dba986[m change from mock.patch to mock.patch.object.
+[33m7e49f40[m use model_path instead of model_id for gcs in the cli
+[33mdc20197[m [Tunix] Remove EOS token appending to the prompt in vLLM and SGLang sampler.
+[33maa8a0a9[m change `qwen3_4b_2507` model config added to match HF model ids
+[33meb6af5c[m Code update
+[33m1222a8a[m Fix breaking config test
+[33m245d94f[m Add Colab and Kaggle badges to the example notebboks
+[33mba5c799[m Merge pull request #852 from precur-ai:reward_allow_module_import
+[33m1c41829[m Adding Automodel interface to Tunix
+[33m56fd46c[m [Tunix] Update TPU nightly regression workflow script.
+[33me8b63fa[m Code update
+[33m0863146[m Adding support for gemma-X-*, llama-X-* naming similar to HF
+[33m95ab23e[m Merge pull request #868 from google:scripts/merge-scripts
+[33md13dbf0[m Add codewiki link
+[33m33bbef9[m Merge pull request #858 from precur-ai:qwen4b_model_config
+[33md069be3[m[33m ([m[1;31morigin/scripts/merge-scripts[m[33m)[m remove debug log
+[33mc873895[m remove obsolete manual annotations
+[33mad0ac1c[m succeed to run in multi hosts with Pathways
+[33me71a63b[m change `qwen3_30b` more specific to `qwen3_30b_a3b`
+[33mba40ff4[m Merge pull request #870 from rajasekharporeddy:examples
+[33m7fbaede[m [Tunix] Support pre-resharding pytrees with different meshes.
+[33mcbcace8[m remove extra import and adhere to Google's styling
+[33m621faea[m use np instead jnp to compute rewards in agentic framework
+[33m35d2410[m Copybara import of the project:
+[33m3f540c7[m update readme
+[33mdc7400a[m Add smoke shell scripts to nightly run
+[33m77bb9c0[m check integer type
+[33m169b608[m Code update
+[33medae7c9[m use env_utils in config_test
+[33m1d6cede[m update OSS readme
+[33md5dd0e4[m Add XM launch for tunix cli
+[33m918c4ec[m Fix the ValueError while loading the Gemma model in logit_distillation.ipynb
+[33mf394dd8[m Add AgenticRLLearner base class.
+[33mc920343[m [Tunix] Add number of batches argument and reduce nightly regression run time.
+[33m019d244[m Merge pull request #860 from google:fix/sglang-jax-support-pathways
+[33mb1fed88[m Merge pull request #865 from google:selamw1-patch-1
+[33m24709bb[m[33m ([m[1;31morigin/selamw1-patch-1[m[33m)[m Fix typo and citation formatting
+[33md119405[m [Tunix] Trasnfer weights from train actor to rollout engine for non-vanilla rollout engines.
+[33md0d77a7[m add naming test for qwen 4b
+[33mdbf9b4c[m explicitly specify logical_axis_rules in rl_cluster
+[33m30a6314[m[33m ([m[1;31morigin/fix/sglang-jax-support-pathways[m[33m)[m update codes
+[33md4a9ba9[m update codes
+[33m5f0213e[m add pathwaysutils.initialize() in grpo_demo_sglang_jax_rollout.py
+[33me0124e6[m add qwen4b model config which uses tie embedding; also 4b and 4b-2507 are different
+[33m553dad7[m allow users to import reward module/fn outside tunix folder
+[33mc1fb42b[m [Tunix] Update parallel sizes to use ROLLOUT_MESH in grpo_demo.
+[33m201c311[m Code update
+[33m3e605d8[m remove unused fn
+[33md6a2cc4[m Merge pull request #840 from google:lance-updates
+[33mce03efd[m[33m ([m[1;31morigin/lance-updates[m[33m)[m Improves the GRPO script to be more configurable.
+[33m9dcbc5d[m Fix ref model compute_logps input sharding issue
+[33mdbaba3f[m Fix llama RL verl script
+[33mb953a67[m make TFDS download flag a configurable option
+[33mae70dbb[m Merge pull request #837 from precur-ai:avoid_eager_mode
+[33m911f603[m Merge pull request #836 from precur-ai:wandb_name_config
+[33m96b6646[m fix the issue when eager mode jax is triggered in undesired places
+[33md8ea654[m allow user to config project name and run name in wandb
+[33m0a39687[m add missing refactoring to  model test
+[33mdd9b951[m Expand model tests and fix gemma from_params parsing
+[33me9c8a39[m Code update
+[33mbf87bdd[m Add clu metrics backend to Tunix and improve tests
+[33mea814e6[m Code update
+[33m5af3ed8[m Remove irrelevant text in GRPO example
+[33m5bfa78f[m remove extra flax sharding check
+[33m1335459[m Merge pull request #822 from precur-ai:fix_bos_duplication
+[33mb546b1f[m [Tunix] Remove EOS token appending to the prompt in vLLM and SGLang sampler.
+[33mb29f694[m remove duplicated bos id for dpo as well
+[33mcc12971[m remove duplicated bos id
+[33mcc267fd[m Merge pull request #814 from precur-ai:ckpt_config_typo_fix
+[33mfb8ec0f[m Merge pull request #813 from precur-ai:lora_config_fix
+[33m6ad1e0c[m Merge branch 'main' into ckpt_config_typo_fix
+[33m697af6e[m Merge branch 'main' into lora_config_fix
+[33md06c414[m Code update
+[33m480d946[m rename all model configs to use "p" instead of  "_" for float values
+[33m67b6247[m checkpoint_options->checkpointing_options in cli/config.py
+[33m4c16bbe[m handle the situation when lora_config is not provided
+[33m57522f6[m [Tunix] Fix GRPO script.
+[33m974da5d[m Merge pull request #791 from google:cli-fix
+[33m2c4003e[m Centralize Flax sharding setup in env_utils
+[33m8f6c116[m [Tunix] Update tunix nightly regression workflow schedule. Change the cron schedule from 2 AM UTC to 10 AM UTC.
+[33md9ec662[m[33m ([m[1;31morigin/cli-fix[m[33m)[m add test and make changes compatible with 1p
+[33m9486bfa[m Merge branch 'main' of github.com:google/tunix into cli-fix
+[33mf27d528[m Code update
+[33m2d33e68[m [Tunix] Pin the vLLM TPU Docker image to a specific nightly build version for the TPU tests.
+[33m1fe360d[m [Tunix] Follow up of cl/836961494. It was out of sync with github PR.
+[33m9ab4c8e[m Copybara import of the project:
+[33m9388533[m [Tunix] Pass HF_TOKEN to TPU nightly regression tests.
+[33md2b22f6[m [Tunix] Remove env_utils.fs_open from safetensors_loader. fsspec object doesn't have fileno. 3P test is broken: https://github.com/google/tunix/actions/runs/19689186862/job/56403241781?pr=744
+[33m243509e[m Merge pull request #760 from keshavb96:speedup_safetensor_loader
+[33m9e57977[m Fix merge conflicts
+[33m32794e8[m Code update
+[33mda4f517[m use naming utils in tunix cli
+[33m9b81e41[m remove suffix handling
+[33md10d8a2[m [Tunix] Fix nightly regression: remove unnecessary --root-dir argument from TPU nightly regression script. Fix the MATH500 eval script.
+[33mca195e4[m Merge branch 'main' of github.com:google/tunix into cli-fix
+[33m28d4d3f[m Code update
+[33m8a4f17c[m optimize safetensors loading
+[33mcfd1220[m Merge pull request #795 from google:fix/sglang_jax_sampler_test
+[33md809114[m [Tunix] Remove the version pin for SGLang.
+[33md00350c[m[33m ([m[1;31morigin/fix/sglang_jax_sampler_test[m[33m)[m add explaination for pinning version for transformers in pyproject.toml
+[33m3fdebb0[m update codes according to cr
+[33mf667dbd[m fix transformers=4.57.1 to solve issue42369 in transformers and use correct variable name in sglang_jax_sampler_test.py
+[33m26d5f90[m Merge pull request #799 from rajasekharporeddy:broken_links
+[33m90889db[m Fix broken links in Example gallery doc
+[33m6ccf2f2[m add-unit-test
+[33m8dcd7b7[m update
+[33mf8f8b0c[m update
+[33mfa9ee54[m fix gemma3 shell script
+[33m096080f[m Merge pull request #786 from google:feat/add_device_index
+[33m76bcbeb[m Merge pull request #789 from google:lance-fix1
+[33mff19bed[m [Tunix] Add gcsfs to TPU nightly regression dependencies.
+[33m7684601[m[33m ([m[1;31morigin/feat/add_device_index[m[33m)[m feat:add device indexes for sglang jax
+[33mfa7328b[m Adding back test_logprobs_extraction_with_missing_token.
+[33mb2f7b1a[m [Tunix] Update sharding configuration for attention weights.
+[33m0cc3c37[m Fix TPU nightly regression workflow to use vLLM container and add new tests.
+[33ma0964c7[m Fully async agentic training grpo learner
+[33m40a9bec[m [Tunix] change model implementation to be pytree compatible.
+[33mb600be5[m Add Tunix RL GRPO examples for Gemma3.
+[33ma6716c3[m [Tunix] Update Dockerfile and deepscaler trainer script to seperate trainer model and ref model.
+[33m61cd709[m Merge pull request #784 from google:lance-fix1
+[33m59bcc89[m Merge pull request #785 from google:lance-fix2
+[33mf1ec75b[m[33m ([m[1;31morigin/lance-fix2[m[33m)[m Developing for v0.1.6 now.
+[33me4bcbfe[m[33m ([m[1;33mtag: v0.1.5[m[33m, [m[1;31morigin/v0.1[m[33m)[m Fix first_micro_batch_rollout_time
+[33m5b58413[m Fix the vllm server mode not finish issue.
+[33m7852510[m Lazy load transformers
+[33ma738ac2[m Merge pull request #778 from rajasekharporeddy:examples
+[33m8ce157a[m Replace grpo_config with algo_config while calling GRPOTrainer in grpo_gemma.ipynb notebook
+[33mf98f57e[m Merge pull request #776 from google:lance-fix1
+[33m17eef22[m adding support for cns file downloads in tunix cli
+[33mbdc0aae[m Merge pull request #775 from rajasekharporeddy:main
+[33m5af3ac2[m Remove grpo helper.
+[33m3a4b7e7[m Developing on v0.1.5 now.
+[33m4c2d034[m Fix the GitHub source links in example notebooks on dpo, grpo and qlora
+[33m29d0c0d[m[33m ([m[1;33mtag: v0.1.4[m[33m)[m Merge pull request #772 from google:lance-fix1
+[33mad88ef5[m Code update
+[33m26115c5[m Remove the pinned qwix version because flax released 0.12.1
+[33md99e22c[m Merge pull request #769 from rajasekharporeddy:examples
+[33m959984c[m Fixes the get_logprobs_from_vllm_output util function.
+[33m38244aa[m fix GRPO metrics query and export
+[33mf27de12[m Update model module with pytree=false. Otherwise, we will encounter AtrributeError like `object has no attribute '_pytree__state'`. This error could be seen in both 1p and 3p.
+[33m26553f8[m [Tunix] Remove Jupyter cell markers from `_nb.py` files.
+[33m6a1f43c[m Fix algo_config naming in GRPOLearner
+[33mf5e5c45[m Fix TypeError in example notebooks.
+[33m4970237[m Merge pull request #594 from eghuzefa:feat-add-orpo-support
+[33me7a9905[m Rewrite perf tracer with new data model
+[33m40c2577[m Code update
+[33m9e99644[m feat: add ORPO support
+[33m783b1e7[m fix model name map mismatch in math example
+[33m7412e42[m Refactor to more user-friendly env/agent design
+[33m35599de[m Moves the path checker outside of load_file_from_gcs. Add tests for `safetensors_loader`.
+[33m256ec65[m Merge pull request #758 from google:logo
+[33md9cc85e[m[33m ([m[1;31morigin/logo[m[33m)[m make tunix logo transparent
+[33mc690d1a[m Update orchestrator logic.
+[33m31fbc3a[m Handle local paths in `load_file_from_gcs` more robustly.
+[33m2116585[m Put back JAX_RANDOM_WEIGHTS in vLLM sampler for backward compatibility.
+[33m28e4d79[m Agent mode training for 3p
+[33m5ffd07d[m Fix all the notebooks/scripts/tests to follow the latest jax.make_mesh API change. Add dummy model creator and its test.
+[33m5a682f1[m Remove unnecessary link.
+[33m9d014d7[m Add per-python-thread timeline, export perf metrics to metrics_logger
+[33mfb0a469[m Merge pull request #730 from google:fix/open_ci
+[33m3149a9f[m Merge pull request #728 from rajasekharporeddy:broken_links
+[33m2fcbdf8[m fix failing peft_trainer tests
+[33m4231382[m Creating concrete naming structure for parsing model names, based on the HuggingFace model ids. This includes: - breaking down the model name into model family and model version - standardizing the family and version to internal representations - mapping each family to internal model config path categories - building config ids that can be retrieved from ModelConfig classes of each model - unit test that checks *all* configs in all ModelConfigs are correctly parsable.
+[33m70672fe[m [Tunix] Backward compatibility for set_mesh.
+[33m4cb7541[m [Tunix] use jax.set_mesh for the mesh context after Flax updates the way it applies sharding.
+[33mbe243fd[m[33m ([m[1;31morigin/fix/open_ci[m[33m)[m open sglang-jax ci
+[33md6b19da[m Code update
+[33mf703cfd[m Implement n-step off-policy training in Agentic GRPO learner
+[33mca59c76[m model_agent small update
+[33m6f32fe8[m Fix device collection for PerfTracer initialization.
+[33me10ecea[m Remove `gcsfs` from `pyproject.toml` dependencies.
+[33m73f3cf1[m Merge pull request #718 from google:lance-fix
+[33m594d492[m Enable vLLM DP on Tunix.
+[33mfcdb41b[m Merge pull request #722 from google:lance-fix1
+[33mb3d0a89[m Fix broken links in README.md
+[33m0d13d00[m fix flaky tests
+[33m8c6d150[m Fix the multiple metrics logger issue.
+[33me1219db[m Include perf/ in cpu-tests
+[33m0ba9757[m Merge pull request #694 from ncylich:gemma270m-examples
+[33m7214441[m Merge pull request #721 from melissawm:fix-docs
+[33me3731bd[m Temporarily disable the sglang tests.
+[33m23b92b1[m Updated three example notebooks for fine-tuning Gemma 3 1B models: - DPO (Direct Preference Optimization) training notebook - GRPO (Group Relative Policy Optimization) training notebook - QLoRA (Quantized LoRA) fine-tuning notebook
+[33m4fc5c68[m Fix docs build for ReadTheDocs
+[33ma3f1ca8[m [Tunix] Move out Docker files to the root directory
+[33mf974645[m add metrics and tracer.
+[33m89a777b[m Merge pull request #696 from google:feat/update-arguments-for-sglang-jax-rollout
+[33me7a9836[m Refactor TPU tests to separate jobs that requires HF_TOKENs and only run these tests when merging from same repo.
+[33m045aeeb[m [TunixProgrammingGuide] Add programming_guide to Tunix copybara.
+[33m0f1f132[m Add Kaggle and GitHub buttons to Tunix example notebooks.
+[33mac5c975[m [TunixLoggingPluginBackend] Add a plugin-type custom logging backend support in Tunix `MetricsLogger`.
+[33m3b2f245[m The default AxisType returned by `make_mesh` is going to change to `AxisType.Explicit` in a follow up CL. This change makes it so that the current code falls back to the old behavior.
+[33m5c9220e[m Update Tunix GitHub Actions to trigger on push to main.
+[33mdbe1227[m Upgrade pip before installing tunix dependencies in TPU tests.
+[33m03db739[m [Tunix] Add Dockerfile and build script for Tunix for GKE development.
+[33m4eeb76e[m Merge pull request #697 from google:yhtang/fix-spmd-hbm-usage
+[33m8288e6c[m[33m ([m[1;31morigin/yhtang/fix-spmd-hbm-usage[m[33m)[m let each process reports local devices' HBM usage in multi-process SPMD
+[33m5fb16b0[m[33m ([m[1;31morigin/feat/update-arguments-for-sglang-jax-rollout[m[33m)[m set use_sort_for_toppk_minp to true when initialize the Engine
+[33ma5a6d2f[m Merge pull request #676 from google:yhtang/dummy-loader
+[33m3721bd9[m[33m ([m[1;31morigin/yhtang/dummy-loader[m[33m)[m Merge branch 'main' into yhtang/dummy-loader
+[33m57b6901[m script for grpo agent mode
+[33mf356f1a[m Add tests for `agentic_grpo_learner`
+[33md17e656[m Updates license field to be compatible with old python versions.
+[33m7e45777[m Force reinstall tunix deps to include latest deps.
+[33m78fab15[m Pin the Qwix version to 0.1.1
+[33m53e0f14[m [Tunix] Convert the deepscaler notebook to py script.
+[33mf0d5d1e[m Agentic GRPO with multi-iteration support and fixes
+[33meb29d32[m Add GitHub Actions workflows for Tunix TPU nightly regression.
+[33m69b6ea7[m Log all reward related metrics in one loop. Fix docstring.
+[33m3809c4f[m Add BUILD file for math eval.
+[33mfbf1195[m [Tunix] Minor fix on grpo_demo description
+[33ma6488fe[m [Tunix] WIP Demo script on train deepscaler.
+[33m705dc32[m [Tunix] Update the debug logging.
+[33m58dda34[m Add support for SGLang-JAX sampler in DeepScaler math evaluation.
+[33m5393034[m Refactor `GRPOLearner.train`
+[33mdecfe16[m Convert notebook file to py scipt.
+[33m746f787[m [Tunix] Enable micro_batch_size for rollout and reference models in PPO learner.
+[33m1b752b9[m Fix the wrong loss type issue.
+[33m46ea95e[m Merge pull request #665 from google:fix/qwen2-sglang-mapping
+[33m9aa78dd[m Merge pull request #660 from google:lance-fix-script
+[33m4ab3fcc[m[33m ([m[1;31morigin/fix/qwen2-sglang-mapping[m[33m)[m fix: qwen2 mapping_sglang_jax
+[33m479f83a[m remove debug code
+[33m1c221ae[m OSS math500 eval and deepscalar script.
+[33mf43eda3[m[33m ([m[1;31morigin/lance-fix-script[m[33m)[m Fix the script.
+[33m7f8be70[m Use correct docstring for dataclasses
+[33mcc0a388[m lint
+[33m9596a58[m unit test
+[33m3d2f0cc[m unit test
+[33m3e87d8a[m faster
+[33ma6d455b[m dummy model creator
+[33m6a7dcad[m Code update
+[33m956c205[m[33m ([m[1;32mmain[m[33m, [m[1;32mhaoyu/agent[m[33m, [m[1;32mhaoyu-agentic[m[33m)[m Fix behavior when there are multiple profilers
+[33m8301b81[m Remove explicit sharding after applying LoRA.
+[33m6fe08f3[m [JAX] Replace reference to jax._src.lib.xla_client.SingleDeviceSharding with jax.sharding.SingleDeviceSharding, which is its public name.
+[33m1d94628[m Add Agentic GRPOLearner for RL training.
+[33m15014da[m Update RolloutOrchestrator
+[33m7837421[m Unregister wandb logging callback on MetricsLogger close.
+[33m7e61604[m Not donating `model` for jitted eval step.
+[33mee74136[m update _create_micro_batch_iterator
+[33mcfb6cd0[m fix profiler
+[33m09b1024[m Trajectory engine code update
+[33m9afe29a[m Adds [GemmaChatTemplateParser] to support message formatting for Gemma models, including handling of its unique system prompt and token structure.
+[33ma5f55a5[m fix metric logging
+[33ma900966[m Code update
+[33m7d13098[m Code update
+[33mf5c43b2[m Adds `pad_prompt_and_completion` for token sequence padding and improves tokenizer compatibility and message preprocessing support.
+[33mb0e19d4[m Add `ModelAgent` and `TaskEnvironment` for single-turn agentic workflows.
+[33ma8e386c[m Make put_exception as async
+[33m02f6b3b[m Code update
+[33mb49b15b[m Log individual trajetory rewards, rather than average across microbatch
+[33m763fcd5[m Merge pull request #630 from google:lance-cleanup
+[33m4b83654[m[33m ([m[1;31morigin/lance-cleanup[m[33m)[m Move rollout related configs from cluster config to rollout_config.
+[33md1d0d3f[m Revert "Move rollout related configs from cluster config to rollout_config."
+[33mbd3b14b[m Move rollout related configs from cluster config to rollout_config.
+[33m919e683[m Fix `nnx.remat` usage with bound methods.
+[33m0968c6e[m ---- Fix: Use `train_dataset` in `grpo_demo.ipynb`
+[33m5f250b0[m Move rollout related configs from cluster config to rollout_config.
+[33mc59b3d6[m support user defined rollout engine
+[33m1f3d861[m relax frozen config for model
+[33mc196fab[m Merge pull request #617 from google:feat/add_sglang_jax_readme
+[33m43c559b[m Code update
+[33m3b36737[m[33m ([m[1;31morigin/feat/add_sglang_jax_readme[m[33m)[m add sglang jax readme
+[33m811d5d3[m Add more cli model unit test. `create_model_from_safe_tensor` is broken for gemma, intentionally skip testing.
+[33m8c1bee2[m Merge pull request #615 from google:lance-cleanup
+[33m504b6a9[m Auto assign github issues to all the eng.
+[33m1f73de6[m Maintains the google<->github file structure in github folder.
+[33mf0b06ca[m vanilla sampler accept single str
+[33m56abb42[m fix global_step tracking with mini_batching
+[33m403aaec[m Fix conditional in Tunix Gemma implementation
+[33m0cbdc4f[m Move agentic out from experimental folder
+[33mc04208b[m Merge pull request #608 from google:feat/add_qwen2_sglang_jax_mapping
+[33mac0b0ce[m[33m ([m[1;31morigin/feat/add_qwen2_sglang_jax_mapping[m[33m)[m add qwen2 sglang jax mapping
+[33m30e2851[m Copybara import of the project:
+[33m78efaae[m Merge pull request #553 from primatrix:feat/add_sglang_jax_sampler
+[33maae44a4[m [Tunix] Add qwen2.5 math-1.5b model config
+[33m592666c[m This is trying to fix a very weird bug...
+[33m2654030[m add sglang jax sampler
+[33m1fb7ba6[m Merge pull request #603 from google:lance-async-redo
+[33m9835e14[m[33m ([m[1;31morigin/lance-async-redo[m[33m)[m Adds async tests for vllm server mode.
+[33m61333b1[m Merge pull request #604 from google:lance-fix
+[33m5aaa6ce[m Fix the tests collection so that it only collects the target tests.
+[33m0f51f68[m Copybara import of the project:
+[33md9630f2[m Merge pull request #601 from google:lance-fix
+[33m1372eca[m Fix vllm driver test.
+[33m25fbaff[m Merge pull request #600 from google:lance-fix
+[33m92369e7[m Fix broken CI due to vllm.
+[33m2b4ec65[m Copybara import of the project:
+[33mfc616bd[m Merge pull request #596 from google:lance-ckpt
+[33m58c8fab[m[33m ([m[1;31morigin/lance-ckpt[m[33m)[m Fix gemma model.
+[33m743525a[m Merge pull request #595 from google:lance-ckpt
+[33m8100dd5[m Fix the gemma3 loading from flax orbax checkpoint.
+[33m72d00a8[m[33m ([m[1;33mtag: v0.1.3[m[33m)[m Copybara import of the project:
+[33mc55e233[m add llama3 70 & 405b
+[33m05093d9[m fix gemma3
+[33mac07cfd[m Fix metric logging for DPO
+[33mcad6c35[m Merge pull request #581 from google:lance-bumpup
+[33mbc000a5[m Add test import check for all build target under /rl, /utils, /tests folder. Rename experimental/agentic/ to all `snake_case` for convention. Pass Step with parameter of expected type.
+[33m99eab7a[m[33m ([m[1;31morigin/lance-bumpup[m[33m)[m Bump up Jax version to 0.8.0
+[33md2549c2[m add build test for /models.
+[33m871c9ac[m Fix PeftTrainer and DPO bugs
+[33m91ff4d6[m Fixes copy bara service, the replace rule doesn't work
+[33m3f28ab8[m Adds the build test to stop our colab from breaking on build failure.
+[33mc27e6ab[m Add copyright headers to agentic files.
+[33m516c469[m Exporting the CheckpointManager class
+[33m7e708e7[m Add `RolloutOrchestrator` for parallel agent-environment rollouts
+[33m37a4367[m Async rollout code update
+[33m424f926[m Modify DPO loss function
+[33m6bf80d1[m Fix broken distillation notebook
+[33mef87b8b[m Make sft smoke test executable and runnable in tpu workflow.
+[33m0227bf0[m [Tunix] Minor change to remove unnecessary type casting
+[33m4858530[m Merge pull request #562 from google:lance-cleanup
+[33m8a51e5b[m Merge pull request #545 from google:shell
+[33m1292d5f[m add qwen2.5 1.5b
+[33m93e1bd4[m fix qwen2.5 model
+[33m45e6401[m Refactor the weight mapping config.
+[33m780cbf5[m Merge pull request #556 from google:lance-cleanup
+[33m5e599aa[m Clean up vllm tests.
+[33m5f448e3[m Move CLI utils test to CPU test. Reduce tpu workflow runtime.
+[33medd0d7f[m[33m ([m[1;31morigin/shell[m[33m)[m rebase
+[33m07648c1[m make shell scripts executable
+[33m5db6c55[m more unittest
+[33m0f465c3[m Merge pull request #551 from google:lance-fix
+[33m58b7755[m Bump up Tunix to v0.1.3 for dev.
+[33m11b1dad[m[33m ([m[1;33mtag: v0.1.2[m[33m)[m Merge pull request #549 from google:v0.1
+[33m0a78f78[m Bump up Tunix to v0.1.2
+[33m48080f1[m minor simplification
+[33mc85a6b1[m Move grpo shell scripts.
+[33m610eef6[m update function docstring for tokenize_and_generate_masks
+[33mffce5d9[m fix mtnt import
+[33me6c04a5[m Add flexible collect modes and tokenization support.
+[33m3b3790a[m make shell script executable
+[33m2543be8[m Enable sft smoke shell script to run as part of tpu unit tests
+[33m64f10f3[m Change docker version to jax0.7.1_rev1
+[33mca5d4b6[m Rename 'convert_messages_to_tokens_and_masks' to 'tokenize_and_generate_masks'
+[33m06c095a[m Merge pull request #527 from google:anisha-grpo-pw
+[33m8852950[m Port Precur.AI llama3 example to Tunix CLI 1. Enable read data from parquet 2. Change read reward function from file, so reward function could be defined by dataset 3. Add verl compatible shell scripts
+[33mb7dc4bb[m Merge pull request #540 from google:lance-fix
+[33m29abeb4[m Add sft smoke test. This could act as a integration test for peft trainer.
+[33mfdc21f7[m Fix multiple vLLM Tunix integration issue.
+[33m6de5750[m Code update
+[33m5e4a1a3[m [Tunix] Update reshard lib to respect logical axis rules.
+[33m8a8556d[m[33m ([m[1;31morigin/anisha-grpo-pw[m[33m)[m update with review comments
+[33m1c780f6[m grpo disagg llama3.1 70b works w ckpt
+[33m57371f3[m [Tunix] Add backward compatibility test for Orbax checkpoint restoration.
+[33m93d3bfe[m [Tunix] fix the grpo example which blocks copybara presubmit
+[33mdce193a[m Ensure github workflow failure block on presubmit
+[33m7cffec9[m Add BibTeX
+[33mad7958d[m [Tunix] Update the checkpoint manager with more flexible PyTree.
+[33m5ade098[m Environment code update
+[33m587ff0b[m Add `GroupQueueManager` for trajectory item grouping.
+[33mcb2f1b5[m Exporting Tokenizer + TokenizerAdaptor
+[33ma7ed7d9[m Adding a qwen-8b config
+[33m96aaad1[m Add `jinja2` dependency. This is necessary to `apply_chat_template` on tokenizer.
+[33mfa4541b[m Add explicit imports for specific TFDS datasets.
+[33mfc5c6f9[m simplify micro batching config
+[33m8e16652[m Support 'generate_with_chat_template' functionality for agentic rl
+[33m4abf16b[m Tool code update
+[33me743611[m Remove prompt_template.py
+[33m6e3682d[m Merge pull request #515 from google:lance-fix
+[33m1b5f925[m [Tunix] Allow specifying a different data type for the rollout model.
+[33m6c148bd[m Fix the front page pip install command.
+[33meb8481f[m Update agentic APIs
+[33m6d57c93[m[33m ([m[1;33mtag: v0.1.1[m[33m)[m Merge pull request #481 from google:lance-description
+[33m2761922[m[33m ([m[1;31morigin/lance-description[m[33m)[m Update descriptions.
+[33md20c245[m Disable setting specific profiler options on Pathways backend.
+[33me00ceec[m Merge pull request #501 from chethanuk:add-gemma3-270m-support
+[33mb6528ab[m Add Gemma3-270M model configuration support
+[33mcf656b9[m Merge pull request #447 from google:tunix_grpo_test
+[33m9f5a8ce[m Pass device indexes to vLLM
+[33m928c3d4[m Merge pull request #464 from google:tp_kv_head_repeat
+[33me5a21e6[m Fix type errors within agents/
+[33m3caecdc[m Merge pull request #495 from google:lance-fix-ckpt-path
+[33m1d36319[m[33m ([m[1;31morigin/lance-fix-ckpt-path[m[33m)[m Fix the colab that can't find the final checkpoint. Cleanup the intermediate checkpoint directory.
+[33m774cc91[m[33m ([m[1;31morigin/tunix_grpo_test[m[33m)[m Add TPU tests workflow with GRPO integration test
+[33m2eb4184[m Fix reward function bug
+[33m3a06226[m Fix the slow kaggle image issue. Investigated everything else, the mesh setup is the culprit.  Mesh of (1, 8) is 2x faster than (2, 4). Mesh (1, 4) is at the same level, about 1.5s per training iter. Since Gemma 2B cannot handle (2, 4), we stick to (1, 4) for this example.
+[33m804c284[m Code update
+[33mf8baab9[m Code update
+[33m6642af6[m new reward functions and unit tests
+[33m8ebfb84[m Enable setting default param dtype for Gemma 3 model
+[33m5ecad84[m Move tests under experimental/agentic from tpu test session to cpu session.
+[33m8647e07[m Add utility functions for agentic RL.
+[33m188449c[m Add chat template parsers for agentic models.
+[33maa354f1[m Create a new list container type to support both flax<=0.11.2 and >=0.12.0.
+[33mf585e7a[m add remat options to model
+[33mf722f74[m Merge pull request #474 from google:v0.1
+[33m3f831d4[m Adds experimental pre-shard to Pathways on Cloud `experimental_reshard`
+[33m8fc04b9[m Relax the jax version requirement to get a working Kaggle image.
+[33m7fe4207[m update internal grpo notebook
+[33m4f0b077[m add a comment for version pinning
+[33m77a2b28[m Merge pull request #468 from google:v0.1
+[33m8c9b6cb[m Pin Jax version to 0.7.1
+[33m1c23df8[m Merge pull request #465 from google:v0.1
+[33maab457a[m Downgrad the Jax version to resolve performance issue Cloud TPU.
+[33mb5431bd[m[33m ([m[1;31morigin/tp_kv_head_repeat[m[33m)[m wip
+[33mfd25133[m Add Typed... types to ArrayLike.
+[33m2a9fe73[m [Tunix] Reshard prompt and completion tokens to the `REFERENCE` mesh before computing reference log probabilities if needed. This is needed when rollout and reference are distributed.
+[33m8be9c41[m Enable generic creation of optax.optimizer, optax.learning_rate_schedule from cli Add more unit tests for cli
+[33med8b737[m Add min resources requirements for launch scripts to README plus some cleanup in debug logging
+[33m520c7c0[m Delete this notebook as it's redundant now. Prepare for the release.
+[33mb522969[m Make `huggingface_hub` visible to tunix fix broken import in cli Add more unit tests for cli utils
+[33m46d8fb8[m Merge pull request #446 from google:v0.1
+[33m991f276[m[33m ([m[1;33mtag: v0.1.0[m[33m)[m Bump up the version to v0.1.0
+[33m16b7679[m[33m ([m[1;33mtag: v0.1.0.dev1[m[33m)[m Merge pull request #442 from google:v0.1
+[33mdfcd68e[m Bump up the version to 0.1.0.dev1
+[33mbb10d34[m Merge pull request #441 from google:lance-fix
+[33meb7c149[m Fix the kaggle downloading in GRPO notebook.
+[33m09cb200[m Rename Gemma config classes to ModelConfig for consistency.
+[33m9794c90[m Merge pull request #440 from google:v0.1
+[33m1d8aaef[m[33m ([m[1;33mtag: v0.1.0.dev0[m[33m)[m Adds prod and dev mode for tunix.
+[33mf1acbcf[m Fix Gemma loading
+[33m7532814[m Merge pull request #437 from google:v0.1
+[33mc49e40d[m Fix the pypi release action path.
+[33mad19237[m Fix SFT notebook
+[33md7990df[m Copybara import of the project:
+[33mf3a7361[m Code update
+[33m1c48302[m Fix GRPO notebook bug
+[33m952acb1[m Merge pull request #431 from google:version-bump-0.1.0.dev0
+[33mf868b8d[m[33m ([m[1;31morigin/version-bump-0.1.0.dev0[m[33m)[m Bump up the version.
+[33m2c824cd[m Change the gemma/gemma.py to gemma/model.py to comply with the project.
+[33me0e4371[m remat attn and mlp
+[33m0ad0d95[m log HBM usage at init time
+[33m94a30f5[m Merge pull request #427 from google:lance-colab
+[33m4d33651[m[33m ([m[1;31morigin/lance-colab[m[33m)[m Updates the GRPO colab to switch between TFDS and Kaggle dataset.
+[33m60f190b[m nit
+[33mbd3a248[m Merge pull request #425 from google:lance-fix
+[33m236e05d[m Fix the CI error that no tests are running.
+[33mad4639d[m Merge pull request #423 from google:lance-readme
+[33m732b00d[m Merge pull request #422 from google:lance-fix
+[33me41f804[m[33m ([m[1;31morigin/lance-readme[m[33m)[m Adds the Tunix installation options to README.
+[33m5382706[m Catch tests not covered by specific categories in CI yet.
+[33m017cdf5[m Merge pull request #420 from google:lance-fix
+[33m2c8bedc[m Update TPU requirements in the notebook description.
+[33m481ad35[m Fix RL tests on git.
+[33m938f642[m Merge pull request #417 from google:lance-fix
+[33m885c87a[m Fix SFT tests.
+[33mf267cc8[m Update README.md
+[33mcceb4fa[m Add grpo rl launch script. Update base.yaml. Sft and RL share same base_config.yaml. config.py deal with merging of paramters from yaml and shell files, validating config passed to create tokenizer/model/optimizer etc. grpo_main and sft_main contain pipeline class that inherit hyperparam class defined in config.py. Refactor all config passed utils to create models to `tunix/cli`. Add math_dataset for gsm8k dataset. Tokenizer is put in under `examples/data` since it is generic to different dataset. Support create learning rate scheduler from config.
+[33m1793c8c[m Fix logps micro-batching
+[33m4585c8e[m Add trajectory_ids to buffer metrics
+[33m5e9e8e5[m log compiled train step cache size
+[33m39767db[m Merge pull request #414 from google:lance-fix
+[33m1ddc9b3[m Fix tunix/generate tests.
+[33m9cbf984[m Merge pull request #412 from google:lance-fix-distillation-test
+[33mb57b806[m Merge pull request #411 from google:lance-cleanup
+[33m48056df[m Fix distilaation tests.
+[33m59838cb[m Clean up the PPO.
+[33m8ccde82[m Merge pull request #406 from google:lance-version
+[33m4652102[m[33m ([m[1;31morigin/lance-version[m[33m)[m Adds the version to the tunix package.
+[33mea020b3[m revert nnx.List change temporarily
+[33m1a001fe[m Merge pull request #405 from google:lance-tpu-failure
+[33me7ce3ea[m[33m ([m[1;31morigin/lance-tpu-failure[m[33m)[m Reflect the changes to TPU tests.
+[33m3157f4b[m Merge pull request #399 from melissawm:fix-dpo
+[33m3a78079[m Code update
+[33mf35cb5b[m Add hardware requirements to DPO demo notebook
+[33m98b2c3e[m move sft common fn to sft util
+[33m2530304[m revert nnx.List change temporarily
+[33m267549b[m Change DPO demo titles
+[33mc791307[m Merge pull request #398 from melissawm:fix-gallery
+[33m2b9bcda[m Fix example gallery
+[33m4d63d35[m Merge pull request #397 from ev-br:fix_qwen3_dpo
+[33m6ae8a4a[m add DPO Gemma3 example
+[33mec704eb[m DOC: link to DPO demo not qwen3_demo (which does not exist)
+[33m0003702[m Fix broken distillation notebook
+[33md8954b7[m Add a way to specify pbar description
+[33m9a20b8b[m Merge pull request #391 from google:lance-flax
+[33mebbcafa[m[33m ([m[1;31morigin/lance-flax[m[33m)[m Bump up the flax dep version to 0.12.0
+[33me016771[m Merge pull request #336 from google:tunix_tests
+[33m6c2a613[m Merge pull request #388 from google:lance-dev-mode
+[33m0654441[m[33m ([m[1;31morigin/tunix_tests[m[33m)[m Some initial tests
+[33mcad364b[m[33m ([m[1;31morigin/lance-dev-mode[m[33m)[m Add dev mode.
+[33m688c395[m Code update
+[33m9eddfa9[m Merge pull request #386 from google:lance-add-dep
+[33mf75e257[m[33m ([m[1;31morigin/lance-add-dep[m[33m)[m Adds the gcsfs as deps because SFT example uses it.
+[33mb85ef4e[m [Tunix] dtype casting when updating rollout params if vanilla rollout has different dtype than actor
+[33mb41e94a[m Merge pull request #303 from PLAN-Lab:dpo_example
+[33mc619ce4[m Improve debugging. Add more assertion and debug message. GRPO demo notebook small cleanup.
+[33m1e38447[m remove reward display from tqdm
+[33m02fadfb[m Merge pull request #278 from ev-br:add_apidocs_2
+[33m95c0cdd[m Exporting metrics buffer
+[33m12f160f[m formatting
+[33md0e0257[m formatting
+[33mbf14547[m Add contributors to README
+[33me211e45[m DOC: add API docs via Sphinx autodoc
+[33mb250d80[m Rename Grpo, Dpo, Ppo to GRPO, DPO, PPO
+[33m1c1720b[m Merge pull request #367 from precur-ai:precur-dev
+[33m91c8149[m Merge pull request #375 from google:lance-publish
+[33m9486828[m[33m ([m[1;31morigin/lance-publish[m[33m)[m Release automation.
+[33m4fbffaa[m Merge pull request #374 from google:lance-ci
+[33me5bd530[m[33m ([m[1;31morigin/lance-ci[m[33m)[m Initial cpu only CI setup.
+[33m9a815fa[m Code update
+[33m5a96038[m Merge remote-tracking branch 'upstream/main' into precur-dev
+[33mb42597d[m format
+[33m9d5e838[m Revert "Merge pull request #372 from google:lance-flax"
+[33m6afdc31[m remove whitespace
+[33mc18ab01[m fix gemma3 notebook
+[33ma969b66[m Merge branch 'main' into dpo_example
+[33mc34b8a2[m Merge pull request #372 from google:lance-flax
+[33m991b466[m Use Flax release insteading of github head.
+[33me70eb9f[m Merge pull request #371 from google:lance-version
+[33mbbc265e[m Fix the py version support.
+[33m2260f18[m [Tunix] add back the check on target dim == 128.
+[33ma6bba45[m Add KL methods to PPO, separate logging for actor and critic
+[33m44f1a70[m use the tree_map from jax directly
+[33m7560b9b[m handle batch merge for arbitrary nested structure
+[33mb12199a[m Code update
+[33m5ce33c0[m Rename GRPO, PPO, DPO symbols
+[33m284e754[m Polish DPO example
+[33mc9e8a87[m Refactor RL Learner to support mini-batches, micro-batches and data shuffle.
+[33m024baf2[m minor style changes
+[33mb00a1f9[m Code update
+[33m9153735[m resolved comments
+[33m6f40548[m use np for compute rewards
+[33m0d17104[m Rename GRPO, PPO, DPO symbols
+[33m5a3a2f4[m fail safe with catch all exception
+[33mafe4317[m Merge pull request #348 from melissawm:fix-rtd
+[33m364ab3c[m Code update
+[33m537e12f[m Remove vf_coef
+[33mb39db15[m Remove non-functional workflow
+[33m5e970c2[m Merge pull request #353 from google:lance-isort
+[33m5731cbc[m[33m ([m[1;31morigin/lance-isort[m[33m)[m Adds the isort rules for import reformat. Applied to all the py files.
+[33md70488f[m Fix the lint error of this file from Google due to copybara restrictions.
+[33m461a3c7[m Add entropy loss to PPO
+[33mfd0dcfc[m Move PR, issue templates to the right loc
+[33mc09db43[m Merge pull request #265 from yuxuandexter:ppo_feature_dev
+[33me03f154[m update notebook
+[33m74f46b1[m Improve PR, issue templates
+[33m3b61b44[m remove unused config for now
+[33m1200820[m Bump RTD python version
+[33m0f4ecc6[m Automate notebooks execution in CI
+[33m2967968[m Add OSS DPO example
+[33m17ab915[m Fix common_test :facepalm:
+[33m865e076[m Fix common_test
+[33mdc72904[m Fix ppo_learner
+[33mb7728fc[m Pre-commit
+[33m9292e8e[m Some test + lint fixes
+[33mdaff77c[m Merge branch 'main' into ppo_feature_dev
+[33m9f704d0[m solve conflicts in tunix/rl/rl_cluster.py
+[33m3da92b9[m Merge pull request #344 from google:bugfix-qwix
+[33m357bebc[m Use official qwix release instead of repo head.
+[33mb1bbe43[m Merge pull request #343 from google/bugfix-project-name
+[33m2cec32d[m Merge pull request #343 from google:bugfix-project-name
+[33m0a94231[m[33m ([m[1;31morigin/bugfix-project-name[m[33m)[m Update the project name, version number and other setting.
+[33m965ea6d[m[33m ([m[1;33mtag: v0.0.1[m[33m)[m dedup PPO and GRPO learner
+[33m41a0b02[m Only log warning once. jax.devices() will return device on one type of backend. If no backend specified, it will return default backend registered. It's safe to skip checking.
+[33mf9ec065[m Get rid of Qwen model in the GRPO notebook
+[33mdc8b3f7[m update readme
+[33mea7a843[m Polish the GRPO notebook
+[33m4a64c89[m add flexible batch
+[33m311375e[m [Tunix] Add deepseek distilled qwen 1.5b model.
+[33m9fb8417[m Merge branch 'google:main' into ppo_feature_dev
+[33m4dfb850[m Refactor DPO
+[33md9fb4dc[m Fix broken code and a bit of polishing in qlora/grpo notebooks
+[33mecd604d[m Move mtnt to examples
+[33m1a682e0[m Merge pull request #333 from google:lance-readme1
+[33mca1a1d3[m [TunixObservability] Catch `AttributeError` when measuring TFLOPs.
+[33m4b6e2e2[m[33m ([m[1;31morigin/lance-readme1[m[33m)[m Add the collaboration section for Tunix README.
+[33m556c001[m Merge pull request #240 from melissawm:rtd-setup
+[33maf720be[m Basic RTD set up
+[33mf4fb898[m generate trajectory_id for eval ds
+[33m19ef15b[m Merge pull request #330 from google:lance-fix-format
+[33maa5eed0[m[33m ([m[1;31morigin/lance-fix-format[m[33m)[m Fix the pyink rules and pylint rules to apply to notebooks.
+[33m999c971[m Code update
+[33m0d2dcfa[m Code update
+[33m760daca[m update readme
+[33mb825dc1[m Log warning for hbm logging on non tpu device
+[33mb5c8fa1[m [Tunix] Temporary fix for the OOM issue reported in https://github.com/google/tunix/issues/309. Once we have the mini resource for all models in our plan, we should have better coverage.
+[33mbbc504a[m export PPOLearner and update doc str
+[33m8a0a953[m [Tunix] Follow cl/806421891 to disable remaining Tunix model from eager sharding.
+[33m7ab5a8b[m update doc
+[33m2b37918[m Align GAE perfectly with verl
+[33m9f75d82[m Replace asserts with explicit ValueErrors
+[33mf8f7feb[m Merge pull request #313 from google:lance-fix-safetensor-load
+[33m5cae650[m Merge pull request #312 from google:lance-fix-script
+[33m05935ef[m[33m ([m[1;31morigin/lance-fix-safetensor-load[m[33m)[m Fix the safetensor checkpoint loading function.
+[33md402118[m Fix typo in the GRPO demo script.
+[33m1ce123f[m Merge pull request #311 from google:lance-fix-template
+[33m4e16faf[m[33m ([m[1;31morigin/lance-fix-template[m[33m)[m Fix the apply template call in grpo demo script.
+[33mf200eff[m [Tunix] Add Qwen2.5-3B config.
+[33m7f59855[m Add dual-clip PPO and lower bound/upper bound for ratio clipping
+[33m867a6fc[m Dedup grpo_demo.ipynb
+[33m7487f98[m DPO example with gemma3
+[33m8ab0048[m Add `jax[tpu]` to dependencies.
+[33m3421085[m [Tunix] enable qwen3 in grpo_demo
+[33m11b2135[m update toml
+[33m28b44d7[m safe fail for empty eval ds
+[33m032903d[m Internal change
+[33m20ece84[m update toml
+[33m7ddf10c[m Avoid re-sharding on already sharded inputs in `peft_trainer`
+[33m141dfda[m fix cp
+[33m7117e73[m Merge pull request #277 from google:linchai_vllm_rollout_weight_sync
+[33m2f1e028[m Update deployment reference description in qlora_demo.ipynb.
+[33mdfbd14b[m Update
+[33m50290d3[m [Tunix] Add Qwen3 QLoRA demo notebook and benchmarked deployment reference.
+[33md770659[m Ignore more pylint rules
+[33m55daef8[m Add pre-commit hooks and CONTRIBUTING.md
+[33mff7bd3a[m[33m ([m[1;31morigin/linchai_vllm_rollout_weight_sync[m[33m)[m update
+[33m45e6e4a[m Code update
+[33m96f0d42[m minor fix
+[33m62a30be[m Fixed gemma2 / gemma3 safetensors loading bug
+[33m3872abe[m Merge pull request #284 from google:tunix-match-vllm-head
+[33mf667eb7[m[33m ([m[1;31morigin/tunix-match-vllm-head[m[33m)[m make tunix work with vLLM HEAD
+[33md005e22[m Add dtype casting to safetensors loader.
+[33mb304748[m Add a script to compare logits between Tunix model and HF model
+[33m540484d[m add wall clock measure for actor dequeue
+[33me9ee7fc[m introduce trajectory_ids
+[33maab07db[m SFT CLI Launch. Example script on translation data mtnt. Qwen2 and llama3 is supported from hf. Gemma is supported to download from Kaggle but NNX conversion is needed. Gemma3 could skip nnx conversion if download from GCS bucket.
+[33m0fc4d43[m format
+[33mb235326[m Refactor state transfer for vllm rollout. - Refactor the logic to handle scanned layers by unrolling them before processing. - Refactor the reshard logic to batched manner.
+[33mf5b80b5[m refactore transfer weights to vllm rollout
+[33m9420258[m Cleanup: move utils outside of PeftTrainer
+[33mbe4acf3[m nit
+[33m45036ce[m [TunixLogging] Strip leading `/` from event name when logging to backends.
+[33mc4b84a4[m Code update
+[33me889cd8[m correct kl divergence comment; maintain a general compute_per_token_logps; order completion mask in args
+[33m9f5743f[m Add safetensors loading for Gemma 2 and Gemma 3.
+[33mce9c32c[m Polish Qwen3 notebook a bit
+[33m271abb6[m Rename Qwen model config methods for consistency.
+[33m652fe48[m Use `nnx.List` for decoder layers in Tunix models.
+[33m7714236[m Refactor safetensors loading into a reusable utility.
+[33m22ac0a2[m check and reformat code style in tunix/rl/inference_worker.py, tunix/rl/rl_cluster.py, tunix/rl/rollout/vanilla_rollout.py
+[33mf567409[m Small cleanup
+[33ma8f302a[m format tunix/rl/common.py
+[33mb68d447[m Move data.py outside gemma folder
+[33m8abafb1[m Dedup common utility functions in `gemma.py` .
+[33me7e9a6f[m correct compute kl divergence comments, simplify implementation, and add return_logits flag in the
+[33m334e6b2[m update compute kl divergence
+[33mdc57855[m Merge branch 'google:main' into main
+[33m4c5561b[m Code update
+[33m5b23c50[m Merge branch 'tunix'
+[33me16a9f5[m fix eos token mask issue in value and logis calculaiton
+[33mef0b4e5[m fix eval metric logging
+[33mc6a4776[m Add code_style.sh script to Tunix
+[33mc3d6767[m refactor train_step
+[33md8b4201[m add more kl divergences and refine logprobs functon to support logits return
+[33m81ad1e6[m Code update
+[33m5f17808[m [Tunix] bring back the fix for new llm.generate API which got reverted due to the integration merge.
+[33mac987d9[m Code update
+[33m5e84439[m Code update
+[33mb61396f[m Simplify PPO #1
+[33mea7a147[m validate config
+[33me4ea285[m Add missing get_model_input methods
+[33m6fd0ab2[m fix of np.min() call in metric logging
+[33mf72c32d[m Add LoRA example intro
+[33mc1d2d2c[m another fix of using np for metric logging
+[33m6cb5587[m Move dpo/ to sft/
+[33mabda58a[m Merge pull request #230 from google:maxtext-vllm-integration
+[33m4d6021c[m[33m ([m[1;31morigin/maxtext-vllm-integration[m[33m)[m remove logging
+[33m0e83c59[m fix lint issues
+[33m13737af[m Refactor SFT training hooks to handle buffered metrics.
+[33m805afd5[m refactor
+[33m6ef4eee[m [TunixTelemetryOptimization] Increment train_steps after metric logging to match MaxText.
+[33m1fb76e8[m use partial
+[33m180a4d3[m formatting
+[33m2f82953[m formatting
+[33m7ac1997[m support for vllm and MaxText
+[33m413090b[m Merge pull request #231 from google:weight-sync-with-checkpoint-2
+[33mf8623b5[m[33m ([m[1;31morigin/weight-sync-with-checkpoint-2[m[33m)[m formatting
+[33md89b0cf[m Code update
+[33m38154e5[m Qwen3 loading from safetensors bug fixed
+[33m12559a8[m formatting
+[33m54d5bf0[m fix eval in grpo learner
+[33m002dab1[m wip
+[33m3f73f9b[m wip
+[33mdf525b8[m wip
+[33m67e2a7f[m wip
+[33m5934879[m wip
+[33me7a9be7[m[33m ([m[1;31morigin/weight-sync-with-checkpoint[m[33m)[m Allow model-defined init_cache for Tunix sampler
+[33md98e7bb[m create critic model from actor
+[33ma9db745[m Implemented the core functionality for Agentic RL trajectory generation. Completed the foundational logic for agent-environment interaction. Provided a preview version of tool_agent and tool_env.
+[33m1bdf68b[m use np instead jnp for metric computing
+[33mb6225a5[m rename total_generation_steps to max_generation_steps
+[33meb44d8c[m Merge pull request #222 from google:fix_vllm_test
+[33m28cd37e[m[33m ([m[1;31morigin/fix_vllm_test[m[33m)[m Fix vllm max_model_len check
+[33ma6770a9[m [Tunix]Add a check for Pathways proxy when using experimental reshard.
+[33m5a25f1c[m [TunixTelemetryOptimization] Implement buffered metric logging in PeftTrainer to hide I/O latency.
+[33m1c86875[m [Tunix] Allow different rollout configurations for TRAIN and EVAL modes while keeping users default to share the same rollout configures.
+[33m11ccca5[m Merge pull request #218 from google:fix_vllm_test
+[33m808b050[m fix vllm_sampler_test
+[33m9f41c0b[m fix vllm_sampler_test
+[33m4a1d555[m Merge pull request #213 from google:tsbao-vllm-dev
+[33m58f04e2[m Code update
+[33md7efc73[m Exporting the CheckpointManager class
+[33m1c12ec5[m partial fix vllm
+[33m6d48a64[m remove unused rollout param
+[33m3f8e360[m Merge pull request #212 from google/tsbao-vllm-dev
+[33me3ca79c[m Partial fix vllm
+[33m434f9f4[m Partial fix vllm
+[33mc1c526d[m Pass step time delta to `on_train_step_end`.
+[33m019848f[m update qlora notebook
+[33m377d4e4[m Merge pull request #208 from google:grpo_demo
+[33m4c9110a[m update
+[33me8afeb2[m Merge remote-tracking branch 'origin/main' sync head
+[33m4a94d11[m Merge remote-tracking branch 'origin/lc5211-patch-1' Improve Readme
+[33m920c167[m Revert "Update notebook"
+[33mf7345f2[m new grpo demo with bugs fixed
+[33m77c60a7[m Update notebook
+[33m32481f3[m new grpo demo with bugs fixed
+[33m8366b4e[m [TunixTFLOPS] Get TFLOPs using JAX `cost_analysis` instead of heuristic approximation in Tunix.
+[33mcc08e5c[m [testing]grpo_demo_test update
+[33m0dce56c[m add grpo_demo_test for bug fix
+[33mee3229a[m Merge pull request #202 from google/weight-sync-with-checkpoint
+[33m62a3790[m wip
+[33mbd477a4[m wip
+[33m4e25ff3[m wip
+[33m8e0cfe7[m wip
+[33mda27552[m [Tunix] update qwix import
+[33m3cb3305[m bug fix
+[33m7dbc02f[m Merge pull request #191 from google:lance-vllm-config
+[33mec4bd83[m Update README.md
+[33mbd1cd60[m Update README.md
+[33mfceb6ad[m [Tunix] fix a couple of bugs on running Qwen2.5 models in the integrated tunix+vllm stack.
+[33mc859003[m[33m ([m[1;31morigin/lance-vllm-config[m[33m)[m Fix more lint errors and revert one file that doesn't belong here.
+[33md799a45[m [Tunix] add qwen2 weights mappings to HF.
+[33m8f8969b[m update the approach to check if pathways is available.
+[33m01769ed[m Move vllm related controls to config.
+[33m3c8bfd5[m [Tunix] Add grain as the dependency to install when installing tunix.
+[33m5745c30[m bug fix.
+[33mbd44c2f[m Lazy import the vllm rollout worker in OSS.
+[33m159c573[m Code update
+[33m760dc48[m [Tunix] Remove RL-related compotents with vLLM dependencies imports from `tunix/__init__.py`.
+[33m21ff6bc[m Use huggingface tokenizer template in GRPO demo.
+[33mb37fcf2[m Alias the `donate_input` argument to `donate` for `pathwaysutils.experimental.reshard.reshard`
+[33mf3c8c78[m Add Qwen2 support to the OSS grpo demo script.
+[33m6effe31[m [TUNIX] add qwen2.5 7b model
+[33m780e9f3[m Support head dim padding.
+[33ma36088e[m bug fix.
+[33m934ff8b[m Changes the resharding error messages to info. These are not real errors, just indicates we don't have Pathways in this env. With this change, we can easily surpress these messages by setting the logging level, especially during vLLM weight sync when we are swarmed by these messages right now.
+[33mfb9e911[m Handle tied weights for Llama3 lm_head.
+[33mae09f26[m bug fix.
+[33m8639e02[m Disable warning if metric `learning_rate` is not present.
+[33m19cc5de[m Improves and fixes the oss grpo demo script, e.g. automatically delete the checkpoint saving dir, set the max checkpoint to keep to 1 to save disk space, set the default logging level to INFO
+[33m75ea5ae[m Open source PPO
+[33ma8883ae[m Fix the vLLM import errors.
+[33m6bd0127[m Refactor rollout params updating to reshard inside the rollout.
+[33m383688d[m Make LoRA usage in OSS GRPO demo script optional.
+[33m913865d[m Llama3 loading from safetensors bug fixed
+[33m10c498e[m Fix the minor issues from the merging conflict in previous PRs.
+[33m1e6f048[m [TUNIX] We need to enable h2d or d2h for device_put resharding if jax backend is not pathways.
+[33m4a3b503[m Refactor the vLLM weight sync
+[33m328569b[m Fix the vllm log prob extraction to handle more than token ids in each log probs; Move the log prob extraction function to utils and add unittest.
+[33mfe8cc90[m Update grpo_demo_llama3.py to support llama 3B models.
+[33mf589ad9[m Support host offloading for models.
+[33mcbea12f[m Added LLama 3.2 3B variant to tunix
+[33md13f670[m Internal
+[33m70657e5[m [TUNIX] add qwen2.5 0.5b model.
+[33mc22e862[m Refactor hbm usage in a central place.
+[33m08b1c78[m Fix the grpo to take other models.
+[33m485657f[m Code update
+[33md457b31[m minor renaming
+[33maba20d4[m fix g3 import
+[33m6c826d8[m Fix minor errors of the llama3 GRPO demo script
+[33m3b5f47b[m Fix the share weights checker util and vllm classes. vLLM will not share the weights with trainer.
+[33m6c59ef0[m Merge pull request #148 from google:lance-vllm
+[33mb44b201[m[33m ([m[1;31morigin/lance-vllm[m[33m)[m Init vLLM model with random weights, bypassing from loading from HF.
+[33mcb97478[m Internal development
+[33mbadd921[m Fix the wrong class name. Missed this one.
+[33m15f3bee[m Always loads rollout model to reshard. Previously it bypasses the resharding and apply the training actor model directly to the rollout worker.
+[33mca6b578[m Merge pull request #131 from google:lance-vllm
+[33m609e06c[m support gspo-token
+[33m7ad40de[m support GSPO
+[33m137c418[m vllm integration
+[33m23d4d10[m minor cleanup
+[33m3151259[m [Tunix] Fix profiler anti-pattern.
+[33ma1916b1[m fix sync weight logic
+[33m8bdd3ac[m Fix copybara
+[33mb1300b2[m Delete nnx.Module references in RLCluster after workers are initialized.
+[33mbb6db45[m Fix some minor python <3.12 incompatible issue.
+[33m52d1811[m Fix local attention of Gemma3 model
+[33m186610b[m Copybara import of the project:
+[33ma4aaddc[m [Tunix] Add support for hooks in training loop.
+[33mbb0d2ba[m Change the Self return type to forward declared string literal of the class name, mainly for backward compatible with older python versions.
+[33mf8542a8[m Changes seed from Jax prng to int to comply with most OSS serving stacks.
+[33m9fade17[m update copybara configures.
+[33mfd8c63c[m Fix pad id and add a unit test for the tokenizer adapter.
+[33mdaf08c6[m improve test coverage.
+[33m94b0048[m move sync_weight to rl_cluster
+[33m62a0ce6[m [TunixW&B] Install `wandb` in qlora_demo
+[33m37c06ae[m remove unnecessary comments.
+[33m17651ea[m bootstrap RL cluster
+[33m737287c[m [Tunix] Enable to log learning rate at each train step.
+[33m0d1adc8[m Add Colab self-links to example notebooks.
+[33m9dff097[m common rl trainer abstraction
+[33mee3a7c7[m Simple heuristic to eliminate replicated all-gather.
+[33mb7fcd9a[m [TunixW&B] Create a unique wandb_run_name based on datetime.
+[33mc1868cb[m [TunixProfiler] Add invalid step number check in profiler.
+[33mf6162e5[m minor cleanup
+[33m5dd3f7c[m stop grad for compute per token logps
+[33m9762843[m [Tunix] Add test to showcase Tunix support learning rate schedule.
+[33m7bcc7de[m Copybara import of the project:
+[33mfe728f2[m [Tunix] Fix the issue that step_fn would compile twice due to incorrect sharding in optimizer
+[33mddcc4e8[m Internal
+[33m15622fe[m Disable the backward pass for inference worker.
+[33m529266b[m fix the memory usage issue around per token log probs calculation
+[33mb90dc62[m Minor changes.
+[33mfdd878d[m Add back the resharding APIs for weights sync.
+[33m70c8dae[m bootstrap inference worker
+[33m8ba907b[m [Tunix] Add data queue abstraction. Later we can add ser/de logic, ckpt, etc.
+[33ma9f1319[m Adds the llama3 1B model for development. Smaller model is faster to iterate.
+[33md4df30d[m Adds a function to return a dummy input to the llama3 model.
+[33m938d4b5[m add Jax named_scope
+[33mdbcd284[m [Tunix] Replace grpo trainer with new grpo learner
+[33mf394e89[m Bootstrap rollout worker abstraction
+[33m1d1b2a1[m [Tunix] Add resuming support for grpo learner
+[33mfea30d6[m [Tunix] Create async queue between sampler and trainer
+[33m5c47c7b[m [Tunix] Fix some parity issue between grpo learner and grpo trainer
+[33mb172d85[m minor renaming
+[33m1792cdf[m [Tunix] Improve performance
+[33m5cd7554[m internal changes.
+[33m72fa710[m remove test only output field
+[33m7715be8[m [Tunix] Add distributed support for grpo learner.
+[33m210a20d[m [TUNIX] Add padding support for sampler, this is to enable jit for sampler decoding phase and then avoid doing padding later in the trainer.
+[33me2a984b[m [TunixMFU] Add approximated global `TFLOPS` measurement in Tunix trainer.
+[33mb6b2256[m vanilla qwen3-30b moe
+[33m0454a18[m Remove nnx.jit from inside loop in distillation which could be causing re-compilations on each iteration.
+[33m693f5c0[m [Tunix] Decouple Sampler and Trainer in GRPOTrainer
+[33m1e5cd17[m Added DPO demo notebook
+[33m67ee4fc[m Fix sampler_test by silencing type errors.
+[33mc0898aa[m Make CPU default device when loading full models from kaggle to avoid OOM issue on TPU.
+[33m1c8b59b[m Add a logit distillation strategy example using Gemma 7b and Gemma 2b models.
+[33m8ab3f34[m remove contrastive search support
+[33m05e8bcd[m rearrange fn
+[33m3099d1f[m bucketize prompt padding in sampler
+[33meaffff1[m Use typing_extension to import override.
+[33me918084[m add support for Gemma3 4b/12b/27b text only.
+[33m99327cd[m Fix LoRA example
+[33md26edf1[m Fix TokenizerAdapter, GemmaTokenizer, tunix/generate
+[33m9d6d18f[m Merge pull request #55 from hangfei:patch-1
+[33m90624ef[m doc: fix minor issues in  setup_notebook_tpu_single_host.sh
+[33m55c1c83[m Add Gemma 1.1
+[33m3eba12a[m [Tunix] Implement contrastive search for generation.
+[33m35ca1a8[m Use safetensors.flax to load weights to avoid pytorch dependency.
+[33m1027387[m Add gemma3 1B to models.
+[33mcf0180d[m shard to devices after loading from safetensors
+[33m4b06936[m Merge pull request #47 from google:lance-scripts
+[33m986e7c2[m Add single host setup script.
+[33m2d0fd1c[m add llama3
+[33m8d0257f[m change the export config
+[33mf8bbec8[m remove unnecessary `mask_tokens_after_eos_ids`
+[33m37963bb[m Add missing code to handle HF dataset
+[33md54974c[m Open dataset visibility for all Tunix sub packages and fix data.py BUILD rule and pytype check error.
+[33m6767345[m [Tunix] Implement beam search for generation.
+[33m641e6ae[m Add a new HF dataset to the qlora example
+[33m6de0314[m add .gitignore
+[33m7bd9ae1[m Add Gemma 2
+[33m349cf49[m use epath for compatibility.
+[33m59ce1d0[m dedup sampler
+[33md962a51[m Add top_k to sampler and evaluation to GRPO example
+[33m20fba63[m Rename gemma2 to gemma
+[33m40b597e[m Add feature projection and extend it to build Attention projection strategy.
+[33mdb512d3[m 1. Add Feature Pooling distillation strategy that support capturing features from models and calculate a cosine distance by using avg pooling to compare features. 2. Use Feature Pooling to make Attention Transfer work out of the box by making attention capture part of the strategy.
+[33m66c2226[m Make sowed_module work with lists of modules as part of models.
+[33mde2fafd[m Refactor distillation module and use cosine distance for attention transfer
+[33m4e015ca[m 1. Adds function reduce_array_to_target_shape to handle the aggregation of intermediate for distillation. It uses average pooling and supports both VALID and SAME padding strategies.
+[33me5b3c7d[m [TunixProfile] Add `profiler` to `tunix/sft` and its `peft_trainer`.
+[33mcb716de[m add qwen3 14b config and oss example
+[33m3b23ccf[m fix qwen1.7b config
+[33m790f6d9[m rename model folder
+[33m4e948a3[m add qwen3 dense model
+[33m16b965f[m Add Colab self-link
+[33m574593a[m [TunixMetricsLogger] Use _DEFAULT_STEP(=0) when step is not provided as kwargs.
+[33m88cb504[m support multi-host sharded data
+[33mf4b7382[m Add PEFT OSS example
+[33mae44fa7[m Add GRPO OSS example
+[33m570f2fb[m Merge pull request #9 from google/init
+[33m8e188a7[m modify pyproject
+[33m2700636[m only add init to top level
+[33m8dec41d[m Add init files
+[33med09d97[m Add doc-strings for GRPO
+[33m8737012[m Add deps
+[33m1603594[m Gemma fixes
+[33md7535e4[m Move gemma to tunix/examples
+[33mef58169[m Update GRPO example
+[33m395f8a3[m dedup tokenization
+[33m6827d83[m Initial open source release
+[33m62e4c54[m Prepare the repo for OSS release
