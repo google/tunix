@@ -10,7 +10,10 @@ gcloud container clusters get-credentials ${TPU_CLUSTER_NAME} \
     --region ${REGION} \
     --project ${PROJECT_ID}
 
-source /opt/venv/bin/activate
+conda activate deepswe
+cd tunix
+git fetch origin
+git reset --hard origin/sizhi-deepswe-dev
 
 # Go to R2EGym to
 /opt/venv/bin/python3.12/site-packages/r2egym/agenthub/runtime/docker.py 

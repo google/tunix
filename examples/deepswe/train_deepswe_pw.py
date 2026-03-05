@@ -84,7 +84,7 @@ os.makedirs(DATASET_CACHE, exist_ok=True)
 
 os.environ["KUBECONFIG"] = "~/.kube/config"
 os.environ["NODE_SELECTOR_KEY"] = "cloud.google.com/gke-nodepool"
-os.environ["NODE_SELECTOR_VAL"] = "lance-cpu-pool" # NB: change based on your node pool name
+os.environ["NODE_SELECTOR_VAL"] = "deepswe-worker-pool" # NB: change based on your node pool name
 
 # Kubernetes Setup
 try:
