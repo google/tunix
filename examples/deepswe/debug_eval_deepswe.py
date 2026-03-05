@@ -16,6 +16,14 @@ Usage:
 
   # Specific instance by ID
   INSTANCE_ID=django__django-12345 python debug_eval_deepswe.py
+
+Command:
+  MODEL_VERSION="Qwen/Qwen3-1.7B" \
+  TASK_INDEX=0 \
+  MAX_STEPS=10 \
+  MAX_GENERATION_STEPS=256 \
+  TIMEOUT=600 \
+  python debug_eval_deepswe.py
 """
 
 import json
