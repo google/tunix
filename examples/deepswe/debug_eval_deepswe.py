@@ -131,7 +131,7 @@ print(SEP)
 
 os.environ.setdefault("KUBECONFIG", "~/.kube/config")
 os.environ.setdefault("NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool")
-os.environ.setdefault("NODE_SELECTOR_VAL", "haoyugao-cpu-pool")
+os.environ.setdefault("NODE_SELECTOR_VAL", "deepswe-cpu-pool")
 
 from kubernetes import client, config as k8s_config
 
