@@ -160,12 +160,22 @@ devices = jax.devices()
 mesh_devices = np.array(devices).reshape(len(devices), 1)
 mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
 
-if MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
-  model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
-elif MODEL_VERSION == "Qwen/Qwen3-32B":
-  model_config = model_lib.ModelConfig.qwen3_32b()
-else:
-  raise ValueError(f"Unsupported MODEL_VERSION: {MODEL_VERSION}")
+MODEL_CONFIG_FACTORY = {
+    "Qwen/Qwen3-0.6B": model_lib.ModelConfig.qwen3_0p6b,
+    "Qwen/Qwen3-1.7B": model_lib.ModelConfig.qwen3_1p7b,
+    "Qwen/Qwen3-4B": model_lib.ModelConfig.qwen3_4b,
+    "Qwen/Qwen3-4B-Instruct-2507": model_lib.ModelConfig.qwen3_4b_instruct_2507,
+    "Qwen/Qwen3-8B": model_lib.ModelConfig.qwen3_8b,
+    "Qwen/Qwen3-14B": model_lib.ModelConfig.qwen3_14b,
+    "Qwen/Qwen3-30B-A3B": model_lib.ModelConfig.qwen3_30b_a3b,
+    "Qwen/Qwen3-32B": model_lib.ModelConfig.qwen3_32b,
+}
+if MODEL_VERSION not in MODEL_CONFIG_FACTORY:
+  raise ValueError(
+      "Unsupported MODEL_VERSION: "
+      f"{MODEL_VERSION}. Supported: {sorted(MODEL_CONFIG_FACTORY.keys())}"
+  )
+model_config = MODEL_CONFIG_FACTORY[MODEL_VERSION]()
 
 logger.info("Loading model weights from %s ...", MODEL_PATH)
 model = params_lib.create_model_from_safe_tensors(
