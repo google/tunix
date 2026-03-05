@@ -33,8 +33,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$ENGINE" != "sglang_jax" && "$ENGINE" != "vllm-tpu" && "$ENGINE" != "none" ]]; then
-    echo "Error: Invalid engine '$ENGINE'. Must be 'sglang_jax' or 'vllm-tpu'."
+if [[ "$ENGINE" != "sglang_jax" && "$ENGINE" != "vllm" && "$ENGINE" != "none" ]]; then
+    echo "Error: Invalid engine '$ENGINE'. Must be 'sglang_jax' or 'vllm'."
     exit 1
 fi
 
