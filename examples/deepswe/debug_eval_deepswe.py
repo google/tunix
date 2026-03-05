@@ -11,17 +11,26 @@ Diagnostics printed:
   - Full conversation history dumped to JSON
 
 Usage:
-  # Default: first instance
+  # Default: first instance (local model)
   TASK_INDEX=0 python debug_eval_deepswe.py
 
   # Specific instance by ID
   INSTANCE_ID=django__django-12345 python debug_eval_deepswe.py
 
-Command:
+  # Local model:
   MODEL_VERSION="Qwen/Qwen3-1.7B" \
   TASK_INDEX=0 \
   MAX_STEPS=10 \
   MAX_GENERATION_STEPS=256 \
+  TIMEOUT=600 \
+  python debug_eval_deepswe.py
+
+  # Gemini API mode:
+  USE_API=gemini \
+  API_KEY="your-api-key" \
+  API_MODEL="gemini-2.5-flash" \
+  TASK_INDEX=0 \
+  MAX_STEPS=10 \
   TIMEOUT=600 \
   python debug_eval_deepswe.py
 """
@@ -56,6 +65,11 @@ INSTANCE_ID = os.getenv("INSTANCE_ID", "")  # overrides TASK_INDEX if set
 
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/scratch/debug_eval")
 
+# API mode: set USE_API=gemini to use Gemini API instead of local model
+USE_API = os.getenv("USE_API", "")  # "gemini" for Gemini API
+API_KEY = os.getenv("API_KEY", "")
+API_MODEL = os.getenv("API_MODEL", "gemini-2.5-flash")
+
 # ========================== Logging ==========================
 
 for handler in logging.root.handlers[:]:
@@ -73,11 +87,12 @@ SEP = "=" * 72
 
 # ========================== JAX / Pathways ==========================
 
-if os.getenv("JAX_PLATFORMS", None) == "proxy":
-  import pathwaysutils
-  pathwaysutils.initialize()
+if not USE_API:
+  if os.getenv("JAX_PLATFORMS", None) == "proxy":
+    import pathwaysutils
+    pathwaysutils.initialize()
 
-os.environ["TOKENIZERS_PARALLELISM"] = "true"
+  os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 # ========================== Dataset ==========================
 
@@ -142,71 +157,101 @@ logger.info("Kubernetes connection verified.")
 
 # ========================== Model ==========================
 
-import jax
-import jax.numpy as jnp
-from jax.sharding import Mesh
-import numpy as np
-from huggingface_hub import snapshot_download
-from transformers import AutoTokenizer
-from tunix.models.qwen3 import model as model_lib
-from tunix.models.qwen3 import params as params_lib
-from tunix.sft import utils as sft_utils
-from tunix.rl.agentic.parser.chat_template_parser import parser
+if not USE_API:
+  import jax
+  import jax.numpy as jnp
+  from jax.sharding import Mesh
+  import numpy as np
+  from huggingface_hub import snapshot_download
+  from transformers import AutoTokenizer
+  from tunix.models.qwen3 import model as model_lib
+  from tunix.models.qwen3 import params as params_lib
+  from tunix.sft import utils as sft_utils
+  from tunix.rl.agentic.parser.chat_template_parser import parser
 
-if not os.path.isdir(MODEL_PATH) or not os.listdir(MODEL_PATH):
-  os.makedirs(MODEL_PATH, exist_ok=True)
-  snapshot_download(
-      repo_id=MODEL_VERSION,
-      local_dir=MODEL_PATH,
-      local_dir_use_symlinks=False,
+  if not os.path.isdir(MODEL_PATH) or not os.listdir(MODEL_PATH):
+    os.makedirs(MODEL_PATH, exist_ok=True)
+    snapshot_download(
+        repo_id=MODEL_VERSION,
+        local_dir=MODEL_PATH,
+        local_dir_use_symlinks=False,
+    )
+
+  tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+  chat_parser = parser.QwenChatTemplateParser(tokenizer)
+
+  devices = jax.devices()
+  mesh_devices = np.array(devices).reshape(len(devices), 1)
+  mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
+
+  MODEL_CONFIG_FACTORY = {
+      "Qwen/Qwen3-0.6B": model_lib.ModelConfig.qwen3_0p6b,
+      "Qwen/Qwen3-1.7B": model_lib.ModelConfig.qwen3_1p7b,
+      "Qwen/Qwen3-4B": model_lib.ModelConfig.qwen3_4b,
+      "Qwen/Qwen3-4B-Instruct-2507": model_lib.ModelConfig.qwen3_4b_instruct_2507,
+      "Qwen/Qwen3-8B": model_lib.ModelConfig.qwen3_8b,
+      "Qwen/Qwen3-14B": model_lib.ModelConfig.qwen3_14b,
+      "Qwen/Qwen3-30B-A3B": model_lib.ModelConfig.qwen3_30b_a3b,
+      "Qwen/Qwen3-32B": model_lib.ModelConfig.qwen3_32b,
+  }
+  if MODEL_VERSION not in MODEL_CONFIG_FACTORY:
+    raise ValueError(
+        "Unsupported MODEL_VERSION: "
+        f"{MODEL_VERSION}. Supported: {sorted(MODEL_CONFIG_FACTORY.keys())}"
+    )
+  model_config = MODEL_CONFIG_FACTORY[MODEL_VERSION]()
+
+  logger.info("Loading model weights from %s ...", MODEL_PATH)
+  model = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, model_config, mesh, dtype=jnp.float32
+  )
+  sft_utils.show_hbm_usage()
+
+  # ========================== Sampler ==========================
+
+  from tunix.generate import sampler as sampler_lib
+
+  sampler = sampler_lib.Sampler(
+      model,
+      tokenizer,
+      sampler_lib.CacheConfig(
+          cache_size=16384,
+          num_layers=model_config.num_layers,
+          num_kv_heads=model_config.num_kv_heads,
+          head_dim=model_config.head_dim,
+      ),
   )
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-chat_parser = parser.QwenChatTemplateParser(tokenizer)
+  sampler_lock = threading.Lock()
 
-devices = jax.devices()
-mesh_devices = np.array(devices).reshape(len(devices), 1)
-mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
+else:
+  # ========================== Gemini API Client ==========================
 
-MODEL_CONFIG_FACTORY = {
-    "Qwen/Qwen3-0.6B": model_lib.ModelConfig.qwen3_0p6b,
-    "Qwen/Qwen3-1.7B": model_lib.ModelConfig.qwen3_1p7b,
-    "Qwen/Qwen3-4B": model_lib.ModelConfig.qwen3_4b,
-    "Qwen/Qwen3-4B-Instruct-2507": model_lib.ModelConfig.qwen3_4b_instruct_2507,
-    "Qwen/Qwen3-8B": model_lib.ModelConfig.qwen3_8b,
-    "Qwen/Qwen3-14B": model_lib.ModelConfig.qwen3_14b,
-    "Qwen/Qwen3-30B-A3B": model_lib.ModelConfig.qwen3_30b_a3b,
-    "Qwen/Qwen3-32B": model_lib.ModelConfig.qwen3_32b,
-}
-if MODEL_VERSION not in MODEL_CONFIG_FACTORY:
-  raise ValueError(
-      "Unsupported MODEL_VERSION: "
-      f"{MODEL_VERSION}. Supported: {sorted(MODEL_CONFIG_FACTORY.keys())}"
-  )
-model_config = MODEL_CONFIG_FACTORY[MODEL_VERSION]()
+  import google.genai as genai
 
-logger.info("Loading model weights from %s ...", MODEL_PATH)
-model = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, model_config, mesh, dtype=jnp.float32
-)
-sft_utils.show_hbm_usage()
+  if not API_KEY:
+    logger.error("API_KEY is required when USE_API is set.")
+    sys.exit(1)
 
-# ========================== Sampler ==========================
+  api_client = genai.Client(api_key=API_KEY)
+  logger.info("Using Gemini API: model=%s", API_MODEL)
 
-from tunix.generate import sampler as sampler_lib
 
-sampler = sampler_lib.Sampler(
-    model,
-    tokenizer,
-    sampler_lib.CacheConfig(
-        cache_size=16384,
-        num_layers=model_config.num_layers,
-        num_kv_heads=model_config.num_kv_heads,
-        head_dim=model_config.head_dim,
-    ),
-)
-
-sampler_lock = threading.Lock()
+def _chat_to_gemini(chat_completions):
+  """Convert OpenAI-style chat messages to Gemini API format."""
+  system_parts = []
+  contents = []
+  for msg in chat_completions:
+    role = msg.get("role", "user")
+    content = msg.get("content", "")
+    if role == "system":
+      system_parts.append(content)
+    elif role == "assistant":
+      contents.append({"role": "model", "parts": [{"text": content}]})
+    else:
+      contents.append({"role": "user", "parts": [{"text": content}]})
+  system_instruction = "\n".join(system_parts) if system_parts else None
+  return contents, system_instruction
 
 # ========================== Agent & Env ==========================
 
@@ -272,18 +317,39 @@ def run_debug_eval():
     print(f"  content length: {len(content)} chars")
     print(f"  content (last 300 chars): ...{content[-300:]}")
 
-    print("\n--- Calling model ---")
     t0 = time.time()
-    prompt = chat_parser.parse(agent.chat_completions)
-    prompt_tokens = len(tokenizer.encode(prompt))
-    logger.info("Prompt tokens: %d", prompt_tokens)
+    if USE_API:
+      print("\n--- Calling Gemini API ---")
+      contents, system_instruction = _chat_to_gemini(agent.chat_completions)
+      config = {}
+      if system_instruction:
+        config["system_instruction"] = system_instruction
+      response = api_client.models.generate_content(
+          model=API_MODEL,
+          contents=contents,
+          config=config,
+      )
+      model_response = response.text
+      model_time = time.time() - t0
+      usage = getattr(response, "usage_metadata", None)
+      prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+      response_tokens = getattr(usage, "candidates_token_count", 0) or 0
+      logger.info(
+          "API responded in %.1fs (%d prompt tokens, %d response tokens)",
+          model_time, prompt_tokens, response_tokens,
+      )
+    else:
+      print("\n--- Calling model ---")
+      prompt = chat_parser.parse(agent.chat_completions)
+      prompt_tokens = len(tokenizer.encode(prompt))
+      logger.info("Prompt tokens: %d", prompt_tokens)
 
-    with sampler_lock:
-      out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
-    model_response = out.text[0]
-    model_time = time.time() - t0
-    response_tokens = len(tokenizer.encode(model_response))
-    logger.info("Model responded in %.1fs (%d tokens)", model_time, response_tokens)
+      with sampler_lock:
+        out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
+      model_response = out.text[0]
+      model_time = time.time() - t0
+      response_tokens = len(tokenizer.encode(model_response))
+      logger.info("Model responded in %.1fs (%d tokens)", model_time, response_tokens)
 
     # --- Parse response ---
     print("\n--- Model Response ---")
@@ -451,7 +517,10 @@ def run_debug_eval():
   print(f"  total_steps   : {total_steps}")
   print(f"  total_time    : {total_time:.1f}s")
   print(f"  final_reward  : {reward_val}")
-  print(f"  model_version : {MODEL_VERSION}")
+  if USE_API:
+    print(f"  backend       : Gemini API ({API_MODEL})")
+  else:
+    print(f"  model_version : {MODEL_VERSION}")
   print(f"  max_steps     : {MAX_STEPS}")
   print()
   print("  Per-step summary:")
@@ -481,7 +550,7 @@ def run_debug_eval():
       "FAIL_TO_PASS": entry.get("FAIL_TO_PASS", []),
       "PASS_TO_PASS": entry.get("PASS_TO_PASS", []),
       "problem_statement": entry.get("problem_statement", ""),
-      "model_version": MODEL_VERSION,
+      "model_version": f"api:{API_MODEL}" if USE_API else MODEL_VERSION,
       "max_steps": MAX_STEPS,
       "total_steps": total_steps,
       "total_time_s": round(total_time, 1),
