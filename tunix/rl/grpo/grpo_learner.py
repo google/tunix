@@ -30,6 +30,7 @@ from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
+from tunix.rl.ppo import ppo_helpers
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -65,6 +66,8 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
     epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
       PPO, it ensures stable updates.
     epsilon_high: Epsilon value for upper bound clipping.
+    entropy_coef: Entropy coefficient for the policy loss. Set to `None` or
+      `0.0` to disable entropy regularization.
     loss_algo: use GRPO or GSPO for loss computation. GRPO loss is per-batch
       normalized instead of per-response normalized as mentioned in the paper.
       For GSPO, we use gspo-token loss which is more flexible.
@@ -89,6 +92,7 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
   num_iterations: int = 1
   beta: float = 0.04
   epsilon: float = 0.2
+  entropy_coef: float | None = None
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -184,7 +188,14 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
+    actor_rl_metrics_to_log = {
+        "kl": np.mean,
+        "loss/pg_loss": np.mean,
+        "loss/kl_loss": np.mean,
+        "pg_clipfrac": np.mean,
+        "loss/entropy": np.mean,
+    }
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(actor_rl_metrics_to_log)
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
@@ -298,10 +309,26 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             ),
             "completions/max_length": (
                 np.max(agg_completion_mask),
-                np.max,
+                np.mean,
             ),
             "completions/min_length": (
                 np.min(agg_completion_mask),
+                np.mean,
+            ),
+            "advantages/mean": (
+                np.nanmean(advantages),
+                np.mean,
+            ),
+            "advantages/std": (
+                np.nanstd(advantages),
+                np.mean,
+            ),
+            "advantages/max": (
+                np.max(advantages),
+                np.max,
+            ),
+            "advantages/min": (
+                np.min(advantages),
                 np.min,
             ),
         },
@@ -442,6 +469,7 @@ def grpo_loss_fn(
   """
   beta = algo_config.beta
   epsilon = algo_config.epsilon
+  entropy_coef = algo_config.entropy_coef
   loss_algo = algo_config.loss_algo
   epsilon_high = (
       algo_config.epsilon_high
@@ -458,7 +486,7 @@ def grpo_loss_fn(
   # TODO(yangmu): trace this part as "actor_inference_and_training".
   # with perf_tracer.span("...", list(completion_ids.devices())):
   graphdef, state = nnx.split(model)
-  per_token_logps = common.compute_per_token_logps(
+  out = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
@@ -466,8 +494,9 @@ def grpo_loss_fn(
       pad_id=pad_id,
       eos_id=eos_id,
       stop_gradient=False,
-      return_logits=False,
+      return_logits=True,
   )
+  per_token_logps, logits = out
   advantages = train_example.advantages
 
   if train_example.old_per_token_logps is None:
@@ -492,26 +521,51 @@ def grpo_loss_fn(
   coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
 
   # TODO(tsbao): We should handle token level advantages.
-  per_token_loss = -jnp.minimum(
+  per_token_pg_loss = -jnp.minimum(
       coef_1 * jnp.expand_dims(advantages, 1),
       coef_2 * jnp.expand_dims(advantages, 1),
   )
 
-  aux = {"kl": 0.0}
+  pg_loss = common.aggregate_loss(
+      per_token_pg_loss, completion_mask, loss_aggregation_mode
+  )
+
+  aux = {
+      "kl": 0.0,
+      "loss/pg_loss": pg_loss,
+      "loss/kl_loss": 0.0,
+      "pg_clipfrac": jnp.mean(
+          (
+              coef_2 * jnp.expand_dims(advantages, 1)
+              > coef_1 * jnp.expand_dims(advantages, 1)
+          ).astype(jnp.float32)
+      ),
+  }
+
+  loss = pg_loss
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps
     )
-    per_token_loss = per_token_loss + beta * kl
+    kl_loss_per_token = beta * kl
+    kl_loss = common.aggregate_loss(
+        kl_loss_per_token, completion_mask, loss_aggregation_mode
+    )
+    loss = loss + kl_loss
 
     # Log mean KL.
     aux["kl"] = (kl * completion_mask).sum() / jnp.clip(
         completion_mask.sum(), min=1
     )
+    aux["loss/kl_loss"] = kl_loss
 
-  loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+  token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
+  entropy_loss = common.aggregate_loss(
+      token_entropy, completion_mask, loss_aggregation_mode
   )
+  aux["loss/entropy"] = entropy_loss
+  if entropy_coef is not None and entropy_coef != 0.0:
+    loss -= entropy_coef * entropy_loss
 
   return loss, aux
 
