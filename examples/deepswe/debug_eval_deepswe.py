@@ -120,11 +120,11 @@ print(SEP)
 print(f"  instance_id   : {entry.get('instance_id', 'N/A')}")
 print(f"  repo          : {entry.get('repo', 'N/A')}")
 print(f"  docker_image  : {entry.get('docker_image', 'N/A')}")
-print(f"  FAIL_TO_PASS  : {entry.get('FAIL_TO_PASS', [])}")
-print(f"  PASS_TO_PASS  : {entry.get('PASS_TO_PASS', [])}")
+print(f"  FAIL_TO_PASS  : {len(entry.get('FAIL_TO_PASS', []))} tests")
+print(f"  PASS_TO_PASS  : {len(entry.get('PASS_TO_PASS', []))} tests")
 problem_stmt = entry.get("problem_statement", "")
-print(f"  problem_statement (first 500 chars):")
-print(f"    {problem_stmt[:500]}")
+print(f"  problem_statement (first 200 chars):")
+print(f"    {problem_stmt[:200]}")
 print(SEP)
 
 # ========================== Kubernetes ==========================
@@ -228,11 +228,26 @@ def run_debug_eval():
   print("RESETTING ENVIRONMENT")
   print(SEP)
   t0 = time.time()
+  logger.info(
+      "Calling env.reset() for instance_id=%s backend=%s",
+      entry.get("instance_id", "N/A"),
+      env.backend,
+  )
+  reset_done = threading.Event()
+
+  def _reset_watchdog():
+    while not reset_done.wait(30):
+      logger.warning(
+          "Still waiting for env.reset() ... %.0fs elapsed", time.time() - t0
+      )
+
+  threading.Thread(target=_reset_watchdog, daemon=True).start()
   obs, info = env.reset()
+  reset_done.set()
   reset_time = time.time() - t0
   logger.info("Environment reset in %.1fs", reset_time)
   logger.info("Initial observation length: %d chars", len(str(obs)))
-  print(f"  Initial observation (first 300 chars):\n    {str(obs)[:300]}")
+  print(f"  Initial observation (first 120 chars):\n    {str(obs)[:120]}")
 
   agent.reset()
   agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
