@@ -25,10 +25,14 @@ from typing import Any, Callable, Dict
 import ast
 
 from tunix.rl.agentic.rewards import reward_types
+_REGISTRY: Dict[
+    str, Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+] = {}
 
-_REGISTRY:
+
 class UnsafeExpressionError(ValueError):
   """Raised when an expression contains disallowed syntax."""
+
 
 def _safe_eval_math(expr: str) -> float:
   """Safely evaluate a simple numeric arithmetic expression.
@@ -91,10 +95,6 @@ def _safe_eval_math(expr: str) -> float:
     raise UnsafeExpressionError(f"Disallowed expression node: {type(n).__name__}")
 
   return float(_eval(node))
- Dict[
-    str, Callable[[Dict[str, Any], str], reward_types.RewardOutput]
-] = {}
-
 
 def register(name: str):
   """Decorator for registering reward functions into the global registry.
