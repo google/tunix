@@ -17,6 +17,7 @@
 import atexit
 import dataclasses
 import asyncio
+import inspect
 import threading
 import concurrent.futures
 import queue as _queue
@@ -220,7 +221,18 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             try:
               while not self._async_llm_log_stop.is_set():
                 try:
-                  log_target.do_log_stats()
+                  maybe_awaitable = log_target.do_log_stats()
+                  if inspect.isawaitable(maybe_awaitable):
+                    if self._async_loop is None:
+                      logging.warning(
+                          "AsyncLLM do_log_stats() returned awaitable but async loop is not available."
+                      )
+                    else:
+                      fut = asyncio.run_coroutine_threadsafe(
+                          maybe_awaitable, self._async_loop
+                      )
+                      # Surface coroutine errors and avoid unbounded build-up.
+                      fut.result(timeout=10.0)
                 except Exception:
                   logging.exception("AsyncLLM log_stats failed")
                 # Match VLLMInProcessDriver default cadence (10s)
