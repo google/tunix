@@ -30,7 +30,6 @@ _REGISTRY:
 class UnsafeExpressionError(ValueError):
   """Raised when an expression contains disallowed syntax."""
 
-
 def _safe_eval_math(expr: str) -> float:
   """Safely evaluate a simple numeric arithmetic expression.
 
@@ -112,7 +111,6 @@ def register(name: str):
   Raises:
       ValueError: If a reward function with the given name already exists
   """
-
   def _wrap(fn):
     if name in _REGISTRY:
 
@@ -190,7 +188,6 @@ def combine_rewards(
   Example:
       composite_fn = combine_rewards({"exact_match": 1.0, "zero": 0.0})
   """
-
   def _fn(task: Dict[str, Any], action: str):
     total, meta = 0.0, {}
     for name, w in weights.items():
