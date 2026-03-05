@@ -18,6 +18,28 @@ fi
 
 # Default engine
 ENGINE="none"
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --engine=*)
+      ENGINE="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$ENGINE" != "sglang_jax" && "$ENGINE" != "vllm-tpu" && "$ENGINE" != "none" ]]; then
+    echo "Error: Invalid engine '$ENGINE'. Must be 'sglang_jax' or 'vllm-tpu'."
+    exit 1
+fi
+
+# Default engine
+ENGINE="none"
 LOCAL_IMAGE_NAME=tunix_base_image
 TAG=$(date +%Y%m%d_%H%M%S)
 
