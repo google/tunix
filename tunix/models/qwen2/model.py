@@ -224,15 +224,14 @@ class Einsum(nnx.Module):
     self.shape = shape
     self.config = config
     self.w = nnx.Param(
-      nnx.initializers.normal()(rngs.params(), shape),
+      nnx.initializers.normal()(rngs.params(), shape,  config.param_dtype),
       sharding=sharding,
-      dtype=config.dtype,
-      param_dtype=config.param_dtype,
     )
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    out = jnp.einsum(self.einsum_str, x, self.w.value)
+    w_val = self.w.astype(self.config.dtype)
+    out = jnp.einsum(self.einsum_str, x, w_val)
     return out.astype(self.config.dtype)
 
 
@@ -249,23 +248,21 @@ class Embedder(nnx.Module):
       config: ModelConfig,
   ):
     self.input_embedding = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
+        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim), config.param_dtype),
         sharding=shd_config.emb_vd,
-        dtype=config.dtype,
-        param_dtype=config.param_dtype,
     )
     self.shd_config = shd_config
     self.config = config
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    x = self.input_embedding[(x,)]
+    x = self.input_embedding[(x,)].astype(self.config.dtype)
     x = shard(x, self.shd_config.act_btd)
     return x
 
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    out = jnp.dot(x, self.input_embedding.value.T)
+    out = jnp.dot(x, self.input_embedding.value.T).astype(self.config.dtype)
     return out.astype(self.config.dtype)
 
 
@@ -333,11 +330,14 @@ class RMSNorm(nnx.Module):
       norm_eps: float = 1e-06,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      config: ModelConfig,
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim),
+        nnx.initializers.ones_init()(rngs.params(), dim, config.param_dtype),
+        # nnx.initializers.ones_init()(rngs.params(), dim),
         sharding=shd_config.rms_norm_weight,
     )
+    self.config = config
     self.norm_eps = norm_eps
 
   @jax.named_scope('rms_norm')
@@ -393,27 +393,21 @@ class Attention(nnx.Module):
     self.scale = self.head_dim**-0.5
     self.q_bias = nnx.Param(
         nnx.initializers.zeros_init()(
-            rngs.params(), config.num_heads * config.head_dim
+            rngs.params(), config.num_heads * config.head_dim, config.param_dtype
         ),
         sharding=self.shd_config.qkv_bias,
-        dtype=config.dtype,
-        param_dtype=config.param_dtype,
     )
     self.k_bias = nnx.Param(
         nnx.initializers.zeros_init()(
-            rngs.params(), config.num_kv_heads * config.head_dim
+            rngs.params(), config.num_kv_heads * config.head_dim, config.param_dtype
         ),
         sharding=self.shd_config.qkv_bias,
-        dtype=config.dtype,
-        param_dtype=config.param_dtype,
     )
     self.v_bias = nnx.Param(
         nnx.initializers.zeros_init()(
-            rngs.params(), config.num_kv_heads * config.head_dim
+            rngs.params(), config.num_kv_heads * config.head_dim, config.param_dtype
         ),
         sharding=self.shd_config.qkv_bias,
-        dtype=config.dtype,
-        param_dtype=config.param_dtype,
     )
 
   def block(
@@ -429,14 +423,14 @@ class Attention(nnx.Module):
 
     query_proj = self.q_proj(x)
     b, t, n, h = query_proj.shape
-    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias
+    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias.astype(self.config.dtype)
     query_proj = jnp.reshape(query_proj, (b, t, n, h))
     key_proj = self.k_proj(x)
     _, s, k, h = key_proj.shape
-    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias
+    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias.astype(self.config.dtype)
     key_proj = jnp.reshape(key_proj, (b, s, k, h))
     value_proj = self.v_proj(x)
-    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias
+    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias.astype(self.config.dtype)
     value_proj = jnp.reshape(value_proj, (b, s, k, h))
 
     query_proj = shard(query_proj, self.shd_config.act_btnh)
@@ -605,6 +599,7 @@ class DecoderLayer(nnx.Module):
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=config.shd_config,
+        config=config,
     )
     self.attn = Attention(
         config=config,
@@ -615,6 +610,7 @@ class DecoderLayer(nnx.Module):
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=config.shd_config,
+        config=config,
     )
     self.mlp = MLP(
         config=config,
@@ -671,6 +667,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
         rngs=rngs,
         norm_eps=config.norm_eps,
         shd_config=shd_config,
+        config=config,
     )
     if not self.config.use_tied_embedding:
       self.lm_head = Einsum(
