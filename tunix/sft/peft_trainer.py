@@ -99,6 +99,9 @@ class TrainingInput:
   # A mask that determines which input tokens are valid.
   input_mask: jax.Array | np.ndarray
 
+  # Optional images for vision models.
+  images: jax.Array | np.ndarray | None = None
+
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class MetricsBuffer:
@@ -815,9 +818,16 @@ def _default_loss_fn(
     input_mask: jax.Array,
     positions: jax.Array,
     attention_mask: jax.Array,
+    images: jax.Array | None = None,
 ) -> ArrayLike:
   """Default loss function for PEFT training."""
-  logits, _ = model(input_tokens, positions, None, attention_mask)
+  # Weird kwargs workaround because not all models support `images` right now.
+  kwargs = {}
+  if images is not None:
+    kwargs["images"] = images
+  logits, _ = model(
+      input_tokens, positions, None, attention_mask, **kwargs
+  )
 
   # Exclude the last step as it does not appear in the targets.
   logits = logits[:, :-1, :]
