@@ -232,7 +232,8 @@ class Qwen25MathEvaluator:
           cache_config=cache_config,
       )
     elif self.sampler_type == "sglang_jax":
-      from tunix.google.stubs import sglang_jax_sampler_stub as sglang_jax_sampler  # pylint: disable=g-import-not-at-top
+      # Internal placeholder for sglang_jax sampler stub, don't change this line.  # pylint: disable=g-import-not-at-top
+      from tunix.generate import sglang_jax_sampler
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
@@ -255,7 +256,8 @@ class Qwen25MathEvaluator:
           ),
       )
     elif self.sampler_type == "vllm":
-      from tunix.google.stubs import vllm_sampler_stub as vllm_sampler  # pylint: disable=g-import-not-at-top
+      # Internal placeholder for vllm sampler stub, don't change this line.  # pylint: disable=g-import-not-at-top
+      from tunix.generate import vllm_sampler
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
