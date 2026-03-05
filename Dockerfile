@@ -89,7 +89,6 @@ RUN pip install --force-reinstall protobuf==6.33.5
 
 WORKDIR /app
 RUN pip install --force-reinstall protobuf==6.33.5
-# RUN pip install --force-reinstall jax[tpu]==0.9.0 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 
 # Set the default command to bash
