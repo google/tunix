@@ -492,6 +492,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
+MAX_CONCURRENCY=1024
 MAX_NUM_SEQS = 768
 # MAX_NUM_SEQS = 1
 MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8  # Divide by 8 for on policy, 1 step off divide by 4
@@ -578,7 +579,7 @@ grpo_config = GRPOConfig(
     epsilon=EPSILON,
     epsilon_high=EPSILON_HIGH,
     system_prompt="",
-    max_concurrency=MAX_NUM_SEQS,
+    max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
 )
 
