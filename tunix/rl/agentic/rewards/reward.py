@@ -113,7 +113,6 @@ def register(name: str):
   """
   def _wrap(fn):
     if name in _REGISTRY:
-
       raise ValueError(f"Reward {name} already registered.")
     _REGISTRY[name] = fn
     return fn
@@ -134,7 +133,6 @@ def unregister(name: str) -> bool:
       bool: True if the function was removed, False if it wasn't registered
   """
   if name in _REGISTRY:
-
     del _REGISTRY[name]
     return True
   return False
