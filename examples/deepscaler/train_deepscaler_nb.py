@@ -328,8 +328,8 @@ def create_datasets(
     train_df = pd.read_json(train_f)
     test_df = pd.read_parquet(test_f)
 
-  train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
-  test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
+  train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True).shuffle(SEED)
+  test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True).shuffle(SEED)
 
   def process_item(item):
     question = item["question"]
