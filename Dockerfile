@@ -52,7 +52,7 @@ WORKDIR /usr/src
 RUN if [ "$ENGINE" = "sglang_jax" ]; then \
         rm -rf sglang-jax && git clone https://github.com/sgl-project/sglang-jax.git && \
         cd sglang-jax/python && pip install --force-reinstall --no-cache-dir .; \
-    elif [ "$ENGINE" = "vllm-tpu" ]; then \
+    elif [ "$ENGINE" = "vllm" ]; then \
         rm -rf vllm && git clone https://github.com/wang2yn84/vllm.git && cd vllm && git checkout lance-ds && \
         pip uninstall torch torch-xla -y && pip install -r requirements/tpu.txt && VLLM_TARGET_DEVICE="tpu" python -m pip install -e . && \
         cd .. && \
