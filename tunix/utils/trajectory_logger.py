@@ -117,6 +117,7 @@ def log_item(
   logging.log_first_n(logging.INFO, f'Logging item to {file_path}', 1)
   write_header = not file_path.exists()
 
+  logging.log_first_n(logging.INFO, f'Logging item to {file_path}', 1)
   df = pd.DataFrame(
       serialized_item if isinstance(item, list) else [serialized_item]
   )
