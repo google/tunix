@@ -125,7 +125,7 @@ MAX_RESPONSE_LENGTH = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
-TOP_P = 1
+TOP_P = 0.95
 TOP_K = None
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
@@ -146,8 +146,8 @@ EPSILON_HIGH = 0.28
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 64
-MINI_BATCH_SIZE = 64
+BATCH_SIZE = 128
+MINI_BATCH_SIZE = 128
 NUM_BATCHES = 625
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -162,7 +162,7 @@ MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
-LEARNING_RATE = 5e-6
+LEARNING_RATE = 5.00E-06
 B1 = 0.9  # Adam beta1
 B2 = 0.99  # Adam beta2
 WEIGHT_DECAY = 0.01
@@ -254,11 +254,13 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_exp05/01")
+print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 
+print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
@@ -463,7 +465,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
-MAX_NUM_SEQS =512
+MAX_NUM_SEQS =768
 MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
@@ -536,7 +538,7 @@ grpo_config = GRPOConfig(
     epsilon=EPSILON,
     epsilon_high=EPSILON_HIGH,
     system_prompt="",
-    max_concurrency=BATCH_SIZE,
+    max_concurrency=BATCH_SIZE * NUM_GENERATIONS,
 )
 
 # %%

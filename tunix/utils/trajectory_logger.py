@@ -81,7 +81,6 @@ def log_item(
     logging.warning('Trying to log an empty list, skipping.')
     return
 
-  logging.log_first_n(logging.INFO, f'Logging item to {log_path}', 1)
   if dataclasses.is_dataclass(item) or isinstance(item, (dict, list)):
     serialized_item = _make_serializable(item)
   else:
@@ -102,6 +101,7 @@ def log_item(
   file_path = log_path / filename
   write_header = not file_path.exists()
 
+  logging.log_first_n(logging.INFO, f'Logging item to {file_path}', 1)
   df = pd.DataFrame(
       serialized_item if isinstance(item, list) else [serialized_item]
   )
