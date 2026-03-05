@@ -193,8 +193,10 @@ class PeftTrainer:
       training_config: TrainingConfig,
       metrics_logger: Optional[MetricsLogger] = None,
       perf_tracer: Optional[perf_trace.Tracer] = None,
+      compute_bundle: Optional[Any] = None,
   ):
     self.model = model
+    self.compute_bundle = compute_bundle if compute_bundle is not None else self.model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     if training_config.gradient_accumulation_steps is not None:
@@ -409,10 +411,10 @@ class PeftTrainer:
           return functools.partial(f, *args)
 
       self._jitted_train_step_fn = maybe_cache_and_partial(
-          self._jitted_train_step_fn, self.model, self.optimizer
+          self._jitted_train_step_fn, self.compute_bundle, self.optimizer
       )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
-          self._jitted_eval_step_fn, self.model
+          self._jitted_eval_step_fn, self.compute_bundle
       )
     return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
