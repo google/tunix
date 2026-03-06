@@ -563,5 +563,33 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
 
+@function_registry.register_advantage_estimator("rloo")
+def compute_rloo_advantages(
+    rewards: np.ndarray, num_generations: int
+) -> np.ndarray:
+  """Compute RLOO (REINFORCE Leave-One-Out) advantages.
+
+  Args:
+    rewards: reward functions output.
+    num_generations: Number of generations.
+
+  Returns:
+    RLOO advantages.
+  """
+  if num_generations < 2:
+    # RLOO requires at least 2 samples to calculate a baseline.
+    # Return zeros (no advantage) or the raw rewards if you prefer.
+    return np.zeros_like(rewards)
+
+  reshaped_rewards = rewards.reshape(-1, num_generations)
+  total_group_sum = reshaped_rewards.sum(axis=-1, keepdims=True)
+  loo_sum = total_group_sum - reshaped_rewards
+
+  loo_mean = loo_sum / (num_generations - 1)
+  rloo_advantages = reshaped_rewards - loo_mean
+
+  return rloo_advantages.flatten()
+
+
 GrpoConfig = GRPOConfig
 GrpoLearner = GRPOLearner
