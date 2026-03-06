@@ -517,12 +517,15 @@ def grpo_loss_fn(
       stop_gradient=False,
       return_logits=False,
   )
-  advantages = train_example.advantages
+  per_token_logps = jnp.astype(per_token_logps, jnp.float32)
+  advantages = jnp.astype(train_example.advantages, jnp.float32)
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
-    old_per_token_logps = train_example.old_per_token_logps
+    old_per_token_logps = jnp.astype(
+        train_example.old_per_token_logps, jnp.float32
+    )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
   # TODO(sizhi): Refactor this to a separate function.
@@ -544,7 +547,7 @@ def grpo_loss_fn(
   per_token_loss = -jnp.minimum(
       coef_1 * jnp.expand_dims(advantages, 1),
       coef_2 * jnp.expand_dims(advantages, 1),
-  )
+  ).astype(jnp.float32)
 
   aux = {"kl": 0.0}
   if beta is not None and beta != 0.0:
@@ -554,8 +557,9 @@ def grpo_loss_fn(
     per_token_loss = per_token_loss + beta * kl
 
     # Log mean KL.
-    aux["kl"] = (kl * completion_mask).sum() / jnp.clip(
-        completion_mask.sum(), min=1
+    aux["kl"] = jnp.astype(
+        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+        jnp.float32,
     )
 
   loss = common.aggregate_loss(
@@ -576,6 +580,7 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
   Returns:
     Group relative advantages.
   """
+  rewards = jnp.astype(rewards, jnp.float32)
   mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
   std_grouped_rewards = rewards.reshape(-1, num_generations).std(
       axis=-1, ddof=1
