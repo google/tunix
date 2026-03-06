@@ -64,6 +64,7 @@ class VllmConfig:
   data_parallel_size: int = -1
   tensor_parallel_size: int = -1
   expert_parallel_size: int = 1
+  scan_group_ordering: str = "sequential"
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -220,6 +221,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           src_state=updated_weights,
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
+          scan_group_ordering=self.config.scan_group_ordering,
       )
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
