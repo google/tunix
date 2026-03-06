@@ -64,7 +64,6 @@ class AbstractRewardManager(abc.ABC):
     Args:
         prompts: A list of input prompts.
         completions: A list of generated text completions.
-        mode: The mode to use for logging metrics.
         **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
@@ -146,16 +145,13 @@ class SequenceRewardManager(AbstractRewardManager):
 
       rewards[:, i] = np.array(r)
 
-    # Sum rewards across all reward functions for each prompt.
-    sum_rewards = np.nansum(rewards, axis=1)
-
     # Prepare metrics for logging.
     log_metrics = self._prepare_log_metrics(
         prompts,
         completions,
         rewards,
-        sum_rewards,
     )
+    sum_rewards = np.nansum(rewards, axis=1)
     rewards_info = {
         "rewards": sum_rewards,
         "log_metrics": log_metrics,
@@ -167,7 +163,6 @@ class SequenceRewardManager(AbstractRewardManager):
       prompts: List[str],
       completions: List[str],
       rewards: np.ndarray,  # (num_prompts, num_reward_fns)
-      sum_rewards: np.ndarray,  # (num_prompts,)
   ) -> Dict[str, Any]:
     """Logs individual and summed rewards, along with prompts/completions, for each trajectory."""
     # Assuming self.reward_fns and self.rl_cluster are accessible instance attributes
@@ -177,8 +172,9 @@ class SequenceRewardManager(AbstractRewardManager):
     metrics_to_log["prompts"] = (prompts, None)
     metrics_to_log["completions"] = (completions, None)
 
-    # Log the sum rewards for each prompt-completion pair.
-    metrics_to_log["rewards/sum"] = (sum_rewards, np.mean)
+    # Log the sum/mean rewards for each prompt-completion pair.
+    metrics_to_log["rewards/sum"] = (np.nansum(rewards, axis=1), np.mean)
+    metrics_to_log["rewards/mean"] = (np.nanmean(rewards, axis=1), np.mean)
 
     # Log the min and max rewards for the prompt-completion pair.
     metrics_to_log["rewards/min"] = (np.min(rewards, axis=1), np.min)
