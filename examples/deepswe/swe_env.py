@@ -146,8 +146,8 @@ class SWEEnv(BaseTaskEnv):
     os.write(1, f"observation: {obs}\n".encode())
     if reward != 0:
         os.write(1,f"getting non-zero reward: {reward}")
-    if done == true:
-        os.write(1,f'signal done from r2egym env')
+    if done == True:
+        os.write(1,b'signal done from r2egym env')
     return EnvStepResult(
         observation=str(obs), reward=reward, done=done, info=info
     )

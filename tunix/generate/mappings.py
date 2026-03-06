@@ -1,4 +1,3 @@
-"""Shared helpers and dataclasses for model weight mappings."""
 
 from __future__ import annotations
 
@@ -12,6 +11,8 @@ class BackendMappingMixin:
 
   DEFAULT_BACKEND = 'vllm_jax'
   # Subclasses can override this to explicitly set the path
+  BACKEND_PACKAGE_PATH = None
+
   BACKEND_PACKAGE_PATH = None
 
   @classmethod

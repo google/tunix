@@ -19,7 +19,7 @@ asynchronous collection of rollouts by managing the interaction loop between
 an LLM-based agent and an environment. It supports single and concurrent
 multi-pair trajectory collection.
 """
-
+import os
 import asyncio
 import time
 from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optional, ParamSpec, Set, Tuple
@@ -423,6 +423,7 @@ class TrajectoryCollectEngine:
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
     last_step.reward += final_reward.reward
+    os.write(1, f"Final reward computed: {final_reward.reward}".encode('utf-8'))
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.
