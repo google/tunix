@@ -184,7 +184,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
+      "kl": np.mean,
+      "pg_clipfrac": np.mean,
+    })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
@@ -288,6 +291,16 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           rewards=rewards, num_generations=self.algo_config.num_generations
       )
 
+    # Log raw scores from the reward model fn
+    self.rl_cluster.buffer_metrics(
+        {
+            "rewards/score/mean": (np.mean(rewards), np.mean),
+            "rewards/score/max": (np.max(rewards), np.max),
+            "rewards/score/min": (np.min(rewards), np.min),
+        },
+        mode=mode,
+    )
+
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
     self.rl_cluster.buffer_metrics(
@@ -307,11 +320,13 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         },
         mode=mode,
     )
+
+    # log user defined metrics
     for m_fn in self.metric_fns:
       user_defined_metric = m_fn(
           prompts=training_input["prompts"],
           completions=rollout_output.text,
-          advances=advantages,
+          advantages=advantages,
           rewards=rewards,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
@@ -491,23 +506,34 @@ def grpo_loss_fn(
   coef_1 = jnp.exp(seq_importance_ratio)
   coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
 
+  # Compute pg_clipfrac
+  pg_losses_1 = -coef_1 * jnp.expand_dims(advantages, 1)
+  pg_losses_2 = -coef_2 * jnp.expand_dims(advantages, 1)
+  pg_clipfrac = jnp.sum(
+      (pg_losses_2 > pg_losses_1) * completion_mask
+  ) / jnp.clip(jnp.sum(completion_mask), min=1)
+
   # TODO(tsbao): We should handle token level advantages.
   per_token_loss = -jnp.minimum(
       coef_1 * jnp.expand_dims(advantages, 1),
       coef_2 * jnp.expand_dims(advantages, 1),
   )
 
-  aux = {"kl": 0.0}
+  # add KL penalty
+  mean_kl = 0.0
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps
     )
     per_token_loss = per_token_loss + beta * kl
-
-    # Log mean KL.
-    aux["kl"] = (kl * completion_mask).sum() / jnp.clip(
+    mean_kl = (kl * completion_mask).sum() / jnp.clip(
         completion_mask.sum(), min=1
     )
+
+  aux = {
+    "kl": mean_kl,
+    "pg_clipfrac": pg_clipfrac,
+  }
 
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
