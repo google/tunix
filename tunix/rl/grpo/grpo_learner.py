@@ -326,7 +326,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       user_defined_metric = m_fn(
           prompts=training_input["prompts"],
           completions=rollout_output.text,
-          advances=advantages,
+          advantages=advantages,
           rewards=rewards,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
