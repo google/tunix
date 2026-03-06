@@ -26,6 +26,7 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -809,8 +810,10 @@ def _assign_linen_params_to_nnx_state(
   return state
 
 
-class Gemma(nnx.Module):
+class Gemma(BackendMappingMixin, nnx.Module):
   """Gemma transformer."""
+
+  BACKEND_PACKAGE_PATH = __name__
 
   @classmethod
   def from_params(cls, params: params_lib.Params, version: str) -> 'Gemma':

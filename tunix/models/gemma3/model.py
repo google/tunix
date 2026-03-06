@@ -25,6 +25,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 import jaxtyping
+from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
 from tunix.models.gemma3 import vision
 from tunix.utils import compat
@@ -905,8 +906,10 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
-class Gemma3(nnx.Module):
+class Gemma3(BackendMappingMixin, nnx.Module):
   """Gemma3 transformer."""
+
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
