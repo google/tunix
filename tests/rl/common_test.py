@@ -346,6 +346,31 @@ class CommonTest(parameterized.TestCase):
           norm=norm_val,
       )
 
+  def test_compute_kl_divergence_bf16(self):
+    per_token_logps = jnp.array([-10.0, -1.0, 0.0], dtype=jnp.bfloat16)
+    ref_per_token_logps = jnp.array([-1.0, -10.0, 0.0], dtype=jnp.bfloat16)
+
+    kl = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps, method="low_var_kl"
+    )
+    self.assertEqual(kl.dtype, jnp.float32)
+    expected_kl = common.compute_kl_divergence(
+        per_token_logps.astype(jnp.float32),
+        ref_per_token_logps.astype(jnp.float32),
+        method="low_var_kl",
+    )
+    np.testing.assert_allclose(kl, expected_kl, rtol=1e-3)
+
+  def test_aggregate_loss_bf16(self):
+    per_token_loss = jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16)
+    completion_mask = jnp.array([1, 1, 0], dtype=jnp.int32)
+
+    loss = common.aggregate_loss(
+        per_token_loss, completion_mask, loss_agg_mode="token-mean"
+    )
+    self.assertEqual(loss.dtype, jnp.float32)
+    self.assertAlmostEqual(loss, 1.5, places=5)
+
 
 if __name__ == "__main__":
   absltest.main()
