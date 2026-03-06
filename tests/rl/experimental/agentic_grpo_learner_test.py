@@ -1246,18 +1246,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         return "Initial prompt."
 
       def _step_impl(self, action: Any) -> EnvStepResult:
-        if self.step_count <= self.max_steps:
-          reward = 1.0
-          done = False
-        else:
-          reward = 0.0
-          done = True
+        done = self.step_count >= self.max_steps
+        reward = 1.0 if not done else 0.0
         return EnvStepResult(
             observation=f"Observation after step {self.step_count}",
             reward=reward,
             done=done,
             info={"max_steps": self.max_steps},
         )
+
 
     class MockAgent(ConversationAgentBase):
 
