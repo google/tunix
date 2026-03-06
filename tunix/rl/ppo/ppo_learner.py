@@ -474,7 +474,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
       user_defined_metric = m_fn(
           prompts=training_input["prompts"],
           completions=rollout_output.text,
-          advances=advantages,
+          advantages=advantages,
           rewards=last_token_scores,
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
