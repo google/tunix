@@ -26,15 +26,9 @@ Dataset = datasets.Dataset
 # ==========================================
 # 1. Path Setup
 # ==========================================
-<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
-# Use the absolute path to the ROOT folder
-pathways_root = os.path.expanduser("~/pathways-utils")
-r2egym_root = os.path.expanduser("~/r2egym")
-=======
 # Use the absolute path to the ROOT folder 
 pathways_root = os.path.expanduser('~/deepswe/pathways-utils')
 r2egym_root = os.path.expanduser('~/deepswe/r2egym')
->>>>>>> 2e50687 (more logging, docker command, update pw train script):examples/deepswe/train_deepswe_sz.py
 
 for root in [pathways_root, r2egym_root]:
   if root not in sys.path:
@@ -259,29 +253,12 @@ dataset = datasets.load_dataset(
 
 
 def transform(entry):
-<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
   for k, v in entry.items():
     if isinstance(v, list):
       entry[k] = json.dumps(v)
 
   return entry
 
-=======
-    # Rename 'prompt' to 'prompts'
-    # entry['prompts'] = [] # agentic rl learner require this field to calculate size of batch 
-    # JSON encode lists (excluding the new 'prompts')
-    
-    for k, v in entry.items():
-        if isinstance(v, list):
-            entry[k] = json.dumps(v)
-    
-    # Pre-calculate token length for filtering later
-    # This prevents redundant tokenization during the training loop
-    # tokens = tokenizer.encode(entry["problem_statement"], add_special_tokens=False)
-    # entry["prompt_length"] = len(tokens)
-    
-    return entry
->>>>>>> 6fbd540 (move unpack logic to swe_env, add reshard to pw script, add run docker script):examples/deepswe/train_deepswe_sz.py
 
 dataset = dataset.map(
     transform,
@@ -337,7 +314,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     ),
     rollout_config=base_rollout.RolloutConfig(
         max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
+        kv_cache_size=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH*MAX_TURNS*2 + 256,
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
@@ -394,11 +371,6 @@ import grain
 
 grain_dataset = grain.MapDataset.source(dataset)
 
-<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
-
-=======
-# grain_dataset = grain.MapDataset.source(dataset).map(transform_entry)
->>>>>>> 2e50687 (more logging, docker command, update pw train script):examples/deepswe/train_deepswe_sz.py
 def mixed_type_batch_fn(elements):
   """elements: A list of dicts."""
   batched_data = {}
@@ -452,9 +424,6 @@ train_dataset, _ = data_lib.post_init_dataset(
 
 print("Starting training...")
 agentic_grpo_learner.train(train_dataset=train_dataset)
-<<<<<<< HEAD:examples/deepswe/train_deepswe_nb.py
 
 
 # %%
-=======
->>>>>>> 2e50687 (more logging, docker command, update pw train script):examples/deepswe/train_deepswe_sz.py

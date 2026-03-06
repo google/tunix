@@ -1,4 +1,3 @@
-"""Shared helpers and dataclasses for model weight mappings."""
 
 from __future__ import annotations
 
@@ -12,9 +11,12 @@ class BackendMappingMixin:
 
   DEFAULT_BACKEND = 'vllm_jax'
 
+  BACKEND_PACKAGE_PATH = None
+
   @classmethod
   def _backend_registry(cls) -> Dict[str, Any]:
-    module = cls.__module__
+    module = cls.BACKEND_PACKAGE_PATH or cls.__module__
+
     package_name = module.rsplit('.', 1)[0] if '.' in module else module
     package = importlib.import_module(package_name)
     return getattr(package, 'BACKEND_MAPPINGS', {})
