@@ -619,6 +619,8 @@ class DecoderLayer(nnx.Module):
 class Qwen2(BackendMappingMixin, nnx.Module):
   """Qwen2.5 model."""
 
+  BACKEND_PACKAGE_PATH = __name__
+
   def __init__(
       self,
       config: ModelConfig,
