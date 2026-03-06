@@ -20,6 +20,8 @@ from absl import logging
 import fsspec
 import huggingface_hub as hf
 import kagglehub
+import tenacity
+
 
 
 def pathways_available() -> bool:
@@ -64,20 +66,51 @@ def kaggle_pipeline(model_id: str, model_download_path: str):
   return kagglehub.model_download(model_id)
 
 
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+    reraise=True,
+)
+def safe_list_repo_files(model_id: str):
+  return hf.list_repo_files(model_id)
+
+
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+    reraise=True,
+)
+def safe_hf_hub_download(repo_id: str, filename: str, local_dir: str):
+  return hf.hf_hub_download(
+      repo_id=repo_id,
+      filename=filename,
+      local_dir=local_dir,
+  )
+
+
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+    reraise=True,
+)
+def safe_snapshot_download(*args, **kwargs):
+  return hf.snapshot_download(*args, **kwargs)
+
+
 def hf_pipeline(model_id: str, model_download_path: str):
   """Download model from HuggingFace."""
-  if 'HF_TOKEN' not in os.environ:
+  if "HF_TOKEN" not in os.environ:
     hf.login()
-  all_files = hf.list_repo_files(model_id)
-  filtered_files = [f for f in all_files if not f.startswith('original/')]
+  all_files = safe_list_repo_files(model_id)
+  filtered_files = [f for f in all_files if not f.startswith("original/")]
   for filename in filtered_files:
-    hf.hf_hub_download(
+    safe_hf_hub_download(
         repo_id=model_id,
         filename=filename,
         local_dir=model_download_path,
     )
   logging.info(
-      'Downloaded %s to: %s',
+      "Downloaded %s to: %s",
       filtered_files,
       model_download_path,
   )

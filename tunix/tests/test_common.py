@@ -23,12 +23,10 @@ import sys
 from typing import Any, List, Tuple
 
 from flax import nnx
-import huggingface_hub
 import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
-import tenacity
 from tunix.rl import reshard
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -277,24 +275,11 @@ class ToyTransformerWithScoreHead(nnx.Module):
     return score
 
 
-@tenacity.retry(
-    stop=tenacity.stop_after_attempt(3),
-    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
-    reraise=True,
-)
-def safe_list_files(repo_id):
-  return huggingface_hub.list_repo_files(repo_id)
+from tunix.oss import utils as oss_utils
 
-
-@tenacity.retry(
-    stop=tenacity.stop_after_attempt(3),
-    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
-    reraise=True,
-)
-def safe_download(repo_id, filename, local_dir):
-  return huggingface_hub.hf_hub_download(
-      repo_id=repo_id, filename=filename, local_dir=local_dir
-  )
+safe_list_files = oss_utils.safe_list_repo_files
+safe_download = oss_utils.safe_hf_hub_download
+safe_snapshot_download = oss_utils.safe_snapshot_download
 
 
 def download_from_huggingface(repo_id: str, model_path: str):
