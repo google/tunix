@@ -42,6 +42,7 @@ import optax
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -471,15 +472,28 @@ class RLCluster:
       self.r2m[Role.ROLLOUT] = self._rollout.mesh
 
     # Initialize the performance tracer after we have all the meshes
-    if self.perf_config is None:
-      self._perf = perf_trace.NoopTracer()
-    else:
-      devices = []
-      for mesh in self.cluster_config.role_to_mesh.values():
-        devices.extend(mesh.devices.flatten().tolist())
-      self._perf = perf_trace.PerfTracer(
-          devices, self.perf_config.custom_export_fn
-      )
+    self._perf = perf_trace.NoopTracer()
+    self._perf_v2 = perf_tracer_v2.NoopTracer()
+
+    if self.perf_config:
+      export_fn_v1 = self.perf_config.custom_export_fn
+      export_fn_v2 = self.perf_config.custom_export_fn_v2
+
+      if export_fn_v1 or export_fn_v2:
+        devices = list(
+            itertools.chain.from_iterable(
+                mesh.devices.flatten().tolist()
+                for mesh in self.cluster_config.role_to_mesh.values()
+            )
+        )
+
+        if export_fn_v1:
+          self._perf = perf_trace.PerfTracer(devices, export_fn_v1)
+
+        if export_fn_v2:
+          self._perf_v2 = perf_tracer_v2.PerfTracer(
+              devices, export_fn=export_fn_v2
+          )
 
     # 2. Initialize inference worker.
     inference_models = {}
@@ -622,7 +636,13 @@ class RLCluster:
 
   @property
   def perf(self) -> perf_trace.Tracer:
+    """The v1 performance tracer."""
     return self._perf
+
+  @property
+  def perf_v2(self) -> perf_tracer_v2.Tracer:
+    """The v2 performance tracer."""
+    return self._perf_v2
 
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
