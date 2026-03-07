@@ -115,9 +115,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  @classmethod
-  def qwen3_0p6b_base(cls): # qwen3-0.6B-base
-    return cls.qwen3_0p6b()
+  qwen3_0p6b_base = qwen3_0p6b  # qwen3-0.6B-base
 
   @classmethod
   def qwen3_1p7b(cls):  # qwen3-1.7B
@@ -133,9 +131,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  @classmethod
-  def qwen3_1p7b_base(cls): # qwen3-1.7B-base
-    return cls.qwen3_1p7b()
+  qwen3_1p7b_base = qwen3_1p7b  # qwen3-1.7B-base
 
   @classmethod
   def qwen3_4b(cls):  # qwen3-4B
@@ -152,9 +148,7 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
-  @classmethod
-  def qwen3_4b_base(cls): # qwen3-4B-base
-    return cls.qwen3_4b()
+  qwen3_4b_base = qwen3_4b      # qwen3-4B-base
 
   @classmethod
   def _qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
@@ -193,9 +187,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  @classmethod
-  def qwen3_8b_base(cls): # qwen3-8B-base
-    return cls.qwen3_8b()
+  qwen3_8b_base = qwen3_8b    # qwen3-8B-base
 
   @classmethod
   def qwen3_14b(cls):  # qwen3-14B
@@ -211,9 +203,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  @classmethod
-  def qwen3_14b_base(cls): # qwen3-14B-base
-    return cls.qwen3_14b()
+  qwen3_14b_base = qwen3_14b   # qwen3-14B-base
 
   @classmethod
   def qwen3_30b_a3b(cls):  # qwen3-30B-a3b
@@ -245,9 +235,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  @classmethod
-  def qwen3_32b_base(cls): # qwen3-32B-base
-    return cls.qwen3_32b()
+  qwen3_32b_base = qwen3_32b   # qwen3-32B-base
 
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
