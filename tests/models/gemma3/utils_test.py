@@ -17,18 +17,19 @@ from absl.testing import parameterized
 import jax.numpy as jnp
 import numpy as np
 from tunix.models.gemma3 import utils
-from tunix.models.gemma3 import vision
+
+
+_TOKEN_PLACEHOLDER = 219
 
 
 class UtilsTest(parameterized.TestCase):
 
-  def test_get_positions_and_attention_mask_not_multimodal(self):
+  def test_get_attention_mask_not_multimodal(self):
     tokens = jnp.array([[1, 2, 3, utils._PADDING_ID, utils._PADDING_ID]])
-    result = utils.get_positions_and_attention_mask(tokens)
-    positions = result['positions']
-    attention_mask = result['attention_mask']
+    attention_mask = utils.get_attention_mask(
+        tokens, token_placeholder_id=_TOKEN_PLACEHOLDER
+    )
 
-    expected_positions = jnp.array([[0, 1, 2, 2, 2]])
     expected_attention_mask = jnp.array(
         [[
             [1, 0, 0, 0, 0],
@@ -39,23 +40,21 @@ class UtilsTest(parameterized.TestCase):
         ]],
         dtype=jnp.bool_,
     )
-    np.testing.assert_array_equal(positions, expected_positions)
     np.testing.assert_array_equal(attention_mask, expected_attention_mask)
 
-  def test_get_positions_and_attention_mask_multimodal(self):
+  def test_get_attention_mask_multimodal(self):
     tokens = jnp.array([[
         1,
         2,
-        vision.TOKEN_PLACEHOLDER,
-        vision.TOKEN_PLACEHOLDER,
+        _TOKEN_PLACEHOLDER,
+        _TOKEN_PLACEHOLDER,
         3,
         utils._PADDING_ID,
     ]])
-    result = utils.get_positions_and_attention_mask(tokens)
-    positions = result['positions']
-    attention_mask = result['attention_mask']
+    attention_mask = utils.get_attention_mask(
+        tokens, token_placeholder_id=_TOKEN_PLACEHOLDER
+    )
 
-    expected_positions = jnp.array([[0, 1, 2, 3, 4, 4]])
     expected_attention_mask = jnp.array(
         [[
             [1, 0, 0, 0, 0, 0],
@@ -67,19 +66,15 @@ class UtilsTest(parameterized.TestCase):
         ]],
         dtype=jnp.bool_,
     )
-    np.testing.assert_array_equal(positions, expected_positions)
     np.testing.assert_array_equal(attention_mask, expected_attention_mask)
 
-  def test_get_positions_and_attention_mask_precomputed_mask(self):
+  def test_get_attention_mask_precomputed_mask(self):
     tokens = jnp.array([[1, 2, 3, utils._PADDING_ID, utils._PADDING_ID]])
     inputs_mask = jnp.array([[1, 0, 1, 0, 0]])
-    result = utils.get_positions_and_attention_mask(
-        tokens, inputs_mask=inputs_mask
+    attention_mask = utils.get_attention_mask(
+        tokens, inputs_mask=inputs_mask, token_placeholder_id=_TOKEN_PLACEHOLDER
     )
-    positions = result['positions']
-    attention_mask = result['attention_mask']
 
-    expected_positions = jnp.array([[0, 0, 1, 1, 1]])
     expected_attention_mask = jnp.array(
         [[
             [1, 0, 0, 0, 0],
@@ -90,7 +85,6 @@ class UtilsTest(parameterized.TestCase):
         ]],
         dtype=jnp.bool_,
     )
-    np.testing.assert_array_equal(positions, expected_positions)
     np.testing.assert_array_equal(attention_mask, expected_attention_mask)
 
 
