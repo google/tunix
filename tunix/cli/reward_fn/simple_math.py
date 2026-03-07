@@ -35,7 +35,7 @@ match_format = re.compile(
 
 
 # range: [0, 0.1]
-def format(prompts, completions, r=0.1, **kwargs):
+def check_format(prompts, completions, r=0.1, **kwargs):
   return [
       0 if match_format.search(response) is None else r
       for response in completions
