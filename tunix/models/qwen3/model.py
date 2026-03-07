@@ -203,9 +203,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  @classmethod
-  def qwen3_14b_base(cls): # qwen3-14B-base
-    return cls.qwen3_14b()
+  qwen3_14b_base = qwen3_14b   # qwen3-14B-base
 
   @classmethod
   def qwen3_30b_a3b(cls):  # qwen3-30B-a3b
