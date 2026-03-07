@@ -235,8 +235,6 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  qwen3_32b_base = qwen3_32b   # qwen3-32B-base
-
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
