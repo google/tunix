@@ -43,7 +43,7 @@ def check_format(prompts, completions, r=0.1, **kwargs):
 
 
 # range: [0, 1]
-def answer(prompts, completions, answer, r=1, **kwargs):
+def check_answer(prompts, completions, answer, r=1, **kwargs):
   match_numbers = re.compile(
       rf"{solution_start}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
   )
