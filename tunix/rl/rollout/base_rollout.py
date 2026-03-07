@@ -113,6 +113,9 @@ class RolloutConfig:
   data_parallel_size: int = -1
   expert_parallel_size: int = 1
 
+  # Whether to return logprobs from the sampler.
+  return_logprobs: bool = False
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.
