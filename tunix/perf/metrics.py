@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import dataclasses
 from typing import Any
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Mapping, Tuple
 
 from jax import typing
 from tunix.perf import span
@@ -81,17 +81,24 @@ class PerfMetricsOptions:
       written out.
     log_dir: Directory to write the raw metrics/events to.
     custom_export_fn_path: Path to the custom export function. If set, the
-      custom export function will be loaded from the path instead of being
-      created by PerfMetricsExport.
+      custom export function will be loaded by the perf tracer v1 from the path
+      instead of being created by PerfMetricsExport.
+    custom_export_fn_path_v2: Path to the custom export function. If set, the
+      custom export function will be loaded by the perf tracer v2 from the path
+      instead of being created by PerfMetricsExport.
   """
   enable_trace_writer: bool = True
   log_dir: str = ""
   custom_export_fn_path: str = ""
+  custom_export_fn_path_v2: str = ""
 
 
 class PerfMetricsConfig:
   # (query, epoch) -> metrics
   custom_export_fn: Callable[[PerfSpanQuery], MetricsT] | None = None
+  custom_export_fn_v2: Callable[[Mapping[str, Timeline]], MetricsT] | None = (
+      None
+  )
 
 
 class PerfSpanQuery:
