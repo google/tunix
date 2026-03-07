@@ -98,6 +98,10 @@ class PerfettoTraceWriter:
       uuid = i + 1
       timeline = timelines[t_id]
 
+      # Skip empty timelines.
+      if not timeline.spans:
+        continue
+
       # Track Descriptor
       packet = builder.add_packet()
       packet.track_descriptor.uuid = uuid

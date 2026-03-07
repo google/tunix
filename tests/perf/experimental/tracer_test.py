@@ -17,7 +17,7 @@ from __future__ import annotations
 import dataclasses
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, List
 from unittest import mock
 
 from absl.testing import absltest
@@ -42,9 +42,9 @@ class ControlledAsyncWait:
     lock: A `threading.Lock` to ensure thread-safe access to `tasks`.
   """
 
-  def __init__(self):
-    self.tasks = []
-    self.lock = threading.Lock()
+  def __init__(self) -> None:
+    self.tasks: List[tuple[threading.Event, threading.Thread]] = []
+    self.lock: threading.Lock = threading.Lock()
 
   def __call__(
       self,
@@ -54,7 +54,7 @@ class ControlledAsyncWait:
   ) -> threading.Thread:
     event = threading.Event()
 
-    def target():
+    def target() -> None:
       event.wait()
       success()
 
@@ -151,9 +151,11 @@ class PerfTracerTest(absltest.TestCase):
     self.assertEqual(t.all_devices, ["tpu0"])
 
     # Simulate async wait success immediately calling back
-    def immediate_success(waitlist, success, failure):
+    def immediate_success(
+        waitlist: Any, success: Callable[[], None], failure: Callable[[], None]
+    ) -> mock.Mock:
       success()
-      return mock.Mock(spec=threading.Thread)
+      return mock.create_autospec(threading.Thread, instance=True)
 
     self.mock_async_wait.side_effect = immediate_success
     tags = {"key": "value", "step": 100}
@@ -177,12 +179,17 @@ class PerfTracerTest(absltest.TestCase):
   def test_tracer_with_multiple_devices(self):
     d1 = MockDevice("tpu", 0)
     d2 = MockDevice("tpu", 1)
-    t = tracer.PerfTracer(devices=[d1, d2])
+    t = tracer.PerfTracer(
+        devices=[d1, d2],
+        collect_on_first_device_per_mesh=False,
+    )
     self.assertCountEqual(t.all_devices, ["tpu0", "tpu1"])
 
-    def immediate_success(waitlist, success, failure):
+    def immediate_success(
+        waitlist: Any, success: Callable[[], None], failure: Callable[[], None]
+    ) -> mock.Mock:
       success()
-      return mock.Mock(spec=threading.Thread)
+      return mock.create_autospec(threading.Thread, instance=True)
 
     self.mock_async_wait.side_effect = immediate_success
 
@@ -206,12 +213,43 @@ class PerfTracerTest(absltest.TestCase):
     self.assertEqual(tl1.spans[0].name, "multi_dev_op")
     self.assertEqual(tl2.spans[0].name, "multi_dev_op")
 
+  def test_tracer_collect_on_one_device(self):
+    d1 = MockDevice("tpu", 0)
+    d2 = MockDevice("tpu", 1)
+    # Default collect_on_first_device_per_mesh=True
+    t = tracer.PerfTracer(devices=[d1, d2])
+    self.assertCountEqual(t.all_devices, ["tpu0", "tpu1"])
+
+    def immediate_success(
+        waitlist: Any, success: Callable[[], None], failure: Callable[[], None]
+    ) -> mock.Mock:
+      success()
+      return mock.create_autospec(threading.Thread, instance=True)
+
+    self.mock_async_wait.side_effect = immediate_success
+
+    with t.span("multi_dev_op", devices=[d1, d2]) as span:
+      span.async_end(["future"])
+
+    timelines = t._get_timelines()
+    self.assertIn("tpu0", timelines)
+    self.assertIn("tpu1", timelines)
+
+    tl1 = timelines["tpu0"]
+    tl2 = timelines["tpu1"]
+
+    self.assertLen(tl1.spans, 1, msg="Only the first device should have a span")
+    self.assertEqual(tl1.spans[0].name, "multi_dev_op")
+    self.assertEmpty(tl2.spans)
+
   def test_tracer_with_multidim_devices(self):
     d1 = MockDevice("tpu", 0)
     d2 = MockDevice("tpu", 1)
     arr_devices = np.array([[d1], [d2]])
 
-    t = tracer.PerfTracer(devices=arr_devices)
+    t = tracer.PerfTracer(
+        devices=arr_devices, collect_on_first_device_per_mesh=False
+    )
 
     self.assertCountEqual(t.all_devices, ["tpu0", "tpu1"])
 
@@ -228,9 +266,11 @@ class PerfTracerTest(absltest.TestCase):
     d1 = "gpu0"
     t = tracer.PerfTracer(devices=[d1])
 
-    def immediate_success(waitlist, success, failure):
+    def immediate_success(
+        waitlist: Any, success: Callable[[], None], failure: Callable[[], None]
+    ) -> mock.Mock:
       success()
-      return mock.Mock()
+      return mock.create_autospec(threading.Thread, instance=True)
 
     self.mock_async_wait.side_effect = immediate_success
 
@@ -256,7 +296,7 @@ class PerfTracerTest(absltest.TestCase):
     # Test multiple threads using the same tracer
     t = tracer.PerfTracer()
 
-    def worker(name):
+    def worker(name: str) -> None:
       with t.span(name):
         time.sleep(0.01)
 
@@ -300,13 +340,13 @@ class PerfTracerTest(absltest.TestCase):
       mock_future_fast.block_until_ready.return_value = None
 
       # Slow one sleeps
-      def slow_block():
+      def slow_block() -> None:
         time.sleep(0.1)
 
       mock_future_slow.block_until_ready.side_effect = slow_block
 
       # device_put returns fast then slow (or based on device arg)
-      def side_effect_put(arr, device):
+      def side_effect_put(arr: Any, device: Any) -> mock.Mock:
         if device == "fast_dev":
           return mock_future_fast
         else:
@@ -450,7 +490,7 @@ class AdvancedPerfTracerTest(absltest.TestCase):
 
     # Check Span counts & waitlist
     self.assertLen(host_tl.spans, 2)
-    self.assertLen(dev_tl.spans, 0)
+    self.assertEmpty(dev_tl.spans)
     self.assertLen(self.controller.tasks, 2)
 
     self.controller.trigger_all()
@@ -489,7 +529,7 @@ class AdvancedPerfTracerTest(absltest.TestCase):
     num_threads = 10
     spans_per_thread = 20
 
-    def worker():
+    def worker() -> None:
       for _ in range(spans_per_thread):
         with t.span(f"span", devices=[self.device]) as s:
           s.async_end(["w"])
