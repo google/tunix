@@ -24,7 +24,7 @@ import gc
 import itertools
 import operator
 import os
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from absl import logging
 import flax
@@ -42,6 +42,8 @@ import optax
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -471,15 +473,28 @@ class RLCluster:
       self.r2m[Role.ROLLOUT] = self._rollout.mesh
 
     # Initialize the performance tracer after we have all the meshes
-    if self.perf_config is None:
-      self._perf = perf_trace.NoopTracer()
-    else:
-      devices = []
-      for mesh in self.cluster_config.role_to_mesh.values():
-        devices.extend(mesh.devices.flatten().tolist())
-      self._perf = perf_trace.PerfTracer(
-          devices, self.perf_config.custom_export_fn
-      )
+    self._perf = perf_trace.NoopTracer()
+    self._perf_v2 = perf_tracer_v2.NoopTracer()
+
+    if self.perf_config:
+      export_fn_v1 = self.perf_config.custom_export_fn
+      export_fn_v2 = self.perf_config.custom_export_fn_v2
+
+      if export_fn_v1 or export_fn_v2:
+        devices = list(
+            itertools.chain.from_iterable(
+                mesh.devices.flatten().tolist()
+                for mesh in self.cluster_config.role_to_mesh.values()
+            )
+        )
+
+        if export_fn_v1:
+          self._perf = perf_trace.PerfTracer(devices, export_fn_v1)
+
+        if export_fn_v2:
+          self._perf_v2 = perf_tracer_v2.PerfTracer(
+              devices, export_fn=export_fn_v2
+          )
 
     # 2. Initialize inference worker.
     inference_models = {}
@@ -511,10 +526,12 @@ class RLCluster:
             optimizer=self.cluster_config.training_config.critic_optimizer,
             training_config=critic_config,
             custom_checkpoint_metadata_fn=lambda: {
-                "global_step": self.global_steps + 1
+                "global_step": self.global_steps + 1,
+                "role": Role.CRITIC.value,
             },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
             metrics_logger=self._rl_metrics_logger,
             perf_tracer=self._perf,
+            perf_tracer_v2=self._perf_v2,
         )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
@@ -533,10 +550,12 @@ class RLCluster:
           optimizer=self.cluster_config.training_config.actor_optimizer,
           training_config=actor_config,
           custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1
+              "global_step": self.global_steps + 1,
+              "role": Role.ACTOR.value,
           },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
           metrics_logger=self._rl_metrics_logger,
           perf_tracer=self._perf,
+          perf_tracer_v2=self._perf_v2,
       )
     del self.rollout_actor
     del self.train_actor
@@ -622,7 +641,13 @@ class RLCluster:
 
   @property
   def perf(self) -> perf_trace.Tracer:
+    """The v1 performance tracer."""
     return self._perf
+
+  @property
+  def perf_v2(self) -> perf_tracer_v2.Tracer:
+    """The v2 performance tracer."""
+    return self._perf_v2
 
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
@@ -802,6 +827,7 @@ class RLCluster:
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
+      trace_tags: Mapping[str, Any] | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -814,6 +840,7 @@ class RLCluster:
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
+      trace_tags: Optional tags to add to the performance tracer.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -848,7 +875,17 @@ class RLCluster:
       else:
         rollout_config = self.cluster_config.rollout_config
 
-      with self._perf.span("rollout", mesh.devices) as span:
+      base_tags = {
+          perf_constants.ROLE: Role.ROLLOUT.value,
+      }
+      if trace_tags:
+        base_tags.update(trace_tags)
+
+      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
+          perf_constants.ROLLOUT,
+          mesh.devices,
+          tags=base_tags,
+      ) as span_v2:
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
             for s in rl_utils.chunk_slices_by_size(
@@ -856,7 +893,7 @@ class RLCluster:
             )
         ]
         span.device_end([o.tokens for o in outputs])
-
+        span_v2.async_end([o.tokens for o in outputs])
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))

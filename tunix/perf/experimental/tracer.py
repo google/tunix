@@ -147,7 +147,19 @@ class PerfTracer(NoopTracer):
       self,
       devices: Sequence[str | JaxDevice] | np.ndarray | None = None,
       export_fn: Callable[[Any], MetricsT] | None = None,
+      *,
+      collect_on_first_device_per_mesh: bool = True,
   ) -> None:
+    """Initializes the instance.
+
+    Args:
+      devices: A list of devices to collect trace data for.
+      export_fn: A function that takes in a dictionary of timelines and returns
+        a MetricsT object.
+      collect_on_first_device_per_mesh: If True, collect trace data on the first
+        device per mesh when calling span().
+    """
+
     self._export_fn = export_fn
 
     # align all timelines with the same born time.
@@ -159,11 +171,10 @@ class PerfTracer(NoopTracer):
         self._main_thread_id: Timeline(self._main_thread_id, self._born)
     }
     self._device_timelines: dict[str, AsyncTimeline] = {}
-    # TODO(noghabi): add support for collecting trace on one device in the mesh
-    # instead of all of them.
     if devices is not None:
       for device_id in generate_device_timeline_ids(devices):
         self._get_or_create_device_timeline(device_id)
+    self._collect_on_first_device_per_mesh = collect_on_first_device_per_mesh
 
   def _get_timelines(self) -> Mapping[str, Timeline]:
     timelines: dict[str, Timeline] = {}
@@ -224,6 +235,14 @@ class PerfTracer(NoopTracer):
       devices: Sequence[str | JaxDevice] | np.ndarray | None = None,
       tags: Mapping[str, Any] | None = None,
   ) -> Iterator[AsyncWaitlist]:
+    span_devices = devices
+    if self._collect_on_first_device_per_mesh and devices is not None:
+      if isinstance(devices, np.ndarray):
+        if devices.size > 0:
+          span_devices = [devices.flat[0]]
+      elif devices:
+        span_devices = [devices[0]]
+
     begin = time.perf_counter()
     host_timeline = None
     device_waitlist = AsyncWaitlist()
@@ -237,7 +256,7 @@ class PerfTracer(NoopTracer):
       if host_timeline is not None:
         end = time.perf_counter()
         host_timeline.stop_span(end)
-        self._get_or_create_device_timelines(devices).span(
+        self._get_or_create_device_timelines(span_devices).span(
             name, begin, device_waitlist.waitlist, tags=tags
         )  # pylint: disable=protected-access
 

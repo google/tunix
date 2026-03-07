@@ -70,6 +70,8 @@ with cm:
   from tunix.utils import math_rewards
   from tunix.utils import compat
   from tunix.cli.utils import data as data_lib
+  from tunix import PerfMetricsConfig
+  from tunix.perf.experimental.export import PerfMetricsExport
 
 try:
   import pathwaysutils
@@ -529,6 +531,11 @@ grpo_config = GRPOConfig(
     max_concurrency=MAX_CONCURRENCY,
 )
 
+# Perf Metrics logging
+perf_metrics_config = PerfMetricsConfig(
+    custom_export_fn_v2=PerfMetricsExport("/tmp/agentic_perf").export_metrics
+)
+
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
@@ -536,6 +543,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     reference=qwen2_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_metrics_config,
 )
 
 show_hbm_usage("after RLCluster creation")

@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import dataclasses
 from typing import Any
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Mapping, Tuple
 
 from jax import typing
 from tunix.perf import span
@@ -76,22 +76,52 @@ class PerfMetricsOptions:
   """Options for configuring performance metrics.
 
   Attributes:
+    enable_perf_v1: Whether to enable perf metrics v1. Default is True.
+    enable_perf_v2: Whether to enable perf metrics v2. Default is False.
+    custom_export_fn_path: Path to the custom export function for Perf metrics
+      v1. If set, the custom export function will be loaded from the path
+      instead of being created by PerfMetricsExport.
+    custom_export_fn_path_v2: Path to the custom export function for Perf
+      metrics v2. If set, the custom export function will be loaded from the
+      path instead of being created by PerfMetricsExport. This is currently
+      experimental and planned to replace the v1 version.
     enable_trace_writer: Whether to enable the trace writer. By default, it is
       enabled when perf metrics are enabled. If False, the trace will not be
       written out.
-    log_dir: Directory to write the raw metrics/events to.
-    custom_export_fn_path: Path to the custom export function. If set, the
-      custom export function will be loaded from the path instead of being
-      created by PerfMetricsExport.
+    log_dir: Directory the trace writer writes the raw metrics/events to.
   """
+
+  enable_perf_v1: bool = True
+  enable_perf_v2: bool = False
+  custom_export_fn_path: str = ""
+  custom_export_fn_path_v2: str = ""
   enable_trace_writer: bool = True
   log_dir: str = ""
-  custom_export_fn_path: str = ""
+
+  def __post_init__(self):
+    if self.custom_export_fn_path and not self.enable_perf_v1:
+      raise ValueError(
+          "custom_export_fn_path is set but enable_perf_v1 is False."
+      )
+    if self.custom_export_fn_path_v2 and not self.enable_perf_v2:
+      raise ValueError(
+          "custom_export_fn_path_v2 is set but enable_perf_v2 is False."
+      )
+    if self.enable_trace_writer and not (
+        self.enable_perf_v1 or self.enable_perf_v2
+    ):
+      raise ValueError(
+          "enable_trace_writer is True but neither perf v1 nor v2 is enabled."
+      )
 
 
+@dataclasses.dataclass
 class PerfMetricsConfig:
   # (query, epoch) -> metrics
   custom_export_fn: Callable[[PerfSpanQuery], MetricsT] | None = None
+  custom_export_fn_v2: Callable[[Mapping[str, Timeline]], MetricsT] | None = (
+      None
+  )
 
 
 class PerfSpanQuery:
