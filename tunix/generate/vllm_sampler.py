@@ -50,6 +50,7 @@ class VllmConfig:
   mapping_config: MappingConfig = dataclasses.field(
       default_factory=MappingConfig
   )
+  return_logprobs: bool = False
 
   # vLLM Env vars
   init_with_random_weights: bool = True
@@ -424,8 +425,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
-      sampling_params.logprobs = 1  # b/428730696
-      sampling_params.prompt_logprobs = 1  # b/428730696
+      if self.config.return_logprobs:
+        sampling_params.logprobs = 1  # b/428730696
+        sampling_params.prompt_logprobs = 1  # b/428730696
+      else:
+        sampling_params.logprobs = 0
+        sampling_params.prompt_logprobs = 0
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
 
@@ -435,10 +440,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.top_k = top_k
       if seed is not None:
         sampling_params.seed = seed
-      
+
       sampling_kwargs = self.config.sampling_kwargs.copy()
       sampling_kwargs.update(kwargs)
-      if sampling_kwargs:     
+      if sampling_kwargs:
         try:
           logging.log_first_n(
               logging.INFO,

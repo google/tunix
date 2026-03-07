@@ -45,6 +45,7 @@ class VllmRollout(base_rollout.BaseRollout):
         config=vllm_sampler.VllmConfig(
             server_mode=rollout_config.rollout_vllm_server_mode,
             mapping_config=mapping_config,
+            return_logprobs=rollout_config.return_logprobs,
             init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
             tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
             additional_config=rollout_config.rollout_vllm_additional_config,
