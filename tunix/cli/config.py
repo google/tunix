@@ -226,6 +226,15 @@ class HyperParameters:
             "Could not load custom export function from"
             f" {custom_export_fn_path}"
         )
+      custom_export_fn_path_v2 = perf_config.get("custom_export_fn_path_v2")
+      if (
+          custom_export_fn_path_v2
+          and self._get_function_from_path(custom_export_fn_path_v2) is None
+      ):
+        raise ValueError(
+            "Could not load custom export function v2 from"
+            f" {custom_export_fn_path_v2}"
+        )
 
   def _validate_tokenizer(self):
     """Validate the tokenizer configuration.

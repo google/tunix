@@ -579,6 +579,17 @@ class ConfigTest(parameterized.TestCase):
           expected_error=ValueError,
           error_regex="Could not load custom export function from invalid.path",
       ),
+      dict(
+          testcase_name="invalid_custom_export_fn_path_v2",
+          main_command="grpo_main",
+          overrides=[
+              "training_config.perf_metrics_options.custom_export_fn_path_v2=invalid.path",
+          ],
+          expected_error=ValueError,
+          error_regex=(
+              "Could not load custom export function v2 from invalid.path"
+          ),
+      ),
   )
   def test_perf_metrics_validation(
       self,
