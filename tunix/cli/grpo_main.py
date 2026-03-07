@@ -116,35 +116,42 @@ class GrpoPipeline(config.HyperParameters):
       return None
 
     perf_config = perf_metrics.PerfMetricsConfig()
-    custom_export_fn_path = perf_metrics_options.custom_export_fn_path
-    if custom_export_fn_path:
-      perf_config.custom_export_fn = self._get_function_from_path(
-          custom_export_fn_path
-      )
-      if perf_config.custom_export_fn is None:
-        raise ValueError(
-            "Could not load custom export function from"
-            f" {custom_export_fn_path}"
-        )
-    else:
-      perf_config.custom_export_fn = (
-          perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
-      )
 
-    custom_export_fn_path_v2 = perf_metrics_options.custom_export_fn_path_v2
-    if custom_export_fn_path_v2:
-      perf_config.custom_export_fn_v2 = self._get_function_from_path(
-          custom_export_fn_path_v2
-      )
-      if perf_config.custom_export_fn_v2 is None:
-        raise ValueError(
-            "Could not load custom export function v2 from"
-            f" {custom_export_fn_path_v2}"
+    if perf_metrics_options.enable_perf_v1:
+      custom_export_fn_path = perf_metrics_options.custom_export_fn_path
+      if custom_export_fn_path:
+        perf_config.custom_export_fn = self._get_function_from_path(
+            custom_export_fn_path
         )
-    else:
-      perf_config.custom_export_fn_v2 = perf_export_v2.PerfMetricsExport(
-          perf_metrics_options.log_dir
-      ).export_metrics
+        if perf_config.custom_export_fn is None:
+          raise ValueError(
+              "Could not load custom export function from"
+              f" {custom_export_fn_path}"
+          )
+      else:
+        perf_config.custom_export_fn = (
+            perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+        )
+
+    if perf_metrics_options.enable_perf_v2:
+      custom_export_fn_path_v2 = perf_metrics_options.custom_export_fn_path_v2
+      if custom_export_fn_path_v2:
+        perf_config.custom_export_fn_v2 = self._get_function_from_path(
+            custom_export_fn_path_v2
+        )
+        if perf_config.custom_export_fn_v2 is None:
+          raise ValueError(
+              "Could not load custom export function v2 from"
+              f" {custom_export_fn_path_v2}"
+          )
+      else:
+        perf_config.custom_export_fn_v2 = (
+            perf_export_v2.PerfMetricsExport(
+                perf_metrics_options.log_dir
+                if perf_metrics_options.log_dir
+                else None
+            ).export_metrics
+        )
     return perf_config
 
   def create_rl_cluster(self):
