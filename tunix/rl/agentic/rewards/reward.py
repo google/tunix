@@ -22,12 +22,79 @@ metadata.
 
 from typing import Any, Callable, Dict
 
-from tunix.rl.agentic.rewards import reward_types
+import ast
 
+from tunix.rl.agentic.rewards import reward_types
 _REGISTRY: Dict[
     str, Callable[[Dict[str, Any], str], reward_types.RewardOutput]
 ] = {}
 
+
+class UnsafeExpressionError(ValueError):
+  """Raised when an expression contains disallowed syntax."""
+
+
+def _safe_eval_math(expr: str) -> float:
+  """Safely evaluate a simple numeric arithmetic expression.
+
+  Supported:
+    - numeric literals (int/float)
+    - parentheses
+    - binary ops: +, -, *, /, //, %, **
+    - unary ops: +, -
+
+  Disallowed:
+    - names/identifiers, attribute access, calls, subscripts, comprehensions, etc.
+  """
+  if not isinstance(expr, str):
+    raise UnsafeExpressionError("Expression must be a string.")
+  expr = expr.strip()
+  if not expr or len(expr) > 200:
+    raise UnsafeExpressionError("Expression is empty or too long.")
+
+  try:
+    node = ast.parse(expr, mode="eval")
+  except SyntaxError as e:
+    raise UnsafeExpressionError("Invalid expression syntax.") from e
+
+  def _eval(n):
+    if isinstance(n, ast.Expression):
+      return _eval(n.body)
+
+    if isinstance(n, ast.Constant):
+      if isinstance(n.value, (int, float)):
+        return float(n.value)
+      raise UnsafeExpressionError("Only numeric constants are allowed.")
+
+    if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)):
+      v = _eval(n.operand)
+      return +v if isinstance(n.op, ast.UAdd) else -v
+
+    if isinstance(n, ast.BinOp) and isinstance(
+        n.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)
+    ):
+      a = _eval(n.left)
+      b = _eval(n.right)
+      if isinstance(n.op, ast.Add):
+        return a + b
+      if isinstance(n.op, ast.Sub):
+        return a - b
+      if isinstance(n.op, ast.Mult):
+        return a * b
+      if isinstance(n.op, ast.Div):
+        return a / b
+      if isinstance(n.op, ast.FloorDiv):
+        return a // b
+      if isinstance(n.op, ast.Mod):
+        return a % b
+      if isinstance(n.op, ast.Pow):
+        if abs(b) > 1000:
+          raise UnsafeExpressionError("Exponent too large.")
+        return a ** b
+
+    raise UnsafeExpressionError(f"Disallowed expression node: {type(n).__name__}")
+
+  return float(_eval(node))
 
 def register(name: str):
   """Decorator for registering reward functions into the global registry.
@@ -44,7 +111,6 @@ def register(name: str):
   Raises:
       ValueError: If a reward function with the given name already exists
   """
-
   def _wrap(fn):
     if name in _REGISTRY:
       raise ValueError(f"Reward {name} already registered.")
@@ -120,7 +186,6 @@ def combine_rewards(
   Example:
       composite_fn = combine_rewards({"exact_match": 1.0, "zero": 0.0})
   """
-
   def _fn(task: Dict[str, Any], action: str):
     total, meta = 0.0, {}
     for name, w in weights.items():
@@ -189,7 +254,7 @@ def calculate_reward(
   try:
     answer_str = action.replace("The answer is ", "").strip().rstrip(".")
     answer = float(answer_str)
-    correct_value = eval(expression)
+    correct_value = _safe_eval_math(expression)
     tolerance = 1e-6
     if abs(correct_value - answer) < tolerance:
       score = 1.0
