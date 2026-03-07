@@ -37,6 +37,11 @@ class TrainingInput(peft_trainer.TrainingInput):
 
   teacher_output: Any = None
 
+@flax.struct.dataclass(frozen=True)
+class ModelBundle:
+  student_model: nnx.Module
+  teacher_model: nnx.Module
+
 
 class DistillationTrainer(peft_trainer.PeftTrainer):
   """Distillation trainer."""
@@ -61,7 +66,8 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
     student_model, teacher_model = strategy.pre_process_models(
         student_model, teacher_model
     )
-    super().__init__(student_model, optimizer, training_config)
+    compute_bundle = ModelBundle(student_model, teacher_model)
+    super().__init__(student_model, optimizer, training_config, compute_bundle=compute_bundle)
     self.strategy = strategy
     self.teacher_model = teacher_model
     self.loss_fn = self.get_train_loss
