@@ -148,9 +148,7 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
-  @classmethod
-  def qwen3_4b_base(cls): # qwen3-4B-base
-    return cls.qwen3_4b()
+  qwen3_4b_base = qwen3_4b      # qwen3-4B-base
 
   @classmethod
   def _qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
