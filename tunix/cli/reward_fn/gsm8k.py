@@ -35,6 +35,7 @@ match_format = re.compile(
 
 
 # All reward functions must have this signature.
+# range: [0, 3]
 def match_format_exactly(prompts, completions, **kwargs):
   return [
       0 if match_format.search(response) is None else 3.0
@@ -42,6 +43,7 @@ def match_format_exactly(prompts, completions, **kwargs):
   ]
 
 
+# range: [-2, 2] 
 def match_format_approximately(prompts, completions, **kwargs):
   scores = []
 
@@ -58,6 +60,7 @@ def match_format_approximately(prompts, completions, **kwargs):
   return scores
 
 
+# range: [-1, 3]
 def check_answer(prompts, completions, answer, **kwargs):
   responses = completions
 
@@ -95,14 +98,12 @@ def check_answer(prompts, completions, answer, **kwargs):
   return scores
 
 
+# range: [0, 1.5]
 def check_numbers(prompts, completions, answer, **kwargs):
   match_numbers = re.compile(
       rf"{solution_start}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
   )
-  match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
-  question = kwargs["question"]
   responses = completions
-
   extracted_responses = [
       guess.group(1) if (guess := match_numbers.search(r)) is not None else None
       for r in responses
@@ -121,10 +122,4 @@ def check_numbers(prompts, completions, answer, **kwargs):
     except ValueError:
       scores.append(0)
       continue
-  logging.info("START ============================")
-  logging.info(f"Question: {question[0]}")
-  logging.info(f"Answer: {answer[0]}")
-  logging.info(f"Response: {responses[0]}")
-  logging.info(f"Extracted: {extracted_responses[0]} score: {scores[0]}")
-  logging.info("END ==============================")
   return scores
