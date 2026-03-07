@@ -34,8 +34,8 @@ import unittest
 
 from absl.testing import absltest
 from flax import nnx
-from huggingface_hub import snapshot_download
 import jax
+from tunix.oss import utils as oss_utils
 from tunix.models.llama3 import model
 from tunix.models.llama3 import params
 
@@ -54,7 +54,7 @@ ignore_patterns = [
 # Download the 1B model and get its local path
 # pylint: disable=broad-exception-caught
 try:
-  local_model_path_1b = snapshot_download(
+  local_model_path_1b = oss_utils.safe_snapshot_download(
       repo_id=model_id_1b, ignore_patterns=ignore_patterns
   )
   print(f"Llama-3.2-1B model downloaded to: {local_model_path_1b}")
