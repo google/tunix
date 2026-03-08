@@ -330,6 +330,7 @@ class Encoder1DBlock(nnx.Module):
         dropout=dropout,
         dtype_mm=dtype_mm,
         rngs=rngs,
+        shd_config=shd_config,
     )
     self.dropout = nnx.Dropout(rate=dropout, deterministic=False)
     self.ln2 = nnx.LayerNorm(
