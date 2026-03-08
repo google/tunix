@@ -18,33 +18,29 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import jaxtyping
-from tunix.models.gemma3 import vision
 
 _PADDING_ID = 0
 
 
-def get_positions_and_attention_mask(
+def get_attention_mask(
     tokens: jaxtyping.ArrayLike,  # (B, L)
     *,
     inputs_mask: jaxtyping.ArrayLike | None = None,  # (B, L, L')
+    token_placeholder_id: int = 219,
 ):
-  """Returns the positions and attention mask for the transformer."""
+  """Returns the attention mask for the transformer."""
   # Compute the mask
   if inputs_mask is None:
     inputs_mask = tokens != _PADDING_ID
-  positions = _build_positions_from_mask(inputs_mask)
 
   # The image tokens have bidirectional attention within themselves.
-  bidirectional_mask = tokens == vision.TOKEN_PLACEHOLDER
+  bidirectional_mask = tokens == token_placeholder_id
   attention_mask = make_causal_bidirectional_attention_mask(
       inputs_mask,
       bidirectional_mask=bidirectional_mask,
   )
 
-  return {
-      'positions': positions,
-      'attention_mask': attention_mask,
-  }
+  return attention_mask
 
 
 def make_causal_bidirectional_attention_mask(
@@ -153,21 +149,3 @@ def _add_bidirectional_mask(
       & (q_block_indices[..., None] > 0)
   )
   return attn_mask
-
-
-def _build_positions_from_mask(
-    input_mask: jaxtyping.ArrayLike,
-) -> jaxtyping.ArrayLike:
-  """Computes the `positions` from the `input_mask`.
-
-  Args:
-    input_mask: The tokens `input_mask`, True for non-padded tokens only.
-
-  Returns:
-    The indices to use for RoPE and absolute position encodings for the given
-    input mask.
-  """
-  positions = jnp.cumsum(input_mask, axis=-1)
-  # Subtract one for all positions from the first valid one as they are
-  # 0-indexed
-  return positions - (positions >= 1)

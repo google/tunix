@@ -91,7 +91,7 @@ def create_model_from_checkpoint(
   )
   params = ocp.StandardCheckpointer().restore(checkpoint_path)
   params = map_from_upstream_checkpoint(
-      params, text_only=model_config.siglip_config is None
+      params, text_only=model_config.vision_config is None
   )
 
   if mesh is not None:
