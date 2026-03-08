@@ -26,7 +26,7 @@ def get_attention_mask(
     tokens: jaxtyping.ArrayLike,  # (B, L)
     *,
     inputs_mask: jaxtyping.ArrayLike | None = None,  # (B, L, L')
-    token_placeholder_id: int = 219,
+    token_placeholder_id: int | None = None,
 ):
   """Returns the attention mask for the transformer."""
   # Compute the mask
@@ -34,7 +34,9 @@ def get_attention_mask(
     inputs_mask = tokens != _PADDING_ID
 
   # The image tokens have bidirectional attention within themselves.
-  bidirectional_mask = tokens == token_placeholder_id
+  bidirectional_mask = None
+  if token_placeholder_id is not None:
+    bidirectional_mask = tokens == token_placeholder_id
   attention_mask = make_causal_bidirectional_attention_mask(
       inputs_mask,
       bidirectional_mask=bidirectional_mask,

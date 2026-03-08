@@ -27,6 +27,7 @@ from jax import numpy as jnp
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
+from tunix.models.gemma3 import utils
 from tunix.models.gemma3 import vision
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -1048,10 +1049,15 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     soft_embeddings = self._encode_vision(images)
 
     # Merge the soft tokens back with the text embeddings.
+    if self.config.vision_config is None:
+      raise ValueError(
+          '`vision_config` is required for `_merge_mm_embeddings`. Received: '
+          f'{self.config.vision_config=}'
+      )
     merged_embeddings = merge_embeddings_lib.merge_embeddings(
         text_embeddings=embeddings,
         vision_embeddings=soft_embeddings,
-        mask=tokens == self.config.vision_config.soft_token_placeholder_id,  # pytype: disable=attribute-error
+        mask=tokens == self.config.vision_config.soft_token_placeholder,
     )
 
     return merged_embeddings
@@ -1103,6 +1109,23 @@ class Gemma3(BackendMappingMixin, nnx.Module):
   @property
   def num_embed(self) -> int:
     return self.embedder.num_embed
+
+  def get_attention_mask(
+      self,
+      tokens: jaxtyping.ArrayLike,  # (B, L)
+      *,
+      inputs_mask: jaxtyping.ArrayLike | None = None,  # (B, L)
+  ):
+    """Returns the positions and attention mask for the transformer."""
+    token_placeholder_id = (
+        None if self.config.vision_config is None else
+        self.config.vision_config.soft_token_placeholder
+    )
+    return utils.get_attention_mask(
+        tokens,
+        inputs_mask=inputs_mask,
+        token_placeholder_id=token_placeholder_id,
+    )
 
   @property
   def num_layers(self) -> int:

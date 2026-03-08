@@ -35,6 +35,7 @@ from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
+from tunix.processors import image_processor as image_processor_lib
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -180,6 +181,7 @@ class Sampler(base_sampler.BaseSampler):
       transformer: nnx.Module,
       tokenizer: Any,
       cache_config: CacheConfig,
+      image_processor: image_processor_lib.ImageProcessor | None = None,
   ):
     """Initializes the sampler.
 
@@ -187,9 +189,11 @@ class Sampler(base_sampler.BaseSampler):
       transformer: an instance of the transformer.
       tokenizer: a tokenizer for the given model.
       cache_config: configuration for the KV cache.
+      image_processor: The image processor.
     """
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.cache_config = cache_config
+    self.image_processor = image_processor
     self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)
     self._transformer_state: list[statelib.State] = nnx.variables(transformer)
     self._flattened_transformer_state: list[statelib.State] = jax.tree.leaves(
@@ -484,7 +488,10 @@ class Sampler(base_sampler.BaseSampler):
     )
 
   def _prefill_fn(
-      self, params: statelib.State, sampler_state: _SamplingState
+      self,
+      params: statelib.State,
+      sampler_state: _SamplingState,
+      images: jnp.ndarray | None = None,
   ) -> _SamplingState:
     """Performs prefill."""
     batch_size = sampler_state.token_buffer.shape[0]
@@ -505,16 +512,30 @@ class Sampler(base_sampler.BaseSampler):
     )
 
     input_mask = tokens != self.tokenizer.pad_id()
-    attention_mask = utils.make_causal_attn_mask(
-        input_mask, self.cache_config.cache_size
-    )
+
+    if hasattr(self.transformer, 'get_attention_mask'):
+      attention_mask = self.transformer.get_attention_mask(
+          tokens, inputs_mask=input_mask
+      )
+      seq_len = attention_mask.shape[-1]
+      padding = self.cache_config.cache_size - seq_len
+      attention_mask = jnp.pad(
+          attention_mask,
+          (*((0, 0) for _ in range(attention_mask.ndim - 1)), (0, padding)),
+      )
+    else:
+      attention_mask = utils.make_causal_attn_mask(
+          input_mask, self.cache_config.cache_size
+      )
 
     transformer = nnx.merge(self._transformer_graphdef, params)
+    kwargs = {} if images is None else {'images': images}
     logits, cache = transformer(
         tokens,
         step_positions,
         sampler_state.cache,
         attention_mask,
+        **kwargs,
     )
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
@@ -652,6 +673,13 @@ class Sampler(base_sampler.BaseSampler):
       beam_size: Optional[int] = None,
       seed: int | None = None,
       pad_output: bool = False,
+      images: (
+          str
+          | np.ndarray
+          | list[str | np.ndarray | list[str | np.ndarray] | None]
+          | jnp.ndarray
+          | None
+      ) = None,
   ) -> base_sampler.SamplerOutput:
     """Samples a completion of the input string.
 
@@ -680,6 +708,9 @@ class Sampler(base_sampler.BaseSampler):
         otherwise it will be max_generation_steps + max_prompt_length. The
         padding now only supports right padding. Can modify to support left
         padding if needed.
+      images: input images to process. Can be a string/array, list of
+        strings/arrays, or list of list of strings/arrays depending on whether
+        there is one, multiple, or varying number of images per batch.
 
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
@@ -692,6 +723,12 @@ class Sampler(base_sampler.BaseSampler):
     forbidden_token_ids = tuple(forbidden_tokens) if forbidden_tokens else None
 
     tokens = [self.tokenize(x) for x in input_strings]
+
+    processed_images = images
+    if images is not None and self.image_processor is not None:
+      processed_images = self.image_processor(images)
+      processed_images = jnp.array(processed_images)
+
     max_tokens_length = max(len(x) for x in tokens)
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
@@ -729,7 +766,9 @@ class Sampler(base_sampler.BaseSampler):
         beam_size=beam_size,
     )
     sampling_state = self._compiled_prefill_fn(
-        self._flattened_transformer_state, sampling_state
+        self._flattened_transformer_state,
+        sampling_state,
+        processed_images,
     )
 
     sampling_state = self._compiled_decode_fn(
