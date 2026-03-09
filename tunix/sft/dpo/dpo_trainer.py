@@ -49,14 +49,14 @@ class DataInput:
 
   Attributes:
     prompts: A list of prompts.
-    images: Array of images. The passed value should be preprocessed using
-      `tunix.processors.ImageProcessor`.
+    images: List of images (or list of list of images, if the model supports
+      multiple images).
     chosen_responses: A list of chosen responses.
     rejected_responses: A list of rejected responses.
   """
 
   prompts: list[str]
-  images: np.ndarray | jax.Array | None = None
+  images: RawImageType | None = None
   chosen_responses: list[str]
   rejected_responses: list[str]
 
