@@ -20,30 +20,24 @@
  */
 module.exports = async ({github, context}) => {
   let issueNumber;
-  let assigneesList;
+  let isPR = false;
+  const assigneesList = [
+    "hgao327",
+    "lc5211",
+    "s-noghabi",
+    "sizhit2",
+    "jiangyangmu",
+    "jeffcarp",
+    "wang2yn84",
+    "tianshub",
+  ]
 
   if (context.payload.issue) {
-    assigneesList = [
-      "tianshub",
-      "wang2yn84",
-      "lc5211",
-      "hgao327",
-      "sizhit2",
-      "abheesht17",
-      "jiangyangmu"
-    ];  // for issues
     issueNumber = context.payload.issue.number;
+    isPR = false;
   } else if (context.payload.pull_request) {
-    assigneesList = [
-      "tianshub",
-      "wang2yn84",
-      "lc5211",
-      "hgao327",
-      "sizhit2",
-      "abheesht17",
-      "jiangyangmu"
-    ];  // for PRs
     issueNumber = context.payload.pull_request.number;
+    isPR = true;
   } else {
     console.log('Not an issue or PR');
     return;
@@ -51,11 +45,6 @@ module.exports = async ({github, context}) => {
 
   console.log('Assignee list:', assigneesList);
   console.log('Entered auto assignment for this issue/PR:', issueNumber);
-
-  if (!assigneesList.length) {
-    console.log('No assignees found for this repo.');
-    return;
-  }
 
   // To assign issue or PRs on Weekly Rotation basis
   const now = new Date();
@@ -67,13 +56,22 @@ module.exports = async ({github, context}) => {
   const selection = weekCount % noOfAssignees;
   const assigneeForIssue = assigneesList[selection];
 
-  console.log(
-      `Issue/PR Number = ${issueNumber}, assigning to: ${assigneeForIssue}`);
-
-  return github.rest.issues.addAssignees({
-    issue_number: issueNumber,
-    owner: context.repo.owner,
-    repo: context.repo.repo,
-    assignees: [assigneeForIssue],
-  });
+  if (isPR) {
+    console.log(
+      `Weekly Rotation: Requesting review from ${assigneeForIssue} for PR #${issueNumber}`);
+    return github.rest.pulls.requestReviewers({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      pull_number: issueNumber,
+      reviewers: [assigneeForIssue],
+    });
+  } else {
+    console.log(`Weekly Rotation: Assigning ${assigneeForIssue} to Issue #${issueNumber}`);
+    return github.rest.issues.addAssignees({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      pull_number: issueNumber,
+      assignees: [assigneeForIssue],
+    });
+  }
 };
