@@ -69,9 +69,10 @@ except wandb.errors.UsageError as e:
 
 
 try:
+  import datetime
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb.init(project="tunix", name=run_name)
-  # wandb.init(project="tunix", name=run_name, id="q0djft6p", resume="must",)
+  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -129,8 +130,8 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(2, 1), ("fsdp", "tp")]
-TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -139,7 +140,7 @@ MAX_RESPONSE_LENGTH = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
-TOP_P = 0.95
+TOP_P = 1
 TOP_K = None
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
@@ -159,7 +160,7 @@ NUM_ITERATIONS = 1
 # The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
 # Important to keep a high enough value for this, otherwise, the KL divergence
 # can increase unchecked.
-BETA = 0.001
+BETA = 0.05
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 EPSILON = 0.2
@@ -170,7 +171,7 @@ EPSILON_HIGH = 0.28
 ENABLE_REMAT = True
 BATCH_SIZE = 128
 MINI_BATCH_SIZE = 128
-NUM_BATCHES = 625
+NUM_BATCHES = 312
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
@@ -190,7 +191,7 @@ OFF_POLICY_STEPS = 0
 MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
-LEARNING_RATE = 5.00E-06
+LEARNING_RATE = 1.00E-06
 B1 = 0.9  # Adam beta1
 B2 = 0.99  # Adam beta2
 WEIGHT_DECAY = 0.01
@@ -286,7 +287,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_exp05/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_exp11/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -508,11 +509,11 @@ sglang_jax_rollout_dict = {
 }
 
 MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    "rollout_vllm_hbm_utilization": 0.3,
+    "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
@@ -571,7 +572,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
           # skip_first_n_steps=1,
           # set_profile_options=False,
           # log_dir=PROFILER_PATH,
-        # )
+        # ) if ENABLE_PROFILER else None,
     ),
     rollout_config=rollout_engine_config,
 )
