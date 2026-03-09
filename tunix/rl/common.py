@@ -174,11 +174,11 @@ def get_per_token_logps(
   """Computes the per-token log probabilities."""
   kwargs = {} if images is None else {"images": images}
   logits, _ = model(
-    input_tokens,
-    positions=positions,
-    attention_mask=attn_mask,
-    cache=None,
-    **kwargs
+      input_tokens,
+      positions=positions,
+      attention_mask=attn_mask,
+      cache=None,
+      **kwargs
   )
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]
@@ -236,11 +236,11 @@ def compute_per_token_logps(
   )
   kwargs = {} if images is None else {"images": images}
   logits, _ = model(
-    input_tokens,
-    positions=positions,
-    attention_mask=attn_mask,
-    cache=None,
-    **kwargs,
+      input_tokens,
+      positions=positions,
+      attention_mask=attn_mask,
+      cache=None,
+      **kwargs,
   )
   logits_to_keep = completion_tokens.shape[1]
   logits = logits[:, -logits_to_keep - 1 : -1, :]
