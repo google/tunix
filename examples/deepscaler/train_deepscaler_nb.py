@@ -70,9 +70,10 @@ except wandb.errors.UsageError as e:
 
 
 try:
+  import datetime
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb.init(project="tunix", name=run_name)
-  # wandb.init(project="tunix", name=run_name, id="q0djft6p", resume="must",)
+  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -311,7 +312,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_exp05/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_exp11/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -537,11 +538,11 @@ sglang_jax_rollout_dict = {
 }
 
 MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    "rollout_vllm_hbm_utilization": 0.3,
+    "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
@@ -600,7 +601,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
           # skip_first_n_steps=1,
           # set_profile_options=False,
           # log_dir=PROFILER_PATH,
-        # )
+        # ) if ENABLE_PROFILER else None,
     ),
     rollout_config=rollout_engine_config,
 )
