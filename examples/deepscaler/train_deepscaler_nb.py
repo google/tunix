@@ -70,9 +70,10 @@ except wandb.errors.UsageError as e:
 
 
 try:
+  import datetime
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb.init(project="tunix", name=run_name)
-  # wandb.init(project="tunix", name=run_name, id="q0djft6p", resume="must",)
+  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -570,7 +571,7 @@ sglang_jax_rollout_dict = {
 }
 
 MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 4 # 256 * 10k
+MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
