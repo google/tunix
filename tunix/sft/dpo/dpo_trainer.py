@@ -174,6 +174,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
       optimizer: optax.GradientTransformation,
       training_config: DPOTrainingConfig,
       tokenizer: Any | None = None,
+      image_processor: Any | None = None,
   ):
     """Initializes the DPO/ORPO trainer.
 
@@ -189,6 +190,9 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         hyperparameters like `beta`, `lambda_orpo`, and `label_smoothing`.
       tokenizer: An optional tokenizer. If provided, the trainer can accept
         string inputs and tokenize them internally.
+      image_processor: An optional image processor. If provided, the trainer can
+        accept raw images and process (resize, normalize, etc.) them internally.
+        
     """
     self.model = model
     self.ref_model = ref_model
@@ -201,6 +205,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         if tokenizer is None
         else tokenizer_adapter.TokenizerAdapter(tokenizer)
     )
+    self.image_processor = image_processor
 
     self.with_loss_fn(dpo_loss_fn, has_aux=True)
 
@@ -251,7 +256,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
     if self.algorithm == "orpo":
       self._aux_metrics_to_log["odds_ratio"] = np.mean
-  
+
   @override
   def _prepare_inputs(
       self,
@@ -290,6 +295,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
           tokenizer=self.tokenizer,
           max_prompt_length=self.dpo_config.max_prompt_length,
           max_response_length=self.dpo_config.max_response_length,
+          image_processor=image_processor,
       )
 
     # Concatenate chosen and rejected IDs so we can do a forward pass together.
@@ -620,6 +626,10 @@ def process_dpo_record(
       rejected_responses, tokenizer, max_response_length, left_pad=False
   )
   if images is not None:
+    if image_processor is None:
+      raise ValueError(
+          "`image_processor` must be provided if images are provided."
+      )
     images = jnp.array(image_processor(images))
 
   if unbatched:
