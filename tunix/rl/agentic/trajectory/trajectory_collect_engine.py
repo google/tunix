@@ -21,20 +21,20 @@ multi-pair trajectory collection.
 """
 
 import asyncio
-import logging
 import time
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
 
+from absl import logging
 import numpy as np
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 
+P = ParamSpec("P")
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
-logger = logging.getLogger(__name__)
 
 
 class TrajectoryCollectEngine:
@@ -55,16 +55,15 @@ class TrajectoryCollectEngine:
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       *,
-      model_call: Callable[..., str],
+      model_call: Callable[Concatenate[Dict[str, str], P], str],
+      model_call_kwargs: Optional[Dict[str, Any]] = None,
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
-      max_steps: int = 10,
       gamma: float = 1.0,
-      timeout: float = 30.0,
+      timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
-      model_call_kwargs: Optional[Dict[str, Any]] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -72,20 +71,20 @@ class TrajectoryCollectEngine:
         agent (ConversationAgentBase): The agent that will interact with the
           environment
         env (BaseTaskEnv): The environment providing tasks and feedback
-        model_call (Callable): Function that takes chat completions and returns
-          model response string. Handles the actual LLM inference.
+        model_call (Callable): Function that takes chat completions as first
+          argument with optional kwargs and returns model response string.
+          Handles the actual LLM inference.
+        model_call_kwargs (Optional[Dict[str, Any]]): Optional kwargs to pass to
+          model_call.
         final_reward_fn (Optional[Callable]): Optional function to compute
           additional reward at episode end. Takes (task, response) and returns
           float. Defaults to zero if not provided.
-        max_steps (int): Maximum number of interaction steps before forced
-          termination
-        gamma (float): Discount factor for return calculation (1.0 = no
+        gamma (float): Discount factor for MC reward calculation (1.0 = no
           discounting)
         timeout (float): Maximum episode duration in seconds before timeout
           termination
         tokenizer: Optional tokenizer for converting messages to token IDs
         chat_parser: Optional chat parser for formatting messages
-        model_call_kwargs: Optional kwargs to pass to model_call.
     """
     self.agent = agent
     self.env = env
@@ -94,7 +93,6 @@ class TrajectoryCollectEngine:
         lambda *_: reward_types.RewardOutput(reward=0.0)
     )
     self.model_call_kwargs = model_call_kwargs or {}
-    self.max_steps = max_steps
     self.gamma = gamma
     self.timeout = timeout
 
@@ -111,16 +109,17 @@ class TrajectoryCollectEngine:
     calculation, and resource cleanup.
 
     Args:
-        mode (str): Output format. Options: - "Trajectory": return full
-          Trajectory object. - "Token": return flattened tokenized dict for
-          training. - "Steps": return stepwise tokenized data only. -
-          "Conversation": return raw conversation messages (default).
+        mode (str): Output format. Options: 
+          - "Trajectory": return full Trajectory object. 
+          - "Token": return flattened tokenized dict for training.
+          - "Steps": return stepwise tokenized data only. 
+          - "Conversation": return raw conversation messages (default).
 
     Returns:
         Trajectory | dict | list: Depending on mode.
-    """
+    """  # fmt: skip
     await self._reset()
-    for _ in range(self.max_steps):
+    while True:
       done = await self._one_step()
       if done:
         break
@@ -183,8 +182,8 @@ class TrajectoryCollectEngine:
           "conversation_masks": conversation_masks,
           "trajectory_reward": self.agent.trajectory.reward,
           "policy_version": self.env.task.get("policy_version"),
-          "original_input": self.env.task.get("original_input"),
-          "group_id": self.env.task.get("group_id"),
+          "original_input": self.agent.trajectory.task,
+          "group_id": self.env.extra_kwargs.get("group_id"),
       }
     elif mode == "Conversation":
       # return raw conversation history
@@ -198,7 +197,6 @@ class TrajectoryCollectEngine:
       final_reward_fn: Optional[
           Callable[[Dict[str, Any], str], reward_types.RewardOutput]
       ] = None,
-      max_steps: int = 10,
       gamma: float = 1.0,
       timeout: float = 30.0,
       mode: str = "Trajectory",
@@ -214,7 +212,6 @@ class TrajectoryCollectEngine:
           environment) pairs
         model_call (Callable): Shared model inference function for all pairs
         final_reward_fn (Optional[Callable]): Shared final reward function
-        max_steps (int): Maximum steps per episode
         gamma (float): Discount factor for return calculation
         timeout (float): Per-episode timeout in seconds
         mode (str): Output format. See `collect` method for options.
@@ -231,7 +228,6 @@ class TrajectoryCollectEngine:
           env,
           model_call=model_call,
           final_reward_fn=final_reward_fn,
-          max_steps=max_steps,
           gamma=gamma,
           timeout=timeout,
       )
@@ -252,6 +248,11 @@ class TrajectoryCollectEngine:
     obs, _ = await asyncio.get_event_loop().run_in_executor(
         None, self.env.reset
     )
+    if hasattr(self.env, 'compute_final_reward') and callable(
+        self.env.compute_final_reward
+    ):
+      self.final_reward_fn = self.env.compute_final_reward
+
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
@@ -282,14 +283,14 @@ class TrajectoryCollectEngine:
     resp = await asyncio.get_event_loop().run_in_executor(
         None,
         self.model_call,
-        [self.agent.chat_completions],
+        self.agent.chat_completions,
         self.env,
         **self.model_call_kwargs,
     )
     action = self.agent.update_from_model(resp).action
 
     if action is None:
-      logger.warning(
+      logging.warning(
           "Agent returned None action, using empty action list as fallback"
       )
       action = []
@@ -333,6 +334,7 @@ class TrajectoryCollectEngine:
           cur_step.env_masks = env_masks
 
     if time.time() - self._start_ts > self.timeout:
+      logging.warning("Episode timed out after %d seconds.", self.timeout)
       self.agent.get_current_state().done = True
       return True
     return done

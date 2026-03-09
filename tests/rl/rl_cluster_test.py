@@ -39,6 +39,11 @@ os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 Mesh = jax.sharding.Mesh
 
 
+def _dummy_export_fn(*args, **kwargs) -> None:
+  """Provides a dummy export function for testing."""
+  del args, kwargs
+
+
 class RlClusterTest(parameterized.TestCase):
 
   @classmethod
@@ -126,17 +131,58 @@ class RlClusterTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='2d_mesh',
+          testcase_name='2d_mesh_perf_v1_only',
           reshape_dims=(-1, 1),
           mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={'v1': _dummy_export_fn},
+          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
       ),
       dict(
-          testcase_name='3d_mesh',
+          testcase_name='3d_mesh_perf_v1_only',
           reshape_dims=(1, -1, 1),
           mesh_axes=('data', 'fsdp', 'tp'),
+          export_fns_by_version={'v1': _dummy_export_fn},
+          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
+      ),
+      dict(
+          testcase_name='2d_mesh_perf_v2_only',
+          reshape_dims=(-1, 1),
+          mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={'v2': _dummy_export_fn},
+          expected_perf_type=rl_cluster_lib.perf_trace.NoopTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.PerfTracer,
+      ),
+      dict(
+          testcase_name='2d_mesh_both_v1_and_v2',
+          reshape_dims=(-1, 1),
+          mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={
+              'v1': _dummy_export_fn,
+              'v2': _dummy_export_fn,
+          },
+          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.PerfTracer,
+      ),
+      dict(
+          testcase_name='2d_mesh_no_perf',
+          reshape_dims=(-1, 1),
+          mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={},
+          expected_perf_type=rl_cluster_lib.perf_trace.NoopTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
       ),
   )
-  def test_init_with_perf_config(self, reshape_dims, mesh_axes):
+  def test_init_with_perf_config(
+      self,
+      *,
+      reshape_dims,
+      mesh_axes,
+      export_fns_by_version,
+      expected_perf_type,
+      expected_perf_v2_type,
+  ):
     mesh = Mesh(np.array(jax.devices()).reshape(*reshape_dims), mesh_axes)
     cluster_config = rl_cluster_lib.ClusterConfig(
         role_to_mesh={
@@ -163,14 +209,18 @@ class RlClusterTest(parameterized.TestCase):
     model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
-    perf_config = rl_cluster_lib.perf_metrics.PerfMetricsConfig()
+    perf_config = rl_cluster_lib.perf_metrics.PerfMetricsConfig(
+        custom_export_fn=export_fns_by_version.get('v1'),
+        custom_export_fn_v2=export_fns_by_version.get('v2'),
+    )
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
         tokenizer=vocab,
         cluster_config=cluster_config,
         perf_config=perf_config,
     )
-    self.assertIsInstance(rl_cluster.perf, rl_cluster_lib.perf_trace.PerfTracer)
+    self.assertIsInstance(rl_cluster.perf, expected_perf_type)
+    self.assertIsInstance(rl_cluster.perf_v2, expected_perf_v2_type)
 
   def test_batch_size_config(self):
     cfg = rl_cluster_lib.RLTrainingConfig(

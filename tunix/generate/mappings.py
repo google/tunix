@@ -11,12 +11,17 @@ class BackendMappingMixin:
   """Provides helper methods to retrieve backend-specific weight mappings."""
 
   DEFAULT_BACKEND = 'vllm_jax'
+  # Subclasses can override this to explicitly set the path
+  BACKEND_PACKAGE_PATH = None
 
   @classmethod
   def _backend_registry(cls) -> Dict[str, Any]:
-    module = cls.__module__
+    # Use the explicit path if provided, otherwise fallback to the module path
+    module = cls.BACKEND_PACKAGE_PATH or cls.__module__
+
     package_name = module.rsplit('.', 1)[0] if '.' in module else module
     package = importlib.import_module(package_name)
+
     return getattr(package, 'BACKEND_MAPPINGS', {})
 
   @classmethod

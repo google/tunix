@@ -28,6 +28,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
+import tenacity
+from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
+from tunix.models.gemma3 import utils as gemma_utils
 from tunix.rl import reshard
 from tunix.utils import env_utils
 
@@ -85,12 +88,16 @@ class Decoder(nnx.Module):
         out_features=32,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('fsdp', 'tp')),
+        bias_init=nnx.with_partitioning(nnx.initializers.zeros_init(), ('tp',)),
     )
     self.w2 = nnx.Linear(
         in_features=32,
         out_features=16,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('tp', 'fsdp')),
+        bias_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), ('fsdp',)
+        ),
     )
 
   def __call__(self, x):
@@ -101,6 +108,17 @@ class Decoder(nnx.Module):
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
+class VisionConfig:
+  """Vision config for testing."""
+
+  num_mm_tokens_per_image: int = 4
+  soft_token_placeholder: int = 22
+  start_of_image_token: int = 23
+  end_of_image_token: int = 24
+  double_new_line_token: int = 25
+
+
+@dataclasses.dataclass(kw_only=True, frozen=True)
 class ModelConfig:
   """Model config for testing."""
 
@@ -108,6 +126,7 @@ class ModelConfig:
   num_kv_heads: int = 4
   head_dim: int = 16
   vocab_size: int = 256
+  vision_config: VisionConfig | None = None
 
 
 class ToyTransformer(nnx.Module):
@@ -131,9 +150,35 @@ class ToyTransformer(nnx.Module):
     self.head_dim = 16
 
   def __call__(
-      self, x, positions, cache, attention_mask, output_hidden_states=False
+      self,
+      x,
+      positions,
+      cache,
+      attention_mask,
+      output_hidden_states=False,
+      images=None,
   ):
-    x = self.emb(x)
+    tokens = x
+    x = self.emb(tokens)
+    if images is not None:
+      num_images = images.shape[1]
+      vision_embs = jax.random.normal(
+          key=jax.random.key(2),
+          shape=(
+              x.shape[0],
+              num_images,
+              self.config.vision_config.num_mm_tokens_per_image,  # pytype: disable=attribute-error
+              x.shape[-1],
+          ),
+          dtype=x.dtype,
+      )
+      # Merge the soft tokens back with the text embeddings.
+      x = merge_embeddings_lib.merge_embeddings(
+          text_embeddings=x,
+          vision_embeddings=vision_embs,
+          mask=tokens == self.config.vision_config.soft_token_placeholder,  # pytype: disable=attribute-error
+      )
+
     for layer in self.layers:
       x = layer(x)
     if output_hidden_states:
@@ -147,6 +192,18 @@ class ToyTransformer(nnx.Module):
   @property
   def num_embed(self) -> int:
     return self.emb.num_embeddings
+
+  def get_attention_mask(self, tokens, inputs_mask=None):
+    token_placeholder_id = (
+        None
+        if self.config.vision_config is None
+        else self.config.vision_config.soft_token_placeholder
+    )
+    return gemma_utils.get_attention_mask(
+        tokens,
+        inputs_mask=inputs_mask,
+        token_placeholder_id=token_placeholder_id,
+    )
 
   def get_model_input(self):
     return get_dummy_inputs_for_lora_toy_transformer_tests()
@@ -186,33 +243,45 @@ def get_lora_model(
 class MockVocab(spm.SentencePieceProcessor):
   """Mock vocabulary for testing."""
 
-  def __init__(self):
+  DEFAULT_MAPPING = {
+      '<pad>': 0,
+      '<s>': 1,
+      '</s>': 2,
+      'input': 3,
+      'string': 4,
+      'hello': 5,
+      'world': 6,
+      'Hello': 7,
+      'there': 8,
+      '!': 9,
+      'My': 10,
+      'name': 11,
+      'is': 12,
+      'Morgane': 13,
+      'Tunix': 14,
+      'Parallax': 15,
+      'PT': 16,
+      'library': 17,
+      'distributed': 18,
+      'training': 19,
+      'optimizer': 20,
+      'quantization': 21,
+  }
+
+  def __init__(
+      self, mapping_text_to_id: dict[str, int] | None = None,
+      is_multimodal=False
+  ):
     super().__init__()
     self._start_id = 3
-    self._mapping_text_to_id = {
-        '<pad>': 0,
-        '<s>': 1,
-        '</s>': 2,
-        'input': 3,
-        'string': 4,
-        'hello': 5,
-        'world': 6,
-        'Hello': 7,
-        'there': 8,
-        '!': 9,
-        'My': 10,
-        'name': 11,
-        'is': 12,
-        'Morgane': 13,
-        'Tunix': 14,
-        'Parallax': 15,
-        'PT': 16,
-        'library': 17,
-        'distributed': 18,
-        'training': 19,
-        'optimizer': 20,
-        'quantization': 21,
-    }
+    if is_multimodal:
+      self.DEFAULT_MAPPING.update({
+          '<img>': 22,
+          '<soi>': 23,
+          '<eoi>': 24,
+          '<doubleline>': 25,
+      })
+    self._mapping_text_to_id = mapping_text_to_id or self.DEFAULT_MAPPING
     self._vocab_size = len(self._mapping_text_to_id)
 
   def pad_id(self) -> int:
@@ -233,11 +302,12 @@ class MockVocab(spm.SentencePieceProcessor):
 
   def EncodeAsIds(self, text: str, **kwargs) -> list[int]:  # pylint: disable=invalid-name
     words = text.split(' ')
-    return [
+    res = [
         self._mapping_text_to_id[word]
         for word in words
         if word in self._mapping_text_to_id
     ]
+    return res
 
 
 class ToyTransformerWithScoreHead(nnx.Module):
@@ -268,16 +338,36 @@ class ToyTransformerWithScoreHead(nnx.Module):
     return score
 
 
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+    reraise=True,
+)
+def safe_list_files(repo_id):
+  return huggingface_hub.list_repo_files(repo_id)
+
+
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+    reraise=True,
+)
+def safe_download(repo_id, filename, local_dir):
+  return huggingface_hub.hf_hub_download(
+      repo_id=repo_id, filename=filename, local_dir=local_dir
+  )
+
+
 def download_from_huggingface(repo_id: str, model_path: str):
   """Download checkpoint files from huggingface."""
   print('Make sure you logged in to the huggingface cli.')
-  all_files = huggingface_hub.list_repo_files(repo_id)
+
+  all_files = safe_list_files(repo_id)
   filtered_files = [f for f in all_files if not f.startswith('original/')]
 
   for filename in filtered_files:
-    huggingface_hub.hf_hub_download(
-        repo_id=repo_id, filename=filename, local_dir=model_path
-    )
+
+    safe_download(repo_id=repo_id, filename=filename, local_dir=model_path)
   print(f'Downloaded {filtered_files} to: {model_path}')
 
 

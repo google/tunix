@@ -41,11 +41,11 @@ from __future__ import annotations
 
 from concurrent import futures
 import contextlib
-import logging
 import threading
 import time
 from typing import Any, Callable
 
+from absl import logging
 import jax
 import jaxtyping
 import numpy as np
@@ -279,7 +279,31 @@ class Timeline:
     inner.end = end
     # print(f"{self.id}: end {inner.name}")
 
-  def device_span(self, name: str, thread_begin: float, end: float) -> None:
+  def device_span(
+      self,
+      name: str,
+      *,
+      thread_begin: float,
+      end: float,
+      group: SpanGroup | None = None,
+  ) -> None:
+    """Records a device span within the timeline.
+
+    The span's begin time is the maximum of `thread_begin` and the end time of
+    the last recorded span on this timeline. The end time is given by `end`.
+
+    Args:
+      name: The name of the device span.
+      thread_begin: The time when the thread initiated the device operation.
+      end: The time when the device operation completed.
+      group: The SpanGroup to which this device span belongs. If None, the
+        current group on the stack is used.
+
+    Raises:
+      ValueError: If the last recorded span on this timeline has not been ended
+        before calling this method.
+    """
+
     if self._last_span and not self._last_span.ended:
       raise ValueError(
           f"{self.id}: last span '{self._last_span.name}' is not ended. current"
@@ -291,7 +315,8 @@ class Timeline:
     else:
       inner = Span(name, thread_begin)
     inner.end = end
-    self.stack[-1].inner.append(inner)
+    active_group = group or self.stack[-1]
+    active_group.inner.append(inner)
 
     self._last_span = inner
 
@@ -355,9 +380,22 @@ class DeviceTimeline(Timeline):
       waitlist: The JAX computation to be tracked, used to infer the end time of
         the span on the device.
     """
+    # Capture the current group when the span is initiated.
+    # This ensures that even if the stack changes (e.g. a new group is pushed)
+    # before the async wait finishes, the span is attached to the correct
+    # parent group.
+    # TODO(b/481789498): With multiple threads, this might still not be assigned
+    # to the correct group in rare cases. We need a proper design to track the
+    # true parent group for each device span.
+    parent_group = self.stack[-1]
 
     def on_success():
-      self.device_span(name, thread_span_begin, time.perf_counter())
+      self.device_span(
+          name,
+          thread_begin=thread_span_begin,
+          end=time.perf_counter(),
+          group=parent_group,
+      )
 
     def on_failure(e: Exception):
       raise e

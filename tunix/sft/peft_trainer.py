@@ -17,6 +17,7 @@
 from collections.abc import Iterable
 import contextlib
 import dataclasses
+import functools
 import time
 from typing import Any, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
 
@@ -31,6 +32,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
@@ -39,7 +41,6 @@ from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
-from tunix.sft import system_metrics_calculator
 from tunix.sft import utils
 
 _ModelInputT = Dict[str, ArrayLike]
@@ -68,6 +69,9 @@ class TrainingConfig:
   # Configs for the profiler.
   profiler_options: profiler.ProfilerOptions | None = None
 
+  # Configs for performance metrics.
+  perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
+
   data_sharding_axis: Tuple[str, ...] = ("fsdp",)
 
   # Controls how many train_steps can be scheduled ahead of time.
@@ -94,6 +98,9 @@ class TrainingInput:
 
   # A mask that determines which input tokens are valid.
   input_mask: jax.Array | np.ndarray
+
+  # Optional images for vision models.
+  images: jax.Array | np.ndarray | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -176,6 +183,7 @@ class PeftTrainer:
       input.
     checkpoint_manager: The checkpoint manager to use.
     metrics_logger: The metrics logger to use.
+    metrics_prefix: The prefix for metric names for logging.
     is_managed_externally: Whether the trainer is managed externally.
     training_hooks: The training hooks to use.
     data_hooks: The data hooks to use.
@@ -200,6 +208,7 @@ class PeftTrainer:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.Param)
+
     self.loss_fn = _default_loss_fn
     self.eval_loss_fn = _default_loss_fn
     self.gen_model_input_fn = lambda x: x
@@ -226,7 +235,6 @@ class PeftTrainer:
     self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
-    self._flops_measured: bool = False
 
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
@@ -256,6 +264,7 @@ class PeftTrainer:
     self._buffered_eval_metrics: MetricsBuffer | None = None
     self.training_hooks = None
     self.data_hooks = None
+    self._jit_cache = set()
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -267,7 +276,7 @@ class PeftTrainer:
     """Clears the JIT cache of the train and eval step functions.
 
     This function should be called when the trainer is being reused after
-    overiding the training related states, for example, the loss function.
+    overriding the training related states, for example, the loss function.
     """
     self._jitted_train_step_fn = None
     self._jitted_eval_step_fn = None
@@ -369,13 +378,16 @@ class PeftTrainer:
     )
     nnx.update(self.optimizer, optimizer_sharded_state)
 
-  def jit_train_and_eval_step(self, skip_jit: bool = False):
+  def jit_train_and_eval_step(
+      self, skip_jit: bool = False, cache_nnx_graph: bool = False
+  ):
     """Creates and returns the train and eval step functions.
 
     This function will return the cached ones if available.
 
     Args:
       skip_jit: If True, the train and eval step functions will not be JITed.
+      cache_nnx_graph: If True, the nnx graph will be cached.
 
     Returns:
       A tuple of train and eval step functions.
@@ -384,14 +396,28 @@ class PeftTrainer:
     eval_step = self.create_eval_step_fn()
     if skip_jit:
       return train_step, eval_step
-    else:
-      if self._jitted_train_step_fn is None:
-        self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-        self._jitted_train_step_fn = nnx.jit(
-            train_step, donate_argnames=("optimizer",)
-        )
-        self._jitted_eval_step_fn = nnx.jit(eval_step)
-      return self._jitted_train_step_fn, self._jitted_eval_step_fn
+
+    if self._jitted_train_step_fn is None:
+      self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+      self._jitted_train_step_fn = nnx.jit(
+          train_step, donate_argnames=("optimizer",)
+      )
+      self._jitted_eval_step_fn = nnx.jit(eval_step)
+
+      def maybe_cache_and_partial(f, *args):
+        if cache_nnx_graph:
+          # wrap with partial so we can access jitted_fn in a consistent way.
+          return functools.partial(nnx.cached_partial(f, *args))
+        else:
+          return functools.partial(f, *args)
+
+      self._jitted_train_step_fn = maybe_cache_and_partial(
+          self._jitted_train_step_fn, self.model, self.optimizer
+      )
+      self._jitted_eval_step_fn = maybe_cache_and_partial(
+          self._jitted_eval_step_fn, self.model
+      )
+    return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
   def _prepare_inputs(self, input_data: Any) -> Any:
     """Override this function for additional input preparation."""
@@ -558,33 +584,28 @@ class PeftTrainer:
       eval_ds: Iterable[Any] | None = None,
       skip_jit: bool = False,
       *,
-      cache_nnx_graph: bool = False,
+      cache_nnx_graph: bool = True,
   ) -> None:
     """Training loop."""
-    train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
+    logging.log_first_n(
+        logging.INFO,
+        f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
+        1,
+    )
+    train_step, eval_step = self.jit_train_and_eval_step(
+        skip_jit, cache_nnx_graph
+    )
     if not skip_jit:
-      logging.info(
-          "Training with mesh: %s. Compiled train_step cache size: %s",
-          pxla.thread_resources.env.physical_mesh,
-          train_step.jitted_fn._cache_size(),  # pytype: disable=attribute-error,protected-access
+      cache_size = train_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
+      logging.log_if(
+          logging.INFO,
+          f"Compiled train_step cache size: {cache_size}",
+          condition=cache_size not in self._jit_cache,
       )
-    if cache_nnx_graph:
-      # For performance, cache the nnx graph traversals. However, the training
-      # loop must _not_ modify the model or optimizer graph in this case.  For
-      # example, the distillation trainer mutates the model graph by adding the
-      # distillation loss.
-      partial_train_step = nnx.cached_partial(
-          train_step, self.model, self.optimizer
-      )
-      partial_eval_step = nnx.cached_partial(eval_step, self.model)
-    else:
-      partial_train_step = lambda inputs: train_step(
-          self.model, self.optimizer, inputs
-      )
-      partial_eval_step = lambda inputs: eval_step(self.model, inputs)
+      self._jit_cache.add(cache_size)
 
     if eval_ds:
-      self._run_eval(eval_ds, partial_eval_step)
+      self._run_eval(eval_ds, eval_step)
 
     if self.config.max_steps is not None and self._pbar is None:
       self._pbar = progress_bar.ProgressBar(
@@ -639,24 +660,6 @@ class PeftTrainer:
               train_example, self.config.data_sharding_axis
           )
 
-          if not self._flops_measured and not skip_jit:
-            self._flops_measured = True
-
-            tflops_per_step = system_metrics_calculator.measure_tflops_per_step(
-                train_step_fn=train_step,
-                model=self.model,
-                optimizer=self.optimizer,
-                train_example=train_example,
-            )
-            if tflops_per_step is not None:
-              self.metrics_logger.log(
-                  self.metrics_prefix,
-                  "tflops_per_step",
-                  tflops_per_step,
-                  self._mode,
-                  0,
-              )
-
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
@@ -664,7 +667,7 @@ class PeftTrainer:
           with self._perf_tracer.span(
               "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
           ) as span:
-            train_loss, aux = partial_train_step(train_example)
+            train_loss, aux = train_step(train_example)
             span.device_end([train_loss])
 
           current_time = time.perf_counter()
@@ -703,7 +706,7 @@ class PeftTrainer:
                 eval_ds
                 and self._train_steps % self.config.eval_every_n_steps == 0
             ):
-              self._run_eval(eval_ds, partial_eval_step)
+              self._run_eval(eval_ds, eval_step)
 
         self._prof.maybe_deactivate(self._iter_steps)
 
@@ -815,9 +818,14 @@ def _default_loss_fn(
     input_mask: jax.Array,
     positions: jax.Array,
     attention_mask: jax.Array,
+    images: jax.Array | None = None,
 ) -> ArrayLike:
   """Default loss function for PEFT training."""
-  logits, _ = model(input_tokens, positions, None, attention_mask)
+  # Weird kwargs workaround because not all models support `images` right now.
+  kwargs = {} if images is None else {"images": images}
+  logits, _ = model(
+      input_tokens, positions, None, attention_mask, **kwargs
+  )
 
   # Exclude the last step as it does not appear in the targets.
   logits = logits[:, :-1, :]

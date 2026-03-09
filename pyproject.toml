@@ -30,14 +30,17 @@ dependencies = [
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "pillow",  # Image processing
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
+  "perfetto",  # Perfetto trace writer for metrics export
   "qwix",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
   "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
+  "tenacity",
 ]
 
 [project.optional-dependencies]
@@ -53,7 +56,7 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2, <=0.8.1", # Jax 0.7.2 has performance regression on OSS
+  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2

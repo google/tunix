@@ -23,7 +23,7 @@ MappingEntry = Tuple[str, Sharding]
 
 
 TO_HF_MAPPINGS: Dict[str, MappingEntry] = {
-    'embedder.input_embedding': ('embed.embedding', ('model', None)),
+    'embedder.input_embedding': ('model.embed.embedding', ('model', None)),
     'layers.*.input_layernorm.w': (
         'model.layers.*.input_layernorm.scale',
         (None,),
@@ -73,7 +73,7 @@ TO_HF_MAPPINGS: Dict[str, MappingEntry] = {
         ('model', None),
     ),
     'final_norm.w': ('model.norm.scale', (None,)),
-    'lm_head.w': ('lm_head', (None, 'model')),
+    'lm_head.w': ('model.lm_head', (None, 'model')),
 }
 
 

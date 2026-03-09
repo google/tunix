@@ -13,6 +13,7 @@
 # limitations under the License.
 """Common RL helper classes and functions."""
 
+from functools import partial  # pylint: disable=g-importing-member
 from typing import Any, Iterable
 
 import flax
@@ -127,6 +128,10 @@ def compute_kl_divergence(
   Returns:
     KL divergence.
   """
+  per_token_logps = per_token_logps.astype(jnp.float32)
+  if ref_per_token_logps is not None:
+    ref_per_token_logps = ref_per_token_logps.astype(jnp.float32)
+
   if method == "kl":
     return per_token_logps - ref_per_token_logps
   elif method == "mse_kl":
@@ -185,7 +190,7 @@ def get_per_token_logps(
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@nnx.jit(static_argnames=("pad_id", "eos_id"))
+@partial(jax.jit, static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
@@ -210,9 +215,13 @@ def process_ids(
   return prompt_completion_ids, positions, attn_mask
 
 
-@nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"))
+@partial(
+    jax.jit,
+    static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"),
+)
 def compute_per_token_logps(
-    model: nnx.Module,
+    graphdef,
+    state,
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
     pad_id: int,
@@ -223,6 +232,7 @@ def compute_per_token_logps(
     return_logits: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
+  model = nnx.merge(graphdef, state)
   input_tokens, positions, attn_mask = process_ids(
       prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
@@ -383,8 +393,11 @@ def aggregate_loss(
       Aggregated loss.
   """
 
+  per_token_loss = per_token_loss.astype(jnp.float32)
+
   if loss_agg_mode == "token-mean":
-    # sum all the token loss, and average by total number of completion token in the batch
+    # sum all the token loss, and average by total number of completion tokens
+    # in the batch
     loss = (per_token_loss * completion_mask).sum() / (
         jnp.clip(completion_mask.sum(), min=1)
     )
@@ -413,7 +426,8 @@ def aggregate_loss(
   else:
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
-        " 'token-mean', 'sequence-mean-token-mean'."
+        " 'token-mean', 'sequence-mean-token-mean',"
+        " 'sequence-mean-token-scale', 'sequence-mean-token-sum-norm'."
     )
   return loss
 

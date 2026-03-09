@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Base class for samplers."""
+
 import abc
 import dataclasses
 from typing import List, Optional
@@ -63,7 +64,7 @@ class BaseSampler(ABC):
   @abstractmethod
   def __call__(
       self,
-      input_strings: List[str],
+      input_strings: str | List[str],
       max_generation_steps,
       max_prompt_length=None,
       temperature=0.0,

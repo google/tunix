@@ -3,9 +3,9 @@
 import collections
 import dataclasses
 import enum
-import logging
 from typing import Callable
 
+from absl import logging
 import jax
 from metrax import logging as metrax_logging
 import numpy as np

@@ -89,6 +89,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ('obs2', 2.0, True, {}),
     ]
     self.mock_env.task = {'some': 'task'}
+    self.mock_env.extra_kwargs = {'group_id': 1}
 
     # Configure mock model call
     self.mock_model_call.side_effect = ['response1', 'response2']
@@ -102,7 +103,6 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         env=self.mock_env,
         model_call=self.mock_model_call,
         final_reward_fn=self.mock_final_reward_fn,
-        max_steps=5,
         gamma=0.9,
     )
     result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
@@ -134,7 +134,6 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         agent=self.mock_agent,
         env=self.mock_env,
         model_call=self.mock_model_call,
-        max_steps=5,
     )
     conversation = asyncio.run(self._run_collect(engine, mode='Conversation'))
 
@@ -162,7 +161,6 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         model_call=self.mock_model_call,
         tokenizer=self.mock_tokenizer,
         chat_parser=self.mock_chat_parser,
-        max_steps=5,
     )
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
     expected_tokens = {
@@ -179,7 +177,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'trajectory_reward': 3.0,  # 1.0 + 2.0
         'policy_version': None,
         'original_input': None,
-        'group_id': None,
+        'group_id': 1,
     }
     self.assertEqual(token_data, expected_tokens)
 
@@ -253,17 +251,17 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     mock_tokenize.assert_not_called()
 
   def test_collect_timeout(self):
-    with mock.patch.object(time, 'time') as mock_time:
+    with mock.patch.object(trajectory_collect_engine.time, 'time') as mock_time:
       mock_time.side_effect = [
           100.0,  # start time in _reset
           100.05,  # time check in _one_step (1st call)
           100.11,  # time check in _one_step (2nd call) -> timeout
+          100.12,  # time access in logging.warning
       ]
       engine = trajectory_collect_engine.TrajectoryCollectEngine(
           agent=self.mock_agent,
           env=self.mock_env,
           model_call=self.mock_model_call,
-          max_steps=5,
           timeout=0.1,
       )
       result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
@@ -344,7 +342,6 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     mock_model_call = mock.Mock(side_effect=['resp1', 'resp2a', 'resp2b'])
     engine_args = {
         'model_call': mock_model_call,
-        'max_steps': 5,
         'mode': 'Conversation',
     }
 

@@ -15,10 +15,13 @@
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
+import jax
+import numpy as np
 from tunix.perf import export
 from tunix.perf import metrics
-from tunix.perf import span
 from tunix.perf import trace
+from tunix.rl import rl_cluster
 
 patch = mock.patch
 
@@ -28,18 +31,125 @@ ThreadTimeline = trace.ThreadTimeline
 DeviceTimeline = trace.DeviceTimeline
 
 
-class ExportTest(absltest.TestCase):
+def _create_mock_cluster_config_with_perf_metrics(
+    *,
+    enable_perf_metrics: bool = True,
+    enable_trace_writer: bool = True,
+    perf_metrics_log_dir: str = "",
+) -> mock.Mock:
+  """Creates a mock ClusterConfig object for testing.
+
+  Args:
+    enable_perf_metrics: If True, enables perf metrics.
+    enable_trace_writer: If True, enables trace writer to write out the trace
+      timeline.
+    perf_metrics_log_dir: The log directory for perf metrics.
+
+  Returns:
+    A mock ClusterConfig object.
+  """
+  mock_device = mock.create_autospec(jax.Device, instance=True)
+  mock_device.platform = "tpu"
+  mock_device.id = 0
+  mock_mesh = mock.create_autospec(jax.sharding.Mesh, instance=True)
+  mock_mesh.devices = np.array([mock_device])
+
+  # Setup mock configuration
+  cluster_config = mock.create_autospec(rl_cluster.ClusterConfig, instance=True)
+  cluster_config.role_to_mesh = {
+      rl_cluster.Role.ROLLOUT: mock_mesh,
+      rl_cluster.Role.ACTOR: mock_mesh,
+      rl_cluster.Role.REFERENCE: mock_mesh,
+  }
+
+  mock_training_config = mock.create_autospec(
+      rl_cluster.RLTrainingConfig, instance=True
+  )
+  cluster_config.training_config = mock_training_config
+
+  if enable_perf_metrics:
+    mock_options = mock.create_autospec(
+        metrics.PerfMetricsOptions, instance=True
+    )
+    mock_options.log_dir = perf_metrics_log_dir
+    mock_options.enable_trace_writer = enable_trace_writer
+    mock_training_config.perf_metrics_options = mock_options
+  else:
+    mock_training_config.perf_metrics_options = None
+  return cluster_config
+
+
+class ExportTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="with_export_dir",
+          perf_metrics_log_dir="test_log_dir",
+          expected_log_dir="test_log_dir",
+      ),
+      dict(
+          testcase_name="without_export_dir",
+          perf_metrics_log_dir="",
+          expected_log_dir=None,
+      ),
+  )
+  def test_from_cluster_config_trace_writer_enabled(
+      self, perf_metrics_log_dir, expected_log_dir
+  ):
+    cluster_config = _create_mock_cluster_config_with_perf_metrics(
+        perf_metrics_log_dir=perf_metrics_log_dir
+    )
+    with mock.patch.object(
+        export, "PerfettoTraceWriter", autospec=True, spec_set=True
+    ) as mock_writer:
+      PerfMetricsExport.from_cluster_config(cluster_config)
+      mock_writer.assert_called_with(expected_log_dir)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="disabled_trace_writer",
+          enable_perf_metrics=True,
+          enable_trace_writer=False,
+      ),
+      dict(
+          testcase_name="disabled_perf_metrics",
+          enable_perf_metrics=False,
+          enable_trace_writer=True,
+      ),
+  )
+  def test_from_cluster_config_trace_writer_disabled(
+      self, enable_perf_metrics, enable_trace_writer
+  ):
+    log_dir = "test_log_dir"
+    cluster_config = _create_mock_cluster_config_with_perf_metrics(
+        perf_metrics_log_dir=log_dir,
+        enable_perf_metrics=enable_perf_metrics,
+        enable_trace_writer=enable_trace_writer,
+    )
+    with mock.patch.object(
+        export, "PerfettoTraceWriter", autospec=True, spec_set=True
+    ) as mock_writer:
+      PerfMetricsExport.from_cluster_config(cluster_config)
+      mock_writer.assert_not_called()
 
   @patch("time.perf_counter")
-  def test_export_grpo_metrics_colocated(self, mock_perf_counter):
+  def test_export_grpo_metrics_colocated_with_trace_writer(
+      self, mock_perf_counter
+  ):
     # tpu0 span end times
     mock_perf_counter.side_effect = [0.41, 0.61, 1.21]
+    mock_trace_writer = mock.create_autospec(
+        export.PerfettoTraceWriter, instance=True, spec_set=True
+    )
 
-    export_fn = PerfMetricsExport.from_role_to_devices({
-        "rollout": ["tpu0"],
-        "refer": ["tpu0"],
-        "actor": ["tpu0"],
-    })
+    export_fn = PerfMetricsExport.from_role_to_devices(
+        {
+            "rollout": ["tpu0"],
+            "refer": ["tpu0"],
+            "actor": ["tpu0"],
+        },
+        trace_writer=mock_trace_writer,
+    )
     host_timeline = ThreadTimeline("host", 0.0)
     tpu0_timeline = DeviceTimeline("tpu0", 0.0)
     timelines = {
@@ -60,12 +170,11 @@ class ExportTest(absltest.TestCase):
     tpu0_timeline.span("rollout", 0.3, [])  # end 0.41
     host_timeline.span_end(0.4)
 
+    host_timeline.span_group_begin("actor_training", 0.5)
+    tpu0_timeline.span_group_begin("actor_training", 0.5)
     host_timeline.span_begin("refer_inference", 0.5)
     tpu0_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
-
-    host_timeline.span_group_begin("actor_training", 0.7)
-    tpu0_timeline.span_group_begin("actor_training", 0.7)
     host_timeline.span_begin("peft_train_step", 0.70)
     host_timeline.span_end(0.75)
     host_timeline.span_begin("peft_train_step", 0.76)
@@ -93,18 +202,22 @@ class ExportTest(absltest.TestCase):
         "perf/weight_sync_time": 0.1,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_time": 0.31,
         "perf/sum/actor_train_step_time": 0.1,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_time": 0.31,
         "perf/mean/actor_train_step_time": 0.05,
     }
     actual_metrics = {}
     for k, v in export_fn(PerfSpanQuery(timelines, "host")).items():
       actual_metrics[k] = float(v[0])
 
-    self.assertDictAlmostEqual(actual_metrics, expected_metrics)
+    with self.subTest("metrics"):
+      self.assertDictAlmostEqual(actual_metrics, expected_metrics)
+
+    with self.subTest("trace_logging"):
+      mock_trace_writer.log_trace.assert_called_once()
 
   @patch("time.perf_counter")
   def test_export_grpo_metrics_rollout_1_actor_2_reference_2(
@@ -139,12 +252,11 @@ class ExportTest(absltest.TestCase):
     tpu0_timeline.span("rollout", 0.3, [])  # end 0.41
     host_timeline.span_end(0.4)
 
+    host_timeline.span_group_begin("actor_training", 0.5)
+    tpu1_timeline.span_group_begin("actor_training", 0.5)
     host_timeline.span_begin("refer_inference", 0.5)
     tpu1_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
-
-    host_timeline.span_group_begin("actor_training", 0.7)
-    tpu1_timeline.span_group_begin("actor_training", 0.7)
     host_timeline.span_begin("peft_train_step", 0.70)
     host_timeline.span_end(0.75)
     host_timeline.span_begin("peft_train_step", 0.76)
@@ -176,12 +288,12 @@ class ExportTest(absltest.TestCase):
         "perf/first_micro_batch_rollout_time": 0.41,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_time": 0.31,
         "perf/sum/actor_train_step_time": 0.1,
         "perf/sum/between_micro_batch_gap_time": 0.0,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_time": 0.31,
         "perf/mean/actor_train_step_time": 0.05,
         "perf/mean/between_micro_batch_gap_time": 0.0,
     }
@@ -224,12 +336,11 @@ class ExportTest(absltest.TestCase):
     tpu0_timeline.span("rollout", 0.3, [])  # end 0.41
     host_timeline.span_end(0.4)
 
+    host_timeline.span_group_begin("actor_training", 0.5)
+    tpu2_timeline.span_group_begin("actor_training", 0.5)
     host_timeline.span_begin("refer_inference", 0.5)
     tpu1_timeline.span("refer_inference", 0.5, [])  # end 0.61
     host_timeline.span_end(0.6)
-
-    host_timeline.span_group_begin("actor_training", 0.7)
-    tpu2_timeline.span_group_begin("actor_training", 0.7)
     host_timeline.span_begin("peft_train_step", 0.70)
     host_timeline.span_end(0.75)
     host_timeline.span_begin("peft_train_step", 0.76)
@@ -263,13 +374,13 @@ class ExportTest(absltest.TestCase):
         "perf/first_micro_batch_rollout_time": 0.41,
         "perf/sum/rollout_time": 0.11,
         "perf/sum/refer_inference_time": 0.11,
-        "perf/sum/actor_train_time": 0.11,
+        "perf/sum/actor_train_time": 0.31,
         "perf/sum/actor_train_step_time": 0.1,
         "perf/sum/refer_gap_time": 0.0,
         "perf/sum/actor_gap_time": 0.0,
         "perf/mean/rollout_time": 0.11,
         "perf/mean/refer_inference_time": 0.11,
-        "perf/mean/actor_train_time": 0.11,
+        "perf/mean/actor_train_time": 0.31,
         "perf/mean/actor_train_step_time": 0.05,
         "perf/mean/refer_gap_time": 0.0,
         "perf/mean/actor_gap_time": 0.0,
