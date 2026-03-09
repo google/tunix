@@ -18,12 +18,22 @@ fi
 
 # Default engine
 ENGINE="none"
+LOCAL_IMAGE_NAME=tunix_base_image
+TAG=$(date +%Y%m%d_%H%M%S)
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
     --engine=*)
       ENGINE="${1#*=}"
+      shift
+      ;;
+    --local_image_name=*)
+      LOCAL_IMAGE_NAME="${1#*=}"
+      shift
+      ;;
+    --tag=*)
+      TAG="${1#*=}"
       shift
       ;;
     *)
@@ -38,8 +48,7 @@ if [[ "$ENGINE" != "sglang_jax" && "$ENGINE" != "vllm" && "$ENGINE" != "none" ]]
     exit 1
 fi
 
-export LOCAL_IMAGE_NAME=tunix_base_image
-echo "Building base image: $LOCAL_IMAGE_NAME with engine: $ENGINE"
+echo "Building base image: $LOCAL_IMAGE_NAME:$TAG with engine: $ENGINE"
 
 echo "Using Dockerfile: $DOCKERFILE"
 
@@ -60,7 +69,7 @@ build_ai_image() {
     $DOCKER_COMMAND build \
         --network=host \
         --build-arg ENGINE=${ENGINE} \
-        -t ${LOCAL_IMAGE_NAME} \
+        -t "${LOCAL_IMAGE_NAME}:${TAG}" \
         -f ${DOCKERFILE} .
 }
 
@@ -70,5 +79,5 @@ echo ""
 echo "*************************
 "
 
-echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}.
+echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}:${TAG}.
 It only has the dependencies installed. "
