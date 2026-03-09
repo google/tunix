@@ -34,7 +34,6 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
   Returns:
     float: The calculated reward value based on math evaluation
   """
-  # print(f"Calculating math rewards... with  answer: {answer}, completions: {completions},")
   rewards = []
   for i in range(len(prompts)):
     print("prompt: ", prompts[i])
@@ -56,16 +55,15 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
       model_solution = model_response
 
     model_answer = math_utils.extract_answer(model_solution)
-    # print(f"Extracted model answer: {model_answer} from model response: {model_response}")
     if model_answer is None:
-      # print("model_answer is None after extraction")
+      # return RewardOutput(0.0, {"is_correct": False})
       rewards.append(0.0)
       continue
 
     # Process the ground truth(s)
     ground_truths = answer[i]
     if ground_truths is None:
-      # print("ground_truths is None")
+      # return RewardOutput(0.0, {"is_correct": False})
       rewards.append(0.0)
       continue
 
@@ -75,9 +73,11 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
 
     # Process each ground truth
     processed_ground_truths = []
+    found_correct_format = False
     for truth in ground_truths:
       truth = str(truth)
       if "\\boxed" in truth:
+        found_correct_format = True
         processed_truth = math_utils.extract_answer(truth)
         if processed_truth is not None:
           processed_ground_truths.append(processed_truth)
@@ -85,13 +85,13 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
         processed_ground_truths.append(truth)
 
     if not processed_ground_truths:
-      # print("No valid ground truths after processing")
       rewards.append(0.0)
       continue
 
-    found_correct = False
+    penalty = -0.0001 * len(model_response.split(' '))  # Small penalty for longer responses to encourage conciseness.
     # Check against all possible correct answers
     found_correct_answer = False
+    reward_value: float = 0.1 if found_correct_format else 0.0  # Small reward for correct format even if answer is wrong.
     for ground_truth in processed_ground_truths:
       if found_correct_answer:
         break
@@ -104,12 +104,12 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
       )
       if is_correct:
         found_correct_answer = True
-        reward_value: float = 1.0  # Base reward for a correct answer.
+        reward_value += 0.9  # Base reward for a correct answer.
         # Apply tool call bonus if applicable and answer is correct
         # if task_info.get("has_toolcall", False):
         #   reward_value += 0.5
+        reward_value += penalty  # Apply length penalty to the reward.
         rewards.append(reward_value)
     if not found_correct_answer:
-      rewards.append(0.2)
-  # print(f"Calculated rewards: {rewards}")
+      rewards.append(reward_value)
   return rewards
