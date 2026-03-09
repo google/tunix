@@ -139,7 +139,7 @@ MAX_PROMPT_LENGTH = 2048
 MAX_RESPONSE_LENGTH = 8192
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
-TEMPERATURE = 0.6
+TEMPERATURE = 0.9
 TOP_P = 1
 TOP_K = None
 # The number of times the policy generates multiple responses for a given prompt
@@ -160,11 +160,10 @@ NUM_ITERATIONS = 1
 # The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
 # Important to keep a high enough value for this, otherwise, the KL divergence
 # can increase unchecked.
-BETA = 0.05
+BETA = 0.005
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 EPSILON = 0.2
-EPSILON_HIGH = 0.28
 EPSILON_HIGH = 0.28
 
 # ====== Training ======
@@ -287,7 +286,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_exp11/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_exp15/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
