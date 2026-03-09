@@ -16,19 +16,16 @@
 
 import copy
 import json
-import logging
-from typing import Any
+from typing import Any, Dict
 import uuid
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.parser.tool_parser import tool_parser_base
 from tunix.rl.agentic.parser.tool_parser import tool_parser_registry
 from tunix.rl.agentic.tools import base_tool
 from tunix.rl.agentic.tools import tool_manager
-
-
-logger = logging.getLogger(__name__)
 
 
 class ToolAgent(base_agent.ConversationAgentBase):
@@ -74,8 +71,15 @@ class ToolAgent(base_agent.ConversationAgentBase):
     content = system_prompt + (self.tools_prompt or "")
     self._messages = [{"role": "system", "content": content}]
 
-  def _observation_to_messages(self, observation: Any) -> None:
+  def _observation_to_messages(
+      self,
+      observation: Any,
+      reward: float,
+      done: bool,
+      info: Dict[str, Any],
+  ) -> None:
     """Convert environment observation into messages, including tool outputs."""
+    del reward, done, info  # Unused in this implementation.
     if isinstance(observation, dict):
       if "tool_outputs" in observation:
         # Handle structured tool execution results.
@@ -91,7 +95,7 @@ class ToolAgent(base_agent.ConversationAgentBase):
             "content": observation["question"],
         })
       else:
-        logger.warning("Unknown dict observation format: %s", observation)
+        logging.warning("Unknown dict observation format: %s", observation)
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})
 
@@ -119,7 +123,7 @@ class ToolAgent(base_agent.ConversationAgentBase):
     try:
       tool_calls = self.tool_parser.parse(response)
     except Exception as e:
-      logger.warning("ToolParser failed: %s", e)
+      logging.warning("ToolParser failed: %s", e)
       tool_calls = []
 
     # Fallback mechanism: if no tool calls detected, use finish function.

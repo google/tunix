@@ -14,15 +14,15 @@
 
 """Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
 
+import asyncio
+import concurrent
 import dataclasses
-import logging
 import math
-import re
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+from absl import logging
 from flax import nnx
 import jax
-import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 from sgl_jax.srt.entrypoints.engine import Engine
@@ -39,9 +39,7 @@ def update_hf_key_mappings_with_lora(
     enable_static_lora: bool = False,
     lora_target_modules: Optional[List] = None,
 ):
-  """
-  Update LoRA key_mapping into hf_key_mapping.
-  """
+  """Update LoRA key_mapping into hf_key_mapping."""
   if mappings is None or not enable_static_lora or not lora_target_modules:
     return mappings
 
@@ -84,9 +82,12 @@ class SglangJaxConfig:
   precompile_token_paddings: Optional[List[int]] = None
   precompile_bs_paddings: Optional[List[int]] = None
   chunked_prefill_size: Optional[int] = -1
-  page_size: int = 64
+  page_size: int = 128
   load_format: str = "auto"
   max_running_requests: int = None
+
+  # Logging knob to enable debugging at different verbosity levels.
+  log_level: str = "info"
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -103,6 +104,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self,
       tokenizer: Any,
       config: SglangJaxConfig,
+      **kwargs,
   ):
     """Initializes the SglangJaxSampler.
 
@@ -112,6 +114,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     """
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.args = self._sglang_jax_config(config)
+    if kwargs:
+      self.args.update(kwargs)
     self.engine = Engine(**self.args)
 
     self.to_hf_key_mappings = update_hf_key_mappings_with_lora(
@@ -130,9 +134,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           config.mapping_config.lora_to_hf_transpose_keys
       )
 
-    self._logger = logging.getLogger(self.__class__.__name__)
-
-    self._logger.debug(f"{self.to_hf_key_mappings=}")
+    logging.debug(f"{self.to_hf_key_mappings=}")
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -149,6 +151,16 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         transpose_keys=self.to_hf_transpose_keys,
         reshard_fn=reshard.reshard_pytree,
         rollout_engine="sglang_jax",
+        num_kv_heads=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_total_num_kv_heads()
+        ),
+        head_dim=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.head_dim
+        ),
     )
     new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
     self._model_runner.model_state_leaves = new_model_state_leaves
@@ -194,7 +206,9 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
     args["load_format"] = config.load_format
     args["max_running_requests"] = config.max_running_requests
+    args["enable_engine_loop_run_forever_daemon"] = True
 
+    args["log_level"] = config.log_level
     return args
 
   def _validate_config(self, config: SglangJaxConfig):
@@ -229,6 +243,18 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       return None
 
   @property
+  def mesh(self) -> jax.sharding.Mesh:
+    if hasattr(self._model_runner, "mesh") and isinstance(
+        self._model_runner.mesh, jax.sharding.Mesh
+    ):
+      return self._model_runner.mesh
+    else:
+      raise AttributeError(
+          "SGLang model runner doesn't have mesh or mesh is not a"
+          " jax.sharding.Mesh."
+      )
+
+  @property
   def transformer(self):
     # sglang-jax doesn't expose the underlying model
     return None
@@ -240,21 +266,12 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
   def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
-    bos_tok = (
-        [self.tokenizer.bos_id()]
-        if (self.tokenizer.bos_id() and input_ids[0] != self.tokenizer.bos_id())
-        else []
-    )
-    eos_tok = (
-        [self.tokenizer.eos_id()]
-        if input_ids[-1] != self.tokenizer.eos_id()
-        else []
-    )
-    return bos_tok + input_ids + eos_tok
+    bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
+    return self.tokenizer.dedup_bos_ids(bos_tok + input_ids)
 
   def __call__(
       self,
-      input_strings: List[str],
+      input_strings: str | List[str],
       max_generation_steps: int,
       max_prompt_length: int | None = None,
       temperature: float = 0.0,
@@ -266,6 +283,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      **kwargs,
   ) -> base_sampler.SamplerOutput:
     # max_generation_steps: maximum number of tokens to generate
     if (
@@ -279,6 +297,9 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           f"{self.args['context_length']}."
       )
 
+    if isinstance(input_strings, str):
+      input_strings = [input_strings]
+
     self.sampling_params = self.engine.get_default_sampling_params()
     self.sampling_params.max_new_tokens = max_generation_steps
     self.sampling_params.n = multi_sampling
@@ -290,6 +311,25 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       self.sampling_params.top_p = top_p
     if top_k is not None:
       self.sampling_params.top_k = top_k
+
+    if kwargs:
+      try:
+        self.sampling_params.update(**kwargs)
+        logging.log_first_n(
+            logging.INFO,
+            "Received additional kwargs that are not explicitly defined in the"
+            f" method signature: {kwargs}. These will be forwarded to the"
+            " underlying sampler, but please ensure that they are valid.",
+            1,
+        )
+      except Exception as e:
+        logging.log_first_n(
+            logging.INFO,
+            f"Failed to update sampling_params with kwargs: {kwargs}."
+            f" Error: {e}",
+            1,
+        )
+
     sampling_params = [
         self.sampling_params.convert_to_dict() for _ in input_strings
     ]
@@ -305,7 +345,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           sampling_params[i]["sampling_seed"] = seed
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    outputs = self.engine.generate(
+    outputs = self._generate_with_loop_guard(
         input_ids=[ids for ids in prompt_ids],
         sampling_params=sampling_params,
     )
@@ -326,15 +366,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
     all_output_ids = [
-        utils.pad_to_length(
-            np.array(x["output_ids"], dtype=np.int32),
-            target_length=max_generation_steps,
-            pad_value=self.tokenizer.pad_id(),
-            left=False,
-        )
-        for x in outputs
+        np.array(x["output_ids"], dtype=np.int32) for x in outputs
     ]
-    all_output_ids = jnp.array(all_output_ids)
     output_texts = [o["text"] for o in outputs]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
@@ -344,3 +377,43 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         padded_prompt_tokens=all_input_ids,
         logprobs=None,
     )
+
+  def _generate_with_loop_guard(
+      self,
+      *,
+      input_ids: List[List[int]],
+      sampling_params: List[dict],
+  ):
+    coro = self.engine.async_generate(
+        input_ids=input_ids,
+        sampling_params=sampling_params,
+        stream=False,
+    )
+    loop = get_or_create_event_loop()
+
+    if not loop.is_running():
+      try:
+        return loop.run_until_complete(coro)
+      finally:
+        loop.close()
+
+    def wrap_generate():
+      loop = get_or_create_event_loop()
+      try:
+        return loop.run_until_complete(coro)
+      finally:
+        loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+      future = executor.submit(wrap_generate)
+      return future.result()
+
+
+def get_or_create_event_loop():
+  try:
+    loop = asyncio.get_running_loop()
+  except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+  finally:
+    return loop

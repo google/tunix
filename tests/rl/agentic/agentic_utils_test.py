@@ -19,6 +19,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+import numpy as np
 
 from tunix.rl.agentic import utils
 
@@ -93,6 +94,23 @@ class RecentMessagesTest(parameterized.TestCase):
     self.assertEqual(
         utils.get_recent_assistant_user_messages(messages), expected_output
     )
+
+
+class ConvertMessagesToStringTest(parameterized.TestCase):
+
+  def test_convert_messages_to_string_with_numpy_array_string(self):
+    message = {'role': 'user', 'content': np.array(['hello'])}
+    expected_output = {'role': 'user', 'content': 'hello'}
+    self.assertEqual(utils.convert_messages_to_string(message), expected_output)
+
+  def test_convert_messages_to_string_with_numpy_array_int_fails(self):
+    message = {'role': 'user', 'content': np.array([1])}
+    with self.assertRaisesRegex(
+        ValueError,
+        "Message field content must be a string after preprocessing, got <class"
+        " 'int'>.",
+    ):
+      utils.convert_messages_to_string(message)
 
 
 class MessagesToTokensTest(unittest.TestCase):

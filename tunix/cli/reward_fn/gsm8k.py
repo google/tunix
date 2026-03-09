@@ -109,12 +109,6 @@ def check_numbers(prompts, completions, answer, **kwargs):
   ]
 
   scores = []
-  logging.info("START ============================")
-  logging.info(f"Question: {question[0]}")
-  logging.info(f"Answer: {answer[0]}")
-  logging.info(f"Response: {responses[0]}")
-  logging.info(f"Extracted: {extracted_responses[0]}")
-  logging.info("END ==============================")
   for guess, true_answer in zip(extracted_responses, answer):
     if guess is None:
       scores.append(0)
@@ -127,4 +121,10 @@ def check_numbers(prompts, completions, answer, **kwargs):
     except ValueError:
       scores.append(0)
       continue
+  logging.info("START ============================")
+  logging.info(f"Question: {question[0]}")
+  logging.info(f"Answer: {answer[0]}")
+  logging.info(f"Response: {responses[0]}")
+  logging.info(f"Extracted: {extracted_responses[0]} score: {scores[0]}")
+  logging.info("END ==============================")
   return scores

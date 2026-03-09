@@ -118,15 +118,16 @@ class ConfigTest(parameterized.TestCase):
     self.run_test_peft_trainer(hp)
 
   def test_override_training_config_complex(self):
-    argv = [
-        "",
-        "base_config.yaml",
-        "training_config.profiler_options.log_dir=/tmp/profiler_log_dir",
-        "training_config.profiler_options.skip_first_n_steps=1",
-        "training_config.profiler_options.profiler_steps=5",
-        "training_config.eval_every_n_steps=10",
-    ]
-    self.run_test_peft_trainer(config.initialize(argv))
+    with tempfile.TemporaryDirectory() as log_dir:
+      argv = [
+          "",
+          "base_config.yaml",
+          f"training_config.profiler_options.log_dir={log_dir}",
+          "training_config.profiler_options.skip_first_n_steps=1",
+          "training_config.profiler_options.profiler_steps=5",
+          "training_config.eval_every_n_steps=10",
+      ]
+      self.run_test_peft_trainer(config.initialize(argv))
 
   @parameterized.named_parameters(
       dict(
@@ -544,6 +545,67 @@ class ConfigTest(parameterized.TestCase):
     self.assertEqual(
         hp3.config["reference_model_config"]["model_name"], "gemma3-4b"
     )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="grpo_enabled",
+          main_command="grpo_main",
+          overrides=[
+              "training_config.perf_metrics_options.log_dir={log_dir}",
+          ],
+      ),
+      dict(
+          testcase_name="peft_enabled_fails",
+          main_command="peft_main",
+          overrides=[
+              "training_config.perf_metrics_options.log_dir={log_dir}",
+          ],
+          expected_error=ValueError,
+          error_regex=(
+              "Perf metrics are currently only supported for GRPO training"
+          ),
+      ),
+      dict(
+          testcase_name="peft_disabled",
+          main_command="peft_main",
+          overrides=[],
+      ),
+      dict(
+          testcase_name="invalid_custom_export_fn_path",
+          main_command="grpo_main",
+          overrides=[
+              "training_config.perf_metrics_options.custom_export_fn_path=invalid.path",
+          ],
+          expected_error=ValueError,
+          error_regex="Could not load custom export function from invalid.path",
+      ),
+      dict(
+          testcase_name="invalid_custom_export_fn_path_v2",
+          main_command="grpo_main",
+          overrides=[
+              "training_config.perf_metrics_options.custom_export_fn_path_v2=invalid.path",
+          ],
+          expected_error=ValueError,
+          error_regex=(
+              "Could not load custom export function v2 from invalid.path"
+          ),
+      ),
+  )
+  def test_perf_metrics_validation(
+      self,
+      main_command,
+      overrides,
+      expected_error=None,
+      error_regex=None,
+  ):
+    with tempfile.TemporaryDirectory() as log_dir:
+      overrides = [o.format(log_dir=log_dir) for o in overrides]
+      argv = [main_command, "base_config.yaml"] + overrides
+      if expected_error:
+        with self.assertRaisesRegex(expected_error, error_regex):
+          config.initialize(argv)
+      else:
+        config.initialize(argv)
 
 
 if __name__ == "__main__":

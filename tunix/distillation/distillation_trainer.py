@@ -14,7 +14,7 @@
 
 """Distillation trainer."""
 import dataclasses
-from typing import Any, Callable, Tuple
+from typing import Any, Callable
 
 import flax
 from flax import nnx
@@ -66,6 +66,11 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
     self.teacher_model = teacher_model
     self.loss_fn = self.get_train_loss
     self.eval_loss_fn = self.get_eval_loss
+
+    # Since distillation strategies return (loss, metrics),
+    # we explicitly enable auxiliary metric handling.
+    self._has_aux = True
+
     self.gen_model_input_fn = lambda x: {
         "inputs": {"input_tokens": x.input_tokens, "input_mask": x.input_mask},
         "teacher_output": (
@@ -88,7 +93,7 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
   @override
   def with_loss_fn(
       self,
-      loss_fn: Callable[..., ArrayLike | Tuple[ArrayLike, Any]],
+      loss_fn: Callable[..., ArrayLike | tuple[ArrayLike, Any]],
       has_aux: bool = False,
   ) -> "DistillationTrainer":
     raise NotImplementedError(
@@ -112,22 +117,48 @@ class DistillationTrainer(peft_trainer.PeftTrainer):
         teacher_output=teacher_output,
     )
 
+  def _standardize_loss_output(
+      self, output: Any
+  ) -> tuple[ArrayLike, dict[str, Any]]:
+    """Adapts strategy output to always be (loss, metrics).
+
+    This helper function ensures that the return value from a strategy's
+    loss computation is consistent, regardless of whether the strategy
+    returns just a scalar loss or a tuple of (loss, metrics).
+
+    Args:
+        output: The raw output from a strategy's `compute_loss` or
+          `compute_eval_loss` method. Can be a single scalar (loss) or a tuple.
+
+    Returns:
+        A tuple containing:
+          - loss: The scalar loss value (ArrayLike).
+          - metrics: A dictionary of auxiliary metrics. If the input was just
+            a scalar, this will be an empty dictionary.
+    """
+    if isinstance(output, tuple):
+      return output
+    # If strategy returned just a scalar loss, wrap it with empty metrics
+    return output, {}
+
   def get_train_loss(
       self,
       model: nnx.Module,
       teacher_output: Any,
       inputs: dict[str, ArrayLike],
-  ) -> ArrayLike:
-    return self.strategy.get_train_loss(model, teacher_output, inputs)
+  ) -> tuple[ArrayLike, dict[str, Any]]:
+    output = self.strategy.get_train_loss(model, teacher_output, inputs)
+    return self._standardize_loss_output(output)
 
   def get_eval_loss(
       self,
       model: nnx.Module,
       teacher_output: Any,
       inputs: dict[str, ArrayLike],
-  ) -> ArrayLike:
+  ) -> tuple[ArrayLike, dict[str, Any]]:
     del teacher_output  # Not computed in eval.
-    return self.strategy.get_eval_loss(model, inputs)
+    output = self.strategy.get_eval_loss(model, inputs)
+    return self._standardize_loss_output(output)
 
   def close(self):
     super().close()

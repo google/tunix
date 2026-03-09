@@ -73,6 +73,7 @@ sphinx_gallery_conf = {
 }
 
 # -- Options for myst -------------------------------------------------------
+myst_heading_anchors = 3
 myst_enable_extensions = [
     "amsmath",
     "dollarmath",

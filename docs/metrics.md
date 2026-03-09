@@ -1,4 +1,4 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Metrics
 Tunix provides a comprehensive observability stack for training LLMs. It

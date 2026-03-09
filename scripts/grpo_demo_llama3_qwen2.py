@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,6 +47,8 @@ from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen2 import params as qwen2_params
+from tunix.models.qwen3 import model as qwen3_lib
+from tunix.models.qwen3 import params as qwen3_params
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
@@ -645,6 +647,7 @@ MODEL_CONFIG = {
     "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2p5_0p5b,
     "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2p5_7b,
+    "Qwen/Qwen3-4B-Instruct-2507": qwen3_lib.ModelConfig.qwen3_4b,
 }
 
 
@@ -655,6 +658,10 @@ def get_trainer_model(ckpt_path, model_mesh, ref_model_config):
     )
   elif "Qwen2.5" in HF_MODEL_VERSION:
     return qwen2_params.create_model_from_safe_tensors(
+        ckpt_path, ref_model_config, model_mesh
+    )
+  elif "Qwen3" in HF_MODEL_VERSION:
+    return qwen3_params.create_model_from_safe_tensors(
         ckpt_path, ref_model_config, model_mesh
     )
   raise NotImplementedError(

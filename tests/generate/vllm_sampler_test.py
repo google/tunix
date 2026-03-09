@@ -31,6 +31,7 @@ import transformers
 from tunix.generate import mappings
 from tunix.generate import sampler as vanilla_sampler
 from tunix.generate import vllm_sampler
+from tunix.models.dummy_model_creator import create_dummy_model
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.sft import utils as base_utils
@@ -58,7 +59,12 @@ class VllmSamplerTest(absltest.TestCase):
 
     mesh_shape = (1, len(jax.devices()))  # e.g., (1, 8) for v2-8
     axis_names = ("fsdp", "tp")
-    cls.mesh = jax.make_mesh(mesh_shape, axis_names, devices=jax.devices(), axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names))
+    cls.mesh = jax.make_mesh(
+        mesh_shape,
+        axis_names,
+        devices=jax.devices(),
+        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
+    )
 
   def load_llama3_model(self, model_version: str, enable_lora: bool = False):
     model_config = {
@@ -157,8 +163,6 @@ class VllmSamplerTest(absltest.TestCase):
     mapping_config = mappings.MappingConfig.build(tunix_model)
 
     vllm_config = vllm_sampler.VllmConfig(
-        model_version=self.model_path,
-        max_model_len=512,
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
@@ -167,12 +171,19 @@ class VllmSamplerTest(absltest.TestCase):
         lora_config=lora_config,
         server_mode=server_mode,
         data_parallel_size=data_parallel_size,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },  # Test kwargs forwarding
     )
 
     vl_sampler = vllm_sampler.VllmSampler(
         tokenizer=model_tokenizer,
         config=vllm_config,
     )
+    # vLLM construct its own mesh
+    self.assertNotEqual(vl_sampler.mesh, self.mesh)
     state = nnx.state(tunix_model)
     vl_sampler.load_checkpoint(state)
 
@@ -227,14 +238,17 @@ class VllmSamplerTest(absltest.TestCase):
 
     mapping_config = mappings.MappingConfig.build(tunix_model)
     vllm_config = vllm_sampler.VllmConfig(
-        model_version=self.model_path,
-        max_model_len=512,
         mesh=self.mesh,
         hbm_utilization=0.2,
         init_with_random_weights=True,
         tpu_backend_type="jax",
         mapping_config=mapping_config,
         server_mode=True,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },  # Test kwargs forwarding
     )
 
     vl_sampler = vllm_sampler.VllmSampler(
@@ -292,7 +306,9 @@ class VllmSamplerTest(absltest.TestCase):
           pad_output=True,
       )
 
-    async def __call_sampler_async(index: int, templated_prompt: str, delay: float):
+    async def __call_sampler_async(
+        index: int, templated_prompt: str, delay: float
+    ):
       loop = asyncio.get_running_loop()
       result = await loop.run_in_executor(
           None,
@@ -307,9 +323,7 @@ class VllmSamplerTest(absltest.TestCase):
       tasks = []
       for idx, templated_prompt in enumerate(templated_prompts):
         task = loop.create_task(
-            __call_sampler_async(
-                idx, templated_prompt, delays[idx]
-            )
+            __call_sampler_async(idx, templated_prompt, delays[idx])
         )
 
         tasks.append(task)
@@ -331,9 +345,7 @@ class VllmSamplerTest(absltest.TestCase):
     for (prompt, expectations), sampler_output in zip(
         prompt_expectations, results
     ):
-      tc.validate_llm_outputs(
-          [(prompt, expectations)], sampler_output.text
-      )
+      tc.validate_llm_outputs([(prompt, expectations)], sampler_output.text)
 
     expected_order = list(range(len(prompts)))
     self.assertCountEqual(completion_order, expected_order)
@@ -345,6 +357,238 @@ class VllmSamplerTest(absltest.TestCase):
             "expected out-of-order completions."
         ),
     )
+
+  def test_vllm_sampler_sampling_kwargs(self):
+    """Test that sampling kwargs are correctly applied to sampling_params."""
+    tunix_model = create_dummy_model(
+          model_class=llama_lib.Llama3,
+          config=llama_lib.ModelConfig.llama3p2_1b(),
+          mesh=self.mesh,
+          random_seed=3,
+    )
+
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path
+    )
+
+    prompts = ["Hello, my name is Tom."]
+    inputs = tc.batch_templatize(prompts, model_tokenizer)
+
+    mapping_config = mappings.MappingConfig.build(tunix_model)
+
+    # Test 1: Config sampling_kwargs are applied
+    config_sampling_kwargs = {
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.3,
+    }
+
+    vllm_config = vllm_sampler.VllmConfig(
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type="jax",
+        mapping_config=mapping_config,
+        server_mode=False,
+        sampling_kwargs=config_sampling_kwargs,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },
+    )
+
+    vl_sampler = vllm_sampler.VllmSampler(
+        tokenizer=model_tokenizer,
+        config=vllm_config,
+    )
+
+    state = nnx.state(tunix_model)
+    vl_sampler.load_checkpoint(state)
+
+    # Mock the generate method to capture sampling_params
+    original_generate = vl_sampler.llm.generate
+    captured_sampling_params = []
+
+    def mock_generate(prompts, sampling_params, **kwargs):
+      captured_sampling_params.append(sampling_params)
+      return original_generate(prompts, sampling_params, **kwargs)
+
+    vl_sampler.llm.generate = mock_generate
+
+    # Call with additional method kwargs
+    method_sampling_kwargs = {"min_tokens": 10}
+    vl_sampler(
+        input_strings=inputs,
+        max_generation_steps=128,
+        max_prompt_length=None,
+        temperature=0.0,
+        top_k=1,
+        seed=0,
+        echo=False,
+        pad_output=True,
+        **method_sampling_kwargs,
+    )
+
+    # Verify that both config and method kwargs were applied
+    self.assertLen(captured_sampling_params, 1)
+    sampling_params = captured_sampling_params[0]
+
+    # Check config kwargs
+    self.assertEqual(sampling_params.frequency_penalty, 0.5)
+    self.assertEqual(sampling_params.presence_penalty, 0.3)
+
+    # Check method kwargs
+    self.assertEqual(sampling_params.min_tokens, 10)
+
+  def test_vllm_sampler_sampling_kwargs_override(self):
+    """Test that method kwargs override config sampling_kwargs."""
+    tunix_model = create_dummy_model(
+          model_class=llama_lib.Llama3,
+          config=llama_lib.ModelConfig.llama3p2_1b(),
+          mesh=self.mesh,
+          random_seed=3,
+    )
+
+    model_tokenizer = transformers.AutoTokenizer.from_pretrained(
+        self.model_path
+    )
+
+    prompts = ["Hello, my name is Tom."]
+    inputs = tc.batch_templatize(prompts, model_tokenizer)
+
+    mapping_config = mappings.MappingConfig.build(tunix_model)
+
+    # Config has frequency_penalty = 0.5
+    config_sampling_kwargs = {
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.3,
+    }
+
+    vllm_config = vllm_sampler.VllmConfig(
+        mesh=self.mesh,
+        hbm_utilization=0.2,
+        init_with_random_weights=True,
+        tpu_backend_type="jax",
+        mapping_config=mapping_config,
+        server_mode=False,
+        sampling_kwargs=config_sampling_kwargs,
+        engine_kwargs={
+            "model": self.model_path,
+            "max_model_len": 512,
+            "enable_prefix_caching": True,
+        },
+    )
+
+    vl_sampler = vllm_sampler.VllmSampler(
+        tokenizer=model_tokenizer,
+        config=vllm_config,
+    )
+
+    state = nnx.state(tunix_model)
+    vl_sampler.load_checkpoint(state)
+
+    # Mock the generate method to capture sampling_params
+    original_generate = vl_sampler.llm.generate
+    captured_sampling_params = []
+
+    def mock_generate(prompts, sampling_params, **kwargs):
+      captured_sampling_params.append(sampling_params)
+      return original_generate(prompts, sampling_params, **kwargs)
+
+    vl_sampler.llm.generate = mock_generate
+
+    # Call with method kwargs that override config kwargs
+    method_sampling_kwargs = {"frequency_penalty": 0.8}  # Override from 0.5 to 0.8
+    vl_sampler(
+        input_strings=inputs,
+        max_generation_steps=128,
+        max_prompt_length=None,
+        temperature=0.0,
+        top_k=1,
+        seed=0,
+        echo=False,
+        pad_output=True,
+        **method_sampling_kwargs,
+    )
+
+    # Verify that method kwargs override config kwargs
+    self.assertLen(captured_sampling_params, 1)
+    sampling_params = captured_sampling_params[0]
+
+    # Check that method kwarg overrides config kwarg
+    self.assertEqual(sampling_params.frequency_penalty, 0.8)
+
+    # Check that other config kwargs are still applied
+    self.assertEqual(sampling_params.presence_penalty, 0.3)
+
+
+class VllmSamplerConfigTest(absltest.TestCase):
+  """Unit tests for VllmSampler config plumbing (no hardware required)."""
+
+  def _make_mock_mesh(self, total_devices):
+    mesh = mock.MagicMock()
+    mesh.shape = {"axis": total_devices}
+    mesh.device_ids.flatten.return_value.tolist.return_value = list(
+        range(total_devices)
+    )
+    return mesh
+
+  def _make_sampler(self, config):
+    with mock.patch("tunix.generate.vllm_sampler.LLM"), mock.patch(
+        "tunix.generate.vllm_sampler.tok_adapter.TokenizerAdapter"
+    ):
+      return vllm_sampler.VllmSampler(
+          tokenizer=mock.MagicMock(), config=config
+      )
+
+  def test_expert_parallel_size_plumbed_to_sharding(self):
+    mesh = self._make_mock_mesh(8)
+    config = vllm_sampler.VllmConfig(
+        mesh=mesh,
+        expert_parallel_size=2,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    # EP=2 should appear in the sharding strategy passed to vLLM.
+    self.assertEqual(sharding_strategy["expert_parallelism"], 2)
+    # With 8 total devices and EP=2, TP should be inferred as 4 and DP as 1.
+    self.assertEqual(sampler.args["tensor_parallel_size"], 4)
+    self.assertEqual(sampler.args["data_parallel_size"], 1)
+
+  def test_reserved_keys_in_engine_kwargs_raise_value_error(self):
+    # Reserved VllmConfig fields (e.g. tp, dp, ep) must be set directly on
+    # VllmConfig, not smuggled through engine_kwargs. Passing them via
+    # engine_kwargs should raise a ValueError at config construction time
+    # before any vLLM engine args are assembled.
+    mesh = self._make_mock_mesh(8)
+    for key in ("expert_parallel_size", "tensor_parallel_size", "data_parallel_size"):
+      with self.subTest(key=key):
+        with self.assertRaisesRegex(ValueError, key):
+          vllm_sampler.VllmConfig(
+              mesh=mesh,
+              init_with_random_weights=False,
+              engine_kwargs={key: 2},
+          )
+
+  def test_default_expert_parallel_size_is_one(self):
+    mesh = self._make_mock_mesh(8)
+    config = vllm_sampler.VllmConfig(
+        mesh=mesh,
+        init_with_random_weights=False,
+    )
+    sampler = self._make_sampler(config)
+
+    sharding_strategy = sampler.args["additional_config"]["sharding"][
+        "sharding_strategy"
+    ]
+    self.assertEqual(sharding_strategy["expert_parallelism"], 1)
+    self.assertEqual(sampler.args["tensor_parallel_size"], 8)
+    self.assertEqual(sampler.args["data_parallel_size"], 1)
+
 
 if __name__ == "__main__":
   absltest.main()

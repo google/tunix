@@ -42,6 +42,7 @@ import optax
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -196,6 +197,7 @@ class RLCluster:
       perf_config: perf_metrics.PerfMetricsConfig | None = None,
   ):
     self.cluster_config = cluster_config
+    self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
     self._init_backbone_sharing_map(actor, reference)
 
@@ -247,13 +249,6 @@ class RLCluster:
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
-    if perf_config is None:
-      self._perf = perf_trace.NoopTracer()
-    else:
-      devices = []
-      for mesh in cluster_config.role_to_mesh.values():
-        devices.extend(mesh.devices.flatten().tolist())
-      self._perf = perf_trace.PerfTracer(devices, perf_config.custom_export_fn)
 
     self._init_cluster()
     gc.collect()
@@ -414,13 +409,19 @@ class RLCluster:
         raise ValueError("Rollout vllm model version or path is missing!")
 
       # TODO(linchai): maybe support offloading for vllm rollout.
-      self._rollout = vllm_rollout.VllmRollout(
-          self.rollout_actor,
-          self.tokenizer,
-          cache_config_or_size=max_kv_cache_size,
-          mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=loaded_vllm_config,
-      )
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+        # vLLM handles model initialization and loading internally, so we need
+        # to provide logical axis rules for vLLM to correctly shard the model on
+        # the rollout mesh. This is important for out-of-tree models in vLLM
+        # that are implemented with custom logical axis rules, like is the case
+        # for MaxText models.
+        self._rollout = vllm_rollout.VllmRollout(
+            self.rollout_actor,
+            self.tokenizer,
+            cache_config_or_size=max_kv_cache_size,
+            mesh=self.r2m[Role.ROLLOUT],
+            rollout_config=loaded_vllm_config,
+        )
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
@@ -464,6 +465,36 @@ class RLCluster:
           f"Rollout engine {self.cluster_config.rollout_engine} not supported"
       )
 
+    # If the rollout engine constructs its own mesh, it could potentially
+    # rearanges the devices for better performance. Use that mesh instead of the
+    # one provided in the cluster config.
+    if hasattr(self._rollout, "mesh") and self._rollout.mesh is not None:
+      self.r2m[Role.ROLLOUT] = self._rollout.mesh
+
+    # Initialize the performance tracer after we have all the meshes
+    self._perf = perf_trace.NoopTracer()
+    self._perf_v2 = perf_tracer_v2.NoopTracer()
+
+    if self.perf_config:
+      export_fn_v1 = self.perf_config.custom_export_fn
+      export_fn_v2 = self.perf_config.custom_export_fn_v2
+
+      if export_fn_v1 or export_fn_v2:
+        devices = list(
+            itertools.chain.from_iterable(
+                mesh.devices.flatten().tolist()
+                for mesh in self.cluster_config.role_to_mesh.values()
+            )
+        )
+
+        if export_fn_v1:
+          self._perf = perf_trace.PerfTracer(devices, export_fn_v1)
+
+        if export_fn_v2:
+          self._perf_v2 = perf_tracer_v2.PerfTracer(
+              devices, export_fn=export_fn_v2
+          )
+
     # 2. Initialize inference worker.
     inference_models = {}
     if self.critic is not None:
@@ -488,16 +519,17 @@ class RLCluster:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
         )
-      self._critic_trainer = rl_trainer.Trainer(
-          model=self.critic,
-          optimizer=self.cluster_config.training_config.critic_optimizer,
-          training_config=critic_config,
-          custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-          metrics_logger=self._rl_metrics_logger,
-          perf_tracer=self._perf,
-      )
+      with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
+        self._critic_trainer = rl_trainer.Trainer(
+            model=self.critic,
+            optimizer=self.cluster_config.training_config.critic_optimizer,
+            training_config=critic_config,
+            custom_checkpoint_metadata_fn=lambda: {
+                "global_step": self.global_steps + 1
+            },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+            metrics_logger=self._rl_metrics_logger,
+            perf_tracer=self._perf,
+        )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
 
@@ -509,16 +541,17 @@ class RLCluster:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
-    self._actor_trainer = rl_trainer.Trainer(
-        model=self.train_actor,
-        optimizer=self.cluster_config.training_config.actor_optimizer,
-        training_config=actor_config,
-        custom_checkpoint_metadata_fn=lambda: {
-            "global_step": self.global_steps + 1
-        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-        metrics_logger=self._rl_metrics_logger,
-        perf_tracer=self._perf,
-    )
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      self._actor_trainer = rl_trainer.Trainer(
+          model=self.train_actor,
+          optimizer=self.cluster_config.training_config.actor_optimizer,
+          training_config=actor_config,
+          custom_checkpoint_metadata_fn=lambda: {
+              "global_step": self.global_steps + 1
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          metrics_logger=self._rl_metrics_logger,
+          perf_tracer=self._perf,
+      )
     del self.rollout_actor
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
@@ -603,7 +636,13 @@ class RLCluster:
 
   @property
   def perf(self) -> perf_trace.Tracer:
+    """The v1 performance tracer."""
     return self._perf
+
+  @property
+  def perf_v2(self) -> perf_tracer_v2.Tracer:
+    """The v2 performance tracer."""
+    return self._perf_v2
 
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
@@ -647,8 +686,12 @@ class RLCluster:
         if agg_value.size > 0:
           agg_value = op(agg_value)
 
+      if "/" in metric_name:
+        prefix, metric_name = metric_name.split("/", maxsplit=1)
+      else:
+        prefix = "global"
       self._rl_metrics_logger.log(
-          "global",
+          prefix,
           metric_name,
           agg_value,
           metrics_buffer.mode,
@@ -760,18 +803,14 @@ class RLCluster:
         self._log_metrics(m)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[
-        Role.ACTOR
-    ] as _, self._get_logical_axis_rules_cm(Role.ACTOR):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[
-        Role.CRITIC
-    ] as _, self._get_logical_axis_rules_cm(Role.CRITIC):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
       with self._perf.span_group("critic_training"):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
@@ -818,9 +857,7 @@ class RLCluster:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    with self.cluster_config.role_to_mesh[
-        Role.ROLLOUT
-    ] as mesh, self._get_logical_axis_rules_cm(Role.ROLLOUT):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -838,7 +875,7 @@ class RLCluster:
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
-        span.device_end([o.logits for o in outputs])
+        span.device_end([o.tokens for o in outputs])
 
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -853,13 +890,17 @@ class RLCluster:
       )
 
     logits = None
-    if isinstance(outputs[0].logits, jnp.ndarray):
-      logits = jnp.concatenate([out.logits for out in outputs], axis=0)
+    if outputs[0].logits is not None:
+      logits = list(
+          itertools.chain.from_iterable(out.logits for out in outputs)
+      )
 
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
-        tokens=np.concatenate([out.tokens for out in outputs], axis=0),
+        tokens=list(
+            itertools.chain.from_iterable(out.tokens for out in outputs)
+        ),
         left_padded_prompt_tokens=np.concatenate(
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
@@ -883,9 +924,7 @@ class RLCluster:
       )
     micro_batch_size = micro_batch_size or batch_size
 
-    reference_mesh = self.cluster_config.role_to_mesh[Role.REFERENCE]
-
-    with reference_mesh, self._get_logical_axis_rules_cm(Role.REFERENCE):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
       # This assumes reference model shards same data sharding as actor, which
       # should be true as ref model and policy model shares same architecture.
       dest_prompt_tokens = sharding_utils.shard_input(
@@ -933,9 +972,7 @@ class RLCluster:
       raise ValueError("Cannot get old log probabilities from an empty batch.")
     micro_batch_size = micro_batch_size or batch_size
 
-    with self.cluster_config.role_to_mesh[
-        Role.ROLLOUT
-    ], self._get_logical_axis_rules_cm(Role.ROLLOUT):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -988,9 +1025,7 @@ class RLCluster:
       eos_id: int,
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    with self.cluster_config.role_to_mesh[
-        Role.CRITIC
-    ], self._get_logical_axis_rules_cm(Role.CRITIC):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       return self.inference_worker.get_values(
           prompt_tokens,
           completion_tokens,
@@ -1006,9 +1041,7 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    with self.cluster_config.role_to_mesh[
-        Role.REWARD
-    ], self._get_logical_axis_rules_cm(Role.REWARD):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REWARD):
       return self.inference_worker.get_rewards(
           prompt_tokens,
           completion_tokens,
@@ -1016,8 +1049,9 @@ class RLCluster:
           eos_id,
       )
 
-  def _get_logical_axis_rules_cm(self, role: Role):
-    """Returns a context manager for the logical axis rules.
+  @contextlib.contextmanager
+  def _get_mesh_and_logical_axis_rules_cm(self, role: Role):
+    """Returns a context manager for the mesh and logical axis rules.
 
     This is used for models that uses logical sharding, so XLA can generate the
     correct graph based on physical mesh.
@@ -1026,8 +1060,13 @@ class RLCluster:
       role: The role of the model (e.g., ACTOR, CRITIC, REFERENCE, etc.).
     """
     role_logical_axis_rule = self.cluster_config.role_to_logical_axis_rule
-    if role_logical_axis_rule is None or role not in role_logical_axis_rule:
-      return contextlib.nullcontext()
-    cm = contextlib.ExitStack()
-    cm.enter_context(nn_partitioning.axis_rules(role_logical_axis_rule[role]))
-    return cm
+    logical_axis_rule_ctx = contextlib.nullcontext()
+    if role_logical_axis_rule and role in role_logical_axis_rule:
+      logical_axis_rule_ctx = nn_partitioning.axis_rules(
+          role_logical_axis_rule[role]
+      )
+    with contextlib.ExitStack() as stack:
+      yield (
+          stack.enter_context(self.cluster_config.role_to_mesh[role]),
+          stack.enter_context(logical_axis_rule_ctx),
+      )

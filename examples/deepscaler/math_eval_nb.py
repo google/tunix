@@ -231,7 +231,7 @@ class Qwen25MathEvaluator:
           tokenizer=self.tokenizer,
           cache_config=cache_config,
       )
-    elif self.sampler_type == "sglang-jax":
+    elif self.sampler_type == "sglang_jax":
       from tunix.google.stubs import sglang_jax_sampler_stub as sglang_jax_sampler  # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
@@ -251,6 +251,27 @@ class Qwen25MathEvaluator:
               init_with_random_weights=False,
               disable_radix_cache=True,
               enable_deterministic_sampling=False,
+              mapping_config=mapping_config,
+          ),
+      )
+    elif self.sampler_type == "vllm":
+      from tunix.google.stubs import vllm_sampler_stub as vllm_sampler  # pylint: disable=g-import-not-at-top
+
+      mapping_config = mappings.MappingConfig.build(
+          mapping_obj=None,
+          model=self.model,
+          backend="vllm",
+      )
+      self.sampler_vllm = vllm_sampler.VllmSampler(
+          tokenizer=self.tokenizer,
+          config=vllm_sampler.VllmConfig(
+              mesh=self.mesh,
+              max_model_len=self.max_prompt_length
+              + self.max_generation_steps
+              + 100,
+              model_version=self.model_version,
+              hbm_utilization=0.4,
+              init_with_random_weights=False,
               mapping_config=mapping_config,
           ),
       )
@@ -358,8 +379,20 @@ class Qwen25MathEvaluator:
           eos_tokens=[stop_token_id],
           seed=jax.random.PRNGKey(seed) if seed is not None else None,
       )
-    elif self.sampler_type == "sglang-jax":
+    elif self.sampler_type == "sglang_jax":
       out_data = self.sampler_sglang(
+          input_strings=prompts,
+          max_generation_steps=safe_gen_length,
+          max_prompt_length=self.max_prompt_length,
+          temperature=temperature,
+          top_p=top_p,
+          top_k=top_k,
+          seed=seed,
+          echo=False,
+          pad_output=True,
+      )
+    elif self.sampler_type == "vllm":
+      out_data = self.sampler_vllm(
           input_strings=prompts,
           max_generation_steps=safe_gen_length,
           max_prompt_length=self.max_prompt_length,
@@ -585,6 +618,7 @@ print("=" * 60)
 # %%
 # AIME-2024
 model_version = "agentica-org/DeepScaleR-1.5B-Preview"
+# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 dataset = AIME_2024_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 

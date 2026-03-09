@@ -15,14 +15,16 @@
 
 """Utility functions for sampler."""
 
+from collections import abc
 import functools
 import gc
-import logging
+from absl import logging
 import math
 import re
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from flax import nnx
+from flax import traverse_util
 import jax
 from jax import lax
 import jax.image as jimg
@@ -523,14 +525,31 @@ def _apply_transpose(
 
 
 def _align_shape(
-    val: jnp.ndarray, tgt_shape: Tuple[int, ...], src_key: str
+    val: jnp.ndarray,
+    tgt_shape: Tuple[int, ...],
+    src_key: str,
+    rollout_engine: Optional[str] = None,
+    **kwargs,
 ) -> jnp.ndarray:
   """Align source value shape to target shape through padding or repeating.
+
+  This function attempts to align the shape of a source JAX array (`val`) to a
+  target shape (`tgt_shape`). It supports alignment by:
+  1.  Reshaping: If the product of dimensions matches, especially for attention
+      biases and projections.
+  2.  Padding/Repeating: For attention-related weights, it can pad the head
+      dimension or repeat along the number of heads dimension.
+  3.  Special Handling: Includes specific logic for 1-D KV biases in
+      'sglang_jax' rollout.
 
   Args:
       val: Source value.
       tgt_shape: Target shape.
       src_key: Source key for error messages.
+      rollout_engine: Optional string indicating the rollout engine, used for
+        special-casing certain alignments (e.g., 'sglang_jax').
+      **kwargs: Additional keyword arguments, potentially containing metadata
+        like 'num_kv_heads' and 'head_dim' for specific alignment logic.
 
   Returns:
       Shape-aligned value.
@@ -546,14 +565,30 @@ def _align_shape(
   # Handle rank mismatch
   if len(val.shape) != len(tgt_shape):
     if re.compile(r'layers\..*\.attn\.(q|k|v)_bias').match(src_key):
-      new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
-      logging.debug(
-          'Reshaping attention bias on %s: %s -> %s',
-          src_key,
-          val.shape,
-          new_shape,
-      )
-      return jnp.reshape(val, new_shape)
+      if math.prod(tgt_shape) == math.prod(val.shape):
+        new_shape = (tgt_shape[0], val.shape[0] // tgt_shape[0])
+        logging.debug(
+            'Reshaping attention bias on %s: %s -> %s',
+            src_key,
+            val.shape,
+            new_shape,
+        )
+        return jnp.reshape(val, new_shape)
+      else:
+        # If target pads number of heads, we need to reshape and then pad, we
+        # don't consider padding head dimensions here.
+        # example cases: (256,) -> (8, 128)
+        assert (
+            val.shape[0] == kwargs['num_kv_heads'] * kwargs['head_dim']
+            and tgt_shape[0] % kwargs['num_kv_heads'] == 0
+            and tgt_shape[1] == kwargs['head_dim']
+        ), (
+            f'Unexpected attention bias shape: {val.shape} and target shape:'
+            f' {tgt_shape}'
+        )
+        val = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
+        new_tgt_shape = tgt_shape
+
     elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
       if math.prod(tgt_shape) == math.prod(val.shape):
         logging.debug(
@@ -587,6 +622,25 @@ def _align_shape(
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
       )
+  elif re.compile(r'layers\..*\.attn\.(k|v)_bias').match(src_key):
+    logging.debug(
+        'Handling 1-D KV bias for %s in SGLangJAX rollout.', src_key
+    )
+    assert tgt_shape[0] > val.shape[0] and tgt_shape[0] % val.shape[0] == 0, (
+        f'Unexpected attention bias shape: {val.shape} and target shape:'
+        f' {tgt_shape}'
+    )
+    repeat_factor = tgt_shape[0] // val.shape[0]
+    logging.debug(
+        'Replicating 1-D KV bias on %s: %s -> %s (repeat x%d per head)',
+        src_key,
+        val.shape,
+        tgt_shape,
+        repeat_factor,
+    )
+    val_2d = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
+    val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
+    return jnp.reshape(val_2d, tgt_shape)
 
   attention_patterns = [
       r'.*(q|k|v|o)_proj.*',
@@ -653,8 +707,10 @@ def _apply_dtype_cast(
     val: jnp.ndarray, tgt_dtype: jnp.dtype, src_key: str
 ) -> jnp.ndarray:
   if val.dtype != tgt_dtype:
-    logging.warning(
+    logging.log_first_n(
+        logging.WARNING,
         'Type mismatch on %s: %s -> %s',
+        1,
         src_key,
         val.dtype,
         tgt_dtype,
@@ -671,6 +727,7 @@ def transfer_state_with_mappings(
     transpose_keys=None,
     reshard_fn=None,
     rollout_engine=None,
+    **kwargs,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
 
@@ -686,6 +743,8 @@ def transfer_state_with_mappings(
     transpose_keys: A dictionary defining which keys to transpose and the
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
+    rollout_engine: The name of the rollout engine being used.
+    **kwargs: Additional keyword arguments.
 
   Returns:
     The target state with the transferred values.
@@ -713,7 +772,7 @@ def transfer_state_with_mappings(
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
 
   # Transfer values with transformations
-  for (flat_src_key, tgt_key), (
+  for (flat_src_key, _), (
       val,
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
@@ -725,7 +784,9 @@ def transfer_state_with_mappings(
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
-    val = _align_shape(val, tgt_param.value.shape, flat_src_key)
+    val = _align_shape(
+        val, tgt_param.value.shape, flat_src_key, rollout_engine, **kwargs
+    )
 
     # Cast to target dtype
     val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
@@ -757,6 +818,70 @@ def transfer_state_with_mappings(
   return dst_state.from_flat_path(tgt_flat_list)
 
 
+def _slice_scanned_param(
+    src_val: jax.Array | np.ndarray | Any,
+    tgt_val: jax.Array | np.ndarray | Any,
+    slice_idx: int,
+    key_path: str,
+) -> jax.Array | np.ndarray | Any:
+  """Slices a scanned parameter dynamically detecting the scan axis.
+
+  This helper finds the dimension in src_val that needs to be sliced to match
+  tgt_val's shape. It is used when transferring weights from a scanned
+  representation (e.g., MaxText) to an unrolled one (e.g., vLLM).
+
+  Args:
+      src_val: The source array (scanned) to slice from.
+      tgt_val: The target array whose shape we want to match.
+      slice_idx: The index along the scanned axis to extract.
+      key_path: The dot-separated path to the parameter for debugging.
+
+  Returns:
+      The sliced array matching the target shape, or the original src_val if
+      slicing failed or was unnecessary.
+  """
+  if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
+    return src_val
+
+  src_shape = src_val.shape
+  tgt_shape = tgt_val.shape
+
+  if src_shape == tgt_shape:
+    return src_val
+
+  if len(src_shape) == len(tgt_shape) + 1:
+    scan_axis = None
+    # Check which dimension, when removed, matches the target shape
+    for i in range(len(src_shape)):
+      if src_shape[:i] + src_shape[i + 1 :] == tgt_shape:
+        scan_axis = i
+        break
+
+    if scan_axis is not None:
+      # Construct slice: (:, :, slice_idx, :, :)
+      slicer = [slice(None)] * len(src_shape)
+      slicer[scan_axis] = slice_idx
+      return src_val[tuple(slicer)]
+
+    logging.warning(
+        "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
+        ' determine scan axis.',
+        key_path, src_shape, tgt_shape,
+    )
+
+  # Fallback to direct slicing if the above logic fails, which may work for simple cases
+  try:
+    return src_val[slice_idx]
+
+  except (IndexError, TypeError) as e:
+    logging.debug(
+        "Direct slicing fallback failed for '%s' (slice_idx=%d). "
+        "Error: %s. Using original value.",
+        key_path, slice_idx, e
+    )
+    return src_val
+
+
 def transfer_state_directly(
     src_state: Mapping[str, Any],
     dst_state: Mapping[str, Any],
@@ -784,14 +909,14 @@ def transfer_state_directly(
     return hasattr(obj, key)
 
   # Unwrap Source (Remove 'base' wrapper from MaxText)
-  if isinstance(src_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
+  if isinstance(src_state, abc.Mapping) and safe_has_key(
       src_state, 'base'
   ):
     logging.info("Unwrapping 'base' key from source state.")
     src_state = src_state['base']
 
   # Unwrap Target (Remove nested 'model' wrappers from vLLM)
-  while isinstance(dst_state, (dict, nnx.State, nnx.Dict)) and safe_has_key(
+  while isinstance(dst_state, abc.Mapping) and safe_has_key(
       dst_state, 'model'
   ):
     logging.info("Unwrapping nested 'model' key from target state.")
@@ -803,11 +928,9 @@ def transfer_state_directly(
     # Unwrap NNX containers
     if hasattr(node, 'to_pure_dict'):
       node = node.to_pure_dict()
-    elif isinstance(node, (nnx.Dict, nnx.State)):
-      node = dict(node)
 
     # Recurse into dicts
-    if isinstance(node, dict):
+    if isinstance(node, abc.Mapping):
       return {k: to_pure_spec(v) for k, v in node.items()}
 
     # Unwrap Variables
@@ -818,44 +941,95 @@ def transfer_state_directly(
 
     return node
 
-  # Helper: Intersect Trees (Handle KVCache/RNG mismatches)
   def intersect_trees(
-      src: Any, tgt_spec: Any, path: str = ''
-  ) -> Tuple[Any, Any]:
-    # Stop recursion if we hit a leaf (non-dict)
-    if not isinstance(src, dict) or not isinstance(tgt_spec, dict):
+      src: Mapping[str, Any],
+      tgt_spec: Mapping[str, Any],
+  ) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Optimized intersection (Handle KVCache/RNG mismatches and Scanned Layers).
+
+    Uses flat dictionary traversal for efficiency.
+    """
+    # Fast path for non-dict inputs (leaves)
+    if not isinstance(src, abc.Mapping) or not isinstance(tgt_spec, abc.Mapping):
       return src, tgt_spec
 
-    src_keys = set(src.keys())
-    tgt_keys = set(tgt_spec.keys())
-    common_keys = src_keys & tgt_keys
+    # Flatten both structures to (path_tuple) -> value
+    # usage of sep='/' is optional, but tuples are faster for manipulation
+    src_flat = traverse_util.flatten_dict(src)
+    tgt_flat = traverse_util.flatten_dict(tgt_spec)
 
-    # Debug Logging for dropped keys
-    if src_keys - tgt_keys:
-      logging.debug(
-          "Ignored checkpoint keys at '%s': %s", path, src_keys - tgt_keys
-      )
-    if tgt_keys - src_keys:
-      logging.debug(
-          "Unmatched model keys at '%s': %s", path, tgt_keys - src_keys
-      )
+    filtered_src_flat = {}
+    filtered_tgt_flat = {}
 
-    filtered_src = {}
-    filtered_tgt = {}
+    # Compile regex once
+    layer_pattern = re.compile(r'^layers_(\d+)$')
 
-    for k in common_keys:
-      new_path = f'{path}/{k}' if path else k
-      s_val, t_val = intersect_trees(src[k], tgt_spec[k], new_path)
-      filtered_src[k] = s_val
-      filtered_tgt[k] = t_val
+    for key_tuple, tgt_val in tgt_flat.items():
+      # Try Direct Match
+      if key_tuple in src_flat:
+        src_val = src_flat[key_tuple]
+        src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(key_tuple))
+        filtered_src_flat[key_tuple] = src_val
+        filtered_tgt_flat[key_tuple] = tgt_val
+        continue
 
-    return filtered_src, filtered_tgt
+      # Try Scanned Layer Mapping
+      # We look for 'layers_X' in the path and try to map it to 'layers' (MaxText)
+      # or remove it (GPT-OSS / implicit stack).
+
+      # Locate which part of the path is 'layers_X'
+      layer_idx = -1
+      match_index = -1
+
+      for i, part in enumerate(key_tuple):
+        # Optimization: Only check strings that look like layers
+        if isinstance(part, str) and part.startswith('layers_'):
+          m = layer_pattern.match(part)
+          if m:
+            layer_idx = int(m.group(1))
+            match_index = i
+            break
+
+      if match_index != -1:
+        # Check different candidate path formats for scanned layers
+        # Candidate A: Replace 'layers_X' with 'layers' (Standard MaxText)
+        candidate_a = list(key_tuple)
+        candidate_a[match_index] = 'layers'
+
+        # Candidate B: Remove 'layers_X' (Implicit Container / GPT-OSS)
+        candidate_b = list(key_tuple)
+        candidate_b.pop(match_index)
+
+        found_candidate = None
+        for cand in [tuple(candidate_a), tuple(candidate_b)]:
+          if cand in src_flat:
+            found_candidate = cand
+            break
+
+        if found_candidate:
+          src_val = src_flat[found_candidate]
+          # Slice the scanned parameter
+          sliced_val = _slice_scanned_param(
+              src_val, tgt_val, layer_idx, str(key_tuple)
+          )
+          sliced_val = _apply_dtype_cast(
+              sliced_val, tgt_val.dtype, str(key_tuple)
+          )
+          filtered_src_flat[key_tuple] = sliced_val
+          filtered_tgt_flat[key_tuple] = tgt_val
+          continue
+
+    # Unflatten back to nested structure
+    return (
+        traverse_util.unflatten_dict(filtered_src_flat),
+        traverse_util.unflatten_dict(filtered_tgt_flat),
+    )
 
   # Prepare clean source and target specs
   full_source_dict = to_pure_spec(src_state)
   full_target_spec = to_pure_spec(dst_state)
 
-  # Filter both to their intersection
+  # Filter both to their intersection / mapping
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
 
   # Reshard and Update
@@ -864,6 +1038,53 @@ def transfer_state_directly(
       target=final_spec,
   )
   nnx.update(dst_state, resharded_weights)
+
+  # Explicitly free memory
+  gc.collect()
+
+
+def resolve_parallelism_sizes(
+    mesh: jax.sharding.Mesh,
+    tensor_parallel_size: int = -1,
+    data_parallel_size: int = -1,
+    expert_parallel_size: int = 1,
+) -> tuple[int, int, int]:
+  """Resolves tensor, data, and expert parallelism sizes from the mesh.
+
+  Any size passed as -1 is inferred from the total number of mesh devices and
+  the other sizes. Raises ValueError if the mesh size is not divisible by
+  expert_parallel_size.
+
+  Args:
+    mesh: The JAX device mesh.
+    tensor_parallel_size: Desired tensor parallelism degree, or -1 to infer.
+    data_parallel_size: Desired data parallelism degree, or -1 to infer.
+    expert_parallel_size: Desired expert parallelism degree.
+
+  Returns:
+    A tuple of (tensor_parallel_size, data_parallel_size, expert_parallel_size).
+  """
+  total_mesh_devices = math.prod(mesh.shape.values())
+
+  if total_mesh_devices % expert_parallel_size != 0:
+    raise ValueError(
+        f"Total mesh devices ({total_mesh_devices}) must be divisible by"
+        f" expert_parallel_size ({expert_parallel_size})."
+    )
+
+  if tensor_parallel_size == -1 and data_parallel_size == -1:
+    tensor_parallel_size = total_mesh_devices // expert_parallel_size
+    data_parallel_size = 1
+  elif tensor_parallel_size == -1:
+    tensor_parallel_size = (
+        total_mesh_devices // (data_parallel_size * expert_parallel_size)
+    )
+  elif data_parallel_size == -1:
+    data_parallel_size = (
+        total_mesh_devices // (tensor_parallel_size * expert_parallel_size)
+    )
+
+  return tensor_parallel_size, data_parallel_size, expert_parallel_size
 
 
 def verify_state_closeness(golden_state, state, atol=1e-2):

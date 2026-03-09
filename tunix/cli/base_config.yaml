@@ -143,6 +143,15 @@ training_config: &base_training_config
     run_name: ""
     log_dir: "/tmp/logging"
     flush_every_n_steps: 20
+  # === Perf metrics options ===
+  # Currently only supported for grpo_main. Configs you can specify are:
+    # enable_perf_v1 = whether to enable perf metrics v1 (default: true).
+    # enable_perf_v2 = whether to enable perf metrics v2 (default: false).
+    # custom_export_fn_path = the path to the custom export function for the v1 perf metrics.
+    # custom_export_fn_path_v2 = the path to the custom export function for the v2 perf metrics (experimental).
+    # enable_trace_writer = whether to enable writing out the trace for visualization (enabled by default).
+    # log_dir = the directory to save the trace files.
+  perf_metrics_options: {}
   profiler_options:
     log_dir: "/tmp/profiling"
     skip_first_n_steps: 1

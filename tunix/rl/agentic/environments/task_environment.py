@@ -14,9 +14,9 @@
 
 """RL Environment for single-turn task-based agent interactions."""
 
-import logging
 from typing import Any, Dict
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward
@@ -36,7 +36,7 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
 
   def __init__(
       self,
-      task: Dict[str, Any] | None = None,
+      single_example: Dict[str, Any],
       *,
       reward_fn=None,
       **kwargs,
@@ -44,8 +44,7 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
     """Initialize the task environment.
 
     Args:
-      task (Dict[str, Any] | None): Task specification containing problem
-        description, ground truth, or other parameters.
+      single_example: A single prompt.
       reward_fn: Reward function that takes (task, action) and returns
         RewardOutput with `.reward` and `.metadata` fields. If None, defaults to
         `dummy_reward`.
@@ -53,13 +52,15 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
         compatibility with a common environment config interface.
     """
     if reward_fn is None:
-      logging.warning("No reward_fn provided, defaulting to dummy_reward().")
+      logging.log_first_n(
+          logging.WARNING,
+          "No reward_fn provided, defaulting to dummy_reward().",
+          1,
+      )
       reward_fn = reward.dummy_reward
 
-    # Single-turn environment: max_steps is 1 by default.
-    max_steps = kwargs.pop("max_steps", 1)
     super().__init__(
-        task=task, reward_fn=reward_fn, max_steps=max_steps, **kwargs
+        task=single_example, reward_fn=reward_fn, max_steps=1, **kwargs
     )
 
   def _initial_observation(self) -> Dict[str, Any]:
@@ -112,5 +113,5 @@ class TaskEnvironment(base_environment.BaseTaskEnv):
       env_args: A dictionary containing environment configuration.
     """
     reward_fn = env_args.pop("reward_fn", None)
-    task = env_args
-    return cls(task=task, reward_fn=reward_fn)
+    group_id = env_args.pop("group_id", None)
+    return cls(single_example=env_args, reward_fn=reward_fn, group_id=group_id)

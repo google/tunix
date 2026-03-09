@@ -21,10 +21,10 @@ framework.
 """
 
 import json
-import logging
 from typing import Any, Dict, List
 import uuid
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward
@@ -71,7 +71,11 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
       **kwargs: Additional arguments reserved for future extensions.
     """
     if reward_fn is None:
-      logging.warning("No reward_fn provided, defaulting to dummy_reward().")
+      logging.log_first_n(
+          logging.WARNING,
+          "No reward_fn provided, defaulting to dummy_reward().",
+          1,
+      )
       reward_fn = reward.dummy_reward
 
     # Let BaseTaskEnv handle task, reward_fn, step_count, and max_steps.

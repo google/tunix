@@ -14,6 +14,7 @@
 
 """Peft trainer unittest."""
 
+import contextlib
 import functools
 import os
 import tempfile
@@ -165,13 +166,20 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer.train(self.train_ds)  # No eval dataset.
 
   @parameterized.named_parameters(
-      ('lora_disabled', False),
-      ('lora_enabled', True),
+      ('lora_disabled_distributed', False, True),
+      ('lora_disabled_single_device', False, False),
+      ('lora_enabled_distributed', True, True),
+      ('lora_enabled_single_device', True, False),
   )
-  def test_checkpoint_save_and_restore(self, enable_lora: bool):
+  def test_checkpoint_save_and_restore(
+      self, enable_lora: bool, distributed: bool
+  ):
     def create_model_and_optimizer():
       rngs = nnx.Rngs(0)
-      model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+      if distributed:
+        model, _ = create_sharded_model(tc.ToyTransformer, rngs, self.mesh)
+      else:
+        model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
       if enable_lora:
         model = tc.get_lora_model(model)
 
@@ -194,7 +202,10 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer.PeftTrainer(model, optimizer, config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
+    ctx = self.mesh if distributed else contextlib.nullcontext()
+
+    with ctx:
+      trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
     trained_model_state = nnx.state(
         model, nnx.LoRAParam if enable_lora else nnx.Param
     )
@@ -221,6 +232,24 @@ class PeftTrainerTest(parameterized.TestCase):
     )
     jax.tree.map_with_path(
         tc.assert_equal, trained_opt_state, resumed_opt_state
+    )
+
+    resumed_trainer = resumed_trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    )
+    with ctx:
+      resumed_trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
+
+    resumed_opt_state = nnx.state(
+        resumed_trainer.optimizer, nnx.optimizer.OptState
+    )
+
+    jax.tree.map(
+        lambda x, y: self.assertTrue(
+            x.sharding.is_equivalent_to(y.sharding, ndim=x.ndim)
+        ),
+        trained_opt_state,
+        resumed_opt_state,
     )
 
   def test_basic_training_with_hooks(self):

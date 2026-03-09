@@ -55,9 +55,9 @@ class ModelIntegrationTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="gemma2_2b_it",
-          model_name="gemma-2-2b-it",
+          model_name="gemma2_2b_it",
           model_source="kaggle",
-          model_id="google/gemma-2-2b-it",
+          model_id="gemma2_2b_it",
           model_path="google/gemma-2/flax/gemma2-2b-it",
           tokenizer_path=model._DEFAULT_TOKENIZER_PATH,
           tokenizer_type="sentencepiece",

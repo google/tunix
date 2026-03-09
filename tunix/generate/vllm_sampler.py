@@ -17,7 +17,6 @@
 import atexit
 import dataclasses
 from itertools import count
-import math
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -38,7 +37,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sampling_params import SamplingParams
 
-
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
@@ -47,28 +45,62 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 class VllmConfig:
   """Vllm rollout configuations."""
 
-  model_version: str
-  max_model_len: int
-  mesh: jax.sharding.Mesh
-  hbm_utilization: float
-  init_with_random_weights: bool
-  tpu_backend_type: str
-  mapping_config: MappingConfig
-  # The size of the CPU swap space to use for the KV cache, in GiB.
-  # This allows vLLM to offload KV cache blocks from TPU/GPU memory (HBM) to
-  # CPU memory (RAM) when HBM is full.
-  # A larger swap space allows for larger batch sizes and longer sequences
-  # than what can fit in HBM alone, potentially increasing throughput.
-  # However, frequent swapping can increase latency due to the overhead of
-  # transferring data between CPU and TPU/GPU memory.
-  swap_space: float = 4.0  # in GiB
-  lora_config: Optional[Dict[str, Any]] = None
+  # Sampler related
   server_mode: bool = False
-  async_scheduling: bool = False
-  tensor_parallel_size: int = -1
-  data_parallel_size: int = -1
-  hf_config_path: Optional[Dict[str, Any]] = None
+  mapping_config: MappingConfig = dataclasses.field(
+      default_factory=MappingConfig
+  )
+  return_logprobs: bool = False
+
+  # vLLM Env vars
+  init_with_random_weights: bool = True
+  tpu_backend_type: str = "jax"
+
+  # vLLM engine arg related, requires additional processing before passing into engine
   additional_config: Optional[Dict[str, Any]] = None
+  enable_dp_attention: bool = False
+  hbm_utilization: float = 0.5
+  lora_config: Optional[Dict[str, Any]] = None
+  mesh: jax.sharding.Mesh = None
+  data_parallel_size: int = -1
+  tensor_parallel_size: int = -1
+  expert_parallel_size: int = 1
+
+  # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
+  engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
+  _processed_engine_kwargs: Dict[str, Any] = dataclasses.field(
+      init=False, default_factory=dict
+  )
+
+  # VllmConfig fields that require special processing before being passed to
+  # vLLM and must not be passed via engine_kwargs, which is a raw pass-through
+  # to vLLM EngineArgs.
+  _RESERVED_KEYS: frozenset[str] = dataclasses.field(
+      default=frozenset(
+          {"tensor_parallel_size", "data_parallel_size", "expert_parallel_size"}
+      ),
+      init=False,
+      repr=False,
+      compare=False,
+  )
+  # vLLM sampling args that can be directly passed in without additional processing, e.g. temperature, stop etc.
+  sampling_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  def __post_init__(self, engine_kwargs: Optional[Dict[str, Any]]):
+    engine_kwargs = engine_kwargs or {}
+    illegal = self._RESERVED_KEYS & engine_kwargs.keys()
+    if illegal:
+      raise ValueError(
+          f"VllmConfig fields must be set directly on VllmConfig, not passed"
+          f" via engine_kwargs: {sorted(illegal)}"
+      )
+    self._processed_engine_kwargs = engine_kwargs
+    if engine_kwargs:
+      for key, value in engine_kwargs.items():
+        logging.info(
+            "Engine kwargs setting key '%s' with value '%s'.", key, value
+        )
+        setattr(self, key, value)
 
 
 class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -128,6 +160,18 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.lora_config and config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
 
+  @property
+  def mesh(self) -> jax.sharding.Mesh:
+    if hasattr(self._model_runner, "mesh") and isinstance(
+        self._model_runner.mesh, jax.sharding.Mesh
+    ):
+      return self._model_runner.mesh
+    else:
+      raise AttributeError(
+          "vLLM model runner doesn't have mesh or mesh is not a"
+          " jax.sharding.Mesh."
+      )
+
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
   def update_params(
@@ -146,16 +190,27 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,
           reshard_fn=reshard.reshard_pytree,
+          num_kv_heads=(
+              None
+              if not self._model_runner
+              else self._model_runner.model_config.get_total_num_kv_heads()
+          ),
+          head_dim=(
+              None
+              if not self._model_runner
+              else self._model_runner.model_config.get_head_size()
+          ),
       )
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
-          "No key mappings configuration found. Proceeding with direct structural "
-          "weight synchronization (assuming matching source/target structures)."
+          "No key mappings configuration found. Proceeding with direct"
+          " structural weight synchronization (assuming matching source/target"
+          " structures)."
       )
 
       additional_config = self.config.additional_config or {}
-      if 'maxtext_config' not in additional_config:
+      if "maxtext_config" not in additional_config:
         raise ValueError(
             "Direct weight synchronization is currently supported only for "
             "MaxText models. The required 'maxtext_config' key is missing "
@@ -168,7 +223,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_fn=reshard.reshard_pytree,
       )
 
-
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
     if isinstance(path_or_weights, jaxtyping.PyTree):
@@ -176,57 +230,39 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       raise NotImplementedError("Only support in memory weight sync as of now.")
 
-  def _find_total_size(self, mesh: jax.sharding.Mesh) -> int:
-    """Finds the tensor parallel size from the mesh."""
-    # since vllm doesn't support DP yet, simply return the total rank size.
-    return math.prod(mesh.shape.values())
-
   def _vllm_config(self, config: VllmConfig):
     """Setup vllm config from Tunix Vllm config."""
-    tensor_parallel_size = config.tensor_parallel_size
-    data_parallel_size = config.data_parallel_size
-    total_mesh_devices = self._find_total_size(config.mesh)
+    args = config._processed_engine_kwargs.copy()
 
-    if config.tensor_parallel_size == -1 and config.data_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices
-      data_parallel_size = 1
-    elif config.tensor_parallel_size == -1:
-      tensor_parallel_size = total_mesh_devices // data_parallel_size
-    elif config.data_parallel_size == -1:
-      data_parallel_size = total_mesh_devices // tensor_parallel_size
-
-    args = {}
     # Init vLLM model with random weights to speed up bootstrap time, because
     # model weights are synced from trainer later on
     if config.init_with_random_weights:
       args["load_format"] = "dummy"
 
-    args["model"] = config.model_version
-    args["max_model_len"] = config.max_model_len
     args["gpu_memory_utilization"] = config.hbm_utilization
-    args["swap_space"] = config.swap_space
 
-    args["data_parallel_size"] = data_parallel_size
-    args["tensor_parallel_size"] = tensor_parallel_size
-    args["async_scheduling"] = config.async_scheduling
+    args["additional_config"] = config.additional_config or {}
 
-    args["additional_config"] = {}
     if config.lora_config is not None:
       args["additional_config"]["lora_config"] = config.lora_config
+
+    tp, dp, ep = utils.resolve_parallelism_sizes(
+        mesh=config.mesh,
+        tensor_parallel_size=config.tensor_parallel_size,
+        data_parallel_size=config.data_parallel_size,
+        expert_parallel_size=config.expert_parallel_size,
+    )
+    args["tensor_parallel_size"] = tp
+    args["data_parallel_size"] = dp
+
     device_indexes = config.mesh.device_ids.flatten().tolist()
     args["additional_config"]["sharding"] = {
         "sharding_strategy": {
+            "expert_parallelism": ep,
             "device_indexes": device_indexes,
+            "enable_dp_attention": config.enable_dp_attention,
         }
     }
-
-    # Add support for "hf_config_path" and "additional_config" which are
-    # directly passed to vLLM engine and part of the vLLM config contract.
-    if config.hf_config_path:
-      args["hf_config_path"] = config.hf_config_path
-
-    if config.additional_config:
-      args["additional_config"].update(config.additional_config)
 
     return args
 
@@ -270,17 +306,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def tokenize(self, input_string: str) -> jax.Array | list[int]:
     """Tokenizes the input string."""
     input_ids = self.tokenizer.encode(input_string)
-    bos_tok = (
-        [self.tokenizer.bos_id()]
-        if (self.tokenizer.bos_id() and input_ids[0] != self.tokenizer.bos_id())
-        else []
-    )
-    eos_tok = (
-        [self.tokenizer.eos_id()]
-        if input_ids[-1] != self.tokenizer.eos_id()
-        else []
-    )
-    return bos_tok + input_ids + eos_tok
+    bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
+    return self.tokenizer.dedup_bos_ids(bos_tok + input_ids)
 
   def detokenize(
       self, input_strings: List[str], request_outputs: List[RequestOutput]
@@ -299,7 +326,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           single_output.token_ids = single_output.token_ids[:-1]
           single_output.logprobs = single_output.logprobs[:-1]
 
-        out_tokens[idx].append(single_output.token_ids)
+        out_tokens[idx].append(
+            np.array(single_output.token_ids, dtype=np.int32)
+        )
         decoded_outputs[idx].append(
             self.tokenizer.decode(single_output.token_ids)
         )
@@ -348,7 +377,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def __call__(
       self,
-      input_strings: List[str],
+      input_strings: str | List[str],
       max_generation_steps: int,
       max_prompt_length: int = None,
       temperature: float = 0.0,
@@ -360,8 +389,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
+    if isinstance(input_strings, str):
+      input_strings = [input_strings]
+
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
       raise ValueError(
@@ -392,8 +425,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
-      sampling_params.logprobs = 1  # b/428730696
-      sampling_params.prompt_logprobs = 1  # b/428730696
+      if self.config.return_logprobs:
+        sampling_params.logprobs = 1  # b/428730696
+        sampling_params.prompt_logprobs = 1  # b/428730696
+      else:
+        sampling_params.logprobs = 0
+        sampling_params.prompt_logprobs = 0
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
 
@@ -401,6 +438,32 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.top_p = top_p
       if top_k is not None:
         sampling_params.top_k = top_k
+      if seed is not None:
+        sampling_params.seed = seed
+
+      sampling_kwargs = self.config.sampling_kwargs.copy()
+      sampling_kwargs.update(kwargs)
+      if sampling_kwargs:
+        try:
+          logging.log_first_n(
+              logging.INFO,
+              "Received additional kwargs that are not explicitly defined in"
+              f" the method signature: {sampling_kwargs}. These will be forwarded to the"
+              " underlying sampler, but please ensure that they are valid.",
+              1
+          )   
+          for key, value in sampling_kwargs.items():
+            logging.log_first_n(
+                logging.DEBUG,
+                f"Sampler kwargs setting key {key} with value {value}.",
+                len(sampling_kwargs)
+            )
+            setattr(sampling_params, key, value)
+        except (AttributeError, TypeError) as e:
+          logging.info(
+              f"Failed to update sampling_params with kwargs: {sampling_kwargs}."
+              f" Error: {e}",
+          )
 
       self.sampling_params = sampling_params
 
@@ -433,20 +496,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     ]
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
-    all_output_ids = [
-        utils.pad_to_length(
-            np.array(x, dtype=np.int32),
-            target_length=max_generation_steps,
-            pad_value=self.tokenizer.pad_id(),
-            left=False,
-        )
-        for x in out_tokens[0]
-    ]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
         logits=None,
-        tokens=all_output_ids,
+        tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs[0],
     )

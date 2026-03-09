@@ -25,9 +25,9 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
 from tunix.utils import env_utils
-
 
 env_utils.setup_sharding_environment()
 
@@ -209,6 +209,20 @@ class ModelConfig:
         rope_theta=1_000_000,
         num_experts=128,
         num_experts_per_tok=8,
+    )
+
+  @classmethod
+  def qwen3_32b(cls):  # qwen3-32B
+    return cls(
+        num_layers=64,
+        vocab_size=151936,
+        embed_dim=5120,
+        hidden_dim=25600,
+        num_heads=64,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
     )
 
 
@@ -562,6 +576,7 @@ class MLP(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.shd_config = config.shd_config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
@@ -592,12 +607,21 @@ class MLP(nnx.Module):
         ),
     )
 
-  @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def block(
+      self,
+      x: jaxtyping.Array,
+  ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
     activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
     return outputs
+
+  @jax.named_scope('feed_forward')
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.config.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block.__func__)(self, x)
+    else:
+      return self.block(x)
 
 
 class DecoderLayer(nnx.Module):
@@ -659,8 +683,10 @@ class DecoderLayer(nnx.Module):
     return cache, outputs
 
 
-class Qwen3(nnx.Module):
+class Qwen3(BackendMappingMixin, nnx.Module):
   """Qwen3 model."""
+
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(
       self,

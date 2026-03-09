@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,13 +17,16 @@
 from __future__ import annotations
 
 import abc
+import time
 import asyncio
-from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import copy
 import dataclasses
 import itertools
 import queue
-from typing import Any, AsyncIterator, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
+import threading
+from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
 
 from absl import logging
 import flax
@@ -34,18 +37,19 @@ import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
-from tunix.rl import reward_manager
+from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
-
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -55,7 +59,7 @@ MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
-  policy_version: jax.Array | None = None
+  policy_version: np.ndarray | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -64,18 +68,25 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
 
   Parameters:
     system_prompt: System prompt for the agent.
-    max_concurrency: Maximum number of concurrent rollout engines.
+    max_response_length: Maximum number of tokens for each episode.
+    max_concurrency: Maximum number of concurrent requests to the rollout
+      engines.
     off_policy_steps: Number of off-policy steps can be accepted before a
       policy update.
     num_generations: Number of samples per prompt.
     num_iterations: Number of iterations per batch.
+    episode_timeout: Timeout for each episode in seconds.
   """
 
   system_prompt: str = ""
-  max_concurrency: int = 16
+  # TODO(tsbao): we need to update the scripts that uses max_tokens_to_generate
+  # once this new agentic_rl_learner is used.
+  max_response_length: int = 1024
+  max_concurrency: int = 32
   off_policy_steps: int = 0
   num_generations: int = 1
   num_iterations: int = 1
+  episode_timeout: float = 1800.0
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -112,6 +123,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
+      agent_class: Type[
+          base_agent.ConversationAgentBase
+      ] = model_agent.ModelAgent,
+      agent_kwargs: Dict[str, Any] | None = None,
+      env_class: Type[
+          base_environment.BaseTaskEnv
+      ] = task_environment.TaskEnvironment,
+      env_kwargs: Dict[str, Any] | None = None,
   ):
     """Initializes the `AgenticRLLearner`.
 
@@ -122,9 +141,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       chat_parser: A parser to handle chat message formatting.
       metric_fns: Metric functions.
       data_shuffle_seed: Seed for data shuffling.
+      agent_class: User defined agent class.
+      agent_kwargs: Keyword arguments for the agent class.
+      env_class: User defined environment class.
+      env_kwargs: Keyword arguments for the environment class.
     """
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
+    self._patch_rollout_config()
 
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
@@ -147,13 +171,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else None
     )
 
+    self.agent_class = agent_class
+    self.agent_kwargs = agent_kwargs or {}
+    self.env_class = env_class
+    self.env_kwargs = env_kwargs or {}
+
     self._training_config = self.rl_cluster.cluster_config.training_config
 
     self.rl_cluster.global_steps = (
         self.rl_cluster.actor_trainer.restored_global_step()
     )
     # Current iter steps for micro-batch based training.
-    self._iter_steps = 0
+    self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
     self._eval_iter_steps = 0
 
     # Sync weights if the actor model and rollout model are not sharing weights.
@@ -173,8 +202,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             rl_cluster_lib.Role.ROLLOUT
         ]
     )
-    self.executor = futures.ThreadPoolExecutor(max_workers=3)
-    self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 
     self._rollout_micro_batch_size = (
         self._training_config.rollout_micro_batch_size
@@ -186,9 +213,31 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     self.chat_parser = chat_parser
     self.tokenizer = rl_cluster.tokenizer
-    self.policy_version = 0
+    self.policy_version = self.rl_cluster.global_steps
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
     self._full_batch_size = 0
+
+    loop_queue = queue.Queue()
+
+    def run_loop_forever():
+      loop = agentic_utils.get_or_create_loop()
+      loop.set_default_executor(
+          ThreadPoolExecutor(max_workers=algo_config.max_concurrency + 1)
+      )
+      loop_queue.put(loop)
+      loop.run_forever()
+
+    loop_thread = threading.Thread(target=run_loop_forever, daemon=True)
+    loop_thread.start()
+    self.loop = loop_queue.get()
+    self._global_step_start_time = time.time()
+
+  def _patch_rollout_config(self):
+    rollout_config = self.rl_cluster.cluster_config.rollout_config
+    if not isinstance(rollout_config, dict):
+      rollout_config = {"train": rollout_config}
+    for config in rollout_config.values():
+      config.max_tokens_to_generate = self.algo_config.max_response_length
 
   def _compute_rewards(
       self,
@@ -284,64 +333,71 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
         yield micro_batch
 
-  def _make_agent_env_pair(
-      self, single_example: TrainingInputT, group_id: int | None = None
-  ) -> tuple[model_agent.ModelAgent, task_environment.TaskEnvironment]:
+  def _create_agent_env_pair(
+      self, single_example: TrainingInputT, group_id: int, pair_index: int
+  ) -> tuple[base_agent.ConversationAgentBase, base_environment.BaseTaskEnv]:
     """Constructs an (agent, environment) pair for a single input sample.
 
     This is used to set up a rollout for one generation within a group.
 
     Args:
       single_example: A training input containing a single prompt.
-      group_id: An identifier to group generations from the same original
+      group_id: An identifier for group generations from the same original
         prompt.
+      pair_index: The index of the pair within the group.
 
     Returns:
-      A tuple containing a configured `ModelAgent` and `TaskEnvironment`.
+      A tuple of agent and environment.
     """
 
-    question_text = single_example["question"][0]
-    # Embed original input to avoid materializing the dataset in producer.
-    task = {"question": question_text, "original_input": single_example}
-    if group_id is not None:
-      task["group_id"] = group_id
-    # Pass along other metadata from the original example.
-    for key, value in single_example.items():
-      if key not in ["prompts", "original_input"]:
-        task[key] = value[0]
-    agent = model_agent.ModelAgent(system_prompt=self.algo_config.system_prompt)
-    # TODO: b/456528861 - Support both single-turn and multi-turn from config.
-    env = task_environment.TaskEnvironment(
-        task=task,
-        reward_fn=reward.dummy_reward,
-        max_steps=1,
+    agent = self.agent_class(
+        **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
+    )  # if agent_kwargs contains "system_prompt", it will be honored.
+
+    assert "group_id" not in self.env_kwargs
+    assert "pair_index" not in self.env_kwargs
+    env = self.env_class(
+        single_example,
+        **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
+
     return agent, env
 
-  def _model_call(self, chat_lists, env: Any = None):
+  def _model_call(
+      self, chat_lists: List[Dict[str, str]], env: Any = None
+  ) -> str:
     """Calls model generation."""
     version = self.policy_version
 
     if env:
       env.task["policy_version"] = version
+
+    if self.chat_parser:
+      chat_lists = self.chat_parser.parse(
+          messages=chat_lists,
+          add_generation_prompt=True,
+          is_first_msg=True,  # no op if system msg is populated in reset
+      )
     result = self.rl_cluster.generate(
         prompts=chat_lists,
-        apply_chat_template=True,
+        apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
     )
+
     return result.text[0]
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
-    engine_defaults = dict(
+    engine_kwargs = dict(
         model_call=self._model_call,
         final_reward_fn=reward.dummy_reward,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        timeout=self.algo_config.episode_timeout,
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,
-        engine_defaults=engine_defaults,
+        engine_kwargs=engine_kwargs,
         max_concurrency=self.algo_config.max_concurrency,
         rollout_sync_lock=self._rollout_sync_lock,
     )
@@ -362,33 +418,54 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       collect_mode: The mode for trajectory collection (e.g., "Token").
 
     Yields:
-      A tuple where the first element is a list of trajectory results for a
-      group, and the second is a list containing the original `TrainingInputT`
-      for that group.
+      A list of trajectories for a group.
     """
     is_async_iterator = hasattr(prompt_iterator, "__aiter__")
 
     async def pairs_stream_generator():
       """Yield (agent, env) pairs with unique group_id per original prompt."""
-      i = 0
+      # TODO (tsbao): fix the group id when we can resume from mid global step
+      # with mini-batch.
+      group_id = self.rl_cluster.global_steps * self._full_batch_size
       if is_async_iterator:
         async for single_example in prompt_iterator:
-          agent, env = self._make_agent_env_pair(single_example, group_id=i)
-          yield agent, env
-          i += 1
+          # Create agent-env pairs in parallel for a group to handle potential
+          # cold start latency on env creation.
+          agent_env_pairs = await asyncio.gather(*[
+              self.loop.run_in_executor(
+                  None,
+                  self._create_agent_env_pair,
+                  copy.deepcopy(single_example),
+                  group_id,
+                  pair_index,
+              )
+              for pair_index in range(num_generations)
+          ])
+          for agent, env in agent_env_pairs:
+            yield agent, env
+          group_id += 1
       else:
         for single_example in prompt_iterator:
-          agent, env = self._make_agent_env_pair(single_example, group_id=i)
-          yield agent, env
-          i += 1
+          agent_env_pairs = await asyncio.gather(*[
+              self.loop.run_in_executor(
+                  None,
+                  self._create_agent_env_pair,
+                  copy.deepcopy(single_example),
+                  group_id,
+                  pair_index,
+              )
+              for pair_index in range(num_generations)
+          ])
+          for agent, env in agent_env_pairs:
+            yield agent, env
+          group_id += 1
 
     # Start producers in the background.
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
             pairs_stream=pairs_stream_generator(),
             group_size=self.algo_config.num_generations,
-            group_key=lambda i, env, traj: env.task["group_id"],
-            num_episodes=num_generations,
+            group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
             collect_mode=collect_mode,
         )
     )
@@ -405,8 +482,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         async for group in stream:
           if group:
             # Retrieve the original input embedded in the task.
-            original_input = group[0].traj["original_input"]
-            yield group, [original_input]
+            yield group
     except (GeneratorExit, asyncio.CancelledError):
       # This is the normal shutdown path for a generator.
       return
@@ -425,14 +501,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   def _batch_to_train_example(
       self,
       batch_results: list[Any],
-      cached_inputs_for_window: list[TrainingInputT],
       mode: rl_cluster_lib.Mode,
   ) -> List[TrainExample]:
     """Converts a group of trajectories into a list of `TrainExample`s.
 
     Args:
-      batch_results: A list of trajectory results from the orchestrator.
-      cached_inputs_for_window: The original input data for this group.
+      batch_results: A list of trajectories from the same generation group.
       mode: The current mode (TRAIN or EVAL).
 
     Returns:
@@ -440,29 +514,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
-    num_generations = self.algo_config.num_generations
-    micro_batches = [cached_inputs_for_window[0]] * num_generations
-    training_input = rl_utils.merge_micro_batches(micro_batches)
-
-    prompt_index = batch_results[0].pair_index
-    if mode == rl_cluster_lib.Mode.TRAIN and self._full_batch_size:
-      expected_step = prompt_index // self._full_batch_size
+    if mode == rl_cluster_lib.Mode.TRAIN:
+      expected_step = batch_results[0].group_id // self._full_batch_size
     else:
       expected_step = self.rl_cluster.global_steps
-    trajectory_ids = self._compute_trajectory_ids(training_input, prompt_index)
-    assert "trajectory_ids" not in training_input
-    training_input["trajectory_ids"] = trajectory_ids
-    for t_id in trajectory_ids:
-      self.rl_cluster.buffer_metrics_async(
-          {
-              "trajectory_ids": (t_id, None),
-          },
-          mode=mode,
-          step=expected_step,
-      )
+
     return self._process_results(
-        results=batch_results,
-        training_input=training_input,
+        trajectories=batch_results,
         mode=mode,
         expected_step=expected_step,
     )
@@ -470,8 +528,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   @abc.abstractmethod
   def _process_results(
       self,
-      results: List[Any],
-      training_input: TrainingInputT,
+      trajectories: List[Any],
       mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
       expected_step: int | None = None,
   ) -> List[TrainExample]:
@@ -488,30 +545,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "_generate_and_compute_advantage is not used in AgenticRLLearner"
     )
 
-  def _compute_trajectory_ids(
-      self, example: TrainingInputT, prompt_index: int
-  ) -> List[str]:
-    """Computes the trajectory ID for each prompt in the batch."""
-    batch_size = len(example["prompts"]) // self.algo_config.num_generations
-    if batch_size != 1:
-      raise ValueError(
-          "_compute_trajectory_ids expects inputs for a single prompt group,"
-          f" but got batch_size={batch_size}"
-      )
-    row_offset = prompt_index
-    row_offsets = np.repeat(
-        np.arange(row_offset, row_offset + batch_size),
-        self.algo_config.num_generations,
-        axis=0,
-    )
-    group_offsets = np.tile(
-        np.arange(self.algo_config.num_generations),
-        batch_size,
-    )
-    return [
-        f"{r_off}_{g_off}" for r_off, g_off in zip(row_offsets, group_offsets)
-    ]
-
   def _num_iterations(self) -> int:
     """Returns the number of iterations per batch."""
     return self.algo_config.num_iterations
@@ -519,19 +552,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
   def _num_generations(self) -> int:
     """Returns the number of generations per prompt."""
     return self.algo_config.num_generations
-
-  @staticmethod
-  def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
-    """Runs a coroutine, handling existing event loops correctly."""
-    try:
-      loop = asyncio.get_running_loop()
-    except RuntimeError:
-      # asyncio.get_running_loop() raises RuntimeError if no loop is running.
-      # If no loop is running, start a new one using asyncio.run().
-      return asyncio.run(coro)
-    else:
-      # If a loop is already running, use it to run the coroutine.
-      return loop.run_until_complete(coro)
 
   async def _producer(
       self,
@@ -550,7 +570,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     prompt_iterator = _iterate_micro_batches()
     try:
-      async for batch, cached_inputs in self._orchestrator_producer(
+      async for batch in self._orchestrator_producer(
           orchestrator=orchestrator,
           prompt_iterator=prompt_iterator,
           num_generations=self.algo_config.num_generations,
@@ -559,7 +579,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         try:
           train_examples = self._batch_to_train_example(
               batch_results=batch,
-              cached_inputs_for_window=cached_inputs,
               mode=rl_cluster_lib.Mode.TRAIN,
           )
           iterations = self.algo_config.num_iterations
@@ -599,6 +618,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """Main training loop for the AgenticRLLearner."""
     full_batch_iterator = iter(train_dataset)
 
+    if self.rl_cluster.global_steps > 0:
+      logging.info(
+          "Skipping %d batches from train_dataset to fast-forward to step %d",
+          self.rl_cluster.global_steps,
+          self.rl_cluster.global_steps,
+      )
+      # TODO(b/483779605): Current implementation of fast-forwarding does not
+      # take into account the mini-batch size. Follow-up CL will address this.
+      for _ in range(self.rl_cluster.global_steps):
+        try:
+          next(full_batch_iterator)
+        except StopIteration:
+          logging.warning("Train dataset exhausted while skipping batches.")
+          self.rl_cluster.close()
+          return
+
     try:
       first_item = next(full_batch_iterator)
     except StopIteration:
@@ -606,13 +641,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self.rl_cluster.close()
       return
 
-    full_batch_size = len(first_item["prompts"])
+    full_batch_size = len(next(iter(first_item.values())))
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
     train_micro_batch_size = (
         self._training_config.train_micro_batch_size or mini_batch_size
     )
+    # Rollout and compute_logps micro batch sizes have to be 1 since we only
+    # process inidividual prompts.
     self._rollout_micro_batch_size = 1
     self._compute_logps_micro_batch_size = 1
     for v, n in [
@@ -651,30 +688,33 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     orchestrator = self._build_orchestrator()
 
     prompt_queue = queue.Queue()
-    initial_buffer_size = max(1, self.algo_config.off_policy_steps)
+    initial_buffer_size = self.algo_config.off_policy_steps + 1
     logging.info(
         "Prefilling prompt queue with %d batches.", initial_buffer_size
     )
     for _ in range(initial_buffer_size):
       try:
-        prompt_queue.put(next(full_dataset_iterator))
+        self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
       except StopIteration:
         prompt_queue.put(None)
         break
 
-    producer_future = self.executor.submit(
-        self._run_async,
+    producer_future = asyncio.run_coroutine_threadsafe(
         self._producer(orchestrator, prompt_queue, train_data_queue),
+        self.loop,
     )
 
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue, train_micro_batch_size * self._num_generations()
+        train_data_queue, train_micro_batch_size
     )
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
     for train_micro_batch in train_data_gen:
-      if self.rl_cluster.global_steps >= self._training_config.max_steps:
+      if (
+          self._training_config.max_steps
+          and self.rl_cluster.global_steps >= self._training_config.max_steps
+      ):
         logging.info(
             "Reached max_steps: %d >= %d",
             self.rl_cluster.global_steps,
@@ -684,32 +724,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         break
       self._iter_steps += 1
 
+      # TODO(tsbao): Re-enable this once off-policy filtering is needed.
       # Filter out examples that are too old (off-policy).
-      filtered_train_micro_batch = []
-      for train_example in train_micro_batch:
-        if train_example.policy_version is not None and (
-            train_example.policy_version[0] == -1
-            or (
-                self.policy_version - train_example.policy_version[0]
-                <= self.algo_config.off_policy_steps
-            )
-        ):
-          filtered_train_micro_batch.append(train_example)
-      if not filtered_train_micro_batch:
-        logging.warning(
-            "Skipping microbatch: all %d examples are too old."
-            " Current policy version: %d, data versions: %s,"
-            " off_policy_steps: %d",
-            len(train_micro_batch),
-            self.policy_version,
-            str([
-                train_example.policy_version[0]
-                for train_example in train_micro_batch
-            ]),
-            self.algo_config.off_policy_steps,
-        )
-        continue
-      train_micro_batch = filtered_train_micro_batch
+      # filtered_train_micro_batch = self._filter_outdated_offpolicy_examples(
+      #     train_micro_batch
+      # )
+      # if not filtered_train_micro_batch:
+      #   continue
+      # train_micro_batch = filtered_train_micro_batch
 
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
@@ -728,21 +750,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
         async def _eval_runner_async(current_eval_orchestrator):
           eval_examples = []
-          async for batch, cached_inputs in self._orchestrator_producer(
+          async for batch in self._orchestrator_producer(
               current_eval_orchestrator,
               all_eval_prompts,
               num_generations=self._num_generations(),
           ):
-            train_examples = self._batch_to_train_example(
+            eval_example = self._batch_to_train_example(
                 batch,
-                cached_inputs,
                 rl_cluster_lib.Mode.EVAL,
             )
-            eval_examples.extend(train_examples)
+            eval_examples.extend(eval_example)
           return eval_examples
 
-        eval_future = self.executor.submit(
-            self._run_async, _eval_runner_async(eval_orchestrator)
+        eval_future = asyncio.run_coroutine_threadsafe(
+            _eval_runner_async(eval_orchestrator), self.loop
         )
         eval_examples = eval_future.result()
         self._eval_iter_steps += 1
@@ -754,12 +775,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       if hasattr(self.rl_cluster, "critic_trainer"):
         self.rl_cluster.update_critic(
-            train_micro_batch, current_eval_dataset, skip_jit
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
 
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
       if micro_batches_since_last_sync == micro_batches_per_full_batch:
+        global_step_time = time.time() - self._global_step_start_time
+        logging.info(
+            f"Global step {self.rl_cluster.global_steps} completed in"
+            f" {global_step_time:.2f} seconds."
+        )
+        self.rl_cluster.buffer_metrics_async(
+            {"perf/global_step_time": (global_step_time, np.mean)},
+            mode=rl_cluster_lib.Mode.TRAIN,
+            step=self.rl_cluster.global_steps,
+        )
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()
@@ -772,7 +803,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 self.policy_version,
             )
             try:
-              prompt_queue.put(next(full_dataset_iterator))
+              self._put_prompts_to_queue(
+                  prompt_queue, next(full_dataset_iterator)
+              )
             except StopIteration:
               prompt_queue.put(None)
           finally:
@@ -781,10 +814,80 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else:
           self.rl_cluster.global_steps += 1
           try:
-            prompt_queue.put(next(full_dataset_iterator))
+            self._put_prompts_to_queue(
+                prompt_queue, next(full_dataset_iterator)
+            )
           except StopIteration:
             prompt_queue.put(None)
         micro_batches_since_last_sync = 0
+        self._global_step_start_time = time.time()
 
     _ = producer_future.result()
     self.rl_cluster.close()
+
+  def _put_prompts_to_queue(
+      self,
+      prompt_queue: queue.Queue[TrainingInputT | None],
+      batch,
+  ):
+    """Puts a batch of prompts into the queue.
+
+    If the batch size does not match the expected full batch size, a warning is
+    logged, and a StopIteration is raised to signal the end of the dataset.
+    A None is put into the queue upon StopIteration to signal completion.
+
+    Args:
+      prompt_queue: The queue to put the batch into.
+      batch: The batch of prompts (TrainingInputT).
+    """
+    current_batch_size = len(next(iter(batch.values())))
+    if (
+        self._training_config.max_steps
+        and self.rl_cluster.global_steps >= self._training_config.max_steps
+    ):
+      logging.info(
+          "Reached max_steps: %d >= %d",
+          self.rl_cluster.global_steps,
+          self._training_config.max_steps,
+      )
+      prompt_queue.put(None)
+    elif current_batch_size != self._full_batch_size:
+      logging.warning(
+          "partial batch %d vs %d detected. The rest of the batch will be"
+          " skipped.",
+          current_batch_size,
+          self._full_batch_size,
+      )
+      prompt_queue.put(None)
+    else:
+      prompt_queue.put(batch)
+
+  def _filter_outdated_offpolicy_examples(
+      self,
+      train_micro_batch: List[TrainExample],
+  ) -> List[TrainExample]:
+    """Filters out outdated off-policy examples."""
+    filtered_train_micro_batch = []
+    for train_example in train_micro_batch:
+      if train_example.policy_version is not None and (
+          train_example.policy_version[0] == -1
+          or (
+              self.policy_version - train_example.policy_version[0]
+              <= self.algo_config.off_policy_steps
+          )
+      ):
+        filtered_train_micro_batch.append(train_example)
+    if not filtered_train_micro_batch:
+      logging.warning(
+          "Skipping microbatch: all %d examples are too old."
+          " Current policy version: %d, data versions: %s,"
+          " off_policy_steps: %d",
+          len(train_micro_batch),
+          self.policy_version,
+          str([
+              train_example.policy_version[0]
+              for train_example in train_micro_batch
+          ]),
+          self.algo_config.off_policy_steps,
+      )
+    return filtered_train_micro_batch
