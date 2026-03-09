@@ -334,12 +334,13 @@ class PeftTrainer:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
+    grad_norm = optax.global_norm(grads)
     optimizer.update(model, grads)
     if self._has_aux:
       loss, aux = out
-      return loss, aux
+      return loss, aux, grad_norm
     else:
-      return out, None
+      return out, None, grad_norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -497,16 +498,27 @@ class PeftTrainer:
       loss: ArrayLike,
       step: int,
       step_time_delta: float = 0.0,
+      additional_metrics: (
+          dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
+      ) = None,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
     if metrics_buffer is None:
       metrics_buffer = MetricsBuffer(
-          step=step, losses=[loss], step_time_deltas=[step_time_delta]
+          step=step,
+          losses=[loss],
+          step_time_deltas=[step_time_delta],
       )
     else:
       assert metrics_buffer.step == step
       metrics_buffer.losses.append(loss)
       metrics_buffer.step_time_deltas.append(step_time_delta or 0)
+    if additional_metrics is not None:
+      for k, (v, op) in additional_metrics.items():
+        if k not in metrics_buffer.additional_metrics:
+          metrics_buffer.additional_metrics[k] = ([v], op)
+        else:
+          metrics_buffer.additional_metrics[k][0].append(v)
     return metrics_buffer
 
   def _write_train_metrics(self):
@@ -666,7 +678,7 @@ class PeftTrainer:
         with self._perf_tracer.span(
             "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
         ) as span:
-          train_loss, aux = train_step(train_example)
+          train_loss, aux, grad_norm = train_step(train_example)
           span.device_end([train_loss])
 
         current_time = time.perf_counter()
@@ -679,6 +691,7 @@ class PeftTrainer:
             loss=train_loss,
             step=self._train_steps,
             step_time_delta=step_time_delta,
+            additional_metrics={"grad_norm": (grad_norm, np.mean)},
         )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
@@ -826,9 +839,7 @@ def _default_loss_fn(
   """Default loss function for PEFT training."""
   # Weird kwargs workaround because not all models support `images` right now.
   kwargs = {} if images is None else {"images": images}
-  logits, _ = model(
-      input_tokens, positions, None, attention_mask, **kwargs
-  )
+  logits, _ = model(input_tokens, positions, None, attention_mask, **kwargs)
 
   # Exclude the last step as it does not appear in the targets.
   logits = logits[:, :-1, :]
