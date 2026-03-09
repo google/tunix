@@ -47,6 +47,7 @@ from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.rl.experimental import agentic_rl_learner
+from tunix.rl.ppo import ppo_helpers
 from tunix.utils import trajectory_logger
 
 
@@ -229,7 +230,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
+        {"kl": np.mean, "entropy": np.mean}
+    )
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
@@ -507,7 +510,7 @@ def grpo_loss_fn(
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
-  per_token_logps = common.compute_per_token_logps(
+  per_token_logps, logits = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
@@ -515,7 +518,7 @@ def grpo_loss_fn(
       pad_id=pad_id,
       eos_id=eos_id,
       stop_gradient=False,
-      return_logits=False,
+      return_logits=True,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   advantages = jnp.astype(train_example.advantages, jnp.float32)
@@ -565,6 +568,9 @@ def grpo_loss_fn(
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
+  token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
+  entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
+  aux["entropy"] = entropy_loss
 
   return loss, aux
 
@@ -588,7 +594,7 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
 
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
 
 
 GrpoConfig = GRPOConfig

@@ -897,9 +897,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       prefix, metric_name = metric_name.split("/", maxsplit=1)
       self.assertGreaterEqual(
           len(
-              rl_metric_logger.get_metric_history(
-                  prefix, metric_name, "train"
-              )
+              rl_metric_logger.get_metric_history(prefix, metric_name, "train")
           ),
           grpo_learner.rl_cluster.global_steps,
           msg=f"metric_name: {metric_name}",
@@ -907,9 +905,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
       if metric_name != "global_step_time":
         self.assertLen(
-            rl_metric_logger.get_metric_history(
-                prefix, metric_name, "eval"
-            ),
+            rl_metric_logger.get_metric_history(prefix, metric_name, "eval"),
             10,
             msg=f"metric_name: {metric_name}",
         )
@@ -919,7 +915,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertGreater(np.sum(clip_ratio_history), 0)
 
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
-    for metric_name in ["loss", "kl"]:
+    for metric_name in ["loss", "kl", "entropy"]:
       self.assertLen(
           metric_logger.get_metric_history("actor", metric_name, "train"),
           grpo_learner.rl_cluster.actor_trainer.train_steps,
@@ -930,6 +926,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           10,
           msg=f"metric_name: {metric_name}",
       )
+    self.assertLen(
+        metric_logger.get_metric_history("actor", "grad_norm", "train"),
+        grpo_learner.rl_cluster.actor_trainer.train_steps,
+    )
 
   @parameterized.named_parameters(
       dict(
