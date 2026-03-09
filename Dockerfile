@@ -44,7 +44,7 @@ WORKDIR /app
 COPY . .
 
 # Install the project in editable mode
-RUN pip install  --force-reinstall .
+RUN pip install  --force-reinstall -e .
 
 ARG ENGINE
 # Set a directory to clone sglang-jax or vllm into

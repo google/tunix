@@ -18,12 +18,22 @@ fi
 
 # Default engine
 ENGINE="none"
+LOCAL_IMAGE_NAME=tunix_base_image
+TAG=$(date +%Y%m%d_%H%M%S)
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
     --engine=*)
       ENGINE="${1#*=}"
+      shift
+      ;;
+    --local_image_name=*)
+      LOCAL_IMAGE_NAME="${1#*=}"
+      shift
+      ;;
+    --tag=*)
+      TAG="${1#*=}"
       shift
       ;;
     *)
