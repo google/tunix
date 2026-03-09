@@ -678,7 +678,7 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
 
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
+  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
 
 GrpoConfig = GRPOConfig
