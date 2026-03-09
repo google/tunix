@@ -27,7 +27,6 @@ from flax import nnx
 from flax import traverse_util
 import jax
 from jax import lax
-import jax.image as jimg
 import jax.numpy as jnp
 import numpy as np
 
