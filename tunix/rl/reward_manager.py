@@ -145,13 +145,12 @@ class SequenceRewardManager(AbstractRewardManager):
 
       rewards[:, i] = np.array(r)
 
+    
     # Prepare metrics for logging.
     log_metrics = self._prepare_log_metrics(
         prompts,
         completions,
         rewards,
-        sum_rewards,
-        log_prompts_completions=kwargs["log_prompts_completions"],
     )
     sum_rewards = np.nansum(rewards, axis=1)
     rewards_info = {
