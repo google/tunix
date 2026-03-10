@@ -33,8 +33,7 @@ match_format = re.compile(
     flags=re.MULTILINE | re.DOTALL,
 )
 
-
-# range: [0, 0.1]
+# binary reward function on format
 def check_format(prompts, completions, r=0.1, **kwargs):
   return [
       0 if match_format.search(response) is None else r
@@ -42,7 +41,8 @@ def check_format(prompts, completions, r=0.1, **kwargs):
   ]
 
 
-# range: [0, 1]
+# binary reward function on answer correctness
+# NB does not use sympy, only checks float equality 
 def check_answer(prompts, completions, answer, r=1, **kwargs):
   match_numbers = re.compile(
       rf"{solution_start}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
