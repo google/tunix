@@ -44,5 +44,5 @@ docker tag "${LOCAL_IMAGE_NAME}:${TAG}" "europe-west4-docker.pkg.dev/${PROJECT_I
 
 docker push "europe-west4-docker.pkg.dev/${PROJECT_ID}/linchai-repo/${LOCAL_IMAGE_NAME}:${TAG}"
 
-xpk workload create-pathways --cluster="linchai-5-v5p-16-pw" --workload=deepscaler-152 --command="TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=<my-hf-token> WANDB_API_KEY=<my-wandb-key> ROLLOUT_ENGINE=vllm python3 examples/deepscaler/train_deepscaler_nb.py" --num-slices=1 --tpu-type="v5p-16" --docker-image europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/linchai-repo/${LOCAL_IMAGE_NAME}:${TAG}   --priority=high
+xpk workload create-pathways --cluster="linchai-5-v5p-16-pw" --workload=deepscaler-152 --command="TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=my-hf-key WANDB_API_KEY=my-wandb-key ROLLOUT_ENGINE=vllm python3 examples/deepscaler/train_deepscaler_nb.py" --num-slices=1 --tpu-type="v5p-16" --docker-image europe-west4-docker.pkg.dev/${PROJECT_ID}/linchai-repo/${LOCAL_IMAGE_NAME}:${TAG}   --priority=high
 
