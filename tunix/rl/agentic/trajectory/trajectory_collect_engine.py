@@ -30,7 +30,6 @@ from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
-from tunix.rl.agentic.rewards import reward_types
 
 P = ParamSpec("P")
 
@@ -59,7 +58,7 @@ class TrajectoryCollectEngine:
       model_call: Callable[Concatenate[Dict[str, str], P], str],
       model_call_kwargs: Optional[Dict[str, Any]] = None,
       final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+          Callable[[Dict[str, Any], str], Any]
       ] = None,
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
@@ -98,7 +97,7 @@ class TrajectoryCollectEngine:
     self.env = env
     self.model_call = model_call
     self.final_reward_fn = final_reward_fn or (
-        lambda *_: reward_types.RewardOutput(reward=0.0)
+        lambda *_: 0.0
     )
     self.model_call_kwargs = model_call_kwargs or {}
     self.max_steps = getattr(self.env, "max_steps", 1)
@@ -258,7 +257,7 @@ class TrajectoryCollectEngine:
       *,
       model_call: Callable[..., str],
       final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+          Callable[[Dict[str, Any], str], Any]
       ] = None,
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
@@ -422,7 +421,7 @@ class TrajectoryCollectEngine:
     final_reward = await asyncio.get_event_loop().run_in_executor(
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
-    last_step.reward += final_reward.reward
+    last_step.reward += final_reward
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.

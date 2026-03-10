@@ -15,7 +15,6 @@
 from absl.testing import parameterized
 
 from tunix.rl.agentic.rewards import reward
-from tunix.rl.agentic.rewards import reward_types
 
 
 class RewardTest(parameterized.TestCase):
@@ -34,7 +33,7 @@ class RewardTest(parameterized.TestCase):
     """Tests the reward function registry mechanism."""
     # A simple reward function for testing registration
     def test_fn(task, action):
-      return reward_types.RewardOutput(0.5, {})
+      return 0.5
 
     reward.register("test_fn")(test_fn)
     self.assertIs(reward.get_reward_fn("test_fn"), test_fn)
@@ -58,8 +57,7 @@ class RewardTest(parameterized.TestCase):
     """Tests the exact_match reward function."""
     task = {"ground_truth": ground_truth}
     result = reward.exact_match(task, action)
-    self.assertEqual(result.reward, expected_score)
-    self.assertEqual(result.metadata["exact_match"], expected_score)
+    self.assertEqual(result, expected_score)
 
   @parameterized.named_parameters(
       ("integer_string", "2", 1.0),
@@ -71,14 +69,12 @@ class RewardTest(parameterized.TestCase):
   def test_is_two_reward(self, action, expected_score):
     """Tests the is_two_reward function."""
     result = reward.is_two_reward({}, action)
-    self.assertEqual(result.reward, expected_score)
-    self.assertEqual(result.metadata["is_two"], expected_score)
+    self.assertEqual(result, expected_score)
 
   def test_dummy_reward(self):
     """Tests the dummy_reward function."""
     result = reward.dummy_reward({}, "any action")
-    self.assertEqual(result.reward, 0.0)
-    self.assertEqual(result.metadata, {})
+    self.assertEqual(result, 0.0)
 
   @parameterized.named_parameters(
       ("correct", "2 + 2 = ?", "The answer is 4", 1.0),
@@ -91,24 +87,6 @@ class RewardTest(parameterized.TestCase):
     """Tests the calculate_reward function."""
     task = {"question": question}
     result = reward.calculate_reward(task, action)
-    self.assertEqual(result.reward, expected_score)
-    self.assertEqual(result.metadata["calculate_correct"], expected_score)
+    self.assertEqual(result, expected_score)
 
-  def test_combine_rewards(self):
-    """Tests the reward combination logic."""
-    weights = {"exact_match": 0.7, "dummy": 0.3}
-    combined_fn = reward.combine_rewards(weights)
 
-    # Case 1: Matches exact_match
-    task = {"ground_truth": "hello"}
-    action = "hello"
-    result = combined_fn(task, action)
-    self.assertAlmostEqual(result.reward, 0.7)
-    self.assertEqual(result.metadata, {"exact_match": 1.0})
-
-    # Case 2: Does not match exact_match
-    task = {"ground_truth": "world"}
-    action = "hello"
-    result = combined_fn(task, action)
-    self.assertAlmostEqual(result.reward, 0.0)
-    self.assertEqual(result.metadata, {"exact_match": 0.0})

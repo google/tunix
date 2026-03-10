@@ -16,16 +16,13 @@
 
 This module provides a mechanism to register, retrieve, and combine various
 reward functions. Reward functions take a task context and an agent's action
-as input and return a `reward_types.RewardOutput` containing a scalar reward and
-metadata.
+as input and return a float scalar reward.
 """
 
 from typing import Any, Callable, Dict
 
-from tunix.rl.agentic.rewards import reward_types
-
 _REGISTRY: Dict[
-    str, Callable[[Dict[str, Any], str], reward_types.RewardOutput]
+    str, Callable[[Dict[str, Any], str], Any]
 ] = {}
 
 
@@ -85,7 +82,7 @@ def get_reward_fn(name: str):
 
 
 @register("exact_match")
-def exact_match(task: Dict[str, Any], action: str) -> reward_types.RewardOutput:
+def exact_match(task: Dict[str, Any], action: str) -> float:
   """Binary reward based on exact string matching with ground truth.
 
   Returns 1.0 for perfect matches after whitespace normalization,
@@ -96,47 +93,18 @@ def exact_match(task: Dict[str, Any], action: str) -> reward_types.RewardOutput:
       action (str): Agent's response to evaluate
 
   Returns:
-      RewardOutput: Binary reward (1.0 or 0.0) with match status
+      float: Binary reward (1.0 or 0.0)
   """
   truth = str(task.get("ground_truth", "")).strip()
   score = 1.0 if action.strip() == truth else 0.0
-  return reward_types.RewardOutput(score, {"exact_match": score})
-
-
-def combine_rewards(
-    weights: Dict[str, float],
-) -> Callable[[Dict[str, Any], str], reward_types.RewardOutput]:
-  """Create a composite reward function from multiple registered functions.
-
-  Performs weighted linear combination of multiple reward components,
-  enabling complex reward engineering through composition.
-
-  Args:
-      weights (Dict[str, float]): Mapping from reward function names to weights
-
-  Returns:
-      Callable: Composite reward function that computes weighted sum
-
-  Example:
-      composite_fn = combine_rewards({"exact_match": 1.0, "zero": 0.0})
-  """
-
-  def _fn(task: Dict[str, Any], action: str):
-    total, meta = 0.0, {}
-    for name, w in weights.items():
-      out = get_reward_fn(name)(task, action)
-      total += w * out.reward
-      meta.update(out.metadata)
-    return reward_types.RewardOutput(total, meta)
-
-  return _fn
+  return score
 
 
 # -------- Example Reward Function --------
 @register("is_two")
 def is_two_reward(
     task: Dict[str, Any], action: str
-) -> reward_types.RewardOutput:
+) -> float:
   """Specialized reward function that checks if action represents the number 2.
 
   Attempts to parse the action as numeric value and returns 1.0 if it equals
@@ -147,28 +115,28 @@ def is_two_reward(
       action (str): Agent's response to evaluate
 
   Returns:
-      RewardOutput: Binary reward with parsing status in metadata
+      float: Binary reward
   """
   try:
     value = float(action.strip())
     score = 1.0 if value == 2.0 else 0.0
   except ValueError:
     score = 0.0
-  return reward_types.RewardOutput(score, {"is_two": score})
+  return score
 
 
 @register("dummy")
 def dummy_reward(
     task: Dict[str, Any], action: str
-) -> reward_types.RewardOutput:
+) -> float:
   """A dummy reward function that always returns zero."""
-  return reward_types.RewardOutput(0.0, {})
+  return 0.0
 
 
 @register("calculate")
 def calculate_reward(
     task: Dict[str, Any], action: str
-) -> reward_types.RewardOutput:
+) -> float:
   """Calculates the reward for a math expression based on answer correctness.
 
   WARNING: Uses eval(), which is NOT SAFE for untrusted input. This is only for
@@ -179,9 +147,8 @@ def calculate_reward(
     action: The model's answer as a string.
 
   Returns:
-    RewardOutput: 1.0 if the model's answer matches the evaluated
-    expression
-      within a tolerance, 0.0 otherwise.
+    float: 1.0 if the model's answer matches the evaluated
+    expression within a tolerance, 0.0 otherwise.
   """
   question_str = task.get("question", "")
   expression = question_str.replace("= ?", "").replace("=", "").strip()
@@ -198,4 +165,4 @@ def calculate_reward(
 
   except Exception:
     score = 0.0
-  return reward_types.RewardOutput(score, {"calculate_correct": score})
+  return score

@@ -27,7 +27,6 @@ import uuid
 from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.environments import base_environment
-from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.tools import base_tool
 from tunix.rl.agentic.tools import tool_manager
 
@@ -64,8 +63,7 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
       tool_map (Dict[str, type[BaseTool]]): Mapping of tool names to their
         implementation classes for tool discovery and execution.
       reward_fn: Reward function that takes (task, action) and returns
-        RewardOutput with `.reward` and `.metadata` fields. If None, defaults to
-        `dummy_reward` with a warning.
+        a scalar reward. If None, defaults to returning 0.0 with a warning.
       max_steps (int): Maximum number of interaction steps before forced
         termination. Prevents infinite loops and controls episode length.
       **kwargs: Additional arguments reserved for future extensions.
@@ -73,10 +71,10 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
     if reward_fn is None:
       logging.log_first_n(
           logging.WARNING,
-          "No reward_fn provided, defaulting to dummy_reward().",
+          "No reward_fn provided, defaulting to returning 0.0.",
           1,
       )
-      reward_fn = reward.dummy_reward
+      reward_fn = lambda *_: 0.0
 
     # Let BaseTaskEnv handle task, reward_fn, step_count, and max_steps.
     super().__init__(
@@ -140,12 +138,12 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
     # Handle episode termination: compute final reward.
     if done:
       llm_answer = self._extract_llm_answer(action)
-      r_out = self.reward_fn(task=self.task, action=llm_answer)
+      reward_val = self.reward_fn(task=self.task, action=llm_answer)
       return base_environment.EnvStepResult(
           observation={},
-          reward=r_out.reward,
+          reward=reward_val,
           done=True,
-          info={"response": action, "metadata": r_out.metadata},
+          info={"response": action},
       )
 
     # Handle continuing episode: execute tools and return intermediate results.
@@ -155,7 +153,7 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
         observation=obs,
         reward=0.0,
         done=False,
-        info={"response": action, "metadata": {}},
+        info={"response": action},
     )
 
   @staticmethod

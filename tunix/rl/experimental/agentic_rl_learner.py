@@ -37,7 +37,6 @@ import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
-from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
@@ -53,7 +52,7 @@ from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
-RewardFn = Callable[..., List[float]]
+RewardFn = Callable[[Dict[str, Any], str], Any]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
 
@@ -119,7 +118,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
       algo_config: TConfig,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fn: RewardFn,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       data_shuffle_seed: int | None = None,
@@ -137,7 +136,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Args:
       rl_cluster: RL cluster containing actor, reference and reward models.
       algo_config: Configuration object.
-      reward_fns: Reward functions.
+      reward_fn: Reward function.
       chat_parser: A parser to handle chat message formatting.
       metric_fns: Metric functions.
       data_shuffle_seed: Seed for data shuffling.
@@ -150,16 +149,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.algo_config = algo_config
     self._patch_rollout_config()
 
-    reward_manager_fn = function_registry.get_reward_manager(
-        algo_config.reward_manager
-    )
-    self.reward_manager = reward_manager_fn(
-        reward_fns=reward_fns,
-        algo_config=algo_config,
-    )
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
-    )
+    self.reward_fn = reward_fn
     self.metric_fns = metric_fns or []
     self.rl_cluster.actor_trainer.is_managed_externally = True
     if hasattr(self.rl_cluster, "critic_trainer"):
@@ -175,6 +165,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.agent_kwargs = agent_kwargs or {}
     self.env_class = env_class
     self.env_kwargs = env_kwargs or {}
+    if "reward_fn" not in self.env_kwargs:
+      self.env_kwargs["reward_fn"] = self.reward_fn
 
     self._training_config = self.rl_cluster.cluster_config.training_config
 
@@ -238,58 +230,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       rollout_config = {"train": rollout_config}
     for config in rollout_config.values():
       config.max_tokens_to_generate = self.algo_config.max_response_length
-
-  def _compute_rewards(
-      self,
-      prompts: List[str],
-      completions: List[str],
-      mode: rl_cluster_lib.Mode,
-      expected_step: int | None = None,
-      **kwargs,
-  ) -> np.ndarray:
-    """Computes the rewards for completions using the provided reward functions.
-
-    Args:
-      prompts: A list of input prompts.
-      completions: A list of generated text completions.
-      mode: The mode to use for logging metrics.
-      expected_step: The expected training step.
-      **kwargs: Additional keyword arguments passed to the reward functions.
-
-    Returns:
-      A JAX array (shape `[num_prompts]`) of scalar rewards for each
-      prompt-completion pair. The rewards are the sum across all the provided
-      reward functions.
-
-    Raises:
-        RuntimeError: If 'r' reward is None, indicating a failure to obtain the
-        result, or if the length of 'r' reward does not match the length of
-        'prompts'.
-    """
-    if "mode" in kwargs:
-      raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
-    kwargs["mode"] = str(mode)
-
-    rewards_info = self.reward_manager(
-        prompts=prompts,
-        completions=completions,
-        **kwargs,
-    )
-
-    # Log all metrics for this trajectory in one call
-    if expected_step is not None:
-      # Pass the expected_step explicitly because it is calculated based on
-      # the batch index (predicted step) to align metrics with the correct
-      # training step in the asynchronous execution.
-      self.rl_cluster.buffer_metrics_async(
-          rewards_info["log_metrics"], mode=mode, step=expected_step
-      )
-    else:
-      self.rl_cluster.buffer_metrics_async(
-          rewards_info["log_metrics"], mode=mode
-      )
-
-    return rewards_info["rewards"]
 
   def _create_micro_batch_iterator(
       self,
