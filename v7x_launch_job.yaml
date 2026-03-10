@@ -3,7 +3,7 @@ kind: JobSet
 metadata:
   annotations:
     jobset.sigs.k8s.io/hack: "true"
-  name: linchai-deepscaler-sglang-jax
+  name: linchai-ds-sglang
   namespace: default
 spec:
   coordinator:
@@ -142,7 +142,7 @@ spec:
     template:
       metadata:
         annotations:
-          cloud.google.com/gke-tpu-slice-topology: 2x2x2
+          cloud.google.com/gke-tpu-slice-topology: 4x4x4
           kueue.x-k8s.io/safe-to-forcefully-terminate: "true"
         labels:
           kueue.x-k8s.io/queue-name: multislice-queue
@@ -154,10 +154,10 @@ spec:
         template:
           metadata:
             annotations:
-              cloud.google.com/gke-tpu-slice-topology: 2x2x2
+              cloud.google.com/gke-tpu-slice-topology: 4x4x4
               kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               kueue.x-k8s.io/podset-slice-size: "8"
-              kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-2x2x2-id
+              kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id
               cloud.google.com/skip-tpu-webhook-check: "true"
           spec:
             tolerations:
@@ -170,7 +170,7 @@ spec:
                 requiredDuringSchedulingIgnoredDuringExecution:
                   nodeSelectorTerms:
                   - matchExpressions:
-                    - key: cloud.google.com/gke-tpu-partition-2x2x2-state
+                    - key: cloud.google.com/gke-tpu-partition-4x4x4-state
                       operator: In
                       values:
                       - HEALTHY
@@ -235,7 +235,7 @@ spec:
             hostNetwork: true
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: tpu7x
-            priorityClassName: medium
+            priorityClassName: high
             restartPolicy: OnFailure
             terminationGracePeriodSeconds: 30
             volumes:

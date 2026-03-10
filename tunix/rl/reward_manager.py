@@ -151,6 +151,7 @@ class SequenceRewardManager(AbstractRewardManager):
         prompts,
         completions,
         rewards,
+        log_prompts_completions=kwargs["log_prompts_completions"],
     )
     sum_rewards = np.nansum(rewards, axis=1)
     rewards_info = {
@@ -173,8 +174,7 @@ class SequenceRewardManager(AbstractRewardManager):
       prompts: List[str],
       completions: List[str],
       rewards: np.ndarray,  # (num_prompts, num_reward_fns)
-      sum_rewards: np.ndarray,  # (num_prompts,)
-      log_prompts_completions: bool = True
+      log_prompts_completions: bool = True,
   ) -> Dict[str, Any]:
     """Logs individual and summed rewards, along with prompts/completions, for each trajectory."""
     # Assuming self.reward_fns and self.rl_cluster are accessible instance attributes
