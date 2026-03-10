@@ -203,7 +203,9 @@ class Sampler(base_sampler.BaseSampler):
     # we separate out state and graph def so that the state can be passed as an
     # argument to _decode_fn, resulting in it not being treated as a static
     # arg. This greatly reduces the size of the HLO and reduces compile time
+    print(f'YY compiling decode', flush=True)
     self._compiled_decode_fn = jax.jit(self._decode_fn)
+    print(f'YY compiling prefill', flush=True)
     self._compiled_prefill_fn = jax.jit(self._prefill_fn)
 
   def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
@@ -716,6 +718,7 @@ class Sampler(base_sampler.BaseSampler):
       sampler_output: A SamplerOutput object containing the generated samples.
     """
     self.eos_ids = jnp.array(eos_tokens or [self.tokenizer.eos_id()])
+    print(f'YY eos id as jax array done', flush=True)
     input_strings = (
         [input_strings] if isinstance(input_strings, str) else input_strings
     )
@@ -754,6 +757,7 @@ class Sampler(base_sampler.BaseSampler):
       seed = jax.random.PRNGKey(0)
     elif isinstance(seed, int):
       seed = jax.random.PRNGKey(seed)
+    print(f'YY {all_input_ids.shape=}', flush=True)
     sampling_state = self.init_sample_state(
         jnp.array(all_input_ids),
         include_logits=return_logits,
@@ -765,12 +769,13 @@ class Sampler(base_sampler.BaseSampler):
         seed=seed,
         beam_size=beam_size,
     )
+    print(f'YY start to prefill', flush=True)
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state,
         sampling_state,
         processed_images,
     )
-
+    print(f'YY start to decode', flush=True)
     sampling_state = self._compiled_decode_fn(
         self._flattened_transformer_state, sampling_state
     )
@@ -789,6 +794,7 @@ class Sampler(base_sampler.BaseSampler):
       # if need more internal states, they should be updated by
       # finalize_beam_search_state
       del sampling_state
+    print(f'start to pad', flush=True)
     if pad_output:
       max_len = total_sampling_steps if echo else max_generation_steps
       lengths, out_tokens, out_logits = utils.padded_fill_tokens_and_logits(
