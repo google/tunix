@@ -160,7 +160,8 @@ NUM_ITERATIONS = 1
 # The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
 # Important to keep a high enough value for this, otherwise, the KL divergence
 # can increase unchecked.
-BETA = 0.005
+# BETA = 0.005
+BETA = 0
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 EPSILON = 0.2
@@ -190,7 +191,7 @@ OFF_POLICY_STEPS = 0
 MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
-LEARNING_RATE = 1.00E-06
+LEARNING_RATE = 2.00E-06
 B1 = 0.9  # Adam beta1
 B2 = 0.99  # Adam beta2
 WEIGHT_DECAY = 0.01
