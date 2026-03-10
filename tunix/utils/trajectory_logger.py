@@ -16,9 +16,13 @@
 
 import atexit
 import dataclasses
+import os
 import queue
+import signal
+import sys
 import threading
 import time
+import types
 from typing import Any
 
 from absl import logging
@@ -143,17 +147,51 @@ class AsyncTrajectoryLogger:
         if item is None:  # Sentinel for stopping
           self._logging_queue.task_done()
           break
+
+        # Batching: drain the queue to log items in groups
+        items = [item]
+        while not self._logging_queue.empty():
+          try:
+            next_item = self._logging_queue.get_nowait()
+            if next_item is None:
+              # Put back the sentinel so the loop terminates next time
+              self._logging_queue.put(None)
+              break
+            items.append(next_item)
+          except queue.Empty:
+            break
+
         try:
-          log_item(self._log_dir, item, self._file_suffix)
+          log_item(self._log_dir, items, self._file_suffix)
         except Exception:  # pylint: disable=broad-except
-          logging.exception('Failed to log trajectory.')
+          logging.exception('Failed to log trajectories.')
         finally:
-          self._logging_queue.task_done()
+          for _ in range(len(items)):
+            self._logging_queue.task_done()
 
     self._logging_thread = threading.Thread(target=_worker, daemon=True)
     self._logging_thread.start()
+
+    # Register cleanup
     atexit.register(self.stop)
+
+    # Register signal handlers for robust termination
+    if threading.current_thread() is threading.main_thread():
+      try:
+        signal.signal(signal.SIGINT, self._handle_signal)
+        signal.signal(signal.SIGTERM, self._handle_signal)
+      except ValueError:
+        logging.warning('Failed to register signal handlers.')
+
     logging.info('Started trajectory logging thread.')
+
+  def _handle_signal(self, signum: int, frame: types.FrameType):
+    """Gracefully stops the logger and exits."""
+    logging.info('Received signal %d, flushing trajectory logger...', signum)
+    self.stop()
+    # Restore default handler and re-send signal to self
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
   def __del__(self):
     """Ensures stop is called when the object is destroyed."""
