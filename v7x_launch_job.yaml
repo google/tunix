@@ -38,7 +38,7 @@ spec:
                 _sigterm() (kill -SIGTERM $! 2>/dev/null;);
                 trap _sigterm SIGTERM;
 
-                (TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$HF_TOKEN WANDB_API_KEY=$WANDB_API_KEY ROLLOUT_ENGINE=vllm python3 examples/deepscaler/train_deepscaler_nb.py) & PID=$!;
+                (TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=my-hf-key WANDB_API_KEY=my-wandb-key ROLLOUT_ENGINE=vllm python3 examples/deepscaler/train_deepscaler_nb.py) & PID=$!;
                 while kill -0 $PID 2>/dev/null;
                     do sleep 5;
                 done;
@@ -82,6 +82,7 @@ spec:
               - --node_type=resource_manager
               - --instance_count=1
               - --instance_type=tpu7x:4x4x4
+              - --xla_tpu_use_enhanced_launch_barrier=true
               env:
               - name: REPLICATED_JOB_NAME
                 valueFrom:
@@ -148,7 +149,7 @@ spec:
         labels:
           kueue.x-k8s.io/queue-name: multislice-queue
       spec:
-        backoffLimit: 32
+        backoffLimit: 32000
         completionMode: Indexed
         completions: 16
         parallelism: 16
