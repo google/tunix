@@ -16,11 +16,12 @@ import os
 import tempfile
 import time
 from absl.testing import absltest
+from absl.testing import parameterized
 from tunix.perf.experimental import export
 from tunix.perf.experimental import tracer
 
 
-class ExportTest(absltest.TestCase):
+class ExportTest(parameterized.TestCase):
 
   def test_perf_metrics_export(self):
     # Backward compatibility check
@@ -44,9 +45,56 @@ class ExportTest(absltest.TestCase):
         any("=== Exporting Timelines ===" in log for log in logs.output)
     )
 
-  def test_perf_metrics_export_no_trace_dir(self):
-    exporter = export.PerfMetricsExport(trace_dir=None)
-    # Should not raise exception
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="none_dir",
+          trace_dir=None,
+          expected_dir=export.DEFAULT_TRACE_DIR,
+      ),
+      dict(
+          testcase_name="empty_dir",
+          trace_dir="",
+          expected_dir=export.DEFAULT_TRACE_DIR,
+      ),
+      dict(
+          testcase_name="custom_dir",
+          trace_dir="/my/custom/path",
+          expected_dir="/my/custom/path",
+      ),
+  )
+  def test_perf_metrics_export_initialization_with_trace_writer_enabled(
+      self, trace_dir, expected_dir
+  ):
+    exporter = export.PerfMetricsExport(
+        enable_trace_writer=True, trace_dir=trace_dir
+    )
+    self.assertIsNotNone(exporter._writer)
+    self.assertEqual(exporter._writer._trace_dir, expected_dir)
+    # export_metrics shouldn't crash
+    exporter.export_metrics({})
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="none_dir",
+          trace_dir=None,
+      ),
+      dict(
+          testcase_name="empty_dir",
+          trace_dir="",
+      ),
+      dict(
+          testcase_name="custom_dir",
+          trace_dir="/my/custom/path",
+      ),
+  )
+  def test_perf_metrics_export_initialization_with_trace_writer_disabled(
+      self, trace_dir
+  ):
+    exporter = export.PerfMetricsExport(
+        enable_trace_writer=False, trace_dir=trace_dir
+    )
+    self.assertIsNone(exporter._writer)
+    # export_metrics shouldn't crash
     exporter.export_metrics({})
 
 

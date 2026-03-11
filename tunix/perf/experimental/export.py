@@ -24,6 +24,8 @@ from tunix.perf.experimental import tracer
 MetricsT = metrics.MetricsT
 Timeline = tracer.Timeline
 
+DEFAULT_TRACE_DIR = "/tmp/perf_traces"
+
 
 def log_metric_export_fn(timelines: Mapping[str, Timeline]) -> MetricsT:
   """Logs the timelines."""
@@ -39,17 +41,24 @@ class PerfMetricsExport:
   Exports timelines to a trace writer (Perfetto).
   """
 
-  def __init__(self, trace_dir: str | None = None):
+  def __init__(
+      self, *, enable_trace_writer: bool = True, trace_dir: str | None = None
+  ):
     """Initializes the instance.
 
     Args:
-      trace_dir: The directory to write the Perfetto trace files to. If None,
-        the trace writer will not be initialized.
+      enable_trace_writer: Whether to initialize the trace writer.
+      trace_dir: The directory to write the Perfetto trace files to. This is
+        only relevant if enable_trace_writer is True. If not provided (None or
+        empty string) and enable_trace_writer is True, a default directory is
+        used.
     """
-
-    self._writer = (
-        perfetto.PerfettoTraceWriter(trace_dir) if trace_dir else None
-    )
+    if enable_trace_writer:
+      resolved_trace_dir = trace_dir or DEFAULT_TRACE_DIR
+      self._writer = perfetto.PerfettoTraceWriter(resolved_trace_dir)
+    else:
+      # TODO(noghabi): create a NoopTraceWriter.
+      self._writer = None
 
   def export_metrics(
       self,

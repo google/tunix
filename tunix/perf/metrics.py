@@ -47,6 +47,7 @@ import dataclasses
 from typing import Any
 from typing import Callable, Dict, Mapping, Tuple
 
+from absl import logging
 from jax import typing
 from tunix.perf import span
 
@@ -88,7 +89,7 @@ class PerfMetricsOptions:
     enable_trace_writer: Whether to enable the trace writer. By default, it is
       enabled when perf metrics are enabled. If False, the trace will not be
       written out.
-    log_dir: Directory the trace writer writes the raw metrics/events to.
+    trace_dir: Directory the trace writer writes the raw metrics/events to.
   """
 
   enable_perf_v1: bool = True
@@ -96,7 +97,7 @@ class PerfMetricsOptions:
   custom_export_fn_path: str = ""
   custom_export_fn_path_v2: str = ""
   enable_trace_writer: bool = True
-  log_dir: str = ""
+  trace_dir: str = ""
 
   def __post_init__(self):
     if self.custom_export_fn_path and not self.enable_perf_v1:
@@ -112,6 +113,11 @@ class PerfMetricsOptions:
     ):
       raise ValueError(
           "enable_trace_writer is True but neither perf v1 nor v2 is enabled."
+      )
+    if self.trace_dir and not self.enable_trace_writer:
+      logging.warning(
+          "trace_dir is set to %r but enable_trace_writer is False.",
+          self.trace_dir,
       )
 
 

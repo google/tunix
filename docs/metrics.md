@@ -322,7 +322,7 @@ rl_training_config:
     enable_perf_v1: true         # Enable v1 (default: true)
     enable_perf_v2: false        # Enable v2 (default: false)
     enable_trace_writer: true    # Enable writing Perfetto trace files (default: true)
-    log_dir: "/tmp/perf_trace"   # Directory to write the trace files to
+    trace_dir: "/tmp/perf_trace" # Directory to write the trace files to
     custom_export_fn_path: "path.to.my.custom_fn"       # Optional path to a custom v1 export function
     custom_export_fn_path_v2: "path.to.my.custom_fn_v2" # Optional path to a custom v2 export function
 ```
@@ -357,7 +357,7 @@ if Tensorboard is activated:
 By default, v1 also writes detailed execution traces to Perfetto Proto formatted
 file. It reads `perf_metrics_options` from the cluster configuration to
 initialize the trace writer. You can specify the output directory by configuring
-`log_dir` within `PerfMetricsOptions` inside your `RLTrainingConfig`.
+`trace_dir` within `PerfMetricsOptions` inside your `RLTrainingConfig`.
 
 ```python
 from tunix.perf import metrics as perf_metrics
@@ -403,11 +403,11 @@ cluster = rl_cluster.RLCluster(
 
 For the experimental version, you can use the default export function which
 writes the raw timelines to a Perfetto trace file by using the
-`PerfMetricExport` class. You will need to define the `trace_dir` as the
-location for the file to be written to. Note that the v2 is still experimental
-and the additional capabilities such as exporting aggregated metrics to
-Tensorboard are WIP. Once the functionlity is complete, v2 will be replacing
-the original version.
+`PerfMetricExport` class. The trace files can be written to a local directory
+by defining `trace_dir`. If `trace_dir` is not provided, it defaults to
+`/tmp/perf_traces`. Note that the v2 is still experimental and the additional
+capabilities such as exporting aggregated metrics to Tensorboard are WIP. Once
+the functionality is complete, v2 will be replacing the original version.
 
 ```python
 from tunix.perf import metrics as perf_metrics
@@ -477,7 +477,7 @@ If you have enabled the trace writer (by setting `enable_trace_writer: true` via
 the CLI or by specifying `trace_dir` in your configuration), a proto-formatted
 file (e.g., `perfetto_trace_1771973518.pb`) containing the raw spans and
 timelines will be saved to the specified directory (which defaults to
-`/tmp/perf_traces` in v1). To view the trace, download the file to your local
+`/tmp/perf_traces`). To view the trace, download the file to your local
 machine and drag-and-drop it into the
 [Perfetto UI](https://ui.perfetto.dev/). The interface allows you to
 interactively zoom, pan, and query the execution trace, as shown below:

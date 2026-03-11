@@ -170,7 +170,7 @@ class PerfMetricsExport:
     ):
       # Setting export_dir to None will cause the trace writer to use a
       # default directory.
-      export_dir = perf_metrics_options.log_dir or None
+      export_dir = perf_metrics_options.trace_dir or None
       trace_writer = PerfettoTraceWriter(export_dir)
     else:
       trace_writer = None
