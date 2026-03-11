@@ -230,9 +230,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
-        {"kl": np.mean, "entropy": np.mean}
-    )
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
+        "kl": np.mean,
+        "entropy": np.mean,
+        "pg_clipfrac": np.mean,
+        "ppo_kl": np.mean,
+    })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
@@ -521,7 +524,8 @@ def grpo_loss_fn(
       return_logits=True,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
-  advantages = jnp.astype(train_example.advantages, jnp.float32)
+  # TODO(tsbao): We should handle token level advantages.
+  advantages = jnp.astype(train_example.advantages, jnp.float32)[:, None]
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -531,6 +535,8 @@ def grpo_loss_fn(
     )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
+  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
+
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
     seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
@@ -543,16 +549,17 @@ def grpo_loss_fn(
     )
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
-  coef_1 = jnp.exp(seq_importance_ratio)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
+  is_ratio = jnp.exp(seq_importance_ratio)
+  pg_loss_1 = -advantages * is_ratio
+  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
-  # TODO(tsbao): We should handle token level advantages.
-  per_token_loss = -jnp.minimum(
-      coef_1 * jnp.expand_dims(advantages, 1),
-      coef_2 * jnp.expand_dims(advantages, 1),
-  ).astype(jnp.float32)
+  per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
-  aux = {"kl": 0.0}
+  clipped_fraction = ppo_helpers.masked_mean(
+      jnp.greater(pg_loss_2, pg_loss_1), completion_mask
+  )
+
+  aux = {"kl": 0.0, "pg_clipfrac": clipped_fraction, "ppo_kl": ppo_kl}
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps

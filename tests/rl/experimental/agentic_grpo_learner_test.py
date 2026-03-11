@@ -915,7 +915,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertGreater(np.sum(clip_ratio_history), 0)
 
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
-    for metric_name in ["loss", "kl", "entropy"]:
+    for metric_name in ["loss", "kl", "entropy", "pg_clipfrac"]:
       self.assertLen(
           metric_logger.get_metric_history("actor", metric_name, "train"),
           grpo_learner.rl_cluster.actor_trainer.train_steps,
