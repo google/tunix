@@ -136,7 +136,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fn: RewardFn,
       algo_config: TGrpoConfig,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
@@ -154,10 +154,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     Args:
       rl_cluster: RL cluster containing actor, reference and reward models.
-      reward_fns: A single callable or a list of callables that compute a
-        scalar reward for given prompts and completions. Each function should
-        accept `prompts`, `completions` and optional keyword arguments, and
-        return a list of float rewards.
+      reward_fn: A single callable that computes a
+        scalar reward. The function should
+        accept `task` and `action`, and
+        return a `RewardOutput`.
       algo_config: An instance of `GRPOConfig` containing all GRPO specific
         parameters.
       chat_parser: A parser to handle chat message formatting.
@@ -182,7 +182,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     """  # fmt: skip
     super().__init__(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fns,
+        reward_fn=reward_fn,
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,
         algo_config=algo_config,
@@ -389,19 +389,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         step=expected_step,
     )
 
-    reward_kwargs = {
-        key: value for key, value in original_inputs.items() if key != "prompts"
-    }
-    # TODO: b/456528861 - Refactor reward computation to happen within the
-    # environment during rollout, rather than as a post-processing step. This
-    # would align with the standard agentic RL pattern and remove the need for
-    # `dummy_reward`.
-    rewards = self._compute_rewards(
-        prompts=original_inputs["prompts"],
-        completions=completion_texts,
+    rewards_list = [item.traj.get("trajectory_reward", 0.0) for item in trajectories]
+    rewards = jnp.array(rewards_list)
+
+    self.rl_cluster.buffer_metrics_async(
+        {"rewards/sum": (float(np.mean(rewards_list)), np.mean)},
         mode=mode,
-        **reward_kwargs,
-        expected_step=expected_step,
+        step=expected_step,
     )
 
     advantage_estimator = function_registry.get_advantage_estimator(

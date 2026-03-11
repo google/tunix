@@ -20,7 +20,6 @@ from absl.testing import absltest
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
-from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.agentic import utils
 
@@ -40,7 +39,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     self.mock_model_call = mock.Mock()
     self.mock_final_reward_fn = mock.Mock(
-        return_value=reward_types.RewardOutput(reward=0.5)
+        return_value=0.5
     )
     self.mock_tokenizer = mock.Mock()
     self.mock_tokenizer.encode.return_value = [1, 2, 3]
@@ -177,11 +176,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'prompt_tokens': [101],
         'conversation_tokens': [201, 202, 301, 302, 203, 204, 303, 304],
         'conversation_masks': [1, 1, 1, 1, 1, 1, 1, 1],
+        'status': 'SUCCEEDED',
         'trajectory_reward': 3.0,  # 1.0 + 2.0
         'policy_version': None,
         'original_input': {'some': 'task'},
         'group_id': None,
-        'status': 'SUCCEEDED',
     }
     self.assertEqual(token_data, expected_tokens)
 

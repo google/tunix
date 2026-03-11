@@ -56,14 +56,8 @@ Mesh = sharding.Mesh
 TrainingInputT = agentic_grpo_learner.TrainingInputT
 
 
-def reward_fn_1(prompts, completions, **kwargs):
-  del prompts, kwargs
-  return [float(i) for i in range(len(completions))]
-
-
-def reward_fn_2(answer, **kwargs):
-  del kwargs
-  return [float(i) for i in range(len(answer))]
+def reward_fn_1(task, action):
+  return float(len(str(action)))
 
 
 _MOCK_RESPONSES = [
@@ -342,7 +336,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fn_1,
+        reward_fn=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
@@ -491,7 +485,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
       grpo_learner = agentic_grpo_learner.GRPOLearner(
           rl_cluster=rl_cluster,
-          reward_fns=reward_fn_1,
+          reward_fn=reward_fn_1,
           algo_config=grpo_config,
           chat_parser=MockChatParser(),
       )
@@ -535,9 +529,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       mini_batch_size,
       train_micro_batch_size,
   ):
-    def reward_fn(prompts, **kwargs):
-      del kwargs
-      return [1.0] * len(prompts)
+    def reward_fn(task, action):
+      return float(len(str(action)))
 
     def create_learner(
         mini_batch_size,
@@ -591,7 +584,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
       grpo_learner = agentic_grpo_learner.GRPOLearner(
           rl_cluster=rl_cluster,
-          reward_fns=reward_fn,
+          reward_fn=reward_fn,
           algo_config=grpo_config,
           chat_parser=MockChatParser(),
       )
@@ -696,7 +689,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       )
       grpo_learner = agentic_grpo_learner.GRPOLearner(
           rl_cluster=rl_cluster,
-          reward_fns=reward_fn,
+          reward_fn=reward_fn,
           algo_config=grpo_config,
           chat_parser=MockChatParser(),
       )
@@ -769,7 +762,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     grpo_config = agentic_grpo_learner.GRPOConfig(max_response_length=10)
     learner = _LearnerWithException(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fn_1,
+        reward_fn=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
     )
@@ -779,25 +772,17 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name="single_reward_fn",
-          reward_fns=reward_fn_1,
+          testcase_name="grpo_algo",
+          reward_fn=reward_fn_1,
           loss_algo="grpo",
       ),
       dict(
-          testcase_name="multiple_reward_fns",
-          reward_fns=[
-              reward_fn_1,
-              reward_fn_2,
-          ],
-          loss_algo="grpo",
-      ),
-      dict(
-          testcase_name="single_reward_fn_gspo",
-          reward_fns=reward_fn_1,
+          testcase_name="gspo_algo",
+          reward_fn=reward_fn_1,
           loss_algo="gspo-token",
       ),
   )
-  def test_grpo_learner(self, reward_fns, loss_algo):
+  def test_grpo_learner(self, reward_fn, loss_algo):
     vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
@@ -846,7 +831,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fns,
+        reward_fn=reward_fn,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
@@ -870,28 +855,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     rl_metric_logger = grpo_learner.rl_cluster._rl_metrics_logger
 
-    rewards_metrics = (
-        ("rewards/" + f.__name__ for f in reward_fns)
-        if isinstance(reward_fns, list)
-        else ("rewards/" + reward_fns.__name__,)
-    )
     for metric_name in [
         "rewards/sum",
-        *rewards_metrics,
         "generation/prompts/mean_length",
-        "generation/prompts/max_length",
-        "generation/prompts/min_length",
-        "generation/completions/mean_length",
-        "generation/completions/max_length",
         "generation/completions/min_length",
         "generation/completions/clip_ratio",
         "perf/global_step_time",
         "global/test_metric",
     ]:
-      if metric_name == "rewards/reward_fn_2" and not isinstance(
-          reward_fns, list
-      ):
-        continue
       # We log metrics per step, and sometimes one extra step is logged due to
       # buffer flushing. So we check if length is close to global_steps.
       prefix, metric_name = metric_name.split("/", maxsplit=1)
@@ -994,7 +965,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fn_1,
+        reward_fn=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
@@ -1051,7 +1022,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     grpo_config = agentic_grpo_learner.GRPOConfig()
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fn_1,
+        reward_fn=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
     )
@@ -1120,7 +1091,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fn_1,
+        reward_fn=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
@@ -1209,7 +1180,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fn_1,
+        reward_fn=reward_fn_1,
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
     )
@@ -1332,7 +1303,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
-        reward_fns=reward_fn_1,
+        reward_fn=reward_fn_1,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {"test_metric": (1.0, np.mean)}],
         chat_parser=MockChatParser(),
