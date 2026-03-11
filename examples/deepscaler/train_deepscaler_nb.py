@@ -111,6 +111,13 @@ TOP_K = 50
 # paper. The "group" in GRPO comes from here.
 NUM_GENERATIONS = 8
 
+# Max number of sequences to be processed in parallel by vllm.
+VLLM_MAX_NUM_SEQS = 768
+
+# Max number of tokens to be processed in parallel by vllm.
+# Divide by 8 for on policy, 1 step off divide by 4
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
+
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
 NUM_ITERATIONS = 1
@@ -139,7 +146,10 @@ NUM_EPOCHS = 100  # can potentially train for more epochs
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
 # Max concurrency for parallel processing of trajectories.
-MAX_CONCURRENCY = 64
+MAX_CONCURRENCY = 1024
+
+# Max number of off-policy steps. Default to 0 for synchronous training.
+OFF_POLICY_STEPS = 0
 
 MODEL_DTYPE = jnp.float32
 
@@ -468,13 +478,19 @@ sglang_jax_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    "rollout_vllm_hbm_utilization": 0.85,
+    "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
-    "rollout_vllm_kwargs": {"kv_cache_metrics": True},
+    "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
+    "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+    "rollout_vllm_kwargs": {
+        "kv_cache_metrics": True,
+        "disable_log_stats": False,
+        "enable_prefix_caching": True,
+    },
 }
 
 if ROLLOUT_ENGINE == "sglang_jax":
@@ -527,6 +543,7 @@ grpo_config = GRPOConfig(
     epsilon_high=EPSILON_HIGH,
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
+    off_policy_steps=OFF_POLICY_STEPS,
 )
 
 # %%
