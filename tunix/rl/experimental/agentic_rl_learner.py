@@ -780,7 +780,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      if micro_batches_since_last_sync == micro_batches_per_full_batch * (
+          self.algo_config.off_policy_steps + 1
+      ):
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
