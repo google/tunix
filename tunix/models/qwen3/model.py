@@ -113,6 +113,7 @@ class ModelConfig:
         num_kv_heads=8,
         norm_eps=1e-06,
         rope_theta=1_000_000,
+        use_tied_embedding=True,
     )
 
   qwen3_0p6b_base = qwen3_0p6b  # qwen3-0.6B-base
@@ -129,6 +130,7 @@ class ModelConfig:
         num_kv_heads=8,
         norm_eps=1e-06,
         rope_theta=1_000_000,
+        use_tied_embedding=True,
     )
 
   qwen3_1p7b_base = qwen3_1p7b  # qwen3-1.7B-base
