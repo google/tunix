@@ -171,6 +171,7 @@ def create_model_from_safe_tensors(
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
+    mode: str = "auto",
 ) -> model_lib.Gemma:
   v_ckpt = _peek_vocab_size_from_safetensors(file_dir)
   if v_ckpt != config.num_embed:
@@ -184,4 +185,5 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
+      mode=mode,
   )
