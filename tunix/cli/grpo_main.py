@@ -145,13 +145,10 @@ class GrpoPipeline(config.HyperParameters):
               f" {custom_export_fn_path_v2}"
           )
       else:
-        perf_config.custom_export_fn_v2 = (
-            perf_export_v2.PerfMetricsExport(
-                perf_metrics_options.log_dir
-                if perf_metrics_options.log_dir
-                else None
-            ).export_metrics
-        )
+        perf_config.custom_export_fn_v2 = perf_export_v2.PerfMetricsExport(
+            enable_trace_writer=perf_metrics_options.enable_trace_writer,
+            trace_dir=perf_metrics_options.trace_dir,
+        ).export_metrics
     return perf_config
 
   def create_rl_cluster(self):

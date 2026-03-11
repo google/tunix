@@ -26,7 +26,7 @@ class MetricsTest(parameterized.TestCase):
     self.assertEqual(options.custom_export_fn_path, "")
     self.assertEqual(options.custom_export_fn_path_v2, "")
     self.assertTrue(options.enable_trace_writer)
-    self.assertEqual(options.log_dir, "")
+    self.assertEqual(options.trace_dir, "")
 
   @parameterized.named_parameters(
       dict(
