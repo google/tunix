@@ -36,6 +36,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -378,10 +379,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
+    tags = {}
+    if env and hasattr(env, "extra_kwargs"):
+      if "group_id" in env.extra_kwargs:
+        tags[perf_constants.GROUP_ID] = env.extra_kwargs["group_id"]
+        if self._full_batch_size > 0:
+          tags[perf_constants.STEP] = (
+              env.extra_kwargs["group_id"] // self._full_batch_size
+          )
+      if "pair_index" in env.extra_kwargs:
+        tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
+
     result = self.rl_cluster.generate(
         prompts=chat_lists,
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
+        trace_tags=tags,
     )
 
     return result.text[0]
@@ -796,16 +809,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self._rollout_sync_lock.acquire_weight_sync()
           try:
             logging.info("Sync lock acquired. Syncing weights.")
-            self.rl_cluster.sync_weights()
+            with self.rl_cluster.perf_v2.span(
+                perf_constants.WEIGHT_SYNC,
+                self.rl_cluster.perf_v2.all_devices,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                },
+            ):
+              self.rl_cluster.sync_weights()
             self.policy_version += 1
             logging.info(
                 "Weights synced. Policy version incremented to %d.",
                 self.policy_version,
             )
             try:
-              self._put_prompts_to_queue(
-                  prompt_queue, next(full_dataset_iterator)
-              )
+              with self.rl_cluster.perf_v2.span(
+                  perf_constants.DATA_LOADING,
+                  tags={
+                      perf_constants.STEP: self.rl_cluster.global_steps,
+                  },
+              ):
+                batch = next(full_dataset_iterator)
+              self._put_prompts_to_queue(prompt_queue, batch)
             except StopIteration:
               prompt_queue.put(None)
           finally:
@@ -814,11 +839,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else:
           self.rl_cluster.global_steps += 1
           try:
-            self._put_prompts_to_queue(
-                prompt_queue, next(full_dataset_iterator)
-            )
+            with self.rl_cluster.perf_v2.span(
+                perf_constants.DATA_LOADING,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                },
+            ):
+              batch = next(full_dataset_iterator)
+            self._put_prompts_to_queue(prompt_queue, batch)
           except StopIteration:
             prompt_queue.put(None)
+
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf_v2.export(),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
         micro_batches_since_last_sync = 0
         self._global_step_start_time = time.time()
 

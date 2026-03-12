@@ -19,7 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from typing import Any, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
 from absl import logging
 import flax
@@ -34,6 +34,8 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
@@ -194,8 +196,9 @@ class PeftTrainer:
       model: nnx.Module,
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
-      metrics_logger: Optional[MetricsLogger] = None,
-      perf_tracer: Optional[perf_trace.Tracer] = None,
+      metrics_logger: MetricsLogger | None = None,
+      perf_tracer: perf_trace.Tracer | None = None,
+      perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
   ):
     self.model = model
     self.config = training_config
@@ -225,6 +228,11 @@ class PeftTrainer:
     self.is_managed_externally = False
     self._perf_tracer = (
         perf_tracer if perf_tracer is not None else perf_trace.NoopTracer()
+    )
+    self._perf_tracer_v2 = (
+        perf_tracer_v2
+        if perf_tracer_v2 is not None
+        else perf_tracer_lib.NoopTracer()
     )
 
     self._train_steps = 0  # represent # of times model has been updated
@@ -265,6 +273,7 @@ class PeftTrainer:
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
+    self._mini_batch_size = None
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -675,11 +684,43 @@ class PeftTrainer:
         if self.training_hooks:
           self.training_hooks.on_train_step_start(self)
 
+        # Collect tags for the span
+        metadata = self.custom_checkpoint_metadata()
+        global_step = metadata.get("global_step")
+
+        if global_step is not None:
+          # Offset by 1 since global_step is incremented for checkpointing.
+          global_step -= 1
+          if global_step > 0:
+            if self._mini_batch_size is None:
+              self._mini_batch_size = max(1, self._train_steps // global_step)
+            mini_batch = self._train_steps % self._mini_batch_size
+          else:
+            mini_batch = self._train_steps
+        else:
+          mini_batch = None
+          global_step = None
+        micro_batch = self._iter_steps % self.config.get_with_default(
+            "gradient_accumulation_steps", 1
+        )
+        tags = {
+            perf_constants.STEP: global_step,
+            perf_constants.ROLE: metadata.get("role"),
+            perf_constants.MICRO_BATCH: micro_batch,
+            perf_constants.MINI_BATCH: mini_batch,
+        }
+
         with self._perf_tracer.span(
-            "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
-        ) as span:
+            "peft_train_step",
+            pxla.thread_resources.env.physical_mesh.devices,
+        ) as span, self._perf_tracer_v2.span(
+            perf_constants.PEFT_TRAIN,
+            pxla.thread_resources.env.physical_mesh.devices,
+            tags=tags,
+        ) as span_v2:
           train_loss, aux, grad_norm = train_step(train_example)
           span.device_end([train_loss])
+          span_v2.async_end([train_loss])
 
         current_time = time.perf_counter()
         step_time_delta = current_time - last_step_completion_time

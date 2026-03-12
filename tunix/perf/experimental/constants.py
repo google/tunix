@@ -16,13 +16,20 @@
 
 # Tags for Span / Event based data model.
 
-GLOBAL_STEP = "global_step"
-MINI_BATCH_STEP = "mini_batch_step"
-MICRO_BATCH_STEP = "micro_batch_step"
-
+STEP = "step"
+MINI_BATCH = "mini_batch_step"
+MICRO_BATCH = "micro_batch_step"
+ROLE = "role"
+GROUP_ID = "group_id"
+PAIR_INDEX = "pair_index"
 
 # Common Span / Event names.
 
 DATA_LOADING = "data_loading"
 # TODO(noghabi): Consider renaming to train, inference, etc.
 ROLLOUT = "rollout"
+WEIGHT_SYNC = "weight_sync"
+REFERENCE_INFERENCE = "reference_inference"
+OLD_ACTOR_INFERENCE = "old_actor_inference"
+ADVANTAGE_COMPUTATION = "advantage_computation"
+PEFT_TRAIN = "peft_train"
