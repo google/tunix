@@ -67,7 +67,7 @@ spec:
               resources:
                 limits:
                   cpu: "24"
-                  memory: 200G
+                  memory: 300G
               securityContext:
                 privileged: true
               volumeMounts:
@@ -132,7 +132,7 @@ spec:
                   memory: 100G
               restartPolicy: Always
             nodeSelector:
-              cloud.google.com/gke-nodepool: cpu-np
+              cloud.google.com/gke-nodepool: cpu-np-high-ram 
             restartPolicy: Never
             volumes:
             - hostPath:
