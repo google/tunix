@@ -18,15 +18,14 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Mapping
-import os
 import time
+from typing import Any
 
 from absl import logging
+from etils import epath
 from perfetto.trace_builder.proto_builder import TraceProtoBuilder
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import timeline
-
-from typing import Any
 
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackDescriptor
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
@@ -89,15 +88,16 @@ class PerfettoTraceWriter(TraceWriter):
     """Initializes the PerfettoTraceWriter.
 
     Args:
-      trace_dir: The directory to export trace files to. This path must be an
-        absolute Linux path with write permissions.
+      trace_dir: The directory to export trace files to. This path can be a
+        local Linux path or a remote storage path (e.g. gs://).
     """
     self._trace_dir = trace_dir
     self._trace_file_path = None
     try:
-      os.makedirs(self._trace_dir, exist_ok=True)
+      trace_dir_path = epath.Path(self._trace_dir)
+      trace_dir_path.mkdir(parents=True, exist_ok=True)
       trace_file_name = f"perfetto_trace_v2_{int(time.time())}.pb"
-      self._trace_file_path = os.path.join(self._trace_dir, trace_file_name)
+      self._trace_file_path = trace_dir_path / trace_file_name
       logging.info(
           "Initializing perfetto trace writer at: %s", self._trace_file_path
       )
@@ -118,12 +118,11 @@ class PerfettoTraceWriter(TraceWriter):
       return
 
     try:
-      # TODO(b/480134569): see if file writing is a bottleneck and explore
+      # TODO: b/480134569 -  see if file writing is a bottleneck and explore
       # faster alternatives (e.g., keeping in memory and writing at the end).
-      # TODO(noghabi): once we empty timeline, we can just append the recent
+      # TODO: noghabi - once we empty timeline, we can just append the recent
       # spans to the file without serializing the entire trace.
-      with open(self._trace_file_path, "wb") as f:
-        f.write(builder.serialize())
+      self._trace_file_path.write_bytes(builder.serialize())
     except Exception:  # pylint: disable=broad-except
       # Catching broad exceptions to ensure that failures in trace
       # serialization or writing do not crash the application. Tracing is
@@ -162,7 +161,7 @@ class PerfettoTraceWriter(TraceWriter):
 
       # Determine lanes for spans to handle overlaps. Perfetto requires spans
       # on the same track to be strictly nested (no arbitrary overlaps).
-      # TODO(noghabi): Instead of agnostically splitting into lanes, define
+      # TODO: noghabi - Instead of agnostically splitting into lanes, define
       # proper groupings for spans, e.g., a better way for combining rollouts
       # and overlaps of peft_train and reference_inference.
       sorted_spans = sorted(tl.spans.values(), key=lambda s: (s.begin, s.id))

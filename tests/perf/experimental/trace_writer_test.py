@@ -140,6 +140,7 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
         },
     ]
     self.assertEqual(actual_events, expected_events)
+    mock_builder.serialize.assert_called_once()
 
   @mock.patch.object(trace_writer_lib, "TraceProtoBuilder", autospec=True)
   def test_write_timelines_overlapping_spans(self, mock_builder_cls):
@@ -262,6 +263,7 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
         },
     ]
     self.assertEqual(actual_events, expected_events)
+    mock_builder.serialize.assert_called_once()
 
   def test_perfetto_trace_writer_integration(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -286,20 +288,35 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
       # Check if file was created and has content
       files = os.listdir(tmp_dir)
-      self.assertLen(files, 1)
-      self.assertStartsWith(files[0], "perfetto_trace_v2_")
-      self.assertEndsWith(files[0], ".pb")
-      self.assertGreater(os.path.getsize(os.path.join(tmp_dir, files[0])), 0)
+
+      with self.subTest("file_created"):
+        self.assertLen(files, 1)
+
+      if files:
+        with self.subTest("file_name_prefix"):
+          self.assertStartsWith(files[0], "perfetto_trace_v2_")
+
+        with self.subTest("file_name_suffix"):
+          self.assertEndsWith(files[0], ".pb")
+
+        with self.subTest("file_content"):
+          self.assertGreater(
+              os.path.getsize(os.path.join(tmp_dir, files[0])), 0
+          )
 
   def test_perfetto_trace_writer_invalid_dir(self):
     # Use a file path as directory to cause failure
     with tempfile.NamedTemporaryFile() as tmp_file:
       # Expect initialization to fail gracefully (log error, no crash)
-      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_file.name)
+      with self.assertLogs(level="ERROR") as cm:
+        writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_file.name)
 
       t = tracer.Timeline("timeline", 1000.0)
       # Expect write to fail gracefully
       writer.write_timelines({"timeline": t})
+
+    self.assertLen(cm.output, 1)
+    self.assertIn("Failed to initialize perfetto trace writer", cm.output[0])
 
   def test_perfetto_trace_writer_empty_timelines(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
