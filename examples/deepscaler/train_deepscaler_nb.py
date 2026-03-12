@@ -70,6 +70,7 @@ with cm:
   from tunix.utils import math_rewards
   from tunix.utils import compat
   from tunix.cli.utils import data as data_lib
+  from tunix.sft import profiler
 
 try:
   import pathwaysutils
@@ -94,13 +95,13 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
 TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 2048
-MAX_RESPONSE_LENGTH = 8192
+MAX_RESPONSE_LENGTH = 4096
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = 0.6
@@ -139,7 +140,7 @@ NUM_EPOCHS = 100  # can potentially train for more epochs
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
 # Max concurrency for parallel processing of trajectories.
-MAX_CONCURRENCY = 64
+MAX_CONCURRENCY = 128
 
 MODEL_DTYPE = jnp.float32
 
@@ -226,36 +227,30 @@ else:
   trainer_mesh = mesh
 
 # %%
-try:
-  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+NOTEBOOK_ENV = "git"
 
-  file_open = gfile.Open
+from google.cloud import storage
 
-  NOTEBOOK_ENV = "g3"
-except Exception:
-  NOTEBOOK_ENV = "git"
+import fsspec
 
-  from google.cloud import storage
-
-  import fsspec
-
-  file_open = fsspec.open
+file_open = fsspec.open
 
 if NOTEBOOK_ENV == "g3":
   DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/data/"
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
+  DATA_PATH_PREFIX = "gs://linchai-bucket-dev/rl/data"
+  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
   CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "linchai/deepscaler_ckpt/01")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 
+PROFILER_PATH = "gs://linchai-bucket/rl/profiler/traces/grpo_train"
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
@@ -406,7 +401,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
+    log_dir="gs://linchai-bucket/tensorboard/grpo", flush_every_n_steps=1
 )
 
 # %%
@@ -508,12 +503,19 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=2,
+        train_micro_batch_size=1,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
+        # profile options
+        # profiler_options = profiler.ProfilerOptions(
+        #   profiler_steps=64,
+        #   skip_first_n_steps=0,
+        #   set_profile_options=True,
+        #   log_dir=PROFILER_PATH,
+        # )
     ),
     rollout_config=rollout_engine_config,
 )

@@ -576,6 +576,7 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
   Returns:
     Group relative advantages.
   """
+  print("Rewards before advantage estimation:", rewards)
   mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
   std_grouped_rewards = rewards.reshape(-1, num_generations).std(
       axis=-1, ddof=1
@@ -583,8 +584,10 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
 
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-
+  
+  advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
+  print("Computed advantages:", advantages)
+  return advantages
 
 GrpoConfig = GRPOConfig
 GrpoLearner = GRPOLearner

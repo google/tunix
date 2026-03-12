@@ -91,6 +91,7 @@ class Profiler:
         profile_options.python_tracer_level = (
             self._profiler_options.python_tracer_level
         )
+        jax.profiler.enable_hlo_proto = False
         jax.profiler.start_trace(
             log_dir=self._output_path, profiler_options=profile_options
         )
