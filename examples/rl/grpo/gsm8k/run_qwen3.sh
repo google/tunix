@@ -35,8 +35,6 @@ echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 echo "  Train Split: $train_split"
 echo "  Eval Split: $eval_split"
-echo "  Train Split: $train_split"
-echo "  Eval Split: $eval_split"
 
 max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
 max_steps=$(printf "%.0f" "$max_steps_float")
