@@ -436,6 +436,18 @@ class RLCluster:
       else:
         raise ValueError("Rollout sglang jax model config is missing!")
 
+      if (
+          sft_utils.is_lora_enabled(self.rollout_actor)
+          and not loaded_sglang_jax_config.rollout_sglang_jax_enable_static_lora
+      ):
+        raise ValueError(
+            "Rollout sglang jax lora config is missing: must set"
+            " rollout_sglang_jax_lora_target_modules,"
+            " rollout_sglang_jax_enable_static_lora,"
+            " rollout_sglang_jax_max_lora_rank,"
+            " rollout_sglang_jax_lora_scaling."
+        )
+
       self._rollout = sglang_jax_rollout.SglangJaxRollout(
           self.rollout_actor,
           self.tokenizer,
