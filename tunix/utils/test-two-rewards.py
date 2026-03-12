@@ -21,6 +21,9 @@ verify_rewards = rewards_math_verify.math_reward(
 
 print("Original rewards:", orig_rewards)
 print("Verify rewards:", verify_rewards)
+# Original rewards: [1.0, 1.0, 1.0, 1.0]
+# Verify rewards: [1.0, 1.0, 1.0, 1.0]
+
 completions = ["\\boxed{1}", "\\boxed{2.1}", "3", "\\boxed{4}"]
 answers = ["1", "2", "3", "4"]
 orig_rewards = math_rewards.math_reward(
@@ -34,7 +37,7 @@ verify_rewards = rewards_math_verify.math_reward(
     completions=completions,
     answer=answers,
 )
-
-
 print("Original rewards:", orig_rewards)
 print("Verify rewards:", verify_rewards)
+# Original rewards: [1.0, 0.0, 0.0, 1.0]
+# Verify rewards: [1.0, 0.0, 1.0, 1.0]
