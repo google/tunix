@@ -192,9 +192,15 @@ def put_params_on_memory_kind(
   """Puts params on the given memory kind."""
   if memory_kind not in ["device", "pinned_host", "unpinned_host"]:
     raise ValueError(
-        "`memory_kind` must be one of `device`, `pinned_host`, or "
-        f"`unpinned_host`. Received: {memory_kind}."
+        "memory_kind must be one of device, pinned_host, or "
+        f"unpinned_host. Received: {memory_kind}."
     )
+  if not jax.tree_util.tree_leaves(params):
+    logging.debug(
+        "put_params_on_memory_kind received an empty parameter tree. "
+        "Skipping device transfer."
+    )
+    return params
   original_shardings = jax.tree.map(lambda x: x.sharding, params)
   logging.info("original_shardings: %s", original_shardings)
   is_on_device = jax.tree_util.tree_reduce(

@@ -151,6 +151,30 @@ class UtilsTest(absltest.TestCase):
     out, _ = critic_model(x, positions, None, attn_mask)
     self.assertEqual(out.shape, (2, 3, 1))
 
+  def test_put_params_on_memory_kind(self):
+    # Test valid memory kind
+    params = {'a': jnp.array([1.0, 2.0]), 'b': jnp.array([3.0])}
+    updated_params = utils.put_params_on_memory_kind(params, 'pinned_host')
+    self.assertEqual(
+        jax.tree.map(lambda x: x.sharding.memory_kind, updated_params),
+        {'a': 'pinned_host', 'b': 'pinned_host'},
+    )
+
+    # Test already on requested memory kind
+    updated_params_2 = utils.put_params_on_memory_kind(
+        updated_params, 'pinned_host'
+    )
+    self.assertIs(updated_params, updated_params_2)
+
+    # Test empty tree
+    empty_params = {}
+    updated_empty = utils.put_params_on_memory_kind(empty_params, 'device')
+    self.assertEqual(updated_empty, {})
+
+    # Test invalid memory kind
+    with self.assertRaisesRegex(ValueError, 'memory_kind must be one of'):
+      utils.put_params_on_memory_kind(params, 'invalid_kind')
+
 
 if __name__ == '__main__':
   absltest.main()
