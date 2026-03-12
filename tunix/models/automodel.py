@@ -292,18 +292,14 @@ def download_model(
       ValueError: If the model source is not supported for downloading.
   """
 
-  if model_source in (ModelSource.KAGGLE, ModelSource.HUGGINGFACE):
+  if model_source == ModelSource.KAGGLE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
-    if model_download_path:
-      # Append the model name so different models don't share the same directory.
-      model_name = model_id_or_path.split('/')[-1]
-      model_download_path = os.path.join(model_download_path, model_name)
-
-    if model_source == ModelSource.KAGGLE:
-      return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)
-    else:
-      return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
+    return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)
+  elif model_source == ModelSource.HUGGINGFACE:
+    from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
+    
+    return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
   elif model_source == ModelSource.GCS:
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
