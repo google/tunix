@@ -19,7 +19,7 @@ from unittest import mock
 
 from absl.testing import absltest
 from tunix.perf.experimental import constants as perf_constants
-from tunix.perf.experimental import perfetto
+from tunix.perf.experimental import trace_writer as trace_writer_lib
 from tunix.perf.experimental import tracer
 
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TracePacket
@@ -27,9 +27,9 @@ from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackDescriptor
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
 
 
-class PerfettoTest(absltest.TestCase):
+class PerfettoTraceWriterTest(absltest.TestCase):
 
-  @mock.patch.object(perfetto, "TraceProtoBuilder", autospec=True)
+  @mock.patch.object(trace_writer_lib, "TraceProtoBuilder", autospec=True)
   def test_write_timelines_content(self, mock_builder_cls):
     mock_builder = mock_builder_cls.return_value
     mock_builder.serialize.return_value = b""
@@ -45,7 +45,7 @@ class PerfettoTest(absltest.TestCase):
     mock_builder.add_packet.side_effect = add_packet_side_effect
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = perfetto.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
 
       t = tracer.Timeline("timeline_test", 1000.0)
       # Create a span with a specific tag
@@ -94,7 +94,7 @@ class PerfettoTest(absltest.TestCase):
 
   def test_perfetto_trace_writer_integration(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = perfetto.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
 
       # Create multiple timelines with various configurations to verify E2E flow.
       t1 = tracer.Timeline("timeline1", 1000.0)
@@ -124,7 +124,7 @@ class PerfettoTest(absltest.TestCase):
     # Use a file path as directory to cause failure
     with tempfile.NamedTemporaryFile() as tmp_file:
       # Expect initialization to fail gracefully (log error, no crash)
-      writer = perfetto.PerfettoTraceWriter(trace_dir=tmp_file.name)
+      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_file.name)
 
       t = tracer.Timeline("timeline", 1000.0)
       # Expect write to fail gracefully
@@ -132,11 +132,21 @@ class PerfettoTest(absltest.TestCase):
 
   def test_perfetto_trace_writer_empty_timelines(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = perfetto.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
       writer.write_timelines({})
       files = os.listdir(tmp_dir)
       # No content should be written.
       self.assertEmpty(files)
+
+
+class NoopTraceWriterTest(absltest.TestCase):
+
+  def test_noop_trace_writer_write_timelines(self):
+    writer = trace_writer_lib.NoopTraceWriter()
+    t = tracer.Timeline("timeline", 1000.0)
+    t.start_span("span1", 1001.0)
+    # Should not crash and do nothing.
+    writer.write_timelines({"timeline": t})
 
 
 if __name__ == "__main__":

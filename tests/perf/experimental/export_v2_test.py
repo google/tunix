@@ -15,6 +15,7 @@
 import os
 import tempfile
 import time
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.perf.experimental import export
@@ -62,38 +63,23 @@ class ExportTest(parameterized.TestCase):
           expected_dir="/my/custom/path",
       ),
   )
+  @mock.patch.object(export.trace_writer_lib, "PerfettoTraceWriter", autospec=True)
   def test_perf_metrics_export_initialization_with_trace_writer_enabled(
-      self, trace_dir, expected_dir
+      self, mock_writer_cls, trace_dir, expected_dir
   ):
     exporter = export.PerfMetricsExport(
         enable_trace_writer=True, trace_dir=trace_dir
     )
-    self.assertIsNotNone(exporter._writer)
-    self.assertEqual(exporter._writer._trace_dir, expected_dir)
+    mock_writer_cls.assert_called_once_with(expected_dir)
     # export_metrics shouldn't crash
     exporter.export_metrics({})
 
-  @parameterized.named_parameters(
-      dict(
-          testcase_name="none_dir",
-          trace_dir=None,
-      ),
-      dict(
-          testcase_name="empty_dir",
-          trace_dir="",
-      ),
-      dict(
-          testcase_name="custom_dir",
-          trace_dir="/my/custom/path",
-      ),
-  )
+  @mock.patch.object(export.trace_writer_lib, "NoopTraceWriter", autospec=True)
   def test_perf_metrics_export_initialization_with_trace_writer_disabled(
-      self, trace_dir
+      self, mock_noop_cls
   ):
-    exporter = export.PerfMetricsExport(
-        enable_trace_writer=False, trace_dir=trace_dir
-    )
-    self.assertIsNone(exporter._writer)
+    exporter = export.PerfMetricsExport(enable_trace_writer=False)
+    mock_noop_cls.assert_called_once_with()
     # export_metrics shouldn't crash
     exporter.export_metrics({})
 

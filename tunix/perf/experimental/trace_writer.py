@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Perfetto trace writer and helper functions."""
+"""Trace writer implementations and helper functions."""
 
 from __future__ import annotations
 
+import abc
 from collections.abc import Mapping
 import os
 import time
@@ -32,7 +33,22 @@ from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
 Timeline = timeline.Timeline
 
 
-class PerfettoTraceWriter:
+class TraceWriter(abc.ABC):
+  """An abstract base class for writing traces."""
+
+  @abc.abstractmethod
+  def write_timelines(self, timelines: Mapping[str, Timeline]) -> None:
+    """Writes timelines to the trace."""
+
+
+class NoopTraceWriter(TraceWriter):
+  """A no-op trace writer that does nothing."""
+
+  def write_timelines(self, timelines: Mapping[str, Timeline]) -> None:
+    del self, timelines  # Unused.
+
+
+class PerfettoTraceWriter(TraceWriter):
   """A writer for Perfetto trace events."""
 
   def __init__(self, trace_dir: str):
