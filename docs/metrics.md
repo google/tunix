@@ -3,15 +3,15 @@
 # Metrics
 Tunix provides a comprehensive observability stack for training LLMs,
 encompassing everything from basic training metrics to detailed execution
-traces. The section is composed of three main pillars:
+traces. This section is composed of three main pillars:
 
-*   **[Collected Metrics](#collected-metrics)**: describing a rich
-    set of system, model, and RL-specific performance metrics out-of-the-box.
-*   **[Metric Loggers](#metric-loggers)**: describing a flexible,
+*   **[Collected Metrics](#collected-metrics)**: Describes a rich
+    set of system, model, and RL-specific performance metrics out of the box.
+*   **[Metric Loggers](#metric-loggers)**: Describes a flexible,
     protocol-based logging system that allows you to seamlessly integrate with
     your preferred logging service (e.g., TensorBoard, Wandb, CLU) or create
     custom backends.
-*   **[Performance Metric Tracing](#performance-metric-tracing)**: describing a
+*   **[Performance Metric Tracing](#performance-metric-tracing)**: Describes a
     built-in, lightweight tracing system that generates detailed execution
     timelines for deep performance analysis and visualization in Perfetto.
 
@@ -27,7 +27,7 @@ Reinforcement Learning (RL) jobs:
 
 *   **`loss`**: The training loss for the current step.
 *   **`perplexity`**: The perplexity of the model on the training batch
-    (exp(loss)).
+    (`exp(loss)`).
 *   **`learning_rate`**: The current learning rate from the optimizer.
 *   **`step_time_sec`**: The time taken to execute a single training step (in
     seconds).
@@ -84,7 +84,7 @@ integrate any logging service or library.
 The primary interface for logging is the `MetricsLogger`. It is configured
 using `MetricsLoggerOptions`. Below is an example of how to configure the
 `MetricsLogger`. **Note**: The exact fields that need to be configured depend
-on the backends, which typically default based on the execution environment. See
+on the backend, which typically defaults based on the execution environment. See
 [Logging Backends Supported](#logging-backends-supported) for details on
 backend-specific configurations.
 
@@ -200,7 +200,7 @@ to the `metrax.logging.LoggingBackend` protocol.
 
 #### 1. The Protocol
 
-Your custom backend class need only needs to implement `log_scalar` and `close`.
+Your custom backend class only needs to implement `log_scalar` and `close`.
 Explicit inheritance from a base class is not required since Metrax uses
 Python's structural typing (duck typing).
 
@@ -296,7 +296,7 @@ stages (e.g., rollout, actor training, reference inference) across both host
 and device timelines.
 
 > **Note:** Performance metric tracing is currently only supported for the GRPO
-> main entry point
+> main entry point.
 
 There are currently two versions of the performance metrics system:
 
@@ -350,9 +350,9 @@ are collocated or on different TPU meshes
 [code](https://github.com/google/tunix/blob/main/perf/export.py;l=102).
 The metrics are aggregated per `global_step` and use the
 [Metric Logger](#metric-loggers) to log to the desired output. For example,
-if Tensorboard is activated:
+if TensorBoard is activated:
 
-![Perf Metrics Tensorboard](images/perf_metrics_TB.png)
+![Perf Metrics TensorBoard](images/perf_metrics_TB.png)
 
 By default, v1 also writes detailed execution traces to Perfetto Proto formatted
 file. It reads `perf_metrics_options` from the cluster configuration to
@@ -390,7 +390,7 @@ perf_config.custom_export_fn = (
 )
 
 
-# 4. Pass the config to the RLCluster.
+# 3. Pass the config to the RLCluster.
 cluster = rl_cluster.RLCluster(
     actor=actor_model,
     tokenizer=tokenizer,
@@ -401,12 +401,15 @@ cluster = rl_cluster.RLCluster(
 
 #### Experimental Version (v2)
 
-For the experimental version, you can use the default export function which
+For the experimental version, you can use the default export function, which
 writes the raw timelines to a Perfetto trace file by using the
-`PerfMetricExport` class. The trace files can be written to a local directory
+`PerfMetricExport` class. The trace files can be written to a directory
 by defining `trace_dir`. If `trace_dir` is not provided, it defaults to
-`/tmp/perf_traces`. Note that the v2 is still experimental and the additional
-capabilities such as exporting aggregated metrics to Tensorboard are WIP. Once
+`/tmp/perf_traces`. The v2 version supports local files and remote endpoints
+supported by `etils.epath` including GCS such as `gs://your-bucket/path/`.
+
+Note that v2 is still experimental and additional
+capabilities, such as exporting aggregated metrics to TensorBoard, are WIP. Once
 the functionality is complete, v2 will be replacing the original version.
 
 ```python
