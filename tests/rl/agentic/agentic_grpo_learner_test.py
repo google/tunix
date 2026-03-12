@@ -82,8 +82,9 @@ def _mock_generate(
     apply_chat_template: bool = False,
     mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
     micro_batch_size: int | None = None,
+    trace_tags: dict[str, Any] | None = None,
 ) -> base_rollout.RolloutOutput:
-  del apply_chat_template, mode, micro_batch_size
+  del apply_chat_template, mode, micro_batch_size, trace_tags
   batch_size = len(prompts)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
   tokens = [
