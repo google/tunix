@@ -41,12 +41,12 @@ from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
+from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
-from tunix.rl.experimental import agentic_rl_learner
 from tunix.rl.ppo import ppo_helpers
 from tunix.utils import trajectory_logger
 
