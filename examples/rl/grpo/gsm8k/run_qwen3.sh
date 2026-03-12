@@ -35,8 +35,6 @@ echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
 echo "  Train Split: $train_split"
 echo "  Eval Split: $eval_split"
-echo "  Train Split: $train_split"
-echo "  Eval Split: $eval_split"
 
 max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
 max_steps=$(printf "%.0f" "$max_steps_float")
@@ -57,7 +55,7 @@ python3 -m tunix.cli.grpo_main \
   model_config.rng_seed=42 \
   actor_model_config.lora_config.rank=64 \
   actor_model_config.lora_config.alpha=64.0 \
-  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"" \
+  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj" \
   actor_model_config.mesh.shape="(2,4)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   rollout_model_config.mesh.shape="(2,4)" \

@@ -163,7 +163,7 @@ class SequenceRewardManager(AbstractRewardManager):
       for k, v in log_metrics.items():
           logging.info(f"{k}:\t{v[0][0]}")
       logging.info("=======================")
-    #_log_one_example()
+    _log_one_example()
     
     return rewards_info
 
