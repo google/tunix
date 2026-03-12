@@ -38,7 +38,7 @@ spec:
                 _sigterm() (kill -SIGTERM $! 2>/dev/null;);
                 trap _sigterm SIGTERM;
 
-                (TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=my-hf-key WANDB_API_KEY=my-wandb-key ROLLOUT_ENGINE=vllm python3 examples/deepscaler/train_deepscaler_nb.py) & PID=$!;
+                (TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=my-hf-token WANDB_API_KEY=my-wandb-api-key ROLLOUT_ENGINE=vllm python3 examples/deepscaler/train_deepscaler_nb.py) & PID=$!;
                 while kill -0 $PID 2>/dev/null;
                     do sleep 5;
                 done;
@@ -67,7 +67,7 @@ spec:
               resources:
                 limits:
                   cpu: "24"
-                  memory: 100G
+                  memory: 200G
               securityContext:
                 privileged: true
               volumeMounts:
