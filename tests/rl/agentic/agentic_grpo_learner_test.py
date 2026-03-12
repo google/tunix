@@ -40,10 +40,10 @@ import orbax.checkpoint as ocp
 from tunix.generate import tokenizer_adapter
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
-from tunix.rl.experimental import agentic_grpo_learner
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger

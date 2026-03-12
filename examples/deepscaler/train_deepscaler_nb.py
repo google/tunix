@@ -59,11 +59,11 @@ with cm:
   from tunix.models.qwen2 import params as params_lib
   from tunix.models.qwen2 import model as model_lib
   from tunix.sft import metrics_logger
+  from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
   from tunix.rl.agentic.environments import task_environment
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
