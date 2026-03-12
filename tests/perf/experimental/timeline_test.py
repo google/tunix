@@ -97,6 +97,42 @@ class TimelineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "ended at .* before it began"):
       t.stop_span(1.0)
 
+  def test_snapshot(self):
+    t = timeline.Timeline("test_tl", 0.0)
+
+    snap0 = t.snapshot()
+    with self.subTest("initially_empty"):
+      self.assertEmpty(snap0.spans)
+      self.assertIsNot(snap0, t)
+
+    s1 = t.start_span("span1", 1.0)
+    snap1 = t.snapshot()
+    with self.subTest("active_span_not_in_snapshot"):
+      self.assertEmpty(snap1.spans)
+
+    t.stop_span(2.0)
+    snap2 = t.snapshot()
+    with self.subTest("completed_span_in_snapshot"):
+      self.assertLen(snap2.spans, 1)
+      self.assertEqual(snap2.spans[0].name, "span1")
+      self.assertEqual(snap2.spans[0].end, 2.0)
+
+    s2 = t.start_span("span2", 3.0)
+    s3 = t.start_span("span3", 4.0)
+    t.stop_span(5.0)  # stops s3
+    snap3 = t.snapshot()
+    with self.subTest("nested_active_span_not_in_snapshot"):
+      self.assertLen(snap3.spans, 2)
+      self.assertIn(s1.id, snap3.spans)
+      self.assertIn(s3.id, snap3.spans)
+      self.assertNotIn(s2.id, snap3.spans)
+
+    t.stop_span(6.0)  # stops s2
+    snap4 = t.snapshot()
+    with self.subTest("all_spans_completed"):
+      self.assertLen(snap4.spans, 3)
+      self.assertIn(s2.id, snap4.spans)
+
   def test_nested_timeline_with_tags_repr(self):
     born = 1000.0
     t = timeline.Timeline("test_tl", born)
