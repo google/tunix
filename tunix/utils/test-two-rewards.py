@@ -25,7 +25,7 @@ print("Verify rewards:", verify_rewards)
 # Verify rewards: [1.0, 1.0, 1.0, 1.0]
 
 completions = ["\\boxed{1}", "\\boxed{2.1}", "3", "\\boxed{4}", "\\boxed{80\\%}", '\\(\\boxed{-\\dfrac{2}{3}}\\).']
-answers = ["1", "2", "3", "4", '80\\%', '-\\frac{2}{3}']
+answers = ["1", "2", "3", "4", "80\\%", "-\\frac{2}{3}"]
 orig_rewards = math_rewards.math_reward(
     prompts=[""] * len(completions),
     completions=completions,

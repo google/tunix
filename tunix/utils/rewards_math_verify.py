@@ -94,7 +94,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
 
   results = []
   for i in range(len(completions)):
-    response = normalize_response(completions[i])
+    response = completions[i]
     truth = ground_truth[i]
     try:
       ground_truth_parsable = "\\boxed{" + truth + "}"
