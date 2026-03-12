@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from absl import logging
 from tunix.perf import metrics
-from tunix.perf.experimental import perfetto
+from tunix.perf.experimental import trace_writer as trace_writer_lib
 from tunix.perf.experimental import tracer
 
 MetricsT = metrics.MetricsT
@@ -38,7 +38,7 @@ def log_metric_export_fn(timelines: Mapping[str, Timeline]) -> MetricsT:
 class PerfMetricsExport:
   """Perf metrics export class.
 
-  Exports timelines to a trace writer (Perfetto).
+  A class for exporting timelines to a trace writer.
   """
 
   def __init__(
@@ -53,18 +53,25 @@ class PerfMetricsExport:
         empty string) and enable_trace_writer is True, a default directory is
         used.
     """
+    self._writer: trace_writer_lib.TraceWriter
     if enable_trace_writer:
       resolved_trace_dir = trace_dir or DEFAULT_TRACE_DIR
-      self._writer = perfetto.PerfettoTraceWriter(resolved_trace_dir)
+      self._writer = trace_writer_lib.PerfettoTraceWriter(resolved_trace_dir)
     else:
-      # TODO(noghabi): create a NoopTraceWriter.
-      self._writer = None
+      self._writer = trace_writer_lib.NoopTraceWriter()
 
   def export_metrics(
       self,
       timelines: Mapping[str, Timeline],
   ) -> MetricsT:
-    """Exports timelines to a Perfetto trace file."""
-    if self._writer is not None:
-      self._writer.write_timelines(timelines)
+    """Exports timelines to a trace file.
+
+    Args:
+      timelines: A mapping of names to Timeline objects to be exported.
+
+    Returns:
+      An empty dictionary, as this exporter does not produce any aggregated
+      metrics.
+    """
+    self._writer.write_timelines(timelines)
     return {}
