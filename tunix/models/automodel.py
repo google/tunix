@@ -298,7 +298,7 @@ def download_model(
     return oss_utils.kaggle_pipeline(model_id_or_path, model_download_path)
   elif model_source == ModelSource.HUGGINGFACE:
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
-    
+
     return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
   elif model_source == ModelSource.GCS:
     return model_id_or_path
