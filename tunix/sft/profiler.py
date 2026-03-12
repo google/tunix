@@ -35,6 +35,8 @@ class ProfilerOptions:
   host_tracer_level: int = 2  # set to 2 to capture HBM profiles.
   # https://github.com/jax-ml/jax/blob/0b1b909dd66a113ee0d7e54e55d0efef480e2a8a/docs/profiling.md?plain=1#L300
   python_tracer_level: int = 1
+  # Disabling this can tremendously reduce the size of the profile.
+  enable_hlo_proto: bool = True
 
 
 class Profiler:
@@ -90,6 +92,9 @@ class Profiler:
         )
         profile_options.python_tracer_level = (
             self._profiler_options.python_tracer_level
+        )
+        profile_options.enable_hlo_proto = (
+            self._profiler_options.enable_hlo_proto
         )
         jax.profiler.start_trace(
             log_dir=self._output_path, profiler_options=profile_options
