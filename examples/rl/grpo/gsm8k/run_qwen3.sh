@@ -50,6 +50,7 @@ python3 -m tunix.cli.grpo_main \
   model_config.model_name=${model_name} \
   model_config.model_id=Qwen/${model_name} \
   model_config.model_source=huggingface \
+  model_config.model_download_path="/tmp/models/${model_name}" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}" \
   model_config.mesh.shape="(2,4)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
