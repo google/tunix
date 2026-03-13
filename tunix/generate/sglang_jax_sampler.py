@@ -395,6 +395,14 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       try:
         return loop.run_until_complete(coro)
       finally:
+        # Cancel any pending tasks before closing
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+          task.cancel()
+        # Run the loop one more time to process cancellations
+        loop.run_until_complete(
+            asyncio.gather(*pending, return_exceptions=True)
+        )
         loop.close()
 
     def wrap_generate():
@@ -402,6 +410,14 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       try:
         return loop.run_until_complete(coro)
       finally:
+        # Cancel any pending tasks before closing
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+          task.cancel()
+        # Run the loop one more time to process cancellations
+        loop.run_until_complete(
+            asyncio.gather(*pending, return_exceptions=True)
+        )
         loop.close()
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
