@@ -83,11 +83,33 @@ except:
 print("jax devices: ", jax.devices())
 
 # %%
+import argparse
+arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
+arg_parser.add_argument("--batch_size", type=int, default=128)
+arg_parser.add_argument("--mini_batch_size", type=int, default=128)
+arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
+arg_parser.add_argument("--b1", type=float, default=0.9)
+arg_parser.add_argument("--b2", type=float, default=0.99)
+arg_parser.add_argument("--weight_decay", type=float, default=0.01)
+arg_parser.add_argument("--num_batches", type=int, default=312)
+arg_parser.add_argument("--num_generations", type=int, default=8)
+arg_parser.add_argument("--beta", type=float, default=0.0)
+arg_parser.add_argument("--epsilon", type=float, default=0.2)
+arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
+arg_parser.add_argument("--max_response_length", type=int, default=8192)
+arg_parser.add_argument("--temperature", type=float, default=0.8)
+arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--top_k", type=int, default=None)
+arg_parser.add_argument("--max_concurrency", type=int, default=768)
+arg_parser.add_argument("--shuffle_data", type=bool, default=False)
+arg_parser.add_argument("--seed", type=int, default=42)
+args, _ = arg_parser.parse_known_args()
+
 # ====== Data ======
 TRAIN_FRACTION = 1.0
 
 # ====== Reproducibility ======
-SEED = 42
+SEED = args.seed
 
 # ====== LoRA ======
 RANK = 64
@@ -102,16 +124,16 @@ TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 2048
-MAX_RESPONSE_LENGTH = 8192
+MAX_RESPONSE_LENGTH = args.max_response_length
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
-TEMPERATURE = 0.6
-TOP_P = 0.95
-TOP_K = 50
+TEMPERATURE = args.temperature
+TOP_P = args.top_p
+TOP_K = args.top_k
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
 # paper. The "group" in GRPO comes from here.
-NUM_GENERATIONS = 8
+NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
 VLLM_MAX_NUM_SEQS = 768
@@ -126,29 +148,29 @@ NUM_ITERATIONS = 1
 # The coefficient for the KL divergence penalty (𝛽) in the GRPO loss function.
 # Important to keep a high enough value for this, otherwise, the KL divergence
 # can increase unchecked.
-BETA = 0.001
+BETA = args.beta
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
-EPSILON = 0.2
-EPSILON_HIGH = 0.28
+EPSILON = args.epsilon
+EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
-NUM_BATCHES = 100
+BATCH_SIZE = args.batch_size
+MINI_BATCH_SIZE = args.mini_batch_size
+NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
 
 EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 100  # can potentially train for more epochs
+NUM_EPOCHS = 3  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
 # Max concurrency for parallel processing of trajectories.
-MAX_CONCURRENCY = 1024
+MAX_CONCURRENCY = args.max_concurrency
 
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
@@ -156,10 +178,10 @@ OFF_POLICY_STEPS = 0
 MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
-LEARNING_RATE = 1e-6
-B1 = 0.9  # Adam beta1
-B2 = 0.99  # Adam beta2
-WEIGHT_DECAY = 0.1
+LEARNING_RATE = args.learning_rate
+B1 = args.b1  # Adam beta1
+B2 = args.b2  # Adam beta2
+WEIGHT_DECAY = args.weight_decay
 # == Cosine decay with warmup scheduler ==
 # Linearly increase learning rate from 0. to 5e-6 in the first 10% training
 # steps, and then gradually decrease the learning rate to 0 using cosine
@@ -168,7 +190,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.1
+MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 500
@@ -307,6 +329,9 @@ def create_datasets(
 
   train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
   test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
+  if args.shuffle_data:
+    train_ds = train_ds.shuffle(SEED)
+    test_ds = test_ds.shuffle(SEED)
 
   def process_item(item):
     question = item["question"]
