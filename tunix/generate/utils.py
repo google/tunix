@@ -817,6 +817,161 @@ def transfer_state_with_mappings(
   return dst_state.from_flat_path(tgt_flat_list)
 
 
+def _try_map_to_standard_layers(
+    key_tuple: Tuple[str | int, ...],
+    match_index: int,
+    layer_idx: int,
+    src_flat: Mapping[Tuple[str | int, ...], Any],
+    tgt_val: Any,
+) -> Optional[Any]:
+  """Tries mapping by replacing 'layers_X' with 'layers' (Standard MaxText).
+
+  This candidate handles the standard MaxText scanned format where all layers
+  are stacked into a single 'layers' container in the source. For example, if
+  the target expects 'model.layers_0.attn.q_proj', this function tries to map
+  it to 'model.layers.attn.q_proj' in the source and then slices the 'layer'
+  dimension at index 0.
+
+  Args:
+      key_tuple: The path to the parameter in the target state.
+      match_index: The index of the 'layers_X' part in the key_tuple.
+      layer_idx: The index of the layer extracted from 'layers_X'.
+      src_flat: The flattened source state.
+      tgt_val: The target parameter value/spec.
+
+  Returns:
+      The sliced and casted source value if found, else None.
+  """
+  candidate = list(key_tuple)
+  candidate[match_index] = 'layers'
+  cand = tuple(candidate)
+  if cand in src_flat:
+    src_val = src_flat[cand]
+    # Slice the scanned parameter
+    sliced_val = _slice_scanned_param(src_val, tgt_val, layer_idx, str(key_tuple))
+    return _apply_dtype_cast(sliced_val, tgt_val.dtype, str(key_tuple))
+
+  return None
+
+
+def _try_map_by_removing_layer_index(
+    key_tuple: Tuple[str | int, ...],
+    match_index: int,
+    layer_idx: int,
+    src_flat: Mapping[Tuple[str | int, ...], Any],
+    tgt_val: Any,
+) -> Optional[Any]:
+  """Tries mapping by removing 'layers_X' (Implicit Container).
+
+  This candidate handles architectures where layers are implicitly stacked
+  without a dedicated 'layers' container in the source path. For example, if
+  the target expects 'model.layers_0.attn.q_proj', this function tries to map
+  it to 'model.attn.q_proj' in the source (where 'attn.q_proj' is a scanned
+  array) and then slices the 'layer' dimension at index 0.
+
+  Args:
+      key_tuple: The path to the parameter in the target state.
+      match_index: The index of the 'layers_X' part in the key_tuple.
+      layer_idx: The index of the layer extracted from 'layers_X'.
+      src_flat: The flattened source state.
+      tgt_val: The target parameter value/spec.
+
+  Returns:
+      The sliced and casted source value if found, else None.
+  """
+  candidate = list(key_tuple)
+  candidate.pop(match_index)
+  cand = tuple(candidate)
+  if cand in src_flat:
+    src_val = src_flat[cand]
+    # Slice the scanned parameter
+    sliced_val = _slice_scanned_param(src_val, tgt_val, layer_idx, str(key_tuple))
+    return _apply_dtype_cast(sliced_val, tgt_val.dtype, str(key_tuple))
+
+  return None
+
+
+def _try_map_to_scanned_groups(
+    key_tuple: Tuple[str | int, ...],
+    match_index: int,
+    layer_idx: int,
+    src_flat: Mapping[Tuple[str | int, ...], Any],
+    tgt_val: Any,
+    scan_group_ordering: str,
+) -> Optional[Any]:
+  """Tries mapping using the GPT-OSS like scanned format (layers.layers_Y).
+
+  This candidate handles grouped scanned formats common in GPT-OSS and similar
+  implementations. The source state organizes layers into groups (e.g.,
+  'layers.layers_0', 'layers.layers_1'), where each group contains multiple
+  stacked layers.
+
+  This function calculates the correct source group index and the local index
+  within that group for a given global `layer_idx` based on the
+  `scan_group_ordering`.
+
+  - 'sequential': Layers are grouped contiguously (e.g., layers 0-3 in group 0,
+    4-7 in group 1).
+  - 'interleaved': Layers are distributed across groups (e.g., layers 0, 2, 4
+    in group 0; 1, 3, 5 in group 1).
+
+  Args:
+      key_tuple: The path to the parameter in the target state.
+      match_index: The index of the 'layers_X' part in the key_tuple.
+      layer_idx: The index of the layer extracted from 'layers_X'.
+      src_flat: The flattened source state.
+      tgt_val: The target parameter value/spec.
+      scan_group_ordering: How scan groups are ordered relative to layer
+        indices. 'sequential' (default) or 'interleaved'.
+
+  Returns:
+      The sliced and casted source value if found, else None.
+  """
+  prefix = key_tuple[:match_index]
+  suffix = key_tuple[match_index + 1:]
+
+  # Count available scan groups
+  n_groups = 0
+  while prefix + ('layers', f'layers_{n_groups}') + suffix in src_flat:
+    n_groups += 1
+
+  if n_groups > 0:
+    first_val = src_flat[prefix + ('layers', 'layers_0') + suffix]
+    if hasattr(first_val, 'shape') and hasattr(tgt_val, 'shape'):
+      if len(first_val.shape) == len(tgt_val.shape) + 1:
+        for axis in range(len(first_val.shape)):
+          remaining = first_val.shape[:axis] + first_val.shape[axis + 1:]
+          # Check if removing this axis matches the target shape
+          if remaining == tgt_val.shape:
+            n_scan_steps = first_val.shape[axis]
+            # For interleaved ordering, layer_idx 0, n_groups, 2*n_groups... go
+            # to group 0; layer_idx 1, n_groups+1, 2*n_groups+1... go to group
+            # 1, etc.
+            if scan_group_ordering == 'interleaved':
+              src_group_idx = layer_idx % n_groups
+              local_idx = layer_idx // n_groups
+            # For sequential ordering, layers 0-N in group 0, then N+1-2N in
+            # group 1, etc.
+            else:
+              src_group_idx = layer_idx // n_scan_steps
+              local_idx = layer_idx % n_scan_steps
+
+            # We only slice if the calculated group index and local index are
+            # within bounds
+            if src_group_idx < n_groups and local_idx < n_scan_steps:
+              candidate_c = (
+                  prefix + ('layers', f'layers_{src_group_idx}') + suffix
+              )
+              src_val = src_flat[candidate_c]
+              sliced_val = _slice_scanned_param(
+                  src_val, tgt_val, local_idx, str(key_tuple)
+              )
+              return _apply_dtype_cast(sliced_val, tgt_val.dtype, str(key_tuple))
+            break
+
+  return None
+
+
 def _slice_scanned_param(
     src_val: jax.Array | np.ndarray | Any,
     tgt_val: jax.Array | np.ndarray | Any,
@@ -885,6 +1040,7 @@ def transfer_state_directly(
     src_state: Mapping[str, Any],
     dst_state: Mapping[str, Any],
     reshard_fn: Callable[..., Mapping[str, Any]],
+    scan_group_ordering: str = 'sequential',
 ) -> None:
   """Transfers state directly by matching structure, stripping wrappers.
 
@@ -899,6 +1055,10 @@ def transfer_state_directly(
     src_state: The source state to transfer from.
     dst_state: The destination state to transfer to.
     reshard_fn: A function to shard the values.
+    scan_group_ordering: How scan groups are ordered relative to layer indices.
+      'sequential' (default): group = layer_idx // n_scan_steps (e.g. layers 0-N in
+      group 0, then layers N+1-2N in group 1). 'interleaved': group = layer_idx %
+      n_groups (e.g. even layers in group 0, odd layers in group 1).
   """
 
   def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
@@ -992,29 +1152,34 @@ def transfer_state_directly(
       if match_index != -1:
         # Check different candidate path formats for scanned layers
         # Candidate A: Replace 'layers_X' with 'layers' (Standard MaxText)
-        candidate_a = list(key_tuple)
-        candidate_a[match_index] = 'layers'
+        src_val = _try_map_to_standard_layers(
+            key_tuple, match_index, layer_idx, src_flat, tgt_val
+        )
+        if src_val is not None:
+          filtered_src_flat[key_tuple] = src_val
+          filtered_tgt_flat[key_tuple] = tgt_val
+          continue
 
-        # Candidate B: Remove 'layers_X' (Implicit Container / GPT-OSS)
-        candidate_b = list(key_tuple)
-        candidate_b.pop(match_index)
+        # Candidate B: Remove 'layers_X' (Implicit Container)
+        src_val = _try_map_by_removing_layer_index(
+            key_tuple, match_index, layer_idx, src_flat, tgt_val
+        )
+        if src_val is not None:
+          filtered_src_flat[key_tuple] = src_val
+          filtered_tgt_flat[key_tuple] = tgt_val
+          continue
 
-        found_candidate = None
-        for cand in [tuple(candidate_a), tuple(candidate_b)]:
-          if cand in src_flat:
-            found_candidate = cand
-            break
-
-        if found_candidate:
-          src_val = src_flat[found_candidate]
-          # Slice the scanned parameter
-          sliced_val = _slice_scanned_param(
-              src_val, tgt_val, layer_idx, str(key_tuple)
-          )
-          sliced_val = _apply_dtype_cast(
-              sliced_val, tgt_val.dtype, str(key_tuple)
-          )
-          filtered_src_flat[key_tuple] = sliced_val
+        # Candidate C: GPT-OSS like scanned format
+        src_val = _try_map_to_scanned_groups(
+            key_tuple,
+            match_index,
+            layer_idx,
+            src_flat,
+            tgt_val,
+            scan_group_ordering,
+        )
+        if src_val is not None:
+          filtered_src_flat[key_tuple] = src_val
           filtered_tgt_flat[key_tuple] = tgt_val
           continue
 
