@@ -324,7 +324,7 @@ class PeftTrainer:
 
   def _train_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
-  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
     """Main body for one train step.
 
     Args:
@@ -333,7 +333,8 @@ class PeftTrainer:
       inputs: The training input.
 
     Returns:
-      The loss and auxiliary data if has_aux is True, otherwise the loss.
+      A tuple containing the loss, auxiliary data (or None if has_aux is False),
+      and the gradient norm.
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -362,7 +363,9 @@ class PeftTrainer:
     else:
       return out, None
 
-  def create_train_step_fn(self) -> Callable[..., ArrayLike]:
+  def create_train_step_fn(
+      self,
+  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
     """Creates the train step function."""
     return self._train_step
 
