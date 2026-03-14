@@ -20,7 +20,6 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
-
 from tunix.rl.agentic import utils
 
 
@@ -38,10 +37,13 @@ class RecentMessagesTest(parameterized.TestCase):
               {'role': 'user', 'content': 'Hello'},
               {'role': 'tool', 'content': 'Tool output'},
           ],
-          (None, [
-              {'role': 'user', 'content': 'Hello'},
-              {'role': 'tool', 'content': 'Tool output'},
-          ]),
+          (
+              None,
+              [
+                  {'role': 'user', 'content': 'Hello'},
+                  {'role': 'tool', 'content': 'Tool output'},
+              ],
+          ),
       ),
       (
           'only_assistant_message',
@@ -88,9 +90,7 @@ class RecentMessagesTest(parameterized.TestCase):
           ({'role': 'assistant', 'content': 'Hello!'}, []),
       ),
   )
-  def test_get_recent_assistant_user_messages(
-      self, messages, expected_output
-  ):
+  def test_get_recent_assistant_user_messages(self, messages, expected_output):
     self.assertEqual(
         utils.get_recent_assistant_user_messages(messages), expected_output
     )
@@ -107,7 +107,7 @@ class ConvertMessagesToStringTest(parameterized.TestCase):
     message = {'role': 'user', 'content': np.array([1])}
     with self.assertRaisesRegex(
         ValueError,
-        "Message field content must be a string after preprocessing, got <class"
+        'Message field content must be a string after preprocessing, got <class'
         " 'int'>.",
     ):
       utils.convert_messages_to_string(message)
@@ -117,7 +117,7 @@ class MessagesToTokensTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.mock_tokenizer = mock.Mock()
+    self.mock_tokenizer = mock.Mock(spec=['encode', 'dedup_bos_ids'])
     self.mock_parser = mock.Mock(spec=['parse', 'assistant_token'])
     self.mock_parser.assistant_token = ''
 
@@ -125,6 +125,7 @@ class MessagesToTokensTest(unittest.TestCase):
     self.mock_tokenizer.encode.side_effect = lambda s, add_special_tokens: [
         ord(c) for c in s
     ]
+    self.mock_tokenizer.dedup_bos_ids.side_effect = lambda x: x
 
     # Simple parser mock: returns a formatted string
     def parse_side_effect(messages, add_generation_prompt, is_first_msg):
@@ -332,9 +333,10 @@ class MessagesToTokensTest(unittest.TestCase):
     )
 
   def test_with_tokenizer_without_add_special_tokens_arg(self):
-    mock_tokenizer_simple = mock.Mock(spec=['encode'])
+    mock_tokenizer_simple = mock.Mock(spec=['encode', 'dedup_bos_ids'])
     # Simple tokenizer mock: returns list of char codes
     mock_tokenizer_simple.encode.side_effect = lambda s: [ord(c) for c in s]
+    mock_tokenizer_simple.dedup_bos_ids.side_effect = lambda x: x
 
     messages = [{'role': 'user', 'content': 'hi'}]
     expected_text = 'role:user content:hi'

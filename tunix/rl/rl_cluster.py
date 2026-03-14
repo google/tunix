@@ -40,6 +40,7 @@ import numpy as np
 import optax
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
+from tunix.generate import tokenizer_adapter
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -243,7 +244,7 @@ class RLCluster:
         self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
     )
 
-    self.tokenizer = tokenizer
+    self.tokenizer = tokenizer_adapter.TokenizerAdapter(tokenizer)
     self._rl_metrics_logger = metrics_logger.MetricsLogger(
         self.cluster_config.training_config.metrics_logging_options
     )
