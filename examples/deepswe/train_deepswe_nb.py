@@ -45,12 +45,16 @@ except ImportError as e:
   r2egym = None
   print(f"❌ Still missing a module: {e}")
 
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
+  pathwaysutils.initialize()
+
 # %%
 # ==========================================
 # 2. Imports from Custom Modules
 # ==========================================
 from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
+from tunix.models.qwen3 import BACKEND_MAPPINGS
 from tunix.sft import utils as sft_utils
 from tunix.sft import metrics_logger
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -101,7 +105,8 @@ except Exception as e:
 # ==========================================
 # MODEL_PATH = "/scratch/models/DeepSeek-R1-Distill-Qwen-1.5B/"
 # MODEL_PATH = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
-MODEL_PATH = os.path.expanduser("~/models/Qwen3-1.7B/")
+MODEL_VERSION = "Qwen/Qwen3-1.7B"
+MODEL_PATH = os.path.expanduser("~/models/") + MODEL_VERSION.split("/")[-1] + "/"
 
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -120,9 +125,8 @@ TRAIN_WITH_LORA = False
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-# MAX_PROMPT_LENGTH = 32768
-MAX_PROMPT_LENGTH = 4096
-MAX_RESPONSE_LENGTH = 512
+MAX_PROMPT_LENGTH = 32768
+MAX_RESPONSE_LENGTH = 4096
 TEMPERATURE = 0.6
 TOP_P = 0.95
 TOP_K = 50
@@ -148,7 +152,9 @@ NUM_EPOCHS = 100
 MAX_STEPS = 10
 
 # Max turns in mult-agent interaction (set to 1 for single-turn)
-MAX_TURNS = 3
+MAX_TURNS = 10
+
+MAX_CONCURRENCY = 8
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = 1e-6
@@ -206,8 +212,8 @@ qwen_reference = params_lib.create_model_from_safe_tensors(
 def get_lora_model(base_model, model_mesh):
   lora_provider = qwix.LoraProvider(
       module_path=(
-          ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
-          ".*attn_vec_einsum"
+          ".*q_proj|.*k_proj|.*v_proj|.*o_proj|"
+          ".*gate_proj|.*down_proj|.*up_proj"
       ),
       rank=RANK,
       alpha=ALPHA,
@@ -227,7 +233,12 @@ def get_lora_model(base_model, model_mesh):
   return lora_model
 
 
-qwen_actor = get_lora_model(qwen_reference, train_mesh)
+if TRAIN_WITH_LORA:
+  qwen_actor = get_lora_model(qwen_reference, train_mesh)
+else:
+  qwen_actor = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, train_mesh, dtype=jnp.bfloat16
+  )
 sft_utils.show_hbm_usage()
 
 # %%
@@ -294,6 +305,52 @@ optimizer = optax.adamw(
 # ==========================================
 # 10. RL Cluster Setup
 # ==========================================
+base_rollout_dict = {
+    "max_prompt_length": MAX_PROMPT_LENGTH,
+    "kv_cache_size": MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH * MAX_TURNS * 2 + 256,
+    "temperature": TEMPERATURE,
+    "top_p": TOP_P,
+    "top_k": TOP_K,
+    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
+}
+
+sglang_jax_rollout_dict = {
+    # sglang-jax specific configs
+    "rollout_sglang_jax_model_version": MODEL_VERSION,
+    "rollout_sglang_jax_mem_fraction_static": 0.9,
+    "rollout_sglang_jax_init_with_random_weights": True,
+    "rollout_sglang_jax_disable_radix_cache": False,
+    "rollout_sglang_jax_enable_deterministic_sampling": False,
+    "rollout_sglang_jax_chunked_prefill_size": 2048,
+    "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
+    "rollout_sglang_jax_page_size": 128,
+}
+
+vllm_rollout_dict = {
+    # vllm-tpu specific configs
+    "rollout_vllm_model_version": MODEL_VERSION,
+    "rollout_vllm_hbm_utilization": 0.85,
+    "rollout_vllm_tpu_backend_type": "jax",
+    "rollout_vllm_server_mode": True,
+    "rollout_vllm_async_scheduling": True,
+    "tensor_parallel_size": rollout_mesh.shape['tp'],
+    "data_parallel_size": rollout_mesh.shape['fsdp'],
+    "rollout_vllm_kwargs": {"kv_cache_metrics": True},
+}
+current_mapping = None
+if ROLLOUT_ENGINE == "sglang_jax":
+  rollout_engine_config = base_rollout.RolloutConfig(
+      **base_rollout_dict, **sglang_jax_rollout_dict
+  )
+elif ROLLOUT_ENGINE == "vllm":
+  rollout_engine_config = base_rollout.RolloutConfig(
+      **base_rollout_dict, **vllm_rollout_dict
+  )
+elif ROLLOUT_ENGINE == "vanilla":
+  rollout_engine_config = base_rollout.RolloutConfig(**base_rollout_dict)
+else:
+  raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: train_mesh,
@@ -312,14 +369,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
     ),
-    rollout_config=base_rollout.RolloutConfig(
-        max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        top_k=TOP_K,
-        eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
-    ),
+    rollout_config=rollout_engine_config,
 )
 
 rl_cluster = rl_cluster_lib.RLCluster(
@@ -340,7 +390,7 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
     beta=BETA,
     epsilon=EPSILON,
     system_prompt=SWE_SYSTEM_PROMPT,
-    max_concurrency=1,
+    max_concurrency=MAX_CONCURRENCY,
     epsilon_high=0.28,
     off_policy_steps=0,
 )
