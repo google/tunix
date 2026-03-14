@@ -15,7 +15,9 @@
 import asyncio
 import concurrent.futures
 import functools
+import inspect
 import os
+import queue
 import re
 import socket
 import tempfile
@@ -586,6 +588,76 @@ class VllmSamplerConfigTest(absltest.TestCase):
     self.assertEqual(sharding_strategy["expert_parallelism"], 1)
     self.assertEqual(sampler.args["tensor_parallel_size"], 8)
     self.assertEqual(sampler.args["data_parallel_size"], 1)
+
+  def test_async_llm_mode_generate_path(self):
+      """Async mode should initialize async backend and return final outputs."""
+
+      class _FakeAsyncEngineArgs:
+          def __init__(self, **kwargs):
+              self.kwargs = kwargs
+
+      class _FakeAsyncLLM:
+          request_ids = []
+
+          @classmethod
+          def from_engine_args(cls, *_args, **_kwargs):
+              return cls()
+
+          async def generate(self, _prompt, _sampling_params, request_id):
+              _FakeAsyncLLM.request_ids.append(request_id)
+              yield mock.MagicMock(finished=True)
+
+          def shutdown(self):
+              return None
+
+      config = vllm_sampler.VllmConfig(
+              mesh=self._make_mock_mesh(1),
+              server_mode=True,
+              use_async_llm_inproc=True,
+              init_with_random_weights=False,
+      )
+      # Attributes referenced by runtime code but not guaranteed to be dataclass
+      # fields in all branches.
+      setattr(config, "enable_log_stats_loop", False)
+
+      with (
+              mock.patch.object(
+                      vllm_sampler.VllmSampler,
+                      "_vllm_config",
+                      return_value={"max_model_len": 64, "additional_config": {}},
+              ),
+              mock.patch.object(vllm_sampler, "AsyncEngineArgs", _FakeAsyncEngineArgs, create=True),
+              mock.patch.object(vllm_sampler, "AsyncLLM", _FakeAsyncLLM, create=True),
+              mock.patch.object(vllm_sampler, "asyncio", asyncio, create=True),
+              mock.patch.object(vllm_sampler, "threading", threading, create=True),
+              mock.patch.object(vllm_sampler, "_queue", queue, create=True),
+              mock.patch.object(vllm_sampler, "inspect", inspect, create=True),
+              mock.patch.object(vllm_sampler, "concurrent", concurrent, create=True),
+              mock.patch.object(
+                      vllm_sampler,
+                      "ThreadPoolExecutor",
+                      concurrent.futures.ThreadPoolExecutor,
+                      create=True,
+              ),
+              mock.patch("tunix.generate.vllm_sampler.atexit.register", lambda _fn: None),
+      ):
+          sampler = vllm_sampler.VllmSampler(
+                  tokenizer=mock.MagicMock(),
+                  config=config,
+          )
+
+          self.assertIsNotNone(sampler.async_llm)
+          self.assertIsNone(sampler.llm)
+          self.assertIsNone(sampler._driver)
+
+          outs = sampler._generate_async_llm(
+                  prompts=[mock.MagicMock(), mock.MagicMock()],
+                  sampling_params=mock.MagicMock(),
+          )
+          self.assertLen(outs, 2)
+          self.assertEqual(_FakeAsyncLLM.request_ids, ["0", "1"])
+
+          sampler.stop()
 
 
 if __name__ == "__main__":
