@@ -1136,10 +1136,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       if grpo_learner._trajectory_logger:
         grpo_learner._trajectory_logger.stop()
       self.assertEqual(grpo_learner.rl_cluster.global_steps, 1)
-      self.assertEqual(mock_log_item.call_count, grpo_config.num_generations)
+      self.assertEqual(mock_log_item.call_count, 1)
 
-      for i in range(grpo_config.num_generations):
-        traj = mock_log_item.call_args_list[i][0][1]
+      logged_items = mock_log_item.call_args_list[0][0][1]
+      self.assertLen(logged_items, grpo_config.num_generations)
+
+      for traj in logged_items:
         self.assertIn("conversation_text", traj)
         conversation = traj["conversation_text"]
         assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
