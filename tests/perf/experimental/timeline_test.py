@@ -31,18 +31,18 @@ class SpanTest(absltest.TestCase):
     self.assertEqual(s.duration, float("inf"))
 
   def test_span_with_tags(self):
-    tags_dict = {constants.GLOBAL_STEP: 1, "custom_tag": "value"}
+    tags_dict = {constants.STEP: 1, "custom_tag": "value"}
     s = timeline.Span(name="test_tags", begin=1.0, id=0, tags=tags_dict)
     self.assertEqual(s.tags, tags_dict)
     self.assertIn("tags=", repr(s))
-    self.assertIn("global_step", repr(s))
+    self.assertIn("step", repr(s))
 
   def test_add_tag(self):
     s = timeline.Span(name="test_add_tag", begin=1.0, id=0)
     s.add_tag("foo", "bar")
     self.assertEqual(s.tags, {"foo": "bar"})
-    s.add_tag(constants.GLOBAL_STEP, 100)
-    self.assertEqual(s.tags, {"foo": "bar", "global_step": 100})
+    s.add_tag(constants.STEP, 100)
+    self.assertEqual(s.tags, {"foo": "bar", "step": 100})
 
   def test_add_tag_overwrite_warning(self):
     s = timeline.Span(name="test_add_tag_overwrite", begin=1.0, id=0)

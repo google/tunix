@@ -18,11 +18,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from absl import logging
 from tunix.perf import metrics
-from tunix.perf.experimental import perfetto
+from tunix.perf.experimental import trace_writer as trace_writer_lib
 from tunix.perf.experimental import tracer
 
 MetricsT = metrics.MetricsT
 Timeline = tracer.Timeline
+
+DEFAULT_TRACE_DIR = "/tmp/perf_traces"
 
 
 def log_metric_export_fn(timelines: Mapping[str, Timeline]) -> MetricsT:
@@ -36,26 +38,40 @@ def log_metric_export_fn(timelines: Mapping[str, Timeline]) -> MetricsT:
 class PerfMetricsExport:
   """Perf metrics export class.
 
-  Exports timelines to a trace writer (Perfetto).
+  A class for exporting timelines to a trace writer.
   """
 
-  def __init__(self, trace_dir: str | None = None):
+  def __init__(
+      self, *, enable_trace_writer: bool = True, trace_dir: str | None = None
+  ):
     """Initializes the instance.
 
     Args:
-      trace_dir: The directory to write the Perfetto trace files to. If None,
-        the trace writer will not be initialized.
+      enable_trace_writer: Whether to initialize the trace writer.
+      trace_dir: The directory to write the Perfetto trace files to. This is
+        only relevant if enable_trace_writer is True. If not provided (None or
+        empty string) and enable_trace_writer is True, a default directory is
+        used.
     """
-
-    self._writer = (
-        perfetto.PerfettoTraceWriter(trace_dir) if trace_dir else None
-    )
+    self._writer: trace_writer_lib.TraceWriter
+    if enable_trace_writer:
+      resolved_trace_dir = trace_dir or DEFAULT_TRACE_DIR
+      self._writer = trace_writer_lib.PerfettoTraceWriter(resolved_trace_dir)
+    else:
+      self._writer = trace_writer_lib.NoopTraceWriter()
 
   def export_metrics(
       self,
       timelines: Mapping[str, Timeline],
   ) -> MetricsT:
-    """Exports timelines to a Perfetto trace file."""
-    if self._writer is not None:
-      self._writer.write_timelines(timelines)
+    """Exports timelines to a trace file.
+
+    Args:
+      timelines: A mapping of names to Timeline objects to be exported.
+
+    Returns:
+      An empty dictionary, as this exporter does not produce any aggregated
+      metrics.
+    """
+    self._writer.write_timelines(timelines)
     return {}
