@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 from typing import Any
+import warnings
 
 import flax
 from flax import nnx
@@ -295,7 +296,7 @@ class DPOTrainer(peft_trainer.PeftTrainer):
           tokenizer=self.tokenizer,
           max_prompt_length=self.dpo_config.max_prompt_length,
           max_response_length=self.dpo_config.max_response_length,
-          image_processor=image_processor,
+          image_processor=self.image_processor,
       )
 
     # Concatenate chosen and rejected IDs so we can do a forward pass together.
@@ -627,10 +628,12 @@ def process_dpo_record(
   )
   if images is not None:
     if image_processor is None:
-      raise ValueError(
-          "`image_processor` must be provided if images are provided."
+      warnings.warn(
+          "`image_processor` was not provided. Images are expected to be "
+          "preprocessed (resized, normalized, etc.)."
       )
-    images = jnp.array(image_processor(images))
+    else:
+      images = jnp.array(image_processor(images))
 
   if unbatched:
     prompt_ids = jnp.squeeze(prompt_ids, axis=0)
