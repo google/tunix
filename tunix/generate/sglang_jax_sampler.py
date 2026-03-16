@@ -112,7 +112,9 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         tokenizer (Any): A tokenizer compatible with the model.
         config: The sglang-jax related configurations
     """
-    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.tokenizer = tokenizer
+    if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
+      self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.args = self._sglang_jax_config(config)
     if kwargs:
       self.args.update(kwargs)
@@ -395,6 +397,14 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       try:
         return loop.run_until_complete(coro)
       finally:
+        # Cancel any pending tasks before closing
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+          task.cancel()
+        # Run the loop one more time to process cancellations
+        loop.run_until_complete(
+            asyncio.gather(*pending, return_exceptions=True)
+        )
         loop.close()
 
     def wrap_generate():
@@ -402,6 +412,14 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       try:
         return loop.run_until_complete(coro)
       finally:
+        # Cancel any pending tasks before closing
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+          task.cancel()
+        # Run the loop one more time to process cancellations
+        loop.run_until_complete(
+            asyncio.gather(*pending, return_exceptions=True)
+        )
         loop.close()
 
     with concurrent.futures.ThreadPoolExecutor() as executor:

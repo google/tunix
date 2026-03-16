@@ -24,7 +24,7 @@ import gc
 import itertools
 import operator
 import os
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from absl import logging
 import flax
@@ -40,8 +40,10 @@ import numpy as np
 import optax
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
+from tunix.generate import tokenizer_adapter
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
@@ -242,7 +244,7 @@ class RLCluster:
         self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
     )
 
-    self.tokenizer = tokenizer
+    self.tokenizer = tokenizer_adapter.TokenizerAdapter(tokenizer)
     self._rl_metrics_logger = metrics_logger.MetricsLogger(
         self.cluster_config.training_config.metrics_logging_options
     )
@@ -436,6 +438,18 @@ class RLCluster:
       else:
         raise ValueError("Rollout sglang jax model config is missing!")
 
+      if (
+          sft_utils.is_lora_enabled(self.rollout_actor)
+          and not loaded_sglang_jax_config.rollout_sglang_jax_enable_static_lora
+      ):
+        raise ValueError(
+            "Rollout sglang jax lora config is missing: must set"
+            " rollout_sglang_jax_lora_target_modules,"
+            " rollout_sglang_jax_enable_static_lora,"
+            " rollout_sglang_jax_max_lora_rank,"
+            " rollout_sglang_jax_lora_scaling."
+        )
+
       self._rollout = sglang_jax_rollout.SglangJaxRollout(
           self.rollout_actor,
           self.tokenizer,
@@ -525,10 +539,12 @@ class RLCluster:
             optimizer=self.cluster_config.training_config.critic_optimizer,
             training_config=critic_config,
             custom_checkpoint_metadata_fn=lambda: {
-                "global_step": self.global_steps + 1
+                "global_step": self.global_steps + 1,
+                "role": Role.CRITIC.value,
             },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
             metrics_logger=self._rl_metrics_logger,
             perf_tracer=self._perf,
+            perf_tracer_v2=self._perf_v2,
         )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
@@ -547,10 +563,12 @@ class RLCluster:
           optimizer=self.cluster_config.training_config.actor_optimizer,
           training_config=actor_config,
           custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1
+              "global_step": self.global_steps + 1,
+              "role": Role.ACTOR.value,
           },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
           metrics_logger=self._rl_metrics_logger,
           perf_tracer=self._perf,
+          perf_tracer_v2=self._perf_v2,
       )
     del self.rollout_actor
     del self.train_actor
@@ -822,6 +840,7 @@ class RLCluster:
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
+      trace_tags: Mapping[str, Any] | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -834,6 +853,7 @@ class RLCluster:
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
+      trace_tags: Optional tags to add to the performance tracer.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -868,7 +888,17 @@ class RLCluster:
       else:
         rollout_config = self.cluster_config.rollout_config
 
-      with self._perf.span("rollout", mesh.devices) as span:
+      base_tags = {
+          perf_constants.ROLE: Role.ROLLOUT.value,
+      }
+      if trace_tags:
+        base_tags.update(trace_tags)
+
+      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
+          perf_constants.ROLLOUT,
+          mesh.devices,
+          tags=base_tags,
+      ) as span_v2:
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
             for s in rl_utils.chunk_slices_by_size(
@@ -876,7 +906,7 @@ class RLCluster:
             )
         ]
         span.device_end([o.tokens for o in outputs])
-
+        span_v2.async_end([o.tokens for o in outputs])
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))

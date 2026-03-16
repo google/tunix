@@ -33,6 +33,8 @@ from tunix.generate.tokenizer_adapter import TokenizerAdapter, Tokenizer
 from tunix.perf.export import PerfMetricsExport
 from tunix.perf.metrics import PerfMetricsConfig
 from tunix.perf.metrics import PerfSpanQuery
+from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig as AgenticGRPOConfig
+from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner as AgenticGRPOLearner
 from tunix.rl.grpo.grpo_learner import GRPOConfig
 from tunix.rl.grpo.grpo_learner import GrpoConfig
 from tunix.rl.grpo.grpo_learner import GRPOLearner

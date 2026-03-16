@@ -312,7 +312,12 @@ def download_model(
 
 
 def create_model_from_safe_tensors(
-    model_name: str, file_dir: str, model_config: Any, mesh: jax.sharding.Mesh
+    model_name: str,
+    file_dir: str,
+    model_config: Any,
+    mesh: jax.sharding.Mesh,
+    dtype: jnp.dtype | None = None,
+    mode: str = "auto",
 ) -> Any:
   """Dynamically imports the correct module and calls `create_model_from_safe_tensors` based on the model_name.
 
@@ -321,6 +326,9 @@ def create_model_from_safe_tensors(
       file_dir: Directory containing the safe tensors.
       model_config: Model configuration object.
       mesh: Mesh object for device layout.
+      dtype: Optional dtype to cast the loaded tensors to.
+      mode: The mode to use for loading the model. Options are ('auto',
+        'optimized', 'original').
 
   Returns:
       The result of the create_model_from_safe_tensors call.
@@ -347,7 +355,13 @@ def create_model_from_safe_tensors(
   logging.info(
       'Calling %s.create_model_from_safe_tensors', params_module.__name__
   )
-  return create_fn(file_dir=file_dir, config=model_config, mesh=mesh)
+  return create_fn(
+      file_dir=file_dir,
+      config=model_config,
+      mesh=mesh,
+      dtype=dtype,
+      mode=mode,
+  )
 
 
 class AutoModel:

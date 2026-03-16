@@ -40,10 +40,10 @@ import orbax.checkpoint as ocp
 from tunix.generate import tokenizer_adapter
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
-from tunix.rl.experimental import agentic_grpo_learner
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
@@ -82,8 +82,9 @@ def _mock_generate(
     apply_chat_template: bool = False,
     mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
     micro_batch_size: int | None = None,
+    trace_tags: dict[str, Any] | None = None,
 ) -> base_rollout.RolloutOutput:
-  del apply_chat_template, mode, micro_batch_size
+  del apply_chat_template, mode, micro_batch_size, trace_tags
   batch_size = len(prompts)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
   tokens = [
@@ -897,9 +898,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       prefix, metric_name = metric_name.split("/", maxsplit=1)
       self.assertGreaterEqual(
           len(
-              rl_metric_logger.get_metric_history(
-                  prefix, metric_name, "train"
-              )
+              rl_metric_logger.get_metric_history(prefix, metric_name, "train")
           ),
           grpo_learner.rl_cluster.global_steps,
           msg=f"metric_name: {metric_name}",
@@ -907,9 +906,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
       if metric_name != "global_step_time":
         self.assertLen(
-            rl_metric_logger.get_metric_history(
-                prefix, metric_name, "eval"
-            ),
+            rl_metric_logger.get_metric_history(prefix, metric_name, "eval"),
             10,
             msg=f"metric_name: {metric_name}",
         )
@@ -919,7 +916,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertGreater(np.sum(clip_ratio_history), 0)
 
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
-    for metric_name in ["loss", "kl"]:
+    for metric_name in ["loss", "kl", "entropy", "pg_clipfrac"]:
       self.assertLen(
           metric_logger.get_metric_history("actor", metric_name, "train"),
           grpo_learner.rl_cluster.actor_trainer.train_steps,
@@ -930,6 +927,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           10,
           msg=f"metric_name: {metric_name}",
       )
+    self.assertLen(
+        metric_logger.get_metric_history("actor", "grad_norm", "train"),
+        grpo_learner.rl_cluster.actor_trainer.train_steps,
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -1246,18 +1247,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         return "Initial prompt."
 
       def _step_impl(self, action: Any) -> EnvStepResult:
-        if self.step_count <= self.max_steps:
-          reward = 1.0
-          done = False
-        else:
-          reward = 0.0
-          done = True
+        done = self.step_count >= self.max_steps
+        reward = 1.0 if not done else 0.0
         return EnvStepResult(
             observation=f"Observation after step {self.step_count}",
             reward=reward,
             done=done,
             info={"max_steps": self.max_steps},
         )
+
 
     class MockAgent(ConversationAgentBase):
 

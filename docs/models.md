@@ -21,7 +21,7 @@ Tunix supports the following models:
 
 #### Huggingface & Kaggle
 The model configurations and checkpoints should be accessible from Huggingface and Kaggle.
-For example, following snippets shows how to load the Qwen 2B model from Huggingface:
+For example, following snippets shows how to load the Gemma 2B model from Huggingface:
 
 ```python
 ignore_patterns = [

@@ -13,6 +13,7 @@ import numpy as np
 from safetensors import numpy as stnp
 from tunix.models import safetensors_loader
 from tunix.tests import test_common
+from tunix.utils import env_utils
 
 
 def key_mapping(config):
@@ -86,11 +87,17 @@ class SafetensorsLoaderTest(parameterized.TestCase):
       )
 
   @parameterized.named_parameters(
-      dict(testcase_name='absolute_path', path_type='abs'),
-      dict(testcase_name='relative_path', path_type='rel'),
-      dict(testcase_name='relative_dot_path', path_type='rel_dot'),
+      *(([dict(testcase_name='opt_loader_enabled', mode='optimized')] 
+         if not env_utils.is_internal_env() else []) + [
+          dict(testcase_name='absolute_path', path_type='abs'),
+          dict(testcase_name='relative_path', path_type='rel'),
+          dict(testcase_name='relative_dot_path', path_type='rel_dot'),
+          dict(testcase_name='opt_loader_disabled', mode='original'),
+      ])
   )
-  def test_load_and_create_model(self, path_type):
+  def test_load_and_create_model(
+      self, path_type='abs', mode='optimized'
+  ):
     try:
       st_dir_abs = self.create_tempdir().full_path
     except Exception:  # pylint: disable=broad-except
@@ -119,6 +126,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         self.model.config,
         key_mapping,
         dtype=jnp.float32,
+        mode=mode,
     )
     loaded_state = nnx.state(loaded_model)
     jax.tree.map(
@@ -128,6 +136,8 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     )
 
   def test_load_and_create_model_from_gcs(self):
+    if env_utils.is_internal_env():
+      self.skipTest('GCS is not supported in GOOGLE_INTERNAL_PACKAGE_PATH')
     try:
       st_dir_abs = self.create_tempdir().full_path
     except Exception:  # pylint: disable=broad-except

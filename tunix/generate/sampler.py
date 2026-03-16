@@ -191,7 +191,9 @@ class Sampler(base_sampler.BaseSampler):
       cache_config: configuration for the KV cache.
       image_processor: The image processor.
     """
-    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.tokenizer = tokenizer
+    if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
+      self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.cache_config = cache_config
     self.image_processor = image_processor
     self._transformer_graphdef: graph.NodeDef = nnx.graphdef(transformer)
