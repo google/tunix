@@ -260,19 +260,23 @@ class Qwen25MathEvaluator:
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
           model=self.model,
-          backend="vllm",
+          backend="vllm_jax",
       )
       self.sampler_vllm = vllm_sampler.VllmSampler(
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
               mesh=self.mesh,
-              max_model_len=self.max_prompt_length
-              + self.max_generation_steps
-              + 100,
-              model_version=self.model_version,
               hbm_utilization=0.4,
               init_with_random_weights=False,
               mapping_config=mapping_config,
+              engine_kwargs={
+                  "model": self.model_version,
+                  "max_model_len": (
+                      self.max_prompt_length + self.max_generation_steps + 100
+                  ),
+                  "max_num_seqs": 10,
+                  "max_num_batched_tokens": 256 * 2 * 1024,
+              },
           ),
       )
     else:
@@ -306,7 +310,6 @@ class Qwen25MathEvaluator:
         test_df = pd.read_parquet(test_f)
 
     test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
-
 
     print(f"Loaded {len(test_ds)} examples")
     print("Example data:")
@@ -399,7 +402,7 @@ class Qwen25MathEvaluator:
           temperature=temperature,
           top_p=top_p,
           top_k=top_k,
-          seed=seed,
+          seed=None,
           echo=False,
           pad_output=True,
       )
@@ -458,7 +461,9 @@ class Qwen25MathEvaluator:
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-            seed=pass_idx,
+            seed=pass_idx
+            if self.sampler_type != "vllm"
+            else None,  # vllm handles seeding differently
         )
         for i, r in enumerate(batch_response):
           responses_collection[i].append(r)
@@ -579,7 +584,8 @@ MODEL_MAPPING = {
 mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
-model_version = "Qwen/Qwen2.5-1.5B-Instruct"
+# model_version = "Qwen/Qwen2.5-1.5B-Instruct"
+model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
