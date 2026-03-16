@@ -555,7 +555,7 @@ def _preprocess_dict(
     field in training_input for field in data_input_fields if field != "images"
   ):
     return DataInput(
-        **{field: training_input[field] for field in data_input_fields}
+        **{field: training_input.get(field, None) for field in data_input_fields}
     )
   else:
     raise ValueError(
