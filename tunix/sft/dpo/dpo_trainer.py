@@ -26,7 +26,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from PIL import Image
 # TODO(abheesht): We should move TokenizerAdapter outside `generate`.
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common
