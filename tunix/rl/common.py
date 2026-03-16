@@ -169,10 +169,16 @@ def get_per_token_logps(
     positions: jax.Array,
     attn_mask: jax.Array,
     logits_to_keep: int,
+    images: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
+  kwargs = {} if images is None else {"images": images}
   logits, _ = model(
-      input_tokens, positions=positions, attention_mask=attn_mask, cache=None
+      input_tokens,
+      positions=positions,
+      attention_mask=attn_mask,
+      cache=None,
+      **kwargs
   )
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]
@@ -218,6 +224,7 @@ def compute_per_token_logps(
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
+    images: jax.Array | None = None,
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     return_logits: bool = False,
@@ -227,8 +234,13 @@ def compute_per_token_logps(
   input_tokens, positions, attn_mask = process_ids(
       prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
   )
+  kwargs = {} if images is None else {"images": images}
   logits, _ = model(
-      input_tokens, positions=positions, attention_mask=attn_mask, cache=None
+      input_tokens,
+      positions=positions,
+      attention_mask=attn_mask,
+      cache=None,
+      **kwargs,
   )
   logits_to_keep = completion_tokens.shape[1]
   logits = logits[:, -logits_to_keep - 1 : -1, :]
