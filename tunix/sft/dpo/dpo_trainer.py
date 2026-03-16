@@ -193,7 +193,6 @@ class DPOTrainer(peft_trainer.PeftTrainer):
         string inputs and tokenize them internally.
       image_processor: An optional image processor. If provided, the trainer can
         accept raw images and process (resize, normalize, etc.) them internally.
-        
     """
     self.model = model
     self.ref_model = ref_model
