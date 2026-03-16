@@ -817,22 +817,39 @@ def transfer_state_with_mappings(
   return dst_state.from_flat_path(tgt_flat_list)
 
 
+def _shapes_are_repeatable(
+    candidate_shape: tuple[int, ...],
+    tgt_shape: tuple[int, ...],
+) -> bool:
+  """Returns True if candidate_shape can be repeated to match tgt_shape."""
+  if len(candidate_shape) != len(tgt_shape):
+    return False
+
+  for s, t in zip(candidate_shape, tgt_shape):
+    if s > t or t % s != 0:
+      return False
+  return True
+
+
 def _unstack_scanned_param(
     src_val: jax.Array | np.ndarray | Any,
     tgt_val: jax.Array | np.ndarray | Any,
     key_path: str,
+    scan_axis: Optional[int] = None,
 ) -> Tuple[jax.Array | np.ndarray | Any]:
   """Unstacks a scanned parameter by moving the scan axis to 0.
 
-  This helper finds the dimension in src_val that needs to be removed to match
-  tgt_val's shape, transposes that axis to the 0th position, and unstacks it. It
-  is used when transferring weights from a scanned representation (e.g., MaxText)
-  to an unrolled one (e.g., vLLM).
+  This helper unstacks a scanned array at the specified scan_axis. When scan_axis
+  is provided, it transposes that axis to position 0 and unstacks it. This is used
+  when transferring weights from a scanned representation (e.g., MaxText) to an
+  unrolled one (e.g., vLLM).
 
   Args:
     src_val: The source array (scanned) to slice from.
     tgt_val: The target array whose shape we want to match.
     key_path: The dot-separated path to the parameter for debugging.
+    scan_axis: The axis containing the scanned dimension. If None, attempts to
+      auto-detect it for backward compatibility.
 
   Returns:
       A tuple of unstacked arrays, or a tuple containing just the original src_val 
@@ -848,15 +865,16 @@ def _unstack_scanned_param(
     return (src_val,)
 
   if len(src_shape) == len(tgt_shape) + 1:
-    scan_axis = None
-    # Check which dimension, when removed, matches the target shape
-    for i in range(len(src_shape)):
-      if src_shape[:i] + src_shape[i + 1 :] == tgt_shape:
-        scan_axis = i
-        break
-
+    # If scan_axis not provided, try to detect it
+    if scan_axis is None:
+      for i in range(len(src_shape)):
+        candidate = src_shape[:i] + src_shape[i + 1 :]
+        if _shapes_are_repeatable(candidate, tgt_shape):
+          scan_axis = i
+          break
+    
     if scan_axis is not None:
-      # 1. Transpose the scanned axis to the 0th position
+      # Transpose the scanned axis to the 0th position
       if scan_axis != 0:
         perm = (scan_axis,) + tuple(i for i in range(len(src_shape)) if i != scan_axis)
         if hasattr(src_val, 'transpose'):
@@ -864,7 +882,7 @@ def _unstack_scanned_param(
         elif isinstance(src_val, np.ndarray):
           src_val = np.transpose(src_val, perm)
 
-      # 2. Unstack along the 0th axis
+      # Unstack along the 0th axis
       # Handling JAX version differences where unstack might be under jnp
       try:
         if hasattr(jax, 'unstack'):
@@ -880,20 +898,85 @@ def _unstack_scanned_param(
             key_path, e
         )
         return (src_val,)
-
-    logging.warning(
-        "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
-        ' determine scan axis.',
-        key_path, src_shape, tgt_shape,
-    )
+    else:
+      logging.warning(
+          "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
+          ' determine scan axis.',
+          key_path, src_shape, tgt_shape,
+      )
 
   return (src_val,)
+
+
+def _repeat_to_model_shape(
+    src_val: jax.Array | np.ndarray | Any,
+    tgt_val: jax.Array | np.ndarray | Any,
+    key_path: str,
+) -> jax.Array | np.ndarray | Any:
+  """Repeats src_val to match tgt_val's shape if shapes are compatible multiples.
+
+  This is used to broadcast KV heads (or other dimensions) from a model with
+  fewer heads to one with more heads, e.g., when transferring GQA weights.
+
+  Args:
+      src_val: The source array to repeat.
+      tgt_val: The target array whose shape we want to match.
+      key_path: Path string for debug logging.
+
+  Returns:
+      A repeated version of src_val matching tgt_val's shape, or src_val
+      unchanged if shapes already match or repeating is not possible.
+  """
+  if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
+    return src_val
+
+  src_shape = src_val.shape
+  tgt_shape = tgt_val.shape
+
+  if src_shape == tgt_shape:
+    return src_val
+
+  if len(src_shape) != len(tgt_shape):
+    return src_val
+
+  for src_dim, tgt_dim in zip(src_shape, tgt_shape):
+    if src_dim > tgt_dim or tgt_dim % src_dim != 0:
+      return src_val
+
+  logging.info(
+      "Repeating '%s' from %s to %s.",
+      key_path, src_shape, tgt_shape,
+  )
+  result = src_val
+  for axis, (src_dim, tgt_dim) in enumerate(zip(src_shape, tgt_shape)):
+    if tgt_dim != src_dim:
+      result = jnp.repeat(result, tgt_dim // src_dim, axis=axis)
+
+  return result
+
+
+def _delete_pytree_buffers(pytree: Any) -> None:
+  """Deletes buffers of jax.Arrays in a pytree to save memory."""
+  logging.info('Deleting pytree buffers.')
+
+  def _delete_buffers(x):
+    if isinstance(x, nnx.Variable) and isinstance(x.value, jax.Array):
+      if not x.value.is_deleted():
+        x.value.delete()
+    elif isinstance(x, jax.Array):
+      if not x.is_deleted():
+        x.delete()
+    return x
+
+  jax.tree_util.tree_map(_delete_buffers, pytree)
 
 
 def transfer_state_directly(
     src_state: Mapping[str, Any],
     dst_state: Mapping[str, Any],
     reshard_fn: Callable[..., Mapping[str, Any]],
+    scan_axis: int = 1,
+    delete_dst_buffers: bool = False,
 ) -> None:
   """Transfers state directly by matching structure, stripping wrappers.
 
@@ -908,7 +991,13 @@ def transfer_state_directly(
     src_state: The source state to transfer from.
     dst_state: The destination state to transfer to.
     reshard_fn: A function to shard the values.
+    scan_axis: The axis along which to unroll scanned layers, if needed.
+    delete_dst_buffers: Whether to delete buffers in the destination state after transfer to save memory.
   """
+
+  if delete_dst_buffers:
+    _delete_pytree_buffers(dst_state)
+    gc.collect()
 
   def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
     if isinstance(obj, dict):
@@ -974,11 +1063,15 @@ def transfer_state_directly(
 
     layer_pattern = re.compile(r'^layers_(\d+)$')
 
+    # Cache to store unstacked scanned arrays to avoid repeated work
+    unstacked_cache = {}
+
     for key_tuple, tgt_val in tgt_flat.items():
       # Try Direct Match
       if key_tuple in src_flat:
         src_val = src_flat[key_tuple]
         src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(key_tuple))
+        src_val = _repeat_to_model_shape(src_val, tgt_val, str(key_tuple))
         filtered_src_flat[key_tuple] = src_val
         filtered_tgt_flat[key_tuple] = tgt_val
         continue
@@ -1017,31 +1110,35 @@ def transfer_state_directly(
             break
 
         if found_candidate:
-          # Cache unstacked params to guarantee we only transpose/unstack ONCE
+          # Apply the dtype cast and the repeating *before* unstacking
           if found_candidate not in unstacked_cache:
             src_val = src_flat[found_candidate]
+            
+            # Cast the bulk tensor once
+            src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(found_candidate))
+            
+            # Predict the stacked target shape and repeat the bulk tensor once
+            src_shape = getattr(src_val, 'shape', None)
+            tgt_shape = getattr(tgt_val, 'shape', None)
+            
+            if src_shape and tgt_shape and len(src_shape) == len(tgt_shape) + 1:
+              # Construct the 3D target shape (e.g., [layers, global_heads, dim])
+              stacked_tgt_shape = tgt_shape[:scan_axis] + (src_shape[scan_axis],) + tgt_shape[scan_axis:]
+              
+              # Mock a target array purely to pass the shape to our repeat helper
+              class _MockTarget:
+                shape = stacked_tgt_shape
+                
+              src_val = _repeat_to_model_shape(src_val, _MockTarget(), str(found_candidate))
+            
+            # Unstack the already casted and repeated tensor using the provided scan_axis
             unstacked_cache[found_candidate] = _unstack_scanned_param(
-                src_val, tgt_val, str(found_candidate)
+                src_val, tgt_val, str(found_candidate), scan_axis=scan_axis
             )
+          
+          # Extract the layer_idx-th element from the unstacked cache
+          sliced_val = unstacked_cache[found_candidate][layer_idx]
 
-          unstacked_list = unstacked_cache[found_candidate]
-
-          try:
-            # Handle fallback cases where unstacking returned original value
-            if len(unstacked_list) == 1 and layer_idx > 0:
-              sliced_val = unstacked_list[0]
-            else:
-              sliced_val = unstacked_list[layer_idx]
-          except IndexError as e:
-            logging.debug(
-                "Index error pulling layer %d for '%s'. Error: %s. Using original.",
-                layer_idx, found_candidate, e
-            )
-            sliced_val = src_flat[found_candidate]
-
-          sliced_val = _apply_dtype_cast(
-              sliced_val, tgt_val.dtype, str(key_tuple)
-          )
           filtered_src_flat[key_tuple] = sliced_val
           filtered_tgt_flat[key_tuple] = tgt_val
           continue

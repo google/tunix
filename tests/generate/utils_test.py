@@ -1054,7 +1054,7 @@ class UtilsTest(parameterized.TestCase):
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
 
     np.testing.assert_array_equal(
         dst_state['model']['decoder']['layers_0']['mlp']['weight'][...], # Use [...]
@@ -1082,7 +1082,7 @@ class UtilsTest(parameterized.TestCase):
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
 
     np.testing.assert_array_equal(
         dst_state['layers']['layers_0']['mlp']['weight'][...],
@@ -1127,7 +1127,7 @@ class UtilsTest(parameterized.TestCase):
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
 
     # Verify direct mapping cast
     self.assertEqual(dst_state['decoder']['layer0']['weight'].dtype, jnp.bfloat16)
@@ -1171,7 +1171,7 @@ class UtilsTest(parameterized.TestCase):
     )
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
 
     # Verify casting and slicing for implicit layers
     self.assertEqual(dst_state['layers']['layers_0']['mlp']['weight'].dtype, jnp.bfloat16)
@@ -1186,6 +1186,115 @@ class UtilsTest(parameterized.TestCase):
         jnp.array(200.0, dtype=jnp.bfloat16),
         atol=1e-2
     )
+
+  def test_transfer_state_directly_repeats_kv_heads(self):
+    """Tests that direct-match weights are repeated when dst has more heads."""
+    src = jnp.array([[1., 2., 3., 4., 5., 6., 7., 8.],
+                     [3., 4., 5., 6., 7., 8., 9., 10.]], dtype=jnp.float32)
+    src_state = nnx.Dict(
+        attn=nnx.Dict(
+            kv_weight=nnx.Param(src)
+        )
+    )
+    dst_state = nnx.Dict(
+        attn=nnx.Dict(
+            kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32))
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    expected = jnp.repeat(src, 2, axis=0)
+    np.testing.assert_array_equal(
+        dst_state['attn']['kv_weight'][...],
+        expected,
+    )
+
+  def test_transfer_state_directly_repeats_scanned_kv_heads(self):
+    """Tests that scanned weights are tiled when dst has more heads than src."""
+    # Source: scanned layers, kv_weight shape [2, 2, 8] (layers=2, heads=2, dim=8)
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.ones((2, 2, 8), dtype=jnp.float32))
+            )
+        )
+    )
+    # Destination: unrolled layers, each with kv_weight shape [4, 8]
+    dst_state = nnx.Dict(
+        layers_0=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32))
+            )
+        ),
+        layers_1=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32))
+            )
+        ),
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    expected = jnp.repeat(jnp.ones((2, 8), dtype=jnp.float32), 2, axis=0)
+    np.testing.assert_array_equal(
+        dst_state['layers_0']['attn']['kv_weight'][...],
+        expected,
+    )
+    np.testing.assert_array_equal(
+        dst_state['layers_1']['attn']['kv_weight'][...],
+        expected,
+    )
+
+  def test_slice_scanned_param_with_repeatable_target(self):
+    """_slice_scanned_param finds scan axis even when post-slice shape needs repeat."""
+    # src: (embed=4, layers=3, kv_heads=2, head_dim=8)
+    # tgt: (embed=4, kv_heads=4, head_dim=8) — 2x repeat on kv_heads axis
+    src = jnp.arange(4 * 3 * 2 * 8, dtype=jnp.float32).reshape(4, 3, 2, 8)
+    tgt = jnp.zeros((4, 4, 8), dtype=jnp.float32)
+    result = utils._unstack_scanned_param(src, tgt, key_path='test')[1]
+    # Should return layer 1 slice: shape (4, 2, 8)
+    np.testing.assert_equal(result.shape, (4, 2, 8))
+    np.testing.assert_array_equal(result, src[:, 1, :, :])
+
+  def test_transfer_state_directly_scanned_with_repeated_kv_heads(self):
+    """Scanned src + KV-head-repeated dst transfer works end-to-end."""
+    # src: scanned, shape (2, 2, 4) = (embed, layers, kv_heads*head_dim combined)
+    # Use small shapes: embed=4, layers=2, kv_heads=2, head_dim=4
+    # scanned param shape: (4, 2, 2, 4)
+    layer0 = jnp.array([[1., 2., 3., 4.], [5., 6., 7., 8.]], dtype=jnp.float32)  # (2, 4)
+    layer1 = jnp.array([[9., 10., 11., 12.], [13., 14., 15., 16.]], dtype=jnp.float32)
+    # Stack into scanned shape (2, 2, 4): [layer0, layer1] on axis 0
+    scanned = jnp.stack([layer0, layer1], axis=0)  # (2, 2, 4)
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(scanned)
+            )
+        )
+    )
+    # dst: unrolled, each layer has (4, 4) — 2x repeat on kv_heads axis
+    dst_state = nnx.Dict(
+        layers_0=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 4), dtype=jnp.float32))
+            )
+        ),
+        layers_1=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 4), dtype=jnp.float32))
+            )
+        ),
+    )
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    expected_0 = jnp.repeat(layer0, 2, axis=0)  # (4, 4)
+    expected_1 = jnp.repeat(layer1, 2, axis=0)
+    np.testing.assert_array_equal(dst_state['layers_0']['attn']['kv_weight'][...], expected_0)
+    np.testing.assert_array_equal(dst_state['layers_1']['attn']['kv_weight'][...], expected_1)
 
   def test_sglang_jax_1d_kv_bias_alignment(self):
     """Test 1-D KV bias alignment for sglang_jax rollout engine."""
