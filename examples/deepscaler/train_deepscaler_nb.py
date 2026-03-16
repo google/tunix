@@ -13,6 +13,7 @@ from flax import nnx
 import grain
 import jax
 from jax import numpy as jnp
+import numpy as np
 import optax
 import optax
 from orbax import checkpoint as ocp
@@ -84,6 +85,7 @@ print("jax devices: ", jax.devices())
 
 # %%
 import argparse
+
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
 arg_parser.add_argument("--batch_size", type=int, default=128)
 arg_parser.add_argument("--mini_batch_size", type=int, default=128)
@@ -592,7 +594,23 @@ rl_cluster = rl_cluster_lib.RLCluster(
 
 show_hbm_usage("after RLCluster creation")
 
+
 # %%
+def metric_fn(prompts, completions, rewards, advantages, **kwargs):
+  del prompts, completions, advantages, kwargs
+  solve_all = (rewards > 0.1).all()
+  solve_none = (rewards == 0).all()
+  return {
+      "rewards/solve_all": (
+          1 if solve_all else 0,
+          np.sum,
+      ),
+      "rewards/solve_none": (
+          1 if solve_none else 0,
+          np.sum,
+      ),
+  }
+
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
@@ -602,6 +620,7 @@ grpo_trainer = GRPOLearner(
     ],
     algo_config=grpo_config,
     chat_parser=chat_parser,
+    metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
 
