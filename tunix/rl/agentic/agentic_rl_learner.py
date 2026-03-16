@@ -123,7 +123,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       reward_fns: RewardFn | List[RewardFn],
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
-      data_shuffle_seed: int | None = None,
       agent_class: Type[
           base_agent.ConversationAgentBase
       ] = model_agent.ModelAgent,
@@ -140,8 +139,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       algo_config: Configuration object.
       reward_fns: Reward functions.
       chat_parser: A parser to handle chat message formatting.
-      metric_fns: Metric functions.
-      data_shuffle_seed: Seed for data shuffling.
+      metric_fns: A sequence of callables that compute metrics for the
+        completions. Each callable should accept ``prompts``, ``completions``,
+        ``rewards``, ``advantages`` and optional keyword arguments, and return
+        a dictionary of metric names to tuples of
+        ``(metric_value, aggregation_fn)``:
+
+           >>> def metric_fn(
+           ...     prompts, completions, rewards, advantages, **kargs
+           ... ):
+           ...     return {
+           ...       # ...
+           ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
+           ...       # ... }
       agent_class: User defined agent class.
       agent_kwargs: Keyword arguments for the agent class.
       env_class: User defined environment class.
@@ -165,12 +175,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.rl_cluster.actor_trainer.is_managed_externally = True
     if hasattr(self.rl_cluster, "critic_trainer"):
       self.rl_cluster.critic_trainer.is_managed_externally = True
-
-    self._data_shuffle_seed = (
-        jax.random.PRNGKey(data_shuffle_seed)
-        if data_shuffle_seed is not None
-        else None
-    )
 
     self.agent_class = agent_class
     self.agent_kwargs = agent_kwargs or {}
@@ -277,18 +281,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         **kwargs,
     )
 
-    # Log all metrics for this trajectory in one call
-    if expected_step is not None:
-      # Pass the expected_step explicitly because it is calculated based on
-      # the batch index (predicted step) to align metrics with the correct
-      # training step in the asynchronous execution.
-      self.rl_cluster.buffer_metrics_async(
-          rewards_info["log_metrics"], mode=mode, step=expected_step
-      )
-    else:
-      self.rl_cluster.buffer_metrics_async(
-          rewards_info["log_metrics"], mode=mode
-      )
+    # Pass the expected_step explicitly because it is calculated based on
+    # the batch index (predicted step) to align metrics with the correct
+    # training step in the asynchronous execution.
+    expected_step = 0 if expected_step is None else expected_step
+    self.rl_cluster.buffer_metrics_async(
+        rewards_info["log_metrics"], mode=mode, step=expected_step
+    )
 
     return rewards_info["rewards"]
 

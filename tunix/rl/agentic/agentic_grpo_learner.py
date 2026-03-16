@@ -141,7 +141,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       algo_config: TGrpoConfig,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
-      data_shuffle_seed: int | None = None,
       agent_class: Type[
           base_agent.ConversationAgentBase
       ] = model_agent.ModelAgent,
@@ -175,7 +174,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
            ...       # ...
            ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
            ...       # ... }
-      data_shuffle_seed: The seed used to shuffle the training data.
       agent_class: The class of the agent to be used.
       agent_kwargs: Keyword arguments to pass to the agent class.
       env_class: The class of the environment to be used.
@@ -185,7 +183,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         metric_fns=metric_fns,
-        data_shuffle_seed=data_shuffle_seed,
         algo_config=algo_config,
         chat_parser=chat_parser,
         agent_class=agent_class,
