@@ -173,7 +173,7 @@ class Qwen25MathEvaluator:
       mesh_config=None,
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
-      sampler_type: str = "vanilla",  # vanilla, vllm, or sglang-jax
+      sampler_type: str = "vllm",  # vanilla, vllm, or sglang-jax
   ):
     self.model_config = model_config
     self.model_version = model_version
@@ -255,26 +255,26 @@ class Qwen25MathEvaluator:
           ),
       )
     elif self.sampler_type == "vllm":
-      from tunix.google.stubs import vllm_sampler_stub as vllm_sampler  # pylint: disable=g-import-not-at-top
+      from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
           model=self.model,
-          backend="vllm",
+          backend="vllm_jax",
       )
       self.sampler_vllm = vllm_sampler.VllmSampler(
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
               mesh=self.mesh,
-              max_model_len=self.max_prompt_length
-              + self.max_generation_steps
-              + 100,
-              model_version=self.model_version,
               hbm_utilization=0.4,
               init_with_random_weights=False,
               mapping_config=mapping_config,
-          ),
-      )
+              engine_kwargs={
+                "model": self.model_version,
+                "max_model_len": self.max_prompt_length + self.max_generation_steps + 100,
+            },
+          )
+        )
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
@@ -399,7 +399,7 @@ class Qwen25MathEvaluator:
           temperature=temperature,
           top_p=top_p,
           top_k=top_k,
-          seed=seed,
+          seed=None,
           echo=False,
           pad_output=True,
       )
@@ -557,7 +557,7 @@ if NOTEBOOK_ENV == "g3":
     MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev"
 else:
     DATA_PATH_PREFIX = "gs://tunix/data"
-    MODEL_PATH_PREFIX = "gs://tunix/models"
+    MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
 
 MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "MATH-500/test.jsonl")
 AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
@@ -579,7 +579,8 @@ MODEL_MAPPING = {
 mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
-model_version = "Qwen/Qwen2.5-1.5B-Instruct"
+# model_version = "Qwen/Qwen2.5-1.5B-Instruct"
+model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -615,44 +616,44 @@ print(f"Dataset: {dataset}")
 print(f"Correct: {results['correct']}/{results['total']}")
 print(f"Accuracy: {results['accuracy']:.2f}%")
 print("=" * 60)
-# %%
-# AIME-2024
-model_version = "agentica-org/DeepScaleR-1.5B-Preview"
-# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-dataset = AIME_2024_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
+# # %%
+# # AIME-2024
+# model_version = "agentica-org/DeepScaleR-1.5B-Preview"
+# # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# dataset = AIME_2024_DATA_PATH
+# model_config, model_path = MODEL_MAPPING[model_version]
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=2048,  # Increased
-    max_generation_steps=32768,  # Increased
-)
+# evaluator = Qwen25MathEvaluator(
+#     model_config=model_config,
+#     model_version=model_version,
+#     model_path=model_path,
+#     dataset=dataset,
+#     mesh_config=mesh_config,
+#     max_prompt_length=2048,  # Increased
+#     max_generation_steps=32768,  # Increased
+# )
 
-evaluator.load_model()
+# evaluator.load_model()
 
-print("\nStarting evaluation...")
+# print("\nStarting evaluation...")
 
-results = evaluator.evaluate(
-    batch_size=1,
-    num_batches=None,
-    temperature=0.6,
-    top_k=None,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
+# results = evaluator.evaluate(
+#     batch_size=1,
+#     num_batches=None,
+#     temperature=0.6,
+#     top_k=None,
+#     top_p=0.95,
+#     num_passes=1,
+#     debug_first_n=5,
+# )
 
-# Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
-# %%
+# # Print results
+# print("\n" + "=" * 60)
+# print("Evaluation Results")
+# print("=" * 60)
+# print(f"Model: {model_path}")
+# print(f"Dataset: {dataset}")
+# print(f"Correct: {results['correct']}/{results['total']}")
+# print(f"Accuracy: {results['accuracy']:.2f}%")
+# print("=" * 60)
+# # %%

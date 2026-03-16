@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import multiprocessing
 import re
 from typing import Callable, Optional
 
@@ -24,7 +25,7 @@ from typing import Any, Callable, Dict, List
 from tunix.utils import math_utils
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.rewards import reward_types
-  
+
 math_rewards_verify = math_metric(
   gold_extraction_target=(LatexExtractionConfig(),),
   pred_extraction_target=(
@@ -33,24 +34,6 @@ math_rewards_verify = math_metric(
   ),
 )
 
-
-def normalize_response(response: str) -> str:
-  """Normalize the response by removing markdown and LaTeX formatting that may prevent a match."""
-  return (
-    response.replace("**", "")
-    .replace("$\\boxed{", "")
-    .replace("}$", "")
-    .replace("\\$", "")
-    .replace("$\\text{", "")
-    .replace("$", "")
-    .replace("\\mathrm{", "")
-    .replace("\\{", "")
-    .replace("\\text", "")
-    .replace("\\(", "")
-    .replace("\\mathbf{", "")
-    .replace("{", "")
-    .replace("\\boxed", "")
-  )
 
 def math_reward(prompts: List[str], completions: List[str], answer: List[str], **kwargs):
   """
@@ -93,15 +76,31 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
         ground_truth[i] = ""
 
   results = []
+  timeout_seconds=2
+  ctx = multiprocessing.get_context('spawn')
   for i in range(len(completions)):
     response = completions[i]
     truth = ground_truth[i]
-    try:
-      ground_truth_parsable = "\\boxed{" + truth + "}"
-      print(f"Normalized response: {response}, Processed ground truth: {ground_truth_parsable}")
-      ret_score, extracted_answer = math_rewards_verify([ground_truth_parsable], [response])
-      results.append(float(ret_score))
-    except (Exception, TimeoutException):
-      results.append(0.0)
-      extracted_answers.append(None)
+    q = ctx.Queue()
+    ground_truth_parsable = "\\boxed{" + truth + "}"
+    print(f"Normalized response: {response}, Processed ground truth: {ground_truth_parsable}")
+    proc = ctx.Process(target=lambda q, response, ground_truth_parsable: q.put(math_rewards_verify([ground_truth_parsable], [response], None)), args=(queue, response, ground_truth_parsable))
+    proc.start()
+    proc.join(timeout=timeout_seconds)
+    
+    if proc.is_alive():
+      print(f"Hard timeout reached for prediction! Terminating...")
+      proc.terminate()
+      proc.join()
+      results.append(0.0) # Assign 0 reward on timeout
+    else:
+      try:
+        # Adding a small timeout to get() prevents hanging if the process died
+        res, _ = q.get(timeout=1) 
+        results.append(res[0])
+      except Exception:
+        results.append(0.0)
+    q.close()          # Tells the queue no more data is coming
+    q.join_thread()    # Ensures the background feeder thread exits cleanly
+  print(f"Final rewards: {results}")
   return results

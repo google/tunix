@@ -180,6 +180,11 @@ class AsyncTrajectoryLogger:
       try:
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
+        signal.signal(signal.SIGHUP, self._handle_signal)
+        
+        # possible_signals = signal.valid_signals()
+        # for sig in possible_signals:
+        #   signal.signal(sig, self._handle_signal)
       except ValueError:
         logging.warning('Failed to register signal handlers.')
 
@@ -187,6 +192,7 @@ class AsyncTrajectoryLogger:
 
   def _handle_signal(self, signum: int, frame: types.FrameType):
     """Gracefully stops the logger and exits."""
+    print(f'\nReceived signal {signum}, flushing trajectory logger...')
     logging.info('Received signal %d, flushing trajectory logger...', signum)
     self.stop()
     # Restore default handler and re-send signal to self

@@ -736,6 +736,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
+      print(f"size of prompt ids: ", len(merged_train_micro_batch.prompt_ids))
 
       # --- Evaluation Logic ---
       current_eval_dataset = None

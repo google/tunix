@@ -67,7 +67,7 @@ with cm:
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
-  from tunix.utils import math_rewards
+  from tunix.utils import rewards_math_verify
   from tunix.utils import compat
   from tunix.cli.utils import data as data_lib
   from tunix.sft import profiler
@@ -126,8 +126,8 @@ EPSILON_HIGH = 0.28
 
 # ====== Training ======
 ENABLE_REMAT = True
-BATCH_SIZE = 128
-MINI_BATCH_SIZE = 64
+BATCH_SIZE = 4
+MINI_BATCH_SIZE = 4
 NUM_BATCHES = 100
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -456,7 +456,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_disable_radix_cache": True,
     "rollout_sglang_jax_enable_deterministic_sampling": False,
     "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
+    "rollout_sglang_jax_max_running_requests": 4,
     "rollout_sglang_jax_page_size": 128,
 }
 
@@ -548,7 +548,7 @@ show_hbm_usage("after RLCluster creation")
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=[
-        math_rewards.math_reward,
+        rewards_math_verify.math_reward,
     ],
     algo_config=grpo_config,
     chat_parser=chat_parser,
