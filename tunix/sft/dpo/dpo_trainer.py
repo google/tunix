@@ -56,9 +56,9 @@ class DataInput:
   """
 
   prompts: list[str]
-  images: RawImageType | None = None
   chosen_responses: list[str]
   rejected_responses: list[str]
+  images: RawImageType | None = None
 
 
 @flax.struct.dataclass(frozen=True)
