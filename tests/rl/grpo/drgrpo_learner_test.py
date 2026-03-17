@@ -100,7 +100,7 @@ class DrGRPOlearnerTest(parameterized.TestCase):
     )
     # Dr. GRPO advantages are not scaled by the standard deviation.
     # Std. across groups above is the same by construction.
-    std_factor = jnp.array([1.0, 2.0]).std(ddof=1) + 1e-4
+    std_factor = jnp.array([1.0, 2.0]).std(ddof=1) + 1e-6
     np.testing.assert_allclose(grpo_advantages * std_factor, drgrpo_advantages)
 
   def test_drgrpo_loss_fn(self):

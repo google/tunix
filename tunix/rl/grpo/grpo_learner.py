@@ -30,6 +30,7 @@ from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
+from tunix.rl.ppo import ppo_helpers
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -186,7 +187,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
       "kl": np.mean,
+      "entropy": np.mean,
       "pg_clipfrac": np.mean,
+      "ppo_kl": np.mean,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
@@ -297,6 +300,14 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             "rewards/score/mean": (np.mean(rewards), np.mean),
             "rewards/score/max": (np.max(rewards), np.max),
             "rewards/score/min": (np.min(rewards), np.min),
+        },
+        mode=mode,
+    )
+
+    self.rl_cluster.buffer_metrics(
+        {
+            "advantages/mean": (np.mean(advantages), np.mean),
+            "advantages/std": (np.std(advantages), np.std),
         },
         mode=mode,
     )
@@ -473,7 +484,7 @@ def grpo_loss_fn(
   # TODO(yangmu): trace this part as "actor_inference_and_training".
   # with perf_tracer.span("...", list(completion_ids.devices())):
   graphdef, state = nnx.split(model)
-  per_token_logps = common.compute_per_token_logps(
+  per_token_logps, logits = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
@@ -481,16 +492,21 @@ def grpo_loss_fn(
       pad_id=pad_id,
       eos_id=eos_id,
       stop_gradient=False,
-      return_logits=False,
+      return_logits=True,
   )
-  advantages = train_example.advantages
+  per_token_logps = jnp.astype(per_token_logps, jnp.float32)
+  advantages = jnp.astype(train_example.advantages, jnp.float32)[:, None]
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
-    old_per_token_logps = train_example.old_per_token_logps
+    old_per_token_logps = jnp.astype(
+        train_example.old_per_token_logps, jnp.float32
+    )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
+
+  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
     seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
@@ -503,41 +519,35 @@ def grpo_loss_fn(
     )
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
-  coef_1 = jnp.exp(seq_importance_ratio)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
+  is_ratio = jnp.exp(seq_importance_ratio)
+  pg_loss_1 = -advantages * is_ratio
+  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
-  # Compute pg_clipfrac
-  pg_losses_1 = -coef_1 * jnp.expand_dims(advantages, 1)
-  pg_losses_2 = -coef_2 * jnp.expand_dims(advantages, 1)
-  pg_clipfrac = jnp.sum(
-      (pg_losses_2 > pg_losses_1) * completion_mask
-  ) / jnp.clip(jnp.sum(completion_mask), min=1)
+  per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
-  # TODO(tsbao): We should handle token level advantages.
-  per_token_loss = -jnp.minimum(
-      coef_1 * jnp.expand_dims(advantages, 1),
-      coef_2 * jnp.expand_dims(advantages, 1),
+  clipped_fraction = ppo_helpers.masked_mean(
+      jnp.greater(pg_loss_2, pg_loss_1), completion_mask
   )
 
-  # add KL penalty
-  mean_kl = 0.0
+  aux = {"kl": 0.0, "pg_clipfrac": clipped_fraction, "ppo_kl": ppo_kl}
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps
     )
     per_token_loss = per_token_loss + beta * kl
-    mean_kl = (kl * completion_mask).sum() / jnp.clip(
-        completion_mask.sum(), min=1
-    )
 
-  aux = {
-    "kl": mean_kl,
-    "pg_clipfrac": pg_clipfrac,
-  }
+    # Log mean KL.
+    aux["kl"] = jnp.astype(
+        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+        jnp.float32,
+    )
 
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
+  token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
+  entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
+  aux["entropy"] = entropy_loss
 
   return loss, aux
 
@@ -553,6 +563,7 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   Returns:
     Group relative advantages.
   """
+  rewards = rewards.astype(np.float32)
   mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
   std_grouped_rewards = rewards.reshape(-1, num_generations).std(
       axis=-1, ddof=1
@@ -560,7 +571,7 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
 
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
 
 
 @function_registry.register_advantage_estimator("rloo")

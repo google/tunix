@@ -1159,7 +1159,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     rewards = jax.random.uniform(rng, shape=(1, 6))
     advantages = grpo_lib.compute_advantages(rewards, num_generations=3)
     expected_value = jnp.array(
-        [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
+        [[0.307497, -1.117635, 0.810137, 1.094525, -0.228670, -0.865855]]
     )
     np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
 
