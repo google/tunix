@@ -9,12 +9,10 @@ import os
 import sys
 
 from absl import logging as absl_logging
-# from etils import ecolab
 from flax import nnx
 import grain
 import jax
 from jax import numpy as jnp
-import numpy as np
 import optax
 import optax
 from orbax import checkpoint as ocp
@@ -51,6 +49,7 @@ absl_logging.set_stderrthreshold("info")
 print("Logging configured at INFO level.")
 
 
+
 try:
   import pathwaysutils
   pathwaysutils.initialize()
@@ -76,23 +75,21 @@ except:
   cm = contextlib.nullcontext()
 
 with cm:
-  from tunix.models.qwen2 import params as params_lib
-  from tunix.models.qwen2 import model as model_lib
+  from tunix.models.qwen3 import params as params_lib
+  from tunix.models.qwen3 import model as model_lib
   from tunix.sft import metrics_logger
-  from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
   from tunix.rl.agentic.environments import task_environment
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
+  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
   from tunix.utils import compat
-  from tunix.sft import profiler
   from tunix.cli.utils import data as data_lib
-  from tunix import PerfMetricsConfig
-  from tunix.perf.experimental.export import PerfMetricsExport
+  from tunix.sft import profiler
 
 try:
   import pathwaysutils
@@ -104,8 +101,8 @@ except:
 print("jax devices: ", jax.devices())
 
 # %%
-import argparse
 
+import argparse
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
 arg_parser.add_argument("--batch_size", type=int, default=128)
 arg_parser.add_argument("--mini_batch_size", type=int, default=128)
@@ -122,9 +119,9 @@ arg_parser.add_argument("--max_response_length", type=int, default=8192)
 arg_parser.add_argument("--temperature", type=float, default=0.8)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=768)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
-arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument("--max_concurrency", type=int, default=1024)
+arg_parser.add_argument("--shuffle_data", type=bool, default=True)
+arg_parser.add_argument("--seed", type=int, default=123) 
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -133,6 +130,7 @@ TRAIN_FRACTION = 1.0
 # ====== Reproducibility ======
 SEED = args.seed
 
+
 # ====== LoRA ======
 RANK = 64
 ALPHA = 64.0
@@ -140,18 +138,20 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(8, 8), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 8), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 2048
 MAX_RESPONSE_LENGTH = args.max_response_length
+
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
 TEMPERATURE = args.temperature
 TOP_P = args.top_p
 TOP_K = args.top_k
+
 # The number of times the policy generates multiple responses for a given prompt
 # within a single training step. This corresponds to `G` in Algorithm 1 in the
 # paper. The "group" in GRPO comes from here.
@@ -176,6 +176,7 @@ BETA = args.beta
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
 
+
 # ====== Training ======
 ENABLE_REMAT = True
 BATCH_SIZE = args.batch_size
@@ -199,11 +200,13 @@ OFF_POLICY_STEPS = 0
 
 MODEL_DTYPE = jnp.float32
 
+
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
 B1 = args.b1  # Adam beta1
 B2 = args.b2  # Adam beta2
 WEIGHT_DECAY = args.weight_decay
+
 # == Cosine decay with warmup scheduler ==
 # Linearly increase learning rate from 0. to 5e-6 in the first 10% training
 # steps, and then gradually decrease the learning rate to 0 using cosine
@@ -213,6 +216,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
 MAX_GRAD_NORM = 1
+
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 10
@@ -307,6 +311,7 @@ trainer_mesh = jax.sharding.Mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
 )
 
+
 # %%
 try:
   from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
@@ -332,14 +337,15 @@ else:
   MODEL_PATH_PREFIX = "gs://tunix/models"
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
+
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_jax_exp22/01")
-print(f"Checkpoint directory: {CKPT_DIR}")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "linchai/deepscaler_ckpt/qwen3_4b/01")
 
-MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+MODEL_VERSION = "Qwen/Qwen3-4B"
 
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen3-4b")
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
+
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
@@ -383,6 +389,7 @@ def create_datasets(
     train_ds = train_ds.shuffle(SEED)
     test_ds = test_ds.shuffle(SEED)
 
+
   def process_item(item):
     question = item["question"]
     answer = item["answer"]
@@ -412,7 +419,6 @@ chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 
 # %%
 train_dataset, test_dataset = create_datasets()
-
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
     tokenizer,
@@ -430,21 +436,17 @@ test_dataset, _ = data_lib.post_init_dataset(
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
 )
-for s in train_dataset:
-  print(s)
-  break
+
 # %%
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config = model_lib.ModelConfig.qwen3_4b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
-else:
-  config.remat_config = model_lib.RematConfig.NONE
 
 print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(
+qwen3_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 
@@ -476,21 +478,14 @@ def get_lora_model(base_model, model_mesh):
 
 # %%
 if TRAIN_WITH_LORA:
-  qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
+  qwen3_actor = get_lora_model(qwen3_ref, trainer_mesh)
 else:
-  qwen2_actor = params_lib.create_model_from_safe_tensors(
+  qwen3_actor = params_lib.create_model_from_safe_tensors(
       MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
 
 # %%
-show_hbm_usage("after loading qwen2_actor")
-
-
-# %%
-rollout_config = config.replace(remat_config=model_lib.RematConfig.NONE)
-qwen2_rollout = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, rollout_config, rollout_mesh, dtype=jnp.bfloat16
-)
+show_hbm_usage("after loading qwen3_actor")
 
 # %%
 ModelAgent = model_agent.ModelAgent
@@ -505,7 +500,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-   log_dir="gs://linchai-bucket-dev/tensorboard/grpo", flush_every_n_steps=20
+    log_dir="gs://linchai-bucket-dev/tensorboard/grpo", flush_every_n_steps=20
 )
 
 # %%
@@ -543,7 +538,6 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
-    "data_type": jnp.bfloat16,
 }
 
 sglang_jax_rollout_dict = {
@@ -562,9 +556,10 @@ sglang_jax_rollout_dict = {
 
 MAX_NUM_SEQS =768
 MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
+
 vllm_rollout_dict = {
     # vllm-tpu specific configs
-    "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "rollout_vllm_model_version": "Qwen/Qwen3-4B",
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
@@ -580,7 +575,9 @@ vllm_rollout_dict = {
     },
 }
 
+
 print(f"Rollout engine: {ROLLOUT_ENGINE}")
+
 if ROLLOUT_ENGINE == "sglang_jax":
   rollout_engine_config = base_rollout.RolloutConfig(
       **base_rollout_dict, **sglang_jax_rollout_dict
@@ -593,6 +590,7 @@ elif ROLLOUT_ENGINE == "vanilla":
   rollout_engine_config = base_rollout.RolloutConfig(**base_rollout_dict)
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
+
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
@@ -618,13 +616,13 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # checkpoint saving
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
-        # profiler
+        # profile options
         # profiler_options = profiler.ProfilerOptions(
-          # profiler_steps=1,
-          # skip_first_n_steps=1,
-          # set_profile_options=False,
-          # log_dir=PROFILER_PATH,
-        # ) if ENABLE_PROFILER else None,
+        #   profiler_steps=64,
+        #   skip_first_n_steps=0,
+        #   set_profile_options=True,
+        #   log_dir=PROFILER_PATH,
+        # )
     ),
     rollout_config=rollout_engine_config,
 )
@@ -639,61 +637,37 @@ grpo_config = GRPOConfig(
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
-)
 
-# Perf Metrics logging
-perf_metrics_config = PerfMetricsConfig(
-    custom_export_fn_v2=PerfMetricsExport(
-        trace_dir="/tmp/agentic_perf"
-    ).export_metrics
 )
 
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen2_actor,
-    reference=qwen2_ref,
-    rollout=qwen2_rollout,
+    actor=qwen3_actor,
+    rollout=qwen3_rollout,
+    reference=qwen3_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
-    perf_config=perf_metrics_config,
 )
 
 show_hbm_usage("after RLCluster creation")
 
-
 # %%
-def metric_fn(prompts, completions, rewards, advantages, **kwargs):
-  del prompts, completions, advantages, kwargs
-  solve_all = (rewards > 0.1).all()
-  solve_none = (rewards == 0).all()
-  return {
-      "rewards/solve_all": (
-          1 if solve_all else 0,
-          np.sum,
-      ),
-      "rewards/solve_none": (
-          1 if solve_none else 0,
-          np.sum,
-      ),
-  }
-
 
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=[
         math_rewards.math_reward,
+
     ],
     algo_config=grpo_config,
     chat_parser=chat_parser,
-    metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
-
 try:
   wandb.finish()
   print("WandB session finished successfully")

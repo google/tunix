@@ -4,7 +4,7 @@ metadata:
   annotations:
     jobset.sigs.k8s.io/hack: "true"
   labels:
-  name: linchai-0311-test
+  name: linchai-qwen3-4b-test
   namespace: default
 spec:
   coordinator:
@@ -38,7 +38,7 @@ spec:
                 _sigterm() (kill -SIGTERM $! 2>/dev/null;);
                 trap _sigterm SIGTERM;
 
-                (TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$HF_TOKEN WANDB_API_KEY=$WANDB_API_KEY ROLLOUT_ENGINE=sglang_jax python3 examples/deepscaler/train_deepscaler_nb.py --max_concurrency=1) & PID=$!;
+                (TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' HF_TOKEN=$HF_TOKEN WANDB_API_KEY=$WANDB_API_KEY ROLLOUT_ENGINE=vllm python3 examples/deepscaler/train_qwen3_4b.py) & PID=$!;
                 while kill -0 $PID 2>/dev/null;
                     do sleep 5;
                 done;
@@ -61,7 +61,7 @@ spec:
                 value: GCP
               - name: JAX_BACKEND_TARGET
                 value: grpc://$(PATHWAYS_HEAD):29000
-              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/linchai-repo/tunix_base_image:sglang_jax_exp22
+              image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/linchai-repo/tunix_base_image:qwen3_4b
               imagePullPolicy: Always
               name: jax-tpu
               resources:
