@@ -191,6 +191,7 @@ class RLCluster:
       self,
       *,
       actor: ModelOrPath,
+      rollout: ModelOrPath | None = None,
       critic: ModelOrPath | None = None,
       reference: ModelOrPath | None = None,
       reward: ModelOrPath | None = None,
@@ -215,7 +216,7 @@ class RLCluster:
           else self.cluster_config.rollout_config.data_type
       )
       self.rollout_actor = self._load_model(
-          actor,
+          rollout if rollout is not None else actor,
           self.r2m[Role.ROLLOUT],
           rollout_data_type,
       )
