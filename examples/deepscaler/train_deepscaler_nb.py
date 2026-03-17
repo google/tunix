@@ -62,22 +62,6 @@ print("jax devices: ", jax.devices())
 # os.environ["WANDB_MODE"] = "online"
 
 try:
-  wandb.login()
-  print("linchai: logged in to W&B")
-except wandb.errors.UsageError as e:
-  # Handle the error, maybe disable W&B logging
-  wandb.init(mode="disabled")
-
-
-try:
-  import datetime
-  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb.init(project="tunix", name=run_name)
-  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
-except Exception as e:
-  print(f"linchai: W&B initialization failed with error: {e}")
-
-try:
   from etils import ecolab
 
   cm = ecolab.adhoc(
@@ -156,8 +140,8 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -246,7 +230,7 @@ GENERATION_CONFIGS = {
 }
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "vllm"
+    "ROLLOUT_ENGINE", "vanilla"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
 
@@ -406,7 +390,7 @@ def create_datasets(
     answer = item["answer"]
 
     instruction = (
-        "Let's think step by step, and very importantly you MUST put your final answer within \\boxed{}."
+        "Let's think step by step, and put your final answer within \\boxed{}."
     )
     prompt = f"{question} {instruction}"
 
@@ -665,6 +649,7 @@ perf_metrics_config = PerfMetricsConfig(
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen2_actor,
     reference=qwen2_ref,
+    rollout=qwen2_rollout,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
     perf_config=perf_metrics_config,
