@@ -488,6 +488,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         mode=mode,
         step=expected_step,
     )
+
+    self.rl_cluster.buffer_metrics(
+        {
+            "advantages/mean": (np.mean(advantages), np.mean),
+            "advantages/std": (np.std(advantages), np.std),
+        },
+        mode=mode,
+    )
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
           prompts=original_inputs["prompts"],
@@ -678,7 +686,7 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
 
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
 
 
 GrpoConfig = GRPOConfig
