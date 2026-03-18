@@ -23,19 +23,19 @@ import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
 
 
-def left_pad(x, length, pad):
-  x = np.asarray(x, dtype=np.int32)
+def left_pad(x, length, pad, dtype=np.int32):
+  x = np.asarray(x, dtype=dtype)
   if x.size >= length:
     return x[-length:]
-  pad_part = np.full(length - x.size, pad, np.int32)
+  pad_part = np.full(length - x.size, pad, dtype)
   return np.concatenate([pad_part, x], axis=0)
 
 
-def right_pad(x, length, pad):
-  x = np.asarray(x, dtype=np.int32)
+def right_pad(x, length, pad, dtype=np.int32):
+  x = np.asarray(x, dtype=dtype)
   if x.size >= length:
     return x[:length]
-  pad_part = np.full(length - x.size, pad, np.int32)
+  pad_part = np.full(length - x.size, pad, dtype)
   return np.concatenate([x, pad_part], axis=0)
 
 

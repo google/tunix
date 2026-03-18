@@ -61,7 +61,7 @@ class RolloutOutput:
   left_padded_prompt_tokens: np.ndarray
 
   # The log probs from sampler generations.
-  logprobs: list[float] | None
+  logprobs: list[np.ndarray] | None
 
 
 @dataclasses.dataclass

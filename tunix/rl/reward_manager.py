@@ -156,15 +156,6 @@ class SequenceRewardManager(AbstractRewardManager):
         "rewards": sum_rewards,
         "log_metrics": log_metrics,
     }
-
-    # log a single example from the batch
-    def _log_one_example():
-      logging.info("======= example =======")
-      for k, v in log_metrics.items():
-          logging.info(f"{k}:\t{v[0][0]}")
-      logging.info("=======================")
-    _log_one_example()
-    
     return rewards_info
 
   def _prepare_log_metrics(

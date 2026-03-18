@@ -40,6 +40,7 @@ from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.rollout import base_rollout
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import base_agent
@@ -243,6 +244,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       rollout_config = {"train": rollout_config}
     for config in rollout_config.values():
       config.max_tokens_to_generate = self.algo_config.max_response_length
+      config.return_logprobs = True
 
   def _compute_rewards(
       self,
@@ -365,12 +367,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   def _model_call(
       self, chat_lists: List[Dict[str, str]], env: Any = None
-  ) -> str:
+  ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
-    version = self.policy_version
-
     if env:
-      env.task["policy_version"] = version
+      env.task["policy_version"] = self.policy_version
 
     if self.chat_parser:
       chat_lists = self.chat_parser.parse(
@@ -396,7 +396,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trace_tags=tags,
     )
 
-    return result.text[0]
+    return result
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
