@@ -1,6 +1,6 @@
 [project]
 name = "google-tunix"
-version = "0.1.6"
+version = "0.1.7"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
@@ -30,6 +30,7 @@ dependencies = [
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "pillow",  # Image processing
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export

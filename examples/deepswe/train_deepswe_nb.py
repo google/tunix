@@ -55,7 +55,7 @@ from tunix.sft import utils as sft_utils
 from tunix.sft import metrics_logger
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
-from tunix.rl.experimental import agentic_grpo_learner
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
 from tunix.oss.examples.deepswe.swe_agent import (

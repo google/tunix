@@ -1,0 +1,2 @@
+tpu-inference @ git+https://github.com/google/tpu-inference.git@a9f13e53
+vllm @ git+https://github.com/vllm-project/vllm.git@6330f9477

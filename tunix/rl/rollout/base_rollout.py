@@ -61,7 +61,7 @@ class RolloutOutput:
   left_padded_prompt_tokens: np.ndarray
 
   # The log probs from sampler generations.
-  logprobs: list[float] | None
+  logprobs: list[np.ndarray] | None
 
 
 @dataclasses.dataclass
@@ -112,6 +112,9 @@ class RolloutConfig:
   tensor_parallel_size: int = -1
   data_parallel_size: int = -1
   expert_parallel_size: int = 1
+
+  # Whether to return logprobs from the sampler.
+  return_logprobs: bool = False
 
   # vLLM specific rollout configs.
 

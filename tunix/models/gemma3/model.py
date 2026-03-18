@@ -25,7 +25,9 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 import jaxtyping
+from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
+from tunix.models.gemma3 import utils
 from tunix.models.gemma3 import vision
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -115,7 +117,7 @@ class ModelConfig:
       QueryPreAttentionNormalisation.BY_ONE_OVER_SQRT_HEAD_DIM
   )
 
-  siglip_config: vision.SigLIPConfig | None = None
+  vision_config: vision.SigLIPConfig | None = None
 
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
@@ -203,7 +205,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -245,7 +247,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -287,7 +289,7 @@ class ModelConfig:
         local_base_frequency=10_000,
         global_base_frequency=1_000_000,
         global_scale_factor=8.0,
-        siglip_config=None if text_only else vision.SigLIPConfig(),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         shd_config=sharding_config,
     )
 
@@ -905,15 +907,17 @@ class RMSNorm(nnx.Module):
     return normed_inputs
 
 
-class Gemma3(nnx.Module):
+class Gemma3(BackendMappingMixin, nnx.Module):
   """Gemma3 transformer."""
+
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
 
-    if config.siglip_config is not None:
+    if config.vision_config is not None:
       self.vision_encoder = vision.SigLiP(
-          config=config.siglip_config,
+          config=config.vision_config,
           shd_config=config.shd_config.siglip,
           rngs=rngs,
       )
@@ -1009,7 +1013,7 @@ class Gemma3(nnx.Module):
       images: jaxtyping.Array | None = None,  # (B, H, W, C) or (B, N, H, W, C)
   ) -> jaxtyping.Array:
     """Encode the text tokens, eventually including the vision embeddings."""
-    if images is not None:
+    if self.config.vision_config is not None and images is not None:
       self._assert_support_mm()
       if len(images.shape) == 4:  # If num_images is 1, add an axis.
         images = einops.rearrange(images, 'b h w c -> b 1 h w c')
@@ -1045,10 +1049,15 @@ class Gemma3(nnx.Module):
     soft_embeddings = self._encode_vision(images)
 
     # Merge the soft tokens back with the text embeddings.
+    if self.config.vision_config is None:
+      raise ValueError(
+          '`vision_config` is required for `_merge_mm_embeddings`. Received: '
+          f'{self.config.vision_config=}'
+      )
     merged_embeddings = merge_embeddings_lib.merge_embeddings(
         text_embeddings=embeddings,
         vision_embeddings=soft_embeddings,
-        mask=tokens == vision.TOKEN_PLACEHOLDER,
+        mask=tokens == self.config.vision_config.soft_token_placeholder,
     )
 
     return merged_embeddings
@@ -1100,6 +1109,23 @@ class Gemma3(nnx.Module):
   @property
   def num_embed(self) -> int:
     return self.embedder.num_embed
+
+  def get_attention_mask(
+      self,
+      tokens: jaxtyping.ArrayLike,  # (B, L)
+      *,
+      inputs_mask: jaxtyping.ArrayLike | None = None,  # (B, L)
+  ):
+    """Returns the positions and attention mask for the transformer."""
+    token_placeholder_id = (
+        None if self.config.vision_config is None else
+        self.config.vision_config.soft_token_placeholder
+    )
+    return utils.get_attention_mask(
+        tokens,
+        inputs_mask=inputs_mask,
+        token_placeholder_id=token_placeholder_id,
+    )
 
   @property
   def num_layers(self) -> int:

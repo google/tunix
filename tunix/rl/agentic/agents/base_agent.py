@@ -106,7 +106,7 @@ class LLMBaseAgent(abc.ABC):
   # Debugging and Introspection
   # ──────────────────────────────────────────────────────────────
 
-  def get_current_state(self) -> agent_types.Step | None:
+  def get_current_step(self) -> agent_types.Step | None:
     """Get the most recent step for debugging and introspection."""
     if not self.trajectory.steps:
       return None
@@ -209,7 +209,7 @@ class ConversationAgentBase(LLMBaseAgent):
       else:
         self._trajectory.task = copy.deepcopy(observation)
 
-    step = self.get_current_state()
+    step = self.get_current_step()
     if step:
       step.observation = observation
       step.reward = reward

@@ -134,7 +134,7 @@ def get_dataset_from_module(specifier: str, tokenizer: TokenizerAdapter):
 
 def post_init_dataset(
     dataset,
-    tokenizer: Tokenizer,
+    tokenizer: TokenizerAdapter,
     batch_size: int,
     num_batches: Optional[int],
     max_prompt_length: Optional[int],
@@ -164,7 +164,7 @@ def post_init_dataset(
   if max_prompt_length is not None and max_prompt_length > 0:
 
     def prompt_length_filter(x):
-      tokens = tokenizer.tokenize(x[prompt_key])
+      tokens = tokenizer.encode(x[prompt_key])
       return len(tokens) <= max_prompt_length
 
     dataset = dataset.filter(prompt_length_filter)

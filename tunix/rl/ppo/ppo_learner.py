@@ -469,6 +469,17 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         mode=mode,
     )
 
+    # log user defined metrics
+    for m_fn in self.metric_fns:
+      user_defined_metric = m_fn(
+          prompts=training_input["prompts"],
+          completions=rollout_output.text,
+          advantages=advantages,
+          rewards=last_token_scores,
+          **{k: v for k, v in training_input.items() if k != "prompts"},
+      )
+      self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
+
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,

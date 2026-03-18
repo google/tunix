@@ -50,6 +50,7 @@ class VllmConfig:
   mapping_config: MappingConfig = dataclasses.field(
       default_factory=MappingConfig
   )
+  return_logprobs: bool = False
 
   # vLLM Env vars
   init_with_random_weights: bool = True
@@ -90,7 +91,7 @@ class VllmConfig:
     illegal = self._RESERVED_KEYS & engine_kwargs.keys()
     if illegal:
       raise ValueError(
-          f"VllmConfig fields must be set directly on VllmConfig, not passed"
+          "VllmConfig fields must be set directly on VllmConfig, not passed"
           f" via engine_kwargs: {sorted(illegal)}"
       )
     self._processed_engine_kwargs = engine_kwargs
@@ -137,7 +138,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.init_with_random_weights:
       os.environ["JAX_RANDOM_WEIGHTS"] = "1"
 
-    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.tokenizer = tokenizer
+    if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
+      self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
     self._driver: VLLMInProcessDriver | None = None
@@ -424,8 +427,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
-      sampling_params.logprobs = 1  # b/428730696
-      sampling_params.prompt_logprobs = 1  # b/428730696
+      if self.config.return_logprobs:
+        sampling_params.logprobs = 1  # b/428730696
+        sampling_params.prompt_logprobs = 1  # b/428730696
+      else:
+        sampling_params.logprobs = 0
+        sampling_params.prompt_logprobs = 0
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
 
@@ -435,29 +442,30 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.top_k = top_k
       if seed is not None:
         sampling_params.seed = seed
-      
+
       sampling_kwargs = self.config.sampling_kwargs.copy()
       sampling_kwargs.update(kwargs)
-      if sampling_kwargs:     
+      if sampling_kwargs:
         try:
           logging.log_first_n(
               logging.INFO,
               "Received additional kwargs that are not explicitly defined in"
-              f" the method signature: {sampling_kwargs}. These will be forwarded to the"
-              " underlying sampler, but please ensure that they are valid.",
-              1
-          )   
+              f" the method signature: {sampling_kwargs}. These will be"
+              " forwarded to the underlying sampler, but please ensure that"
+              " they are valid.",
+              1,
+          )
           for key, value in sampling_kwargs.items():
             logging.log_first_n(
                 logging.DEBUG,
                 f"Sampler kwargs setting key {key} with value {value}.",
-                len(sampling_kwargs)
+                len(sampling_kwargs),
             )
             setattr(sampling_params, key, value)
         except (AttributeError, TypeError) as e:
           logging.info(
-              f"Failed to update sampling_params with kwargs: {sampling_kwargs}."
-              f" Error: {e}",
+              "Failed to update sampling_params with kwargs:"
+              f" {sampling_kwargs}. Error: {e}",
           )
 
       self.sampling_params = sampling_params

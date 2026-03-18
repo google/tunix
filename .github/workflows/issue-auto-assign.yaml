@@ -22,4 +22,4 @@ jobs:
         with:
           script: |
             const script = require('./\.github/workflows/issue-auto-assign.js')
-            script({github, context})
+            await script({github, context})

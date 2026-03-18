@@ -98,7 +98,7 @@ class SequenceRewardManagerTest(parameterized.TestCase):
 
     expected_rewards = np.array([float(len("c1_long")), float(len("c2"))])
     np.testing.assert_array_equal(rewards_info["rewards"], expected_rewards)
-    self.assertLen(rewards_info["log_metrics"], 6)
+    self.assertLen(rewards_info["log_metrics"], 7)
 
   def test_multiple_reward_fns(self):
     manager = reward_manager.SequenceRewardManager(

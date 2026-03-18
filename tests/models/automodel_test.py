@@ -162,10 +162,14 @@ class AutoModelTest(parameterized.TestCase):
     mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
     naming_info = naming.ModelNaming(model_name=model_name)
     automodel.create_model_from_safe_tensors(
-        model_name, "file_dir", "model_config", mesh
+        model_name, "file_dir", "model_config", mesh, "dtype", "mode"
     )
     mock_create_fn.assert_called_once_with(
-        file_dir="file_dir", config="model_config", mesh=mesh
+        file_dir="file_dir",
+        config="model_config",
+        mesh=mesh,
+        dtype="dtype",
+        mode="mode",
     )
 
     if naming_info.model_family in ("gemma", "gemma1p1", "gemma2", "gemma3"):

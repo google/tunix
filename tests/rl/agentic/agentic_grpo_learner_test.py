@@ -15,6 +15,7 @@
 """Tests for agentic_grpo_learner."""
 
 import asyncio
+import functools
 import os
 import queue
 import random
@@ -40,10 +41,10 @@ import orbax.checkpoint as ocp
 from tunix.generate import tokenizer_adapter
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
-from tunix.rl.experimental import agentic_grpo_learner
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
@@ -82,19 +83,22 @@ def _mock_generate(
     apply_chat_template: bool = False,
     mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
     micro_batch_size: int | None = None,
+    trace_tags: dict[str, Any] | None = None,
+    output_logprobs: bool = True,
+    tokenizer: Any | None = None,
 ) -> base_rollout.RolloutOutput:
-  del apply_chat_template, mode, micro_batch_size
+  del apply_chat_template, mode, micro_batch_size, trace_tags
+  assert tokenizer is not None
   batch_size = len(prompts)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
-  tokens = [
-      np.arange(len(text[i].split()), dtype=np.int32) for i in range(batch_size)
-  ]
+  tokens = [tokenizer.encode(text_i) for text_i in text]
+  logprobs = [-np.random.rand(len(tokens[i])) for i in range(batch_size)]
   return base_rollout.RolloutOutput(
       text=text,
       tokens=tokens,
       left_padded_prompt_tokens=np.ones((batch_size, 8), dtype=np.int32),
       logits=None,
-      logprobs=None,
+      logprobs=logprobs if output_logprobs else None,
   )
 
 
@@ -165,20 +169,28 @@ def _dummy_dataset(source=MySource(), batch_size: int = 1):
 class MockChatParser:
 
   def parse(self, messages, add_generation_prompt=False, is_first_msg=False):
-    del add_generation_prompt, is_first_msg
+    del is_first_msg
     if not messages:
       return ""
-    if messages[0]["role"] == "system":
-      return f"System: {messages[0]['content']}"
-    if messages[0]["role"] == "user":
-      return f"User: {messages[0]['content']}"
-    if messages[0]["role"] == "assistant":
-      return f"Assistant: {messages[0]['content']}"
-    return ""
+
+    result = ""
+    for message in messages:
+      if message["role"] == "system":
+        result += f"System: {message['content']}"
+      elif message["role"] == "user":
+        result += f" User: {message['content']}"
+      elif message["role"] == "assistant":
+        result += f" Assistant: {message['content']}"
+      else:
+        raise ValueError(f"Unsupported message role: {message['role']}")
+
+    if add_generation_prompt:
+      result += " " + self.assistant_token
+    return result
 
   @property
   def assistant_token(self):
-    return ""
+    return "Assistant: "
 
 
 class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
@@ -198,6 +210,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     random.seed(42)
+    self.vocab = _mock_vocab()
+    self.tokenizer = tokenizer_adapter.TokenizerAdapter(self.vocab)
+    self._mock_generate = functools.partial(
+        _mock_generate, tokenizer=self.tokenizer
+    )
 
   def test_iterator(self):
     class _MockTrainer(agentic_grpo_learner.GRPOLearner):
@@ -361,6 +378,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         mock.patch.object(
             rl_cluster, "update_actor", wraps=rl_cluster.update_actor
         ) as mock_update_actor,
+        mock.patch.object(
+            rl_cluster,
+            "generate",
+            side_effect=self._mock_generate,
+        ),
     ):
       grpo_learner.train(train_ds)
 
@@ -782,6 +804,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           testcase_name="single_reward_fn",
           reward_fns=reward_fn_1,
           loss_algo="grpo",
+          use_old_logprobs=False,
       ),
       dict(
           testcase_name="multiple_reward_fns",
@@ -790,14 +813,16 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
               reward_fn_2,
           ],
           loss_algo="grpo",
+          use_old_logprobs=True,
       ),
       dict(
           testcase_name="single_reward_fn_gspo",
           reward_fns=reward_fn_1,
           loss_algo="gspo-token",
+          use_old_logprobs=True,
       ),
   )
-  def test_grpo_learner(self, reward_fns, loss_algo):
+  def test_grpo_learner(self, reward_fns, loss_algo, use_old_logprobs=False):
     vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
@@ -855,7 +880,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
     eval_ds = _dummy_dataset(batch_size=1)
 
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster,
+        "generate",
+        side_effect=functools.partial(
+            self._mock_generate,
+            output_logprobs=use_old_logprobs,
+        ),
+    ):
       grpo_learner.train(train_ds, eval_ds)
 
     variables = nnx.state(model, nnx.Param)
@@ -897,9 +929,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       prefix, metric_name = metric_name.split("/", maxsplit=1)
       self.assertGreaterEqual(
           len(
-              rl_metric_logger.get_metric_history(
-                  prefix, metric_name, "train"
-              )
+              rl_metric_logger.get_metric_history(prefix, metric_name, "train")
           ),
           grpo_learner.rl_cluster.global_steps,
           msg=f"metric_name: {metric_name}",
@@ -907,9 +937,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
       if metric_name != "global_step_time":
         self.assertLen(
-            rl_metric_logger.get_metric_history(
-                prefix, metric_name, "eval"
-            ),
+            rl_metric_logger.get_metric_history(prefix, metric_name, "eval"),
             10,
             msg=f"metric_name: {metric_name}",
         )
@@ -919,7 +947,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertGreater(np.sum(clip_ratio_history), 0)
 
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
-    for metric_name in ["loss", "kl"]:
+    for metric_name in ["loss", "kl", "entropy", "pg_clipfrac"]:
       self.assertLen(
           metric_logger.get_metric_history("actor", metric_name, "train"),
           grpo_learner.rl_cluster.actor_trainer.train_steps,
@@ -930,6 +958,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           10,
           msg=f"metric_name: {metric_name}",
       )
+    self.assertLen(
+        metric_logger.get_metric_history("actor", "grad_norm", "train"),
+        grpo_learner.rl_cluster.actor_trainer.train_steps,
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -1002,7 +1034,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(MySource(repeat=4), batch_size=2)
     eval_ds = _dummy_dataset(batch_size=1)
 
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster, "generate", side_effect=self._mock_generate
+    ):
       grpo_learner.train(train_ds, eval_ds)
 
     variables = nnx.state(model, nnx.Param)
@@ -1129,16 +1163,20 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     with (
         mock.patch.object(trajectory_logger, "log_item") as mock_log_item,
-        mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate),
+        mock.patch.object(
+            rl_cluster, "generate", side_effect=self._mock_generate
+        ),
     ):
       grpo_learner.train(train_ds)
       if grpo_learner._trajectory_logger:
         grpo_learner._trajectory_logger.stop()
       self.assertEqual(grpo_learner.rl_cluster.global_steps, 1)
-      self.assertEqual(mock_log_item.call_count, grpo_config.num_generations)
+      self.assertEqual(mock_log_item.call_count, 1)
 
-      for i in range(grpo_config.num_generations):
-        traj = mock_log_item.call_args_list[i][0][1]
+      logged_items = mock_log_item.call_args_list[0][0][1]
+      self.assertLen(logged_items, grpo_config.num_generations)
+
+      for traj in logged_items:
         self.assertIn("conversation_text", traj)
         conversation = traj["conversation_text"]
         assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
@@ -1215,7 +1253,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     self.assertTrue(grpo_learner.should_sync_weights)
     train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster, "generate", side_effect=self._mock_generate
+    ):
       grpo_learner.train(train_ds, None)
 
     base_params = nnx.state(
@@ -1246,12 +1286,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         return "Initial prompt."
 
       def _step_impl(self, action: Any) -> EnvStepResult:
-        if self.step_count <= self.max_steps:
-          reward = 1.0
-          done = False
-        else:
-          reward = 0.0
-          done = True
+        done = self.step_count >= self.max_steps
+        reward = 1.0 if not done else 0.0
         return EnvStepResult(
             observation=f"Observation after step {self.step_count}",
             reward=reward,
@@ -1274,7 +1310,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           else:
             observation += " You have reached the maximum number of steps."
         self._messages.append({"role": "user", "content": observation})
-        step = self.get_current_state()
+        step = self.get_current_step()
         if step:
           step.observation = observation
 
@@ -1330,7 +1366,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=1,
         loss_algo="grpo",
-        max_response_length=64,
+        max_response_length=128,
         max_concurrency=1,  # so the output is deterministic.
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
@@ -1374,22 +1410,37 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
     eval_ds = _dummy_dataset(batch_size=1)
 
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster, "generate", side_effect=self._mock_generate
+    ):
       grpo_learner.train(train_ds, eval_ds)
 
     traj = agents[0].trajectory
 
     target_mask = []
     for step in traj.steps:
-      # + 1 for extra token from MockChatParser
-      target_mask.extend([1] * (len(step.model_response.split()) + 1))
-      target_mask.extend([0] * (len(step.observation.split()) + 1))
+      target_mask.extend([1] * (len(step.model_response.split())))
+      # + 2 for user and assistant role token from MockChatParser
+      target_mask.extend([0] * (len(step.observation.split()) + 2))
     target_mask.extend(
         [0] * (grpo_config.max_response_length - len(target_mask))
     )
+    target_mask = target_mask[: grpo_config.max_response_length]
 
     res = processed_results[0][0]
-    np.testing.assert_array_equal(res.completion_mask[0], np.array(target_mask))
+    # Since rollout is async and two generations will be executed concurrently,
+    # the order of the results is not guaranteed.
+    pass_1 = np.array_equal(res.completion_mask[0], np.array(target_mask))
+    pass_2 = np.array_equal(res.completion_mask[1], np.array(target_mask))
+    self.assertTrue(pass_1 or pass_2)
+    decoded_prompt = tokenizer.decode(np.array(res.prompt_ids[0]).tolist())
+    decoded_completion = tokenizer.decode(
+        np.array(res.completion_ids[0]).tolist()
+    )
+    self.assertEqual(decoded_prompt.count("Assistant:"), 1)
+    self.assertEqual(
+        decoded_completion.count("Assistant:"), 3
+    )  # 3 turns including trailing one for last env obs
 
 
 if __name__ == "__main__":

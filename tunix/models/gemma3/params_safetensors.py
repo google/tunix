@@ -113,7 +113,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   }
 
   # Vision Tower (SigLIP).
-  if cfg.siglip_config is not None:
+  if cfg.vision_config is not None:
     mapping.update({
         r"vision_tower\.vision_model\.embeddings\.patch_embedding\.weight": (
             "vision_encoder.siglip_encoder.embedding.kernel",
@@ -310,6 +310,7 @@ def create_model_from_safe_tensors(
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
+    mode: str = "auto",
 ):
   return safetensors_loader.load_and_create_model(
       file_dir=file_dir,
@@ -319,4 +320,5 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
+      mode=mode,
   )

@@ -27,6 +27,7 @@ from tunix.cli.utils import model as model_lib
 from tunix.examples.data import math_dataset as example_data
 from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
@@ -115,20 +116,39 @@ class GrpoPipeline(config.HyperParameters):
       return None
 
     perf_config = perf_metrics.PerfMetricsConfig()
-    custom_export_fn_path = perf_metrics_options.custom_export_fn_path
-    if custom_export_fn_path:
-      perf_config.custom_export_fn = self._get_function_from_path(
-          custom_export_fn_path
-      )
-      if perf_config.custom_export_fn is None:
-        raise ValueError(
-            "Could not load custom export function from"
-            f" {custom_export_fn_path}"
+
+    if perf_metrics_options.enable_perf_v1:
+      custom_export_fn_path = perf_metrics_options.custom_export_fn_path
+      if custom_export_fn_path:
+        perf_config.custom_export_fn = self._get_function_from_path(
+            custom_export_fn_path
         )
-    else:
-      perf_config.custom_export_fn = (
-          perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
-      )
+        if perf_config.custom_export_fn is None:
+          raise ValueError(
+              "Could not load custom export function from"
+              f" {custom_export_fn_path}"
+          )
+      else:
+        perf_config.custom_export_fn = (
+            perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+        )
+
+    if perf_metrics_options.enable_perf_v2:
+      custom_export_fn_path_v2 = perf_metrics_options.custom_export_fn_path_v2
+      if custom_export_fn_path_v2:
+        perf_config.custom_export_fn_v2 = self._get_function_from_path(
+            custom_export_fn_path_v2
+        )
+        if perf_config.custom_export_fn_v2 is None:
+          raise ValueError(
+              "Could not load custom export function v2 from"
+              f" {custom_export_fn_path_v2}"
+          )
+      else:
+        perf_config.custom_export_fn_v2 = perf_export_v2.PerfMetricsExport(
+            enable_trace_writer=perf_metrics_options.enable_trace_writer,
+            trace_dir=perf_metrics_options.trace_dir,
+        ).export_metrics
     return perf_config
 
   def create_rl_cluster(self):
