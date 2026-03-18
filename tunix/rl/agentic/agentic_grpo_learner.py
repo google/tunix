@@ -264,6 +264,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     Returns:
       A list of `TrainExample` instances containing all data needed for the
       loss function.
+
+    Raises:
+      ValueError: If `policy_version` is missing from any trajectory task.
+      RuntimeError: If `old_per_token_logps` is not available for off-policy RL.
     """
     logging.debug(
         "Processing results to compute advantage for %d items.",
@@ -274,10 +278,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
     # Extract completions and tokens from the group of G results.
-    completion_texts = []
-    completion_tokens_list = []
-    completion_masks_list = []
-    policy_versions_list = []
+    completion_texts: List[str] = []
+    completion_tokens_list: List[np.ndarray] = []
+    completion_masks_list: List[np.ndarray] = []
+    old_logprobs_list: List[np.ndarray] = []
+    policy_versions_list: List[int] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -291,6 +296,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       completion_texts.append(assistant_text)
       completion_tokens_list.append(item.traj.get("conversation_tokens"))
       completion_masks_list.append(item.traj.get("conversation_masks"))
+      old_logprobs_list.append(item.traj.get("old_logprobs"))
       policy_version = item.traj.get("policy_version")
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
@@ -308,14 +314,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     rollout_config = self.rl_cluster.cluster_config.rollout_config
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
+
     padded_prompt_ids = []
     padded_completion_ids = []
     padded_completion_masks = []
+    padded_old_logprobs = []
 
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
-    for completion_tokens, completion_mask in zip(
-        completion_tokens_list, completion_masks_list
+    for completion_tokens, completion_mask, old_logprobs in zip(
+        completion_tokens_list, completion_masks_list, old_logprobs_list
     ):
       if (
           len(completion_tokens) >= max_response_length
@@ -338,8 +346,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               :max_response_length
           ]
       )
+      if old_logprobs is not None:
+        padded_old_logprobs.append(
+            agentic_utils.right_pad(
+                old_logprobs,
+                length=max_response_length,
+                pad=0.0,
+                dtype=old_logprobs.dtype,
+            )[:max_response_length]
+        )
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
+    prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
     logging.debug(
@@ -348,8 +366,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_ids.shape,
     )
 
-    # Masks
-    prompt_mask = prompt_ids != pad_value
+    if padded_old_logprobs:
+      old_per_token_logps = jnp.asarray(padded_old_logprobs)
+    else:
+      old_per_token_logps = None
+
+    if self.algo_config.num_iterations > 1 and old_per_token_logps is None:
+      raise RuntimeError(
+          "old_per_token_logps is not available for off-policy RL. Enable "
+          " `return_logprobs` in RolloutConfig."
+      )
 
     # Collect perf tags
     traj = trajectories[0].traj
@@ -365,10 +391,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       perf_tags[perf_constants.GROUP_ID] = group_id
 
     if self.algo_config.beta != 0.0:
-      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
       with self.rl_cluster.perf_v2.span(
           perf_constants.REFERENCE_INFERENCE,
-          devices,
+          devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
           tags=perf_tags,
       ) as interval_v2:
         ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
@@ -381,25 +406,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         interval_v2.async_end([ref_per_token_logps])
     else:
       ref_per_token_logps = None
-    logging.debug("Ref logps computed.")
-    if self.algo_config.num_iterations > 1:
-      devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
-      with self.rl_cluster.perf_v2.span(
-          perf_constants.OLD_ACTOR_INFERENCE,
-          devices,
-          tags=perf_tags,
-      ) as interval_v2:
-        old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
-            micro_batch_size=1,
-        )
-        interval_v2.async_end([old_per_token_logps])
-    else:
-      old_per_token_logps = None
-    logging.debug("Old logps computed.")
-    # Rewards & advantages
 
+    # Rewards & advantages
     # Prepare arguments for reward computation by forwarding all training inputs
     # except for prompts, which is passed explicitly.
     original_input = trajectories[0].traj["original_input"]

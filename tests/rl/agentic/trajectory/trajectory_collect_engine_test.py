@@ -17,12 +17,17 @@ import time
 from unittest import mock
 
 from absl.testing import absltest
+import jax.numpy as jnp
+import numpy as np
+from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
-from tunix.rl.agentic import utils
+from tunix.rl.rollout import base_rollout
+
+RolloutOutput = base_rollout.RolloutOutput
 
 
 class TrajectoryCollectEngineTest(absltest.TestCase):
@@ -79,7 +84,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_agent.update_from_model.side_effect = _update_from_model
     self.mock_agent.update_from_env.side_effect = _update_from_env
     self.mock_agent.reset.side_effect = _reset_agent
-    self.mock_agent.get_current_state.side_effect = lambda: self.current_step
+    self.mock_agent.get_current_step.side_effect = lambda: self.current_step
 
     # Configure mock env
     self.mock_env.reset.return_value = ('initial_obs', {})
@@ -91,8 +96,23 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_env.extra_kwargs = {}
     self.trajectory.task = self.mock_env.task
 
+    def _mock_rollout_output(text, tokens):
+      return RolloutOutput(
+          text=[text],
+          logits=[jnp.zeros_like(tokens)],
+          tokens=[tokens],
+          left_padded_prompt_tokens=np.array([1]),
+          logprobs=[np.ones_like(tokens)],
+      )
+
     # Configure mock model call
-    self.mock_model_call.side_effect = ['response1', 'response2', 'response3', 'response4', 'response5']
+    self.mock_model_call.side_effect = [
+        _mock_rollout_output('response1', np.array([201, 202])),
+        _mock_rollout_output('response2', np.array([203, 204])),
+        _mock_rollout_output('response3', np.array([205, 206])),
+        _mock_rollout_output('response4', np.array([207, 208])),
+        _mock_rollout_output('response5', np.array([209, 210])),
+    ]
 
   async def _run_collect(self, engine, mode='Trajectory'):
     return await engine.collect(mode=mode)
@@ -152,9 +172,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
   def test_collect_with_tokenization(self, mock_convert):
     mock_convert.side_effect = [
         ([101], [1]),  # prompt tokens
-        ([201, 202], [1, 1]),  # assistant tokens 1
         ([301, 302], [1, 1]),  # env tokens 1
-        ([203, 204], [1, 1]),  # assistant tokens 2
         ([303, 304], [1, 1]),  # env tokens 2
     ]
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
@@ -174,16 +192,24 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             {'role': 'assistant', 'content': 'response2'},
             {'role': 'user', 'content': 'obs2'},
         ],
-        'prompt_tokens': [101],
-        'conversation_tokens': [201, 202, 301, 302, 203, 204, 303, 304],
-        'conversation_masks': [1, 1, 1, 1, 1, 1, 1, 1],
+        'prompt_tokens': np.array([101]),
+        'conversation_tokens': np.array(
+            [201, 202, 301, 302, 203, 204, 303, 304]
+        ),
+        'conversation_masks': np.array([1, 1, 1, 1, 1, 1, 1, 1]),
         'trajectory_reward': 3.0,  # 1.0 + 2.0
+        'old_logprobs': np.array([1, 1, 0, 0, 1, 1, 0, 0]),
         'policy_version': None,
         'original_input': {'some': 'task'},
         'group_id': None,
         'status': 'SUCCEEDED',
     }
-    self.assertEqual(token_data, expected_tokens)
+
+    for k, v in expected_tokens.items():
+      if isinstance(v, np.ndarray):
+        np.testing.assert_array_equal(token_data[k], v)
+      else:
+        self.assertEqual(token_data[k], v, msg=f'Failed for key: {k}')
 
     # The function using the parser is mocked, so the parser itself is not
     # called. Instead, we check that the parser is passed as an argument.
@@ -192,33 +218,26 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       self.assertIs(call.kwargs['parser'], self.mock_chat_parser)
 
     # Verify that the initial prompt tokenization in _reset is called with
-    # contains_first_msg=True and contains_generation_msg=False.
-    self.assertGreaterEqual(mock_convert.call_count, 1)
+    # contains_first_msg=True and contains_generation_msg=True.
+    self.assertGreaterEqual(mock_convert.call_count, 2)
     self.assertTrue(
         mock_convert.call_args_list[0].kwargs['contains_first_msg'],
         'contains_first_msg should be True for initial prompt tokenization',
     )
-    self.assertFalse(
+    self.assertTrue(
         mock_convert.call_args_list[0].kwargs['contains_generation_msg'],
-        'contains_generation_msg should be False for initial prompt tokenization',
+        'contains_generation_msg should be True for initial prompt'
+        ' tokenization',
     )
 
-    # Verify that tokenization for model responses and environment observations
-    # has contains_generation_msg=False.
-    self.assertEqual(mock_convert.call_count, 5)
-    # Calls 1 and 3 are for model responses.
-    self.assertFalse(
+    # Verify that tokenization for environment observations
+    # has contains_generation_msg=True.
+    self.assertEqual(mock_convert.call_count, 3)
+    self.assertTrue(
         mock_convert.call_args_list[1].kwargs['contains_generation_msg']
     )
-    self.assertFalse(
-        mock_convert.call_args_list[3].kwargs['contains_generation_msg']
-    )
-    # Calls 2 and 4 are for environment observations.
-    self.assertFalse(
+    self.assertTrue(
         mock_convert.call_args_list[2].kwargs['contains_generation_msg']
-    )
-    self.assertFalse(
-        mock_convert.call_args_list[4].kwargs['contains_generation_msg']
     )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
@@ -294,7 +313,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
       agent.update_from_model.side_effect = _update_from_model
       agent.update_from_env.side_effect = _update_from_env
-      agent.get_current_state.side_effect = lambda: current_step[0]
+      agent.get_current_step.side_effect = lambda: current_step[0]
 
       def _reset_agent():
         traj.steps.clear()
@@ -364,7 +383,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     # Verify status is MAX_CONTEXT_LIMIT_REACHED
     self.assertEqual(
-        result_traj.status, agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+        result_traj.status,
+        agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
     )
     # 100 prompt + 100 step = 200 > 150. Should stop after 1 step.
     self.assertLen(result_traj.steps, 1)
@@ -381,11 +401,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
     result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
 
-    self.assertEqual(
-        result_traj.status, agent_types.TrajectoryStatus.SUCCEEDED
-    )
+    self.assertEqual(result_traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
     self.assertLen(result_traj.steps, 1)
-
 
   def test_collect_timeout(self):
     self.mock_env.max_steps = 10
