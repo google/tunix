@@ -17,15 +17,16 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import time
-from typing import Any
+from typing import Any, Tuple
 
 from absl import logging
 from etils import epath
 from perfetto.trace_builder.proto_builder import TraceProtoBuilder
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import timeline
+from tunix.perf.experimental import timeline_utils
 
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackDescriptor
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
@@ -61,9 +62,94 @@ def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
     if perf_constants.PAIR_INDEX in tags:
       parts.append(f"pair_index={tags[perf_constants.PAIR_INDEX]}")
 
+  if name == perf_constants.QUEUE:
+    if perf_constants.QUEUED_SPAN in tags:
+      parts.append(f"queued_span={tags[perf_constants.QUEUED_SPAN]}")
+
   if parts:
     return f"{name} ({', '.join(parts)})"
   return name
+
+
+def _assign_lanes(
+    spans: Iterable[timeline.Span],
+) -> Tuple[Mapping[int, int], int]:
+  """Assigns lanes to spans to handle overlaps.
+
+  Perfetto requires spans on the same track to be strictly nested (no arbitrary
+  overlaps). This function assigns a lane index to each span such that spans
+  in the same lane do not overlap.
+
+  Args:
+    spans: An iterable of spans to assign to lanes.
+
+  Returns:
+    A tuple containing:
+      - A dictionary mapping span IDs to their assigned lane index. If all spans
+        fit in a single lane, the lane index is -1.
+      - The total number of lanes required.
+  """
+  # TODO: noghabi - Instead of agnostically splitting into lanes, define
+  # proper groupings for spans, e.g., a better way for combining rollouts
+  # and overlaps of peft_train and reference_inference.
+  sorted_spans = sorted(spans, key=lambda s: (s.begin, s.id))
+  lanes_end_times = []
+  span_to_lane = {}
+
+  for s in sorted_spans:
+    placed = False
+    for lane_idx, lane_end in enumerate(lanes_end_times):
+      if lane_end <= s.begin:
+        lanes_end_times[lane_idx] = s.end
+        span_to_lane[s.id] = lane_idx
+        placed = True
+        break
+    if not placed:
+      span_to_lane[s.id] = len(lanes_end_times)
+      lanes_end_times.append(s.end)
+
+  if len(lanes_end_times) <= 1:
+    # Just use the main track, no need for child tracks
+    for s in spans:
+      span_to_lane[s.id] = -1
+
+  return span_to_lane, len(lanes_end_times)
+
+
+def _is_host_timeline(tl_id: str) -> bool:
+  return tl_id.startswith("host-")
+
+
+def _is_rollout_only_timeline(tl: Timeline) -> bool:
+  if not tl.spans:
+    return False
+  return all(span.name == perf_constants.ROLLOUT for span in tl.spans.values())
+
+
+def _get_track_name(tl_id: str, role_to_devices: Mapping[str, Any]) -> str:
+  """Gets a formatted track name for a timeline.
+
+  Args:
+    tl_id: The timeline ID.
+    role_to_devices: A mapping from role names to their assigned devices.
+
+  Returns:
+    A formatted track name.
+  """
+  if _is_host_timeline(tl_id):
+    return tl_id
+
+  for role, devices in role_to_devices.items():
+    for device in devices:
+      # TODO: noghabi - this is duplicated from tracer.py. Refactor to a common
+      # function.
+      device_str = (
+          device if isinstance(device, str) else f"{device.platform}{device.id}"
+      )
+      if device_str == tl_id:
+        camel_role = "".join(word.capitalize() for word in role.split("_"))
+        return f"{camel_role} Cluster - {tl_id}"
+  return tl_id
 
 
 class TraceWriter(abc.ABC):
@@ -84,14 +170,22 @@ class NoopTraceWriter(TraceWriter):
 class PerfettoTraceWriter(TraceWriter):
   """A writer for Perfetto trace events."""
 
-  def __init__(self, trace_dir: str):
+  def __init__(
+      self,
+      trace_dir: str,
+      role_to_devices: Mapping[str, Any] | None = None,
+  ):
     """Initializes the PerfettoTraceWriter.
 
     Args:
       trace_dir: The directory to export trace files to. This path can be a
         local Linux path or a remote storage path (e.g. gs://).
+      role_to_devices: An optional mapping from role names to their assigned
+        devices.
     """
     self._trace_dir = trace_dir
+    self._role_to_devices = dict(role_to_devices) if role_to_devices else {}
+    self._track_names: dict[str, str] = {}
     self._trace_file_path = None
     try:
       trace_dir_path = epath.Path(self._trace_dir)
@@ -120,8 +214,6 @@ class PerfettoTraceWriter(TraceWriter):
     try:
       # TODO: b/480134569 -  see if file writing is a bottleneck and explore
       # faster alternatives (e.g., keeping in memory and writing at the end).
-      # TODO: noghabi - once we empty timeline, we can just append the recent
-      # spans to the file without serializing the entire trace.
       self._trace_file_path.write_bytes(builder.serialize())
     except Exception:  # pylint: disable=broad-except
       # Catching broad exceptions to ensure that failures in trace
@@ -136,19 +228,96 @@ class PerfettoTraceWriter(TraceWriter):
     if not timelines:
       return
 
+    timelines_dict = dict(timelines)
+
+    actor_dev_str = None
+    if "actor" in self._role_to_devices and self._role_to_devices["actor"]:
+      dev = self._role_to_devices["actor"][0]
+      actor_dev_str = dev if isinstance(dev, str) else f"{dev.platform}{dev.id}"
+
+    # Create actor execution and queue timelines.
+    if actor_dev_str and actor_dev_str in timelines_dict:
+      exec_tl, queue_tl = timeline_utils.flatten_overlapping_spans(
+          timelines_dict[actor_dev_str]
+      )
+      exec_idle_tl = timeline_utils.add_idle_spans(exec_tl)
+      exec_idle_tl.id = f"{actor_dev_str}_actor_exec_idle"
+      queue_tl.id = f"{actor_dev_str}_actor_queue"
+      timeline_utils.strip_tags_from_timeline(queue_tl, [perf_constants.STEP])
+      self._track_names[exec_idle_tl.id] = f"Actor cluster - (Execution)"
+      self._track_names[queue_tl.id] = f"Actor cluster - (Queued on device)"
+      timelines_dict[exec_idle_tl.id] = exec_idle_tl
+      timelines_dict[queue_tl.id] = queue_tl
+
+    # Create rollout execution timeline.
+    if "rollout" in self._role_to_devices and self._role_to_devices["rollout"]:
+      dev = self._role_to_devices["rollout"][0]
+      dev_str = dev if isinstance(dev, str) else f"{dev.platform}{dev.id}"
+      if dev_str in timelines_dict:
+        rollout_tl = timelines_dict[dev_str]
+
+        # Add weight sync spans from actor timeline to rollout timeline.
+        if actor_dev_str and actor_dev_str in timelines_dict:
+          actor_tl = timelines_dict[actor_dev_str]
+          weight_sync_spans = timeline_utils.filter_spans_by_name(
+              actor_tl, perf_constants.WEIGHT_SYNC
+          )
+          rollout_tl = timeline_utils.add_spans_to_timeline(
+              rollout_tl, weight_sync_spans
+          )
+
+        merged_tl = timeline_utils.merge_overlapping_spans(rollout_tl)
+        timeline_utils.strip_tags_from_timeline(
+            merged_tl,
+            [perf_constants.GROUP_ID, perf_constants.PAIR_INDEX],
+        )
+        aggregate_rollout_tl = timeline_utils.add_idle_spans(merged_tl)
+        aggregate_rollout_tl.id = f"{dev_str}_rollout_merged_idle"
+        self._track_names[aggregate_rollout_tl.id] = (
+            f"Rollout cluster - (Execution)"
+        )
+        timelines_dict[aggregate_rollout_tl.id] = aggregate_rollout_tl
+
     builder = TraceProtoBuilder()
 
     # Sort timelines by ID to ensure consistent track ordering.
-    sorted_ids = sorted(timelines)
+    sorted_ids = sorted(timelines_dict)
 
     events = []
 
+    # Initialize tracks for host timelines.
+    # Give them their own 1,000,000-sized blocks to avoid lane index collisions.
+    host_main_uuid = 1000000
+    host_rollout_uuid = 2000000
+
+    has_host_main = False
+    has_host_rollout = False
+    for tl_id in sorted_ids:
+      tl = timelines_dict[tl_id]
+      if not tl.spans:
+        continue
+      if _is_host_timeline(tl_id):
+        if _is_rollout_only_timeline(tl):
+          has_host_rollout = True
+        else:
+          has_host_main = True
+
+    if has_host_main:
+      packet = builder.add_packet()
+      packet.track_descriptor.uuid = host_main_uuid
+      packet.track_descriptor.name = "Host - Main threads"
+
+    if has_host_rollout:
+      packet = builder.add_packet()
+      packet.track_descriptor.uuid = host_rollout_uuid
+      packet.track_descriptor.name = "Host - Rollout threads"
+
     for i, tl_id in enumerate(sorted_ids):
       # Assign a unique UUID for the track.
-      # We start from 1 because 0 is sometimes reserved or special.
+      # Offset by 3 to reserve UUID space (blocks 1,000,000 and 2,000,000) for the host parent tracks.
       # Multiply by a large number to reserve a block of UUIDs for child lanes.
-      tl_uuid = (i + 1) * 1000000
-      tl = timelines[tl_id]
+      tl_uuid = (i + 3) * 1000000
+      tl = timelines_dict[tl_id]
 
       # Skip empty timelines.
       if not tl.spans:
@@ -157,41 +326,27 @@ class PerfettoTraceWriter(TraceWriter):
       # Track Descriptor for the timeline group
       packet = builder.add_packet()
       packet.track_descriptor.uuid = tl_uuid
-      packet.track_descriptor.name = tl_id
 
-      # Determine lanes for spans to handle overlaps. Perfetto requires spans
-      # on the same track to be strictly nested (no arbitrary overlaps).
-      # TODO: noghabi - Instead of agnostically splitting into lanes, define
-      # proper groupings for spans, e.g., a better way for combining rollouts
-      # and overlaps of peft_train and reference_inference.
-      sorted_spans = sorted(tl.spans.values(), key=lambda s: (s.begin, s.id))
-      lanes_end_times = []
-      span_to_lane = {}
+      if tl_id not in self._track_names:
+        self._track_names[tl_id] = _get_track_name(tl_id, self._role_to_devices)
+      packet.track_descriptor.name = self._track_names[tl_id]
 
-      for s in sorted_spans:
-        placed = False
-        for lane_idx, lane_end in enumerate(lanes_end_times):
-          if lane_end <= s.begin:
-            lanes_end_times[lane_idx] = s.end
-            span_to_lane[s.id] = lane_idx
-            placed = True
-            break
-        if not placed:
-          span_to_lane[s.id] = len(lanes_end_times)
-          lanes_end_times.append(s.end)
+      if _is_host_timeline(tl_id):
+        if _is_rollout_only_timeline(tl):
+          packet.track_descriptor.parent_uuid = host_rollout_uuid
+        else:
+          packet.track_descriptor.parent_uuid = host_main_uuid
 
-      if len(lanes_end_times) <= 1:
-        # Just use the main track, no need for child tracks
-        for s in tl.spans.values():
-          span_to_lane[s.id] = -1
-      else:
+      span_to_lane, num_lanes = _assign_lanes(tl.spans.values())
+
+      if num_lanes > 1:
         # Emit track descriptors for each lane so they group under the timeline
-        for lane_idx in range(len(lanes_end_times)):
+        for lane_idx in range(num_lanes):
           lane_uuid = tl_uuid + lane_idx + 1
           packet = builder.add_packet()
           packet.track_descriptor.uuid = lane_uuid
           packet.track_descriptor.parent_uuid = tl_uuid
-          packet.track_descriptor.name = f"Lane {lane_idx}"
+          packet.track_descriptor.name = ""  # empty name for lanes
 
       for s in tl.spans.values():
         lane_idx = span_to_lane[s.id]

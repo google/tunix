@@ -22,6 +22,7 @@ MICRO_BATCH = "micro_batch_step"
 ROLE = "role"
 GROUP_ID = "group_id"
 PAIR_INDEX = "pair_index"
+QUEUED_SPAN = "queued_span"
 
 # Common Span / Event names.
 
@@ -33,3 +34,5 @@ REFERENCE_INFERENCE = "reference_inference"
 OLD_ACTOR_INFERENCE = "old_actor_inference"
 ADVANTAGE_COMPUTATION = "advantage_computation"
 PEFT_TRAIN = "peft_train"
+IDLE = "idle"
+QUEUE = "queue"

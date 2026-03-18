@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 from collections.abc import Mapping
+from typing import Any
 from absl import logging
 from tunix.perf import metrics
 from tunix.perf.experimental import trace_writer as trace_writer_lib
@@ -41,8 +42,44 @@ class PerfMetricsExport:
   A class for exporting timelines to a trace writer.
   """
 
+  @classmethod
+  def from_cluster_config(
+      cls,
+      cluster_config: Any,
+      enable_trace_writer: bool = True,
+      trace_dir: str | None = None,
+  ) -> PerfMetricsExport:
+    """Creates an instance from a ClusterConfig.
+
+    Args:
+      cluster_config: The tunix.rl.rl_cluster.ClusterConfig to extract
+        role_to_mesh from.
+      enable_trace_writer: Whether to initialize the trace writer.
+      trace_dir: The directory to write the Perfetto trace files to.
+
+    Returns:
+      A new PerfMetricsExport instance configured with role to device mappings.
+    """
+    role_to_devices = {}
+    if hasattr(cluster_config, "role_to_mesh"):
+      for role, mesh in cluster_config.role_to_mesh.items():
+        role_name = role.value if hasattr(role, "value") else str(role)
+        # Convert JAX devices to strings (or their IDs) if needed, here we just
+        # keep them as lists of devices for the trace writer to consume.
+        role_to_devices[role_name] = mesh.devices.flatten().tolist()
+
+    return cls(
+        enable_trace_writer=enable_trace_writer,
+        trace_dir=trace_dir,
+        role_to_devices=role_to_devices,
+    )
+
   def __init__(
-      self, *, enable_trace_writer: bool = True, trace_dir: str | None = None
+      self,
+      *,
+      enable_trace_writer: bool = True,
+      trace_dir: str | None = None,
+      role_to_devices: Mapping[str, Any] | None = None,
   ):
     """Initializes the instance.
 
@@ -52,11 +89,15 @@ class PerfMetricsExport:
         only relevant if enable_trace_writer is True. If not provided (None or
         empty string) and enable_trace_writer is True, a default directory is
         used.
+      role_to_devices: An optional mapping from role names to their assigned
+        devices, passed to the trace writer.
     """
     self._writer: trace_writer_lib.TraceWriter
     if enable_trace_writer:
       resolved_trace_dir = trace_dir or DEFAULT_TRACE_DIR
-      self._writer = trace_writer_lib.PerfettoTraceWriter(resolved_trace_dir)
+      self._writer = trace_writer_lib.PerfettoTraceWriter(
+          resolved_trace_dir, role_to_devices=role_to_devices
+      )
     else:
       self._writer = trace_writer_lib.NoopTraceWriter()
 
