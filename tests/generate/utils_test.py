@@ -1187,6 +1187,131 @@ class UtilsTest(parameterized.TestCase):
         atol=1e-2
     )
 
+  def test_transfer_state_directly_gpt_oss_scanned_format(self):
+    """Tests GPT-OSS scanned format: source layers.layers_Y with axis!=0 scan to individual layers_X."""
+    n_scan = 3  # layers per scan group
+    n_heads, head_dim = 4, 8
+
+    # Single scan group: shape (n_heads, n_scan, head_dim), layers at axis 1
+    stacked_group0 = jnp.stack(
+        [jnp.full((n_heads, head_dim), float(i + 1)) for i in range(n_scan)],
+        axis=1,
+    )  # shape: (4, 3, 8); layer 0 = 1.0, layer 1 = 2.0, layer 2 = 3.0
+
+    # Part 1: single group
+    src_single = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                layers=nnx.Dict(
+                    layers_0=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(stacked_group0)))
+                )
+            )
+        )
+    )
+    dst_single = nnx.Dict(
+        decoder=nnx.Dict(
+            layers_0=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_1=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_2=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+        )
+    )
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_single, dst_single, reshard_fn=mock_reshard)
+
+    for i in range(n_scan):
+      expected = jnp.full((n_heads, head_dim), float(i + 1))
+      np.testing.assert_array_equal(
+          dst_single['decoder'][f'layers_{i}']['Attn']['bias'][...],
+          expected,
+          err_msg=f'Single-group: layer {i} mismatch',
+      )
+
+    # Part 2: two scan groups (group 0 -> layers 0-2, group 1 -> layers 3-5)
+    stacked_group1 = jnp.stack(
+        [jnp.full((n_heads, head_dim), float(i + 10)) for i in range(n_scan)],
+        axis=1,
+    )  # layer 3 = 10.0, layer 4 = 11.0, layer 5 = 12.0
+
+    src_two = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                layers=nnx.Dict(
+                    layers_0=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(stacked_group0))),
+                    layers_1=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(stacked_group1))),
+                )
+            )
+        )
+    )
+    dst_two = nnx.Dict(
+        decoder=nnx.Dict(
+            layers_0=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_1=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_2=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_3=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_4=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_5=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+        )
+    )
+    utils.transfer_state_directly(
+        src_two, dst_two, reshard_fn=mock_reshard, scan_group_ordering='sequential'
+    )
+
+    expected_values = [1.0, 2.0, 3.0, 10.0, 11.0, 12.0]
+    for i, val in enumerate(expected_values):
+      np.testing.assert_array_equal(
+          dst_two['decoder'][f'layers_{i}']['Attn']['bias'][...],
+          jnp.full((n_heads, head_dim), val),
+          err_msg=f'Two-group: layer {i} mismatch',
+      )
+
+  def test_transfer_state_directly_gpt_oss_scanned_format_interleaved(self):
+    """Tests interleaved scan group ordering: group = layer_idx % n_groups."""
+    n_scan = 3
+    n_heads, head_dim = 4, 8
+
+    stacked_group0 = jnp.stack(
+        [jnp.full((n_heads, head_dim), float(i + 1)) for i in range(n_scan)],
+        axis=1,
+    )  # local 0=1.0, 1=2.0, 2=3.0
+    stacked_group1 = jnp.stack(
+        [jnp.full((n_heads, head_dim), float(i + 10)) for i in range(n_scan)],
+        axis=1,
+    )  # local 0=10.0, 1=11.0, 2=12.0
+
+    src = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                layers=nnx.Dict(
+                    layers_0=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(stacked_group0))),
+                    layers_1=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(stacked_group1))),
+                )
+            )
+        )
+    )
+    dst = nnx.Dict(
+        decoder=nnx.Dict(
+            layers_0=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_1=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_2=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_3=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_4=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+            layers_5=nnx.Dict(Attn=nnx.Dict(bias=nnx.Param(jnp.zeros((n_heads, head_dim))))),
+        )
+    )
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src, dst, reshard_fn=mock_reshard, scan_group_ordering='interleaved'
+    )
+
+    # Interleaved: layers_0→g0l0=1.0, layers_1→g1l0=10.0, layers_2→g0l1=2.0, ...
+    expected_values = [1.0, 10.0, 2.0, 11.0, 3.0, 12.0]
+    for i, val in enumerate(expected_values):
+      np.testing.assert_array_equal(
+          dst['decoder'][f'layers_{i}']['Attn']['bias'][...],
+          jnp.full((n_heads, head_dim), val),
+          err_msg=f'Interleaved: layer {i} mismatch',
+      )
+
   def test_sglang_jax_1d_kv_bias_alignment(self):
     """Test 1-D KV bias alignment for sglang_jax rollout engine."""
     src_key = "layers.0.attn.k_bias"

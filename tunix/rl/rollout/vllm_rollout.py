@@ -56,6 +56,7 @@ class VllmRollout(base_rollout.BaseRollout):
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             expert_parallel_size=rollout_config.expert_parallel_size,
+            scan_group_ordering=rollout_config.rollout_vllm_scan_group_ordering,
             engine_kwargs={
                 "model": rollout_config.rollout_vllm_model_version,
                 "max_model_len": cache_config_or_size,
