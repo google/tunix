@@ -6,11 +6,17 @@ R2E-Gym Docker environments. Parallels rllm's run_deepswe.py but
 uses tunix components (Sampler, RolloutOrchestrator).
 
 Usage:
-  # Small test run
+  # Small test run (vanilla sampler)
   TASKS_LIMIT=2 MAX_CONCURRENT=1 python eval_deepswe.py
 
   # Full evaluation
   TASKS_LIMIT=0 MAX_CONCURRENT=16 python eval_deepswe.py
+
+  # Use vLLM sampler
+  ROLLOUT_ENGINE=vllm TASKS_LIMIT=10 python eval_deepswe.py
+
+  # Use SGLang-JAX sampler
+  ROLLOUT_ENGINE=sglang_jax TASKS_LIMIT=10 python eval_deepswe.py
 """
 
 import asyncio
@@ -42,6 +48,18 @@ MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "512"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "1"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
+
+# Rollout engine: "vanilla", "vllm", or "sglang_jax"
+ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
+
+# vLLM-specific
+VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.5"))
+VLLM_INIT_RANDOM_WEIGHTS = os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
+
+# SGLang-specific
+SGLANG_MEM_FRACTION_STATIC = float(os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4"))
+SGLANG_INIT_RANDOM_WEIGHTS = os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "false").lower() == "true"
+SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 
 # Output
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/scratch/eval_results")
@@ -146,18 +164,72 @@ sft_utils.show_hbm_usage()
 
 # ========================== Sampler ==========================
 
-from tunix.generate import sampler as sampler_lib
+logger.info("Creating sampler with engine=%s ...", ROLLOUT_ENGINE)
 
-sampler = sampler_lib.Sampler(
-    model,
-    tokenizer,
-    sampler_lib.CacheConfig(
-        cache_size=16384,
-        num_layers=model_config.num_layers,
-        num_kv_heads=model_config.num_kv_heads,
-        head_dim=model_config.head_dim,
-    ),
-)
+if ROLLOUT_ENGINE == "vanilla":
+  from tunix.generate import sampler as sampler_lib
+
+  sampler = sampler_lib.Sampler(
+      model,
+      tokenizer,
+      sampler_lib.CacheConfig(
+          cache_size=16384,
+          num_layers=model_config.num_layers,
+          num_kv_heads=model_config.num_kv_heads,
+          head_dim=model_config.head_dim,
+      ),
+  )
+
+elif ROLLOUT_ENGINE == "vllm":
+  from tunix.generate import mappings
+  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+
+  mapping_config = mappings.MappingConfig.build(
+      mapping_obj=None,
+      model=model,
+      backend="vllm_jax",
+  )
+  vllm_config = VllmConfig(
+      mesh=mesh,
+      hbm_utilization=VLLM_HBM_UTILIZATION,
+      init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
+      tpu_backend_type="jax",
+      mapping_config=mapping_config,
+      engine_kwargs={"model": MODEL_PATH, "max_model_len": 16384},
+  )
+  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+
+elif ROLLOUT_ENGINE == "sglang_jax":
+  from tunix.generate import mappings
+  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
+
+  mapping_config = mappings.MappingConfig.build(
+      mapping_obj=None,
+      model=model,
+      backend="sglang_jax",
+  )
+  sampler = SglangJaxSampler(
+      tokenizer=tokenizer,
+      config=SglangJaxConfig(
+          mesh=mesh,
+          mapping_config=mapping_config,
+          model_version=MODEL_VERSION,
+          context_length=16384 + MAX_GENERATION_STEPS + 100,
+          mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
+          init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
+          disable_radix_cache=True,
+          enable_deterministic_sampling=False,
+          precompile_token_paddings=[8192, 16384],
+          precompile_bs_paddings=[1],
+          max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
+      ),
+  )
+
+else:
+  raise ValueError(
+      f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
+      f"Choose from: 'vanilla', 'vllm', 'sglang_jax'"
+  )
 
 # ========================== Model Call ==========================
 
@@ -288,10 +360,11 @@ def save_results(results):
 
 if __name__ == "__main__":
   logger.info(
-      "Starting evaluation: %d instances, max_concurrent=%d, max_steps=%d",
+      "Starting evaluation: %d instances, max_concurrent=%d, max_steps=%d, engine=%s",
       len(entries),
       MAX_CONCURRENT,
       MAX_STEPS,
+      ROLLOUT_ENGINE,
   )
 
   eval_results = asyncio.run(run_evaluation())
