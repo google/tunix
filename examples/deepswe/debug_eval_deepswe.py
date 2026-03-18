@@ -255,6 +255,7 @@ def _chat_to_gemini(chat_completions):
 
 # ========================== Agent & Env ==========================
 
+from action_guard import ActionGuard, GuardConfig
 from swe_agent import SWEAgent, parse_xml_response
 from swe_env import SWEEnv
 
@@ -296,6 +297,8 @@ def run_debug_eval():
 
   agent.reset()
   agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
+
+  guard = ActionGuard(GuardConfig())
 
   start_time = time.time()
 
@@ -379,18 +382,33 @@ def run_debug_eval():
     action_result = agent.update_from_model(model_response)
     logger.info("Agent action: %s", action_result.action[:200] if action_result.action else "None")
 
-    # --- Step environment ---
-    print("\n--- Stepping Environment ---")
-    t0 = time.time()
-    try:
-      obs, reward, done, info = env.step(action_result.action)
-      step_time = time.time() - t0
-      logger.info("Env step in %.1fs, reward=%.1f, done=%s", step_time, reward, done)
-    except Exception as e:
-      logger.error("Env step failed: %s", e)
-      traceback.print_exc()
-      obs, reward, done, info = str(e), 0.0, True, {}
-      step_time = time.time() - t0
+    # --- Guard evaluation ---
+    verdict = guard.evaluate(action_result.action)
+    guard_blocked = verdict.blocked
+
+    if guard_blocked:
+      print("\n--- GUARD BLOCKED ---")
+      print(f"  reason: {verdict.reason}")
+      print(f"  message: {verdict.message[:300]}")
+      logger.warning("GUARD BLOCKED: %s", verdict.reason)
+      obs, reward, done, info = verdict.message, 0.0, False, {
+          "guard_blocked": True, "guard_reason": verdict.reason,
+      }
+      step_time = 0.0
+    else:
+      # --- Step environment ---
+      print("\n--- Stepping Environment ---")
+      t0 = time.time()
+      try:
+        obs, reward, done, info = env.step(action_result.action)
+        step_time = time.time() - t0
+        logger.info("Env step in %.1fs, reward=%.1f, done=%s", step_time, reward, done)
+      except Exception as e:
+        logger.error("Env step failed: %s", e)
+        traceback.print_exc()
+        obs, reward, done, info = str(e), 0.0, True, {}
+        step_time = time.time() - t0
+      guard.record_outcome(action_result.action, str(obs))
 
     print(f"\n--- Env Observation ---")
     obs_str = str(obs)
@@ -418,6 +436,7 @@ def run_debug_eval():
         "done": done,
         "observation_length": len(obs_str),
         "model_response_length": len(model_response),
+        "guard_blocked": guard_blocked,
     })
 
     # --- Update agent with env feedback ---

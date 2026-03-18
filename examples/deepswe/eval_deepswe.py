@@ -174,6 +174,8 @@ def model_call(chat_completions, env_unused):
 
 # ========================== Evaluation ==========================
 
+from action_guard import GuardConfig
+from guarded_engine import GuardedTrajectoryCollectEngine
 from swe_agent import SWEAgent
 from swe_env import SWEEnv
 from tunix.rl.agentic import utils as agentic_utils
@@ -191,10 +193,12 @@ def pairs_generator():
 async def run_evaluation():
   """Run parallel evaluation using RolloutOrchestrator."""
   orchestrator = RolloutOrchestrator(
+      engine_cls=GuardedTrajectoryCollectEngine,
       engine_kwargs=dict(
           model_call=model_call,
           max_steps=MAX_STEPS,
           timeout=TIMEOUT,
+          guard_config=GuardConfig(),
       ),
       max_concurrency=MAX_CONCURRENT,
       rollout_sync_lock=agentic_utils.RolloutSyncLock(),
