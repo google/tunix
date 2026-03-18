@@ -19,7 +19,6 @@ Usage:
 import dataclasses
 import logging
 import re
-from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -32,9 +31,6 @@ logger = logging.getLogger(__name__)
 @dataclasses.dataclass
 class GuardConfig:
   """Configuration for the action guard."""
-
-  max_identical_failures: int = 2
-  """Block after the exact same action string has failed this many times."""
 
   max_consecutive_edit_failures: int = 3
   """Block all edits after this many consecutive edit failures."""
@@ -98,7 +94,7 @@ class ActionGuard:
   def __init__(self, config: Optional[GuardConfig] = None):
     self.config = config or GuardConfig()
     self._history: List[ActionRecord] = []
-    self._failure_counts: Dict[str, int] = defaultdict(int)
+    self._last_failed_action: Optional[str] = None
     self._consecutive_edit_failures: int = 0
     self._last_failure_type: Optional[str] = None
     self._last_failed_path: Optional[str] = None
@@ -111,7 +107,7 @@ class ActionGuard:
   def reset(self) -> None:
     """Reset all guard state. Call at the start of each episode."""
     self._history.clear()
-    self._failure_counts.clear()
+    self._last_failed_action = None
     self._consecutive_edit_failures = 0
     self._last_failure_type = None
     self._last_failed_path = None
@@ -198,13 +194,14 @@ class ActionGuard:
 
     if failure_type:
       # ---- failure ----
-      self._failure_counts[action_str] += 1
+      self._last_failed_action = action_str
       self._last_failure_type = failure_type
       self._last_failed_path = path
       if is_edit:
         self._consecutive_edit_failures += 1
     else:
       # ---- success ----
+      self._last_failed_action = None
       self._last_failure_type = None
       self._last_failed_path = None
       if is_edit:
@@ -218,6 +215,7 @@ class ActionGuard:
 
     # recovery actions (view/search/grep) clear transition constraints
     if is_recovery:
+      self._last_failed_action = None
       self._last_failure_type = None
       self._last_failed_path = None
       # Also reset consecutive edit failure count so agent can try editing again
@@ -228,15 +226,14 @@ class ActionGuard:
   # ---- rules ----
 
   def _check_repeated_failure(self, action_str: str) -> Optional[GuardVerdict]:
-    """Rule 1: block if this exact action string has failed too many times."""
-    count = self._failure_counts.get(action_str, 0)
-    if count >= self.config.max_identical_failures:
+    """Rule 1: block if this is the exact same action that just failed."""
+    if self._last_failed_action is not None and action_str == self._last_failed_action:
       return GuardVerdict(
           blocked=True,
-          reason=f"repeated_failure:{count}",
+          reason="repeated_failure",
           message=(
-              f"[ACTION GUARD] This exact action has already failed {count} "
-              f"time(s). Repeating it will produce the same result.\n"
+              f"[ACTION GUARD] This exact action just failed. "
+              f"Repeating it will produce the same result.\n"
               f"Please try a DIFFERENT approach:\n"
               f"- View the file around the relevant lines with a specific "
               f"view_range\n"

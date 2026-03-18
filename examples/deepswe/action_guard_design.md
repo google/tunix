@@ -74,7 +74,6 @@ agent.update_from_model(response)
 ```python
 @dataclasses.dataclass
 class GuardConfig:
-    max_identical_failures: int = 2        # How many times the exact same action can fail
     max_consecutive_edit_failures: int = 3  # Consecutive edit failure cap
     require_view_after_not_found: bool = True   # After not_found, must view first
     require_view_after_non_unique: bool = True  # After non_unique, must view first
@@ -112,7 +111,7 @@ class ActionRecord:
 ```python
 class ActionGuard:
     _history: List[ActionRecord]           # Complete history of actions and outcomes
-    _failure_counts: Dict[str, int]        # action_str literal → failure count (exact match)
+    _last_failed_action: Optional[str]     # The action string that just failed (for consecutive repeat detection)
     _consecutive_edit_failures: int         # Running count of consecutive edit failures
     _last_failure_type: Optional[str]       # Type of the most recent failure
     _last_failed_path: Optional[str]        # File path involved in the most recent failure
@@ -166,26 +165,26 @@ def evaluate(self, action_str):
 
 ## 6. Rules in Detail
 
-### Rule 1: Repeated Failure Blocking
+### Rule 1: Repeated Failure Blocking (Consecutive)
 
-**Trigger condition**: The action string is **exactly identical** (exact match) and has failed >= `max_identical_failures` times.
+**Trigger condition**: The action string is **exactly identical** to the one that **just failed** in the immediately preceding step. If the same action appears right after a failure, it is blocked immediately — no threshold, no accumulated count.
 
-**No fingerprint abstraction** — only blocks when the command is literally the same.
+**No fingerprint abstraction** — only blocks when the command is literally the same. **Consecutive only** — if a different action (successful or not) intervenes, the constraint resets.
 
 ```python
 def _check_repeated_failure(self, action_str: str) -> Optional[GuardVerdict]:
-    count = self._failure_counts.get(action_str, 0)
-    if count >= self.config.max_identical_failures:
+    if self._last_failed_action is not None and action_str == self._last_failed_action:
         return GuardVerdict(
             blocked=True,
-            reason=f"repeated_failure:{count}",
+            reason="repeated_failure",
             message=(
-                f"[ACTION GUARD] This exact action has already failed {count} time(s). "
+                f"[ACTION GUARD] This exact action just failed. "
                 f"Repeating it will produce the same result.\n"
                 f"Please try a DIFFERENT approach:\n"
-                f"- View the file around the relevant lines\n"
-                f"- Use search/grep to find the correct string\n"
-                f"- Include more context in old_str to make it unique"
+                f"- View the file around the relevant lines with a specific view_range\n"
+                f"- Use search or grep to find the correct string\n"
+                f"- Include more context in old_str to make it unique\n"
+                f"- Try a completely different editing strategy"
             ),
         )
     return None
@@ -195,7 +194,13 @@ def _check_repeated_failure(self, action_str: str) -> Optional[GuardVerdict]:
 
 ```python
 if failure_type:
-    self._failure_counts[action_str] = self._failure_counts.get(action_str, 0) + 1
+    self._last_failed_action = action_str   # Remember this action as the most recent failure
+else:
+    self._last_failed_action = None          # Success clears the constraint
+
+# Recovery actions (view/search/grep) also clear it:
+if is_recovery:
+    self._last_failed_action = None
 ```
 
 ---
@@ -389,13 +394,14 @@ def record_outcome(self, action_str: str, observation: str) -> None:
 
     if failure_type:
         # Failure
-        self._failure_counts[action_str] = self._failure_counts.get(action_str, 0) + 1
+        self._last_failed_action = action_str
         self._last_failure_type = failure_type
         self._last_failed_path = path
         if is_edit:
             self._consecutive_edit_failures += 1
     else:
         # Success
+        self._last_failed_action = None
         self._last_failure_type = None
         self._last_failed_path = None
         if is_edit:
@@ -407,10 +413,13 @@ def record_outcome(self, action_str: str, observation: str) -> None:
     if is_view and path:
         self._files_edited_since_last_view.discard(path)
 
-    # view/search/grep clears transition constraints (redundant if already cleared by success, but harmless)
-    if is_view or is_search or is_bash_grep:
+    # recovery actions (view/search/grep) clear all constraints
+    is_recovery = is_view or is_search or is_bash_grep
+    if is_recovery:
+        self._last_failed_action = None
         self._last_failure_type = None
         self._last_failed_path = None
+        self._consecutive_edit_failures = 0
 
     self._step_index += 1
 ```
@@ -534,7 +543,7 @@ class GuardedTrajectoryCollectEngine(TrajectoryCollectEngine):
 | Trajectory records faithfully | Blocked steps have guard messages as their observation, useful for post-hoc analysis |
 | Guard steps consume turns | The model did waste a turn (already called `update_from_model`), and this is correct |
 | `[ACTION GUARD]` prefix | Both humans and the model can distinguish guard feedback from real environment output |
-| Rule 1 uses exact match | Only blocks when the command is literally identical — no fingerprint abstraction |
+| Rule 1 uses consecutive exact match | Only blocks when the command is literally identical to the one that **just** failed — no accumulated count, no fingerprint abstraction |
 | `re.search` instead of `re.match` | Observations are prefixed with `"Execution output of [...]:\n"` |
 | guard_config via engine_kwargs | Leverages `RolloutOrchestrator`'s existing `engine_cls` + `engine_kwargs` mechanism |
 
