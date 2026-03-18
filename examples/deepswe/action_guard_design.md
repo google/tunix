@@ -1,21 +1,21 @@
-# Failure-Aware Action Guard — 设计文档
+# Failure-Aware Action Guard — Design Document
 
-## 1. 问题背景
+## 1. Problem Statement
 
-DeepSWE agent 在解 SWE-bench 问题时，经常出现以下失败模式：
+When solving SWE-bench problems, the DeepSWE agent frequently exhibits the following failure patterns:
 
-| 问题 | 表现 |
+| Problem | Symptom |
 |---|---|
-| 重复无效动作 | 同一个 `str_replace` 已经失败，模型又原样再来一次 |
-| 没吸收 tool feedback | 工具返回 `Multiple occurrences` / `No occurrences`，模型继续原地试 |
-| 失败后不转状态 | non-unique 应该先看更大上下文，not-found 应该先重新看源码，但模型继续 edit |
-| 以为成功了 | 模型"觉得自己修好了"，patch 没确认写进去，就想 finish |
+| Repeated ineffective actions | The same `str_replace` has already failed, yet the model retries it verbatim |
+| Ignoring tool feedback | The tool returns `Multiple occurrences` / `No occurrences`, but the model keeps trying in place |
+| No state transition after failure | After non-unique the agent should view more context first; after not-found it should re-read source — but it just keeps editing |
+| Premature completion | The model "thinks it fixed the bug" but the patch was never confirmed, and it tries to finish |
 
-**目标**: 在 agent 和 env 之间加一层 **runtime policy** (action guard)，强制执行失败恢复策略。不改 prompt，不改模型，改 **运行时行为**。
+**Goal**: Insert a **runtime policy** layer (action guard) between the agent and the environment that enforces failure recovery strategies. No prompt changes, no model changes — only **runtime behavior** changes.
 
 ---
 
-## 2. 架构总览
+## 2. Architecture Overview
 
 ```
 Model Response
@@ -24,14 +24,14 @@ agent.update_from_model(response)
       ↓
     action
       ↓
-┌─────────────────────────────┐
-│   ActionGuard.evaluate()    │
-│                             │
-│  Rule 1: 重复失败拦截        │
-│  Rule 2: 失败状态转移        │
-│  Rule 3: 连续 edit 失败上限  │
-│  Rule 4: finish 前置检查     │
-└──────────┬──────────────────┘
+┌─────────────────────────────────────┐
+│      ActionGuard.evaluate()         │
+│                                     │
+│  Rule 1: Repeated failure blocking  │
+│  Rule 2: Failure state transitions  │
+│  Rule 3: Consecutive edit cap       │
+│  Rule 4: Finish pre-check           │
+└──────────┬──────────────────────────┘
            │
      ┌─────┴─────┐
      │           │
@@ -50,36 +50,36 @@ agent.update_from_model(response)
   agent.update_from_env(obs)
 ```
 
-**核心原则**：Guard 被 block 时，不调用 `env.step()`，而是注入合成 observation（带 `[ACTION GUARD]` 前缀）通过已有的 `update_from_env` 通道回给 agent。模型下一轮自然能看到这条反馈。
+**Core principle**: When the guard blocks an action, it does NOT call `env.step()`. Instead, it injects a synthetic observation (prefixed with `[ACTION GUARD]`) through the existing `update_from_env` channel. The model naturally sees this feedback in its next turn.
 
 ---
 
-## 3. 文件结构
+## 3. File Structure
 
-| 文件 | 类型 | 说明 |
+| File | Type | Description |
 |---|---|---|
-| `examples/deepswe/action_guard.py` | 新建 ~300 行 | 核心 guard 模块：ActionGuard, GuardConfig, GuardVerdict |
-| `examples/deepswe/guarded_engine.py` | 新建 ~80 行 | GuardedTrajectoryCollectEngine，继承原 engine |
-| `examples/deepswe/debug_eval_deepswe.py` | 修改 ~15 行 | 在 debug loop 中集成 guard |
-| `examples/deepswe/eval_deepswe.py` | 修改 ~5 行 | 用 `engine_cls=GuardedTrajectoryCollectEngine` |
+| `examples/deepswe/action_guard.py` | New ~300 lines | Core guard module: ActionGuard, GuardConfig, GuardVerdict |
+| `examples/deepswe/guarded_engine.py` | New ~80 lines | GuardedTrajectoryCollectEngine, subclasses the original engine |
+| `examples/deepswe/debug_eval_deepswe.py` | Modified ~15 lines | Guard integration in the debug loop |
+| `examples/deepswe/eval_deepswe.py` | Modified ~5 lines | Uses `engine_cls=GuardedTrajectoryCollectEngine` |
 
-**不改的文件**：base_agent.py, agent_types.py, trajectory_collect_engine.py, rollout_orchestrator.py — 所有框架层不动。
+**Untouched files**: base_agent.py, agent_types.py, trajectory_collect_engine.py, rollout_orchestrator.py — all framework-level files remain unchanged.
 
 ---
 
-## 4. 核心数据结构
+## 4. Core Data Structures
 
 ### 4.1 GuardConfig
 
 ```python
 @dataclasses.dataclass
 class GuardConfig:
-    max_identical_failures: int = 2        # 完全相同 action 允许失败几次
-    max_consecutive_edit_failures: int = 3  # 连续 edit 失败上限
-    require_view_after_not_found: bool = True   # not_found 后必须先 view
-    require_view_after_non_unique: bool = True  # non_unique 后必须先 view
-    require_view_before_finish: bool = False    # finish 前是否要求确认编辑
-    enabled: bool = True                        # 总开关
+    max_identical_failures: int = 2        # How many times the exact same action can fail
+    max_consecutive_edit_failures: int = 3  # Consecutive edit failure cap
+    require_view_after_not_found: bool = True   # After not_found, must view first
+    require_view_after_non_unique: bool = True  # After non_unique, must view first
+    require_view_before_finish: bool = False    # Whether to require verifying edits before finish
+    enabled: bool = True                        # Master switch
 ```
 
 ### 4.2 GuardVerdict
@@ -87,9 +87,9 @@ class GuardConfig:
 ```python
 @dataclasses.dataclass
 class GuardVerdict:
-    blocked: bool           # True = 不调 env.step
-    message: str = ""       # blocked 时注入的合成 observation
-    reason: str = ""        # 日志用原因码（如 "repeated_failure:3"）
+    blocked: bool           # True = do NOT call env.step
+    message: str = ""       # Synthetic observation to inject when blocked
+    reason: str = ""        # Reason code for logging (e.g. "repeated_failure:3")
 ```
 
 ### 4.3 ActionRecord
@@ -97,44 +97,44 @@ class GuardVerdict:
 ```python
 @dataclasses.dataclass
 class ActionRecord:
-    action_str: str              # 完整 action XML string
-    observation: str             # env 返回的 observation（截断到 500 字符）
-    failure_type: Optional[str]  # 分类后的失败类型，None = 成功
-    step_index: int              # 第几步
+    action_str: str              # Full action XML string
+    observation: str             # Observation returned by env (truncated to 500 chars)
+    failure_type: Optional[str]  # Classified failure type, None = success
+    step_index: int              # Step number
 ```
 
 ---
 
-## 5. ActionGuard 类
+## 5. ActionGuard Class
 
 ### 5.1 State Variables
 
 ```python
 class ActionGuard:
-    _history: List[ActionRecord]           # 完整历史记录
-    _failure_counts: Dict[str, int]        # action_str 原文 → 失败次数 (exact match)
-    _consecutive_edit_failures: int         # 连续 edit 失败计数
-    _last_failure_type: Optional[str]       # 上一次失败类型
-    _last_failed_path: Optional[str]        # 上一次失败涉及的文件路径
-    _files_edited_since_last_view: set      # 编辑后未确认的文件集合
-    _files_successfully_edited: set         # 本 episode 成功编辑过的文件集合
-    _step_index: int                        # 当前步数
+    _history: List[ActionRecord]           # Complete history of actions and outcomes
+    _failure_counts: Dict[str, int]        # action_str literal → failure count (exact match)
+    _consecutive_edit_failures: int         # Running count of consecutive edit failures
+    _last_failure_type: Optional[str]       # Type of the most recent failure
+    _last_failed_path: Optional[str]        # File path involved in the most recent failure
+    _files_edited_since_last_view: set      # Files edited but not yet verified
+    _files_successfully_edited: set         # All files successfully edited this episode
+    _step_index: int                        # Current step counter
 ```
 
-### 5.2 核心方法
+### 5.2 Core Methods
 
 ```python
 def evaluate(self, action_str: str) -> GuardVerdict:
-    """判断 action 是否允许执行。依次检查 4 条规则。"""
+    """Decide whether an action should be executed. Checks all 4 rules in order."""
 
 def record_outcome(self, action_str: str, observation: str) -> None:
-    """action 执行后记录结果，更新 guard 状态。必须在每次 env.step() 后调用。"""
+    """Record the outcome after execution and update guard state. Must be called after every env.step()."""
 
 def reset(self) -> None:
-    """episode 开始时重置所有状态。"""
+    """Reset all state at the start of each episode."""
 ```
 
-### 5.3 evaluate() 流程
+### 5.3 evaluate() Flow
 
 ```python
 def evaluate(self, action_str):
@@ -143,19 +143,19 @@ def evaluate(self, action_str):
 
     func_name, params = self._parse_action(action_str)
 
-    # Rule 1: 完全相同的 action 重复失败
+    # Rule 1: Exact same action repeated after failure
     verdict = self._check_repeated_failure(action_str)
     if verdict: return verdict
 
-    # Rule 2: 失败后必须先恢复再继续
+    # Rule 2: Must recover before retrying after certain failures
     verdict = self._check_failure_transition(func_name, params)
     if verdict: return verdict
 
-    # Rule 3: 连续 edit 失败太多次
+    # Rule 3: Too many consecutive edit failures
     verdict = self._check_consecutive_edit_failures(func_name, params)
     if verdict: return verdict
 
-    # Rule 4: finish/submit 前置条件检查
+    # Rule 4: Pre-conditions for finish/submit
     verdict = self._check_finish_preconditions(func_name, params)
     if verdict: return verdict
 
@@ -164,13 +164,13 @@ def evaluate(self, action_str):
 
 ---
 
-## 6. 四条规则详解
+## 6. Rules in Detail
 
-### Rule 1: 重复失败拦截
+### Rule 1: Repeated Failure Blocking
 
-**触发条件**: action string **完全一样**（exact match），且已失败 >= `max_identical_failures` 次。
+**Trigger condition**: The action string is **exactly identical** (exact match) and has failed >= `max_identical_failures` times.
 
-**不做 fingerprint 抽象**——只有 command 一模一样才拦。
+**No fingerprint abstraction** — only blocks when the command is literally the same.
 
 ```python
 def _check_repeated_failure(self, action_str: str) -> Optional[GuardVerdict]:
@@ -191,7 +191,7 @@ def _check_repeated_failure(self, action_str: str) -> Optional[GuardVerdict]:
     return None
 ```
 
-**record_outcome 中更新**：
+**Updated in record_outcome**:
 
 ```python
 if failure_type:
@@ -200,16 +200,16 @@ if failure_type:
 
 ---
 
-### Rule 2: 失败后状态转移
+### Rule 2: Failure State Transitions
 
-**核心思想**: 每种失败都映射到明确的下一步，不允许不看就重试。
+**Core idea**: Each failure type maps to a required next step — no retrying without observing first.
 
-| 上一次失败 | 当前 action | 判定 |
+| Last Failure | Current Action | Decision |
 |---|---|---|
-| `non_unique` | edit 同一文件 | **block** — 要求先 view 更大上下文 |
-| `not_found` | edit 同一文件 | **block** — 要求先 view 刷新源码 |
-| `path_not_found` | edit 同一路径 | **block** — 要求先确认路径存在 |
-| 任意失败 | view / search / grep | **allow** 并清除 transition 约束 |
+| `non_unique` | edit on same file | **block** — must view larger context first |
+| `not_found` | edit on same file | **block** — must refresh source view first |
+| `path_not_found` | edit on same path | **block** — must verify path exists first |
+| any failure | view / search / grep | **allow** and clear transition constraint |
 
 ```python
 def _check_failure_transition(self, func_name, params) -> Optional[GuardVerdict]:
@@ -263,15 +263,15 @@ def _check_failure_transition(self, func_name, params) -> Optional[GuardVerdict]
     return None
 ```
 
-**Transition 清除**: 在 `record_outcome` 中，当执行 view/search/grep 时：
+**Transition clearing**: In `record_outcome`, when a view/search/grep action is executed:
 
 ```python
-# view/search/grep 清除 transition 约束
+# view/search/grep clears transition constraints
 if is_view or is_search or is_bash_grep:
     self._last_failure_type = None
     self._last_failed_path = None
 
-# 成功的 action 也清除
+# Successful actions also clear
 if failure_type is None:
     self._last_failure_type = None
     self._last_failed_path = None
@@ -279,9 +279,9 @@ if failure_type is None:
 
 ---
 
-### Rule 3: 连续 edit 失败上限
+### Rule 3: Consecutive Edit Failure Cap
 
-**触发条件**: 连续 `max_consecutive_edit_failures` 次 edit 失败（任何 edit，任何文件），再次 edit 时 block。
+**Trigger condition**: `max_consecutive_edit_failures` consecutive edit failures (any edit, any file) — blocks all further edits.
 
 ```python
 def _check_consecutive_edit_failures(self, func_name, params) -> Optional[GuardVerdict]:
@@ -304,15 +304,15 @@ def _check_consecutive_edit_failures(self, func_name, params) -> Optional[GuardV
     return None
 ```
 
-**重置条件**:
-- edit 成功 → 重置为 0
-- view/search 成功 → 重置为 0
+**Reset conditions**:
+- Successful edit → reset to 0
+- Successful view/search → reset to 0
 
 ---
 
-### Rule 4: Finish 前置检查
+### Rule 4: Finish Pre-check
 
-**触发条件**: `require_view_before_finish=True` 且有编辑过但未重新查看的文件。
+**Trigger condition**: `require_view_before_finish=True` and there are files that were edited but not re-viewed.
 
 ```python
 def _check_finish_preconditions(self, func_name, params) -> Optional[GuardVerdict]:
@@ -338,9 +338,9 @@ def _check_finish_preconditions(self, func_name, params) -> Optional[GuardVerdic
 
 ---
 
-## 7. Failure 分类
+## 7. Failure Classification
 
-`record_outcome` 中通过正则匹配 observation 来分类失败类型：
+`record_outcome` classifies failure types by regex-matching the observation string:
 
 ```python
 def _classify_failure(self, observation: str) -> Optional[str]:
@@ -356,14 +356,14 @@ def _classify_failure(self, observation: str) -> Optional[str]:
         return "path_not_found"
     if observation.strip().startswith("ERROR:"):
         return "generic_error"
-    return None  # 成功
+    return None  # success
 ```
 
-用 `re.search`（不是 `re.match`）——observation 前面有 `"Execution output of [file_editor]:\n"` 前缀。
+Uses `re.search` (not `re.match`) because observations are prefixed with `"Execution output of [file_editor]:\n"`.
 
 ---
 
-## 8. record_outcome 完整逻辑
+## 8. record_outcome — Full Logic
 
 ```python
 def record_outcome(self, action_str: str, observation: str) -> None:
@@ -379,7 +379,7 @@ def record_outcome(self, action_str: str, observation: str) -> None:
     is_bash_grep = (func_name == "execute_bash" and
                     "grep" in params.get("cmd", params.get("command", "")))
 
-    # 记录到历史
+    # Append to history
     self._history.append(ActionRecord(
         action_str=action_str,
         observation=observation[:500],
@@ -388,14 +388,14 @@ def record_outcome(self, action_str: str, observation: str) -> None:
     ))
 
     if failure_type:
-        # 失败
+        # Failure
         self._failure_counts[action_str] = self._failure_counts.get(action_str, 0) + 1
         self._last_failure_type = failure_type
         self._last_failed_path = path
         if is_edit:
             self._consecutive_edit_failures += 1
     else:
-        # 成功
+        # Success
         self._last_failure_type = None
         self._last_failed_path = None
         if is_edit:
@@ -403,11 +403,11 @@ def record_outcome(self, action_str: str, observation: str) -> None:
             self._files_successfully_edited.add(path)
             self._files_edited_since_last_view.add(path)
 
-    # view 清除 "未确认" 状态
+    # view clears "unverified" status for that file
     if is_view and path:
         self._files_edited_since_last_view.discard(path)
 
-    # view/search/grep 清除 transition 约束（即使上面已经因为成功清除了，这里覆盖也无妨）
+    # view/search/grep clears transition constraints (redundant if already cleared by success, but harmless)
     if is_view or is_search or is_bash_grep:
         self._last_failure_type = None
         self._last_failed_path = None
@@ -417,9 +417,9 @@ def record_outcome(self, action_str: str, observation: str) -> None:
 
 ---
 
-## 9. Action 解析
+## 9. Action Parsing
 
-用正则从 XML action string 中提取 function_name 和 parameters（Rule 2-4 需要）：
+Extracts function_name and parameters from XML action strings via regex (needed by Rules 2–4):
 
 ```python
 def _parse_action(self, action_str: str) -> Tuple[str, Dict[str, str]]:
@@ -435,16 +435,16 @@ def _parse_action(self, action_str: str) -> Tuple[str, Dict[str, str]]:
 
 ---
 
-## 10. 集成方式
+## 10. Integration
 
-### 10.1 debug_eval_deepswe.py（手动 loop）
+### 10.1 debug_eval_deepswe.py (manual loop)
 
 ```python
 from action_guard import ActionGuard, GuardConfig
 
 guard = ActionGuard(GuardConfig())
 
-# 在 step loop 中:
+# In the step loop:
 action_result = agent.update_from_model(model_response)
 
 verdict = guard.evaluate(action_result.action)
@@ -458,7 +458,7 @@ else:
 agent.update_from_env(observation=obs, reward=reward, done=done, info=info)
 ```
 
-### 10.2 eval_deepswe.py（并行 eval）
+### 10.2 eval_deepswe.py (parallel eval)
 
 ```python
 from guarded_engine import GuardedTrajectoryCollectEngine
@@ -476,14 +476,14 @@ orchestrator = RolloutOrchestrator(
 )
 ```
 
-`RolloutOrchestrator` 已有 `engine_cls` 参数，天然支持替换 engine 类。
+`RolloutOrchestrator` already supports an `engine_cls` parameter, making the swap trivial.
 
 ### 10.3 GuardedTrajectoryCollectEngine
 
 ```python
 class GuardedTrajectoryCollectEngine(TrajectoryCollectEngine):
     def __init__(self, *args, guard_config=None, **kwargs):
-        # guard_config 从 kwargs 中取出，不传给 parent
+        # guard_config is captured here, not passed to parent
         super().__init__(*args, **kwargs)
         self.guard = ActionGuard(guard_config or GuardConfig())
 
@@ -501,7 +501,7 @@ class GuardedTrajectoryCollectEngine(TrajectoryCollectEngine):
         if action is None:
             action = []
 
-        # guard evaluate
+        # guard evaluation
         verdict = self.guard.evaluate(action)
         if verdict.blocked:
             obs, rew, done, info = verdict.message, 0.0, False, {"guard_blocked": True}
@@ -525,33 +525,33 @@ class GuardedTrajectoryCollectEngine(TrajectoryCollectEngine):
 
 ---
 
-## 11. 关键设计决策
+## 11. Key Design Decisions
 
-| 决策 | 理由 |
+| Decision | Rationale |
 |---|---|
-| 不改框架文件 | guard 是 deepswe 特有逻辑，不应污染通用框架 |
-| 利用 `update_from_env` 通道注入 | 不需要新接口，model 下一轮自然看到 |
-| Trajectory 如实记录 | blocked step 的 observation 是 guard message，可用于后续分析 |
-| Guard step 消耗轮次 | model 确实浪费了一轮（已调 `update_from_model`），这是正确的 |
-| `[ACTION GUARD]` 前缀 | 人类和模型都能区分 guard feedback 和真实环境输出 |
-| Rule 1 用 exact match | 用户要求：只有 command 完全一样才拦截 |
-| `re.search` 而非 `re.match` | observation 前有 `"Execution output of [...]:\n"` 前缀 |
-| guard_config 通过 engine_kwargs 传入 | 利用 `RolloutOrchestrator` 已有的 `engine_cls` + `engine_kwargs` 机制 |
+| No framework file changes | The guard is DeepSWE-specific logic and should not pollute the generic framework |
+| Inject via `update_from_env` channel | No new interfaces needed; the model naturally sees guard feedback next turn |
+| Trajectory records faithfully | Blocked steps have guard messages as their observation, useful for post-hoc analysis |
+| Guard steps consume turns | The model did waste a turn (already called `update_from_model`), and this is correct |
+| `[ACTION GUARD]` prefix | Both humans and the model can distinguish guard feedback from real environment output |
+| Rule 1 uses exact match | Only blocks when the command is literally identical — no fingerprint abstraction |
+| `re.search` instead of `re.match` | Observations are prefixed with `"Execution output of [...]:\n"` |
+| guard_config via engine_kwargs | Leverages `RolloutOrchestrator`'s existing `engine_cls` + `engine_kwargs` mechanism |
 
 ---
 
-## 12. 实现顺序
+## 12. Implementation Order
 
-1. **`action_guard.py`** — 核心 guard 逻辑（无外部依赖，纯 Python + re）
-2. **`guarded_engine.py`** — engine 子类（依赖 action_guard.py + trajectory_collect_engine.py）
-3. **`debug_eval_deepswe.py`** — 集成到 debug loop（最方便测试）
-4. **`eval_deepswe.py`** — 集成到正式 eval
+1. **`action_guard.py`** — Core guard logic (no external dependencies, pure Python + re)
+2. **`guarded_engine.py`** — Engine subclass (depends on action_guard.py + trajectory_collect_engine.py)
+3. **`debug_eval_deepswe.py`** — Integrate into debug loop (easiest to test)
+4. **`eval_deepswe.py`** — Integrate into production eval
 
 ---
 
-## 13. 验证方案
+## 13. Verification Plan
 
-1. **Unit test**: 构造合成 action XML string + observation，测试 ActionGuard 的 4 条规则是否正确触发/放行
-2. **Debug eval**: 用 `debug_eval_deepswe.py` 跑一个已知会反复失败的 instance，观察 log 中 `GUARD BLOCKED` 输出
-3. **Conversation 检查**: 确认 guard message 出现在 `agent.chat_completions` 中，格式正确
-4. **A/B eval**: 对比有/无 guard 的 Pass@1（预期持平或提升）
+1. **Unit tests**: Construct synthetic action XML strings + observations, verify all 4 rules trigger/pass correctly
+2. **Debug eval**: Run `debug_eval_deepswe.py` on an instance known to cause repeated failures, observe `GUARD BLOCKED` in logs
+3. **Conversation check**: Confirm guard messages appear in `agent.chat_completions` with correct format
+4. **A/B eval**: Compare Pass@1 with and without guard (expected: equal or improved)
