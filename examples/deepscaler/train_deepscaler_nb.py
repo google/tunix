@@ -576,8 +576,9 @@ grpo_config = GRPOConfig(
 
 # Perf Metrics logging
 perf_metrics_config = PerfMetricsConfig(
-    custom_export_fn_v2=PerfMetricsExport(
-        trace_dir="/tmp/agentic_perf"
+    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
+        cluster_config=cluster_config,
+        trace_dir="/tmp/agentic_perf",
     ).export_metrics
 )
 
