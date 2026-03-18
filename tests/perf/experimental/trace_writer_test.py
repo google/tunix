@@ -194,8 +194,8 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     ]
     expected_descriptors = [
         {"name": "overlap_timeline", "parent_uuid": None},
-        {"name": "Lane 0", "parent_uuid": main_uuid},
-        {"name": "Lane 1", "parent_uuid": main_uuid},
+        {"name": "", "parent_uuid": main_uuid},
+        {"name": "", "parent_uuid": main_uuid},
     ]
     self.assertEqual(actual_descriptors, expected_descriptors)
 
@@ -264,6 +264,64 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     ]
     self.assertEqual(actual_events, expected_events)
     mock_builder.serialize.assert_called_once()
+
+  @mock.patch.object(trace_writer_lib, "TraceProtoBuilder", autospec=True)
+  def test_write_timelines_grouping(self, mock_builder_cls):
+    mock_builder = mock_builder_cls.return_value
+    mock_builder.serialize.return_value = b""
+    captured_packets = []
+
+    def add_packet_side_effect():
+      p = mock.create_autospec(TracePacket, instance=True)
+      p.track_descriptor = mock.create_autospec(TrackDescriptor, instance=True)
+      p.track_event = mock.create_autospec(TrackEvent, instance=True)
+      captured_packets.append(p)
+      return p
+
+    mock_builder.add_packet.side_effect = add_packet_side_effect
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, role_to_devices={"actor": ["tpu0", "tpu1"]}
+      )
+
+      t_main = tracer.Timeline("host-1", 1000.0)
+      t_main.start_span("main_span", 1001.0)
+
+      t_rollout = tracer.Timeline("host-2", 1000.0)
+      t_rollout.start_span("rollout", 1002.0)
+
+      t_tpu = tracer.Timeline("tpu0", 1000.0)
+      t_tpu.start_span("compute", 1003.0)
+
+      writer.write_timelines({
+          "host-1": t_main,
+          "host-2": t_rollout,
+          "tpu0": t_tpu,
+      })
+
+    # The first packet should be the "Host - Main threads" group
+    self.assertEqual(
+        captured_packets[0].track_descriptor.name, "Host - Main threads"
+    )
+    self.assertEqual(captured_packets[0].track_descriptor.uuid, 999998)
+
+    # The second packet should be the "Host - rollout threads" group
+    self.assertEqual(
+        captured_packets[1].track_descriptor.name, "Host - Rollout threads"
+    )
+    self.assertEqual(captured_packets[1].track_descriptor.uuid, 999999)
+
+    # The third packet should be host-1
+    self.assertEqual(captured_packets[2].track_descriptor.name, "host-1")
+    self.assertEqual(captured_packets[2].track_descriptor.parent_uuid, 999998)
+
+    # The fourth packet should be host-2
+    self.assertEqual(captured_packets[3].track_descriptor.name, "host-2")
+    self.assertEqual(captured_packets[3].track_descriptor.parent_uuid, 999999)
+
+    # The fifth packet should be tpu0, renamed to "actor - tpu0"
+    self.assertEqual(captured_packets[4].track_descriptor.name, "actor - tpu0")
 
   def test_perfetto_trace_writer_integration(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
