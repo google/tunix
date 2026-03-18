@@ -166,6 +166,7 @@ class PerfTracer(NoopTracer):
     self._born = time.perf_counter()
 
     self._main_thread_id = generate_host_timeline_id()
+    self._timelines_lock = threading.Lock()
 
     self._host_timelines: dict[str, Timeline] = {
         self._main_thread_id: Timeline(self._main_thread_id, self._born)
@@ -176,29 +177,32 @@ class PerfTracer(NoopTracer):
         self._get_or_create_device_timeline(device_id)
     self._collect_on_first_device_per_mesh = collect_on_first_device_per_mesh
 
-  def _get_timelines(self) -> Mapping[str, Timeline]:
-    timelines: dict[str, Timeline] = {}
-    for tl in self._host_timelines.values():
-      timelines[tl.id] = tl
-    for tl in self._device_timelines.values():
-      if tl.id in timelines:
-        raise ValueError(f"Timeline ID collision detected: {tl.id}")
-      timelines[tl.id] = tl
-    return timelines
+  def _get_timeline_snapshots(self) -> Mapping[str, Timeline]:
+    timelines_by_id: dict[str, Timeline] = {}
+    with self._timelines_lock:
+      for tl in self._host_timelines.values():
+        timelines_by_id[tl.id] = tl.snapshot()
+      for tl in self._device_timelines.values():
+        if tl.id in timelines_by_id:
+          raise ValueError(f"Timeline ID collision detected: {tl.id!r}")
+        timelines_by_id[tl.id] = tl.snapshot()
+    return timelines_by_id
 
   def _get_or_create_host_timeline(self, timeline_id: str) -> Timeline:
-    host_timeline = self._host_timelines.get(timeline_id)
-    if host_timeline is None:
-      host_timeline = Timeline(timeline_id, self._born)
-      self._host_timelines[timeline_id] = host_timeline
-    return host_timeline
+    with self._timelines_lock:
+      host_timeline = self._host_timelines.get(timeline_id)
+      if host_timeline is None:
+        host_timeline = Timeline(timeline_id, self._born)
+        self._host_timelines[timeline_id] = host_timeline
+      return host_timeline
 
   def _get_or_create_device_timeline(self, timeline_id: str) -> AsyncTimeline:
-    device_timeline = self._device_timelines.get(timeline_id)
-    if device_timeline is None:
-      device_timeline = AsyncTimeline(timeline_id, self._born)
-      self._device_timelines[timeline_id] = device_timeline
-    return device_timeline
+    with self._timelines_lock:
+      device_timeline = self._device_timelines.get(timeline_id)
+      if device_timeline is None:
+        device_timeline = AsyncTimeline(timeline_id, self._born)
+        self._device_timelines[timeline_id] = device_timeline
+      return device_timeline
 
   def _get_or_create_device_timelines(
       self, ids: Sequence[str | JaxDevice] | np.ndarray | None
@@ -210,23 +214,26 @@ class PerfTracer(NoopTracer):
 
   def synchronize(self) -> None:
     _synchronize_devices()
-    for tl in self._device_timelines.values():
+    with self._timelines_lock:
+      device_timelines = list(self._device_timelines.values())
+    for tl in device_timelines:
       tl.wait_pending_spans()
 
   def print(self) -> None:
     self.synchronize()
-    for tl in self._get_timelines().values():
+    for tl in self._get_timeline_snapshots().values():
       print(f"\n[{tl.id}]")
       print(tl)
 
   def export(self) -> MetricsT:
     if self._export_fn is None:
       return {}
-    return self._export_fn(self._get_timelines())
+    return self._export_fn(self._get_timeline_snapshots())
 
   @property
   def all_devices(self) -> Sequence[str]:
-    return list(self._device_timelines.keys())
+    with self._timelines_lock:
+      return list(self._device_timelines.keys())
 
   @contextlib.contextmanager
   def span(
