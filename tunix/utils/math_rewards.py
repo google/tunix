@@ -35,6 +35,10 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
     float: The calculated reward value based on math evaluation
   """
   rewards = []
+  for i in range(len(prompts)):
+    print("prompt: ", prompts[i])
+    print("last 1000 chars of completion: ", completions[i][-1000:])
+    print("answer: ", answer[i])
   # Extract information from task_info
   for i, completion in enumerate(completions):
     model_response = completion

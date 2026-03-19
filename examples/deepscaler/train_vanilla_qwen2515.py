@@ -315,15 +315,15 @@ if NOTEBOOK_ENV == "g3":
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
   DATA_PATH_PREFIX = "gs://linchai-bucket-dev/rl/data"
-  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
+  MODEL_PATH_PREFIX = "gs://tunix/models"
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vanilla/07")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vanilla_qwen2515/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
-MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it")
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
@@ -520,7 +520,7 @@ if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
       # Capture the norm of the updates entering this point in the chain
-      optax.snapshot("clipped_grad_norm", optax.global_norm),
+      # optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
