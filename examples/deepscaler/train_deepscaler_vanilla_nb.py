@@ -520,6 +520,8 @@ optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      # Capture the norm of the updates entering this point in the chain
+      optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
@@ -617,7 +619,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
           # set_profile_options=False,
           # log_dir=PROFILER_PATH,
         # ) if ENABLE_PROFILER else None,
-        rollout_micro_batch_size = 8,
+        rollout_micro_batch_size = 32,
     ),
     rollout_config=rollout_engine_config,
 )
