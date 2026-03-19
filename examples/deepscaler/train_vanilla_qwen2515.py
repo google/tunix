@@ -432,7 +432,7 @@ else:
   config.remat_config = model_lib.RematConfig.NONE
 
 print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(
+qwen2_ref = params_lib.create_model_from_safe_tensors(d
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 
