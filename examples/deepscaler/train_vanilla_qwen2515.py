@@ -425,14 +425,14 @@ for s in train_dataset:
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config = model_lib.ModelConfig.qwen2p5_1p5b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 else:
   config.remat_config = model_lib.RematConfig.NONE
 
 print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(
+qwen2_ref = params_lib.create_model_from_safe_tensors(d
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 
@@ -541,9 +541,7 @@ base_rollout_dict = {
 
 sglang_jax_rollout_dict = {
     # sglang-jax specific configs
-    "rollout_sglang_jax_model_version": (
-        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ),
+    "rollout_sglang_jax_model_version": MODEL_VERSION,
     "rollout_sglang_jax_mem_fraction_static": 0.8,
     "rollout_sglang_jax_init_with_random_weights": True,
     "rollout_sglang_jax_disable_radix_cache": True,
@@ -557,7 +555,7 @@ MAX_NUM_SEQS =768
 MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
-    "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "rollout_vllm_model_version": MODEL_VERSION,
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
