@@ -437,7 +437,7 @@ for s in train_dataset:
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config = model_lib.ModelConfig.qwen2p5_1p5b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 else:
@@ -522,8 +522,6 @@ optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-      # Capture the norm of the updates entering this point in the chain
-      # optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
@@ -538,7 +536,6 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
     "data_type": jnp.bfloat16,
 }
 
