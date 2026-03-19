@@ -487,7 +487,6 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
 }
 
 sglang_jax_rollout_dict = {
