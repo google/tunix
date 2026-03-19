@@ -29,7 +29,7 @@ RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
-RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+RUN pip install --upgrade "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 
 RUN pip uninstall wandb
@@ -63,8 +63,6 @@ RUN if [ "$ENGINE" = "sglang_jax" ]; then \
     fi
 
 WORKDIR /app
-RUN pip install --force-reinstall flax==0.12.4
-RUN pip install "numpy>=2.0,<2.3"
 RUN pip install --force-reinstall protobuf==6.33.5
 
 
