@@ -151,6 +151,55 @@ class GrpoPipeline(config.HyperParameters):
         ).export_metrics
     return perf_config
 
+  def _load_and_init_dataset(self, tokenizer, data_config_prefix: str = "", split: str = "train"):
+    """Helper function to load and initialize a dataset.
+
+    Args:
+      tokenizer: Tokenizer for processing.
+      data_config_prefix: Optional prefix for config keys (e.g., "eval_" for
+        eval dataset).
+      split: The dataset split to use (e.g., "train", "test"). Only applies to
+        TFDS datasets.
+
+    Returns:
+      Initialized dataset ready for training.
+    """
+    def get_key(suffix):
+      return f"{data_config_prefix}{suffix}"
+
+    # Load dataset
+    if self.config.get(get_key("data_module")):
+      dataset = data_lib.get_dataset_from_module(
+          self.config[get_key("data_module")],
+          tokenizer,
+      )
+    elif self.config[get_key("data_source")] == "local":
+      dataset = example_data.create_dataset(
+          data_source=self.config[get_key("data_source")],
+          dataset=self.config[get_key("data_directory")],
+          tokenizer=tokenizer,
+      )
+    else:
+      dataset = example_data.create_dataset(
+          data_source="tfds",
+          dataset=self.config[get_key("dataset_name")],
+          tfds_download=self.config.get(get_key("tfds_download"), False),
+          split=split,
+      )
+
+    # Post-initialize dataset
+    dataset, _ = data_lib.post_init_dataset(
+        dataset,
+        tokenizer,
+        batch_size=self.config["batch_size"],
+        num_batches=self.config.get(get_key("num_batches"), None),
+        max_prompt_length=self.config["rollout_config"].get(
+            "max_prompt_length", None
+        ),
+    )
+
+    return dataset
+
   def create_rl_cluster(self):
     # Should not use LoRA for reference model.
     if self.config["reference_model_config"].get("lora_config"):
@@ -199,33 +248,25 @@ class GrpoPipeline(config.HyperParameters):
     )
 
     tokenizer = grpo_trainer.rl_cluster.tokenizer
-    if self.config.get("data_module", None):
-      dataset = data_lib.get_dataset_from_module(
-          self.config["data_module"],
-          tokenizer,
+    
+    # Get dataset splits from config with defaults
+    train_split = self.config.get("train_split", "train")
+    eval_split = self.config.get("eval_split", "test")
+    
+    # Load training dataset
+    dataset = self._load_and_init_dataset(tokenizer, split=train_split)
+    
+    # Load eval dataset if configured
+    eval_dataset = None
+    if (self.config.get("eval_data_source", "") or
+        self.config.get("eval_data_module", "")):
+      eval_dataset = self._load_and_init_dataset(
+          tokenizer, 
+          data_config_prefix="eval_",
+          split=eval_split
       )
-    elif self.config["data_source"] == "local":
-      dataset = example_data.create_dataset(
-          data_source=self.config["data_source"],
-          dataset=self.config["data_directory"],
-          tokenizer=tokenizer,
-      )
-    else:
-      dataset = example_data.create_dataset(
-          data_source="tfds",
-          dataset=self.config["dataset_name"],
-          tfds_download=self.config["tfds_download"],
-      )
-    dataset, _ = data_lib.post_init_dataset(
-        dataset,
-        tokenizer,
-        batch_size=self.config["batch_size"],
-        num_batches=self.config.get("num_batches", None),
-        max_prompt_length=self.config["rollout_config"].get(
-            "max_prompt_length", None
-        ),
-    )
-    grpo_trainer.train(dataset)
+    
+    grpo_trainer.train(dataset, eval_ds=eval_dataset)
 
 
 def _setup_jax_pathways(pathways_bns: str):
