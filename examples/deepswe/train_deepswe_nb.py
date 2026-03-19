@@ -197,9 +197,9 @@ TRAIN_WITH_LORA = False
 # === Generation during GRPO training ===
 MAX_PROMPT_LENGTH = 4096
 MAX_RESPONSE_LENGTH = 8192
-TEMPERATURE = 0.85
-TOP_P = 0.95
-TOP_K = 50
+TEMPERATURE = 1.0
+TOP_P = None
+TOP_K = None
 NUM_GENERATIONS = 2  # This corresponds to `G` in Algorithm 1
 
 # === other GRPO configs ===
