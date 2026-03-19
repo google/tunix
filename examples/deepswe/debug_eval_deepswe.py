@@ -18,28 +18,31 @@ Usage:
   INSTANCE_ID=django__django-12345 python debug_eval_deepswe.py
 
   # Local model:
+  ENABLE_GUARD=false \
   MODEL_VERSION="Qwen/Qwen3-1.7B" \
   TASK_INDEX=0 \
   MAX_STEPS=10 \
   MAX_GENERATION_STEPS=256 \
   TIMEOUT=600 \
-  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
 
   # Use vLLM sampler:
+  ENABLE_GUARD=false \
   ROLLOUT_ENGINE=vllm \
   MODEL_VERSION="Qwen/Qwen3-4B-Instruct-2507" \
   TASK_INDEX=0 \
   MAX_STEPS=30 \
   TIMEOUT=600 \
-  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
 
   # Use SGLang-JAX sampler:
+  ENABLE_GUARD=false \
   ROLLOUT_ENGINE=sglang_jax \
   MODEL_VERSION="Qwen/Qwen3-4B-Instruct-2507" \
   TASK_INDEX=0 \
   MAX_STEPS=30 \
   TIMEOUT=600 \
-  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
 
   # Gemini API mode:
   USE_API=gemini \
@@ -48,7 +51,7 @@ Usage:
   TASK_INDEX=0 \
   MAX_STEPS=10 \
   TIMEOUT=600 \
-  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
 """
 
 import json
@@ -93,6 +96,9 @@ VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
 SGLANG_MEM_FRACTION_STATIC = float(os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4"))
 SGLANG_INIT_RANDOM_WEIGHTS = os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "false").lower() == "true"
 SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
+
+# Guard: set ENABLE_GUARD=false to disable the action guard
+ENABLE_GUARD = os.getenv("ENABLE_GUARD", "true").lower() == "true"
 
 # API mode: set USE_API=gemini to use Gemini API instead of local model
 USE_API = os.getenv("USE_API", "")  # "gemini" for Gemini API
@@ -393,7 +399,7 @@ def run_debug_eval():
   agent.reset()
   agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
-  guard = ActionGuard(GuardConfig())
+  guard = ActionGuard(GuardConfig(enabled=ENABLE_GUARD))
 
   start_time = time.time()
 

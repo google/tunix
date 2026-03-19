@@ -49,6 +49,9 @@ MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "1"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
 
+# Guard: set ENABLE_GUARD=false to disable the action guard
+ENABLE_GUARD = os.getenv("ENABLE_GUARD", "true").lower() == "true"
+
 # Rollout engine: "vanilla", "vllm", or "sglang_jax"
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
 
@@ -284,7 +287,7 @@ async def run_evaluation():
           model_call=model_call,
           max_steps=MAX_STEPS,
           timeout=TIMEOUT,
-          guard_config=GuardConfig(),
+          guard_config=GuardConfig(enabled=ENABLE_GUARD),
       ),
       max_concurrency=MAX_CONCURRENT,
       rollout_sync_lock=agentic_utils.RolloutSyncLock(),
