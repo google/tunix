@@ -58,7 +58,7 @@ class VllmRollout(base_rollout.BaseRollout):
             engine_kwargs={
                 "model": rollout_config.rollout_vllm_model_version,
                 "max_model_len": cache_config_or_size,
-                "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
+                # "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
                 "async_scheduling": (
                     rollout_config.rollout_vllm_async_scheduling
                 ),
