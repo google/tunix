@@ -199,7 +199,6 @@ if not USE_API:
   import numpy as np
   from huggingface_hub import snapshot_download
   from transformers import AutoTokenizer
-  from tunix.models.qwen3 import model as model_lib
   from tunix.models.qwen3 import params as params_lib
   from tunix.sft import utils as sft_utils
   from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -215,26 +214,19 @@ if not USE_API:
   tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
   chat_parser = parser.QwenChatTemplateParser(tokenizer)
 
-  devices = jax.devices()
-  mesh_devices = np.array(devices).reshape(len(devices), 1)
-  mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
+  from tunix.models.automodel import call_model_config
 
-  MODEL_CONFIG_FACTORY = {
-      "Qwen/Qwen3-0.6B": model_lib.ModelConfig.qwen3_0p6b,
-      "Qwen/Qwen3-1.7B": model_lib.ModelConfig.qwen3_1p7b,
-      "Qwen/Qwen3-4B": model_lib.ModelConfig.qwen3_4b,
-      "Qwen/Qwen3-4B-Instruct-2507": model_lib.ModelConfig.qwen3_4b_instruct_2507,
-      "Qwen/Qwen3-8B": model_lib.ModelConfig.qwen3_8b,
-      "Qwen/Qwen3-14B": model_lib.ModelConfig.qwen3_14b,
-      "Qwen/Qwen3-30B-A3B": model_lib.ModelConfig.qwen3_30b_a3b,
-      "Qwen/Qwen3-32B": model_lib.ModelConfig.qwen3_32b,
-  }
-  if MODEL_VERSION not in MODEL_CONFIG_FACTORY:
-    raise ValueError(
-        "Unsupported MODEL_VERSION: "
-        f"{MODEL_VERSION}. Supported: {sorted(MODEL_CONFIG_FACTORY.keys())}"
-    )
-  model_config = MODEL_CONFIG_FACTORY[MODEL_VERSION]()
+  model_name = MODEL_VERSION.split("/")[-1]
+  model_config = call_model_config(model_name)
+
+  devices = jax.devices()
+  num_devices = len(devices)
+
+  # Compute TP/FSDP split based on num_kv_heads, matching train_deepswe_nb.py
+  rollout_tp = np.gcd(num_devices, model_config.num_kv_heads)
+  rollout_fsdp = num_devices // rollout_tp
+  mesh_devices = np.array(devices).reshape(rollout_fsdp, rollout_tp)
+  mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
 
   logger.info("Loading model weights from %s ...", MODEL_PATH)
   model = params_lib.create_model_from_safe_tensors(
