@@ -817,6 +817,19 @@ def transfer_state_with_mappings(
   return dst_state.from_flat_path(tgt_flat_list)
 
 
+def _shapes_are_repeatable(
+    candidate_shape: tuple[int, ...],
+    tgt_shape: tuple[int, ...],
+) -> bool:
+  """Returns True if candidate_shape can be repeated to match tgt_shape."""
+  if len(candidate_shape) != len(tgt_shape):
+    return False
+  return all(
+      s <= t and t % s == 0
+      for s, t in zip(candidate_shape, tgt_shape)
+  )
+
+
 def _slice_scanned_param(
     src_val: jax.Array | np.ndarray | Any,
     tgt_val: jax.Array | np.ndarray | Any,
@@ -852,7 +865,8 @@ def _slice_scanned_param(
     scan_axis = None
     # Check which dimension, when removed, matches the target shape
     for i in range(len(src_shape)):
-      if src_shape[:i] + src_shape[i + 1 :] == tgt_shape:
+      candidate = src_shape[:i] + src_shape[i + 1:]
+      if _shapes_are_repeatable(candidate, tgt_shape):
         scan_axis = i
         break
 
@@ -879,6 +893,53 @@ def _slice_scanned_param(
         key_path, slice_idx, e
     )
     return src_val
+
+
+def _repeat_to_model_shape(
+    src_val: jax.Array | np.ndarray | Any,
+    tgt_val: jax.Array | np.ndarray | Any,
+    key_path: str,
+) -> jax.Array | np.ndarray | Any:
+  """Repeats src_val to match tgt_val's shape if shapes are compatible multiples.
+
+  This is used to broadcast KV heads (or other dimensions) from a model with
+  fewer heads to one with more heads, e.g., when transferring GQA weights.
+
+  Args:
+      src_val: The source array to repeat.
+      tgt_val: The target array whose shape we want to match.
+      key_path: Path string for debug logging.
+
+  Returns:
+      A repeated version of src_val matching tgt_val's shape, or src_val
+      unchanged if shapes already match or repeating is not possible.
+  """
+  if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
+    return src_val
+
+  src_shape = src_val.shape
+  tgt_shape = tgt_val.shape
+
+  if src_shape == tgt_shape:
+    return src_val
+
+  if len(src_shape) != len(tgt_shape):
+    return src_val
+
+  for src_dim, tgt_dim in zip(src_shape, tgt_shape):
+    if src_dim > tgt_dim or tgt_dim % src_dim != 0:
+      return src_val
+
+  logging.info(
+      "Repeating '%s' from %s to %s.",
+      key_path, src_shape, tgt_shape,
+  )
+  result = src_val
+  for axis, (src_dim, tgt_dim) in enumerate(zip(src_shape, tgt_shape)):
+    if tgt_dim != src_dim:
+      result = jnp.repeat(result, tgt_dim // src_dim, axis=axis)
+
+  return result
 
 
 def transfer_state_directly(
@@ -968,6 +1029,7 @@ def transfer_state_directly(
       if key_tuple in src_flat:
         src_val = src_flat[key_tuple]
         src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(key_tuple))
+        src_val = _repeat_to_model_shape(src_val, tgt_val, str(key_tuple))
         filtered_src_flat[key_tuple] = src_val
         filtered_tgt_flat[key_tuple] = tgt_val
         continue
@@ -1014,6 +1076,7 @@ def transfer_state_directly(
           sliced_val = _apply_dtype_cast(
               sliced_val, tgt_val.dtype, str(key_tuple)
           )
+          sliced_val = _repeat_to_model_shape(sliced_val, tgt_val, str(key_tuple))
           filtered_src_flat[key_tuple] = sliced_val
           filtered_tgt_flat[key_tuple] = tgt_val
           continue
