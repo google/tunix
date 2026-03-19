@@ -53,8 +53,10 @@ TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
 
 # vLLM-specific
-VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.5"))
+VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.4"))
 VLLM_INIT_RANDOM_WEIGHTS = os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
+VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
+VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", str(MAX_CONCURRENT)))
 
 # SGLang-specific
 SGLANG_MEM_FRACTION_STATIC = float(os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4"))
@@ -184,6 +186,8 @@ elif ROLLOUT_ENGINE == "vllm":
   from tunix.generate import mappings
   from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
 
+  os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+
   mapping_config = mappings.MappingConfig.build(
       mapping_obj=None,
       model=model,
@@ -194,8 +198,18 @@ elif ROLLOUT_ENGINE == "vllm":
       hbm_utilization=VLLM_HBM_UTILIZATION,
       init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
       tpu_backend_type="jax",
+      server_mode=VLLM_SERVER_MODE,
+      tensor_parallel_size=mesh.shape["tp"],
+      data_parallel_size=mesh.shape["fsdp"],
       mapping_config=mapping_config,
-      engine_kwargs={"model": MODEL_PATH, "max_model_len": 16384},
+      engine_kwargs={
+          "model": MODEL_PATH,
+          "max_model_len": 16384,
+          "max_num_seqs": VLLM_MAX_NUM_SEQS,
+          "enable_prefix_caching": True,
+          "kv_cache_metrics": True,
+          "disable_log_stats": False,
+      },
   )
   sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
 
