@@ -89,7 +89,7 @@ ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
 
 # vLLM-specific
 VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.4"))
-VLLM_INIT_RANDOM_WEIGHTS = os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
+VLLM_INIT_RANDOM_WEIGHTS = os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "false").lower() == "true"
 VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
 
 # SGLang-specific
