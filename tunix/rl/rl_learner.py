@@ -20,6 +20,7 @@ import abc
 from concurrent import futures
 import itertools
 import math
+import time
 from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
@@ -135,6 +136,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     self._compute_logps_micro_batch_size = (
         self._training_config.compute_logps_micro_batch_size
     )
+    self._global_step_start_time = time.time()
     sft_utils.show_hbm_usage(title="RLLearner init")
 
   @abstractmethod
@@ -578,6 +580,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               eval_ds,
               skip_jit,
           )
+          global_step_time = time.time() - self._global_step_start_time
+          logging.info(
+              f"Global step {self.rl_cluster.global_steps} completed in"
+              f" {global_step_time:.2f} seconds."
+          )
+             
 
           if self.should_sync_weights:
             logging.debug(
@@ -596,9 +604,16 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.global_steps += (
                 1  # manually increment the global steps.
             )
+          self._global_step_start_time = time.time()
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf.export(),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
+
+
+        self.rl_cluster.buffer_metrics(
+            {"perf/global_step_time": (global_step_time, np.mean)},
             mode=rl_cluster_lib.Mode.TRAIN,
         )
 

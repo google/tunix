@@ -78,11 +78,11 @@ with cm:
   from tunix.models.qwen3 import params as params_lib
   from tunix.models.qwen3 import model as model_lib
   from tunix.sft import metrics_logger
+  from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
   from tunix.rl.agentic.environments import task_environment
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
-  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl import rl_cluster as rl_cluster_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
@@ -158,11 +158,11 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 768
+VLLM_MAX_NUM_SEQS = 512
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 16
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -537,7 +537,6 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
 }
 
 sglang_jax_rollout_dict = {
@@ -553,9 +552,6 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
     "rollout_sglang_jax_page_size": 128,
 }
-
-MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 
 vllm_rollout_dict = {
     # vllm-tpu specific configs
@@ -644,7 +640,6 @@ grpo_config = GRPOConfig(
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen3_actor,
-    rollout=qwen3_rollout,
     reference=qwen3_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
