@@ -68,6 +68,9 @@ class VllmRollout(base_rollout.BaseRollout):
                 ),
                 "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
                 "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
+                "max_logprobs": (
+                    1
+                ),  # We only need the logprobs of the sampled tokens
                 **rollout_config.rollout_vllm_kwargs,
             },
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
