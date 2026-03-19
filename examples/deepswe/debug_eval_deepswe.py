@@ -23,7 +23,23 @@ Usage:
   MAX_STEPS=10 \
   MAX_GENERATION_STEPS=256 \
   TIMEOUT=600 \
-  python debug_eval_deepswe.py
+  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+
+  # Use vLLM sampler:
+  ROLLOUT_ENGINE=vllm \
+  MODEL_VERSION="Qwen/Qwen3-4B-Instruct-2507" \
+  TASK_INDEX=0 \
+  MAX_STEPS=30 \
+  TIMEOUT=600 \
+  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+
+  # Use SGLang-JAX sampler:
+  ROLLOUT_ENGINE=sglang_jax \
+  MODEL_VERSION="Qwen/Qwen3-4B-Instruct-2507" \
+  TASK_INDEX=0 \
+  MAX_STEPS=30 \
+  TIMEOUT=600 \
+  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
 
   # Gemini API mode:
   USE_API=gemini \
@@ -32,7 +48,7 @@ Usage:
   TASK_INDEX=0 \
   MAX_STEPS=10 \
   TIMEOUT=600 \
-  python debug_eval_deepswe.py
+  python3 -n examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
 """
 
 import json
@@ -64,6 +80,18 @@ TASK_INDEX = int(os.getenv("TASK_INDEX", "0"))
 INSTANCE_ID = os.getenv("INSTANCE_ID", "")  # overrides TASK_INDEX if set
 
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/scratch/debug_eval")
+
+# Rollout engine: "vanilla", "vllm", or "sglang_jax"
+ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
+
+# vLLM-specific
+VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.5"))
+VLLM_INIT_RANDOM_WEIGHTS = os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
+
+# SGLang-specific
+SGLANG_MEM_FRACTION_STATIC = float(os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4"))
+SGLANG_INIT_RANDOM_WEIGHTS = os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "false").lower() == "true"
+SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 
 # API mode: set USE_API=gemini to use Gemini API instead of local model
 USE_API = os.getenv("USE_API", "")  # "gemini" for Gemini API
@@ -209,18 +237,72 @@ if not USE_API:
 
   # ========================== Sampler ==========================
 
-  from tunix.generate import sampler as sampler_lib
+  logger.info("Creating sampler with engine=%s ...", ROLLOUT_ENGINE)
 
-  sampler = sampler_lib.Sampler(
-      model,
-      tokenizer,
-      sampler_lib.CacheConfig(
-          cache_size=16384,
-          num_layers=model_config.num_layers,
-          num_kv_heads=model_config.num_kv_heads,
-          head_dim=model_config.head_dim,
-      ),
-  )
+  if ROLLOUT_ENGINE == "vanilla":
+    from tunix.generate import sampler as sampler_lib
+
+    sampler = sampler_lib.Sampler(
+        model,
+        tokenizer,
+        sampler_lib.CacheConfig(
+            cache_size=16384,
+            num_layers=model_config.num_layers,
+            num_kv_heads=model_config.num_kv_heads,
+            head_dim=model_config.head_dim,
+        ),
+    )
+
+  elif ROLLOUT_ENGINE == "vllm":
+    from tunix.generate import mappings
+    from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=None,
+        model=model,
+        backend="vllm_jax",
+    )
+    vllm_config = VllmConfig(
+        mesh=mesh,
+        hbm_utilization=VLLM_HBM_UTILIZATION,
+        init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
+        tpu_backend_type="jax",
+        mapping_config=mapping_config,
+        engine_kwargs={"model": MODEL_PATH, "max_model_len": 16384},
+    )
+    sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+
+  elif ROLLOUT_ENGINE == "sglang_jax":
+    from tunix.generate import mappings
+    from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
+
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=None,
+        model=model,
+        backend="sglang_jax",
+    )
+    sampler = SglangJaxSampler(
+        tokenizer=tokenizer,
+        config=SglangJaxConfig(
+            mesh=mesh,
+            mapping_config=mapping_config,
+            model_version=MODEL_VERSION,
+            context_length=16384 + MAX_GENERATION_STEPS + 100,
+            mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
+            init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
+            disable_radix_cache=True,
+            enable_deterministic_sampling=False,
+            precompile_token_paddings=[8192, 16384],
+            precompile_bs_paddings=[1],
+            max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
+        ),
+    )
+
+  else:
+    raise ValueError(
+        f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
+        f"Choose from: 'vanilla', 'vllm', 'sglang_jax'"
+    )
 
   sampler_lock = threading.Lock()
 
@@ -540,6 +622,7 @@ def run_debug_eval():
     print(f"  backend       : Gemini API ({API_MODEL})")
   else:
     print(f"  model_version : {MODEL_VERSION}")
+    print(f"  engine        : {ROLLOUT_ENGINE}")
   print(f"  max_steps     : {MAX_STEPS}")
   print()
   print("  Per-step summary:")
