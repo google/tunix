@@ -240,6 +240,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
     completion_mask = np.not_equal(padded_completion_ids, pad_value)
+    clipped_completion_count = 0
+    for padded_completion in padded_completion_ids:
+      if (len(padded_completion) >= rollout_config.max_tokens_to_generate  and padded_completion[-1] != eos_value):
+        clipped_completion_count += 1
 
     # Convert completion_ids and completion_mask to jax arrays
     jax_completion_ids = jnp.array(padded_completion_ids)
@@ -308,6 +312,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         {
             "advantages/mean": (np.mean(advantages), np.mean),
             "advantages/std": (np.std(advantages), np.std),
+            "advantages/max": (np.max(advantages), np.max),
+            "advantages/min": (np.min(advantages), np.min),
         },
         mode=mode,
     )
@@ -327,6 +333,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             "completions/min_length": (
                 np.min(agg_completion_mask),
                 np.min,
+            ),
+            "generation/completions/clip_ratio": (
+                clipped_completion_count / len(agg_completion_mask),
+                np.mean,
             ),
         },
         mode=mode,
@@ -561,7 +571,7 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   Returns:
     Group relative advantages.
   """
-  rewards = jnp.astype(rewards, jnp.float32)
+  rewards = rewards.astype(np.float32)
   mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
   std_grouped_rewards = rewards.reshape(-1, num_generations).std(
       axis=-1, ddof=1
@@ -569,7 +579,9 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
 
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
+  advantage = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
+  print("advantage", advantage)
+  return advantage
 
 
 @function_registry.register_advantage_estimator("rloo")

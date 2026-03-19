@@ -346,11 +346,15 @@ class PeftTrainer:
     out, grads = grad_fn(model, **inputs)
     grad_norm = optax.global_norm(grads)
     optimizer.update(model, grads)
+    # Extract the value from the state by the name given in snapshot()
+    # clipped_norm = optax.tree.get(optimizer.opt_state, "clipped_grad_norm")
     if self._has_aux:
       loss, aux = out
       return loss, aux, grad_norm
+      # , clipped_norm
     else:
       return out, None, grad_norm
+      # , clipped_norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -735,7 +739,9 @@ class PeftTrainer:
             loss=train_loss,
             step=self._train_steps,
             step_time_delta=step_time_delta,
-            additional_metrics={"grad_norm": (grad_norm, np.mean)},
+            additional_metrics={
+                "grad_norm": (grad_norm, np.mean),
+            }
         )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)

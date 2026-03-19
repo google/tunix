@@ -140,8 +140,8 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -230,7 +230,7 @@ GENERATION_CONFIGS = {
 }
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "vanilla"
+    "ROLLOUT_ENGINE", "vllm"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
 
@@ -333,11 +333,11 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_jax_exp22/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/qwen2p5_1p5b_it/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
-MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it")
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
@@ -487,12 +487,6 @@ show_hbm_usage("after loading qwen2_actor")
 
 
 # %%
-rollout_config = config.replace(remat_config=model_lib.RematConfig.NONE)
-qwen2_rollout = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, rollout_config, rollout_mesh, dtype=jnp.bfloat16
-)
-
-# %%
 ModelAgent = model_agent.ModelAgent
 TaskEnvironment = task_environment.TaskEnvironment
 TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
@@ -529,7 +523,7 @@ if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
       # Capture the norm of the updates entering this point in the chain
-      optax.snapshot("clipped_grad_norm", optax.global_norm),
+      # optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
@@ -544,14 +538,13 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
+    "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
     "data_type": jnp.bfloat16,
 }
 
 sglang_jax_rollout_dict = {
     # sglang-jax specific configs
-    "rollout_sglang_jax_model_version": (
-        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ),
+    "rollout_sglang_jax_model_version": MODEL_VERSION,
     "rollout_sglang_jax_mem_fraction_static": 0.8,
     "rollout_sglang_jax_init_with_random_weights": True,
     "rollout_sglang_jax_disable_radix_cache": True,
@@ -561,11 +554,9 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
-MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
-    "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "rollout_vllm_model_version": MODEL_VERSION,
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
@@ -654,7 +645,6 @@ perf_metrics_config = PerfMetricsConfig(
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen2_actor,
     reference=qwen2_ref,
-    rollout=qwen2_rollout,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
     perf_config=perf_metrics_config,
