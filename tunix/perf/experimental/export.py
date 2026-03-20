@@ -16,6 +16,9 @@
 
 from __future__ import annotations
 from collections.abc import Mapping
+import concurrent.futures
+import types
+from typing import Self
 from absl import logging
 from tunix.perf import metrics
 from tunix.perf.experimental import trace_writer as trace_writer_lib
@@ -33,8 +36,6 @@ def log_metric_export_fn(timelines: Mapping[str, Timeline]) -> MetricsT:
   return {}
 
 
-# TODO(noghabi): Calculate aggregated metrics from the timelines and export them
-# to a logger (TensorBoard).
 class PerfMetricsExport:
   """Perf metrics export class.
 
@@ -53,12 +54,24 @@ class PerfMetricsExport:
         empty string) and enable_trace_writer is True, a default directory is
         used.
     """
+    self._trace_writer_enabled = enable_trace_writer
     self._writer: trace_writer_lib.TraceWriter
     if enable_trace_writer:
       resolved_trace_dir = trace_dir or DEFAULT_TRACE_DIR
       self._writer = trace_writer_lib.PerfettoTraceWriter(resolved_trace_dir)
+      # We need to keep max_workers = 1 to serialize writes
+      self._executor = concurrent.futures.ThreadPoolExecutor(
+          max_workers=1, thread_name_prefix="PerfExport"
+      )
     else:
       self._writer = trace_writer_lib.NoopTraceWriter()
+      self._executor = None
+
+  def _safe_write(self, timelines: Mapping[str, Timeline]) -> None:
+    try:
+      self._writer.write_timelines(timelines)
+    except Exception:  # pylint: disable=broad-except
+      logging.exception("Background trace export failed.")
 
   def export_metrics(
       self,
@@ -73,5 +86,35 @@ class PerfMetricsExport:
       An empty dictionary, as this exporter does not produce any aggregated
       metrics.
     """
-    self._writer.write_timelines(timelines)
+    # Calculate aggregated metrics
+    # TODO(noghabi): Calculate aggregated metrics from the timelines and export
+    # them to a logger (TensorBoard).
+
+    # Write timelines to the trace writer executor.
+    if self._trace_writer_enabled:
+      if self._executor is not None:
+        self._executor.submit(self._safe_write, timelines)
+      else:
+        logging.warning(
+            "PerfMetricsExport background worker has been shut down. Cannot"
+            " write metrics."
+        )
     return {}
+
+  def shutdown(self, wait: bool = True) -> None:
+    """Shuts down the background executor safely."""
+    if self._executor is not None:
+      self._executor.shutdown(wait=wait)
+      self._executor = None
+      logging.info("PerfMetricsExport background worker shut down.")
+
+  def __enter__(self) -> Self:
+    return self
+
+  def __exit__(
+      self,
+      exc_type: type[BaseException] | None,
+      exc_value: BaseException | None,
+      traceback: types.TracebackType | None,
+  ) -> None:
+    self.shutdown(wait=True)
