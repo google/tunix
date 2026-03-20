@@ -94,7 +94,7 @@ INSTANCE_ID = os.getenv("INSTANCE_ID", "")
 TASK_INDICES = os.getenv("TASK_INDICES", "")  # e.g. "0,1,5,10"
 NUM_TASKS = int(os.getenv("NUM_TASKS", "0"))  # run first N tasks
 
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/scratch/debug_eval")
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", os.path.join(os.getcwd(), "debug_eval_output"))
 
 # Rollout engine: "vanilla", "vllm", or "sglang_jax"
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
