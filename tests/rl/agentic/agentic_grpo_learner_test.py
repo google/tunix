@@ -341,6 +341,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -495,6 +497,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           ),
           rollout_config=base_rollout.RolloutConfig(
               max_prompt_length=32,
+              max_tokens_to_generate=10,
+              return_logprobs=True,
               kv_cache_size=256,
               temperature=0.5,
           ),
@@ -595,6 +599,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           ),
           rollout_config=base_rollout.RolloutConfig(
               max_prompt_length=32,
+              max_tokens_to_generate=10,
+              return_logprobs=True,
               kv_cache_size=256,
               temperature=0.5,
           ),
@@ -700,6 +706,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           training_config=training_config,
           rollout_config=base_rollout.RolloutConfig(
               max_prompt_length=32,
+              max_tokens_to_generate=10,
+              return_logprobs=True,
               kv_cache_size=256,
               temperature=0.5,
           ),
@@ -779,6 +787,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=256,
         ),
     )
@@ -852,6 +862,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1007,6 +1019,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1073,7 +1087,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
         ),
-        rollout_config=base_rollout.RolloutConfig(),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=512,
+            return_logprobs=True,
+        ),
     )
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
@@ -1082,7 +1099,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = agentic_grpo_learner.GRPOConfig()
+    grpo_config = agentic_grpo_learner.GRPOConfig(max_response_length=512)
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
@@ -1136,6 +1153,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1230,6 +1249,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1349,8 +1370,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             gradient_accumulation_steps=None,
         ),
         rollout_config=base_rollout.RolloutConfig(
-            max_tokens_to_generate=10,
+            max_tokens_to_generate=128,
             max_prompt_length=32,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
