@@ -120,7 +120,6 @@ parser.add_argument("--max_concurrency", type=int, default=1)
 parser.add_argument("--context_ratio", type=int, default=2)
 
 
-
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
 parser.add_argument("--model_dtype", type=str, default="bfloat16",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
@@ -323,7 +322,6 @@ VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 VLLM_UTILIZATION = args.vllm_utilization
 
 
-
 # 2. Max number of sequences to be processed in parallel by vllm.
 VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS  # 1 * 2 = 2
 # Max number of tokens to be processed in parallel by vllm.
@@ -477,6 +475,8 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
+    "return_logprobs": True,
+    "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
 sglang_jax_rollout_dict = {

@@ -160,8 +160,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
-    self._patch_rollout_config()
-
+    self._validate_rollout_config()
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
     )
@@ -238,13 +237,27 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.loop = loop_queue.get()
     self._global_step_start_time = time.time()
 
-  def _patch_rollout_config(self):
+  def _validate_rollout_config(self):
+    """Validates that the rollout config is properly aligned with the algo config."""
     rollout_config = self.rl_cluster.cluster_config.rollout_config
     if not isinstance(rollout_config, dict):
-      rollout_config = {"train": rollout_config}
-    for config in rollout_config.values():
-      config.max_tokens_to_generate = self.algo_config.max_response_length
-      config.return_logprobs = True
+      configs_to_check = {"train": rollout_config}
+    else:
+      configs_to_check = rollout_config
+
+    for mode, config in configs_to_check.items():
+      if config.max_tokens_to_generate != self.algo_config.max_response_length:
+        raise ValueError(
+            f"RolloutConfig ({mode}) max_tokens_to_generate "
+            f"({config.max_tokens_to_generate}) must match AgenticRLConfig "
+            f"max_response_length ({self.algo_config.max_response_length}). "
+            "Please align these configurations before initializing RLCluster."
+        )
+      if not config.return_logprobs:
+        raise ValueError(
+            f"RolloutConfig ({mode}) must have return_logprobs=True for "
+            "AgenticRLLearner. Please set this before initializing RLCluster."
+        )
 
   def _compute_rewards(
       self,

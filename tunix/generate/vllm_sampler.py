@@ -505,5 +505,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0],
+        logprobs=out_logprobs[0] if len(out_logprobs[0]) else None,
     )
