@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import time
 from typing import Any
 
@@ -64,6 +64,48 @@ def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
   if parts:
     return f"{name} ({', '.join(parts)})"
   return name
+
+
+def _assign_lanes(
+    spans: Iterable[timeline.Span],
+) -> tuple[Mapping[int, int], int]:
+  """Assigns lanes to spans to handle overlaps.
+
+  Perfetto requires spans on the same track to be strictly nested (no arbitrary
+  overlaps). This function assigns a lane index to each span such that spans
+  in the same lane do not overlap.
+
+  Args:
+    spans: An iterable of spans to assign to lanes.
+
+  Returns:
+    A tuple (`lane_by_span_id`, `num_lanes`), where:
+      `lane_by_span_id`: A dictionary mapping span IDs to their assigned lane
+        index. If all spans fit in a single lane, the lane index is -1.
+      `num_lanes`: The total number of lanes required.
+  """
+  sorted_spans = sorted(spans, key=lambda s: (s.begin, s.id))
+  lanes_end_times = []
+  lane_by_span_id = {}
+
+  for s in sorted_spans:
+    placed = False
+    for lane_idx, lane_end in enumerate(lanes_end_times):
+      if lane_end <= s.begin:
+        lanes_end_times[lane_idx] = s.end
+        lane_by_span_id[s.id] = lane_idx
+        placed = True
+        break
+    if not placed:
+      lane_by_span_id[s.id] = len(lanes_end_times)
+      lanes_end_times.append(s.end)
+
+  if len(lanes_end_times) <= 1:
+    # Just use the main track, no need for child tracks
+    for s in sorted_spans:
+      lane_by_span_id[s.id] = -1
+
+  return lane_by_span_id, len(lanes_end_times)
 
 
 class TraceWriter(abc.ABC):
@@ -159,42 +201,22 @@ class PerfettoTraceWriter(TraceWriter):
       packet.track_descriptor.uuid = tl_uuid
       packet.track_descriptor.name = tl_id
 
-      # Determine lanes for spans to handle overlaps. Perfetto requires spans
-      # on the same track to be strictly nested (no arbitrary overlaps).
       # TODO: noghabi - Instead of agnostically splitting into lanes, define
       # proper groupings for spans, e.g., a better way for combining rollouts
       # and overlaps of peft_train and reference_inference.
-      sorted_spans = sorted(tl.spans.values(), key=lambda s: (s.begin, s.id))
-      lanes_end_times = []
-      span_to_lane = {}
+      lane_by_span_id, num_lanes = _assign_lanes(tl.spans.values())
 
-      for s in sorted_spans:
-        placed = False
-        for lane_idx, lane_end in enumerate(lanes_end_times):
-          if lane_end <= s.begin:
-            lanes_end_times[lane_idx] = s.end
-            span_to_lane[s.id] = lane_idx
-            placed = True
-            break
-        if not placed:
-          span_to_lane[s.id] = len(lanes_end_times)
-          lanes_end_times.append(s.end)
-
-      if len(lanes_end_times) <= 1:
-        # Just use the main track, no need for child tracks
-        for s in tl.spans.values():
-          span_to_lane[s.id] = -1
-      else:
+      if num_lanes > 1:
         # Emit track descriptors for each lane so they group under the timeline
-        for lane_idx in range(len(lanes_end_times)):
+        for lane_idx in range(num_lanes):
           lane_uuid = tl_uuid + lane_idx + 1
           packet = builder.add_packet()
           packet.track_descriptor.uuid = lane_uuid
           packet.track_descriptor.parent_uuid = tl_uuid
-          packet.track_descriptor.name = f"Lane {lane_idx}"
+          packet.track_descriptor.name = ""  # empty name for lanes
 
       for s in tl.spans.values():
-        lane_idx = span_to_lane[s.id]
+        lane_idx = lane_by_span_id[s.id]
         lane_uuid = tl_uuid if lane_idx == -1 else (tl_uuid + lane_idx + 1)
 
         # Timestamp in nanoseconds, relative to timeline creation (born).
