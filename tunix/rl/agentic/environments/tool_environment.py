@@ -73,10 +73,9 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
     if reward_fn is None:
       logging.log_first_n(
           logging.WARNING,
-          "No reward_fn provided, defaulting to dummy_reward().",
+          "No reward_fn provided, skipping trajectory reward computation.",
           1,
       )
-      reward_fn = reward.dummy_reward
 
     # Let BaseTaskEnv handle task, reward_fn, step_count, and max_steps.
     super().__init__(
