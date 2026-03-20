@@ -61,6 +61,12 @@ prod = [
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
 ]
+test = [
+  "chex",
+  "pytest",
+  "pytest-xdist",
+]
+
 
 [project.urls]
 Source = "https://github.com/google/tunix"

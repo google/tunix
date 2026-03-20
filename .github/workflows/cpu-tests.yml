@@ -40,8 +40,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           WHEEL=$(ls -1 google_tunix-*-py3-none-any.whl | head -n1)
-          python -m pip install "${WHEEL}[prod]"
-          python -m pip install pytest
+          python -m pip install "${WHEEL}[prod,test]"
 
       - name: Verify Tunix imports from installed package
         run: |
