@@ -16,14 +16,18 @@
 
 import dataclasses
 import enum
+from functools import partial
 from typing import Tuple
-
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
@@ -101,6 +105,7 @@ class ModelConfig:
   remat_config: RematConfig = RematConfig.NONE
   dtype: jnp.dtype = jnp.float32
   param_dtype: jnp.dtype = jnp.float32
+  use_flash_attention: bool = False
 
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
@@ -503,6 +508,124 @@ class Attention(nnx.Module):
 
     return new_cache, outputs
 
+  def splash_block(
+      self,
+      x: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array | None,
+      sin: jaxtyping.Array,
+      cos: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    """Attention block."""
+    seq_len = x.shape[1]
+
+    query_proj = self.q_proj(x)
+    b, t, n, h = query_proj.shape
+    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias.astype(
+        self.config.dtype
+    )
+    query_proj = jnp.reshape(query_proj, (b, t, n, h))
+    key_proj = self.k_proj(x)
+    _, s, k, h = key_proj.shape
+    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias.astype(
+        self.config.dtype
+    )
+    key_proj = jnp.reshape(key_proj, (b, s, k, h))
+    value_proj = self.v_proj(x)
+    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias.astype(
+        self.config.dtype
+    )
+    value_proj = jnp.reshape(value_proj, (b, s, k, h))
+
+    query_proj = shard(query_proj, self.shd_config.act_btnh)
+    key_proj = shard(key_proj, self.shd_config.act_btnh)
+    value_proj = shard(value_proj, self.shd_config.act_btnh)
+
+    query_proj = apply_rotary_embedding(
+        query_proj,
+        sin,
+        cos,
+    )
+    key_proj = apply_rotary_embedding(
+        key_proj,
+        sin,
+        cos,
+    )
+
+    if cache is not None:
+      end_index = cache['end_index'][0]
+      slice_indices = (0, end_index % cache['v'].shape[2], 0, 0)
+      value_proj = jax.lax.dynamic_update_slice(
+          cache['v'],
+          value_proj,
+          slice_indices,
+      )
+      key_proj = jax.lax.dynamic_update_slice(
+          cache['k'], key_proj, slice_indices
+      )
+
+    query_proj = query_proj.transpose(0, 2, 1, 3)
+    key_proj = key_proj.transpose(0, 2, 1, 3)
+    value_proj = value_proj.transpose(0, 2, 1, 3)
+
+    query_proj = query_proj * self.scale
+
+    b, qh, t, d = query_proj.shape
+    _, kh, s, _ = key_proj.shape
+
+    mesh = pxla.thread_resources.env.physical_mesh
+    causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+    multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
+
+    # TODO: config block size
+    block_sizes = splash.BlockSizes(
+        block_q=1024,
+        block_kv=1024,
+        block_q_dkv=1024,
+        block_kv_dkv=1024,
+        block_kv_dkv_compute=1024,
+        block_q_dq=1024,
+        block_kv_dq=1024,
+    )
+
+    # For sharding by batch, head_shards and q_seq_shards remain 1
+    attn_kernel = splash.make_splash_mha(
+        multi_head_mask, block_sizes=block_sizes, head_shards=1, q_seq_shards=1
+    )
+
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(
+            P('fsdp', None, None, None),
+            P('fsdp', None, None, None),
+            P('fsdp', None, None, None),
+        ),
+        out_specs=P('fsdp', None, None, None),
+        check_rep=False,
+    )
+    def sharded_attn(q_block, k_block, v_block):
+      # Inside shard_map, we act on a local shard (batch_size // num_devices)
+      # The kernel expects (heads, seq, dim), so we use vmap for the local batch
+      return jax.vmap(attn_kernel)(q_block, k_block, v_block)
+
+    qkv = sharded_attn(query_proj, key_proj, value_proj)
+    qkv = qkv.transpose(0, 2, 1, 3)
+    outputs = self.o_proj(qkv)
+
+    outputs = shard(outputs, self.shd_config.act_btd)
+
+    if cache is not None:
+      new_cache = {
+          'v': value_proj,
+          'k': key_proj,
+          'end_index': cache['end_index'] + seq_len,
+      }
+    else:
+      new_cache = None
+
+    return new_cache, outputs
+
   @jax.named_scope('attention')
   def __call__(
       self,
@@ -512,12 +635,15 @@ class Attention(nnx.Module):
       sin: jaxtyping.Array,
       cos: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    block_fn = (
+        self.splash_block if self.config.use_flash_attention else self.block
+    )
     if self.config.remat_config == RematConfig.BLOCK:
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
-      return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
+      return nnx.remat(block_fn.__func__)(self, x, cache, attn_mask, sin, cos)
     else:
-      return self.block(x, cache, attn_mask, sin, cos)
+      return block_fn(x, cache, attn_mask, sin, cos)
 
   @property
   def head_dim(self):
