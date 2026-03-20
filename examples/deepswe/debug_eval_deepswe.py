@@ -1,48 +1,53 @@
 #!/usr/bin/env python
-"""Debug single-instance DeepSWE evaluation.
+"""DeepSWE evaluation with trajectory logging.
 
-Runs ONE SWE-bench instance without the RolloutOrchestrator abstraction,
-printing detailed logs at every stage so you can diagnose why reward=0.
-
-Diagnostics printed:
-  - Dataset entry metadata (instance_id, FAIL_TO_PASS, PASS_TO_PASS, etc.)
-  - Each agent step: model response, parsed action, env observation
-  - Reward computation: raw test output from /run_tests.sh, parsed results
-  - Full conversation history dumped to JSON
+Runs SWE-bench instances and writes clean trajectory logs (action, observation,
+reward per step) to per-instance files under OUTPUT_DIR. All other debug noise
+(JAX, vLLM, k8s) stays on stderr and is NOT written to trajectory files.
 
 Usage:
-  # Default: first instance (local model)
-  TASK_INDEX=0 python debug_eval_deepswe.py
-
-  # Specific instance by ID
-  INSTANCE_ID=django__django-12345 python debug_eval_deepswe.py
-
-  # Local model:
+  # Local model (single instance):
   ENABLE_GUARD=false \
   MODEL_VERSION="Qwen/Qwen3-1.7B" \
   TASK_INDEX=0 \
   MAX_STEPS=10 \
   MAX_GENERATION_STEPS=256 \
   TIMEOUT=600 \
-  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py
 
-  # Use vLLM sampler:
+  # vLLM sampler (single instance):
   ENABLE_GUARD=false \
   ROLLOUT_ENGINE=vllm \
   MODEL_VERSION="Qwen/Qwen3-4B-Instruct-2507" \
   TASK_INDEX=0 \
   MAX_STEPS=30 \
   TIMEOUT=600 \
-  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py
 
-  # Use SGLang-JAX sampler:
+  # SGLang-JAX sampler (single instance):
   ENABLE_GUARD=false \
   ROLLOUT_ENGINE=sglang_jax \
   MODEL_VERSION="Qwen/Qwen3-4B-Instruct-2507" \
   TASK_INDEX=0 \
   MAX_STEPS=30 \
   TIMEOUT=600 \
-  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py
+
+  # Multiple instances by indices:
+  ENABLE_GUARD=false \
+  ROLLOUT_ENGINE=vllm \
+  MODEL_VERSION="Qwen/Qwen3-4B-Instruct-2507" \
+  TASK_INDICES="0,1,5,10" \
+  python3 -u examples/deepswe/debug_eval_deepswe.py
+
+  # Multiple instances by count (first N):
+  ENABLE_GUARD=false \
+  NUM_TASKS=5 \
+  python3 -u examples/deepswe/debug_eval_deepswe.py
+
+  # By instance ID:
+  INSTANCE_ID=django__django-12345 \
+  python3 -u examples/deepswe/debug_eval_deepswe.py
 
   # Gemini API mode:
   USE_API=gemini \
@@ -51,7 +56,12 @@ Usage:
   TASK_INDEX=0 \
   MAX_STEPS=10 \
   TIMEOUT=600 \
-  python3 -u examples/deepswe/debug_eval_deepswe.py 2>&1 | tee debug_eval_output.log
+  python3 -u examples/deepswe/debug_eval_deepswe.py
+
+Outputs:
+  - Trajectory files: OUTPUT_DIR/<instance_id>.trajectory.log
+  - JSON records:     OUTPUT_DIR/<instance_id>.json
+  - Summary:          OUTPUT_DIR/summary.json
 """
 
 import json
@@ -78,9 +88,11 @@ MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
 MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "512"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 
-# Which task to debug: by index or by instance_id
+# Task selection (priority: INSTANCE_ID > TASK_INDICES > NUM_TASKS > TASK_INDEX)
 TASK_INDEX = int(os.getenv("TASK_INDEX", "0"))
-INSTANCE_ID = os.getenv("INSTANCE_ID", "")  # overrides TASK_INDEX if set
+INSTANCE_ID = os.getenv("INSTANCE_ID", "")
+TASK_INDICES = os.getenv("TASK_INDICES", "")  # e.g. "0,1,5,10"
+NUM_TASKS = int(os.getenv("NUM_TASKS", "0"))  # run first N tasks
 
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/scratch/debug_eval")
 
@@ -106,19 +118,20 @@ API_KEY = os.getenv("API_KEY", "")
 API_MODEL = os.getenv("API_MODEL", "gemini-2.5-flash")
 
 # ========================== Logging ==========================
+# Root logger at WARNING to suppress JAX/vLLM/k8s noise.
+# Our logger at INFO for progress messages on stdout.
 
 for handler in logging.root.handlers[:]:
   logging.root.removeHandler(handler)
 
 logging.basicConfig(
     stream=sys.stdout,
-    level=logging.DEBUG,
+    level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger(__name__)
-
-SEP = "=" * 72
+logger = logging.getLogger("deepswe_eval")
+logger.setLevel(logging.INFO)
 
 # ========================== JAX / Pathways ==========================
 
@@ -141,41 +154,28 @@ dataset = load_dataset(
     num_proc=32,
 )
 
-entries = [e for e in dataset if "docker_image" in e]
-logger.info("Dataset has %d instances with docker_image.", len(entries))
+all_entries = [e for e in dataset if "docker_image" in e]
+logger.info("Dataset has %d instances with docker_image.", len(all_entries))
 
-# Select target entry
-entry = None
-if INSTANCE_ID:
-  for e in entries:
-    if e.get("instance_id") == INSTANCE_ID:
-      entry = e
-      break
-  if entry is None:
-    logger.error("Instance ID %s not found in dataset.", INSTANCE_ID)
+
+def select_entries():
+  """Select entries based on env vars."""
+  if INSTANCE_ID:
+    for e in all_entries:
+      if e.get("instance_id") == INSTANCE_ID:
+        return [e]
+    logger.error("Instance ID %s not found.", INSTANCE_ID)
     sys.exit(1)
-  logger.info("Selected instance by ID: %s", INSTANCE_ID)
-else:
-  if TASK_INDEX >= len(entries):
-    logger.error("TASK_INDEX=%d but only %d entries.", TASK_INDEX, len(entries))
-    sys.exit(1)
-  entry = entries[TASK_INDEX]
-  logger.info("Selected instance by index: %d", TASK_INDEX)
+  if TASK_INDICES:
+    indices = [int(i.strip()) for i in TASK_INDICES.split(",")]
+    return [all_entries[i] for i in indices if i < len(all_entries)]
+  if NUM_TASKS > 0:
+    return all_entries[:NUM_TASKS]
+  return [all_entries[TASK_INDEX]]
 
-# ========================== Print Entry Metadata ==========================
 
-print(f"\n{SEP}")
-print("INSTANCE METADATA")
-print(SEP)
-print(f"  instance_id   : {entry.get('instance_id', 'N/A')}")
-print(f"  repo          : {entry.get('repo', 'N/A')}")
-print(f"  docker_image  : {entry.get('docker_image', 'N/A')}")
-print(f"  FAIL_TO_PASS  : {len(entry.get('FAIL_TO_PASS', []))} tests")
-print(f"  PASS_TO_PASS  : {len(entry.get('PASS_TO_PASS', []))} tests")
-problem_stmt = entry.get("problem_statement", "")
-print(f"  problem_statement (first 200 chars):")
-print(f"    {problem_stmt[:200]}")
-print(SEP)
+selected_entries = select_entries()
+logger.info("Selected %d instance(s) for evaluation.", len(selected_entries))
 
 # ========================== Kubernetes ==========================
 
@@ -357,310 +357,178 @@ from action_guard import ActionGuard, GuardConfig
 from swe_agent import SWEAgent, parse_xml_response
 from swe_env import SWEEnv
 
-agent = SWEAgent()
-env = SWEEnv(entry=entry, max_steps=MAX_STEPS, verbose=True)
+
+# ========================== Trajectory Writer ==========================
+
+def _write_traj(f, text):
+  """Write a line to the trajectory file and flush immediately."""
+  f.write(text + "\n")
+  f.flush()
 
 
-# ========================== Manual Rollout ==========================
+# ========================== Single Instance Eval ==========================
 
-def run_debug_eval():
-  """Drive the agent-env loop manually with verbose logging."""
+def run_single_eval(entry, traj_path):
+  """Run one instance. Trajectory content -> traj_path. Returns reward."""
+  instance_id = entry.get("instance_id", "unknown")
+
+  agent = SWEAgent()
+  env = SWEEnv(entry=entry, max_steps=MAX_STEPS, verbose=False)
+
   all_steps = []
 
-  # --- Reset ---
-  print(f"\n{SEP}")
-  print("RESETTING ENVIRONMENT")
-  print(SEP)
-  t0 = time.time()
-  logger.info(
-      "Calling env.reset() for instance_id=%s backend=%s",
-      entry.get("instance_id", "N/A"),
-      env.backend,
-  )
-  reset_done = threading.Event()
+  with open(traj_path, "w") as tf:
+    _write_traj(tf, f"# Instance: {instance_id}")
+    _write_traj(tf, f"# Repo: {entry.get('repo', 'N/A')}")
+    _write_traj(tf, f"# Problem: {entry.get('problem_statement', '')[:200]}")
+    _write_traj(tf, "")
 
-  def _reset_watchdog():
-    while not reset_done.wait(30):
-      logger.warning(
-          "Still waiting for env.reset() ... %.0fs elapsed", time.time() - t0
-      )
-
-  threading.Thread(target=_reset_watchdog, daemon=True).start()
-  obs, info = env.reset()
-  reset_done.set()
-  reset_time = time.time() - t0
-  logger.info("Environment reset in %.1fs", reset_time)
-  logger.info("Initial observation length: %d chars", len(str(obs)))
-  print(f"  Initial observation (first 120 chars):\n    {str(obs)[:120]}")
-
-  agent.reset()
-  agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
-
-  guard = ActionGuard(GuardConfig(enabled=ENABLE_GUARD))
-
-  start_time = time.time()
-
-  for step_idx in range(MAX_STEPS):
-    elapsed = time.time() - start_time
-    if elapsed > TIMEOUT:
-      logger.warning("TIMEOUT after %.0fs at step %d", elapsed, step_idx)
-      break
-
-    print(f"\n{SEP}")
-    print(f"STEP {step_idx + 1}/{MAX_STEPS}  (elapsed: {elapsed:.0f}s)")
-    print(SEP)
-
-    # --- Model call ---
-    print("\n--- Model Input (last message) ---")
-    last_msg = agent.chat_completions[-1] if agent.chat_completions else {}
-    print(f"  role: {last_msg.get('role', 'N/A')}")
-    content = last_msg.get("content", "")
-    print(f"  content length: {len(content)} chars")
-    print(f"  content (last 300 chars): ...{content[-300:]}")
-
+    # --- Reset ---
     t0 = time.time()
-    if USE_API:
-      print("\n--- Calling Gemini API ---")
-      contents, system_instruction = _chat_to_gemini(agent.chat_completions)
-      config = {}
-      if system_instruction:
-        config["system_instruction"] = system_instruction
-      response = api_client.models.generate_content(
-          model=API_MODEL,
-          contents=contents,
-          config=config,
-      )
-      model_response = response.text
-      model_time = time.time() - t0
-      usage = getattr(response, "usage_metadata", None)
-      prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
-      response_tokens = getattr(usage, "candidates_token_count", 0) or 0
-      logger.info(
-          "API responded in %.1fs (%d prompt tokens, %d response tokens)",
-          model_time, prompt_tokens, response_tokens,
-      )
-    else:
-      print("\n--- Calling model ---")
-      prompt = chat_parser.parse(agent.chat_completions)
-      prompt_tokens = len(tokenizer.encode(prompt))
-      logger.info("Prompt tokens: %d", prompt_tokens)
+    obs, info = env.reset()
+    _write_traj(tf, f"[Reset] ({time.time() - t0:.1f}s)")
+    _write_traj(tf, f"Observation: {str(obs)}")
+    _write_traj(tf, "")
 
-      with sampler_lock:
-        out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
-      model_response = out.text[0]
-      model_time = time.time() - t0
-      response_tokens = len(tokenizer.encode(model_response))
-      logger.info("Model responded in %.1fs (%d tokens)", model_time, response_tokens)
+    agent.reset()
+    agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
+    guard = ActionGuard(GuardConfig(enabled=ENABLE_GUARD))
 
-    # --- Parse response ---
-    print("\n--- Model Response ---")
-    print(f"  length: {len(model_response)} chars, {response_tokens} tokens")
-    # Show full response (truncated if huge)
-    if len(model_response) > 2000:
-      print(f"  [first 1000 chars]:\n{model_response[:1000]}")
-      print(f"  ...[truncated {len(model_response) - 2000} chars]...")
-      print(f"  [last 1000 chars]:\n{model_response[-1000:]}")
-    else:
-      print(model_response)
+    start_time = time.time()
 
-    print("\n--- Parsed Action ---")
-    try:
-      thought, action_obj = parse_xml_response(model_response)
-      action_str = action_obj.to_xml_string()
-      print(f"  function_name : {action_obj.function_name}")
-      print(f"  parameters    : {json.dumps(action_obj.parameters, indent=2, default=str)[:500]}")
-      print(f"  thought (first 200 chars): {thought[:200]}")
-    except Exception as e:
-      logger.error("Failed to parse model response: %s", e)
-      traceback.print_exc()
-      action_str = ""
-      thought = model_response
+    for step_idx in range(MAX_STEPS):
+      elapsed = time.time() - start_time
+      if elapsed > TIMEOUT:
+        _write_traj(tf, f"\n[TIMEOUT after {elapsed:.0f}s at step {step_idx}]")
+        logger.warning("[%s] TIMEOUT at step %d", instance_id, step_idx)
+        break
 
-    # --- Update agent with model response ---
-    action_result = agent.update_from_model(model_response)
-    logger.info("Agent action: %s", action_result.action[:200] if action_result.action else "None")
-
-    # --- Guard evaluation ---
-    verdict = guard.evaluate(action_result.action)
-    guard_blocked = verdict.blocked
-
-    if guard_blocked:
-      print("\n--- GUARD BLOCKED ---")
-      print(f"  reason: {verdict.reason}")
-      print(f"  message: {verdict.message[:300]}")
-      logger.warning("GUARD BLOCKED: %s", verdict.reason)
-      obs, reward, done, info = verdict.message, 0.0, False, {
-          "guard_blocked": True, "guard_reason": verdict.reason,
-      }
-      step_time = 0.0
-    else:
-      # --- Step environment ---
-      print("\n--- Stepping Environment ---")
+      # --- Model call ---
       t0 = time.time()
+      prompt_tokens = 0
+      response_tokens = 0
+      if USE_API:
+        contents, system_instruction = _chat_to_gemini(agent.chat_completions)
+        config = {}
+        if system_instruction:
+          config["system_instruction"] = system_instruction
+        response = api_client.models.generate_content(
+            model=API_MODEL,
+            contents=contents,
+            config=config,
+        )
+        model_response = response.text
+        model_time = time.time() - t0
+        usage = getattr(response, "usage_metadata", None)
+        prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+        response_tokens = getattr(usage, "candidates_token_count", 0) or 0
+      else:
+        prompt = chat_parser.parse(agent.chat_completions)
+        prompt_tokens = len(tokenizer.encode(prompt))
+        with sampler_lock:
+          out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
+        model_response = out.text[0]
+        model_time = time.time() - t0
+        response_tokens = len(tokenizer.encode(model_response))
+
+      # --- Parse action ---
+      action_fn = ""
+      action_params_str = ""
+      thought = ""
       try:
-        obs, reward, done, info = env.step(action_result.action)
-        step_time = time.time() - t0
-        logger.info("Env step in %.1fs, reward=%.1f, done=%s", step_time, reward, done)
-      except Exception as e:
-        logger.error("Env step failed: %s", e)
-        traceback.print_exc()
-        obs, reward, done, info = str(e), 0.0, True, {}
-        step_time = time.time() - t0
-      guard.record_outcome(action_result.action, str(obs))
+        thought, action_obj = parse_xml_response(model_response)
+        action_fn = action_obj.function_name
+        action_params_str = json.dumps(action_obj.parameters, default=str)
+      except Exception:
+        thought = model_response[:300]
 
-    print(f"\n--- Env Observation ---")
-    obs_str = str(obs)
-    print(f"  length: {len(obs_str)} chars")
-    if len(obs_str) > 1000:
-      print(f"  [first 500 chars]:\n{obs_str[:500]}")
-      print(f"  ...[truncated]...")
-      print(f"  [last 500 chars]:\n{obs_str[-500:]}")
-    else:
-      print(obs_str)
+      # --- Update agent & guard ---
+      action_result = agent.update_from_model(model_response)
+      verdict = guard.evaluate(action_result.action)
+      guard_blocked = verdict.blocked
 
-    print(f"  step_reward: {reward}")
-    print(f"  done: {done}")
-    print(f"  info keys: {list(info.keys()) if isinstance(info, dict) else info}")
+      step_time = 0.0
+      if guard_blocked:
+        obs, reward, done, info = verdict.message, 0.0, False, {
+            "guard_blocked": True, "guard_reason": verdict.reason,
+        }
+      else:
+        t0 = time.time()
+        try:
+          obs, reward, done, info = env.step(action_result.action)
+          step_time = time.time() - t0
+        except Exception as e:
+          obs, reward, done, info = str(e), 0.0, True, {}
+          step_time = time.time() - t0
+        guard.record_outcome(action_result.action, str(obs))
 
-    # Record step
-    all_steps.append({
-        "step": step_idx + 1,
-        "prompt_tokens": prompt_tokens,
-        "response_tokens": response_tokens,
-        "model_time_s": round(model_time, 1),
-        "step_time_s": round(step_time, 1),
-        "action_function": getattr(action_obj, "function_name", ""),
-        "step_reward": reward,
-        "done": done,
-        "observation_length": len(obs_str),
-        "model_response_length": len(model_response),
-        "guard_blocked": guard_blocked,
-    })
+      obs_str = str(obs)
 
-    # --- Update agent with env feedback ---
-    agent.update_from_env(observation=obs, reward=reward, done=done, info=info)
+      # --- Write trajectory ---
+      _write_traj(tf, f"{'─' * 60}")
+      _write_traj(tf, f"Step {step_idx + 1}/{MAX_STEPS}  "
+                       f"model={model_time:.1f}s  env={step_time:.1f}s  "
+                       f"prompt_tok={prompt_tokens}  resp_tok={response_tokens}")
+      if thought:
+        _write_traj(tf, f"\n[Thought]\n{thought}")
+      _write_traj(tf, f"\n[Action] {action_fn}")
+      if action_params_str:
+        _write_traj(tf, action_params_str)
+      if guard_blocked:
+        _write_traj(tf, f"\n[GUARD BLOCKED] {verdict.reason}")
+      _write_traj(tf, f"\n[Observation]\n{obs_str}")
+      _write_traj(tf, f"\n[Reward] {reward}  [Done] {done}")
+      _write_traj(tf, "")
 
-    if done:
-      logger.info("Agent signaled done at step %d.", step_idx + 1)
-      break
+      # --- Log progress to stdout ---
+      logger.info(
+          "[%s] step %d/%d  action=%s  reward=%.1f  done=%s  (model=%.1fs env=%.1fs)",
+          instance_id, step_idx + 1, MAX_STEPS, action_fn,
+          reward, done, model_time, step_time,
+      )
 
-  total_time = time.time() - start_time
-  total_steps = len(all_steps)
+      all_steps.append({
+          "step": step_idx + 1,
+          "action_function": action_fn,
+          "prompt_tokens": prompt_tokens,
+          "response_tokens": response_tokens,
+          "model_time_s": round(model_time, 1),
+          "step_time_s": round(step_time, 1),
+          "step_reward": reward,
+          "done": done,
+          "guard_blocked": guard_blocked,
+      })
 
-  # ========================== Reward Computation ==========================
-  print(f"\n{SEP}")
-  print("COMPUTING FINAL REWARD")
-  print(SEP)
+      agent.update_from_env(observation=obs, reward=reward, done=done, info=info)
 
-  # Use get_test_output=True to also capture test logs
-  reward_val = 0.0
-  test_output = ""
-  try:
-    logger.info("Running /run_tests.sh inside container...")
-    t0 = time.time()
-    result = env.env.runtime._calculate_reward(get_test_output=True)
-    reward_time = time.time() - t0
+      if done:
+        break
 
-    if isinstance(result, tuple):
-      reward_val, test_output = result[0], result[1]
-    else:
-      reward_val = float(result)
-      test_output = "(test output not captured)"
+    total_time = time.time() - start_time
+    total_steps = len(all_steps)
 
-    logger.info("Reward computation took %.1fs", reward_time)
-  except Exception as e:
-    logger.error("Reward computation FAILED: %s", e)
-    traceback.print_exc()
+    # --- Reward ---
+    reward_val = 0.0
+    test_output_str = ""
+    try:
+      t0 = time.time()
+      result = env.env.runtime._calculate_reward(get_test_output=True)
+      if isinstance(result, tuple):
+        reward_val, test_output = result[0], result[1]
+      else:
+        reward_val = float(result)
+        test_output = ""
+      test_output_str = str(test_output)
+    except Exception as e:
+      logger.error("[%s] Reward computation failed: %s", instance_id, e)
 
-  print(f"\n  REWARD = {reward_val}")
+    _write_traj(tf, f"{'=' * 60}")
+    _write_traj(tf, f"FINAL REWARD: {reward_val}")
+    _write_traj(tf, f"Total steps: {total_steps}  Total time: {total_time:.1f}s")
+    _write_traj(tf, f"{'=' * 60}")
 
-  # Print test output for diagnosis
-  print(f"\n--- Test Output from /run_tests.sh ---")
-  test_output_str = str(test_output)
-  if len(test_output_str) > 5000:
-    print(f"  [first 2500 chars]:\n{test_output_str[:2500]}")
-    print(f"  ...[truncated {len(test_output_str) - 5000} chars]...")
-    print(f"  [last 2500 chars]:\n{test_output_str[-2500:]}")
-  else:
-    print(test_output_str)
-
-  # Parse test results for detailed breakdown
-  print(f"\n--- Test Result Breakdown ---")
-  try:
-    parsed = env.env.runtime.parse_logs(test_output_str)
-    if parsed:
-      fail_to_pass = entry.get("FAIL_TO_PASS", [])
-      pass_to_pass = entry.get("PASS_TO_PASS", [])
-
-      print(f"\n  FAIL_TO_PASS tests ({len(fail_to_pass)} expected):")
-      for test in fail_to_pass:
-        test_key = ".".join(test.split("::")[1:]) if "::" in test else test
-        # Find matching key in parsed results
-        status = parsed.get(test_key, None)
-        if status is None:
-          matching = next((k for k in parsed.keys() if test_key in k), None)
-          status = parsed.get(matching, "NOT FOUND") if matching else "NOT FOUND"
-          if matching:
-            test_key = matching
-        marker = "OK" if status == "PASSED" else "FAIL"
-        print(f"    [{marker}] {test_key}: {status}")
-
-      print(f"\n  PASS_TO_PASS tests ({len(pass_to_pass)} expected):")
-      for test in pass_to_pass:
-        test_key = ".".join(test.split("::")[1:]) if "::" in test else test
-        status = parsed.get(test_key, None)
-        if status is None:
-          matching = next((k for k in parsed.keys() if test_key in k), None)
-          status = parsed.get(matching, "NOT FOUND") if matching else "NOT FOUND"
-          if matching:
-            test_key = matching
-        marker = "OK" if status == "PASSED" else "FAIL"
-        print(f"    [{marker}] {test_key}: {status}")
-
-      print(f"\n  All parsed test results ({len(parsed)} tests):")
-      for k, v in sorted(parsed.items()):
-        print(f"    {v:8s}  {k}")
-    else:
-      print("  (parse_logs returned empty — test output may be malformed)")
-  except Exception as e:
-    logger.error("Failed to parse test results: %s", e)
-    traceback.print_exc()
-
-  # ========================== Summary ==========================
-  print(f"\n{SEP}")
-  print("DEBUG SUMMARY")
-  print(SEP)
-  print(f"  instance_id   : {entry.get('instance_id', 'N/A')}")
-  print(f"  total_steps   : {total_steps}")
-  print(f"  total_time    : {total_time:.1f}s")
-  print(f"  final_reward  : {reward_val}")
-  if USE_API:
-    print(f"  backend       : Gemini API ({API_MODEL})")
-  else:
-    print(f"  model_version : {MODEL_VERSION}")
-    print(f"  engine        : {ROLLOUT_ENGINE}")
-  print(f"  max_steps     : {MAX_STEPS}")
-  print()
-  print("  Per-step summary:")
-  for s in all_steps:
-    print(
-        f"    Step {s['step']:2d}: "
-        f"fn={s['action_function']:20s} "
-        f"model={s['model_time_s']:5.1f}s "
-        f"env={s['step_time_s']:5.1f}s "
-        f"prompt_tok={s['prompt_tokens']:5d} "
-        f"resp_tok={s['response_tokens']:4d} "
-        f"done={s['done']}"
-    )
-  print(SEP)
-
-  # ========================== Save Debug Output ==========================
-  os.makedirs(OUTPUT_DIR, exist_ok=True)
-  instance_id = entry.get("instance_id", f"idx_{TASK_INDEX}")
-  safe_id = instance_id.replace("/", "_")
-  timestamp = time.strftime("%Y%m%d_%H%M%S")
-  output_file = os.path.join(OUTPUT_DIR, f"debug_{safe_id}_{timestamp}.json")
-
+  # --- Save JSON record ---
+  json_path = traj_path.replace(".trajectory.log", ".json")
   debug_record = {
       "instance_id": instance_id,
       "repo": entry.get("repo", ""),
@@ -675,22 +543,16 @@ def run_debug_eval():
       "final_reward": reward_val,
       "steps": all_steps,
       "conversation": agent.chat_completions,
-      "test_output": test_output_str[:50000],  # cap at 50k chars
+      "test_output": test_output_str[:50000],
   }
-
-  with open(output_file, "w") as f:
+  with open(json_path, "w") as f:
     json.dump(debug_record, f, indent=2, default=str)
-  logger.info("Debug output saved to %s", output_file)
 
-  # ========================== Cleanup ==========================
-  print(f"\n{SEP}")
-  print("CLOSING ENVIRONMENT")
-  print(SEP)
+  # --- Cleanup ---
   try:
     env.close()
-    logger.info("Environment closed.")
-  except Exception as e:
-    logger.error("Error closing environment: %s", e)
+  except Exception:
+    pass
 
   return reward_val
 
@@ -698,7 +560,49 @@ def run_debug_eval():
 # ========================== Main ==========================
 
 if __name__ == "__main__":
-  reward = run_debug_eval()
-  print(f"\n{'#' * 72}")
-  print(f"#  FINAL RESULT: reward = {reward}")
-  print(f"{'#' * 72}")
+  os.makedirs(OUTPUT_DIR, exist_ok=True)
+  results = []
+
+  for task_i, entry in enumerate(selected_entries):
+    instance_id = entry.get("instance_id", f"idx_{task_i}")
+    safe_id = instance_id.replace("/", "_")
+    traj_path = os.path.join(OUTPUT_DIR, f"{safe_id}.trajectory.log")
+
+    logger.info(
+        "===== [%d/%d] Starting %s =====",
+        task_i + 1, len(selected_entries), instance_id,
+    )
+
+    try:
+      reward = run_single_eval(entry, traj_path)
+    except Exception as e:
+      logger.error("[%s] FAILED: %s", instance_id, e)
+      traceback.print_exc()
+      reward = 0.0
+
+    results.append({"instance_id": instance_id, "reward": reward})
+    logger.info("[%s] reward=%.1f  trajectory -> %s", instance_id, reward, traj_path)
+
+  # ========================== Summary ==========================
+  num_solved = sum(1 for r in results if r["reward"] > 0)
+  logger.info(
+      "===== Done: %d/%d solved (%.1f%%) =====",
+      num_solved, len(results),
+      100.0 * num_solved / len(results) if results else 0,
+  )
+
+  for r in results:
+    marker = "PASS" if r["reward"] > 0 else "FAIL"
+    logger.info("  [%s] %s  reward=%.1f", marker, r["instance_id"], r["reward"])
+
+  summary_path = os.path.join(OUTPUT_DIR, "summary.json")
+  with open(summary_path, "w") as f:
+    json.dump({
+        "model_version": f"api:{API_MODEL}" if USE_API else MODEL_VERSION,
+        "engine": ROLLOUT_ENGINE if not USE_API else "api",
+        "num_instances": len(results),
+        "num_solved": num_solved,
+        "solve_rate": round(num_solved / len(results), 4) if results else 0,
+        "results": results,
+    }, f, indent=2)
+  logger.info("Summary -> %s", summary_path)
