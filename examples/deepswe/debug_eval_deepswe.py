@@ -59,9 +59,7 @@ Usage:
   python3 -u examples/deepswe/debug_eval_deepswe.py
 
 Outputs:
-  - Trajectory files: OUTPUT_DIR/<instance_id>.trajectory.log
-  - JSON records:     OUTPUT_DIR/<instance_id>.json
-  - Summary:          OUTPUT_DIR/summary.json
+  - Trajectory log: OUTPUT_DIR/trajectory.log  (all instances in one file)
 """
 
 import json
@@ -361,15 +359,16 @@ from swe_env import SWEEnv
 # ========================== Trajectory Writer ==========================
 
 def _write_traj(f, text):
-  """Write a line to the trajectory file and flush immediately."""
+  """Write a line to the trajectory file and print to stdout."""
   f.write(text + "\n")
   f.flush()
+  print(text)
 
 
 # ========================== Single Instance Eval ==========================
 
-def run_single_eval(entry, traj_path):
-  """Run one instance. Trajectory content -> traj_path. Returns reward."""
+def run_single_eval(entry, traj_file):
+  """Run one instance. Trajectory content -> traj_file handle. Returns reward."""
   instance_id = entry.get("instance_id", "unknown")
 
   agent = SWEAgent()
@@ -377,176 +376,141 @@ def run_single_eval(entry, traj_path):
 
   all_steps = []
 
-  with open(traj_path, "w") as tf:
-    _write_traj(tf, f"# Instance: {instance_id}")
-    _write_traj(tf, f"# Repo: {entry.get('repo', 'N/A')}")
-    _write_traj(tf, f"# Problem: {entry.get('problem_statement', '')[:200]}")
-    _write_traj(tf, "")
+  tf = traj_file
+  _write_traj(tf, f"\n{'=' * 60}")
+  _write_traj(tf, f"# Instance: {instance_id}")
+  _write_traj(tf, f"# Repo: {entry.get('repo', 'N/A')}")
+  _write_traj(tf, f"# Problem: {entry.get('problem_statement', '')[:200]}")
+  _write_traj(tf, f"{'=' * 60}")
+  _write_traj(tf, "")
 
-    # --- Reset ---
+  # --- Reset ---
+  t0 = time.time()
+  obs, info = env.reset()
+  _write_traj(tf, f"[Reset] ({time.time() - t0:.1f}s)")
+  _write_traj(tf, f"Observation: {str(obs)}")
+  _write_traj(tf, "")
+
+  agent.reset()
+  agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
+  guard = ActionGuard(GuardConfig(enabled=ENABLE_GUARD))
+
+  start_time = time.time()
+
+  for step_idx in range(MAX_STEPS):
+    elapsed = time.time() - start_time
+    if elapsed > TIMEOUT:
+      _write_traj(tf, f"\n[TIMEOUT after {elapsed:.0f}s at step {step_idx}]")
+      logger.warning("[%s] TIMEOUT at step %d", instance_id, step_idx)
+      break
+
+    # --- Model call ---
     t0 = time.time()
-    obs, info = env.reset()
-    _write_traj(tf, f"[Reset] ({time.time() - t0:.1f}s)")
-    _write_traj(tf, f"Observation: {str(obs)}")
+    prompt_tokens = 0
+    response_tokens = 0
+    if USE_API:
+      contents, system_instruction = _chat_to_gemini(agent.chat_completions)
+      config = {}
+      if system_instruction:
+        config["system_instruction"] = system_instruction
+      response = api_client.models.generate_content(
+          model=API_MODEL,
+          contents=contents,
+          config=config,
+      )
+      model_response = response.text
+      model_time = time.time() - t0
+      usage = getattr(response, "usage_metadata", None)
+      prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+      response_tokens = getattr(usage, "candidates_token_count", 0) or 0
+    else:
+      prompt = chat_parser.parse(agent.chat_completions)
+      prompt_tokens = len(tokenizer.encode(prompt))
+      with sampler_lock:
+        out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
+      model_response = out.text[0]
+      model_time = time.time() - t0
+      response_tokens = len(tokenizer.encode(model_response))
+
+    # --- Parse action ---
+    action_fn = ""
+    action_params_str = ""
+    thought = ""
+    try:
+      thought, action_obj = parse_xml_response(model_response)
+      action_fn = action_obj.function_name
+      action_params_str = json.dumps(action_obj.parameters, default=str)
+    except Exception:
+      thought = model_response[:300]
+
+    # --- Update agent & guard ---
+    action_result = agent.update_from_model(model_response)
+    verdict = guard.evaluate(action_result.action)
+    guard_blocked = verdict.blocked
+
+    step_time = 0.0
+    if guard_blocked:
+      obs, reward, done, info = verdict.message, 0.0, False, {
+          "guard_blocked": True, "guard_reason": verdict.reason,
+      }
+    else:
+      t0 = time.time()
+      try:
+        obs, reward, done, info = env.step(action_result.action)
+        step_time = time.time() - t0
+      except Exception as e:
+        obs, reward, done, info = str(e), 0.0, True, {}
+        step_time = time.time() - t0
+      guard.record_outcome(action_result.action, str(obs))
+
+    obs_str = str(obs)
+
+    # --- Write trajectory ---
+    _write_traj(tf, f"{'─' * 60}")
+    _write_traj(tf, f"Step {step_idx + 1}/{MAX_STEPS}  "
+                     f"model={model_time:.1f}s  env={step_time:.1f}s  "
+                     f"prompt_tok={prompt_tokens}  resp_tok={response_tokens}")
+    if thought:
+      _write_traj(tf, f"\n[Thought]\n{thought}")
+    _write_traj(tf, f"\n[Action] {action_fn}")
+    if action_params_str:
+      _write_traj(tf, action_params_str)
+    if guard_blocked:
+      _write_traj(tf, f"\n[GUARD BLOCKED] {verdict.reason}")
+    _write_traj(tf, f"\n[Observation]\n{obs_str}")
+    _write_traj(tf, f"\n[Reward] {reward}  [Done] {done}")
     _write_traj(tf, "")
 
-    agent.reset()
-    agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
-    guard = ActionGuard(GuardConfig(enabled=ENABLE_GUARD))
+    # --- Log progress to stdout ---
+    logger.info(
+        "[%s] step %d/%d  action=%s  reward=%.1f  done=%s  (model=%.1fs env=%.1fs)",
+        instance_id, step_idx + 1, MAX_STEPS, action_fn,
+        reward, done, model_time, step_time,
+    )
 
-    start_time = time.time()
+    agent.update_from_env(observation=obs, reward=reward, done=done, info=info)
 
-    for step_idx in range(MAX_STEPS):
-      elapsed = time.time() - start_time
-      if elapsed > TIMEOUT:
-        _write_traj(tf, f"\n[TIMEOUT after {elapsed:.0f}s at step {step_idx}]")
-        logger.warning("[%s] TIMEOUT at step %d", instance_id, step_idx)
-        break
+    if done:
+      break
 
-      # --- Model call ---
-      t0 = time.time()
-      prompt_tokens = 0
-      response_tokens = 0
-      if USE_API:
-        contents, system_instruction = _chat_to_gemini(agent.chat_completions)
-        config = {}
-        if system_instruction:
-          config["system_instruction"] = system_instruction
-        response = api_client.models.generate_content(
-            model=API_MODEL,
-            contents=contents,
-            config=config,
-        )
-        model_response = response.text
-        model_time = time.time() - t0
-        usage = getattr(response, "usage_metadata", None)
-        prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
-        response_tokens = getattr(usage, "candidates_token_count", 0) or 0
-      else:
-        prompt = chat_parser.parse(agent.chat_completions)
-        prompt_tokens = len(tokenizer.encode(prompt))
-        with sampler_lock:
-          out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
-        model_response = out.text[0]
-        model_time = time.time() - t0
-        response_tokens = len(tokenizer.encode(model_response))
+  total_time = time.time() - start_time
 
-      # --- Parse action ---
-      action_fn = ""
-      action_params_str = ""
-      thought = ""
-      try:
-        thought, action_obj = parse_xml_response(model_response)
-        action_fn = action_obj.function_name
-        action_params_str = json.dumps(action_obj.parameters, default=str)
-      except Exception:
-        thought = model_response[:300]
+  # --- Reward ---
+  reward_val = 0.0
+  try:
+    t0 = time.time()
+    result = env.env.runtime._calculate_reward(get_test_output=True)
+    if isinstance(result, tuple):
+      reward_val = result[0]
+    else:
+      reward_val = float(result)
+  except Exception as e:
+    logger.error("[%s] Reward computation failed: %s", instance_id, e)
 
-      # --- Update agent & guard ---
-      action_result = agent.update_from_model(model_response)
-      verdict = guard.evaluate(action_result.action)
-      guard_blocked = verdict.blocked
-
-      step_time = 0.0
-      if guard_blocked:
-        obs, reward, done, info = verdict.message, 0.0, False, {
-            "guard_blocked": True, "guard_reason": verdict.reason,
-        }
-      else:
-        t0 = time.time()
-        try:
-          obs, reward, done, info = env.step(action_result.action)
-          step_time = time.time() - t0
-        except Exception as e:
-          obs, reward, done, info = str(e), 0.0, True, {}
-          step_time = time.time() - t0
-        guard.record_outcome(action_result.action, str(obs))
-
-      obs_str = str(obs)
-
-      # --- Write trajectory ---
-      _write_traj(tf, f"{'─' * 60}")
-      _write_traj(tf, f"Step {step_idx + 1}/{MAX_STEPS}  "
-                       f"model={model_time:.1f}s  env={step_time:.1f}s  "
-                       f"prompt_tok={prompt_tokens}  resp_tok={response_tokens}")
-      if thought:
-        _write_traj(tf, f"\n[Thought]\n{thought}")
-      _write_traj(tf, f"\n[Action] {action_fn}")
-      if action_params_str:
-        _write_traj(tf, action_params_str)
-      if guard_blocked:
-        _write_traj(tf, f"\n[GUARD BLOCKED] {verdict.reason}")
-      _write_traj(tf, f"\n[Observation]\n{obs_str}")
-      _write_traj(tf, f"\n[Reward] {reward}  [Done] {done}")
-      _write_traj(tf, "")
-
-      # --- Log progress to stdout ---
-      logger.info(
-          "[%s] step %d/%d  action=%s  reward=%.1f  done=%s  (model=%.1fs env=%.1fs)",
-          instance_id, step_idx + 1, MAX_STEPS, action_fn,
-          reward, done, model_time, step_time,
-      )
-
-      all_steps.append({
-          "step": step_idx + 1,
-          "action_function": action_fn,
-          "prompt_tokens": prompt_tokens,
-          "response_tokens": response_tokens,
-          "model_time_s": round(model_time, 1),
-          "step_time_s": round(step_time, 1),
-          "step_reward": reward,
-          "done": done,
-          "guard_blocked": guard_blocked,
-      })
-
-      agent.update_from_env(observation=obs, reward=reward, done=done, info=info)
-
-      if done:
-        break
-
-    total_time = time.time() - start_time
-    total_steps = len(all_steps)
-
-    # --- Reward ---
-    reward_val = 0.0
-    test_output_str = ""
-    try:
-      t0 = time.time()
-      result = env.env.runtime._calculate_reward(get_test_output=True)
-      if isinstance(result, tuple):
-        reward_val, test_output = result[0], result[1]
-      else:
-        reward_val = float(result)
-        test_output = ""
-      test_output_str = str(test_output)
-    except Exception as e:
-      logger.error("[%s] Reward computation failed: %s", instance_id, e)
-
-    _write_traj(tf, f"{'=' * 60}")
-    _write_traj(tf, f"FINAL REWARD: {reward_val}")
-    _write_traj(tf, f"Total steps: {total_steps}  Total time: {total_time:.1f}s")
-    _write_traj(tf, f"{'=' * 60}")
-
-  # --- Save JSON record ---
-  json_path = traj_path.replace(".trajectory.log", ".json")
-  debug_record = {
-      "instance_id": instance_id,
-      "repo": entry.get("repo", ""),
-      "docker_image": entry.get("docker_image", ""),
-      "FAIL_TO_PASS": entry.get("FAIL_TO_PASS", []),
-      "PASS_TO_PASS": entry.get("PASS_TO_PASS", []),
-      "problem_statement": entry.get("problem_statement", ""),
-      "model_version": f"api:{API_MODEL}" if USE_API else MODEL_VERSION,
-      "max_steps": MAX_STEPS,
-      "total_steps": total_steps,
-      "total_time_s": round(total_time, 1),
-      "final_reward": reward_val,
-      "steps": all_steps,
-      "conversation": agent.chat_completions,
-      "test_output": test_output_str[:50000],
-  }
-  with open(json_path, "w") as f:
-    json.dump(debug_record, f, indent=2, default=str)
+  _write_traj(tf, f"{'=' * 60}")
+  _write_traj(tf, f"FINAL REWARD: {reward_val}")
+  _write_traj(tf, f"Total steps: {len(all_steps)}  Total time: {total_time:.1f}s")
+  _write_traj(tf, f"{'=' * 60}")
 
   # --- Cleanup ---
   try:
@@ -560,49 +524,37 @@ def run_single_eval(entry, traj_path):
 # ========================== Main ==========================
 
 if __name__ == "__main__":
+  traj_log = os.path.join(OUTPUT_DIR, "trajectory.log")
   os.makedirs(OUTPUT_DIR, exist_ok=True)
   results = []
 
-  for task_i, entry in enumerate(selected_entries):
-    instance_id = entry.get("instance_id", f"idx_{task_i}")
-    safe_id = instance_id.replace("/", "_")
-    traj_path = os.path.join(OUTPUT_DIR, f"{safe_id}.trajectory.log")
+  with open(traj_log, "w") as tf:
+    for task_i, entry in enumerate(selected_entries):
+      instance_id = entry.get("instance_id", f"idx_{task_i}")
 
-    logger.info(
-        "===== [%d/%d] Starting %s =====",
-        task_i + 1, len(selected_entries), instance_id,
-    )
+      logger.info(
+          "===== [%d/%d] Starting %s =====",
+          task_i + 1, len(selected_entries), instance_id,
+      )
 
-    try:
-      reward = run_single_eval(entry, traj_path)
-    except Exception as e:
-      logger.error("[%s] FAILED: %s", instance_id, e)
-      traceback.print_exc()
-      reward = 0.0
+      try:
+        reward = run_single_eval(entry, tf)
+      except Exception as e:
+        logger.error("[%s] FAILED: %s", instance_id, e)
+        traceback.print_exc()
+        reward = 0.0
 
-    results.append({"instance_id": instance_id, "reward": reward})
-    logger.info("[%s] reward=%.1f  trajectory -> %s", instance_id, reward, traj_path)
+      results.append({"instance_id": instance_id, "reward": reward})
+      logger.info("[%s] reward=%.1f", instance_id, reward)
 
-  # ========================== Summary ==========================
+  # --- Print summary to stdout ---
   num_solved = sum(1 for r in results if r["reward"] > 0)
   logger.info(
       "===== Done: %d/%d solved (%.1f%%) =====",
       num_solved, len(results),
       100.0 * num_solved / len(results) if results else 0,
   )
-
   for r in results:
     marker = "PASS" if r["reward"] > 0 else "FAIL"
     logger.info("  [%s] %s  reward=%.1f", marker, r["instance_id"], r["reward"])
-
-  summary_path = os.path.join(OUTPUT_DIR, "summary.json")
-  with open(summary_path, "w") as f:
-    json.dump({
-        "model_version": f"api:{API_MODEL}" if USE_API else MODEL_VERSION,
-        "engine": ROLLOUT_ENGINE if not USE_API else "api",
-        "num_instances": len(results),
-        "num_solved": num_solved,
-        "solve_rate": round(num_solved / len(results), 4) if results else 0,
-        "results": results,
-    }, f, indent=2)
-  logger.info("Summary -> %s", summary_path)
+  logger.info("Trajectory log -> %s", traj_log)
