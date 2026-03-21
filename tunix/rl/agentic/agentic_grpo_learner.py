@@ -240,6 +240,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "entropy": np.mean,
         "effective_entropy": np.mean,
         "effective_group_ratio": np.mean,
+        "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
     })
@@ -641,12 +642,18 @@ def grpo_loss_fn(
   pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
+  pg_loss = ppo_helpers.masked_mean(per_token_loss, effective_completion_mask)
 
   clipped_fraction = ppo_helpers.masked_mean(
       jnp.greater(pg_loss_2, pg_loss_1), effective_completion_mask
   )
 
-  aux = {"kl": 0.0, "pg_clipfrac": clipped_fraction, "ppo_kl": ppo_kl}
+    aux = {
+      "kl": 0.0,
+      "pg_loss": pg_loss,
+      "pg_clipfrac": clipped_fraction,
+      "ppo_kl": ppo_kl,
+    }
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps
