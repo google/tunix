@@ -582,7 +582,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     async def _collect_wrapper():
       async def collect_one(prompt: TokensPrompt) -> RequestOutput:
         request_id = str(next(self._request_counter))
-        print(f"YY {request_id=}")
+        # print(f"YY {request_id=}")
         final_out: RequestOutput | None = None
         # Only keep the final output (when finished==True). Ignore intermediate
         # streaming outputs to avoid partial/unfinished results and reduce memory.
