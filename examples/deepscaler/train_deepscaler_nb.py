@@ -116,13 +116,14 @@ arg_parser.add_argument("--weight_decay", type=float, default=0.01)
 arg_parser.add_argument("--num_batches", type=int, default=312)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
+arg_parser.add_argument("--ent_coef", type=float, default=1e-4)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
 arg_parser.add_argument("--temperature", type=float, default=0.8)
 arg_parser.add_argument("--top_p", type=float, default=1.0)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=1024)
+arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 args, _ = arg_parser.parse_known_args()
@@ -171,14 +172,15 @@ NUM_ITERATIONS = 1
 # Important to keep a high enough value for this, otherwise, the KL divergence
 # can increase unchecked.
 BETA = args.beta
+ENT_COEF = args.ent_coef
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
+ENABLE_FLASH_ATTN=True
 ENABLE_REMAT = True
-ENABLE_FLASH_ATTN = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -260,6 +262,7 @@ try:
         "num_steps": MAX_STEPS,
         "num_generations": NUM_GENERATIONS,
         "beta": BETA,
+        "ent_coef": ENT_COEF,
         "epsilon": EPSILON,
         "epsilon_high": EPSILON_HIGH,
         "max_response_length": MAX_RESPONSE_LENGTH,
@@ -342,7 +345,7 @@ MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 # MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
 # MODEL_PATH = "gs://tunix/models/qwen2_5/torch/1.5b-it"
 
-print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
+print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, ENT_COEF={ENT_COEF}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
@@ -631,6 +634,7 @@ grpo_config = GRPOConfig(
     num_iterations=NUM_ITERATIONS,
     max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
+    ent_coef=ENT_COEF,
     epsilon=EPSILON,
     epsilon_high=EPSILON_HIGH,
     system_prompt="",

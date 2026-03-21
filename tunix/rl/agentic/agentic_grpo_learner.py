@@ -75,6 +75,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     beta: KL penalty coefficient.
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
+    ent_coef: Entropy bonus coefficient.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
@@ -95,6 +96,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
+  ent_coef: float = 0.0
   epsilon: float = 0.2
   system_prompt: str = ""
   max_concurrency: int = 16
@@ -113,6 +115,11 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       raise ValueError(
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
+      )
+    if self.ent_coef < 0.0:
+      raise ValueError(
+          "ent_coef must be non-negative. Received: "
+          f"{self.ent_coef}"
       )
 
 
@@ -546,6 +553,7 @@ def grpo_loss_fn(
     A tuple containing the loss and an aux dictionary.
   """
   beta = algo_config.beta
+  ent_coef = getattr(algo_config, "ent_coef", 0.0)
   epsilon = algo_config.epsilon
   loss_algo = algo_config.loss_algo
   epsilon_high = (
@@ -626,6 +634,8 @@ def grpo_loss_fn(
   )
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
   entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
+  if ent_coef != 0.0:
+    loss = loss - ent_coef * entropy_loss
   aux["entropy"] = entropy_loss
 
   # Effective entropy over only groups with non-degenerate advantages.
