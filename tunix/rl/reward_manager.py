@@ -177,8 +177,8 @@ class SequenceRewardManager(AbstractRewardManager):
       metrics_to_log["completions"] = (completions, None)
 
     # Log the sum/mean rewards for each prompt-completion pair.
-    metrics_to_log["rewards/sum"] = (np.nansum(rewards, axis=1), np.mean)
-    metrics_to_log["rewards/mean"] = (np.nanmean(rewards, axis=1), np.mean)
+    metrics_to_log["rewards/sum"] = (np.nansum(rewards, axis=1), np.nansum)
+    metrics_to_log["rewards/mean"] = (np.nanmean(rewards, axis=1), np.nanmean)
 
     # Log the min and max rewards for the prompt-completion pair.
     metrics_to_log["rewards/min"] = (np.min(rewards, axis=1), np.min)

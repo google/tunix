@@ -132,8 +132,8 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(32, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(32, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(8, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -425,7 +425,7 @@ for s in train_dataset:
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config = model_lib.ModelConfig.qwen2p5_1p5b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 else:
@@ -435,7 +435,6 @@ print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
-
 
 # %%
 def get_lora_model(base_model, model_mesh):
@@ -469,6 +468,8 @@ else:
   qwen2_actor = params_lib.create_model_from_safe_tensors(
       MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
+
+print(f"Config qwen2_actor: {config}")
 
 # %%
 show_hbm_usage("after loading qwen2_actor")
@@ -535,15 +536,13 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "data_type": jnp.bfloat16,
+    "return_logprobs": True,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
 sglang_jax_rollout_dict = {
     # sglang-jax specific configs
-    "rollout_sglang_jax_model_version": (
-        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ),
+    "rollout_sglang_jax_model_version": MODEL_VERSION,
     "rollout_sglang_jax_mem_fraction_static": 0.8,
     "rollout_sglang_jax_init_with_random_weights": True,
     "rollout_sglang_jax_disable_radix_cache": True,
@@ -557,7 +556,7 @@ MAX_NUM_SEQS =768
 MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
-    "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "rollout_vllm_model_version": MODEL_VERSION,
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
@@ -605,7 +604,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=8,
+        train_micro_batch_size=4,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -618,7 +617,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
           # set_profile_options=False,
           # log_dir=PROFILER_PATH,
         # ) if ENABLE_PROFILER else None,
-        rollout_micro_batch_size = 32,
+        rollout_micro_batch_size = 8,
     ),
     rollout_config=rollout_engine_config,
 )

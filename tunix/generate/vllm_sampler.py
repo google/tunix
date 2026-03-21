@@ -460,7 +460,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def detokenize(
       self, input_strings: List[str], request_outputs: List[RequestOutput]
-  ) -> Tuple[List[str], List[float], List[int]]:
+  ) -> Tuple[List[str], List[float] | None, List[int]]:
     """Detokenize the vllm outputs."""
     generations = len(request_outputs[0].outputs)
     decoded_outputs = [[] for _ in range(generations)]
@@ -778,5 +778,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0],
+        logprobs=out_logprobs[0] if out_logprobs[0] and len(out_logprobs[0]) else None,
     )

@@ -229,8 +229,8 @@ class TrajectoryCollectEngine:
 
         # logprobs
         if getattr(step, "logprobs", None) is not None:
-          assert step.logprobs.size == len(step.assistant_tokens), (
-              f"Logprobs length {len(step.logprobs)} does not match assistant"
+          assert len(step.logprobs) == len(step.assistant_tokens), (
+              f"Logprobs length {step.logprobs.size} does not match assistant"
               f" tokens length {len(step.assistant_tokens)}"
           )
           logprobs.append(step.logprobs)

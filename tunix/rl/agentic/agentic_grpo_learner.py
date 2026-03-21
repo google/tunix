@@ -231,6 +231,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
+        "effective_entropy": np.mean,
+        "effective_group_ratio": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
     })
@@ -625,6 +627,20 @@ def grpo_loss_fn(
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
   entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
   aux["entropy"] = entropy_loss
+
+  # Effective entropy over only groups with non-degenerate advantages.
+  num_generations = algo_config.num_generations
+  seq_advantages = jnp.squeeze(advantages, axis=-1)
+  grouped_advantages = seq_advantages.reshape((-1, num_generations))
+  valid_group_mask = jnp.std(grouped_advantages, axis=-1) > 1e-6
+  valid_sequence_mask = jnp.repeat(valid_group_mask, num_generations)[:, None]
+  effective_completion_mask = completion_mask * valid_sequence_mask.astype(
+    completion_mask.dtype
+  )
+  aux["effective_entropy"] = ppo_helpers.masked_mean(
+    token_entropy, effective_completion_mask
+  )
+  aux["effective_group_ratio"] = jnp.mean(valid_group_mask.astype(jnp.float32))
 
   return loss, aux
 

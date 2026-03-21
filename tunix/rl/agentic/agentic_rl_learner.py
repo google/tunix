@@ -244,7 +244,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       rollout_config = {"train": rollout_config}
     for config in rollout_config.values():
       config.max_tokens_to_generate = self.algo_config.max_response_length
-      config.return_logprobs = True
+      config.return_logprobs = False
 
   def _compute_rewards(
       self,

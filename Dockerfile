@@ -63,8 +63,8 @@ RUN if [ "$ENGINE" = "sglang_jax" ]; then \
     fi
 
 WORKDIR /app
-RUN pip install --force-reinstall flax==0.12.4
-RUN pip install "numpy>=2.0,<2.3"
+# RUN pip install --force-reinstall flax==0.12.4
+# RUN pip install "numpy>=2.0,<2.3"
 RUN pip install --force-reinstall protobuf==6.33.5
 
 
