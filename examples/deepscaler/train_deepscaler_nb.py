@@ -178,6 +178,7 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
+ENABLE_FLASH_ATTN = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -440,6 +441,8 @@ show_hbm_usage("Done with loading datasets")
 
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config.remat_config = ENABLE_FLASH_ATTN
+
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 else:
