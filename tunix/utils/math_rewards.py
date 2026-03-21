@@ -27,6 +27,18 @@ RewardOutput = reward_types.RewardOutput
 _NUMERIC_PATTERN = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
 
+def _strip_math_mode_wrappers(text: str) -> str:
+  """Strips common display wrappers like `$...$`, `\(...\)`, and `\[...\]`."""
+  s = text.strip()
+  if len(s) >= 2 and s[0] == "$" and s[-1] == "$":
+    s = s[1:-1].strip()
+  if s.startswith("\\(") and s.endswith("\\)"):
+    s = s[2:-2].strip()
+  if s.startswith("\\[") and s.endswith("\\]"):
+    s = s[2:-2].strip()
+  return s
+
+
 def _first_numeric_value(text: str) -> float | None:
   """Extracts the first numeric literal from text."""
   if not text:
@@ -119,13 +131,17 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
     for ground_truth in processed_ground_truths:
       if found_exact_or_symbolic:
         break
+      normalized_model_answer = _strip_math_mode_wrappers(str(model_answer))
+      normalized_ground_truth = _strip_math_mode_wrappers(str(ground_truth))
       is_exact_or_symbolic = math_utils.grade_answer_mathd(
-          model_answer, ground_truth
-      ) or math_utils.grade_answer_sympy(model_answer, ground_truth)
+          normalized_model_answer, normalized_ground_truth
+      ) or math_utils.grade_answer_sympy(
+          normalized_model_answer, normalized_ground_truth
+      )
       if is_exact_or_symbolic:
         found_exact_or_symbolic = True
         break
-      if _is_numeric_close(model_answer, ground_truth):
+      if _is_numeric_close(normalized_model_answer, normalized_ground_truth):
         found_numeric_close = True
 
     if found_exact_or_symbolic:
