@@ -25,6 +25,7 @@ THOUGHT_DELIMITER_END = "</think>"
 RewardOutput = reward_types.RewardOutput
 
 _NUMERIC_PATTERN = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+_THOUSANDS_SEPARATOR_PATTERN = re.compile(r"(?<=\d),(?=\d{3}(\D|$))")
 
 
 def _strip_math_mode_wrappers(text: str) -> str:
@@ -36,6 +37,8 @@ def _strip_math_mode_wrappers(text: str) -> str:
     s = s[2:-2].strip()
   if s.startswith("\\[") and s.endswith("\\]"):
     s = s[2:-2].strip()
+  # Treat thousands separators as formatting, e.g. 8,424,000 == 8424000.
+  s = _THOUSANDS_SEPARATOR_PATTERN.sub("", s)
   return s
 
 
