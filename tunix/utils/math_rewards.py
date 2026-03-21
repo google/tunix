@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Dict, List
+import math
+import re
+from typing import List
 
 from tunix.utils import math_utils
 from tunix.rl.agentic.rewards import reward
@@ -21,6 +23,30 @@ from tunix.rl.agentic.rewards import reward_types
 
 THOUGHT_DELIMITER_END = "</think>"
 RewardOutput = reward_types.RewardOutput
+
+_NUMERIC_PATTERN = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
+def _first_numeric_value(text: str) -> float | None:
+  """Extracts the first numeric literal from text."""
+  if not text:
+    return None
+  match = _NUMERIC_PATTERN.search(text)
+  if not match:
+    return None
+  try:
+    return float(match.group(0))
+  except ValueError:
+    return None
+
+
+def _is_numeric_close(given_answer: str, ground_truth: str) -> bool:
+  """Checks whether two answers are numerically close."""
+  given_value = _first_numeric_value(given_answer)
+  truth_value = _first_numeric_value(ground_truth)
+  if given_value is None or truth_value is None:
+    return False
+  return math.isclose(given_value, truth_value, rel_tol=1e-2, abs_tol=1e-3)
 
 
 @reward.register("deepscaler_math")
@@ -34,11 +60,8 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
   Returns:
     float: The calculated reward value based on math evaluation
   """
+  del prompts, kwargs
   rewards = []
-  for i in range(len(prompts)):
-    print("prompt: ", prompts[i])
-    print("last 1000 chars of completion: ", completions[i][-1000:])
-    print("answer: ", answer[i])
   # Extract information from task_info
   for i, completion in enumerate(completions):
     model_response = completion
@@ -54,17 +77,21 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
     else:
       model_solution = model_response
 
+    reward_value = 0.0
+    if "\\boxed" in model_solution:
+      reward_value += 0.05
+
     model_answer = math_utils.extract_answer(model_solution)
-    if model_answer is None:
-      # return RewardOutput(0.0, {"is_correct": False})
-      rewards.append(0.0)
+    if model_answer is not None:
+      reward_value += 0.05
+    else:
+      rewards.append(reward_value)
       continue
 
     # Process the ground truth(s)
     ground_truths = answer[i]
     if ground_truths is None:
-      # return RewardOutput(0.0, {"is_correct": False})
-      rewards.append(0.0)
+      rewards.append(reward_value)
       continue
 
     # Convert single answer to list for uniform processing
@@ -83,24 +110,28 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
         processed_ground_truths.append(truth)
 
     if not processed_ground_truths:
-      rewards.append(0.0)
+      rewards.append(reward_value)
       continue
 
-    # Check against all possible correct answers
-    found_correct_answer = False
+    # Check against all possible correct answers.
+    found_exact_or_symbolic = False
+    found_numeric_close = False
     for ground_truth in processed_ground_truths:
-      if found_correct_answer:
+      if found_exact_or_symbolic:
         break
-      is_correct = math_utils.grade_answer_mathd(
+      is_exact_or_symbolic = math_utils.grade_answer_mathd(
           model_answer, ground_truth
       ) or math_utils.grade_answer_sympy(model_answer, ground_truth)
-      if is_correct:
-        found_correct_answer = True
-        reward_value: float = 1.0  # Base reward for a correct answer.
-        # Apply tool call bonus if applicable and answer is correct
-        # if task_info.get("has_toolcall", False):
-        #   reward_value += 0.5
-        rewards.append(reward_value)
-    if not found_correct_answer:
-      rewards.append(0.0)
+      if is_exact_or_symbolic:
+        found_exact_or_symbolic = True
+        break
+      if _is_numeric_close(model_answer, ground_truth):
+        found_numeric_close = True
+
+    if found_exact_or_symbolic:
+      reward_value = 1.0
+    elif found_numeric_close:
+      reward_value = max(reward_value, 0.3)  # Maximum fallback reward for numerically close answers.
+
+    rewards.append(reward_value)
   return rewards
