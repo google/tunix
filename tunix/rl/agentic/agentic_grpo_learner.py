@@ -584,6 +584,36 @@ def grpo_loss_fn(
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)[:, None]
 
+  # Mask out degenerate groups (all-0 or all-1 sequence advantages), then
+  # normalize advantages over the remaining valid sequences.
+  num_generations = algo_config.num_generations
+  seq_advantages = jnp.squeeze(advantages, axis=-1)
+  grouped_advantages = seq_advantages.reshape((-1, num_generations))
+  is_all_zero_group = jnp.all(jnp.isclose(grouped_advantages, 0.0), axis=-1)
+  is_all_one_group = jnp.all(jnp.isclose(grouped_advantages, 1.0), axis=-1)
+  valid_group_mask = jnp.logical_not(is_all_zero_group | is_all_one_group)
+  valid_sequence_mask = jnp.repeat(valid_group_mask, num_generations)[:, None]
+  valid_sequence_weights = jnp.squeeze(valid_sequence_mask, axis=-1).astype(
+    jnp.float32
+  )
+
+  valid_count = jnp.clip(valid_sequence_weights.sum(), min=1.0)
+  valid_adv_mean = (seq_advantages * valid_sequence_weights).sum() / valid_count
+  valid_adv_var = (
+    ((seq_advantages - valid_adv_mean) ** 2) * valid_sequence_weights
+  ).sum() / valid_count
+  valid_adv_std = jnp.sqrt(valid_adv_var + 1e-6)
+
+  normalized_seq_advantages = jnp.where(
+    valid_sequence_weights > 0,
+    (seq_advantages - valid_adv_mean) / valid_adv_std,
+    0.0,
+  )
+  advantages = normalized_seq_advantages[:, None]
+  effective_completion_mask = completion_mask * valid_sequence_mask.astype(
+    completion_mask.dtype
+  )
+
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
@@ -592,7 +622,7 @@ def grpo_loss_fn(
     )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
-  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
+  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, effective_completion_mask)
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
@@ -613,7 +643,7 @@ def grpo_loss_fn(
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
   clipped_fraction = ppo_helpers.masked_mean(
-      jnp.greater(pg_loss_2, pg_loss_1), completion_mask
+      jnp.greater(pg_loss_2, pg_loss_1), effective_completion_mask
   )
 
   aux = {"kl": 0.0, "pg_clipfrac": clipped_fraction, "ppo_kl": ppo_kl}
@@ -625,30 +655,23 @@ def grpo_loss_fn(
 
     # Log mean KL.
     aux["kl"] = jnp.astype(
-        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+        (kl * effective_completion_mask).sum()
+        / jnp.clip(effective_completion_mask.sum(), min=1),
         jnp.float32,
     )
 
   loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss, effective_completion_mask, loss_aggregation_mode
   )
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
-  entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
+  entropy_loss = ppo_helpers.masked_mean(token_entropy, effective_completion_mask)
   if ent_coef != 0.0:
     loss = loss - ent_coef * entropy_loss
   aux["entropy"] = entropy_loss
 
   # Effective entropy over only groups with non-degenerate advantages.
-  num_generations = algo_config.num_generations
-  seq_advantages = jnp.squeeze(advantages, axis=-1)
-  grouped_advantages = seq_advantages.reshape((-1, num_generations))
-  valid_group_mask = jnp.std(grouped_advantages, axis=-1) > 1e-6
-  valid_sequence_mask = jnp.repeat(valid_group_mask, num_generations)[:, None]
-  effective_completion_mask = completion_mask * valid_sequence_mask.astype(
-    completion_mask.dtype
-  )
   aux["effective_entropy"] = ppo_helpers.masked_mean(
-    token_entropy, effective_completion_mask
+      token_entropy, effective_completion_mask
   )
   aux["effective_group_ratio"] = jnp.mean(valid_group_mask.astype(jnp.float32))
 
