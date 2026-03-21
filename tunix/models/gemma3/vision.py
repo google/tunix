@@ -597,7 +597,7 @@ class VisionExit(nnx.Module):
     Returns:
       The output tensor.
     """
-    cur_length = x.shape[1]
+    cur_length = x.shape[1]  # pytype: disable=attribute-error  # jax-arraylike
     if cur_length == self.output_length:
       return x
 
@@ -660,7 +660,7 @@ class SigLiP(nnx.Module):
     Returns:
       The output tensor.
     """
-    b, n, _, _, _ = images.shape
+    b, n, _, _, _ = images.shape  # pytype: disable=attribute-error  # jax-arraylike
 
     flattened_images = einops.rearrange(images, "b n h w c -> (b n) h w c")
     soft_tokens = self.siglip_encoder(flattened_images)
@@ -670,7 +670,7 @@ class SigLiP(nnx.Module):
         != self.config.num_mm_tokens_per_image
     ):
       soft_tokens = self.siglip_exit(soft_tokens)
-      assert soft_tokens.shape[-2] == self.siglip_exit.output_length
+      assert soft_tokens.shape[-2] == self.siglip_exit.output_length  # pytype: disable=attribute-error  # jax-arraylike
 
     soft_tokens = einops.rearrange(
         soft_tokens, "(b n) ... -> b n ...", b=b, n=n

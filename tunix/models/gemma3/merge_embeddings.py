@@ -50,7 +50,7 @@ def _merge_embeddings_inner(
   # Save and restore the first position overwritten if there's no MM tokens.
   first_pos = text_embeddings[0]
 
-  merged = text_embeddings.at[target_pos, :].set(vision_embeddings)
+  merged = text_embeddings.at[target_pos, :].set(vision_embeddings)  # pytype: disable=attribute-error  # jax-arraylike
 
   merged = merged.at[0].set(first_pos)
 
