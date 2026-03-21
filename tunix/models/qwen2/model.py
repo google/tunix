@@ -1,3 +1,4 @@
+
 # Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,41 +12,35 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Qwen2 model."""
-
 import dataclasses
 import enum
+from functools import partial
 from typing import Tuple
-
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
 from tunix.utils import env_utils
-
 env_utils.setup_sharding_environment()
-
 K_MASK = -2.3819763e38
-
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
-
-
 class RematConfig(enum.Enum):
   NONE = enum.auto()  #  No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
-
-
 @dataclasses.dataclass(slots=True, frozen=True)
 class ShardingConfig:
   """Sharding configuration for Qwen3 model."""
-
   emb_vd: Tuple[str | None, ...]
   emb_dv: Tuple[str | None, ...]
   q_weight_dnh: Tuple[str | None, ...]
@@ -60,11 +55,9 @@ class ShardingConfig:
   exp_weight_cdf: Tuple[str | None, ...]
   exp_weight_cfd: Tuple[str | None, ...]
   qkv_bias: Tuple[str | None, ...]
-
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
-
     return ShardingConfig(
         emb_vd=('tp', fsdp),
         emb_dv=(fsdp, 'tp'),
@@ -81,12 +74,9 @@ class ShardingConfig:
         exp_weight_cfd=('fsdp', 'tp', None),
         qkv_bias=('tp',),
     )
-
-
 @dataclasses.dataclass(slots=True)
 class ModelConfig:
   """Configuration for the Qwen2 model."""
-
   num_layers: int
   vocab_size: int
   embed_dim: int
@@ -101,7 +91,7 @@ class ModelConfig:
   remat_config: RematConfig = RematConfig.NONE
   dtype: jnp.dtype = jnp.float32
   param_dtype: jnp.dtype = jnp.float32
-
+  use_flash_attention: bool = False
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
   def qwen2p5_0p5b(cls):  # qwen2.5-0.5B
@@ -117,7 +107,6 @@ class ModelConfig:
         rope_theta=1_000_000,
         use_tied_embedding=True,
     )
-
   # DeepSeek-R1-Distill-Qwen-1.5B
   @classmethod
   def deepseek_r1_distill_qwen_1p5b(cls):
@@ -133,7 +122,6 @@ class ModelConfig:
         rope_theta=10000,
         use_tied_embedding=False,
     )
-
   @classmethod
   def qwen2p5_1p5b(cls):  # qwen2.5-1.5B
     return cls(
@@ -148,7 +136,6 @@ class ModelConfig:
         rope_theta=1_000_000,
         use_tied_embedding=True,
     )
-
   @classmethod
   def qwen2p5_math_1p5b(cls):  # qwen2.5-math-1.5B
     return cls(
@@ -163,7 +150,6 @@ class ModelConfig:
         rope_theta=10000,
         use_tied_embedding=True,
     )
-
   # qwen2.5-coder-3B and qwen2.5-3B share the same config.
   @classmethod
   def qwen2p5_3b(cls):
@@ -179,7 +165,6 @@ class ModelConfig:
         rope_theta=1_000_000,
         use_tied_embedding=True,
     )
-
   # qwen2.5-7B and qwen2.5-coder-7B share the same config.
   @classmethod
   def qwen2p5_7b(cls):
@@ -195,10 +180,7 @@ class ModelConfig:
         rope_theta=1_000_000,
         use_tied_embedding=False,
     )
-
   # TODO(linchai): add other qwen2.5 model configs.
-
-
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
@@ -206,11 +188,8 @@ def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   return jax.lax.with_sharding_constraint(
       x, shd.NamedSharding(mesh, shd.PartitionSpec(*s))
   )
-
-
 class Einsum(nnx.Module):
   """Einsum is a convenience module for parameterized tensor multiplication."""
-
   def __init__(
       self,
       einsum_str: str,
@@ -229,17 +208,13 @@ class Einsum(nnx.Module):
         rngs.params.normal(shape, dtype=param_dtype),
         sharding=sharding,
     )
-
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = jnp.astype(x, self.dtype)
     w = jnp.astype(self.w.value, self.dtype)
     return jnp.einsum(self.einsum_str, x, w)
-
-
 class Embedder(nnx.Module):
   """Embedder module."""
-
   def __init__(
       self,
       vocab_size: int,
@@ -256,45 +231,34 @@ class Embedder(nnx.Module):
     )
     self.shd_config = shd_config
     self.dtype = dtype
-
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x = jnp.astype(x, self.dtype)
     x = shard(x, self.shd_config.act_btd)
     return x
-
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = jnp.astype(x, self.dtype)
     w = jnp.astype(self.input_embedding.value, self.dtype)
     return jnp.dot(x, w.T)
-
-
 def _generate_pos_embeddings(
     positions: jax.Array,
     features: int,
     rope_theta: int,
 ) -> tuple[jax.Array, jax.Array]:
   """Generate Sin/Cos for Rotary Embeddings.
-
   Generates sinusoids at (features//2) different timescales, where the
   timescales form a geometric series from min_timescale to max_timescale
   (max_timescale is not included, but would be the next element in the series).
-
   Sinusoids are evaluated at integer positions i in [0, length).
-
   The outputs are computed as:
-
-
   sin[b, t, j] = sin(rope_pos[b, t] / timescale[j])
   cos[b, t, j] = cos(rope_pos[b, t] / timescale[j])
-
   Args:
       postions: [batch, time]
       features: head_dim.
       rope_theta: the rope_theta parameter.
-
   Returns:
       sin: a float32 array with shape [length, features // 2]
       cos: a float32 array with shape [length, features // 2]
@@ -313,8 +277,6 @@ def _generate_pos_embeddings(
       precision=jax.lax.Precision.HIGHEST,
   )
   return jnp.sin(sinusoid_inp), jnp.cos(sinusoid_inp)
-
-
 def apply_rotary_embedding(
     x: jax.Array, sin: jax.Array, cos: jax.Array
 ) -> jax.Array:
@@ -323,11 +285,8 @@ def apply_rotary_embedding(
   # [B, T, head_dim] -> [B, h, T, head_dim]
   sin, cos = sin[:, :, None, :], cos[:, :, None, :]
   return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
-
-
 class RMSNorm(nnx.Module):
   """RMSNorm layer."""
-
   def __init__(
       self,
       dim: int,
@@ -343,7 +302,6 @@ class RMSNorm(nnx.Module):
     )
     self.norm_eps = norm_eps
     self.dtype = dtype
-
   @jax.named_scope('rms_norm')
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
     x = jnp.astype(x, jnp.float32)
@@ -352,11 +310,8 @@ class RMSNorm(nnx.Module):
         jnp.astype(self.w.value, jnp.float32) * (x / rms),
         self.dtype,
     )
-
-
 class Attention(nnx.Module):
   """Attention module."""
-
   def __init__(
       self,
       config: ModelConfig,
@@ -415,7 +370,6 @@ class Attention(nnx.Module):
         ),
         out_sharding=self.shd_config.qkv_bias,
     )
-
   def block(
       self,
       x: jaxtyping.Array,
@@ -426,7 +380,6 @@ class Attention(nnx.Module):
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     """Attention block."""
     seq_len = x.shape[1]
-
     query_proj = self.q_proj(x)
     b, t, n, h = query_proj.shape
     query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias.astype(
@@ -444,11 +397,9 @@ class Attention(nnx.Module):
         self.config.dtype
     )
     value_proj = jnp.reshape(value_proj, (b, s, k, h))
-
     query_proj = shard(query_proj, self.shd_config.act_btnh)
     key_proj = shard(key_proj, self.shd_config.act_btnh)
     value_proj = shard(value_proj, self.shd_config.act_btnh)
-
     query_proj = apply_rotary_embedding(
         query_proj,
         sin,
@@ -459,7 +410,6 @@ class Attention(nnx.Module):
         sin,
         cos,
     )
-
     if cache is not None:
       end_index = cache['end_index'][0]
       slice_indices = (0, end_index % cache['v'].shape[1], 0, 0)
@@ -471,27 +421,20 @@ class Attention(nnx.Module):
       key_proj = jax.lax.dynamic_update_slice(
           cache['k'], key_proj, slice_indices
       )
-
     b, t, qh, d = query_proj.shape
     _, s, kh, _ = key_proj.shape
-
     # GQA
     query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
     attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-
     if attn_mask is not None:
       attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
-
     attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
         key_proj.dtype
     )
-
     qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
     qkv = qkv.reshape((b, t, qh, d))
-
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)
-
     if cache is not None:
       new_cache = {
           'v': value_proj,
@@ -500,9 +443,109 @@ class Attention(nnx.Module):
       }
     else:
       new_cache = None
-
     return new_cache, outputs
-
+  def splash_block(
+      self,
+      x: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array | None,
+      sin: jaxtyping.Array,
+      cos: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    """Attention block."""
+    seq_len = x.shape[1]
+    query_proj = self.q_proj(x)
+    b, t, n, h = query_proj.shape
+    query_proj = jnp.reshape(query_proj, (b, t, n * h)) + self.q_bias.astype(
+        self.config.dtype
+    )
+    query_proj = jnp.reshape(query_proj, (b, t, n, h))
+    key_proj = self.k_proj(x)
+    _, s, k, h = key_proj.shape
+    key_proj = jnp.reshape(key_proj, (b, s, k * h)) + self.k_bias.astype(
+        self.config.dtype
+    )
+    key_proj = jnp.reshape(key_proj, (b, s, k, h))
+    value_proj = self.v_proj(x)
+    value_proj = jnp.reshape(value_proj, (b, s, k * h)) + self.v_bias.astype(
+        self.config.dtype
+    )
+    value_proj = jnp.reshape(value_proj, (b, s, k, h))
+    query_proj = shard(query_proj, self.shd_config.act_btnh)
+    key_proj = shard(key_proj, self.shd_config.act_btnh)
+    value_proj = shard(value_proj, self.shd_config.act_btnh)
+    query_proj = apply_rotary_embedding(
+        query_proj,
+        sin,
+        cos,
+    )
+    key_proj = apply_rotary_embedding(
+        key_proj,
+        sin,
+        cos,
+    )
+    if cache is not None:
+      end_index = cache['end_index'][0]
+      slice_indices = (0, end_index % cache['v'].shape[2], 0, 0)
+      value_proj = jax.lax.dynamic_update_slice(
+          cache['v'],
+          value_proj,
+          slice_indices,
+      )
+      key_proj = jax.lax.dynamic_update_slice(
+          cache['k'], key_proj, slice_indices
+      )
+    query_proj = query_proj.transpose(0, 2, 1, 3)
+    key_proj = key_proj.transpose(0, 2, 1, 3)
+    value_proj = value_proj.transpose(0, 2, 1, 3)
+    query_proj = query_proj * self.scale
+    b, qh, t, d = query_proj.shape
+    _, kh, s, _ = key_proj.shape
+    mesh = pxla.thread_resources.env.physical_mesh
+    causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+    multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
+    # TODO: config block size
+    block_sizes = splash.BlockSizes(
+        block_q=1024,
+        block_kv=1024,
+        block_q_dkv=1024,
+        block_kv_dkv=1024,
+        block_kv_dkv_compute=1024,
+        block_q_dq=1024,
+        block_kv_dq=1024,
+    )
+    # For sharding by batch, head_shards and q_seq_shards remain 1
+    attn_kernel = splash.make_splash_mha(
+        multi_head_mask, block_sizes=block_sizes, head_shards=1, q_seq_shards=1
+    )
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(
+            P('fsdp', None, None, None),
+            P('fsdp', None, None, None),
+            P('fsdp', None, None, None),
+        ),
+        out_specs=P('fsdp', None, None, None),
+        check_rep=False,
+    )
+    def sharded_attn(q_block, k_block, v_block):
+      # Inside shard_map, we act on a local shard (batch_size // num_devices)
+      # The kernel expects (heads, seq, dim), so we use vmap for the local batch
+      return jax.vmap(attn_kernel)(q_block, k_block, v_block)
+    qkv = sharded_attn(query_proj, key_proj, value_proj)
+    qkv = qkv.transpose(0, 2, 1, 3)
+    outputs = self.o_proj(qkv)
+    outputs = shard(outputs, self.shd_config.act_btd)
+    if cache is not None:
+      new_cache = {
+          'v': value_proj,
+          'k': key_proj,
+          'end_index': cache['end_index'] + seq_len,
+      }
+    else:
+      new_cache = None
+    return new_cache, outputs
   @jax.named_scope('attention')
   def __call__(
       self,
@@ -512,29 +555,26 @@ class Attention(nnx.Module):
       sin: jaxtyping.Array,
       cos: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    block_fn = (
+        self.splash_block if self.config.use_flash_attention else self.block
+    )
     if self.config.remat_config == RematConfig.BLOCK:
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
-      return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
+      return nnx.remat(block_fn.__func__)(self, x, cache, attn_mask, sin, cos)
     else:
-      return self.block(x, cache, attn_mask, sin, cos)
-
+      return block_fn(x, cache, attn_mask, sin, cos)
   @property
   def head_dim(self):
     return self.o_proj.shape[1]
-
   @property
   def num_heads(self):
     return self.q_proj.shape[0]
-
   @property
   def num_kv_heads(self):
     return self.k_proj.shape[1]
-
-
 class MLP(nnx.Module):
   """MLP module."""
-
   def __init__(
       self,
       config: ModelConfig,
@@ -577,7 +617,6 @@ class MLP(nnx.Module):
             kernel_init_fn, self.shd_config.ffw_weight_fd
         ),
     )
-
   def block(
       self,
       x: jaxtyping.Array,
@@ -586,18 +625,14 @@ class MLP(nnx.Module):
     activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
     return outputs
-
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     if self.config.remat_config == RematConfig.BLOCK:
       return nnx.remat(self.block.__func__)(self, x)
     else:
       return self.block(x)
-
-
 class DecoderLayer(nnx.Module):
   """DecoderLayer."""
-
   def __init__(
       self,
       config: ModelConfig,
@@ -626,7 +661,6 @@ class DecoderLayer(nnx.Module):
         config=config,
         rngs=rngs,
     )
-
   def __call__(
       self,
       x: jaxtyping.Array,
@@ -649,13 +683,9 @@ class DecoderLayer(nnx.Module):
     outputs = self.mlp(attn_output)
     outputs = residual + outputs
     return cache, outputs
-
-
 class Qwen2(BackendMappingMixin, nnx.Module):
   """Qwen2.5 model."""
-
   BACKEND_PACKAGE_PATH = __name__
-
   def __init__(
       self,
       config: ModelConfig,
@@ -691,7 +721,6 @@ class Qwen2(BackendMappingMixin, nnx.Module):
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
-
   def __call__(
       self,
       input_tokens: jaxtyping.Array,  # [B, L]
@@ -701,17 +730,14 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       output_hidden_states: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Qwen2 model.
-
     Args:
       input_tokens: input sequence of tokens.
       positions: input absolute positions.
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
-
     Returns:
       predicted_logits, new_cache
-
       predicted_logits: output logits predicted by the model
       new_cache: updated cache if the input cache is not None, None elsewhere.
     """
@@ -721,7 +747,6 @@ class Qwen2(BackendMappingMixin, nnx.Module):
         positions, self.config.head_dim, self.config.rope_theta
     )
     sin, cos = sin.astype(x.dtype), cos.astype(x.dtype)
-
     for i, layer in enumerate(self.layers):
       layer_name = f'layer_{i}'
       layer_cache = cache[layer_name] if cache else None
@@ -734,7 +759,6 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
-
     x = self.final_norm(x)
     if output_hidden_states:
       self.sow(nnx.Intermediate, 'all_hidden_states', x)
@@ -743,12 +767,9 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       logits = self.embedder.decode(x)
     else:
       logits = self.lm_head(x)
-
     return jnp.astype(logits, jnp.float32), new_cache  # pytype: disable=bad-return-type
-
   def get_model_input(self):
     """Returns a dummy model input for the transformer.
-
     This dummy input has a batch size compatible with FSDP sharding on a
     2-device axis.
     """
