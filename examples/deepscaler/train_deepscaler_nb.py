@@ -25,6 +25,7 @@ import math
 import sys
 from absl import logging as absl_logging
 from tunix.utils import math_utils
+from datetime import datetime
 
 import wandb
 
@@ -221,7 +222,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 100
+SAVE_INTERVAL_STEPS = 20
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -249,8 +250,8 @@ except wandb.errors.UsageError as e:
 
 
 try:
-  import datetime
-  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+  run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb.init(
     project="tunix",
     name=run_name,
@@ -337,10 +338,13 @@ if NOTEBOOK_ENV == "g3":
 else:
   DATA_PATH_PREFIX = "gs://tunix/data"
   MODEL_PATH_PREFIX = "gs://tunix/models"
-  CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
+  # CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
+  CKPT_DIR_PREFIX = "gs://lancewang-dev-supercomputer-testing/tunix/deepscaler"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_jax_exp22/01")
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/{timestamp}/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -619,8 +623,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
         # profiler
         # profiler_options = profiler.ProfilerOptions(
           # profiler_steps=1,
