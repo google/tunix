@@ -623,21 +623,17 @@ def grpo_loss_fn(
   is_all_one_group = jnp.all(jnp.isclose(grouped_advantages, 1.0), axis=-1)
   valid_group_mask = jnp.logical_not(is_all_zero_group | is_all_one_group)
   valid_sequence_mask = jnp.repeat(valid_group_mask, num_generations)[:, None]
-  valid_sequence_weights = jnp.squeeze(valid_sequence_mask, axis=-1).astype(
-    jnp.float32
+
+  grouped_adv_mean = jnp.mean(grouped_advantages, axis=-1, keepdims=True)
+  grouped_adv_std = jnp.std(grouped_advantages, axis=-1, keepdims=True)
+  normalized_grouped_advantages = (grouped_advantages - grouped_adv_mean) / (
+      grouped_adv_std + 1e-6
   )
-
-  valid_count = jnp.clip(valid_sequence_weights.sum(), min=1.0)
-  valid_adv_mean = (seq_advantages * valid_sequence_weights).sum() / valid_count
-  valid_adv_var = (
-    ((seq_advantages - valid_adv_mean) ** 2) * valid_sequence_weights
-  ).sum() / valid_count
-  valid_adv_std = jnp.sqrt(valid_adv_var + 1e-6)
-
-  normalized_seq_advantages = jnp.where(
-    valid_sequence_weights > 0,
-    (seq_advantages - valid_adv_mean) / valid_adv_std,
-    0.0,
+  normalized_grouped_advantages = jnp.where(
+      valid_group_mask[:, None], normalized_grouped_advantages, 0.0
+  )
+  normalized_seq_advantages = jnp.clip(
+      normalized_grouped_advantages.reshape((-1,)), -5.0, 5.0
   )
   advantages = normalized_seq_advantages[:, None]
   effective_completion_mask = completion_mask * valid_sequence_mask.astype(
