@@ -76,6 +76,10 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
     ent_coef: Entropy bonus coefficient.
+    ent_target_effective_group_ratio: Target ratio of non-degenerate groups.
+    ent_adapt_gain: Gain for adaptive entropy scaling based on target gap.
+    ent_coef_min_scale: Lower bound for adaptive entropy coefficient scale.
+    ent_coef_max_scale: Upper bound for adaptive entropy coefficient scale.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
@@ -97,6 +101,10 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   num_iterations: int = 1
   beta: float = 0.04
   ent_coef: float = 0.0
+  ent_target_effective_group_ratio: float = 1.0
+  ent_adapt_gain: float = 1.0
+  ent_coef_min_scale: float = 1.0
+  ent_coef_max_scale: float = 2.0
   epsilon: float = 0.2
   system_prompt: str = ""
   max_concurrency: int = 16
@@ -120,6 +128,26 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       raise ValueError(
           "ent_coef must be non-negative. Received: "
           f"{self.ent_coef}"
+      )
+    if not 0.0 <= self.ent_target_effective_group_ratio <= 1.0:
+      raise ValueError(
+          "ent_target_effective_group_ratio must be in [0, 1]. Received: "
+          f"{self.ent_target_effective_group_ratio}"
+      )
+    if self.ent_adapt_gain < 0.0:
+      raise ValueError(
+          "ent_adapt_gain must be non-negative. Received: "
+          f"{self.ent_adapt_gain}"
+      )
+    if self.ent_coef_min_scale <= 0.0:
+      raise ValueError(
+          "ent_coef_min_scale must be positive. Received: "
+          f"{self.ent_coef_min_scale}"
+      )
+    if self.ent_coef_max_scale < self.ent_coef_min_scale:
+      raise ValueError(
+          "ent_coef_max_scale must be >= ent_coef_min_scale. Received: "
+          f"{self.ent_coef_max_scale} < {self.ent_coef_min_scale}"
       )
 
 
@@ -238,6 +266,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
+        "entropy_coef": np.mean,
         "effective_entropy": np.mean,
         "effective_group_ratio": np.mean,
         "pg_loss": np.mean,
@@ -648,11 +677,13 @@ def grpo_loss_fn(
       jnp.greater(pg_loss_2, pg_loss_1), effective_completion_mask
   )
 
+  effective_group_ratio = jnp.mean(valid_group_mask.astype(jnp.float32))
+
   aux = {
-    "kl": 0.0,
-    "pg_loss": pg_loss,
-    "pg_clipfrac": clipped_fraction,
-    "ppo_kl": ppo_kl,
+      "kl": 0.0,
+      "pg_loss": pg_loss,
+      "pg_clipfrac": clipped_fraction,
+      "ppo_kl": ppo_kl,
   }
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
@@ -672,15 +703,36 @@ def grpo_loss_fn(
   )
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
   entropy_loss = ppo_helpers.masked_mean(token_entropy, effective_completion_mask)
+  entropy_coef = jnp.asarray(ent_coef, dtype=jnp.float32)
   if ent_coef != 0.0:
-    loss = loss - ent_coef * entropy_loss
+    target_ratio = jnp.asarray(
+        getattr(algo_config, "ent_target_effective_group_ratio", 1.0),
+        dtype=jnp.float32,
+    )
+    adapt_gain = jnp.asarray(
+        getattr(algo_config, "ent_adapt_gain", 1.0),
+        dtype=jnp.float32,
+    )
+    min_scale = jnp.asarray(
+        getattr(algo_config, "ent_coef_min_scale", 1.0),
+        dtype=jnp.float32,
+    )
+    max_scale = jnp.asarray(
+        getattr(algo_config, "ent_coef_max_scale", 2.0),
+        dtype=jnp.float32,
+    )
+    ratio_gap = target_ratio - effective_group_ratio
+    entropy_scale = jnp.clip(1.0 + adapt_gain * ratio_gap, min_scale, max_scale)
+    entropy_coef = entropy_coef * entropy_scale
+    loss = loss - entropy_coef * entropy_loss
   aux["entropy"] = entropy_loss
+  aux["entropy_coef"] = entropy_coef
 
   # Effective entropy over only groups with non-degenerate advantages.
   aux["effective_entropy"] = ppo_helpers.masked_mean(
       token_entropy, effective_completion_mask
   )
-  aux["effective_group_ratio"] = jnp.mean(valid_group_mask.astype(jnp.float32))
+  aux["effective_group_ratio"] = effective_group_ratio
 
   return loss, aux
 
