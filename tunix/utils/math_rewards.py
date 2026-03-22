@@ -26,6 +26,9 @@ RewardOutput = reward_types.RewardOutput
 
 _NUMERIC_PATTERN = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 _THOUSANDS_SEPARATOR_PATTERN = re.compile(r"(?<=\d),(?=\d{3}(\D|$))")
+_REPEATING_DECIMAL_PATTERN = re.compile(
+  r"^\s*([+-]?\d+)\.(\d*)\\overline\{(\d+)\}\s*$"
+)
 
 
 def _strip_math_mode_wrappers(text: str) -> str:
@@ -46,6 +49,18 @@ def _first_numeric_value(text: str) -> float | None:
   """Extracts the first numeric literal from text."""
   if not text:
     return None
+  repeating_match = _REPEATING_DECIMAL_PATTERN.match(text)
+  if repeating_match:
+    int_part_str, non_repeat_str, repeat_str = repeating_match.groups()
+    sign = -1.0 if int_part_str.startswith("-") else 1.0
+    int_part = abs(int(int_part_str))
+    m = len(non_repeat_str)
+    r = len(repeat_str)
+    non_repeat = int(non_repeat_str) if non_repeat_str else 0
+    repeat = int(repeat_str)
+    non_repeat_term = non_repeat / (10**m) if m > 0 else 0.0
+    repeat_term = repeat / ((10**m) * (10**r - 1))
+    return sign * (int_part + non_repeat_term + repeat_term)
   match = _NUMERIC_PATTERN.search(text)
   if not match:
     return None
@@ -53,6 +68,18 @@ def _first_numeric_value(text: str) -> float | None:
     return float(match.group(0))
   except ValueError:
     return None
+
+
+def _is_repeating_decimal_equivalent(given_answer: str, ground_truth: str) -> bool:
+  """Treats repeating-decimal notation and rounded decimals as equivalent."""
+  if "\\overline{" not in given_answer and "\\overline{" not in ground_truth:
+    return False
+  given_value = _first_numeric_value(given_answer)
+  truth_value = _first_numeric_value(ground_truth)
+  if given_value is None or truth_value is None:
+    return False
+  # Rounded decimal match (e.g., 16.67 and 16.\overline{6}).
+  return math.isclose(given_value, truth_value, rel_tol=1e-3, abs_tol=5e-3)
 
 
 def _is_numeric_close(given_answer: str, ground_truth: str) -> bool:
@@ -139,6 +166,8 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
       is_exact_or_symbolic = math_utils.grade_answer_mathd(
           normalized_model_answer, normalized_ground_truth
       ) or math_utils.grade_answer_sympy(
+          normalized_model_answer, normalized_ground_truth
+        ) or _is_repeating_decimal_equivalent(
           normalized_model_answer, normalized_ground_truth
       )
       if is_exact_or_symbolic:
