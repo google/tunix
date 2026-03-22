@@ -111,6 +111,7 @@ import argparse
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
 arg_parser.add_argument("--batch_size", type=int, default=128)
 arg_parser.add_argument("--mini_batch_size", type=int, default=128)
+arg_parser.add_argument("--train_micro_batch_size", type=int, default=2)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -187,6 +188,7 @@ ENABLE_FLASH_ATTN=True
 ENABLE_REMAT = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
+TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
 NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -619,7 +621,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=2,
+        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
