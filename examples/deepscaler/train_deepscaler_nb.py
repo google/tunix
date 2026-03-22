@@ -473,6 +473,8 @@ optimizer = optax.adamw(
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      # Capture the norm of the updates entering this point in the chain
+      optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
