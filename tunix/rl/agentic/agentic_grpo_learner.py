@@ -269,6 +269,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "entropy_coef": np.mean,
         "effective_entropy": np.mean,
         "effective_group_ratio": np.mean,
+        "strict_effective_group_ratio": np.mean,
         "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
@@ -674,12 +675,18 @@ def grpo_loss_fn(
   )
 
   effective_group_ratio = jnp.mean(valid_group_mask.astype(jnp.float32))
+  has_at_least_one_correct = jnp.any(jnp.isclose(grouped_advantages, 1.0), axis=-1)
+  is_all_correct = jnp.all(jnp.isclose(grouped_advantages, 1.0), axis=-1)
+  strict_group_mask = has_at_least_one_correct & jnp.logical_not(is_all_correct)
+  strict_effective_group_ratio = jnp.mean(strict_group_mask.astype(jnp.float32))
 
   aux = {
       "kl": 0.0,
       "pg_loss": pg_loss,
       "pg_clipfrac": clipped_fraction,
       "ppo_kl": ppo_kl,
+      "effective_group_ratio": effective_group_ratio,
+      "strict_effective_group_ratio": strict_effective_group_ratio,
   }
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
@@ -717,7 +724,7 @@ def grpo_loss_fn(
         getattr(algo_config, "ent_coef_max_scale", 2.0),
         dtype=jnp.float32,
     )
-    ratio_gap = target_ratio - effective_group_ratio
+    ratio_gap = target_ratio - strict_effective_group_ratio
     entropy_scale = jnp.clip(1.0 + adapt_gain * ratio_gap, min_scale, max_scale)
     entropy_coef = entropy_coef * entropy_scale
     loss = loss - entropy_coef * entropy_loss
@@ -728,7 +735,6 @@ def grpo_loss_fn(
   aux["effective_entropy"] = ppo_helpers.masked_mean(
       token_entropy, effective_completion_mask
   )
-  aux["effective_group_ratio"] = effective_group_ratio
 
   return loss, aux
 
