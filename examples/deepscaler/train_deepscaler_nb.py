@@ -667,16 +667,89 @@ show_hbm_usage("after RLCluster creation")
 
 # %%
 def metric_fn(prompts, completions, rewards, advantages, **kwargs):
-  del prompts, completions, advantages, kwargs
+  del prompts, advantages
   solve_all = (rewards > 0.1).all()
   solve_none = (rewards == 0).all()
+
+  answers = kwargs.get("answer", [None] * len(completions))
+  parsing_hits = 0
+  value_hits = 0
+
+  for completion, ground_truths in zip(completions, answers):
+    model_response = completion or ""
+    if math_rewards.THOUGHT_DELIMITER_END in model_response:
+      model_solution = model_response.split(math_rewards.THOUGHT_DELIMITER_END)[1]
+    else:
+      model_solution = model_response
+
+    model_answer = math_utils.extract_answer(model_solution)
+    parsed_ok = model_answer is not None
+    if parsed_ok:
+      parsing_hits += 1
+
+    if not parsed_ok or ground_truths is None:
+      continue
+
+    if isinstance(ground_truths, str | float | int):
+      ground_truths = [ground_truths]
+
+    processed_ground_truths = []
+    for truth in ground_truths:
+      truth = str(truth)
+      if "\\boxed" in truth:
+        processed_truth = math_utils.extract_answer(truth)
+        if processed_truth is not None:
+          processed_ground_truths.append(processed_truth)
+      else:
+        processed_ground_truths.append(truth)
+
+    normalized_model_answer = math_rewards._strip_math_mode_wrappers(
+        str(model_answer)
+    )
+    is_value_correct = False
+    for ground_truth in processed_ground_truths:
+      normalized_ground_truth = math_rewards._strip_math_mode_wrappers(
+          str(ground_truth)
+      )
+      if (
+          math_utils.grade_answer_mathd(
+              normalized_model_answer, normalized_ground_truth
+          )
+          or math_utils.grade_answer_sympy(
+              normalized_model_answer, normalized_ground_truth
+          )
+          or math_rewards._is_repeating_decimal_equivalent(
+              normalized_model_answer, normalized_ground_truth
+          )
+          or math_rewards._is_numeric_close(
+              normalized_model_answer, normalized_ground_truth
+          )
+      ):
+        is_value_correct = True
+        break
+
+    if is_value_correct:
+      value_hits += 1
+
+  denom = max(len(completions), 1)
+  solve_parsing_ratio = parsing_hits / denom
+  solve_value_ratio = value_hits / denom
+
   return {
-      "rewards/solve_all_ratio": (
+    "rewards/solve_all_ratio": (
           1 if solve_all else 0,
           np.mean,
       ),
-      "rewards/solve_none_ratio": (
+    "rewards/solve_none_ratio": (
           1 if solve_none else 0,
+          np.mean,
+      ),
+    "rewards/solve_parsing_ratio": (
+          solve_parsing_ratio,
+          np.mean,
+      ),
+    "rewards/solve_value_ratio": (
+          solve_value_ratio,
           np.mean,
       ),
   }
