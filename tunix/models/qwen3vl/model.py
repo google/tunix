@@ -562,24 +562,11 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
-    b, t, qh, d = query_proj.shape
-    _, s, kh, _ = key_proj.shape
-
-    # GQA
-    query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-    attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-    attn = attn.reshape((b, qh, t, s))
-
-    if attn_mask is not None:
-      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
-
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
+    # GQA flash attention: query [B,T,N,H], key/value [B,S,K,H], mask [B,1,T,S]
+    mask = jnp.expand_dims(attn_mask, -3) if attn_mask is not None else None
+    qkv = jax.nn.dot_product_attention(
+        query_proj, key_proj, value_proj, mask=mask, scale=self.scale
     )
-
-    attn = attn.reshape((b, kh, qh // kh, t, s))
-    qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-    qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)
