@@ -83,7 +83,7 @@ USE_QUANTIZATION = False  # True -> QLoRA, False -> LoRA
 LORA_RANK = 16
 LORA_ALPHA = float(2 * LORA_RANK)
 
-MAX_STEPS = 1000
+MAX_STEPS = 100
 EVAL_EVERY_N_STEPS = 20
 
 LORA_CKPT_DIR = '/tmp/qwen3vl_lora_ckpts'
@@ -387,7 +387,9 @@ def main():
   before = _generate_sample(
       lora_model, processor, sample_image, sample_question
   )
-  logger.info('Before training: %s', before)
+  logger.info(
+      'Before training: \n\tquestion: %s\n\tanswer: %s', sample_question, before
+  )
 
   # --- Data ---
   logger.info('Building DocumentVQA datasets (max_seq_len=%d)', MAX_SEQ_LEN)
@@ -421,7 +423,9 @@ def main():
 
   # --- Sample after training ---
   after = _generate_sample(lora_model, processor, sample_image, sample_question)
-  logger.info('After  training: %s', after)
+  logger.info(
+      'Before training: \n\tquestion: %s\n\tanswer: %s', sample_question, after
+  )
 
 
 if __name__ == '__main__' and '__file__' in globals():

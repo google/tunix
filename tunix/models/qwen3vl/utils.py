@@ -163,7 +163,6 @@ def encode_messages(
   Returns:
     EncodedBatch
   """
-  comp_masks: list[np.ndarray] = []
   texts: list[str] = []
   all_images: list[list[Any]] = []
 
@@ -177,37 +176,12 @@ def encode_messages(
             img = block.get('image')
             if img is not None:
               images.append(img)
-
-    full_text = processor.apply_chat_template(
-        conv, tokenize=False, add_generation_prompt=False
+    texts.append(
+        processor.apply_chat_template(
+            conv, tokenize=False, add_generation_prompt=False
+        )
     )
-    full_ids = processor.tokenizer.encode(full_text, add_special_tokens=False)
-
-    mask = np.zeros(len(full_ids), dtype=bool)
-    for idx, msg in enumerate(conv):
-      if msg['role'] not in loss_roles:
-        continue
-      prefix_ids = processor.tokenizer.encode(
-          processor.apply_chat_template(
-              conv[:idx], tokenize=False, add_generation_prompt=False
-          ),
-          add_special_tokens=False,
-      )
-      prefix_next_ids = processor.tokenizer.encode(
-          processor.apply_chat_template(
-              conv[: idx + 1], tokenize=False, add_generation_prompt=False
-          ),
-          add_special_tokens=False,
-      )
-      mask[len(prefix_ids) : len(prefix_next_ids)] = True
-
-    comp_masks.append(mask[:max_seq_len])
-    texts.append(full_text)
     all_images.append(images)
-
-  completion_mask = np.stack(
-      [np.pad(m, (0, max(0, max_seq_len - len(m)))) for m in comp_masks]
-  )  # [B, max_seq_len]
 
   batch = encode_batch(
       processor,
@@ -219,14 +193,46 @@ def encode_messages(
       truncation=truncation,
       pad_to_multiple_of=pad_to_multiple_of,
   )
+
+  # Build the completion mask by scanning the already-expanded input_ids for
+  # turn boundaries.  apply_chat_template(tokenize=False) inserts only a
+  # single <|image_pad|> placeholder per image, while the full processor
+  # expands it to hundreds of tokens.  Computing the mask from
+  # tokenizer.encode() would therefore mis-align it; scanning the final
+  # input_ids is the only reliable approach.
+  im_start = processor.tokenizer.convert_tokens_to_ids('<|im_start|>')
+  im_end = processor.tokenizer.convert_tokens_to_ids('<|im_end|>')
+
+  # Map the first sub-token of each role name to its role string.
+  role_first_token: dict[int, str] = {}
+  for role in ['user', 'system', 'assistant', 'tool']:
+    toks = processor.tokenizer.encode(role, add_special_tokens=False)
+    if toks:
+      role_first_token[toks[0]] = role
+
   B, L = batch.input_tokens.shape
-  out_comp_mask = np.zeros((B, L), dtype=bool)
-  clip = min(completion_mask.shape[1], L)
-  out_comp_mask[:, :clip] = completion_mask[:, :clip]
+  comp_masks = np.zeros((B, L), dtype=bool)
+  for b in range(B):
+    ids = batch.input_tokens[b]
+    i = 0
+    while i < L:
+      if ids[i] == im_start and i + 1 < L:
+        role = role_first_token.get(int(ids[i + 1]))
+        # Scan forward to find the closing <|im_end|>.
+        j = i + 1
+        while j < L and ids[j] != im_end:
+          j += 1
+        # ids[i:j+1] covers <|im_start|>role\ncontent<|im_end|>.
+        if role in loss_roles:
+          comp_masks[b, i : j + 1] = True
+        i = j + 1
+      else:
+        i += 1
+
   return EncodedBatch(
       input_tokens=batch.input_tokens,
       input_mask=batch.input_mask,
-      completion_mask=out_comp_mask,
+      completion_mask=comp_masks,
       positions=batch.positions,
       pixel_values=batch.pixel_values,
       vision_grid=batch.vision_grid,
