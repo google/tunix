@@ -55,19 +55,76 @@ absl_logging.set_stderrthreshold("info")
 parser = argparse.ArgumentParser(
     description="DeepSWE Training with Multi-turn Agentic Framework"
 )
-parser.add_argument(
-    "--model_version",
-    type=str,
-    default="Qwen3-32B",
-    help="Specify the model version (e.g., Qwen3-32B, Qwen3-1.7B)",
-)
 
-parser.add_argument(
-    "--node_selector_val",
-    type=str,
-    default="deepswe-cpu-pool",
-    help="Kubernetes node pool name for rollout tasks",
-)
+# General Config
+parser.add_argument("--models_base_dir", type=str, default="models")
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--model_version", type=str, default="Qwen3-32B")
+parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
+
+# Data & Training Flow
+parser.add_argument("--batch_size", type=int, default=1)
+parser.add_argument("--mini_batch_size", type=int, default=1)
+parser.add_argument("--num_batches", type=int, default=20)
+parser.add_argument("--num_test_batches", type=int, default=50)
+parser.add_argument("--train_fraction", type=float, default=1.0)
+parser.add_argument("--max_steps", type=int, default=10)
+parser.add_argument("--eval_every_n_steps", type=int, default=10)
+parser.add_argument("--num_epochs", type=int, default=1)
+parser.add_argument("--enable_remat", type=bool, default=True)
+
+# LoRA
+# LoRA Config
+parser.add_argument("--rank", type=int, default=64)
+parser.add_argument("--alpha", type=float, default=64.0)
+parser.add_argument("--train_with_lora", type=bool, default=False)
+
+# GRPO Config
+parser.add_argument("--num_generations", type=int, default=2)
+parser.add_argument("--num_iterations", type=int, default=1)
+parser.add_argument("--beta", type=float, default=0.001)
+parser.add_argument("--epsilon", type=float, default=0.2)
+parser.add_argument("--epsilon_high", type=float, default=0.28)
+
+# Rollout Config
+parser.add_argument("--max_prompt_length", type=int, default=4096)
+parser.add_argument("--max_response_length", type=int, default=8192)
+parser.add_argument("--temperature", type=float, default=1.0)
+parser.add_argument("--top_p", type=float, default=None)
+parser.add_argument("--top_k", type=int, default=None)
+parser.add_argument("--rollout_engine", type=str, default="vllm")
+parser.add_argument("--vllm_utilization", type=float, default=0.4)
+
+# Optimizer Config
+parser.add_argument("--learning_rate", type=float, default=1e-6)
+parser.add_argument("--b1", type=float, default=0.9)
+parser.add_argument("--b2", type=float, default=0.99)
+parser.add_argument("--weight_decay", type=float, default=0.1)
+parser.add_argument("--max_grad_norm", type=float, default=0.1)
+parser.add_argument("--warmup_ratio", type=float, default=0.1)
+
+# Checkpointing
+parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
+parser.add_argument("--max_to_keep", type=int, default=4)
+parser.add_argument("--save_interval_steps", type=int, default=500)
+
+# Microbatch Sizes
+parser.add_argument("--train_micro_batch_size", type=int, default=1)
+parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
+parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
+
+# DeepSWE Agentic Specifics
+parser.add_argument("--max_turns", type=int, default=20)
+parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
+parser.add_argument("--max_concurrency", type=int, default=1)
+parser.add_argument("--context_ratio", type=int, default=2)
+
+
+# Other
+parser.add_argument("--do_mem_profiling", type=bool, default=False)
+parser.add_argument("--model_dtype", type=str, default="bfloat16",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
+    help="Data type for the model (e.g., bfloat16, float32)")
+
 args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
@@ -112,7 +169,7 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from tunix.oss.examples.deepswe.swe_agent import (
+from examples.deepswe.swe_agent import (
     SWE_SYSTEM_PROMPT,
     SWE_SYSTEM_PROMPT_FN_CALL,
     SWE_USER_PROMPT,
@@ -122,8 +179,8 @@ from tunix.oss.examples.deepswe.swe_agent import (
 )
 
 # Assumed custom imports based on usage
-from tunix.oss.examples.deepswe.swe_agent import SWEAgent
-from tunix.oss.examples.deepswe.swe_env import SWEEnv
+from examples.deepswe.swe_agent import SWEAgent
+from examples.deepswe.swe_env import SWEEnv
 
 # %%
 # ==========================================
@@ -158,7 +215,7 @@ except Exception as e:
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-MODELS_BASE_DIR = os.path.abspath("models")  # Maps to ./models/
+MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
 MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
 
 print(f"Looking for local model at: {MODEL_PATH}...")
@@ -179,15 +236,15 @@ else:
   print(f"✅ Found existing local model at {MODEL_PATH}")
 
 # ====== Data ======
-TRAIN_FRACTION = 1.0
+TRAIN_FRACTION = args.train_fraction
 
 # ====== Reproducibility ======
-SEED = 42
+SEED = args.seed
 
 # ====== LoRA ======
-RANK = 64
-ALPHA = 64.0
-TRAIN_WITH_LORA = False
+RANK = args.rank
+ALPHA = args.alpha
+TRAIN_WITH_LORA = args.train_with_lora
 
 # ====== Sharding ======
 # MESH = [(4, 2), ("fsdp", "tp")]
@@ -195,73 +252,74 @@ TRAIN_WITH_LORA = False
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 4096
-MAX_RESPONSE_LENGTH = 8192
-TEMPERATURE = 0.85
-TOP_P = 0.95
-TOP_K = 50
-NUM_GENERATIONS = 2  # This corresponds to `G` in Algorithm 1
+MAX_PROMPT_LENGTH = args.max_prompt_length
+MAX_RESPONSE_LENGTH = args.max_response_length
+TEMPERATURE = args.temperature
+TOP_P = args.top_p
+TOP_K = args.top_k
+NUM_GENERATIONS = args.num_generations  # This corresponds to `G` in Algorithm 1
 
 # === other GRPO configs ===
-NUM_ITERATIONS = 1
-BETA = 0.001
-EPSILON = 0.2
-EPSILON_HIGH = 0.28
+NUM_ITERATIONS = args.num_iterations
+BETA = args.beta
+EPSILON = args.epsilon
+EPSILON_HIGH = args.epsilon_high
+
 # ====== Training ======
-MODEL_DTYPE = jnp.bfloat16
-ENABLE_REMAT = True
-BATCH_SIZE = 1
-MINI_BATCH_SIZE = 1
-NUM_BATCHES = 20
-NUM_TEST_BATCHES = 50
+DTYPE_MAP = {
+    "bfloat16": jnp.bfloat16,
+    "float16": jnp.float16,
+    "float32": jnp.float32,
+    "int32": jnp.int32,
+}
+MODEL_DTYPE = DTYPE_MAP[args.model_dtype]
+ENABLE_REMAT = args.enable_remat
+BATCH_SIZE = args.batch_size
+MINI_BATCH_SIZE = args.mini_batch_size
+NUM_BATCHES = args.num_batches
+NUM_TEST_BATCHES = args.num_test_batches
 
-COMPUTE_LOGPS_MICRO_BATCH_SIZE = 1
-TRAIN_MICRO_BATCH_SIZE = 1
-ROLLOUT_MICRO_BATCH_SIZE = 1
+COMPUTE_LOGPS_MICRO_BATCH_SIZE = args.compute_logps_micro_batch_size
+TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
+ROLLOUT_MICRO_BATCH_SIZE = args.rollout_micro_batch_size
 
-EVAL_EVERY_N_STEPS = 10
-NUM_EPOCHS = 100
+EVAL_EVERY_N_STEPS = args.eval_every_n_steps
+NUM_EPOCHS = args.num_epochs
 
 # Number of training steps.
-MAX_STEPS = 10
+MAX_STEPS = args.max_steps
 
 # Max turns in mult-agent interaction (set to 1 for single-turn)
-MAX_TURNS = 20
-PER_TURN_TIMEOUT_SECS = 300
-MAX_CONCURRENCY = 1
-CONTEXT_RATIO = 2  # Context length can be up to 2x responselength in DeepSWE due to multi-turn interactions and long responses, so we set context ratio to 2 to accommodate this.
+MAX_TURNS = args.max_turns
+PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
+
+MAX_CONCURRENCY = args.max_concurrency
+CONTEXT_RATIO = args.context_ratio  # Context length can be up to 2x responselength in DeepSWE due to multi-turn interactions and long responses, so we set context ratio to 2 to accommodate this.
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + (
     MAX_RESPONSE_LENGTH * CONTEXT_RATIO * MAX_TURNS
 )
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
-LEARNING_RATE = 1e-6
-B1 = 0.9
-B2 = 0.99
-WEIGHT_DECAY = 0.1
-WARMUP_STEPS = int(0.1 * MAX_STEPS)
-MAX_GRAD_NORM = 0.1
+LEARNING_RATE = args.learning_rate
+B1 = args.b1
+B2 = args.b2
+WEIGHT_DECAY = args.weight_decay
+WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
+MAX_GRAD_NORM = args.max_grad_norm
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 500
-MAX_TO_KEEP = 4
-DO_MEM_PROFILING = False
-
-# ====== Inference ======
-GENERATION_CONFIGS = {
-    "greedy": {"temperature": 1e-4, "top_k": 1, "top_p": 1.0},
-    "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
-    "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
-}
+SAVE_INTERVAL_STEPS = args.save_interval_steps
+MAX_TO_KEEP = args.max_to_keep
+DO_MEM_PROFILING = args.do_mem_profiling
 
 # ====== Rollout ======
-ROLLOUT_ENGINE = "vllm"
-CKPT_DIR = os.path.join("/tmp/cp", "deepswe_ckpt/01")
+ROLLOUT_ENGINE = args.rollout_engine
+CKPT_DIR = args.ckpt_dir
 
 # Max number of sequences to be processed in parallel by vllm.
 VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 
-VLLM_UTILIZATION = 0.4
+VLLM_UTILIZATION = args.vllm_utilization
 
 
 # 2. Max number of sequences to be processed in parallel by vllm.
@@ -417,6 +475,8 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
+    "return_logprobs": True,
+    "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
 sglang_jax_rollout_dict = {

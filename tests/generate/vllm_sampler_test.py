@@ -280,7 +280,7 @@ class VllmSamplerTest(absltest.TestCase):
         base_prompts[1]: ["Paris"],
         base_prompts[2]: ["Rayleigh", "scattering"],
         base_prompts[3]: ["relativity", "physics"],
-        base_prompts[4]: ["health", "energy"],
+        base_prompts[4]: ["health", "strength"],
         base_prompts[5]: ["winter"],
         base_prompts[6]: ["romeo", "juliet"],
         base_prompts[7]: ["pancake"],

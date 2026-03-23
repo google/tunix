@@ -150,6 +150,34 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertAlmostEqual(result_traj.steps[0].mc_return, 3.25)
     self.assertAlmostEqual(result_traj.reward, 3.5)  # 1.0 + 2.5
 
+  def test_collect_with_list_logprobs(self):
+    # Test that it works with logprobs as a list (which doesn't have .size)
+    self.mock_env.max_steps = 1
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, True, {}),
+    ]
+
+    def _mock_rollout_output_list_logprobs(text, tokens):
+      return RolloutOutput(
+          text=[text],
+          logits=[jnp.zeros_like(tokens)],
+          tokens=[tokens],
+          left_padded_prompt_tokens=np.array([1]),
+          logprobs=[[0.1] * len(tokens)],  # logprobs as a list
+      )
+
+    self.mock_model_call.side_effect = [_mock_rollout_output_list_logprobs('resp', np.array([1, 2]))]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    # This should not raise AttributeError: 'list' object has no attribute 'size'
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertLen(result_traj.steps, 1)
+    self.assertEqual(len(result_traj.steps[0].logprobs), 2)
+
   def test_collect_conversation_mode(self):
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,

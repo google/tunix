@@ -817,36 +817,35 @@ def transfer_state_with_mappings(
   return dst_state.from_flat_path(tgt_flat_list)
 
 
-def _slice_scanned_param(
+def _unstack_scanned_param(
     src_val: jax.Array | np.ndarray | Any,
     tgt_val: jax.Array | np.ndarray | Any,
-    slice_idx: int,
     key_path: str,
-) -> jax.Array | np.ndarray | Any:
-  """Slices a scanned parameter dynamically detecting the scan axis.
+) -> Tuple[jax.Array | np.ndarray | Any]:
+  """Unstacks a scanned parameter by moving the scan axis to 0.
 
-  This helper finds the dimension in src_val that needs to be sliced to match
-  tgt_val's shape. It is used when transferring weights from a scanned
-  representation (e.g., MaxText) to an unrolled one (e.g., vLLM).
+  This helper finds the dimension in src_val that needs to be removed to match
+  tgt_val's shape, transposes that axis to the 0th position, and unstacks it. It
+  is used when transferring weights from a scanned representation (e.g., MaxText)
+  to an unrolled one (e.g., vLLM).
 
   Args:
-      src_val: The source array (scanned) to slice from.
-      tgt_val: The target array whose shape we want to match.
-      slice_idx: The index along the scanned axis to extract.
-      key_path: The dot-separated path to the parameter for debugging.
+    src_val: The source array (scanned) to slice from.
+    tgt_val: The target array whose shape we want to match.
+    key_path: The dot-separated path to the parameter for debugging.
 
   Returns:
-      The sliced array matching the target shape, or the original src_val if
-      slicing failed or was unnecessary.
+      A tuple of unstacked arrays, or a tuple containing just the original src_val 
+      if unstacking fails or is unnecessary.
   """
   if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
-    return src_val
+    return (src_val,)
 
   src_shape = src_val.shape
   tgt_shape = tgt_val.shape
 
   if src_shape == tgt_shape:
-    return src_val
+    return (src_val,)
 
   if len(src_shape) == len(tgt_shape) + 1:
     scan_axis = None
@@ -857,10 +856,30 @@ def _slice_scanned_param(
         break
 
     if scan_axis is not None:
-      # Construct slice: (:, :, slice_idx, :, :)
-      slicer = [slice(None)] * len(src_shape)
-      slicer[scan_axis] = slice_idx
-      return src_val[tuple(slicer)]
+      # 1. Transpose the scanned axis to the 0th position
+      if scan_axis != 0:
+        perm = (scan_axis,) + tuple(i for i in range(len(src_shape)) if i != scan_axis)
+        if hasattr(src_val, 'transpose'):
+          src_val = src_val.transpose(perm)
+        elif isinstance(src_val, np.ndarray):
+          src_val = np.transpose(src_val, perm)
+
+      # 2. Unstack along the 0th axis
+      # Handling JAX version differences where unstack might be under jnp
+      try:
+        if hasattr(jax, 'unstack'):
+          return jax.unstack(src_val)
+        elif hasattr(jnp, 'unstack'):
+          return jnp.unstack(src_val)
+        else:
+           # Fallback for older JAX versions
+          return [src_val[i] for i in range(src_val.shape[0])]
+      except Exception as e:
+        logging.debug(
+            "Failed to unstack parameter '%s'. Error: %s. Using original.",
+            key_path, e
+        )
+        return (src_val,)
 
     logging.warning(
         "Shape mismatch in scanned param '%s'. Src: %s, Tgt: %s. Cannot"
@@ -868,17 +887,7 @@ def _slice_scanned_param(
         key_path, src_shape, tgt_shape,
     )
 
-  # Fallback to direct slicing if the above logic fails, which may work for simple cases
-  try:
-    return src_val[slice_idx]
-
-  except (IndexError, TypeError) as e:
-    logging.debug(
-        "Direct slicing fallback failed for '%s' (slice_idx=%d). "
-        "Error: %s. Using original value.",
-        key_path, slice_idx, e
-    )
-    return src_val
+  return (src_val,)
 
 
 def transfer_state_directly(
@@ -959,8 +968,10 @@ def transfer_state_directly(
 
     filtered_src_flat = {}
     filtered_tgt_flat = {}
+    
+    # Cache to store unstacked scanned arrays to avoid repeated work
+    unstacked_cache = {}
 
-    # Compile regex once
     layer_pattern = re.compile(r'^layers_(\d+)$')
 
     for key_tuple, tgt_val in tgt_flat.items():
@@ -1006,11 +1017,28 @@ def transfer_state_directly(
             break
 
         if found_candidate:
-          src_val = src_flat[found_candidate]
-          # Slice the scanned parameter
-          sliced_val = _slice_scanned_param(
-              src_val, tgt_val, layer_idx, str(key_tuple)
-          )
+          # Cache unstacked params to guarantee we only transpose/unstack ONCE
+          if found_candidate not in unstacked_cache:
+            src_val = src_flat[found_candidate]
+            unstacked_cache[found_candidate] = _unstack_scanned_param(
+                src_val, tgt_val, str(found_candidate)
+            )
+
+          unstacked_list = unstacked_cache[found_candidate]
+
+          try:
+            # Handle fallback cases where unstacking returned original value
+            if len(unstacked_list) == 1 and layer_idx > 0:
+              sliced_val = unstacked_list[0]
+            else:
+              sliced_val = unstacked_list[layer_idx]
+          except IndexError as e:
+            logging.debug(
+                "Index error pulling layer %d for '%s'. Error: %s. Using original.",
+                layer_idx, found_candidate, e
+            )
+            sliced_val = src_flat[found_candidate]
+
           sliced_val = _apply_dtype_cast(
               sliced_val, tgt_val.dtype, str(key_tuple)
           )

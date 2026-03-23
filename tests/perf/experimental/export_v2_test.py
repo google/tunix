@@ -27,13 +27,12 @@ class ExportTest(parameterized.TestCase):
   def test_perf_metrics_export(self):
     # Backward compatibility check
     with tempfile.TemporaryDirectory() as tmp_dir:
-      exporter = export.PerfMetricsExport(trace_dir=tmp_dir)
-
-      # Create dummy timeline
-      t = tracer.PerfTracer(export_fn=exporter.export_metrics)
-      with t.span("test_span"):
-        time.sleep(0.001)
-      t.export()
+      with export.PerfMetricsExport(trace_dir=tmp_dir) as exporter:
+        # Create dummy timeline
+        t = tracer.PerfTracer(export_fn=exporter.export_metrics)
+        with t.span("test_span"):
+          time.sleep(0.001)
+        t.export()
 
       files = os.listdir(tmp_dir)
       self.assertLen(files, 1)
@@ -63,25 +62,52 @@ class ExportTest(parameterized.TestCase):
           expected_dir="/my/custom/path",
       ),
   )
-  @mock.patch.object(export.trace_writer_lib, "PerfettoTraceWriter", autospec=True)
+  @mock.patch.object(
+      export.trace_writer_lib, "PerfettoTraceWriter", autospec=True
+  )
   def test_perf_metrics_export_initialization_with_trace_writer_enabled(
       self, mock_writer_cls, trace_dir, expected_dir
   ):
-    exporter = export.PerfMetricsExport(
+    with export.PerfMetricsExport(
         enable_trace_writer=True, trace_dir=trace_dir
-    )
-    mock_writer_cls.assert_called_once_with(expected_dir)
-    # export_metrics shouldn't crash
-    exporter.export_metrics({})
+    ) as exporter:
+      mock_writer_cls.assert_called_once_with(expected_dir)
+      # export_metrics shouldn't crash
+      exporter.export_metrics({})
 
   @mock.patch.object(export.trace_writer_lib, "NoopTraceWriter", autospec=True)
   def test_perf_metrics_export_initialization_with_trace_writer_disabled(
       self, mock_noop_cls
   ):
-    exporter = export.PerfMetricsExport(enable_trace_writer=False)
-    mock_noop_cls.assert_called_once_with()
-    # export_metrics shouldn't crash
-    exporter.export_metrics({})
+    with export.PerfMetricsExport(enable_trace_writer=False) as exporter:
+      # export_metrics shouldn't crash
+      exporter.export_metrics({})
+      mock_noop_cls.assert_called_once_with()
+      # Test that the writer is actually set to the NoopTraceWriter instance
+      self.assertEqual(exporter._writer, mock_noop_cls.return_value)
+
+  @mock.patch.object(
+      export.concurrent.futures, "ThreadPoolExecutor", autospec=True
+  )
+  def test_perf_metrics_export_shutdown_waits_for_executor(
+      self, mock_executor_cls
+  ):
+    mock_executor_instance = mock_executor_cls.return_value
+    with export.PerfMetricsExport(enable_trace_writer=True):
+      pass
+    mock_executor_instance.shutdown.assert_called_once_with(wait=True)
+
+  @mock.patch.object(
+      export.concurrent.futures, "ThreadPoolExecutor", autospec=True
+  )
+  def test_perf_metrics_export_shutdown_can_be_called_manually(
+      self, mock_executor_cls
+  ):
+    mock_executor_instance = mock_executor_cls.return_value
+    exporter = export.PerfMetricsExport(enable_trace_writer=True)
+    exporter.shutdown(wait=False)
+    mock_executor_instance.shutdown.assert_called_once_with(wait=False)
+    self.assertIsNone(exporter._executor)
 
 
 if __name__ == "__main__":
