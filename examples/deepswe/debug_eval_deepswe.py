@@ -45,6 +45,11 @@ Usage:
   NUM_TASKS=5 \
   python3 -u examples/deepswe/debug_eval_deepswe.py
 
+  # Full test split:
+  ENABLE_GUARD=false \
+  RUN_ALL_TASKS=true \
+  python3 -u examples/deepswe/debug_eval_deepswe.py
+
   # By instance ID:
   INSTANCE_ID=django__django-12345 \
   python3 -u examples/deepswe/debug_eval_deepswe.py
@@ -79,23 +84,26 @@ DATASET_NAME = os.getenv("DATASET_NAME", "R2E-Gym/SWE-Bench-Verified")
 DATASET_SPLIT = os.getenv("DATASET_SPLIT", "test")
 DATASET_CACHE = os.getenv("DATASET_CACHE", "/scratch/dataset_cache")
 
-MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-4B-Instruct-2507")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
-MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
-MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "512"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
+MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "2048"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 
-# Task selection (priority: INSTANCE_ID > TASK_INDICES > NUM_TASKS > TASK_INDEX)
+# Task selection (priority: INSTANCE_ID > TASK_INDICES > RUN_ALL_TASKS > NUM_TASKS > TASK_INDEX)
 TASK_INDEX = int(os.getenv("TASK_INDEX", "0"))
 INSTANCE_ID = os.getenv("INSTANCE_ID", "")
 TASK_INDICES = os.getenv("TASK_INDICES", "")  # e.g. "0,1,5,10"
+RUN_ALL_TASKS = os.getenv("RUN_ALL_TASKS", "false").lower() == "true"
 NUM_TASKS = int(os.getenv("NUM_TASKS", "0"))  # run first N tasks
 
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", os.path.join(os.getcwd(), "debug_eval_output"))
+OUTPUT_DIR = os.getenv(
+    "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "debug_eval_output")
+)
 
 # Rollout engine: "vanilla", "vllm", or "sglang_jax"
-ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
+ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
 
 # vLLM-specific
 VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.4"))
@@ -167,6 +175,8 @@ def select_entries():
   if TASK_INDICES:
     indices = [int(i.strip()) for i in TASK_INDICES.split(",")]
     return [all_entries[i] for i in indices if i < len(all_entries)]
+  if RUN_ALL_TASKS:
+    return all_entries
   if NUM_TASKS > 0:
     return all_entries[:NUM_TASKS]
   return [all_entries[TASK_INDEX]]

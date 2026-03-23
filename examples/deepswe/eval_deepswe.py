@@ -44,9 +44,9 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-4B-Instruct-2507")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 # Evaluation
-MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
 MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "2048"))
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "1"))
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "2"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
 
@@ -54,10 +54,10 @@ TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
 ENABLE_GUARD = os.getenv("ENABLE_GUARD", "true").lower() == "true"
 
 # Rollout engine: "vanilla", "vllm", or "sglang_jax"
-ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vanilla")
+ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
 
 # vLLM-specific
-VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.4"))
+VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.8"))
 VLLM_INIT_RANDOM_WEIGHTS = os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
 VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
 VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", str(MAX_CONCURRENT)))
@@ -68,7 +68,9 @@ SGLANG_INIT_RANDOM_WEIGHTS = os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "false").lo
 SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 
 # Output
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/scratch/eval_results")
+OUTPUT_DIR = os.getenv(
+    "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "eval_results")
+)
 
 # ========================== Logging ==========================
 
@@ -288,10 +290,15 @@ from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 
 def pairs_generator():
   """Yield (agent, env) pairs for each dataset entry."""
-  for entry in entries:
+  for pair_index, entry in enumerate(entries):
     agent = SWEAgent()
     env_cls = GuardedSWEEnv if ENABLE_GUARD else SWEEnv
-    env = env_cls(entry=entry, max_steps=MAX_STEPS)
+    env = env_cls(
+        entry=entry,
+        max_steps=MAX_STEPS,
+        pair_index=pair_index,
+        group_id=pair_index,
+    )
     yield agent, env
 
 
