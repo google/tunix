@@ -602,13 +602,13 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
   solve_all = (rewards > 0.1).all()
   solve_none = (rewards == 0).all()
   return {
-      "rewards/solve_all": (
+      "rewards/solve_all_ratio": (
           1 if solve_all else 0,
-          np.sum,
+          np.mean,
       ),
-      "rewards/solve_none": (
+      "rewards/solve_none_ratio": (
           1 if solve_none else 0,
-          np.sum,
+          np.mean,
       ),
   }
 
