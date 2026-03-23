@@ -17,25 +17,16 @@ set -x # Enable xtrace
 
 # specify at cmd line to override defaults, e.g.
 model_name=${model_name:-"Qwen3-1.7B-base"}
-batch_size=${batch_size:-1}
-num_batches=${num_batches:-3738}
+batch_size=${batch_size:-8}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
-train_fraction=${train_fraction:-1.0}
+train_fraction=${train_fraction:-0.8}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
-echo "  Num Batches: $num_batches"
 echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
-
-max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
-max_steps=$(printf "%.0f" "$max_steps_float")
-warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
-
-echo "Max steps: $max_steps"
-echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
@@ -58,7 +49,6 @@ python3 -m tunix.cli.grpo_main \
   tokenizer_config.add_bos=false \
   dataset_name="gsm8k" \
   batch_size=$batch_size \
-  num_batches=$num_batches \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
@@ -67,14 +57,11 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.actor_optimizer_config.init_value=0.0 \
   rl_training_config.actor_optimizer_config.end_value=0.0 \
   rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio \
-  rl_training_config.actor_optimizer_config.warmup_steps=$warmup_steps \
-  rl_training_config.actor_optimizer_config.decay_steps=$max_steps \
   rl_training_config.actor_optimizer_config.b1=0.9 \
   rl_training_config.actor_optimizer_config.b2=0.99 \
   rl_training_config.actor_optimizer_config.weight_decay=0.1 \
   rl_training_config.actor_optimizer_config.max_grad_norm=0.1 \
   rl_training_config.eval_every_n_steps=10 \
-  rl_training_config.max_steps=$max_steps \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/${model_name}" \
   rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
   rl_training_config.checkpointing_options.save_interval_steps=500 \
