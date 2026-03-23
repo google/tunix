@@ -839,6 +839,30 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
         text_positions, attention_mask
     )
 
+    # When a KV cache is provided the stored keys/values span the full cache
+    # size, so the key axis of the attention score matrix is [B, heads, L,
+    # cache_size] rather than [B, heads, L, L].  Extend the causal mask to
+    # cover the cache key dimension.
+    if cache is not None:
+      first_layer_cache = next(iter(cache.values()))
+      cache_size = first_layer_cache['k'].shape[1]
+      seq_len_q = causal_mask.shape[1]
+      if seq_len_q == 1:
+        # Decode step: attend to all filled cache slots (0..end_index inclusive,
+        # since Attention.block writes the new token before computing attention).
+        end_index = first_layer_cache['end_index'][0]  # scalar
+        cache_pos = jnp.arange(cache_size)  # [cache_size]
+        causal_mask = (cache_pos[None, None, :] <= end_index).astype(jnp.bool_)
+        causal_mask = jnp.broadcast_to(
+            causal_mask, (input_tokens.shape[0], 1, cache_size)
+        )
+      else:
+        # Prefill: standard causal mask padded to cache_size with False so that
+        # empty slots beyond the prompt length are blocked.
+        pad_len = cache_size - causal_mask.shape[-1]
+        if pad_len > 0:
+          causal_mask = jnp.pad(causal_mask, [(0, 0), (0, 0), (0, pad_len)])
+
     vision_embeds = None
     if self.config.vision_config and pixel_values is not None:
       image_pad_id = self.config.vision_config.image_pad_id
