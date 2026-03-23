@@ -479,7 +479,7 @@ def compare_layerwise(
 def main(
     model_id_or_dir: str = 'Qwen/Qwen3-VL-4B-Instruct',
     prompt: str = 'The quick brown fox jumps over the lazy dog.',
-    device: str = 'cuda',
+    device: str = 'cpu',
     dtype: str = 'bfloat16',
     image_url: str | None = None,
     config: model_lib.ModelConfig | None = None,
@@ -534,7 +534,7 @@ if __name__ == '__main__' and '__file__' in globals():
   )
   parser.add_argument(
       '--device',
-      default='cuda',
+      default='cpu',
       help='PyTorch device (e.g. "cuda" or "cpu").',
   )
   parser.add_argument(
@@ -545,7 +545,7 @@ if __name__ == '__main__' and '__file__' in globals():
   )
   parser.add_argument(
       '--image_url',
-      default=None,
+      default='https://fastly.picsum.photos/id/541/300/200.jpg?hmac=EU9KBKReX22D8zAU9GY1iRAuNDwf5pJa3hyZA2eHiDQ',
       help='Path or URL of an image for multimodal (vision-language) testing.',
   )
   _args = parser.parse_args()
