@@ -20,6 +20,7 @@ Usage:
 """
 
 import asyncio
+from collections import Counter
 import json
 import logging
 import os
@@ -348,19 +349,54 @@ async def run_evaluation():
 
 
 def compute_pass_at_k(results):
-  """Compute and print Pass@1 statistics."""
+  """Compute and print evaluation statistics."""
   total = len(results)
   if total == 0:
     logger.warning("No results to evaluate.")
     return
 
-  correct = sum(1 for r in results if r["trajectory"].reward > 0)
+  trajectories = [r["trajectory"] for r in results]
+  correct = sum(1 for traj in trajectories if traj.reward > 0)
+  total_reward = sum(float(traj.reward) for traj in trajectories)
+  total_steps = sum(len(traj.steps) for traj in trajectories)
+  status_counts = Counter(getattr(traj.status, "name", str(traj.status))
+                          for traj in trajectories)
+
+  guard_blocked_trajectories = 0
+  total_guard_blocks = 0
+  guard_reason_counts = Counter()
+  for traj in trajectories:
+    traj_guard_blocks = 0
+    for step in traj.steps:
+      info = getattr(step, "info", {}) or {}
+      if info.get("guard_blocked"):
+        traj_guard_blocks += 1
+        total_guard_blocks += 1
+        guard_reason_counts[info.get("guard_reason", "unknown")] += 1
+    if traj_guard_blocks:
+      guard_blocked_trajectories += 1
+
+  avg_reward = total_reward / total
+  avg_steps = total_steps / total
+
   logger.info("=" * 50)
   logger.info("Evaluation Results")
   logger.info("=" * 50)
   logger.info("Total instances:  %d", total)
   logger.info("Resolved:         %d", correct)
   logger.info("Pass@1:           %.4f", correct / total)
+  logger.info("Avg reward:       %.4f", avg_reward)
+  logger.info("Avg steps:        %.2f", avg_steps)
+  logger.info("Status counts:    %s", dict(status_counts))
+  logger.info(
+      "Guarded trajs:    %d/%d (%.2f%%)",
+      guard_blocked_trajectories,
+      total,
+      100.0 * guard_blocked_trajectories / total,
+  )
+  logger.info("Guard blocks:     %d", total_guard_blocks)
+  if guard_reason_counts:
+    logger.info("Guard reasons:    %s", dict(guard_reason_counts))
   logger.info("=" * 50)
 
 
@@ -379,6 +415,17 @@ def save_results(results):
           "docker_image": entry.get("docker_image", ""),
           "reward": traj.reward,
           "num_steps": len(traj.steps),
+          "status": getattr(traj.status, "name", str(traj.status)),
+          "guard_blocked_steps": sum(
+              1
+              for step in traj.steps
+              if ((getattr(step, "info", {}) or {}).get("guard_blocked"))
+          ),
+          "guard_reasons": sorted({
+              (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
+              for step in traj.steps
+              if ((getattr(step, "info", {}) or {}).get("guard_blocked"))
+          }),
       }
       f.write(json.dumps(record) + "\n")
 
