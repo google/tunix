@@ -45,8 +45,9 @@ MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 # Evaluation
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
+MAX_PROMPT_LENGTH = int(os.getenv("MAX_PROMPT_LENGTH", "4096"))
 MAX_RESPONSE_LENGTH = int(
-    os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "2048"))
+    os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "8192"))
 )
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "2"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
@@ -264,13 +265,30 @@ else:
 sampler_lock = threading.Lock()
 
 
+def build_prompt_within_budget(chat_completions):
+  """Render a chat prompt while trimming oldest history to fit token budget."""
+  if not chat_completions:
+    return "", 0
+
+  system_messages = chat_completions[:1]
+  tail_messages = chat_completions[1:]
+  kept_messages = list(tail_messages)
+
+  while True:
+    prompt = chat_parser.parse(
+        system_messages + kept_messages,
+        add_generation_prompt=True,
+        is_first_msg=True,
+    )
+    prompt_tokens = len(tokenizer.encode(prompt))
+    if prompt_tokens <= MAX_PROMPT_LENGTH or not kept_messages:
+      return prompt, prompt_tokens
+    kept_messages = kept_messages[1:]
+
+
 def model_call(chat_completions, env_unused):
   """Thread-safe model inference via tunix sampler."""
-  prompt = chat_parser.parse(
-      chat_completions,
-      add_generation_prompt=True,
-      is_first_msg=True,
-  )
+  prompt, _ = build_prompt_within_budget(chat_completions)
   with sampler_lock:
     out = sampler(
         prompt,

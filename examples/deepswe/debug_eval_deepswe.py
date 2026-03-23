@@ -88,8 +88,9 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
+MAX_PROMPT_LENGTH = int(os.getenv("MAX_PROMPT_LENGTH", "4096"))
 MAX_RESPONSE_LENGTH = int(
-    os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "2048"))
+    os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "8192"))
 )
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 
@@ -362,6 +363,27 @@ def _chat_to_gemini(chat_completions):
   system_instruction = "\n".join(system_parts) if system_parts else None
   return contents, system_instruction
 
+
+def build_prompt_within_budget(chat_completions):
+  """Render a chat prompt while trimming oldest history to fit token budget."""
+  if not chat_completions:
+    return "", 0
+
+  system_messages = chat_completions[:1]
+  tail_messages = chat_completions[1:]
+  kept_messages = list(tail_messages)
+
+  while True:
+    prompt = chat_parser.parse(
+        system_messages + kept_messages,
+        add_generation_prompt=True,
+        is_first_msg=True,
+    )
+    prompt_tokens = len(tokenizer.encode(prompt))
+    if prompt_tokens <= MAX_PROMPT_LENGTH or not kept_messages:
+      return prompt, prompt_tokens
+    kept_messages = kept_messages[1:]
+
 # ========================== Agent & Env ==========================
 
 from swe_agent import SWEAgent, parse_xml_response
@@ -437,12 +459,9 @@ def run_single_eval(entry, traj_file):
       prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
       response_tokens = getattr(usage, "candidates_token_count", 0) or 0
     else:
-      prompt = chat_parser.parse(
-          agent.chat_completions,
-          add_generation_prompt=True,
-          is_first_msg=True,
+      prompt, prompt_tokens = build_prompt_within_budget(
+          agent.chat_completions
       )
-      prompt_tokens = len(tokenizer.encode(prompt))
       with sampler_lock:
         out = sampler(
             prompt,
