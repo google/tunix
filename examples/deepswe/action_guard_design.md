@@ -59,9 +59,9 @@ agent.update_from_model(response)
 | File | Type | Description |
 |---|---|---|
 | `examples/deepswe/action_guard.py` | New ~300 lines | Core guard module: ActionGuard, GuardConfig, GuardVerdict |
-| `examples/deepswe/guarded_engine.py` | New ~80 lines | GuardedTrajectoryCollectEngine, subclasses the original engine |
+| `examples/deepswe/guarded_swe_env.py` | New ~50 lines | `SWEEnv` wrapper that applies guard checks before env execution |
 | `examples/deepswe/debug_eval_deepswe.py` | Modified ~15 lines | Guard integration in the debug loop |
-| `examples/deepswe/eval_deepswe.py` | Modified ~5 lines | Uses `engine_cls=GuardedTrajectoryCollectEngine` |
+| `examples/deepswe/eval_deepswe.py` | Modified ~5 lines | Switches between `SWEEnv` and `GuardedSWEEnv` via `ENABLE_GUARD` |
 
 **Untouched files**: base_agent.py, agent_types.py, trajectory_collect_engine.py, rollout_orchestrator.py — all framework-level files remain unchanged.
 
@@ -470,66 +470,37 @@ agent.update_from_env(observation=obs, reward=reward, done=done, info=info)
 ### 10.2 eval_deepswe.py (parallel eval)
 
 ```python
-from guarded_engine import GuardedTrajectoryCollectEngine
-from action_guard import GuardConfig
+from guarded_swe_env import GuardedSWEEnv
+from swe_env import SWEEnv
 
-orchestrator = RolloutOrchestrator(
-    engine_cls=GuardedTrajectoryCollectEngine,
-    engine_kwargs=dict(
-        model_call=model_call,
-        timeout=TIMEOUT,
-        guard_config=GuardConfig(),
-    ),
-    max_concurrency=MAX_CONCURRENT,
-    rollout_sync_lock=agentic_utils.RolloutSyncLock(),
-)
+env_cls = GuardedSWEEnv if ENABLE_GUARD else SWEEnv
+env = env_cls(entry=entry, max_steps=MAX_STEPS)
 ```
 
-`RolloutOrchestrator` already supports an `engine_cls` parameter, making the swap trivial.
+The rollout engine stays unchanged. Guarding lives in the SWE environment wrapper.
 
-### 10.3 GuardedTrajectoryCollectEngine
+### 10.3 GuardedSWEEnv
 
 ```python
-class GuardedTrajectoryCollectEngine(TrajectoryCollectEngine):
+class GuardedSWEEnv(SWEEnv):
     def __init__(self, *args, guard_config=None, **kwargs):
-        # guard_config is captured here, not passed to parent
-        super().__init__(*args, **kwargs)
         self.guard = ActionGuard(guard_config or GuardConfig())
+        super().__init__(*args, **kwargs)
 
-    async def _reset(self):
-        await super()._reset()
+    def _initial_observation(self):
         self.guard.reset()
+        return super()._initial_observation()
 
-    async def _one_step(self) -> bool:
-        # model call
-        resp = await asyncio.get_event_loop().run_in_executor(
-            None, self.model_call, self.agent.chat_completions,
-            self.env, **self.model_call_kwargs,
-        )
-        action = self.agent.update_from_model(resp).action
-        if action is None:
-            action = []
-
-        # guard evaluation
+    def _step_impl(self, action):
         verdict = self.guard.evaluate(action)
         if verdict.blocked:
-            obs, rew, done, info = verdict.message, 0.0, False, {"guard_blocked": True}
-        else:
-            obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
-                None, self.env.step, action
+            return EnvStepResult(
+                observation=verdict.message,
+                reward=0.0,
+                done=False,
+                info={"guard_blocked": True, "guard_reason": verdict.reason},
             )
-            self.guard.record_outcome(action, str(obs))
-
-        self.agent.update_from_env(obs, rew, done, info)
-
-        # tokenization (same as parent _one_step lines 303-334)
-        ...
-
-        # timeout check
-        if time.time() - self._start_ts > self.timeout:
-            self.agent.get_current_state().done = True
-            return True
-        return done
+        return super()._step_impl(action)
 ```
 
 ---
@@ -552,7 +523,7 @@ class GuardedTrajectoryCollectEngine(TrajectoryCollectEngine):
 ## 12. Implementation Order
 
 1. **`action_guard.py`** — Core guard logic (no external dependencies, pure Python + re)
-2. **`guarded_engine.py`** — Engine subclass (depends on action_guard.py + trajectory_collect_engine.py)
+2. **`guarded_swe_env.py`** — SWE environment wrapper (depends on action_guard.py + swe_env.py)
 3. **`debug_eval_deepswe.py`** — Integrate into debug loop (easiest to test)
 4. **`eval_deepswe.py`** — Integrate into production eval
 

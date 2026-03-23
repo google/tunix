@@ -352,8 +352,8 @@ def _chat_to_gemini(chat_completions):
 
 # ========================== Agent & Env ==========================
 
-from action_guard import ActionGuard, GuardConfig
 from swe_agent import SWEAgent, parse_xml_response
+from guarded_swe_env import GuardedSWEEnv
 from swe_env import SWEEnv
 
 
@@ -373,7 +373,8 @@ def run_single_eval(entry, traj_file):
   instance_id = entry.get("instance_id", "unknown")
 
   agent = SWEAgent()
-  env = SWEEnv(entry=entry, max_steps=MAX_STEPS, verbose=False)
+  env_cls = GuardedSWEEnv if ENABLE_GUARD else SWEEnv
+  env = env_cls(entry=entry, max_steps=MAX_STEPS, verbose=False)
 
   all_steps = []
 
@@ -394,7 +395,6 @@ def run_single_eval(entry, traj_file):
 
   agent.reset()
   agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
-  guard = ActionGuard(GuardConfig(enabled=ENABLE_GUARD))
 
   start_time = time.time()
 
@@ -453,25 +453,18 @@ def run_single_eval(entry, traj_file):
     except Exception:
       thought = model_response[:300]
 
-    # --- Update agent & guard ---
+    # --- Update agent ---
     action_result = agent.update_from_model(model_response)
-    verdict = guard.evaluate(action_result.action)
-    guard_blocked = verdict.blocked
 
     step_time = 0.0
-    if guard_blocked:
-      obs, reward, done, info = verdict.message, 0.0, False, {
-          "guard_blocked": True, "guard_reason": verdict.reason,
-      }
-    else:
-      t0 = time.time()
-      try:
-        obs, reward, done, info = env.step(action_result.action)
-        step_time = time.time() - t0
-      except Exception as e:
-        obs, reward, done, info = str(e), 0.0, True, {}
-        step_time = time.time() - t0
-      guard.record_outcome(action_result.action, str(obs))
+    t0 = time.time()
+    try:
+      obs, reward, done, info = env.step(action_result.action)
+      step_time = time.time() - t0
+    except Exception as e:
+      obs, reward, done, info = str(e), 0.0, True, {}
+      step_time = time.time() - t0
+    guard_blocked = bool(info.get("guard_blocked"))
 
     obs_str = str(obs)
 
@@ -486,7 +479,7 @@ def run_single_eval(entry, traj_file):
     if action_params_str:
       _write_traj(tf, action_params_str)
     if guard_blocked:
-      _write_traj(tf, f"\n[GUARD BLOCKED] {verdict.reason}")
+      _write_traj(tf, f"\n[GUARD BLOCKED] {info.get('guard_reason', '')}")
     _write_traj(tf, f"\n[Observation]\n{obs_str}")
     _write_traj(tf, f"\n[Reward] {reward}  [Done] {done}")
     _write_traj(tf, "")

@@ -43,8 +43,8 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-4B-Instruct-2507")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 # Evaluation
-MAX_STEPS = int(os.getenv("MAX_STEPS", "1"))
-MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "512"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
+MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "2048"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "1"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
@@ -217,6 +217,11 @@ elif ROLLOUT_ENGINE == "vllm":
   )
   sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
 
+  # Sync actual model weights to vLLM engine (matching debug/training paths)
+  from flax import nnx
+  sampler.load_checkpoint(nnx.state(model))
+  logger.info("Synced model weights to vLLM engine.")
+
 elif ROLLOUT_ENGINE == "sglang_jax":
   from tunix.generate import mappings
   from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
@@ -268,13 +273,12 @@ def model_call(chat_completions, env_unused):
         echo=False,
         eos_tokens=qwen_eos_tokens,
     )
-  return out.text[0]
+  return out
 
 
 # ========================== Evaluation ==========================
 
-from action_guard import GuardConfig
-from guarded_engine import GuardedTrajectoryCollectEngine
+from guarded_swe_env import GuardedSWEEnv
 from swe_agent import SWEAgent
 from swe_env import SWEEnv
 from tunix.rl.agentic import utils as agentic_utils
@@ -285,19 +289,19 @@ def pairs_generator():
   """Yield (agent, env) pairs for each dataset entry."""
   for entry in entries:
     agent = SWEAgent()
-    env = SWEEnv(entry=entry, max_steps=MAX_STEPS)
+    env_cls = GuardedSWEEnv if ENABLE_GUARD else SWEEnv
+    env = env_cls(entry=entry, max_steps=MAX_STEPS)
     yield agent, env
 
 
 async def run_evaluation():
   """Run parallel evaluation using RolloutOrchestrator."""
   orchestrator = RolloutOrchestrator(
-      engine_cls=GuardedTrajectoryCollectEngine,
       engine_kwargs=dict(
           model_call=model_call,
-          max_steps=MAX_STEPS,
           timeout=TIMEOUT,
-          guard_config=GuardConfig(enabled=ENABLE_GUARD),
+          tokenizer=tokenizer,
+          chat_parser=chat_parser,
       ),
       max_concurrency=MAX_CONCURRENT,
       rollout_sync_lock=agentic_utils.RolloutSyncLock(),
@@ -307,9 +311,8 @@ async def run_evaluation():
       orchestrator.run_producers_from_stream(
           pairs_stream=pairs_generator(),
           group_size=1,
-          num_episodes=1,
           collect_mode="Trajectory",
-          group_key=lambda i, env, traj: i,
+          group_key_fn=lambda i, env, traj: i,
       )
   )
 
