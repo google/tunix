@@ -1464,6 +1464,101 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         decoded_completion.count("Assistant:"), 3
     )  # 3 turns including trailing one for last env obs
 
+  def test_grpo_loss_fn_with_valid_traj(self):
+    batch_size, seq_len = 2, 8
+    prompt_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    completion_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    completion_mask = jnp.ones((batch_size, seq_len), dtype=jnp.bool_)
+    advantages = jnp.ones((batch_size,), dtype=jnp.float32)
+    ref_per_token_logps = jnp.full(
+        (batch_size, seq_len), -0.1, dtype=jnp.float32
+    )
+
+    # All trajectories are valid.
+    train_example_1 = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids,
+        prompt_mask=prompt_ids > -1,
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        ref_per_token_logps=ref_per_token_logps,
+        advantages=advantages,
+        old_per_token_logps=None,
+        valid_traj=jnp.array([1, 1], dtype=jnp.int32),
+    )
+
+    # Only first trajectory is valid.
+    train_example_2 = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids,
+        prompt_mask=prompt_ids > -1,
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        ref_per_token_logps=ref_per_token_logps,
+        advantages=advantages,
+        old_per_token_logps=None,
+        valid_traj=jnp.array([1, 0], dtype=jnp.int32),
+    )
+
+    class MockModel(nnx.Module):
+
+      def __init__(self, *, rngs: nnx.Rngs):
+        self.lm_head = 1
+
+      def __call__(self, inputs, positions, cache, attention_mask):
+        return (jnp.full((*inputs.shape, 32), 0.1, dtype=jnp.float32), None)
+
+    algo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.1,
+        epsilon=0.2,
+    )
+    model = MockModel(rngs=nnx.Rngs(0))
+    policy_loss_fn = function_registry.get_policy_loss_fn(
+        algo_config.policy_loss_fn
+    )
+
+    loss_1, _ = policy_loss_fn(
+        model=model,
+        train_example=train_example_1,
+        algo_config=algo_config,
+        pad_id=0,
+        eos_id=2,
+    )
+    loss_2, _ = policy_loss_fn(
+        model=model,
+        train_example=train_example_2,
+        algo_config=algo_config,
+        pad_id=0,
+        eos_id=2,
+    )
+
+    # In sequence-mean-token-mean mode (default), loss is averaged over
+    # sequences. If one sequence is masked out (zeroed), its seq_loss is 0,
+    # and it still contributes to the average (divisor = batch_size).
+    # Since trajectories are identical: loss_2 should be loss_1 / 2.
+    self.assertAlmostEqual(loss_2, loss_1 / 2.0, places=5)
+
+    # Test with token-mean mode.
+    algo_config_token_mean = agentic_grpo_learner.GRPOConfig(
+        beta=0.1,
+        epsilon=0.2,
+        loss_agg_mode="token-mean",
+    )
+    loss_1_tm, _ = policy_loss_fn(
+        model=model,
+        train_example=train_example_1,
+        algo_config=algo_config_token_mean,
+        pad_id=0,
+        eos_id=2,
+    )
+    loss_2_tm, _ = policy_loss_fn(
+        model=model,
+        train_example=train_example_2,
+        algo_config=algo_config_token_mean,
+        pad_id=0,
+        eos_id=2,
+    )
+    # In token-mean mode, loss_2_tm should be equal to loss_1_tm.
+    self.assertAlmostEqual(loss_2_tm, loss_1_tm, places=5)
+
 
 if __name__ == "__main__":
   absltest.main()

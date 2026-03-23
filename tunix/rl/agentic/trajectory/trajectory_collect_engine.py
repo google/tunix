@@ -237,9 +237,6 @@ class TrajectoryCollectEngine:
           if getattr(step, "env_tokens", None) is not None:
             logprobs.append(np.zeros(len(step.env_tokens)))
 
-      # TODO(sizhi): (b/484422277)
-      is_valid = self.agent.trajectory.status in self.valid_statuses
-
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
@@ -253,6 +250,9 @@ class TrajectoryCollectEngine:
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
+          "valid_traj": int(
+              self.agent.trajectory.status in self.valid_statuses
+          ),
       }
     elif mode == "Conversation":
       # return raw conversation history
