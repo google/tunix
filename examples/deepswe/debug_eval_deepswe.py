@@ -63,6 +63,15 @@ Usage:
   TIMEOUT=600 \
   python3 -u examples/deepswe/debug_eval_deepswe.py
 
+  # Qwen API mode (via OpenRouter):
+  USE_API=qwen \
+  API_KEY="your-openrouter-api-key" \
+  API_MODEL="qwen/qwen3-32b" \
+  TASK_INDEX=0 \
+  MAX_STEPS=10 \
+  TIMEOUT=600 \
+  python3 -u examples/deepswe/debug_eval_deepswe.py
+
 Outputs:
   - Trajectory log: OUTPUT_DIR/trajectory.log  (all instances in one file)
 """
@@ -121,8 +130,8 @@ SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 # Guard: set ENABLE_GUARD=false to disable the action guard
 ENABLE_GUARD = os.getenv("ENABLE_GUARD", "true").lower() == "true"
 
-# API mode: set USE_API=gemini to use Gemini API instead of local model
-USE_API = os.getenv("USE_API", "")  # "gemini" for Gemini API
+# API mode: set USE_API=gemini or USE_API=qwen to use API instead of local model
+USE_API = os.getenv("USE_API", "")  # "gemini" or "qwen"
 API_KEY = os.getenv("API_KEY", "")
 API_MODEL = os.getenv("API_MODEL", "gemini-2.5-flash")
 
@@ -335,16 +344,30 @@ if not USE_API:
   sampler_lock = threading.Lock()
 
 else:
-  # ========================== Gemini API Client ==========================
-
-  import google.genai as genai
+  # ========================== API Client ==========================
 
   if not API_KEY:
     logger.error("API_KEY is required when USE_API is set.")
     sys.exit(1)
 
-  api_client = genai.Client(api_key=API_KEY)
-  logger.info("Using Gemini API: model=%s", API_MODEL)
+  if USE_API == "gemini":
+    import google.genai as genai
+
+    api_client = genai.Client(api_key=API_KEY)
+    logger.info("Using Gemini API: model=%s", API_MODEL)
+
+  elif USE_API == "qwen":
+    from openai import OpenAI
+
+    api_client = OpenAI(
+        api_key=API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+    )
+    logger.info("Using Qwen API (OpenRouter): model=%s", API_MODEL)
+
+  else:
+    logger.error("Unknown USE_API value: %s. Choose 'gemini' or 'qwen'.", USE_API)
+    sys.exit(1)
 
 
 def _chat_to_gemini(chat_completions):
@@ -443,7 +466,7 @@ def run_single_eval(entry, traj_file):
     t0 = time.time()
     prompt_tokens = 0
     response_tokens = 0
-    if USE_API:
+    if USE_API == "gemini":
       contents, system_instruction = _chat_to_gemini(agent.chat_completions)
       config = {}
       if system_instruction:
@@ -458,6 +481,16 @@ def run_single_eval(entry, traj_file):
       usage = getattr(response, "usage_metadata", None)
       prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
       response_tokens = getattr(usage, "candidates_token_count", 0) or 0
+    elif USE_API == "qwen":
+      response = api_client.chat.completions.create(
+          model=API_MODEL,
+          messages=agent.chat_completions,
+      )
+      model_response = response.choices[0].message.content
+      model_time = time.time() - t0
+      if response.usage:
+        prompt_tokens = response.usage.prompt_tokens
+        response_tokens = response.usage.completion_tokens
     else:
       prompt, prompt_tokens = build_prompt_within_budget(
           agent.chat_completions
