@@ -207,6 +207,10 @@ MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
 LOSS_AGG_MODE = args.loss_agg_mode
 MODEL_DTYPE = jnp.float32
+ACTIVATION_DTYPE = jnp.float32
+# MODEL_DTYPE = jnp.bfloat16
+# ACTIVATION_DTYPE = jnp.bfloat16
+
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -346,7 +350,7 @@ else:
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/{timestamp}/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt", timestamp, "/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -453,7 +457,9 @@ show_hbm_usage("Done with loading datasets")
 
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
-config.remat_config = ENABLE_FLASH_ATTN
+config.use_flash_attention = ENABLE_FLASH_ATTN
+config.param_dtype = MODEL_DTYPE
+config.dtype = ACTIVATION_DTYPE
 
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
