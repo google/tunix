@@ -211,6 +211,7 @@ if not USE_API:
 
   tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
   chat_parser = parser.QwenChatTemplateParser(tokenizer)
+  qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
   from tunix.models.automodel import call_model_config
 
@@ -424,10 +425,19 @@ def run_single_eval(entry, traj_file):
       prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
       response_tokens = getattr(usage, "candidates_token_count", 0) or 0
     else:
-      prompt = chat_parser.parse(agent.chat_completions)
+      prompt = chat_parser.parse(
+          agent.chat_completions,
+          add_generation_prompt=True,
+          is_first_msg=True,
+      )
       prompt_tokens = len(tokenizer.encode(prompt))
       with sampler_lock:
-        out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
+        out = sampler(
+            prompt,
+            max_generation_steps=MAX_GENERATION_STEPS,
+            echo=False,
+            eos_tokens=qwen_eos_tokens,
+        )
       model_response = out.text[0]
       model_time = time.time() - t0
       response_tokens = len(tokenizer.encode(model_response))

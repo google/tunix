@@ -148,6 +148,7 @@ if not os.path.isdir(MODEL_PATH) or not os.listdir(MODEL_PATH):
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
+qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
 # Create mesh and load weights
 devices = jax.devices()
@@ -255,9 +256,18 @@ sampler_lock = threading.Lock()
 
 def model_call(chat_completions, env_unused):
   """Thread-safe model inference via tunix sampler."""
-  prompt = chat_parser.parse(chat_completions)
+  prompt = chat_parser.parse(
+      chat_completions,
+      add_generation_prompt=True,
+      is_first_msg=True,
+  )
   with sampler_lock:
-    out = sampler(prompt, max_generation_steps=MAX_GENERATION_STEPS, echo=False)
+    out = sampler(
+        prompt,
+        max_generation_steps=MAX_GENERATION_STEPS,
+        echo=False,
+        eos_tokens=qwen_eos_tokens,
+    )
   return out.text[0]
 
 
