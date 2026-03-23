@@ -82,14 +82,146 @@ class VisionEmbeddings:
 class VisionGridData:
   """Pre-computed positional data derived from grid_thw.
 
-  All fields are concrete JAX arrays. Create via VisionModel.compute_grid_data()
-  outside the JIT boundary, then pass into the JIT-compiled forward pass.
+  All fields are static (no model weights needed). Create via
+  compute_grid_data() outside the JIT boundary, then pass into the
+  JIT-compiled forward pass.
   """
 
-  pos_embeds: jax.Array  # [total_patches, hidden_size]
-  cos: jax.Array  # [total_patches, rotary_dim*2]
-  sin: jax.Array  # [total_patches, rotary_dim*2]
-  cu_seqlens: jax.Array  # [num_frames + 1]
+  cos: jax.Array  # [total_patches, rotary_dim*2]   float32
+  sin: jax.Array  # [total_patches, rotary_dim*2]   float32
+  cu_seqlens: jax.Array  # [num_frames + 1]                int32
+  pos_embed_idx: jax.Array  # [4, total_hw]  int32   bilinear corner indices
+  pos_embed_weights: jax.Array  # [4, total_hw]  float32 bilinear weights
+  pos_embed_gather: (
+      jax.Array
+  )  # [total_patches] int32  temporal-repeat + merge reorder
+
+
+def compute_grid_data(grid_thw, spec: "VisionModelConfig") -> VisionGridData:
+  """Compute static positional data from grid_thw.
+
+  Call outside the JIT boundary.
+
+  Args:
+    grid_thw: image/video grid sizes, array-like of shape [N, 3] with columns
+      (temporal, height, width).
+    spec: VisionModelConfig describing the model geometry.
+
+  Returns:
+    VisionGridData with all fields as JAX arrays ready to be passed into JIT.
+  """
+  grid = np.asarray(grid_thw, dtype=np.int32)  # [N, 3]
+  merge = spec.spatial_merge_size
+  rotary_dim = (spec.hidden_size // spec.num_heads) // 2
+
+  # ── rotary position ids ───
+  pos_chunks = []
+  for i in range(grid.shape[0]):
+    t, h, w = int(grid[i, 0]), int(grid[i, 1]), int(grid[i, 2])
+    hpos = np.repeat(np.arange(h)[:, None], w, axis=1)  # [h, w]
+    wpos = np.repeat(np.arange(w)[None, :], h, axis=0)  # [h, w]
+    hpos = (
+        hpos.reshape(h // merge, merge, w // merge, merge)
+        .transpose(0, 2, 1, 3)
+        .reshape(-1)
+    )
+    wpos = (
+        wpos.reshape(h // merge, merge, w // merge, merge)
+        .transpose(0, 2, 1, 3)
+        .reshape(-1)
+    )
+    pos = np.stack([hpos, wpos], axis=-1)  # [h*w, 2]
+    pos_chunks.append(np.tile(pos, (t, 1)))  # [t*h*w, 2]
+
+  pos_ids = (
+      np.concatenate(pos_chunks, axis=0)
+      if pos_chunks
+      else np.zeros((0, 2), dtype=np.int32)
+  )
+  max_grid = int(np.max(grid[:, 1:])) if grid.size > 0 else 1
+  inv_freq = 1.0 / (
+      10000.0 ** (np.arange(0, rotary_dim, 2, dtype=np.float32) / rotary_dim)
+  )
+  rotary_table = np.outer(
+      np.arange(max_grid, dtype=np.float32), inv_freq
+  )  # [max_grid, rotary_dim//2]
+  rotary_emb = rotary_table[pos_ids].reshape(
+      pos_ids.shape[0], -1
+  )  # [total_patches, rotary_dim]
+  emb = np.concatenate([rotary_emb, rotary_emb], axis=-1)
+  cos = np.cos(emb).astype(np.float32)
+  sin = np.sin(emb).astype(np.float32)
+
+  # ── cu_seqlens ───
+  frame_sizes = np.repeat(grid[:, 1] * grid[:, 2], grid[:, 0])
+  cu_seqlens = np.concatenate([[0], np.cumsum(frame_sizes)]).astype(np.int32)
+
+  # ── bilinear interpolation indices / weights for pos_embed ───
+  total_patches = int(np.sum(grid[:, 0] * grid[:, 1] * grid[:, 2]))
+  if spec.num_position_embeddings is not None:
+    num_g = int(spec.num_position_embeddings**0.5)
+    idx_list: list[list[np.ndarray]] = [[] for _ in range(4)]
+    weight_list: list[list[np.ndarray]] = [[] for _ in range(4)]
+    for i in range(grid.shape[0]):
+      h, w = int(grid[i, 1]), int(grid[i, 2])
+      h_f = np.linspace(0, num_g - 1, h, dtype=np.float32)
+      w_f = np.linspace(0, num_g - 1, w, dtype=np.float32)
+      hfl = h_f.astype(np.int32)
+      wfl = w_f.astype(np.int32)
+      hce = np.clip(hfl + 1, 0, num_g - 1)
+      wce = np.clip(wfl + 1, 0, num_g - 1)
+      dh = h_f - hfl
+      dw = w_f - wfl
+      bh = hfl * num_g
+      bhc = hce * num_g
+      for k, (ri, rw) in enumerate([
+          (bh[:, None] + wfl[None], (1.0 - dh)[:, None] * (1.0 - dw)[None]),
+          (bh[:, None] + wce[None], (1.0 - dh)[:, None] * dw[None]),
+          (bhc[:, None] + wfl[None], dh[:, None] * (1.0 - dw)[None]),
+          (bhc[:, None] + wce[None], dh[:, None] * dw[None]),
+      ]):
+        idx_list[k].append(ri.reshape(-1))
+        weight_list[k].append(rw.reshape(-1).astype(np.float32))
+    pos_embed_idx = np.stack(
+        [np.concatenate(idx_list[k]) for k in range(4)], axis=0
+    ).astype(np.int32)
+    pos_embed_weights = np.stack(
+        [np.concatenate(weight_list[k]) for k in range(4)], axis=0
+    ).astype(np.float32)
+
+    # ── gather index (temporal repeat + spatial merge reorder) ──────────────
+    # Maps output position j to patch_pos_embeds source index.
+    # Output layout after repeat+reshape+transpose: (t, h//m, w//m, m, m)
+    # Row-major strides:  [h*w, w*m, m*m, m, 1]
+    gather_idx = np.empty(total_patches, dtype=np.int32)
+    offset_hw, offset_thw = 0, 0
+    for i in range(grid.shape[0]):
+      t, h, w = int(grid[i, 0]), int(grid[i, 1]), int(grid[i, 2])
+      j = np.arange(t * h * w)
+      rem = j % (h * w)
+      hc = rem // (w * merge)
+      rem1 = rem % (w * merge)
+      wc = rem1 // (merge * merge)
+      rem2 = rem1 % (merge * merge)
+      mh = rem2 // merge
+      mw = rem2 % merge
+      source = (hc * merge + mh) * w + (wc * merge + mw)
+      gather_idx[offset_thw : offset_thw + t * h * w] = offset_hw + source
+      offset_hw += h * w
+      offset_thw += t * h * w
+  else:
+    pos_embed_idx = np.zeros((4, 0), dtype=np.int32)
+    pos_embed_weights = np.zeros((4, 0), dtype=np.float32)
+    gather_idx = np.zeros(total_patches, dtype=np.int32)
+
+  return VisionGridData(
+      cos=jnp.asarray(cos),
+      sin=jnp.asarray(sin),
+      cu_seqlens=jnp.asarray(cu_seqlens),
+      pos_embed_idx=jnp.asarray(pos_embed_idx),
+      pos_embed_weights=jnp.asarray(pos_embed_weights),
+      pos_embed_gather=jnp.asarray(gather_idx),
+  )
 
 
 @dataclasses.dataclass
@@ -465,150 +597,19 @@ class VisionModel(nnx.Module):
         for _ in self.deepstack_visual_indexes
     ])
 
-  def _rot_pos_emb(self, grid_thw: jax.Array) -> jax.Array:
-    """Compute rotary position embeddings for vision tokens"""
-    grid_thw = np.array(grid_thw)
-    pos_chunks = []
-    for idx in range(grid_thw.shape[0]):
-      t, h, w = grid_thw[idx]
-      merge = self.spec.spatial_merge_size
-      hpos = jnp.arange(h)[:, None].repeat(w, axis=1)
-      wpos = jnp.arange(w)[None, :].repeat(h, axis=0)
-      hpos = (
-          hpos.reshape(h // merge, merge, w // merge, merge)
-          .transpose(0, 2, 1, 3)
-          .reshape(-1)
-      )
-      wpos = (
-          wpos.reshape(h // merge, merge, w // merge, merge)
-          .transpose(0, 2, 1, 3)
-          .reshape(-1)
-      )
-      pos = jnp.stack([hpos, wpos], axis=-1)
-      pos = jnp.tile(pos, (int(t), 1))
-      pos_chunks.append(pos)
-    pos_ids = jnp.concatenate(pos_chunks, axis=0)
-    max_grid = int(np.max(grid_thw[:, 1:]))
-    rotary_full = self.rotary(max_grid)
-    return rotary_full[pos_ids].reshape(pos_ids.shape[0], -1)
-
-  def _fast_pos_embed_interpolate(self, grid_thw: jax.Array) -> jax.Array:
-    if self.pos_embed is None or self.num_grid_per_side is None:
-      return jnp.zeros((0, self.spec.hidden_size), dtype=self.dtype)
-
-    grid = np.asarray(grid_thw)
-    grid_ts = grid[:, 0].astype(np.int32)
-    grid_hs = grid[:, 1].astype(np.int32)
-    grid_ws = grid[:, 2].astype(np.int32)
-    num_grid = int(self.num_grid_per_side)
-
-    idx_list = [[] for _ in range(4)]
-    weight_list = [[] for _ in range(4)]
-    for h, w in zip(grid_hs, grid_ws):
-      h_idxs = np.linspace(0, num_grid - 1, int(h), dtype=np.float32)
-      w_idxs = np.linspace(0, num_grid - 1, int(w), dtype=np.float32)
-
-      h_floor = h_idxs.astype(np.int32)
-      w_floor = w_idxs.astype(np.int32)
-      h_ceil = np.clip(h_floor + 1, 0, num_grid - 1)
-      w_ceil = np.clip(w_floor + 1, 0, num_grid - 1)
-
-      dh = h_idxs - h_floor
-      dw = w_idxs - w_floor
-
-      base_h = h_floor * num_grid
-      base_h_ceil = h_ceil * num_grid
-
-      indices = [
-          (base_h[:, None] + w_floor[None]).reshape(-1),
-          (base_h[:, None] + w_ceil[None]).reshape(-1),
-          (base_h_ceil[:, None] + w_floor[None]).reshape(-1),
-          (base_h_ceil[:, None] + w_ceil[None]).reshape(-1),
-      ]
-
-      weights = [
-          ((1.0 - dh)[:, None] * (1.0 - dw)[None]).reshape(-1),
-          ((1.0 - dh)[:, None] * dw[None]).reshape(-1),
-          (dh[:, None] * (1.0 - dw)[None]).reshape(-1),
-          (dh[:, None] * dw[None]).reshape(-1),
-      ]
-
-      for i in range(4):
-        idx_list[i].append(indices[i])
-        weight_list[i].append(weights[i])
-
-    idx_concat = [
-        np.concatenate(vals) if vals else np.array([], dtype=np.int32)
-        for vals in idx_list
-    ]
-    weight_concat = [
-        np.concatenate(vals) if vals else np.array([], dtype=np.float32)
-        for vals in weight_list
-    ]
-
-    idx_tensor = jnp.asarray(idx_concat, dtype=jnp.int32)
-    weight_tensor = jnp.asarray(weight_concat, dtype=self.dtype)
-
-    pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[..., None]
-    patch_pos_embeds = (
-        pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
-    )
-
-    merge = int(self.spec.spatial_merge_size)
-    splits = [int(h * w) for h, w in zip(grid_hs, grid_ws)]
-    out_chunks = []
-    offset = 0
-    for t, h, w, count in zip(grid_ts, grid_hs, grid_ws, splits):
-      pos_embed = patch_pos_embeds[offset : offset + count]
-      offset += count
-      if int(t) > 1:
-        pos_embed = jnp.repeat(pos_embed, int(t), axis=0)
-      pos_embed = pos_embed.reshape(
-          int(t), int(h) // merge, merge, int(w) // merge, merge, -1
-      )
-      pos_embed = pos_embed.transpose(0, 1, 3, 2, 4, 5).reshape(
-          -1, pos_embed.shape[-1]
-      )
-      out_chunks.append(pos_embed)
-
-    return (
-        jnp.concatenate(out_chunks, axis=0)
-        if out_chunks
-        else jnp.zeros((0, self.spec.hidden_size), dtype=self.dtype)
-    )
-
   def compute_grid_data(self, grid_thw) -> VisionGridData:
-    """Compute positional data from grid_thw outside the JIT boundary.
+    """Compute static positional data from grid_thw outside the JIT boundary.
 
-    This method contains all shape-dependent numpy operations that cannot
-    be traced by JAX. This method should be called _before_ JIT.
+    Delegates to the module-level :func:`compute_grid_data`. Call before JIT.
 
     Args:
       grid_thw: image/video grid sizes, array-like of shape [N, 3] with
-        columns (temporal, height, width). Can be a numpy array, JAX array,
-        or nested list/tuple — it is immediately converted to numpy.
+        columns (temporal, height, width).
 
     Returns:
-      VisionGridData with pos_embeds, cos, sin, cu_seqlens as JAX arrays.
+      VisionGridData with all static fields as JAX arrays.
     """
-    pos_embeds = self._fast_pos_embed_interpolate(grid_thw)
-    rotary_emb = self._rot_pos_emb(grid_thw)
-    emb = jnp.concatenate([rotary_emb, rotary_emb], axis=-1)
-    # Keep cos/sin in float32 so VisionAttention can apply RoPE in float32,
-    # matching PyTorch's apply_rotary_pos_emb_vision which casts to float32.
-    cos, sin = jnp.cos(emb), jnp.sin(emb)
-
-    grid_thw_arr = np.array(grid_thw)
-    frame_sizes = np.repeat(
-        grid_thw_arr[:, 1] * grid_thw_arr[:, 2], grid_thw_arr[:, 0]
-    )
-    cu_seqlens = jnp.concatenate([
-        jnp.array([0], dtype=jnp.int32),
-        jnp.cumsum(frame_sizes, dtype=jnp.int32),
-    ])
-    return VisionGridData(
-        pos_embeds=pos_embeds, cos=cos, sin=sin, cu_seqlens=cu_seqlens
-    )
+    return compute_grid_data(grid_thw, self.spec)
 
   def __call__(
       self,
@@ -616,7 +617,20 @@ class VisionModel(nnx.Module):
       precomputed: VisionGridData,
   ) -> tuple[jax.Array, tuple]:
     x = self.patch_embed(pixel_values)
-    x = x + precomputed.pos_embeds.astype(x.dtype)
+
+    # Apply learned position embeddings using precomputed static indices.
+    # Three pure JAX ops — safe inside JIT.
+    if self.pos_embed is not None and precomputed.pos_embed_gather.shape[0] > 0:
+      raw = self.pos_embed.embedding[
+          precomputed.pos_embed_idx
+      ]  # [4, total_hw, hidden]
+      patch_embeds = (raw * precomputed.pos_embed_weights[..., None]).sum(
+          0
+      )  # [total_hw, hidden]
+      pos_embeds = patch_embeds[
+          precomputed.pos_embed_gather
+      ]  # [total_patches, hidden]
+      x = x + pos_embeds.astype(x.dtype)
 
     cos, sin, cu_seqlens = (
         precomputed.cos,

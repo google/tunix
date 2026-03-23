@@ -52,6 +52,7 @@ from tunix.models.qwen3vl import model as model_lib
 from tunix.models.qwen3vl import params as params_lib
 from tunix.models.qwen3vl.consistency_test import resolve_model_dir
 from tunix.models.qwen3vl.model import get_rope_index
+from tunix.models.qwen3vl.vision import compute_grid_data
 from tunix.models.qwen3vl.vision import VisionGridData
 
 # Special token IDs (constant for all Qwen3-VL checkpoints).
@@ -454,21 +455,35 @@ class Qwen3VLSampler:
           )
           for m in messages_batch
       ]
+      # Do NOT truncate: truncation strips image tokens from the text while
+      # the image processor still generates the full patch grid, causing a
+      # token-count mismatch that the processor now validates (5.3.0+).
+      # If the encoded length exceeds cache_size we raise a clear error below.
       inputs = self._processor(
           text=texts,
           images=images,
-          max_length=self._cache_size,
           padding=True,
-          truncation=True,
-          return_tensors='np',
+          return_tensors=None,
       )
-      input_ids = inputs['input_ids'].astype(np.int32)  # [B, L]
-      attention_mask = inputs['attention_mask'].astype(np.int32)  # [B, L]
-      pixel_values = inputs['pixel_values'].astype(np.float32)
-      image_grid_thw = inputs['image_grid_thw'].astype(np.int32)  # [N, 3]
+      input_ids = np.array(inputs['input_ids'], dtype=np.int32)  # [B, L]
+      seq_len_check = input_ids.shape[1]
+      if seq_len_check + max_new_tokens > self._cache_size:
+        raise ValueError(
+            f'Encoded sequence length ({seq_len_check}) + max_new_tokens'
+            f' ({max_new_tokens}) = {seq_len_check + max_new_tokens} exceeds'
+            f' cache_size {self._cache_size}. Pass a larger cache_size to'
+            ' Qwen3VLSampler or reduce the image resolution.'
+        )
+      attention_mask = np.array(
+          inputs['attention_mask'], dtype=np.int32
+      )  # [B, L]
+      pixel_values = np.array(inputs['pixel_values'], dtype=np.float32)
+      image_grid_thw = np.array(
+          inputs['image_grid_thw'], dtype=np.int32
+      )  # [N, 3]
 
       vcfg = self._config.vision_config
-      vision_grid = self._model.visual.compute_grid_data(image_grid_thw)
+      vision_grid = compute_grid_data(image_grid_thw, vcfg)
       positions_3d, _ = get_rope_index(
           input_ids=jnp.array(input_ids),
           image_grid_thw=jnp.array(image_grid_thw),
