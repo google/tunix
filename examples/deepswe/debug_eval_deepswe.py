@@ -11,7 +11,7 @@ Usage:
   MODEL_VERSION="Qwen/Qwen3-1.7B" \
   TASK_INDEX=0 \
   MAX_STEPS=10 \
-  MAX_GENERATION_STEPS=256 \
+  MAX_RESPONSE_LENGTH=256 \
   TIMEOUT=600 \
   python3 -u examples/deepswe/debug_eval_deepswe.py
 
@@ -88,7 +88,9 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
-MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "2048"))
+MAX_RESPONSE_LENGTH = int(
+    os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "2048"))
+)
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 
 # Task selection (priority: INSTANCE_ID > TASK_INDICES > RUN_ALL_TASKS > NUM_TASKS > TASK_INDEX)
@@ -312,7 +314,7 @@ if not USE_API:
             mesh=mesh,
             mapping_config=mapping_config,
             model_version=MODEL_VERSION,
-            context_length=16384 + MAX_GENERATION_STEPS + 100,
+            context_length=16384 + MAX_RESPONSE_LENGTH + 100,
             mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
             init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
             disable_radix_cache=True,
@@ -444,7 +446,7 @@ def run_single_eval(entry, traj_file):
       with sampler_lock:
         out = sampler(
             prompt,
-            max_generation_steps=MAX_GENERATION_STEPS,
+            max_generation_steps=MAX_RESPONSE_LENGTH,
             echo=False,
             eos_tokens=qwen_eos_tokens,
         )

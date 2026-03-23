@@ -45,7 +45,9 @@ MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 # Evaluation
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
-MAX_GENERATION_STEPS = int(os.getenv("MAX_GENERATION_STEPS", "2048"))
+MAX_RESPONSE_LENGTH = int(
+    os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "2048"))
+)
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "2"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
@@ -240,7 +242,7 @@ elif ROLLOUT_ENGINE == "sglang_jax":
           mesh=mesh,
           mapping_config=mapping_config,
           model_version=MODEL_VERSION,
-          context_length=16384 + MAX_GENERATION_STEPS + 100,
+          context_length=16384 + MAX_RESPONSE_LENGTH + 100,
           mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
           init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
           disable_radix_cache=True,
@@ -272,7 +274,7 @@ def model_call(chat_completions, env_unused):
   with sampler_lock:
     out = sampler(
         prompt,
-        max_generation_steps=MAX_GENERATION_STEPS,
+        max_generation_steps=MAX_RESPONSE_LENGTH,
         echo=False,
         eos_tokens=qwen_eos_tokens,
     )
