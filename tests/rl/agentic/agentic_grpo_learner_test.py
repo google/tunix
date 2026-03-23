@@ -453,6 +453,85 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     chex.assert_shape(loss, ())
     self.assertIn("kl", aux)
 
+  def test_grpo_loss_fn_masks_zero_advantage_group(self):
+    seq_len = 8
+    prompt_ids = jnp.ones((4, seq_len), dtype=jnp.int32)
+    completion_ids = jnp.ones((4, seq_len), dtype=jnp.int32)
+    completion_mask = jnp.ones((4, seq_len), dtype=jnp.bool_)
+    # First group (2 samples) is degenerate and should be ignored.
+    advantages = jnp.asarray([0.0, 0.0, 1.0, -1.0], dtype=jnp.float32)
+    ref_per_token_logps = jnp.full((4, seq_len), -0.1, dtype=jnp.float32)
+
+    class MockModel(nnx.Module):
+
+      def __init__(self, *, rngs: nnx.Rngs):
+        self.lm_head = 1
+
+      def __call__(self, inputs, positions, cache, attention_mask):
+        return (
+            jnp.full(
+                (*inputs.shape, 32),
+                0.1,
+                dtype=jnp.float32,
+            ),
+            None,
+        )
+
+    train_example = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids,
+        prompt_mask=prompt_ids > -1,
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        ref_per_token_logps=ref_per_token_logps,
+        advantages=advantages,
+        old_per_token_logps=None,
+    )
+
+    valid_only_train_example = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids[2:],
+        prompt_mask=(prompt_ids > -1)[2:],
+        completion_ids=completion_ids[2:],
+        completion_mask=completion_mask[2:],
+        ref_per_token_logps=ref_per_token_logps[2:],
+        advantages=advantages[2:],
+        old_per_token_logps=None,
+    )
+
+    algo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.1,
+        epsilon=0.2,
+        num_generations=2,
+        loss_algo="grpo",
+        loss_agg_mode="token-mean",
+    )
+    policy_loss_fn = function_registry.get_policy_loss_fn(
+        algo_config.policy_loss_fn
+    )
+
+    model = MockModel(rngs=nnx.Rngs(0))
+    full_loss, full_aux = policy_loss_fn(
+        model=model,
+        train_example=train_example,
+        algo_config=algo_config,
+        pad_id=0,
+        eos_id=2,
+    )
+    valid_loss, valid_aux = policy_loss_fn(
+        model=model,
+        train_example=valid_only_train_example,
+        algo_config=algo_config,
+        pad_id=0,
+        eos_id=2,
+    )
+
+    np.testing.assert_allclose(full_loss, valid_loss, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        full_aux["kl"], valid_aux["kl"], rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        full_aux["entropy"], valid_aux["entropy"], rtol=1e-6, atol=1e-6
+    )
+
   def test_checkpointing(self):
     ckpt_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, ckpt_dir)
