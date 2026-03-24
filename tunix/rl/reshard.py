@@ -332,8 +332,6 @@ def _get_reshard_fn_pathwaysutils(
   # not linked to the binary.
   try:
     from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-    from pathwaysutils.experimental import split_by_mesh_axis  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-    from pathwaysutils import jax as pw_jax  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
   except ImportError:
     logging.info(
         'Cannot import PathwaysUtils and experimental reshard API.'
@@ -351,28 +349,29 @@ def _get_reshard_fn_pathwaysutils(
         sharding: jax.sharding.Sharding | Any,
     ):
 
-      if use_experimental_pre_reshard:
-        try:
-          # This will raise an AttributeError if the API is not available.
-          pw_jax.split_by_mesh_axis
-        except AttributeError:
-          logging.debug(
-              'split_by_mesh_axis is not available until JAX 0.8.0. Skipping'
-              ' pre-reshard.'
-          )
-        else:
-          x = _experimental_pre_reshard(
-              split_by_mesh_axis.split_by_mesh_axis, x, sharding
-          )
-
       # TODO(b/476149699): Migrate to new API once it's verified.
-      return experimental_reshard.reshard(
-          x,
-          sharding,
-          donate=donate,
-          may_alias=None,
-          cache_resharding_plans=cache_resharding_plans,
-      )
+      if use_experimental_pre_reshard:
+        in_sharding = jax.tree_util.tree_map(
+            lambda x: x.sharding,
+            x,
+        )
+        return (
+            experimental_reshard.sidechannel_reshard_with_intermediate_sharding(
+                x,
+                in_sharding,
+                sharding,
+                donate=donate,
+                cache_resharding_plans=cache_resharding_plans,
+            )
+        )
+      else:
+        return experimental_reshard.reshard(
+            x,
+            sharding,
+            donate=donate,
+            may_alias=None,
+            cache_resharding_plans=cache_resharding_plans,
+        )
 
   return reshard_fn
 
