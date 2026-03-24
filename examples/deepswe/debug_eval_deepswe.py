@@ -128,7 +128,9 @@ SGLANG_INIT_RANDOM_WEIGHTS = os.getenv("SGLANG_INIT_RANDOM_WEIGHTS", "false").lo
 SGLANG_MAX_RUNNING_REQUESTS = int(os.getenv("SGLANG_MAX_RUNNING_REQUESTS", "1"))
 
 # Guard: set ENABLE_GUARD=false to disable the action guard
-ENABLE_GUARD = os.getenv("ENABLE_GUARD", "true").lower() == "true"
+ENABLE_GUARD = True
+if os.getenv("ENABLE_GUARD", "true").lower() != "true":
+  ENABLE_GUARD = False
 
 # API mode: set USE_API=gemini or USE_API=qwen to use API instead of local model
 USE_API = os.getenv("USE_API", "")  # "gemini" or "qwen"

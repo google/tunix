@@ -6,17 +6,26 @@ R2E-Gym Docker environments. Parallels rllm's run_deepswe.py but
 uses tunix components (Sampler, RolloutOrchestrator).
 
 Usage:
-  # Small test run (vanilla sampler)
+  # Full evaluation with default settings:
+  #   - Qwen/Qwen3-32B
+  #   - vLLM sampler
+  #   - MAX_CONCURRENT=2
+  #   - ENABLE_GUARD=false
+  #   - full evaluation split
+  python eval_deepswe.py
+
+  # Small test run
   TASKS_LIMIT=2 MAX_CONCURRENT=1 python eval_deepswe.py
-
-  # Full evaluation
-  TASKS_LIMIT=0 MAX_CONCURRENT=16 python eval_deepswe.py
-
-  # Use vLLM sampler
-  ROLLOUT_ENGINE=vllm TASKS_LIMIT=10 python eval_deepswe.py
 
   # Use SGLang-JAX sampler
   ROLLOUT_ENGINE=sglang_jax TASKS_LIMIT=10 python eval_deepswe.py
+
+  # Qwen API mode example (single-instance debug script):
+  USE_API=qwen \
+  API_KEY="your-openrouter-api-key" \
+  API_MODEL="qwen/qwen3-32b" \
+  TASK_INDEX=0 \
+  python3 -u examples/deepswe/debug_eval_deepswe.py
 """
 
 import asyncio
@@ -51,10 +60,12 @@ MAX_RESPONSE_LENGTH = int(
 )
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "2"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
-TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "10"))  # 0 = all
+TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "0"))  # 0 = all
 
-# Guard: set ENABLE_GUARD=false to disable the action guard
-ENABLE_GUARD = os.getenv("ENABLE_GUARD", "true").lower() == "true"
+# Guard: disabled by default; enable only with ENABLE_GUARD=true
+ENABLE_GUARD = False
+if os.getenv("ENABLE_GUARD", "false").lower() == "true":
+  ENABLE_GUARD = True
 
 # Rollout engine: "vanilla", "vllm", or "sglang_jax"
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
