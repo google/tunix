@@ -100,6 +100,8 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
+  dtype: jnp.dtype = jnp.float32
+  param_dtype: jnp.dtype = jnp.float32
 
   @classmethod
   def qwen3_0p6b(cls):  # qwen3-0.6B
@@ -257,16 +259,22 @@ class Einsum(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: Tuple[str | None, ...],
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.einsum_str = einsum_str
     self.shape = shape
     self.w = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+        nnx.initializers.normal(dtype=param_dtype)(rngs.params(), shape),
+        sharding=sharding,
     )
+    self.dtype = dtype
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
+    x = jnp.astype(x, self.dtype)
+    w = jnp.astype(self.w.value, self.dtype)
+    return jnp.einsum(self.einsum_str, x, w)
 
 
 class Embedder(nnx.Module):
@@ -279,22 +287,30 @@ class Embedder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.input_embedding = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
+        nnx.initializers.normal(dtype=param_dtype)(
+            rngs.params(), (vocab_size, embed_dim)
+        ),
         sharding=shd_config.emb_vd,
     )
     self.shd_config = shd_config
+    self.dtype = dtype
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
+    x = jnp.astype(x, self.dtype)
     x = shard(x, self.shd_config.act_btd)
     return x
 
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.dot(x, self.input_embedding.value.T)
+    x = jnp.astype(x, self.dtype)
+    w = jnp.astype(self.input_embedding.value, self.dtype)
+    return jnp.dot(x, w.T)
 
 
 def apply_rope(
@@ -311,8 +327,8 @@ def apply_rope(
       positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
   )
   sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
-  sin = jnp.sin(sinusoid_inp)
-  cos = jnp.cos(sinusoid_inp)
+  sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
+  cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
 
   first_half, second_half = jnp.split(inputs, 2, axis=-1)
   first_part = first_half * cos - second_half * sin
@@ -331,21 +347,23 @@ class RMSNorm(nnx.Module):
       norm_eps: float = 1e-06,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim),
+        nnx.initializers.ones_init()(rngs.params(), dim, param_dtype),
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
+    self.dtype = dtype
 
   @jax.named_scope('rms_norm')
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
-    dtype = x.dtype
-    rms = jnp.sqrt(
-        jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True)
-        + self.norm_eps
+    x = jnp.astype(x, jnp.float32)
+    rms = jnp.sqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.norm_eps)
+    return jnp.astype(
+        jnp.astype(self.w.value, jnp.float32) * (x / rms), self.dtype
     )
-    return jnp.astype(self.w * x / rms, dtype)
 
 
 class Attention(nnx.Module):
@@ -364,36 +382,48 @@ class Attention(nnx.Module):
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.q_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
         sharding=self.shd_config.o_weight_nhd,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.q_norm = RMSNorm(
         config.head_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=self.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.k_norm = RMSNorm(
         config.head_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=self.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
@@ -444,16 +474,14 @@ class Attention(nnx.Module):
     # GQA
     query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
     attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-    attn = attn.reshape((b, qh, t, s))
 
     if attn_mask is not None:
-      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
+      attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
 
     attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
         key_proj.dtype
     )
 
-    attn = attn.reshape((b, kh, qh // kh, t, s))
     qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
     qkv = qkv.reshape((b, t, qh, d))
 
@@ -518,28 +546,31 @@ class MoELayer(nnx.Module):
         out_features=config.num_experts,
         use_bias=False,
         rngs=rngs,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.gate_proj = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
         sharding=self.shd_config.exp_weight_cdf,
     )
     self.up_proj = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
         sharding=self.shd_config.exp_weight_cdf,
     )
     self.down_proj = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.hidden_dim, config.embed_dim),
         ),
         sharding=self.shd_config.exp_weight_cfd,
     )
+    self.dtype = config.dtype
 
   def __call__(self, x):
     scores = self.router(x).astype(jnp.float32)  # [B,T,E]
@@ -548,25 +579,28 @@ class MoELayer(nnx.Module):
     )
     routing_weights = (
         routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
-    ).astype(x.dtype)
+    ).astype(self.dtype)
 
     dispatch_mask = jax.nn.one_hot(
-        routing_idx, num_classes=self.num_experts, dtype=x.dtype
+        routing_idx, num_classes=self.num_experts, dtype=self.dtype
     )  # [B, T, K, E]
     dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
 
     dispatched_input = jnp.einsum(
         'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
-    ).astype(x.dtype)
+    ).astype(self.dtype)
 
     expert_outputs = []
     for i in range(self.num_experts):
       expert_input = dispatched_input[:, :, i, :]
+      gate_proj = jnp.astype(self.gate_proj.value[i], self.dtype)
+      up_proj = jnp.astype(self.up_proj.value[i], self.dtype)
       activations = nnx.silu(
-          jnp.einsum('BTD,DF->BTF', expert_input, self.gate_proj[i])
-      ) * jnp.einsum('BTD,DF->BTF', expert_input, self.up_proj[i])
+          jnp.einsum('BTD,DF->BTF', expert_input, gate_proj)
+      ) * jnp.einsum('BTD,DF->BTF', expert_input, up_proj)
       activations = shard(activations, self.shd_config.act_btf)
-      expert_output = jnp.einsum('BTF,FD->BTD', activations, self.down_proj[i])
+      down_proj = jnp.astype(self.down_proj.value[i], self.dtype)
+      expert_output = jnp.einsum('BTF,FD->BTD', activations, down_proj)
       expert_outputs.append(expert_output)
 
     stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
@@ -590,15 +624,17 @@ class MLP(nnx.Module):
   ):
     self.config = config
     self.shd_config = config.shd_config
-    kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=config.embed_dim,
         out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, self.shd_config.ffw_weight_df
+            nnx.initializers.zeros_init(),
+            self.shd_config.ffw_weight_df,
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.up_proj = nnx.Linear(
         in_features=config.embed_dim,
@@ -606,8 +642,11 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, self.shd_config.ffw_weight_df
+            nnx.initializers.zeros_init(),
+            self.shd_config.ffw_weight_df,
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.down_proj = nnx.Linear(
         in_features=config.hidden_dim,
@@ -615,8 +654,10 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, self.shd_config.ffw_weight_fd
+            nnx.initializers.zeros_init(), self.shd_config.ffw_weight_fd
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
   def block(
@@ -651,6 +692,8 @@ class DecoderLayer(nnx.Module):
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.attn = Attention(
         config=config,
@@ -661,6 +704,8 @@ class DecoderLayer(nnx.Module):
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     if config.num_experts is None:
       self.mlp = MLP(
@@ -713,6 +758,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
         embed_dim=config.embed_dim,
         rngs=rngs,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
@@ -723,6 +770,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
         rngs=rngs,
         norm_eps=config.norm_eps,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     if not config.use_tied_embedding:
       self.lm_head = Einsum(
@@ -730,6 +779,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,
           sharding=shd_config.emb_dv,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
       )
 
   def init_cache(
@@ -738,8 +789,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
     """Initializes the cache for the model."""
     config = self.config
     shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
-    k = jnp.zeros(shape, dtype=dtype)
-    v = jnp.zeros(shape, dtype=dtype)
+    k = jnp.zeros(shape, dtype=config.dtype)
+    v = jnp.zeros(shape, dtype=config.dtype)
     end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
     # Jax array is immutable, so updates to each layer creates new arrays.
     return {
@@ -793,7 +844,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
     else:
       logits = self.lm_head(x)
 
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return jnp.astype(logits, jnp.float32), new_cache  # pytype: disable=bad-return-type
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.
