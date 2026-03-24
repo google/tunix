@@ -119,11 +119,11 @@ arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
-arg_parser.add_argument("--temperature", type=float, default=0.8)
-arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--temperature", type=float, default=0.6)
+arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
+arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 args, _ = arg_parser.parse_known_args()
 
@@ -140,8 +140,8 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -245,10 +245,7 @@ except wandb.errors.UsageError as e:
 try:
   import datetime
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb.init(
-    project="tunix",
-    name=run_name,
-    config={
+  wandb_config = {
         "batch_size": BATCH_SIZE,
         "mini_batch_size": MINI_BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
@@ -267,8 +264,12 @@ try:
         "top_k": TOP_K,
         "max_concurrency": MAX_CONCURRENCY,
         "rollout_engine": ROLLOUT_ENGINE,
-    })
-  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
+    }
+  wandb.init(
+    project="tunix",
+    name=run_name,
+    config=wandb_config)
+  # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -306,6 +307,7 @@ trainer_mesh = jax.sharding.Mesh(
     axis_names=TRAINER_MESH[1],
     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
 )
+print(f"ZZ {trainer_devices_list=} {trainer_mesh.devices=}")
 
 # %%
 try:
@@ -329,11 +331,11 @@ if NOTEBOOK_ENV == "g3":
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
   DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
+  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/sglang_jax_exp22/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_old_logpbs_orig/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -487,12 +489,6 @@ show_hbm_usage("after loading qwen2_actor")
 
 
 # %%
-rollout_config = config.replace(remat_config=model_lib.RematConfig.NONE)
-qwen2_rollout = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, rollout_config, rollout_mesh, dtype=jnp.bfloat16
-)
-
-# %%
 ModelAgent = model_agent.ModelAgent
 TaskEnvironment = task_environment.TaskEnvironment
 TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
@@ -528,8 +524,6 @@ optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-      # Capture the norm of the updates entering this point in the chain
-      optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
@@ -550,9 +544,7 @@ base_rollout_dict = {
 
 sglang_jax_rollout_dict = {
     # sglang-jax specific configs
-    "rollout_sglang_jax_model_version": (
-        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ),
+    "rollout_sglang_jax_model_version": MODEL_VERSION,
     "rollout_sglang_jax_mem_fraction_static": 0.8,
     "rollout_sglang_jax_init_with_random_weights": True,
     "rollout_sglang_jax_disable_radix_cache": True,
@@ -562,11 +554,9 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
-MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
-    "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "rollout_vllm_model_version": MODEL_VERSION,
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
@@ -641,6 +631,7 @@ grpo_config = GRPOConfig(
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
+    degenerate_group_masking=False,
 )
 
 # Perf Metrics logging
@@ -656,7 +647,6 @@ perf_metrics_config = PerfMetricsConfig(
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen2_actor,
     reference=qwen2_ref,
-    rollout=qwen2_rollout,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
     perf_config=perf_metrics_config,

@@ -132,8 +132,8 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(32, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(32, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(8, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -315,7 +315,7 @@ if NOTEBOOK_ENV == "g3":
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
   DATA_PATH_PREFIX = "gs://linchai-bucket-dev/rl/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
+  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
@@ -323,7 +323,7 @@ CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vanilla_qwen2515/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it")
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2p5-1p5b-instruct")
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
@@ -432,10 +432,9 @@ else:
   config.remat_config = model_lib.RematConfig.NONE
 
 print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(d
+qwen2_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
-
 
 # %%
 def get_lora_model(base_model, model_mesh):
@@ -470,17 +469,20 @@ else:
       MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
 
+print(f"Config qwen2_actor: {config}")
+
 # %%
 show_hbm_usage("after loading qwen2_actor")
 
 
 # %%
-rollout_config = config
+import copy
+rollout_config = copy.deepcopy(config)
 rollout_config.remat_config=model_lib.RematConfig.NONE
-rollout_config.dtype = jnp.bfloat16
-rollout_config.param_dtype = jnp.bfloat16
+rollout_config.dtype = jnp.float32
+rollout_config.param_dtype = jnp.float32
 qwen2_rollout = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, rollout_config, rollout_mesh, dtype=jnp.bfloat16
+    MODEL_PATH, rollout_config, rollout_mesh, dtype=jnp.float32
 )
 
 # %%
@@ -535,7 +537,7 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "data_type": jnp.bfloat16,
+    "return_logprobs": True,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -603,7 +605,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=8,
+        train_micro_batch_size=4,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -616,7 +618,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
           # set_profile_options=False,
           # log_dir=PROFILER_PATH,
         # ) if ENABLE_PROFILER else None,
-        rollout_micro_batch_size = 32,
+        rollout_micro_batch_size = 8,
     ),
     rollout_config=rollout_engine_config,
 )

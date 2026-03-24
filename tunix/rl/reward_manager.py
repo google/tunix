@@ -166,7 +166,7 @@ class SequenceRewardManager(AbstractRewardManager):
         prompts,
         completions,
         rewards,
-        log_prompts_completions=kwargs["log_prompts_completions"],
+        log_prompts_completions=False,
     )
     sum_rewards = np.nansum(rewards, axis=1)
     rewards_info = {

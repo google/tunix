@@ -593,6 +593,7 @@ def grpo_loss_fn(
   # rewards are equal). Such groups should not contribute to policy, KL, or
   # entropy terms in this loss.
   if algo_config.degenerate_group_masking:
+    print("Masking degenerate groups")
     num_generations = algo_config.num_generations
     grouped_advantages = advantages.reshape((-1, num_generations))
     invalid_group = jnp.all(jnp.isclose(grouped_advantages, 0.0), axis=-1)
@@ -601,6 +602,9 @@ def grpo_loss_fn(
     completion_mask = completion_mask * valid_sequence_mask.astype(
         completion_mask.dtype
     )
+  else:
+    print("Not masking degenerate groups")
+    effective_completion_mask = completion_mask
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)

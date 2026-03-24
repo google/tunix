@@ -118,7 +118,7 @@ arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_response_length", type=int, default=8192)
+arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=1)
 arg_parser.add_argument("--top_p", type=float, default=None)
 arg_parser.add_argument("--top_k", type=int, default=None)
@@ -333,11 +333,11 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/qwen2p5_1p5b_it/02")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/qwen2p5_math_1p5b/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
-MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2p5-1p5b-instruct")
+MODEL_VERSION = "Qwen/Qwen2.5-Math-1.5B"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2p5-math-1p5b")
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
@@ -437,7 +437,7 @@ for s in train_dataset:
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.qwen2p5_1p5b()
+config = model_lib.ModelConfig.qwen2p5_math_1p5b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 else:
@@ -532,7 +532,7 @@ print("Trainer mesh: ", trainer_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
-    "kv_cache_size": MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
+    "kv_cache_size": MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH-256 + 256,
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
