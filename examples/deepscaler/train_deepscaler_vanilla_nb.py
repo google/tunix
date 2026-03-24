@@ -100,8 +100,8 @@ print("jax devices: ", jax.devices())
 # %%
 import argparse
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
-arg_parser.add_argument("--batch_size", type=int, default=128)
-arg_parser.add_argument("--mini_batch_size", type=int, default=128)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -112,12 +112,12 @@ arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
-arg_parser.add_argument("--temperature", type=float, default=0.8)
+arg_parser.add_argument("--temperature", type=float, default=0.6)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=1024)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
-arg_parser.add_argument("--seed", type=int, default=123) 
+arg_parser.add_argument("--seed", type=int, default=42) 
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -132,8 +132,8 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(32, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(32, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -208,7 +208,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 10
+SAVE_INTERVAL_STEPS = 3
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -238,10 +238,7 @@ except wandb.errors.UsageError as e:
 try:
   import datetime
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb.init(
-    project="tunix",
-    name=run_name,
-    config={
+  wandb_config = {
         "batch_size": BATCH_SIZE,
         "mini_batch_size": MINI_BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
@@ -260,8 +257,12 @@ try:
         "top_k": TOP_K,
         "max_concurrency": MAX_CONCURRENCY,
         "rollout_engine": ROLLOUT_ENGINE,
-    })
-  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
+    }
+  wandb.init(
+    project="tunix",
+    name=run_name,
+    config=wandb_config)
+  # wandb.init(project="tunix", id="u9omgqvu", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -292,6 +293,7 @@ trainer_mesh = jax.sharding.Mesh(
     axis_names=TRAINER_MESH[1],
     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
 )
+print(f"YY {trainer_devices_list=} {trainer_mesh.devices=}")
 
 # %%
 try:
@@ -319,7 +321,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vanilla/07")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vanilla_deepseek_with_logprobs/11")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -475,12 +477,11 @@ show_hbm_usage("after loading qwen2_actor")
 
 
 # %%
-rollout_config = config
+import copy
+rollout_config = copy.deepcopy(config)
 rollout_config.remat_config=model_lib.RematConfig.NONE
-rollout_config.dtype = jnp.bfloat16
-rollout_config.param_dtype = jnp.bfloat16
 qwen2_rollout = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, rollout_config, rollout_mesh, dtype=jnp.bfloat16
+    MODEL_PATH, rollout_config, rollout_mesh, dtype=jnp.float32
 )
 
 # %%
@@ -519,8 +520,6 @@ optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-      # Capture the norm of the updates entering this point in the chain
-      optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
@@ -535,7 +534,7 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "data_type": jnp.bfloat16,
+    "return_logprobs": True,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -605,7 +604,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=8,
+        train_micro_batch_size=4,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -618,7 +617,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
           # set_profile_options=False,
           # log_dir=PROFILER_PATH,
         # ) if ENABLE_PROFILER else None,
-        rollout_micro_batch_size = 32,
+        rollout_micro_batch_size = 8,
     ),
     rollout_config=rollout_engine_config,
 )

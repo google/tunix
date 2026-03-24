@@ -119,12 +119,12 @@ arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
-arg_parser.add_argument("--temperature", type=float, default=0.8)
-arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--temperature", type=float, default=1)
+arg_parser.add_argument("--top_p", type=float, default=None)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
-arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument("--shuffle_data", type=bool, default=True)
+arg_parser.add_argument("--seed", type=int, default=123)
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -329,15 +329,15 @@ if NOTEBOOK_ENV == "g3":
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
   DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
+  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/qwen2p5_1p5b_it/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/qwen2p5_1p5b_it/02")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2_5/torch/1.5b-it")
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2p5-1p5b-instruct")
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
@@ -536,7 +536,8 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "data_type": jnp.bfloat16,
+    "return_logprobs": True,
+    "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
 sglang_jax_rollout_dict = {
