@@ -10,6 +10,8 @@ client = genai.Client(
 )
 
 response = client.models.generate_content(
-    model='gemini-2.5-flash', contents='Why is the sky blue?'
+    model='gemini-2.5-flash',
+    contents='Why is the sky blue?',
+    config={'temperature': 0},
 )
 print(response.text)
