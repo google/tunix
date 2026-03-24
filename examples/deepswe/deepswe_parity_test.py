@@ -20,7 +20,7 @@ model inference or optimizer step:
 - final reward / termination-relevant fields
 
 Usage:
-  python3 examples/deepswe/deepswe_parity_test.py --tokenizer-path /path/to/local/qwen-tokenizer
+  python3 examples/deepswe/deepswe_parity_test.py
   python3 examples/deepswe/deepswe_parity_test.py --tokenizer-path /path/to/local/qwen-tokenizer --dump-json /tmp/deepswe_parity.json
 """
 
@@ -42,6 +42,7 @@ from transformers import AutoTokenizer
 
 LOGGER = logging.getLogger("deepswe_parity")
 MAX_DIFF_CHARS = 1500
+DEFAULT_TOKENIZER_PATH = "Qwen/Qwen3-32B"
 
 
 def _install_fake_absl_logging() -> None:
@@ -418,11 +419,17 @@ def _load_real_tokenizer(tokenizer_path: str):
         local_files_only=True,
         trust_remote_code=True,
     )
-  except Exception as exc:
-    raise RuntimeError(
-        "Failed to load a real tokenizer. Pass a local tokenizer/model directory "
-        f"with --tokenizer-path. Attempted: {tokenizer_path}"
-    ) from exc
+  except Exception:
+    try:
+      return AutoTokenizer.from_pretrained(
+          tokenizer_path,
+          trust_remote_code=True,
+      )
+    except Exception as exc:
+      raise RuntimeError(
+          "Failed to load a real tokenizer from local cache or remote source. "
+          f"Attempted: {tokenizer_path}"
+      ) from exc
 
 
 def _run_parity_scenario(tokenizer_path: str, dump_json: Path | None = None) -> int:
@@ -606,10 +613,11 @@ def _parse_args() -> argparse.Namespace:
           os.getenv("DEEPSWE_TOKENIZER_PATH")
           or os.getenv("MODEL_PATH")
           or os.getenv("MODEL_VERSION")
+          or DEFAULT_TOKENIZER_PATH
       ),
       help=(
           "Local tokenizer/model directory for AutoTokenizer.from_pretrained(..., "
-          "local_files_only=True)."
+          "local_files_only=True). Defaults to Qwen/Qwen3-32B."
       ),
   )
   parser.add_argument(
@@ -624,11 +632,6 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
   logging.basicConfig(level=logging.INFO, format="%(message)s")
   args = _parse_args()
-  if not args.tokenizer_path:
-    raise SystemExit(
-        "Missing tokenizer path. Pass --tokenizer-path /path/to/local/tokenizer "
-        "or set DEEPSWE_TOKENIZER_PATH."
-    )
   return _run_parity_scenario(
       tokenizer_path=args.tokenizer_path,
       dump_json=args.dump_json,
