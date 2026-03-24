@@ -130,7 +130,7 @@ arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument("--loss_agg_mode", type=str, default="token-mean")
-
+arg_parser.add_argument("--flash_attn", type=bool, default=False)
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -184,7 +184,7 @@ EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
-ENABLE_FLASH_ATTN=True
+ENABLE_FLASH_ATTN=args.flash_attn
 ENABLE_REMAT = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
