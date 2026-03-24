@@ -273,23 +273,36 @@ else:
 
 # ========================== Model Call ==========================
 
-sampler_lock = threading.Lock()
+# Only backends without a concurrency-safe request path need an outer lock.
+# vLLM server mode already serializes internal engine access and supports
+# concurrent request submission via the in-process driver.
+sampler_lock = None
+if ROLLOUT_ENGINE != "vllm" or not VLLM_SERVER_MODE:
+  sampler_lock = threading.Lock()
 
 
 def model_call(chat_completions, env_unused):
-  """Thread-safe model inference via tunix sampler."""
+  """Model inference via tunix sampler."""
   prompt = chat_parser.parse(
       chat_completions,
       add_generation_prompt=True,
       is_first_msg=True,
   )
-  with sampler_lock:
+  if sampler_lock is None:
     out = sampler(
         prompt,
         max_generation_steps=MAX_RESPONSE_LENGTH,
         echo=False,
         eos_tokens=qwen_eos_tokens,
     )
+  else:
+    with sampler_lock:
+      out = sampler(
+          prompt,
+          max_generation_steps=MAX_RESPONSE_LENGTH,
+          echo=False,
+          eos_tokens=qwen_eos_tokens,
+      )
   return out
 
 
