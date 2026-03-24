@@ -38,9 +38,9 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
-from tunix.generate import tokenizer_adapter
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -369,8 +369,8 @@ class RLCluster:
         "sglang_jax",
     ]:
       raise ValueError(
-          "`cluster_config.rollout_engine` should be one of `'vanilla'` or"
-          " `'vllm'` or `'sglang_jax'`. Received:"
+          "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
+          "`'vllm'`, or `'sglang_jax'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
 
@@ -467,11 +467,16 @@ class RLCluster:
             base_rollout.BaseRollout,
         )
     ):
+      if isinstance(self.cluster_config.rollout_config, dict):
+        loaded_config = self.cluster_config.rollout_config[Mode.TRAIN]
+      else:
+        loaded_config = self.cluster_config.rollout_config
+
       self._rollout = self.cluster_config.rollout_engine(
           rollout_actor=self.rollout_actor,
           tokenizer=self.tokenizer,
           mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=self.cluster_config.rollout_config,
+          rollout_config=loaded_config,
       )
     else:
       raise NotImplementedError(
