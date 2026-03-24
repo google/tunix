@@ -241,6 +241,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
+        "kl_loss": np.mean,
         "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
@@ -633,7 +634,6 @@ def grpo_loss_fn(
     )
   else:
     print("Not masking degenerate groups")
-    effective_completion_mask = completion_mask
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -663,7 +663,9 @@ def grpo_loss_fn(
   is_ratio = jnp.exp(seq_importance_ratio)
   advantages = advantages[:, None]
   pg_loss_1 = -advantages * is_ratio
-  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
+  pg_loss_2 = -advantages * jnp.clip(
+      is_ratio, 1 - epsilon, 1 + epsilon_high
+  )
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
