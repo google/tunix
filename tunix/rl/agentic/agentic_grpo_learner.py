@@ -232,6 +232,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
+        "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
     })
@@ -575,7 +576,6 @@ def grpo_loss_fn(
   # For group-relative advantages, all-0 indicates a no-signal group (e.g. all
   # rewards are equal). Such groups should not contribute to policy, KL, or
   # entropy terms in this loss.
-
   if algo_config.degenerate_group_masking:
     num_generations = algo_config.num_generations
     grouped_advantages = advantages.reshape((-1, num_generations))
@@ -623,7 +623,13 @@ def grpo_loss_fn(
       jnp.greater(pg_loss_2, pg_loss_1), effective_completion_mask
   )
 
-  aux = {"kl": 0.0, "pg_clipfrac": clipped_fraction, "ppo_kl": ppo_kl}
+  pg_loss = ppo_helpers.masked_mean(per_token_loss, effective_completion_mask)
+  aux = {
+      "kl": 0.0,
+      "pg_loss": pg_loss,
+      "pg_clipfrac": clipped_fraction,
+      "ppo_kl": ppo_kl,
+  }
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps
