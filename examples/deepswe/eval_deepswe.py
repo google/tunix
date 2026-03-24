@@ -147,13 +147,10 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
-import optax
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 from tunix.models.qwen3 import model as model_lib
 from tunix.models.qwen3 import params as params_lib
-from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 from tunix.rl.agentic.parser.chat_template_parser import parser
 
@@ -188,95 +185,99 @@ model = params_lib.create_model_from_safe_tensors(
 )
 sft_utils.show_hbm_usage()
 
-# ========================== RLCluster Rollout ==========================
+# ========================== Sampler ==========================
 
-logger.info("Creating RLCluster rollout with engine=%s ...", ROLLOUT_ENGINE)
+logger.info("Creating sampler with engine=%s ...", ROLLOUT_ENGINE)
 
-base_rollout_dict = {
-    "max_prompt_length": MAX_MODEL_LEN,
-    "kv_cache_size": MAX_MODEL_LEN,
-    "temperature": 0.0,
-    "top_p": None,
-    "top_k": None,
-    "eos_tokens": qwen_eos_tokens,
-    "return_logprobs": True,
-    "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
-}
+if ROLLOUT_ENGINE == "vanilla":
+  from tunix.generate import sampler as sampler_lib
 
-if ROLLOUT_ENGINE == "vllm":
+  sampler = sampler_lib.Sampler(
+      model,
+      tokenizer,
+      sampler_lib.CacheConfig(
+          cache_size=16384,
+          num_layers=model_config.num_layers,
+          num_kv_heads=model_config.num_kv_heads,
+          head_dim=model_config.head_dim,
+      ),
+  )
+
+elif ROLLOUT_ENGINE == "vllm":
+  from tunix.generate import mappings
+  from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+
   os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-  rollout_config = base_rollout.RolloutConfig(
-      **base_rollout_dict,
-      rollout_vllm_model_version=MODEL_PATH,
-      rollout_vllm_hbm_utilization=VLLM_HBM_UTILIZATION,
-      rollout_vllm_server_mode=VLLM_SERVER_MODE,
-      rollout_vllm_async_scheduling=True,
-      rollout_vllm_init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
-      rollout_vllm_tpu_backend_type="jax",
+
+  mapping_config = mappings.MappingConfig.build(
+      mapping_obj=None,
+      model=model,
+      backend="vllm_jax",
+  )
+  vllm_config = VllmConfig(
+      mesh=mesh,
+      hbm_utilization=VLLM_HBM_UTILIZATION,
+      init_with_random_weights=VLLM_INIT_RANDOM_WEIGHTS,
+      tpu_backend_type="jax",
+      server_mode=VLLM_SERVER_MODE,
       tensor_parallel_size=mesh.shape["tp"],
       data_parallel_size=mesh.shape["fsdp"],
-      rollout_vllm_max_num_seqs=VLLM_MAX_NUM_SEQS,
-      rollout_vllm_kwargs={
+      mapping_config=mapping_config,
+      engine_kwargs={
+          "model": MODEL_PATH,
           "max_model_len": MAX_MODEL_LEN,
+          "max_num_seqs": VLLM_MAX_NUM_SEQS,
           "enable_prefix_caching": True,
           "kv_cache_metrics": True,
           "disable_log_stats": False,
       },
   )
+  sampler = VllmSampler(tokenizer=tokenizer, config=vllm_config)
+
+  from flax import nnx
+  sampler.load_checkpoint(nnx.state(model))
+  logger.info("Synced model weights to vLLM engine.")
+
 elif ROLLOUT_ENGINE == "sglang_jax":
-  rollout_config = base_rollout.RolloutConfig(
-      **base_rollout_dict,
-      rollout_sglang_jax_model_version=MODEL_VERSION,
-      rollout_sglang_jax_context_length=MAX_MODEL_LEN,
-      rollout_sglang_jax_mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
-      rollout_sglang_jax_init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
-      rollout_sglang_jax_disable_radix_cache=True,
-      rollout_sglang_jax_enable_deterministic_sampling=False,
-      rollout_sglang_jax_precompile_token_paddings=[8192, 16384],
-      rollout_sglang_jax_precompile_bs_paddings=[1],
-      rollout_sglang_jax_max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
+  from tunix.generate import mappings
+  from tunix.generate.sglang_jax_sampler import SglangJaxConfig, SglangJaxSampler
+
+  mapping_config = mappings.MappingConfig.build(
+      mapping_obj=None,
+      model=model,
+      backend="sglang_jax",
   )
-elif ROLLOUT_ENGINE == "vanilla":
-  rollout_config = base_rollout.RolloutConfig(**base_rollout_dict)
+  sampler = SglangJaxSampler(
+      tokenizer=tokenizer,
+      config=SglangJaxConfig(
+          mesh=mesh,
+          mapping_config=mapping_config,
+          model_version=MODEL_VERSION,
+          context_length=MAX_MODEL_LEN,
+          mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
+          init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
+          disable_radix_cache=True,
+          enable_deterministic_sampling=False,
+          precompile_token_paddings=[8192, 16384],
+          precompile_bs_paddings=[1],
+          max_running_requests=SGLANG_MAX_RUNNING_REQUESTS,
+      ),
+  )
+
 else:
   raise ValueError(
       f"Unsupported ROLLOUT_ENGINE: {ROLLOUT_ENGINE!r}. "
       f"Choose from: 'vanilla', 'vllm', 'sglang_jax'"
   )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
-    role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: mesh,
-        rl_cluster_lib.Role.ROLLOUT: mesh,
-    },
-    rollout_engine=ROLLOUT_ENGINE,
-    offload_to_cpu=False,
-    training_config=rl_cluster_lib.RLTrainingConfig(
-        actor_optimizer=optax.sgd(0.0),
-        eval_every_n_steps=1,
-        max_steps=1,
-        mini_batch_size=1,
-        train_micro_batch_size=1,
-        compute_logps_micro_batch_size=1,
-        rollout_micro_batch_size=1,
-        metrics_logging_options=None,
-        checkpoint_root_directory=None,
-        checkpointing_options=None,
-    ),
-    rollout_config=rollout_config,
-)
-
-rl_cluster = rl_cluster_lib.RLCluster(
-    actor=model,
-    reference=None,
-    tokenizer=tokenizer,
-    cluster_config=cluster_config,
-)
-
 # ========================== Model Call ==========================
 
+sampler_lock = None
+if ROLLOUT_ENGINE != "vllm" or not VLLM_SERVER_MODE:
+  sampler_lock = threading.Lock()
+
 def model_call(chat_completions, env_unused):
-  """Model inference via RLCluster rollout, matching training path."""
+  """Model inference via tunix sampler."""
   pair_index = None
   instance_id = "unknown"
   if env_unused is not None:
@@ -295,11 +296,21 @@ def model_call(chat_completions, env_unused):
       len(prompt),
   )
   t0 = time.time()
-  out = rl_cluster.generate(
-      prompts=[prompt],
-      apply_chat_template=False,
-      mode=rl_cluster_lib.Mode.EVAL,
-  )
+  if sampler_lock is None:
+    out = sampler(
+        prompt,
+        max_generation_steps=MAX_RESPONSE_LENGTH,
+        echo=False,
+        eos_tokens=qwen_eos_tokens,
+    )
+  else:
+    with sampler_lock:
+      out = sampler(
+          prompt,
+          max_generation_steps=MAX_RESPONSE_LENGTH,
+          echo=False,
+          eos_tokens=qwen_eos_tokens,
+      )
   logger.info(
       "[pair=%s instance=%s] model_call end response_chars=%d (%.1fs)",
       pair_index,

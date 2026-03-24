@@ -420,7 +420,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           f"{self.args['max_model_len']}."
       )
     if beam_size is not None:
-      self.sampling_params = BeamSearchParams(
+      sampling_params = BeamSearchParams(
           beam_width=beam_size,
           max_tokens=max_generation_steps,
           ignore_eos=False,
@@ -482,16 +482,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               f" {sampling_kwargs}. Error: {e}",
           )
 
-      self.sampling_params = sampling_params
-
     prompt_ids = [self.tokenize(x) for x in input_strings]
     prompt_objects = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids]
     if self._driver is not None:
-      outputs = self._generate_server_mode(prompt_objects, self.sampling_params)
+      outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:
       outputs = self.llm.generate(
           prompts=prompt_objects,
-          sampling_params=self.sampling_params,
+          sampling_params=sampling_params,
           use_tqdm=True,
       )
     decoded_outputs, out_logprobs, out_tokens = self.detokenize(

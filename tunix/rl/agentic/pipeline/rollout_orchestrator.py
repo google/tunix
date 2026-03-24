@@ -161,7 +161,9 @@ class RolloutOrchestrator:
 
     try:
       # Parallel execution for the group
-      self._rollout_sync_lock.acquire_rollout()
+      await asyncio.get_event_loop().run_in_executor(
+          None, self._rollout_sync_lock.acquire_rollout
+      )
       try:
         episode_count = await self._run_and_queue_one_episode(
             agent=agent,
@@ -172,7 +174,9 @@ class RolloutOrchestrator:
             collect_mode=collect_mode,
         )
       finally:
-        self._rollout_sync_lock.release_rollout()
+        await asyncio.get_event_loop().run_in_executor(
+            None, self._rollout_sync_lock.release_rollout
+        )
     except ExceptionGroup as eg:
       for e in eg.exceptions:
         logging.error(
