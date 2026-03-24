@@ -194,8 +194,8 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     ]
     expected_descriptors = [
         {"name": "overlap_timeline", "parent_uuid": None},
-        {"name": "Lane 0", "parent_uuid": main_uuid},
-        {"name": "Lane 1", "parent_uuid": main_uuid},
+        {"name": "", "parent_uuid": main_uuid},
+        {"name": "", "parent_uuid": main_uuid},
     ]
     self.assertEqual(actual_descriptors, expected_descriptors)
 
