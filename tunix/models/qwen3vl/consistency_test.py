@@ -479,7 +479,7 @@ def compare_layerwise(
 def main(
     model_id_or_dir: str = 'Qwen/Qwen3-VL-4B-Instruct',
     prompt: str = 'The quick brown fox jumps over the lazy dog.',
-    device: str = 'cpu',
+    device: str = 'cpu',  # Default to CPU to avoid conflict with JAX on GPU/TPU
     dtype: str = 'bfloat16',
     image_url: str | None = None,
     config: model_lib.ModelConfig | None = None,

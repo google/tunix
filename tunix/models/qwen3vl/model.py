@@ -453,7 +453,7 @@ class RMSNorm(nnx.Module):
     # Use rsqrt (single hardware op) to match PyTorch's
     #   hidden *= torch.rsqrt(variance + eps)
     # Using sqrt+divide gives IEEE-754 exact results but can differ from
-    # rsqrt by 1 ULP in float32, which the MLP down_proj amplifies to ~64.
+    # rsqrt by 1 ULP in float32.
     rms_inv = jax.lax.rsqrt(
         jnp.mean(x_f32**2, axis=-1, keepdims=True) + self.norm_eps
     )
@@ -788,9 +788,7 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
       pixel_values: jaxtyping.Array | None,  # [N_tokens, patch_volume]
       vision_precomputed: VisionGridData | None,
       cache: Cache | None,  # (sequence length L')
-      attention_mask: (
-          jaxtyping.Array | None
-      ),  # [B, L] padding mask (1=real, 0=pad) or None
+      padding_mask: jaxtyping.Array | None,  # [B, L]
       output_hidden_states: bool = False,
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Qwen3-VL model.
@@ -801,7 +799,7 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
         text/temporal axis used for causal masking; rows 1-2 are the spatial
         H/W axes used only for RoPE.  Obtained from get_rope_index().
       cache: Attention KV cache or None.
-      attention_mask: Optional 2D padding mask of shape [B, L], where 1
+      padding_mask: Optional 2D padding mask of shape [B, L], where 1
         indicates a real token and 0 indicates padding.  A position-based
         causal mask is built internally from positions[0] and this mask.
       output_hidden_states: whether to output the hidden states.
@@ -822,9 +820,7 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
     # following causal order with respect to text tokens — matching HF
     # create_causal_mask(position_ids=text_position_ids).
     text_positions = positions[0]  # [B, L]
-    causal_mask = make_causal_mask_from_positions(
-        text_positions, attention_mask
-    )
+    causal_mask = make_causal_mask_from_positions(text_positions, padding_mask)
 
     # When a KV cache is provided the stored keys/values span the full cache
     # size, so the key axis of the attention score matrix is [B, heads, L,
@@ -952,7 +948,7 @@ class Qwen3VL(BackendMappingMixin, nnx.Module):
         'pixel_values': None,
         'vision_precomputed': None,
         'cache': None,
-        'attention_mask': jnp.ones(
+        'padding_mask': jnp.ones(
             (dummy_batch_size, dummy_seq_len), dtype=jnp.bool
         ),
     }

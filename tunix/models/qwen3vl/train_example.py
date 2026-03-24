@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fine-tuning Qwen3-VL-4B with PeftTrainer on DocumentVQA (LoRA / QLoRA).
+"""Fine-tuning Qwen3-VL 4B with PeftTrainer on DocumentVQA (LoRA / QLoRA).
 
 Fine-tunes Qwen/Qwen3-VL-4B-Instruct on the HuggingFaceM4/DocumentVQA
 dataset using LoRA or QLoRA via qwix.  Images are included in the training
 inputs.
 
-Key differences from a text-only fine-tuning example:
+Notes on implementation:
   - Uses qwen3vl_4b() model config (includes vision encoder).
   - Data processing is split into two stages:
       1. _PrepareConversation: dataset-specific, converts raw HF items into
@@ -217,7 +217,7 @@ def _gen_model_input_fn(batch: EncodedBatch) -> dict:
   """Convert an EncodedBatch to model kwargs."""
   return {
       'input_tokens': jnp.array(batch.input_tokens),
-      'input_mask': jnp.array(batch.input_mask).astype(jnp.bool_),
+      'padding_mask': jnp.array(batch.input_mask).astype(jnp.bool_),
       'completion_mask': jnp.array(batch.completion_mask),
       'positions': jnp.array(batch.positions),
       'pixel_values': jnp.array(batch.pixel_values, dtype=jnp.bfloat16),
@@ -228,11 +228,11 @@ def _gen_model_input_fn(batch: EncodedBatch) -> dict:
 def loss_fn(
     model: model_lib.Qwen3VL,
     input_tokens: jax.Array,  # [B, L]
-    input_mask: jax.Array,  # [B, L] — padding mask (1=real, 0=pad)
-    completion_mask: jax.Array,  # [B, L] — 1 for tokens to include in loss
     positions: jax.Array,  # [3, B, L]
     pixel_values: jax.Array,  # [total_patches, C]
     vision_grid: VisionGridData,  # pre-computed outside JIT
+    padding_mask: jax.Array,  # [B, L] — padding mask (1=real, 0=pad)
+    completion_mask: jax.Array,  # [B, L] — 1 for tokens to include in loss
 ) -> jax.Array:
   """Cross-entropy loss over answer tokens only."""
   logits, _ = model(
@@ -241,12 +241,8 @@ def loss_fn(
       pixel_values,
       vision_grid,
       cache=None,
-      attention_mask=input_mask,
+      padding_mask=padding_mask,
   )
-  # Shift by 1: predict token t+1 from the hidden state at position t.
-  # Keep logits in bfloat16 to avoid materialising a float32 [B, L, V] tensor
-  # (~2.4 GiB/GPU unsharded), which exhausts the memory pool during
-  # cross-entropy computation.  Cast only the small [B, L-1] per-token loss.
   logits = logits[:, :-1, :]  # [B, L-1, V] bfloat16
   targets = input_tokens[:, 1:]  # [B, L-1]
   mask = completion_mask[:, 1:].astype(jnp.float32)  # [B, L-1]
@@ -288,6 +284,7 @@ def get_lora_model(
   # reshard_model_to_mesh skips when base-model params are already on the mesh,
   # leaving LoRA params (which QWIX creates without sharding annotations) on
   # device [0] only and causing a device-mismatch error at training time.
+  # TODO: review this logic. I suspect we don't really need resharding here
   if mesh is not None:
     with mesh:
       graph_def, state = nnx.split(lora_model)
