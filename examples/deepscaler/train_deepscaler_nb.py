@@ -206,10 +206,10 @@ MAX_CONCURRENCY = args.max_concurrency
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 LOSS_AGG_MODE = args.loss_agg_mode
-MODEL_DTYPE = jnp.float32
+# MODEL_DTYPE = jnp.float32
+# ACTIVATION_DTYPE = jnp.float32
+MODEL_DTYPE = jnp.bfloat16
 ACTIVATION_DTYPE = jnp.float32
-# MODEL_DTYPE = jnp.bfloat16
-# ACTIVATION_DTYPE = jnp.bfloat16
 
 
 # === AdamW, warmup, cosine scheduler ===
@@ -350,7 +350,7 @@ else:
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt", timestamp, "/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt", timestamp, "01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
