@@ -283,11 +283,24 @@ if ROLLOUT_ENGINE != "vllm" or not VLLM_SERVER_MODE:
 
 def model_call(chat_completions, env_unused):
   """Model inference via tunix sampler."""
+  pair_index = None
+  instance_id = "unknown"
+  if env_unused is not None:
+    pair_index = getattr(env_unused, "extra_kwargs", {}).get("pair_index")
+    instance_id = getattr(env_unused, "entry", {}).get("instance_id", "unknown")
+
   prompt = chat_parser.parse(
       chat_completions,
       add_generation_prompt=True,
       is_first_msg=True,
   )
+  logger.info(
+      "[pair=%s instance=%s] model_call start prompt_chars=%d",
+      pair_index,
+      instance_id,
+      len(prompt),
+  )
+  t0 = time.time()
   if sampler_lock is None:
     out = sampler(
         prompt,
@@ -303,6 +316,13 @@ def model_call(chat_completions, env_unused):
           echo=False,
           eos_tokens=qwen_eos_tokens,
       )
+  logger.info(
+      "[pair=%s instance=%s] model_call end response_chars=%d (%.1fs)",
+      pair_index,
+      instance_id,
+      len(out.text[0]) if out.text else 0,
+      time.time() - t0,
+  )
   return out
 
 
@@ -315,11 +335,68 @@ from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
 
 
+class _EvalLoggingEnvMixin:
+  """Adds phase-level reset/step logs for eval debugging."""
+
+  def reset(self):
+    pair_index = self.extra_kwargs.get("pair_index")
+    instance_id = self.entry.get("instance_id", "unknown")
+    logger.info(
+        "[pair=%s instance=%s] reset start",
+        pair_index,
+        instance_id,
+    )
+    t0 = time.time()
+    obs, info = super().reset()
+    logger.info(
+        "[pair=%s instance=%s] reset end (%.1fs)",
+        pair_index,
+        instance_id,
+        time.time() - t0,
+    )
+    return obs, info
+
+  def step(self, action):
+    pair_index = self.extra_kwargs.get("pair_index")
+    instance_id = self.entry.get("instance_id", "unknown")
+    step_idx = self.step_count + 1
+    action_name = action
+    if isinstance(action, str):
+      action_name = action.split("\n", 1)[0][:120]
+    logger.info(
+        "[pair=%s instance=%s] env.step start step=%s action=%s",
+        pair_index,
+        instance_id,
+        step_idx,
+        action_name,
+    )
+    t0 = time.time()
+    obs, reward, done, info = super().step(action)
+    logger.info(
+        "[pair=%s instance=%s] env.step end step=%s reward=%.1f done=%s (%.1fs)",
+        pair_index,
+        instance_id,
+        step_idx,
+        reward,
+        done,
+        time.time() - t0,
+    )
+    return obs, reward, done, info
+
+
+class LoggedSWEEnv(_EvalLoggingEnvMixin, SWEEnv):
+  pass
+
+
+class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
+  pass
+
+
 def pairs_generator():
   """Yield (agent, env) pairs for each dataset entry."""
   for pair_index, entry in enumerate(entries):
     agent = SWEAgent()
-    env_cls = GuardedSWEEnv if ENABLE_GUARD else SWEEnv
+    env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
     env = env_cls(
         entry=entry,
         max_steps=MAX_STEPS,
