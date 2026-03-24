@@ -1,0 +1,115 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            xl0ys1ht27r8w8w11a5wlu9ybc198468:
+                args:
+                    - base_config.yaml
+                    - model_config.model_name=Qwen3-4B-base
+                    - model_config.model_id=Qwen/Qwen3-4B-base
+                    - model_config.model_source=huggingface
+                    - model_config.intermediate_ckpt_dir=/tmp/intermediate_ckpt/Qwen3-4B-base
+                    - model_config.mesh.shape=(2,4)
+                    - model_config.mesh.axis_names=('fsdp','tp')
+                    - model_config.rng_seed=42
+                    - actor_model_config.lora_config.enabled=True
+                    - actor_model_config.lora_config.rank=64
+                    - actor_model_config.lora_config.alpha=64.0
+                    - actor_model_config.lora_config.module_path=.*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj
+                    - actor_model_config.mesh.shape=(2,4)
+                    - actor_model_config.mesh.axis_names=('fsdp','tp')
+                    - rollout_model_config.mesh.shape=(2,4)
+                    - rollout_model_config.mesh.axis_names=('fsdp','tp')
+                    - tokenizer_config.tokenizer_path=Qwen/Qwen3-4B-base
+                    - tokenizer_config.tokenizer_type=huggingface
+                    - tokenizer_config.add_bos=false
+                    - data_source=huggingface
+                    - dataset_name=nvidia/OpenMathInstruct-2
+                    - batch_size=8
+                    - num_batches=5000
+                    - num_train_epochs=1
+                    - num_test_batches=10
+                    - rl_training_config.mini_batch_size=8
+                    - rl_training_config.train_micro_batch_size=1
+                    - rl_training_config.actor_optimizer_config.opt_type=adamw
+                    - rl_training_config.actor_optimizer_config.peak_value=3e-6
+                    - rl_training_config.actor_optimizer_config.schedule_type=warmup_cosine_decay_schedule
+                    - rl_training_config.actor_optimizer_config.init_value=0.0
+                    - rl_training_config.actor_optimizer_config.end_value=0.0
+                    - rl_training_config.actor_optimizer_config.warmup_ratio=0.1
+                    - rl_training_config.actor_optimizer_config.warmup_steps=200
+                    - rl_training_config.actor_optimizer_config.decay_steps=20000
+                    - rl_training_config.actor_optimizer_config.b1=0.9
+                    - rl_training_config.actor_optimizer_config.b2=0.99
+                    - rl_training_config.actor_optimizer_config.weight_decay=0.1
+                    - rl_training_config.actor_optimizer_config.max_grad_norm=1.0
+                    - rl_training_config.eval_every_n_steps=500
+                    - rl_training_config.max_steps=20000
+                    - rl_training_config.metrics_logging_options.log_dir=/tmp/tensorboard/Qwen3-4B-base-OpenMath
+                    - rl_training_config.metrics_logging_options.run_name=Qwen3-4B_OpenMath_LoRA_20260324_1621
+                    - rl_training_config.metrics_logging_options.flush_every_n_steps=20
+                    - rl_training_config.checkpointing_options.save_interval_steps=1000
+                    - rl_training_config.checkpointing_options.max_to_keep=4
+                    - rl_training_config.profiler_options={}
+                    - rollout_config.total_generation_steps=1024
+                    - rollout_config.max_prompt_length=1024
+                    - rollout_config.temperature=0.9
+                    - rollout_config.top_p=1.0
+                    - rollout_config.top_k=50
+                    - rollout_engine=vanilla
+                    - offload_to_cpu=false
+                    - grpo_config.num_generations=8
+                    - grpo_config.num_iterations=1
+                    - grpo_config.beta=0.08
+                    - grpo_config.epsilon=0.2
+                    - reward_functions=[tunix/cli/reward_fn/openmath_util_reward.py]
+                cpu_count: 180
+                cpu_count_logical: 180
+                disk:
+                    /:
+                        total: "103865303040"
+                        used: "92376403968"
+                email: xianglon@google.com
+                executable: /home/xianglon_google_com/tunix/.venv/bin/python
+                git:
+                    commit: b56e93b5feac2d349427869564c9db7a3e7ce961
+                    remote: https://github.com/google/tunix.git
+                host: t1v-n-1a334833-w-0
+                memory:
+                    total: "1521841643520"
+                os: Linux-6.8.0-1015-gcp-x86_64-with-glibc2.35
+                program: -m tunix.cli.grpo_main
+                python: CPython 3.13.11
+                root: /home/xianglon_google_com/tunix
+                startedAt: "2026-03-24T16:21:45.327747Z"
+                tpu:
+                    count: 8
+                    devicesPerChip: 1
+                    hbmGib: 32
+                    name: v6e
+                writerId: xl0ys1ht27r8w8w11a5wlu9ybc198468
+        m: []
+        python_version: 3.13.11
+        t:
+            "1":
+                - 1
+                - 11
+                - 12
+                - 45
+                - 49
+                - 51
+            "2":
+                - 1
+                - 11
+                - 12
+                - 45
+                - 49
+                - 51
+            "3":
+                - 13
+                - 61
+            "4": 3.13.11
+            "5": 0.25.1
+            "6": 4.57.1
+            "12": 0.25.1
+            "13": linux-x86_64
