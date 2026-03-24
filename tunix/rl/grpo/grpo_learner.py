@@ -297,6 +297,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       advantages = advantage_estimator(
           rewards=rewards, num_generations=self.algo_config.num_generations
       )
+      print("computed advantages")
 
     # Log raw scores from the reward model fn
     self.rl_cluster.buffer_metrics(
@@ -352,6 +353,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           **{k: v for k, v in training_input.items() if k != "prompts"},
       )
       self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
+      print("buffered metrics")
 
     return TrainExample(
         prompt_ids=prompt_ids,
@@ -580,7 +582,7 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
   std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
   advantage = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
-  print("advantage", advantage)
+  # print("advantage", advantage)
   return advantage
 
 

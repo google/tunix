@@ -246,7 +246,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       training_example = rl_utils.get_batch_slice(combined_batch, cur_slice)
       produced.append(training_example)
       offset += n
-
+    print("produced", len(produced), "examples")
     return produced
 
   def _prepare_data(
@@ -442,6 +442,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
         if mode == rl_cluster_lib.Mode.TRAIN:
           self._iter_steps += 1
+          print("iter_steps", self._iter_steps)
         else:
           self._eval_iter_steps += 1
 
@@ -713,6 +714,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           curr_train_ds = train_data_queue.get(block=True)
 
         if curr_train_ds is None:
+          print("curr_train_ds is None")
           break
 
         if self.can_enable_async_rollout:
@@ -745,11 +747,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               mode=rl_cluster_lib.Mode.EVAL,
           )
           curr_eval_ds = eval_data_queue.get(block=True)
+        
+        sft_utils.show_hbm_usage(title="RLLearner update_actor")
         self.rl_cluster.update_actor(
             curr_train_ds,
             curr_eval_ds,
             skip_jit,
         )  # loop over μ num_iterations
+        print("updated actor")
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
               curr_train_ds,

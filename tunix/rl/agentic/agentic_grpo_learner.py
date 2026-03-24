@@ -100,6 +100,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
+  degenerate_group_masking: bool = True  # Whether to mask out degenerate groups with all-0 advantages.
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -572,7 +573,30 @@ def grpo_loss_fn(
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
-  advantages = jnp.astype(train_example.advantages, jnp.float32)[:, None]
+  advantages = jnp.astype(train_example.advantages, jnp.float32)
+  if advantages.ndim != 1:
+    raise ValueError(
+        f"Expected advantages to be a 1D array, but got shape {advantages.shape}"
+    )
+
+  # Mask out degenerate groups (all-0 sequence advantages).
+  #
+  # For group-relative advantages, all-0 indicates a no-signal group (e.g. all
+  # rewards are equal). Such groups should not contribute to policy, KL, or
+  # entropy terms in this loss.
+  if algo_config.degenerate_group_masking:
+    print("Masking degenerate groups")
+    num_generations = algo_config.num_generations
+    grouped_advantages = advantages.reshape((-1, num_generations))
+    invalid_group = jnp.all(jnp.isclose(grouped_advantages, 0.0), axis=-1)
+    valid_group_mask = jnp.logical_not(invalid_group)
+    valid_sequence_mask = jnp.repeat(valid_group_mask, num_generations)[:, None]
+    effective_completion_mask = completion_mask * valid_sequence_mask.astype(
+      completion_mask.dtype
+    )
+  else:
+    print("Not masking degenerate groups")
+    effective_completion_mask = completion_mask
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -582,13 +606,13 @@ def grpo_loss_fn(
     )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
-  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
+  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, effective_completion_mask)
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
-    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
+    seq_importance_ratio = (seq_importance_ratio * effective_completion_mask).sum(
         axis=-1
-    ) / jnp.clip(completion_mask.sum(-1), min=1)
+    ) / jnp.clip(effective_completion_mask.sum(-1), min=1)
     seq_importance_ratio = (
         per_token_logps
         - jax.lax.stop_gradient(per_token_logps)
@@ -597,13 +621,16 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
+  advantages = advantages[:, None]
   pg_loss_1 = -advantages * is_ratio
-  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
+  pg_loss_2 = -advantages * jnp.clip(
+      is_ratio, 1 - epsilon, 1 + epsilon_high
+  )
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
   clipped_fraction = ppo_helpers.masked_mean(
-      jnp.greater(pg_loss_2, pg_loss_1), completion_mask
+      jnp.greater(pg_loss_2, pg_loss_1), effective_completion_mask
   )
 
   aux = {"kl": 0.0, "pg_clipfrac": clipped_fraction, "ppo_kl": ppo_kl}
@@ -615,15 +642,15 @@ def grpo_loss_fn(
 
     # Log mean KL.
     aux["kl"] = jnp.astype(
-        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+        (kl * effective_completion_mask).sum() / jnp.clip(effective_completion_mask.sum(), min=1),
         jnp.float32,
     )
 
   loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss, effective_completion_mask, loss_aggregation_mode
   )
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
-  entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
+  entropy_loss = ppo_helpers.masked_mean(token_entropy, effective_completion_mask)
   aux["entropy"] = entropy_loss
 
   return loss, aux

@@ -118,13 +118,13 @@ arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_response_length", type=int, default=8192)
-arg_parser.add_argument("--temperature", type=float, default=0.6)
-arg_parser.add_argument("--top_p", type=float, default=1)
+arg_parser.add_argument("--max_response_length", type=int, default=2048)
+arg_parser.add_argument("--temperature", type=float, default=1)
+arg_parser.add_argument("--top_p", type=float, default=None)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
-arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument("--seed", type=int, default=123)
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -230,7 +230,7 @@ GENERATION_CONFIGS = {
 }
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "vanilla"
+    "ROLLOUT_ENGINE", "vllm"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
 
@@ -245,7 +245,10 @@ except wandb.errors.UsageError as e:
 try:
   import datetime
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb_config = {
+  wandb.init(
+    project="tunix",
+    name=run_name,
+    config={
         "batch_size": BATCH_SIZE,
         "mini_batch_size": MINI_BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
@@ -264,12 +267,8 @@ try:
         "top_k": TOP_K,
         "max_concurrency": MAX_CONCURRENCY,
         "rollout_engine": ROLLOUT_ENGINE,
-    }
-  wandb.init(
-    project="tunix",
-    name=run_name,
-    config=wandb_config)
-  # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
+    })
+  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -307,7 +306,6 @@ trainer_mesh = jax.sharding.Mesh(
     axis_names=TRAINER_MESH[1],
     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
 )
-print(f"ZZ {trainer_devices_list=} {trainer_mesh.devices=}")
 
 # %%
 try:
@@ -335,11 +333,11 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_old_logpbs_orig/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/qwen2p5_math_1p5b/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
-MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+MODEL_VERSION = "Qwen/Qwen2.5-Math-1.5B"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "qwen2p5-math-1p5b")
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
@@ -439,7 +437,7 @@ for s in train_dataset:
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config = model_lib.ModelConfig.qwen2p5_math_1p5b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 else:
@@ -534,7 +532,7 @@ print("Trainer mesh: ", trainer_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
-    "kv_cache_size": MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
+    "kv_cache_size": MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH-256 + 256,
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
@@ -631,7 +629,6 @@ grpo_config = GRPOConfig(
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
-    degenerate_group_masking=False,
 )
 
 # Perf Metrics logging

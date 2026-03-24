@@ -160,7 +160,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
-    self._patch_rollout_config()
 
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
@@ -238,13 +237,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.loop = loop_queue.get()
     self._global_step_start_time = time.time()
 
-  def _patch_rollout_config(self):
-    rollout_config = self.rl_cluster.cluster_config.rollout_config
-    if not isinstance(rollout_config, dict):
-      rollout_config = {"train": rollout_config}
-    for config in rollout_config.values():
-      config.max_tokens_to_generate = self.algo_config.max_response_length
-      config.return_logprobs = True
 
   def _compute_rewards(
       self,
