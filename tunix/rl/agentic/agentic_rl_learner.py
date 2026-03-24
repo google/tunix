@@ -62,7 +62,7 @@ MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   policy_version: np.ndarray | None = None
-
+  valid_traj: np.ndarray | None = None
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class AgenticRLConfig(algo_config_lib.AlgorithmConfig):

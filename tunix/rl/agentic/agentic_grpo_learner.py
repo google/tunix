@@ -284,6 +284,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_masks_list: List[np.ndarray] = []
     old_logprobs_list: List[np.ndarray] = []
     policy_versions_list: List[int] = []
+    valid_traj_list: List[int] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -302,6 +303,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
+      valid_traj_list.append(item.traj.get("valid_traj"))
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -454,7 +456,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
-
+    valid_traj = np.array(valid_traj_list, dtype=np.int32)
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
     self.rl_cluster.buffer_metrics_async(
@@ -496,6 +498,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       )
 
     logging.debug("Advantages computed: %s", advantages)
+
     combined_batch = TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -505,6 +508,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         advantages=advantages,
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
+        valid_traj=valid_traj,
     )
     return [combined_batch]
 
@@ -549,7 +553,11 @@ def grpo_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
-
+  if train_example.valid_traj is not None:
+    valid_traj_mask = jnp.asarray(
+        train_example.valid_traj, dtype=completion_mask.dtype
+    )
+    completion_mask = completion_mask * valid_traj_mask[:, None]
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
   per_token_logps, logits = common.compute_per_token_logps(
