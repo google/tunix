@@ -140,8 +140,8 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -331,7 +331,7 @@ if NOTEBOOK_ENV == "g3":
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
   DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
+  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
@@ -524,8 +524,6 @@ optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
-      # Capture the norm of the updates entering this point in the chain
-      optax.snapshot("clipped_grad_norm", optax.global_norm),
       optimizer,
   )
 
@@ -556,8 +554,6 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_page_size": 128,
 }
 
-MAX_NUM_SEQS =768
-MAX_BATCHED_TOKENS = MAX_NUM_SEQS * 10 * 1024 // 8 # 256 * 10k
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
@@ -651,7 +647,6 @@ perf_metrics_config = PerfMetricsConfig(
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen2_actor,
     reference=qwen2_ref,
-    rollout=qwen2_rollout,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
     perf_config=perf_metrics_config,
