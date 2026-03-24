@@ -16,6 +16,7 @@
 
 import atexit
 import dataclasses
+import inspect
 from itertools import count
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -271,7 +272,20 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def _build_engine_args(self) -> EngineArgs:
     engine_kwargs = dict(self.args)
     engine_kwargs.setdefault("disable_log_stats", True)
-    return EngineArgs(**engine_kwargs)
+    supported_keys = set(inspect.signature(EngineArgs.__init__).parameters)
+    supported_keys.discard("self")
+    filtered_engine_kwargs = {
+        key: value
+        for key, value in engine_kwargs.items()
+        if key in supported_keys
+    }
+    dropped_keys = sorted(set(engine_kwargs) - set(filtered_engine_kwargs))
+    if dropped_keys:
+      logging.info(
+          "Dropping unsupported EngineArgs kwargs for current vLLM build: %s",
+          dropped_keys,
+      )
+    return EngineArgs(**filtered_engine_kwargs)
 
   def _create_driver(self) -> VLLMInProcessDriver:
     engine_args = self._build_engine_args()
