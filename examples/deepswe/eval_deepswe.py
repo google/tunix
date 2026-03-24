@@ -40,12 +40,12 @@ DATASET_SPLIT = os.getenv("DATASET_SPLIT", "test")
 DATASET_CACHE = os.getenv("DATASET_CACHE", "/scratch/dataset_cache")
 
 # Model
-MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-4B-Instruct-2507")
+MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 # Evaluation
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
-MAX_PROMPT_LENGTH = int(os.getenv("MAX_PROMPT_LENGTH", "4096"))
+MAX_MODEL_LEN = int(os.getenv("MAX_MODEL_LEN", "32768"))
 MAX_RESPONSE_LENGTH = int(
     os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "8192"))
 )
@@ -214,7 +214,7 @@ elif ROLLOUT_ENGINE == "vllm":
       mapping_config=mapping_config,
       engine_kwargs={
           "model": MODEL_PATH,
-          "max_model_len": 16384,
+          "max_model_len": MAX_MODEL_LEN,
           "max_num_seqs": VLLM_MAX_NUM_SEQS,
           "enable_prefix_caching": True,
           "kv_cache_metrics": True,
@@ -243,7 +243,7 @@ elif ROLLOUT_ENGINE == "sglang_jax":
           mesh=mesh,
           mapping_config=mapping_config,
           model_version=MODEL_VERSION,
-          context_length=16384 + MAX_RESPONSE_LENGTH + 100,
+          context_length=MAX_MODEL_LEN,
           mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
           init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
           disable_radix_cache=True,
@@ -265,30 +265,13 @@ else:
 sampler_lock = threading.Lock()
 
 
-def build_prompt_within_budget(chat_completions):
-  """Render a chat prompt while trimming oldest history to fit token budget."""
-  if not chat_completions:
-    return "", 0
-
-  system_messages = chat_completions[:1]
-  tail_messages = chat_completions[1:]
-  kept_messages = list(tail_messages)
-
-  while True:
-    prompt = chat_parser.parse(
-        system_messages + kept_messages,
-        add_generation_prompt=True,
-        is_first_msg=True,
-    )
-    prompt_tokens = len(tokenizer.encode(prompt))
-    if prompt_tokens <= MAX_PROMPT_LENGTH or not kept_messages:
-      return prompt, prompt_tokens
-    kept_messages = kept_messages[1:]
-
-
 def model_call(chat_completions, env_unused):
   """Thread-safe model inference via tunix sampler."""
-  prompt, _ = build_prompt_within_budget(chat_completions)
+  prompt = chat_parser.parse(
+      chat_completions,
+      add_generation_prompt=True,
+      is_first_msg=True,
+  )
   with sampler_lock:
     out = sampler(
         prompt,

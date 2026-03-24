@@ -97,7 +97,7 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
-MAX_PROMPT_LENGTH = int(os.getenv("MAX_PROMPT_LENGTH", "4096"))
+MAX_MODEL_LEN = int(os.getenv("MAX_MODEL_LEN", "32768"))
 MAX_RESPONSE_LENGTH = int(
     os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "8192"))
 )
@@ -295,7 +295,7 @@ if not USE_API:
         mapping_config=mapping_config,
         engine_kwargs={
             "model": MODEL_PATH,
-            "max_model_len": 16384,
+            "max_model_len": MAX_MODEL_LEN,
             "max_num_seqs": 1,
             "enable_prefix_caching": True,
             "kv_cache_metrics": True,
@@ -324,7 +324,7 @@ if not USE_API:
             mesh=mesh,
             mapping_config=mapping_config,
             model_version=MODEL_VERSION,
-            context_length=16384 + MAX_RESPONSE_LENGTH + 100,
+            context_length=MAX_MODEL_LEN,
             mem_fraction_static=SGLANG_MEM_FRACTION_STATIC,
             init_with_random_weights=SGLANG_INIT_RANDOM_WEIGHTS,
             disable_radix_cache=True,
@@ -385,27 +385,6 @@ def _chat_to_gemini(chat_completions):
       contents.append({"role": "user", "parts": [{"text": content}]})
   system_instruction = "\n".join(system_parts) if system_parts else None
   return contents, system_instruction
-
-
-def build_prompt_within_budget(chat_completions):
-  """Render a chat prompt while trimming oldest history to fit token budget."""
-  if not chat_completions:
-    return "", 0
-
-  system_messages = chat_completions[:1]
-  tail_messages = chat_completions[1:]
-  kept_messages = list(tail_messages)
-
-  while True:
-    prompt = chat_parser.parse(
-        system_messages + kept_messages,
-        add_generation_prompt=True,
-        is_first_msg=True,
-    )
-    prompt_tokens = len(tokenizer.encode(prompt))
-    if prompt_tokens <= MAX_PROMPT_LENGTH or not kept_messages:
-      return prompt, prompt_tokens
-    kept_messages = kept_messages[1:]
 
 # ========================== Agent & Env ==========================
 
@@ -492,9 +471,12 @@ def run_single_eval(entry, traj_file):
         prompt_tokens = response.usage.prompt_tokens
         response_tokens = response.usage.completion_tokens
     else:
-      prompt, prompt_tokens = build_prompt_within_budget(
-          agent.chat_completions
+      prompt = chat_parser.parse(
+          agent.chat_completions,
+          add_generation_prompt=True,
+          is_first_msg=True,
       )
+      prompt_tokens = len(tokenizer.encode(prompt))
       with sampler_lock:
         out = sampler(
             prompt,
