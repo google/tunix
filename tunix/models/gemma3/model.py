@@ -1024,7 +1024,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     # Encode the vision tokens and merge them with the text embeddings.
     if images is not None:
       x = self._merge_mm_embeddings(tokens=tokens, embeddings=x, images=images)
-    return x
+    return x  # pytype: disable=bad-return-type  # jax-arraylike
 
   def _assert_support_mm(self) -> None:
     if self.vision_encoder is None:
