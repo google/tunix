@@ -2,8 +2,7 @@
 """DeepSWE Evaluation Script for Tunix.
 
 Runs SWE-bench evaluation using tunix's JAX-based inference and
-R2E-Gym Docker environments. Parallels rllm's run_deepswe.py but
-uses tunix components (Sampler, RolloutOrchestrator).
+R2E-Gym Docker environments.
 
 Usage:
   # Full evaluation with default settings:
@@ -402,7 +401,7 @@ def pairs_generator():
 
 
 async def run_evaluation():
-  """Run parallel evaluation using RolloutOrchestrator."""
+  """Run evaluation using the same RolloutOrchestrator pattern as training."""
   orchestrator = RolloutOrchestrator(
       engine_kwargs=dict(
           model_call=model_call,
@@ -414,40 +413,56 @@ async def run_evaluation():
       rollout_sync_lock=agentic_utils.RolloutSyncLock(),
   )
 
+  results = []
+  start_time = time.time()
+
   producer = asyncio.create_task(
       orchestrator.run_producers_from_stream(
           pairs_stream=pairs_generator(),
           group_size=1,
+          group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
           collect_mode="Trajectory",
-          group_key_fn=lambda i, env, traj: i,
       )
   )
 
-  # Yield control so the producer task can initialize its _manager.
   await asyncio.sleep(0)
-
-  results = []
-  start_time = time.time()
 
   async for batch in orchestrator.yield_batches(batch_size=1):
     for item in batch:
       traj = item.traj
-      results.append({
-          "pair_index": item.pair_index,
-          "trajectory": traj,
+      guard_reasons = sorted({
+          (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
+          for step in traj.steps
+          if (getattr(step, "info", {}) or {}).get("guard_blocked")
       })
+      result = {
+          "pair_index": item.pair_index,
+          "instance_id": entries[item.pair_index].get("instance_id", item.pair_index),
+          "reward": float(traj.reward),
+          "num_steps": len(traj.steps),
+          "status": getattr(traj.status, "name", str(traj.status)),
+          "guard_blocked_steps": sum(
+              1
+              for step in traj.steps
+              if (getattr(step, "info", {}) or {}).get("guard_blocked")
+          ),
+          "guard_reasons": guard_reasons,
+      }
+      results.append(result)
       elapsed = time.time() - start_time
       logger.info(
-          "[%d/%d] Instance %d: reward=%.1f, steps=%d (%.0fs elapsed)",
+          "[%d/%d] Instance %s: reward=%.1f, steps=%d, status=%s (%.0fs elapsed)",
           len(results),
           len(entries),
-          item.pair_index,
-          traj.reward,
-          len(traj.steps),
+          result["instance_id"],
+          result["reward"],
+          result["num_steps"],
+          result["status"],
           elapsed,
       )
 
   await producer
+
   return results
 
 
@@ -461,26 +476,19 @@ def compute_pass_at_k(results):
     logger.warning("No results to evaluate.")
     return
 
-  trajectories = [r["trajectory"] for r in results]
-  correct = sum(1 for traj in trajectories if traj.reward > 0)
-  total_reward = sum(float(traj.reward) for traj in trajectories)
-  total_steps = sum(len(traj.steps) for traj in trajectories)
-  status_counts = Counter(getattr(traj.status, "name", str(traj.status))
-                          for traj in trajectories)
+  correct = sum(1 for r in results if r["reward"] > 0)
+  total_reward = sum(float(r["reward"]) for r in results)
+  total_steps = sum(r["num_steps"] for r in results)
+  status_counts = Counter(r["status"] for r in results)
 
-  guard_blocked_trajectories = 0
-  total_guard_blocks = 0
+  guard_blocked_trajectories = sum(
+      1 for r in results if r["guard_blocked_steps"] > 0
+  )
+  total_guard_blocks = sum(r["guard_blocked_steps"] for r in results)
   guard_reason_counts = Counter()
-  for traj in trajectories:
-    traj_guard_blocks = 0
-    for step in traj.steps:
-      info = getattr(step, "info", {}) or {}
-      if info.get("guard_blocked"):
-        traj_guard_blocks += 1
-        total_guard_blocks += 1
-        guard_reason_counts[info.get("guard_reason", "unknown")] += 1
-    if traj_guard_blocks:
-      guard_blocked_trajectories += 1
+  for r in results:
+    for reason in r["guard_reasons"]:
+      guard_reason_counts[reason] += 1
 
   avg_reward = total_reward / total
   avg_steps = total_steps / total
@@ -514,24 +522,15 @@ def save_results(results):
 
   with open(output_file, "w") as f:
     for r in results:
-      traj = r["trajectory"]
       entry = entries[r["pair_index"]]
       record = {
-          "instance_id": entry.get("instance_id", r["pair_index"]),
+          "instance_id": entry.get("instance_id", r["instance_id"]),
           "docker_image": entry.get("docker_image", ""),
-          "reward": traj.reward,
-          "num_steps": len(traj.steps),
-          "status": getattr(traj.status, "name", str(traj.status)),
-          "guard_blocked_steps": sum(
-              1
-              for step in traj.steps
-              if ((getattr(step, "info", {}) or {}).get("guard_blocked"))
-          ),
-          "guard_reasons": sorted({
-              (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
-              for step in traj.steps
-              if ((getattr(step, "info", {}) or {}).get("guard_blocked"))
-          }),
+          "reward": r["reward"],
+          "num_steps": r["num_steps"],
+          "status": r["status"],
+          "guard_blocked_steps": r["guard_blocked_steps"],
+          "guard_reasons": r["guard_reasons"],
       }
       f.write(json.dumps(record) + "\n")
 
