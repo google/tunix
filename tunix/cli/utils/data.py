@@ -1,5 +1,7 @@
 """Utilities for handling and loading datasets in tunix CLI."""
 
+from absl import logging 
+import datasets
 import ast
 import functools
 import importlib
@@ -141,7 +143,6 @@ def post_init_dataset(
     fraction: float = 1.0,
     num_epochs: int = 1,
     prompt_key: str = "prompts",
-    custom_batch_fn: Optional[Callable] = None,
 ):
   """Applies post-initialization transformations to a dataset.
 
@@ -165,32 +166,58 @@ def post_init_dataset(
 
     def prompt_length_filter(x):
       tokens = tokenizer.tokenize(x[prompt_key])
+      
+      if not isinstance(x, dict):
+          print(f"DEBUG: Example 'x' is not a dict, it's a {type(x)}")
+          return False
+      available_keys = list(x.keys())
+      if prompt_key not in x:
+          print(f"ERROR: prompt_key '{prompt_key}' not found in example keys {available_keys}.")
+          return False
+      tokens = tokenizer.encode(x[prompt_key])
+
       return len(tokens) <= max_prompt_length
 
     dataset = dataset.filter(prompt_length_filter)
 
   if num_batches is not None:
     target_size = min(num_batches * batch_size, len(dataset))
-    dataset = dataset[:target_size]
+    dataset = dataset.select(range(target_size)) # Use select for subsetting
 
   if fraction < 1.0 and fraction > 0.0:
-    first_segment_size = int(len(dataset) * fraction)
-    first_segment_dataset = dataset[:first_segment_size]
-    second_segment_dataset = dataset[first_segment_size:]
+    logging.info("Splitting dataset with test_size fraction: %f", fraction)
+    dataset_dict = first_segment_dataset.train_test_split(test_size=fraction, seed=42)
+    first_segment_dataset = dataset_dict['train']
+    second_segment_dataset = dataset_dict['test']
+    logging.info("Using 'train' split for first_segment, 'test' for second_segment.")
+
   else:
     first_segment_dataset = dataset
     second_segment_dataset = None
 
-  first_segment_dataset = (
-      first_segment_dataset.repeat(num_epochs)
-      .to_iter_dataset()
-      .batch(batch_size, batch_fn=custom_batch_fn)
-  )
-  if second_segment_dataset is not None:
-    second_segment_dataset = (
-        second_segment_dataset.repeat(num_epochs)
-        .to_iter_dataset()
-        .batch(batch_size, batch_fn=custom_batch_fn)
+  if not isinstance(first_segment_dataset, datasets.Dataset):
+      raise TypeError(f"first_segment_dataset is type {type(first_segment_dataset)}, expected datasets.Dataset")
+
+  if num_epochs > 1:
+      logging.info("Repeating dataset for %d epochs", num_epochs)
+      first_segment_dataset = first_segment_dataset.repeat(num_epochs)
+      if second_segment_dataset:
+          second_segment_dataset = second_segment_dataset.repeat(num_epochs)
+
+  # Convert to iterable and batch
+  if hasattr(first_segment_dataset, 'to_iterable_dataset'):
+    first_segment_dataset = first_segment_dataset.to_iterable_dataset().batch(
+        batch_size
     )
+  else:
+    raise TypeError(f"first_segment_dataset (type: {type(first_segment_dataset)}) doesn't have to_iterable_dataset method.")
+
+  if second_segment_dataset is not None:
+    if hasattr(second_segment_dataset, 'to_iterable_dataset'):
+      second_segment_dataset = second_segment_dataset.to_iterable_dataset().batch(
+          batch_size
+      )
+    else:
+        raise TypeError(f"second_segment_dataset (type: {type(second_segment_dataset)}) doesn't have to_iterable_dataset method.")
 
   return first_segment_dataset, second_segment_dataset

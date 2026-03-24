@@ -15,6 +15,7 @@
 import logging
 import os
 
+import datasets
 import grain
 import tensorflow_datasets as tfds
 # For OSS usage
@@ -159,6 +160,28 @@ def create_dataset(
         download=tfds_download,
         split=split,
     )
+  elif data_source == 'huggingface':
+    logging.info("Using Huggingface data source for dataset: %s", dataset)
+    if dataset == 'nvidia/OpenMathInstruct-2':
+        try:
+            data_files_pattern = "data/train_1M-*.parquet"
+            logging.info("Attempting to load dataset %s with data_files: %s", dataset, data_files_pattern)
+            hf_dataset = datasets.load_dataset(
+                dataset,
+                data_files=data_files_pattern,
+                split='train',  # The split name within the filtered files
+                verification_mode="no_checks"  # Skip split validation
+            )
+            logging.info("Successfully loaded dataset: %s with files: %s", dataset, data_files_pattern)
+            return hf_dataset
+        except Exception as e:
+            import traceback
+            logging.error("Detailed error loading dataset: %s", traceback.format_exc())
+            raise ValueError(f"Failed to load {dataset} from Hugging Face using data_files '{data_files_pattern}': {e}")
+    else:
+        raise ValueError(
+            f"Unsupported combination of dataset='{dataset}' and data_source='{data_source}'"
+        )
   else:
     raise ValueError(
         f"Unsupported combination of dataset='{dataset}' and"

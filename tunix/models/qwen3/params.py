@@ -45,6 +45,7 @@ def _stack_experts(params: dict[str, jax.Array]):
 
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
+  print(f"DEBUG: _get_key_and_transform_mapping using cfg.num_heads={cfg.num_heads}, cfg.num_kv_heads={cfg.num_kv_heads}") 
   # Mapping of torch_keys -> (nnx_keys, (permute_rule, reshape_rule)).
   return {
       r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),

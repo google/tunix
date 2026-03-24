@@ -89,10 +89,14 @@ tokenizer_config:
 ################################## DATASET ##################################
 # Translation_dataset  "Helsinki-NLP/opus-100" or "mtnt/en-fr" for SFT
 # Math_dataset "gsm8k" for grpo 
-data_source: ""
+#data_source: ""
+prompt_key: "problem"         
+label_key: "expected_answer"
+data_source: "huggingface"
+dataset_name: "nvidia/OpenMathInstruct-2"
 data_directory: ""
 data_module: ""
-dataset_name: "Helsinki-NLP/opus-100"
+  #dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 num_batches: 3738
 max_target_length: 256
@@ -209,5 +213,7 @@ offload_to_cpu: false
  ############################# Reward Fns #############################
 
 verl_compatible: false 
-reward_functions: 
- - tunix/cli/reward_fn/gsm8k.py
+reward_functions: []
+
+  #reward_functions: 
+  # - tunix/cli/reward_fn/gsm8k.py

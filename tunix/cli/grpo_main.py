@@ -199,24 +199,78 @@ class GrpoPipeline(config.HyperParameters):
     )
 
     tokenizer = grpo_trainer.rl_cluster.tokenizer
+    from absl import logging
+
+    dataset_obj = None
+
+    data_source = self.config.get("data_source", "tfds") # Use .get for safety
+    dataset_name = self.config.get("dataset_name", "gsm8k")
+
     if self.config.get("data_module", None):
-      dataset = data_lib.get_dataset_from_module(
+      dataset_obj = data_lib.get_dataset_from_module(
           self.config["data_module"],
           tokenizer,
       )
-    elif self.config["data_source"] == "local":
-      dataset = example_data.create_dataset(
-          data_source=self.config["data_source"],
+    elif data_source == "local":
+      dataset_obj = example_data.create_dataset(
+          data_source=data_source,
           dataset=self.config["data_directory"],
           tokenizer=tokenizer,
       )
-    else:
-      dataset = example_data.create_dataset(
-          data_source="tfds",
-          dataset=self.config["dataset_name"],
+    elif data_source == "huggingface":
+      dataset_obj = example_data.create_dataset(
+          data_source=data_source,
+          dataset=dataset_name,
           tfds_download=self.config["tfds_download"],
       )
-    dataset, _ = data_lib.post_init_dataset(
+    elif data_source == "tfds":
+       dataset_obj = example_data.create_dataset(
+          data_source=data_source,
+          dataset=dataset_name,
+          tfds_download=self.config["tfds_download"],
+      )
+    else:
+      raise ValueError(f"Unsupported data_source: {data_source}")
+
+    if dataset_obj is None:
+        raise ValueError("Failed to create dataset_obj.")
+
+    logging.info("DEBUG: Type of dataset_obj after create_dataset: %s", type(dataset_obj))
+    if isinstance(dataset_obj, dict):
+        logging.info("DEBUG: Keys of dataset_obj dict: %s", dataset_obj.keys())
+        if 'train' in dataset_obj:
+            logging.info("DEBUG: Extracting 'train' split from DatasetDict")
+            dataset = dataset_obj['train']
+        else:
+            available_splits = list(dataset_obj.keys())
+            if not available_splits:
+                 raise ValueError("Loaded dataset is a dict but it's empty.")
+            first_split = available_splits[0]
+            logging.warning("No 'train' key found in DatasetDict, using first key: %s", first_split)
+            dataset = dataset_obj[first_split]
+    else:
+        dataset = dataset_obj
+
+    logging.info("DEBUG: Type of dataset for post_init: %s", type(dataset))
+    if not hasattr(dataset, 'filter'):
+         raise TypeError(f"The final dataset object (type: {type(dataset)}) does not have the expected dataset methods.")
+
+    # --- BEGIN COLUMN REMAPPING ---
+    prompt_key_orig = self.config.get("prompt_key", "problem")
+    label_key_orig = self.config.get("label_key", "expected_answer")
+
+    def rename_columns(example):
+        return {
+            "prompts": example[prompt_key_orig],
+            "answer": example[label_key_orig], # Remap to "answer" for math_rewards.py
+        }
+    logging.info("DEBUG: Remapping columns: %s -> prompts, %s -> answer", prompt_key_orig, label_key_orig)
+    dataset = dataset.map(rename_columns, remove_columns=dataset.column_names)
+    logging.info("DEBUG: Dataset features after remapping: %s", dataset.features)
+    # --- END COLUMN REMAPPING ---
+
+
+    train_ds, eval_ds = data_lib.post_init_dataset(
         dataset,
         tokenizer,
         batch_size=self.config["batch_size"],
@@ -224,9 +278,9 @@ class GrpoPipeline(config.HyperParameters):
         max_prompt_length=self.config["rollout_config"].get(
             "max_prompt_length", None
         ),
+        prompt_key="prompts",  # Corrected: Use the remapped key
     )
-    grpo_trainer.train(dataset)
-
+    grpo_trainer.train(train_ds, eval_ds)
 
 def _setup_jax_pathways(pathways_bns: str):
   """Sets up Jax with Pathways."""
