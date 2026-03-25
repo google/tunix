@@ -39,10 +39,15 @@ import sentencepiece as spm
 env_utils.setup_sharding_environment()
 
 
-def _convert_to_nparray(arr):
-  if isinstance(arr, jax.Array):
-    return np.asarray(arr)
-  return arr
+def _convert_leaf_to_nparray(leaf):
+  if isinstance(leaf, jax.Array):
+    jax.block_until_ready(leaf)
+    return np.asarray(leaf)
+  return leaf
+
+
+def _convert_to_nparray(tree):
+  return jax.tree.map(_convert_leaf_to_nparray, tree)
 
 
 def assert_equal(path, x, y):
