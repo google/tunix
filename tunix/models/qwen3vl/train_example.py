@@ -55,6 +55,7 @@ from tunix.models.qwen3vl import params as params_lib
 from tunix.models.qwen3vl.sampler import Qwen3VLSampler
 from tunix.models.qwen3vl.utils import encode_messages
 from tunix.models.qwen3vl.utils import EncodedBatch
+from tunix.models.qwen3vl.utils import load_processor
 from tunix.models.qwen3vl.vision import VisionGridData
 from tunix.rl import reshard as reshard_lib
 from tunix.sft import metrics_logger
@@ -280,11 +281,23 @@ def get_lora_model(
   lora_model = qwix.apply_lora_to_model(
       base_model, lora_provider, **model_input
   )
+  # QWIX inherits the parent weight's `out_sharding` metadata when creating
+  # LoRA A/B parameters.  For Einsum weights that are rank-3 (e.g. q_proj with
+  # shape [D, N, H] and spec ('fsdp', 'tp', None)), the LoRA matrices are
+  # rank-2, so the inherited rank-3 spec is invalid.  Fix the metadata in-place
+  # before any resharding so that nnx.get_partition_spec (used by both the
+  # resharding step below and _shard_optimizer in the trainer) returns a spec
+  # that matches the actual array rank.
+  for _, node in nnx.iter_graph(lora_model):
+    if isinstance(node, nnx.Variable) and node.has_metadata('out_sharding'):
+      sharding = node.get_metadata()['out_sharding']
+      if sharding and len(sharding) > len(node.shape):
+        node.set_metadata('out_sharding', tuple(sharding[: len(node.shape)]))
+
   # Reshard every parameter (including freshly-added LoRA params) onto the mesh.
   # reshard_model_to_mesh skips when base-model params are already on the mesh,
   # leaving LoRA params (which QWIX creates without sharding annotations) on
   # device [0] only and causing a device-mismatch error at training time.
-  # TODO: review this logic. I suspect we don't really need resharding here
   if mesh is not None:
     with mesh:
       graph_def, state = nnx.split(lora_model)
@@ -358,8 +371,8 @@ def main():
   )
   show_hbm_usage()
 
-  # --- Processor (tokenizer + image processor) ---
-  processor = AutoProcessor.from_pretrained(model_dir)
+  # --- Processor (tokenizer + image processor, no PyTorch required) ---
+  processor = load_processor(model_dir)
 
   # --- LoRA model ---
   method = 'QLoRA' if USE_QUANTIZATION else 'LoRA'

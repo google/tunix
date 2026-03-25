@@ -37,12 +37,23 @@ import huggingface_hub
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
 from transformers import AutoProcessor
 from transformers import Qwen3VLForConditionalGeneration
 from tunix.models.qwen3vl import model as model_lib
 from tunix.models.qwen3vl import params as params_lib
 from tunix.models.qwen3vl.model import make_causal_mask_from_positions
+
+try:
+  import accelerate  # noqa: F401
+  import torch
+  import torchvision  # noqa: F401
+
+except ImportError:
+  print(
+      'Consistency test requires PyTorch dependencies. Install them using\n\t'
+      + 'pip install torch==2.8.0 torchvision accelerate'
+  )
+  raise
 
 # ---------------------------------------------------------------------------
 # Model ID / directory resolution
@@ -202,7 +213,15 @@ def compare_layerwise(
     pixel_values_pt = inputs['pixel_values'].to(pt_device, pt_dtype)
     image_grid_thw_pt = inputs['image_grid_thw'].to(pt_device)
     image_grid_thw_np = np.array(image_grid_thw_pt.cpu())
-    mm_token_type_ids_pt = inputs['mm_token_type_ids'].to(pt_device)
+    # transformers >= 5.3.0 returns mm_token_type_ids; older versions do not.
+    mm_token_type_ids_pt = inputs.get('mm_token_type_ids')
+    if mm_token_type_ids_pt is None:
+      ids = inputs['input_ids']
+      mm_token_type_ids_pt = torch.zeros_like(ids)
+      mm_token_type_ids_pt[ids == 151652] = 1  # vision_start
+      mm_token_type_ids_pt[(ids == 151655) | (ids == 151656)] = (
+          2  # image/video pad
+      )
     print(f'Image grid (t,h,w): {image_grid_thw_np}')
   else:
     pixel_values_pt = None
@@ -224,14 +243,27 @@ def compare_layerwise(
   # ------------------------------------------------------------------
   # Build 3D M-RoPE position ids
   # ------------------------------------------------------------------
-  # HF transformers >= 5.3.0 requires mm_token_type_ids as a positional arg.
-  position_ids_pt, _ = pt_model.model.get_rope_index(
-      input_ids_pt,
-      mm_token_type_ids_pt,
-      image_grid_thw=image_grid_thw_pt,
-      video_grid_thw=None,
-      attention_mask=attention_mask_pt,
-  )
+  # get_rope_index signature changed across transformers versions:
+  # < 5.3.0: get_rope_index(input_ids, image_grid_thw=..., ...)
+  # >= 5.3.0: get_rope_index(input_ids, mm_token_type_ids, image_grid_thw=..., ...)
+  import inspect as _inspect
+
+  _rope_params = _inspect.signature(pt_model.model.get_rope_index).parameters
+  if 'mm_token_type_ids' in _rope_params:
+    position_ids_pt, _ = pt_model.model.get_rope_index(
+        input_ids_pt,
+        mm_token_type_ids=mm_token_type_ids_pt,
+        image_grid_thw=image_grid_thw_pt,
+        video_grid_thw=None,
+        attention_mask=attention_mask_pt,
+    )
+  else:
+    position_ids_pt, _ = pt_model.model.get_rope_index(
+        input_ids_pt,
+        image_grid_thw=image_grid_thw_pt,
+        video_grid_thw=None,
+        attention_mask=attention_mask_pt,
+    )
   position_ids_pt = position_ids_pt.to(pt_device)  # [3, B, L]
 
   # JAX positions: convert from PT.
@@ -277,13 +309,20 @@ def compare_layerwise(
     visual_mask = input_tokens_jax == jnp.int32(image_pad_id)
 
     # PT vision encoder
-    image_outputs = pt_model.get_image_features(
-        pixel_values_pt, image_grid_thw_pt, return_dict=True
-    )
-    image_embeds_pt = torch.cat(image_outputs.pooler_output, dim=0).to(
-        pt_device, inputs_embeds_pt.dtype
-    )
-    deepstack_visual_embeds = image_outputs.deepstack_features
+    # API changed across transformers versions:
+    #   ≥5.3: returns (image_embeds_list, deepstack_list) tuple directly
+    #   <5.3: returns object with .pooler_output / .deepstack_features
+    _image_out = pt_model.get_image_features(pixel_values_pt, image_grid_thw_pt)
+    if isinstance(_image_out, tuple):
+      image_embeds_pt = torch.cat(_image_out[0], dim=0).to(
+          pt_device, inputs_embeds_pt.dtype
+      )
+      deepstack_visual_embeds = _image_out[1]
+    else:
+      image_embeds_pt = torch.cat(_image_out.pooler_output, dim=0).to(
+          pt_device, inputs_embeds_pt.dtype
+      )
+      deepstack_visual_embeds = _image_out.deepstack_features
 
     # Compare raw vision encoder outputs
     jax_vis_tokens = vision_embeds.tokens[0]  # [N_vis, D]

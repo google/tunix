@@ -28,7 +28,7 @@ Usage::
     python -m tunix.models.qwen3vl.sampler \\
         --model_id_or_dir Qwen/Qwen3-VL-4B-Instruct \\
         --prompt "<|im_start|>user\\nWhat is in the image?<|im_end|>\\n<|im_start|>assistant\\n" \\
-        --image_url https://fastly.picsum.photos/id/100/300/200.jpg \\
+        --image_url https://fastly.picsum.photos/id/125/200/300.jpg?hmac=yLvRBwUcr6LYWuGaGk05UjiU5vArBo3Idr3ap5tpSxU \\
         --top_p 0.9 --temperature 0.7
 """
 
@@ -44,20 +44,40 @@ import flax
 from flax import nnx
 from flax.nnx import graph
 from flax.nnx import statelib
+import huggingface_hub
 import jax
 import jax.numpy as jnp
 import numpy as np
 from transformers import AutoProcessor
 from tunix.models.qwen3vl import model as model_lib
 from tunix.models.qwen3vl import params as params_lib
-from tunix.models.qwen3vl.consistency_test import resolve_model_dir
 from tunix.models.qwen3vl.model import get_rope_index
+from tunix.models.qwen3vl.utils import load_processor
 from tunix.models.qwen3vl.vision import compute_grid_data
 from tunix.models.qwen3vl.vision import VisionGridData
 
 # Special token IDs (constant for all Qwen3-VL checkpoints).
 _VIDEO_TOKEN_ID = 151656
 _VISION_START_TOKEN_ID = 151652
+
+
+# ---------------------------------------------------------------------------
+# Model ID / directory resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_model_dir(model_id_or_dir: str) -> str:
+  """Return a local directory path for the given model ID or local path.
+
+  If ``model_id_or_dir`` is an existing directory it is returned as-is.
+  Otherwise it is treated as a HuggingFace Hub repo ID and the snapshot is
+  downloaded (or retrieved from the local cache) via ``huggingface_hub``.
+  """
+  if os.path.isdir(model_id_or_dir):
+    return model_id_or_dir
+  print(f'Downloading snapshot for "{model_id_or_dir}" from HuggingFace Hub…')
+  return huggingface_hub.snapshot_download(model_id_or_dir)
+
 
 # ---------------------------------------------------------------------------
 # Sampling state
@@ -589,7 +609,7 @@ def load_sampler(
         model_dir, config, mesh=None, dtype=jax_dtype
     )
 
-  processor = AutoProcessor.from_pretrained(model_dir)
+  processor = load_processor(model_dir)
   return Qwen3VLSampler(model, processor, cache_size=cache_size)
 
 

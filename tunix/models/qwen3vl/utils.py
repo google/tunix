@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 from flax import struct
@@ -30,6 +32,69 @@ from tunix.models.qwen3vl.vision import VisionGridData
 # Special token IDs (constant for all Qwen3-VL checkpoints).
 _VIDEO_TOKEN_ID = 151656
 _VISION_START_TOKEN_ID = 151652
+
+
+def load_processor(model_dir: str) -> AutoProcessor:
+  """Load a Qwen3-VL processor without requiring PyTorch / torchvision.
+
+  ``AutoProcessor.from_pretrained`` for Qwen3-VL normally also instantiates
+  an ``AutoVideoProcessor``, which has a hard PyTorch dependency.  Tunix
+  only processes images (not video), so the video processor is not needed.
+
+  This function assembles the processor from its two torch-free components:
+
+  * ``Qwen2VLImageProcessor`` — the *slow* image processor (PIL + NumPy only).
+  * ``AutoTokenizer`` — the standard HuggingFace tokenizer.
+
+  The two are wrapped in ``Qwen2VLProcessor`` with ``video_processor=None``.
+  To satisfy the base-class type check for optional processors, we apply a
+  one-time patch that allows ``None`` values for optional processor slots.
+
+  Args:
+    model_dir: Local directory of a Qwen3-VL checkpoint.
+
+  Returns:
+    A ``Qwen2VLProcessor`` instance that is API-compatible with the full
+    ``AutoProcessor`` for all image + text use cases.
+  """
+  # One-time patch: allow None for optional processor arguments in the base
+  # class validator.  This is safe — None simply means "not used".
+  import transformers.processing_utils as _pu  # local to keep top-level imports clean
+
+  if not getattr(
+      _pu.ProcessorMixin.check_argument_for_proper_class, '_none_patched', False
+  ):
+    _orig = _pu.ProcessorMixin.check_argument_for_proper_class
+
+    def _patched(self, argument_name, argument):
+      if argument is None:
+        return None
+      return _orig(self, argument_name, argument)
+
+    _patched._none_patched = True
+    _pu.ProcessorMixin.check_argument_for_proper_class = _patched
+
+  from transformers import AutoTokenizer
+  from transformers.models.qwen2_vl.image_processing_qwen2_vl import Qwen2VLImageProcessor
+  from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
+
+  tok = AutoTokenizer.from_pretrained(model_dir)
+  img_proc = Qwen2VLImageProcessor.from_pretrained(model_dir)
+
+  # The chat template lives in tokenizer_config.json; pass it explicitly so
+  # that processor.apply_chat_template works correctly.
+  tok_cfg_path = os.path.join(model_dir, 'tokenizer_config.json')
+  chat_template = None
+  if os.path.exists(tok_cfg_path):
+    with open(tok_cfg_path) as f:
+      chat_template = json.load(f).get('chat_template')
+
+  return Qwen2VLProcessor(
+      image_processor=img_proc,
+      tokenizer=tok,
+      video_processor=None,
+      chat_template=chat_template,
+  )
 
 
 @struct.dataclass
