@@ -90,6 +90,7 @@ class ModelConfig:
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
   dtype: jnp.dtype = jnp.float32
+  critical_dtype: jnp.dtype = jnp.float32
   param_dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
@@ -349,7 +350,7 @@ class Attention(nnx.Module):
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
         sharding=self.shd_config.o_weight_nhd,
-        dtype=config.dtype,
+        dtype=config.critical_dtype,
         param_dtype=config.param_dtype,
     )
     self.n_rep = config.num_heads // config.num_kv_heads
@@ -589,7 +590,7 @@ class MLP(nnx.Module):
         out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
-        dtype=config.dtype,
+        dtype=config.critical_dtype,
         param_dtype=config.param_dtype,
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
@@ -600,7 +601,7 @@ class MLP(nnx.Module):
         out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
-        dtype=config.dtype,
+        dtype=config.critical_dtype,
         param_dtype=config.param_dtype,
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_df
@@ -611,7 +612,7 @@ class MLP(nnx.Module):
         out_features=config.embed_dim,
         use_bias=False,
         rngs=rngs,
-        dtype=config.dtype,
+        dtype=config.critical_dtype,
         param_dtype=config.param_dtype,
         kernel_init=nnx.with_partitioning(
             kernel_init_fn, self.shd_config.ffw_weight_fd
@@ -643,7 +644,7 @@ class DecoderLayer(nnx.Module):
         config.embed_dim,
         norm_eps=config.norm_eps,
         shd_config=config.shd_config,
-        dtype=config.dtype,
+        dtype=config.critical_dtype,
         param_dtype=config.param_dtype,
     )
     self.attn = Attention(
@@ -654,7 +655,7 @@ class DecoderLayer(nnx.Module):
         config.embed_dim,
         norm_eps=config.norm_eps,
         shd_config=config.shd_config,
-        dtype=config.dtype,
+        dtype=config.critical_dtype,
         param_dtype=config.param_dtype,
     )
     self.mlp = MLP(

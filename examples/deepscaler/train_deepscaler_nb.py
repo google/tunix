@@ -107,6 +107,11 @@ print("jax devices: ", jax.devices())
 
 # %%
 import argparse
+def parse_dtype(x):
+    try:
+        return getattr(jnp, x)
+    except AttributeError:
+        raise ValueError(f"Invalid dtype: {x}")
 
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
 arg_parser.add_argument("--batch_size", type=int, default=128)
@@ -131,6 +136,10 @@ arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument("--loss_agg_mode", type=str, default="token-mean")
 arg_parser.add_argument("--flash_attn", type=bool, default=False)
+arg_parser.add_argument("--model_dtype", type=parse_dtype, default=jnp.float32)
+arg_parser.add_argument("--dtype", type=parse_dtype, default=jnp.float32)
+arg_parser.add_argument("--critical_dtype", type=parse_dtype, default=jnp.float32)
+
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -206,10 +215,11 @@ MAX_CONCURRENCY = args.max_concurrency
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 LOSS_AGG_MODE = args.loss_agg_mode
-# MODEL_DTYPE = jnp.float32
 # ACTIVATION_DTYPE = jnp.float32
-MODEL_DTYPE = jnp.bfloat16
-ACTIVATION_DTYPE = jnp.float32
+# MODEL_DTYPE = jnp.float32
+ACTIVATION_DTYPE = args.dtype
+MODEL_DTYPE = args.model_dtype
+CRITICAL_DTYPE = args.critical_dtype
 
 
 # === AdamW, warmup, cosine scheduler ===
@@ -460,6 +470,7 @@ config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 config.use_flash_attention = ENABLE_FLASH_ATTN
 config.param_dtype = MODEL_DTYPE
 config.dtype = ACTIVATION_DTYPE
+config.critical_dtype = CRITICAL_DTYPE
 
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
