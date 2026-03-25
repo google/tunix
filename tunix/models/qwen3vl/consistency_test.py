@@ -475,6 +475,26 @@ def compare_layerwise(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+_SIZE_TO_CONFIG = {
+    '2b': model_lib.ModelConfig.qwen3vl_2b,
+    '4b': model_lib.ModelConfig.qwen3vl_4b,
+    '8b': model_lib.ModelConfig.qwen3vl_8b,
+    '32b': model_lib.ModelConfig.qwen3vl_32b,
+}
+
+
+def _infer_config(model_id_or_dir: str) -> model_lib.ModelConfig:
+  """Infer ModelConfig from the model ID or directory name."""
+  name = model_id_or_dir.lower()
+  for size, factory in _SIZE_TO_CONFIG.items():
+    if f'-{size}-' in name or name.endswith(f'-{size}'):
+      return factory()
+  raise ValueError(
+      f'Cannot infer model size from {model_id_or_dir!r}. '
+      'Pass config= explicitly or use a name containing one of: '
+      f'{list(_SIZE_TO_CONFIG)}'
+  )
+
 
 def main(
     model_id_or_dir: str = 'Qwen/Qwen3-VL-4B-Instruct',
@@ -509,7 +529,7 @@ def main(
     ``True`` if the top-1 next-token prediction matches across both frameworks.
   """
   if config is None:
-    config = model_lib.ModelConfig.qwen3vl_4b()
+    config = _infer_config(model_id_or_dir)
   return compare_layerwise(
       model_id_or_dir=model_id_or_dir,
       config=config,
@@ -548,7 +568,14 @@ if __name__ == '__main__' and '__file__' in globals():
       default='https://fastly.picsum.photos/id/541/300/200.jpg?hmac=EU9KBKReX22D8zAU9GY1iRAuNDwf5pJa3hyZA2eHiDQ',
       help='Path or URL of an image for multimodal (vision-language) testing.',
   )
+  parser.add_argument(
+      '--config',
+      choices=list(_SIZE_TO_CONFIG),
+      default=None,
+      help='Model size to use (auto-detected from model_id_or_dir if omitted).',
+  )
   _args = parser.parse_args()
+  _config = _SIZE_TO_CONFIG[_args.config]() if _args.config else None
   raise SystemExit(
       0
       if main(
@@ -557,6 +584,7 @@ if __name__ == '__main__' and '__file__' in globals():
           device=_args.device,
           dtype=_args.dtype,
           image_url=_args.image_url,
+          config=_config,
       )
       else 1
   )

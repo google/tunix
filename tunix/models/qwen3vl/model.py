@@ -109,7 +109,38 @@ class ModelConfig:
   vision_config: VisionModelConfig | None = None
 
   @classmethod
-  def qwen3vl_4b(cls):  # qwen3-vl-4b
+  def qwen3vl_2b(cls):
+    return cls(
+        num_layers=28,
+        vocab_size=151936,
+        embed_dim=2048,
+        hidden_dim=6144,
+        num_heads=16,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=5_000_000,
+        use_tied_embedding=True,
+        vision_config=VisionModelConfig(
+            hidden_size=1024,
+            out_hidden_size=2048,
+            depth=24,
+            num_heads=16,
+            intermediate_size=4096,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            window_size=32,
+            in_channels=3,
+            num_position_embeddings=2304,
+            deepstack_visual_indexes=(5, 11, 17),
+            mrope_section=(24, 20, 20),
+            image_pad_id=151655,
+        ),
+    )
+
+  @classmethod
+  def qwen3vl_4b(cls):
     return cls(
         num_layers=36,
         vocab_size=151936,
@@ -119,7 +150,7 @@ class ModelConfig:
         head_dim=128,
         num_kv_heads=8,
         norm_eps=1e-06,
-        rope_theta=1_000_000,
+        rope_theta=5_000_000,
         use_tied_embedding=True,
         vision_config=VisionModelConfig(
             hidden_size=1024,
@@ -134,6 +165,68 @@ class ModelConfig:
             in_channels=3,
             num_position_embeddings=2304,
             deepstack_visual_indexes=(5, 11, 17),
+            mrope_section=(24, 20, 20),
+            image_pad_id=151655,
+        ),
+    )
+
+  @classmethod
+  def qwen3vl_8b(cls):
+    return cls(
+        num_layers=36,
+        vocab_size=151936,
+        embed_dim=4096,
+        hidden_dim=12288,
+        num_heads=32,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=5_000_000,
+        use_tied_embedding=False,
+        vision_config=VisionModelConfig(
+            hidden_size=1152,
+            out_hidden_size=4096,
+            depth=27,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            window_size=32,
+            in_channels=3,
+            num_position_embeddings=2304,
+            deepstack_visual_indexes=(8, 16, 24),
+            mrope_section=(24, 20, 20),
+            image_pad_id=151655,
+        ),
+    )
+
+  @classmethod
+  def qwen3vl_32b(cls):
+    return cls(
+        num_layers=64,
+        vocab_size=151936,
+        embed_dim=5120,
+        hidden_dim=25600,
+        num_heads=64,
+        head_dim=128,
+        num_kv_heads=8,
+        norm_eps=1e-06,
+        rope_theta=5_000_000,
+        use_tied_embedding=False,
+        vision_config=VisionModelConfig(
+            hidden_size=1152,
+            out_hidden_size=5120,
+            depth=27,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            window_size=32,
+            in_channels=3,
+            num_position_embeddings=2304,
+            deepstack_visual_indexes=(8, 16, 24),
             mrope_section=(24, 20, 20),
             image_pad_id=151655,
         ),
