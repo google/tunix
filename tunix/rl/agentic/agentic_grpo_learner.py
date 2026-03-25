@@ -75,6 +75,11 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     beta: KL penalty coefficient.
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
+    entropy_coef: Entropy bonus coefficient.
+    entropy_target_effective_group_ratio: Target ratio of non-degenerate groups.
+    entropy_adapt_gain: Gain for adaptive entropy scaling based on target gap.
+    entropy_coef_min: Lower bound for adaptive entropy coefficient scale.
+    entropy_coef_max: Upper bound for adaptive entropy coefficient scale.
     loss_algo: "grpo" or "gspo-token".
     system_prompt: System prompt for the agent.
     max_concurrency: Maximum number of concurrent rollout engines.
@@ -99,6 +104,11 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   system_prompt: str = ""
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
+  entropy_coef: float = 0.0
+  entropy_target_effective_group_ratio: float = 1.0
+  entropy_adapt_gain: float = 1.0
+  entropy_coef_min: float = 1.0
+  entropy_coef_max: float = 2.0
   off_policy_steps: int = 0
   degenerate_group_masking: bool = True  # Whether to mask out degenerate groups with all-0 advantages.
 
@@ -115,7 +125,31 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
-
+    if self.entropy_coef < 0.0:
+      raise ValueError(
+          "entropy_coef must be non-negative. Received: "
+          f"{self.entropy_coef}"
+      )
+    if not 0.0 <= self.entropy_target_effective_group_ratio <= 1.0:
+      raise ValueError(
+          "entropy_target_effective_group_ratio must be in [0, 1]. Received: "
+          f"{self.entropy_target_effective_group_ratio}"
+      )
+    if self.entropy_adapt_gain < 0.0:
+      raise ValueError(
+          "entropy_adapt_gain must be non-negative. Received: "
+          f"{self.entropy_adapt_gain}"
+      )
+    if self.entropy_coef_min <= 0.0:
+      raise ValueError(
+          "entropy_coef_min must be positive. Received: "
+          f"{self.entropy_coef_min}"
+      )
+    if self.entropy_coef_max < self.entropy_coef_min:
+      raise ValueError(
+          "entropy_coef_max must be >= entropy_coef_min. Received: "
+          f"{self.entropy_coef_max} < {self.entropy_coef_min}"
+      )
 
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
 
@@ -232,6 +266,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
+        "entropy_coef": np.mean,
         "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
@@ -642,12 +677,37 @@ def grpo_loss_fn(
         jnp.float32,
     )
 
-  loss = common.aggregate_loss(
-      per_token_loss, effective_completion_mask, loss_aggregation_mode
-  )
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
   entropy_loss = ppo_helpers.masked_mean(token_entropy, effective_completion_mask)
   aux["entropy"] = entropy_loss
+
+  if entropy_coef is not None and entropy_coef != 0.0:
+    entropy_tensor = jnp.asarray(entropy_coef, dtype=jnp.float32)
+    per_token_loss = per_token_loss - entropy_tensor * entropy_loss
+    target_ratio = jnp.asarray(
+        getattr(algo_config, "ent_target_effective_group_ratio", 1.0),
+        dtype=jnp.float32,
+    )
+    adapt_gain = jnp.asarray(
+        getattr(algo_config, "ent_adapt_gain", 1.0),
+        dtype=jnp.float32,
+    )
+    min_scale = jnp.asarray(
+        getattr(algo_config, "ent_coef_min_scale", 1.0),
+        dtype=jnp.float32,
+    )
+    max_scale = jnp.asarray(
+        getattr(algo_config, "ent_coef_max_scale", 2.0),
+        dtype=jnp.float32,
+    )
+    ratio_gap = target_ratio - effective_group_ratio
+    entropy_scale = jnp.clip(1.0 + adapt_gain * ratio_gap, min_scale, max_scale)
+    entropy_tensor = entropy_tensor * entropy_scale
+    per_token_loss = per_token_loss - entropy_tensor * entropy_loss
+
+  loss = common.aggregate_loss(
+      per_token_loss, effective_completion_mask, loss_aggregation_mode
+  )
 
   return loss, aux
 
