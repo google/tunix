@@ -134,11 +134,12 @@ arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
-arg_parser.add_argument("--loss_agg_mode", type=str, default="token-mean")
+arg_parser.add_argument("--loss_agg_mode", type=str, default="sequence-mean-token-mean")
 arg_parser.add_argument("--flash_attn", type=bool, default=False)
 arg_parser.add_argument("--model_dtype", type=parse_dtype, default=jnp.float32)
 arg_parser.add_argument("--dtype", type=parse_dtype, default=jnp.float32)
 arg_parser.add_argument("--critical_dtype", type=parse_dtype, default=jnp.float32)
+arg_parser.add_argument("--importance_sampling", type=bool, default=False)
 
 args, _ = arg_parser.parse_known_args()
 
@@ -291,6 +292,10 @@ try:
         "top_k": TOP_K,
         "max_concurrency": MAX_CONCURRENCY,
         "rollout_engine": ROLLOUT_ENGINE,
+        "dtype_activation": ACTIVATION_DTYPE,
+        "dtype_parameter": MODEL_DTYPE,
+        "dtype_critical_activation": CRITICAL_DTYPE,
+        "importance_sampling": args.importance_sampling,
     })
   # wandb.init(project="tunix", id="q0djft6p", resume="must",)
 except Exception as e:
@@ -571,7 +576,7 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "return_logprobs": True,
+    "return_logprobs": args.importance_sampling,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
