@@ -65,8 +65,7 @@ jobs:
     - name: Install tunix dependencies
       run: |
         pip install --upgrade pip
-        pip install -e .[prod] --force-reinstall
-        pip install pytest pytest-xdist
+        pip install -e .[prod,test] --force-reinstall
 
     - name: Verify TPU availability
       run: |
@@ -158,8 +157,8 @@ jobs:
           pwd
           pip install --upgrade pip setuptools wheel
 
-          # Install Tunix with dev dependencies without overwriting the vLLM dependencies.
-          pip install -e .[dev]
+          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
+          pip install -e .[dev,test]
           pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
           # tpu-inference/Numba needs NumPy 2.3 or less.
           pip install numpy==2.3.5 --force-reinstall
