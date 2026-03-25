@@ -1,10 +1,12 @@
 """Unit tests for `progress_bar`."""
 
+import tempfile
+from unittest import mock
+
 from absl.testing import absltest
 import numpy as np
 from tunix.sft import metrics_logger
 from tunix.sft import progress_bar
-import tempfile
 
 
 class ProgressBarTest(absltest.TestCase):
@@ -85,6 +87,27 @@ class ProgressBarTest(absltest.TestCase):
 
   def test_close(self):
     self.assertDictEqual(self.progress_bar.metrics, {})
+
+  def test_disable_logic(self):
+    test_cases = [
+        (True, False, False),  # Terminal, not notebook -> enabled
+        (False, True, False),  # Not terminal, notebook -> enabled
+        (False, False, True),  # Neither -> disabled
+    ]
+
+    for is_atty, is_in_ipython, expected_disable in test_cases:
+      with self.subTest(is_atty=is_atty, is_in_ipython=is_in_ipython):
+        with mock.patch("sys.stderr.isatty", return_value=is_atty):
+          with mock.patch.object(
+              progress_bar, "_is_in_ipython", return_value=is_in_ipython
+          ):
+            pb = progress_bar.ProgressBar(
+                metrics_logger=self.metrics_logger,
+                initial_steps=0,
+                max_steps=2,
+                metrics_prefix=self.metrics_prefix,
+            )
+            self.assertEqual(pb.tqdm_bar.disable, expected_disable)
 
 
 if __name__ == "__main__":
