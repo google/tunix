@@ -206,6 +206,16 @@ class RLCluster:
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
 
+    if self.cluster_config.rollout_config is None:
+      raise ValueError("`cluster_config.rollout_config` cannot be None.")
+    if isinstance(
+        self.cluster_config.rollout_config, dict
+    ) and not self.cluster_config.rollout_config.get(Mode.TRAIN):
+      raise ValueError(
+          "Rollout config is a dict but missing a train config. Provided"
+          f" config: {self.cluster_config.rollout_config}"
+      )
+
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
     elif self.cluster_config.rollout_engine == "vanilla":
@@ -368,10 +378,14 @@ class RLCluster:
           " `'vllm'` or `'sglang_jax'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
+
     if isinstance(self.cluster_config.rollout_config, dict):
+      # train_cfg should always be provided.
+      train_cfg = self.cluster_config.rollout_config[Mode.TRAIN]
+      eval_cfg = self.cluster_config.rollout_config.get(Mode.EVAL)
       max_kv_cache_size = max(
-          self.cluster_config.rollout_config[Mode.TRAIN].kv_cache_size,
-          self.cluster_config.rollout_config[Mode.EVAL].kv_cache_size,
+          train_cfg.kv_cache_size,
+          eval_cfg.kv_cache_size if eval_cfg is not None else 0,
       )
     else:
       max_kv_cache_size = self.cluster_config.rollout_config.kv_cache_size
@@ -396,16 +410,10 @@ class RLCluster:
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
 
-      loaded_vllm_config = None
-      if isinstance(
-          self.cluster_config.rollout_config, base_rollout.RolloutConfig
-      ):
-        loaded_vllm_config = self.cluster_config.rollout_config
-      elif isinstance(self.cluster_config.rollout_config, dict):
+      if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
-
-      if loaded_vllm_config is None:
-        raise ValueError("Rollout vllm model config is missing!")
+      else:
+        loaded_vllm_config = self.cluster_config.rollout_config
 
       if loaded_vllm_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
@@ -427,16 +435,12 @@ class RLCluster:
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
-      if isinstance(
-          self.cluster_config.rollout_config, base_rollout.RolloutConfig
-      ):
-        loaded_sglang_jax_config = self.cluster_config.rollout_config
-      elif isinstance(self.cluster_config.rollout_config, dict):
+      if isinstance(self.cluster_config.rollout_config, dict):
         loaded_sglang_jax_config = self.cluster_config.rollout_config[
             Mode.TRAIN
         ]
       else:
-        raise ValueError("Rollout sglang jax model config is missing!")
+        loaded_sglang_jax_config = self.cluster_config.rollout_config
 
       if (
           sft_utils.is_lora_enabled(self.rollout_actor)
