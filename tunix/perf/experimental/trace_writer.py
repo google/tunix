@@ -121,14 +121,23 @@ class NoopTraceWriter(TraceWriter):
 class PerfettoTraceWriter(TraceWriter):
   """A writer for Perfetto trace events."""
 
-  def __init__(self, trace_dir: str):
-    """Initializes the PerfettoTraceWriter.
+  def __init__(
+      self,
+      trace_dir: str,
+      role_to_devices: Mapping[str, Any] | None = None,
+  ):
+    """Initializes the instance.
 
     Args:
       trace_dir: The directory to export trace files to. This path can be a
         local Linux path or a remote storage path (e.g. gs://).
+      role_to_devices: An optional mapping from role names to their assigned
+        devices.
     """
     self._trace_dir = trace_dir
+    self._role_to_devices = (
+        dict(role_to_devices) if role_to_devices is not None else {}
+    )
     self._trace_file_path = None
     try:
       trace_dir_path = epath.Path(self._trace_dir)

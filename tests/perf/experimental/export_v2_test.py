@@ -20,6 +20,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.perf.experimental import export
 from tunix.perf.experimental import tracer
+import jax
+from tunix.rl import rl_cluster
 
 
 class ExportTest(parameterized.TestCase):
@@ -63,7 +65,10 @@ class ExportTest(parameterized.TestCase):
       ),
   )
   @mock.patch.object(
-      export.trace_writer_lib, "PerfettoTraceWriter", autospec=True
+      export.trace_writer_lib,
+      "PerfettoTraceWriter",
+      autospec=True,
+      spec_set=True,
   )
   def test_perf_metrics_export_initialization_with_trace_writer_enabled(
       self, mock_writer_cls, trace_dir, expected_dir
@@ -71,11 +76,13 @@ class ExportTest(parameterized.TestCase):
     with export.PerfMetricsExport(
         enable_trace_writer=True, trace_dir=trace_dir
     ) as exporter:
-      mock_writer_cls.assert_called_once_with(expected_dir)
+      mock_writer_cls.assert_called_once_with(expected_dir, role_to_devices=None)
       # export_metrics shouldn't crash
       exporter.export_metrics({})
 
-  @mock.patch.object(export.trace_writer_lib, "NoopTraceWriter", autospec=True)
+  @mock.patch.object(
+      export.trace_writer_lib, "NoopTraceWriter", autospec=True, spec_set=True
+  )
   def test_perf_metrics_export_initialization_with_trace_writer_disabled(
       self, mock_noop_cls
   ):
@@ -109,6 +116,62 @@ class ExportTest(parameterized.TestCase):
     mock_executor_instance.shutdown.assert_called_once_with(wait=False)
     self.assertIsNone(exporter._executor)
 
+  @mock.patch.object(
+      export.trace_writer_lib,
+      "PerfettoTraceWriter",
+      autospec=True,
+  )
+  def test_from_cluster_config(self, mock_writer_cls):
+    import numpy as np
+    mock_mesh_1 = mock.create_autospec(jax.sharding.Mesh, instance=True)
+    mock_mesh_1.devices = np.array([["tpu0", "tpu1"], ["tpu2", "tpu3"]])
+
+    mock_mesh_2 = mock.create_autospec(jax.sharding.Mesh, instance=True)
+    mock_mesh_2.devices = np.array([["tpu4", "tpu5"], ["tpu6", "tpu7"]])
+
+    mock_cluster_config = mock.create_autospec(
+        rl_cluster.ClusterConfig, instance=True
+    )
+    mock_cluster_config.role_to_mesh = {
+        rl_cluster.Role.ACTOR: mock_mesh_1,
+        rl_cluster.Role.ROLLOUT: mock_mesh_2,
+    }
+
+    exporter = export.PerfMetricsExport.from_cluster_config(
+        mock_cluster_config,
+        enable_trace_writer=True,
+        trace_dir="/test/dir",
+    )
+
+    expected_role_to_devices = {
+        "actor": ["tpu0", "tpu1", "tpu2", "tpu3"],
+        "rollout": ["tpu4", "tpu5", "tpu6", "tpu7"],
+    }
+    mock_writer_cls.assert_called_once_with(
+        "/test/dir", role_to_devices=expected_role_to_devices
+    )
+    self.assertIs(exporter._writer, mock_writer_cls.return_value)
+
+  @mock.patch.object(
+      export.trace_writer_lib,
+      "PerfettoTraceWriter",
+      autospec=True,
+      spec_set=True,
+  )
+  def test_from_cluster_config_no_role_to_mesh(self, mock_writer_cls):
+    mock_cluster_config = mock.create_autospec(
+        rl_cluster.ClusterConfig, instance=True, spec_set=True
+    )
+    del mock_cluster_config.role_to_mesh
+
+    exporter = export.PerfMetricsExport.from_cluster_config(
+        mock_cluster_config,
+        enable_trace_writer=True,
+        trace_dir="/test/dir",
+    )
+
+    mock_writer_cls.assert_called_once_with("/test/dir", role_to_devices={})
+    self.assertIs(exporter._writer, mock_writer_cls.return_value)
 
 if __name__ == "__main__":
   absltest.main()
