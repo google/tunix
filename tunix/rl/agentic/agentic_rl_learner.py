@@ -52,6 +52,8 @@ from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
+from tunix.rl.agentic.agents import agent_types
+from typing import Any, Dict, List, Optional, Sequence, Set, Type, TypeVar
 
 ArrayLike = typing.ArrayLike
 TrainingInputT = Dict[str, List[str] | ArrayLike]
@@ -90,6 +92,8 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   num_generations: int = 1
   num_iterations: int = 1
   episode_timeout: float = 1800.0
+  compact_filter: bool = False
+  filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -416,6 +420,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,
+        compact_filter=self.algo_config.compact_filter,
+        filter_statuses=self.algo_config.filter_statuses,
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,

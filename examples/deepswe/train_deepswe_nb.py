@@ -567,11 +567,16 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
     max_response_length=MAX_RESPONSE_LENGTH,
-    beta=BETA,
+    beta=None,  # no kl penalty
     epsilon=EPSILON,
+    advantage_estimator="rloo",
+    loss_agg_mode="sequence-mean-token-scale",
+    policy_loss_fn="agentic_grpo",
     system_prompt=SWE_SYSTEM_PROMPT,
     max_concurrency=MAX_CONCURRENCY,
     epsilon_high=EPSILON_HIGH,
+    compact_filter=True,
+    filter_statuses={},  # use default filter statuses
     off_policy_steps=0,
     episode_timeout=PER_TURN_TIMEOUT_SECS * MAX_TURNS,
 )
