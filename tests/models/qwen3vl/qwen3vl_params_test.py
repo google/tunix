@@ -84,7 +84,7 @@ def _extract_state(
   # ── vision: patch embed ────────────────────────────────────────────────────
   # NNX kernel (pixel_volume, hidden_size)
   # → HF weight (hidden_size, temporal, channels, patch_h, patch_w)
-  kernel = np.array(model.visual.patch_embed.proj.kernel.value)
+  kernel = np.array(model.visual.patch_embed.proj.kernel)
   kernel = kernel.reshape(
       v_cfg.temporal_patch_size,
       v_cfg.in_channels,
@@ -96,128 +96,106 @@ def _extract_state(
       4, 0, 1, 2, 3
   )
   state['model.visual.patch_embed.proj.bias'] = np.array(
-      model.visual.patch_embed.proj.bias.value
+      model.visual.patch_embed.proj.bias
   )
 
   # ── vision: positional embedding ───────────────────────────────────────────
   state['model.visual.pos_embed.weight'] = np.array(
-      model.visual.pos_embed.embedding.value
+      model.visual.pos_embed.embedding
   )
 
   # ── vision: transformer blocks ─────────────────────────────────────────────
   for i, block in enumerate(model.visual.blocks):
     pfx = f'model.visual.blocks.{i}'
     # Attention: NNX kernel (in, out) → HF weight (out, in)
-    state[f'{pfx}.attn.qkv.weight'] = np.array(
-        block.attn.qkv_proj.kernel.value
-    ).T
-    state[f'{pfx}.attn.qkv.bias'] = np.array(block.attn.qkv_proj.bias.value)
-    state[f'{pfx}.attn.proj.weight'] = np.array(
-        block.attn.out_proj.kernel.value
-    ).T
-    state[f'{pfx}.attn.proj.bias'] = np.array(block.attn.out_proj.bias.value)
+    state[f'{pfx}.attn.qkv.weight'] = np.array(block.attn.qkv_proj.kernel).T
+    state[f'{pfx}.attn.qkv.bias'] = np.array(block.attn.qkv_proj.bias)
+    state[f'{pfx}.attn.proj.weight'] = np.array(block.attn.out_proj.kernel).T
+    state[f'{pfx}.attn.proj.bias'] = np.array(block.attn.out_proj.bias)
     # MLP: same transpose convention
-    state[f'{pfx}.mlp.linear_fc1.weight'] = np.array(
-        block.mlp.linear1.kernel.value
-    ).T
-    state[f'{pfx}.mlp.linear_fc1.bias'] = np.array(block.mlp.linear1.bias.value)
-    state[f'{pfx}.mlp.linear_fc2.weight'] = np.array(
-        block.mlp.linear2.kernel.value
-    ).T
-    state[f'{pfx}.mlp.linear_fc2.bias'] = np.array(block.mlp.linear2.bias.value)
+    state[f'{pfx}.mlp.linear_fc1.weight'] = np.array(block.mlp.linear1.kernel).T
+    state[f'{pfx}.mlp.linear_fc1.bias'] = np.array(block.mlp.linear1.bias)
+    state[f'{pfx}.mlp.linear_fc2.weight'] = np.array(block.mlp.linear2.kernel).T
+    state[f'{pfx}.mlp.linear_fc2.bias'] = np.array(block.mlp.linear2.bias)
     # LayerNorm: scale → weight, bias → bias (no reshape)
-    state[f'{pfx}.norm1.weight'] = np.array(block.norm1.scale.value)
-    state[f'{pfx}.norm1.bias'] = np.array(block.norm1.bias.value)
-    state[f'{pfx}.norm2.weight'] = np.array(block.norm2.scale.value)
-    state[f'{pfx}.norm2.bias'] = np.array(block.norm2.bias.value)
+    state[f'{pfx}.norm1.weight'] = np.array(block.norm1.scale)
+    state[f'{pfx}.norm1.bias'] = np.array(block.norm1.bias)
+    state[f'{pfx}.norm2.weight'] = np.array(block.norm2.scale)
+    state[f'{pfx}.norm2.bias'] = np.array(block.norm2.bias)
 
   # ── vision: deepstack mergers ───────────────────────────────────────────────
   for i, merger in enumerate(model.visual.deepstack_mergers):
     pfx = f'model.visual.deepstack_merger_list.{i}'
-    state[f'{pfx}.linear_fc1.weight'] = np.array(
-        merger.linear_fc1.kernel.value
-    ).T
-    state[f'{pfx}.linear_fc1.bias'] = np.array(merger.linear_fc1.bias.value)
-    state[f'{pfx}.linear_fc2.weight'] = np.array(
-        merger.linear_fc2.kernel.value
-    ).T
-    state[f'{pfx}.linear_fc2.bias'] = np.array(merger.linear_fc2.bias.value)
-    state[f'{pfx}.norm.weight'] = np.array(merger.norm.scale.value)
-    state[f'{pfx}.norm.bias'] = np.array(merger.norm.bias.value)
+    state[f'{pfx}.linear_fc1.weight'] = np.array(merger.linear_fc1.kernel).T
+    state[f'{pfx}.linear_fc1.bias'] = np.array(merger.linear_fc1.bias)
+    state[f'{pfx}.linear_fc2.weight'] = np.array(merger.linear_fc2.kernel).T
+    state[f'{pfx}.linear_fc2.bias'] = np.array(merger.linear_fc2.bias)
+    state[f'{pfx}.norm.weight'] = np.array(merger.norm.scale)
+    state[f'{pfx}.norm.bias'] = np.array(merger.norm.bias)
 
   # ── vision: final merger ────────────────────────────────────────────────────
   state['model.visual.merger.linear_fc1.weight'] = np.array(
-      model.visual.merger.linear_fc1.kernel.value
+      model.visual.merger.linear_fc1.kernel
   ).T
   state['model.visual.merger.linear_fc1.bias'] = np.array(
-      model.visual.merger.linear_fc1.bias.value
+      model.visual.merger.linear_fc1.bias
   )
   state['model.visual.merger.linear_fc2.weight'] = np.array(
-      model.visual.merger.linear_fc2.kernel.value
+      model.visual.merger.linear_fc2.kernel
   ).T
   state['model.visual.merger.linear_fc2.bias'] = np.array(
-      model.visual.merger.linear_fc2.bias.value
+      model.visual.merger.linear_fc2.bias
   )
   state['model.visual.merger.norm.weight'] = np.array(
-      model.visual.merger.norm.scale.value
+      model.visual.merger.norm.scale
   )
   state['model.visual.merger.norm.bias'] = np.array(
-      model.visual.merger.norm.bias.value
+      model.visual.merger.norm.bias
   )
 
   # ── text: token embedding ───────────────────────────────────────────────────
-  state['model.embed_tokens.weight'] = np.array(
-      model.embedder.input_embedding.value
-  )
+  state['model.embed_tokens.weight'] = np.array(model.embedder.input_embedding)
 
   # ── text: final RMSNorm ─────────────────────────────────────────────────────
-  state['model.norm.weight'] = np.array(model.final_norm.w.value)
+  state['model.norm.weight'] = np.array(model.final_norm.w)
 
   # ── text: decoder layers ────────────────────────────────────────────────────
   for i, layer in enumerate(model.layers):
     pfx = f'model.layers.{i}'
-    state[f'{pfx}.input_layernorm.weight'] = np.array(
-        layer.input_layernorm.w.value
-    )
+    state[f'{pfx}.input_layernorm.weight'] = np.array(layer.input_layernorm.w)
     state[f'{pfx}.post_attention_layernorm.weight'] = np.array(
-        layer.post_attention_layernorm.w.value
+        layer.post_attention_layernorm.w
     )
-    state[f'{pfx}.self_attn.q_norm.weight'] = np.array(
-        layer.attn.q_norm.w.value
-    )
-    state[f'{pfx}.self_attn.k_norm.weight'] = np.array(
-        layer.attn.k_norm.w.value
-    )
+    state[f'{pfx}.self_attn.q_norm.weight'] = np.array(layer.attn.q_norm.w)
+    state[f'{pfx}.self_attn.k_norm.weight'] = np.array(layer.attn.k_norm.w)
 
     # Einsum w (embed_dim, num_heads, head_dim)
     # → HF weight (num_heads*head_dim, embed_dim)
-    w = np.array(layer.attn.q_proj.w.value)
+    w = np.array(layer.attn.q_proj.w)
     state[f'{pfx}.self_attn.q_proj.weight'] = w.reshape(cfg.embed_dim, -1).T
-    w = np.array(layer.attn.k_proj.w.value)
+    w = np.array(layer.attn.k_proj.w)
     state[f'{pfx}.self_attn.k_proj.weight'] = w.reshape(cfg.embed_dim, -1).T
-    w = np.array(layer.attn.v_proj.w.value)
+    w = np.array(layer.attn.v_proj.w)
     state[f'{pfx}.self_attn.v_proj.weight'] = w.reshape(cfg.embed_dim, -1).T
 
     # Einsum w (num_heads, head_dim, embed_dim)
     # → HF weight (embed_dim, num_heads*head_dim)
-    w = np.array(layer.attn.o_proj.w.value)
+    w = np.array(layer.attn.o_proj.w)
     state[f'{pfx}.self_attn.o_proj.weight'] = w.reshape(-1, cfg.embed_dim).T
 
     # nnx.Linear kernel (in, out) → HF weight (out, in)
     state[f'{pfx}.mlp.gate_proj.weight'] = np.array(
-        layer.mlp.gate_proj.kernel.value
+        layer.mlp.gate_proj.kernel
     ).T
-    state[f'{pfx}.mlp.up_proj.weight'] = np.array(
-        layer.mlp.up_proj.kernel.value
-    ).T
+    state[f'{pfx}.mlp.up_proj.weight'] = np.array(layer.mlp.up_proj.kernel).T
     state[f'{pfx}.mlp.down_proj.weight'] = np.array(
-        layer.mlp.down_proj.kernel.value
+        layer.mlp.down_proj.kernel
     ).T
 
   # ── text: lm_head (only when not using tied embeddings) ────────────────────
   if not cfg.use_tied_embedding:
     # Einsum w (embed_dim, vocab_size) → HF weight (vocab_size, embed_dim)
-    state['lm_head.weight'] = np.array(model.lm_head.w.value).T
+    state['lm_head.weight'] = np.array(model.lm_head.w).T
 
   return state
 
@@ -293,16 +271,16 @@ class Qwen3VLParamsTest(lora_params_test_base.LoraParamsTestBase):
     seq_len = 4
     input_tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     positions = jnp.ones((3, batch_size, seq_len), dtype=jnp.int32)
-    return input_tokens, positions, None  # attention_mask=None
+    return input_tokens, positions, None  # padding_mask=None
 
-  def _run_forward_pass(self, model, input_tokens, positions, attention_mask):
+  def _run_forward_pass(self, model, input_tokens, positions, padding_mask):
     return model(
         input_tokens=input_tokens,
         positions=positions,
         pixel_values=None,
         vision_precomputed=None,
         cache=None,
-        attention_mask=attention_mask,
+        padding_mask=padding_mask,
     )
 
 
@@ -363,14 +341,14 @@ class Qwen3VLVisionParamsTest(absltest.TestCase):
     reloaded = self._save_and_reload(model)
 
     np.testing.assert_array_almost_equal(
-        np.array(model.visual.patch_embed.proj.kernel.value),
-        np.array(reloaded.visual.patch_embed.proj.kernel.value),
+        np.array(model.visual.patch_embed.proj.kernel),
+        np.array(reloaded.visual.patch_embed.proj.kernel),
         decimal=6,
         err_msg='patch_embed kernel mismatch',
     )
     np.testing.assert_array_almost_equal(
-        np.array(model.visual.patch_embed.proj.bias.value),
-        np.array(reloaded.visual.patch_embed.proj.bias.value),
+        np.array(model.visual.patch_embed.proj.bias),
+        np.array(reloaded.visual.patch_embed.proj.bias),
         decimal=6,
         err_msg='patch_embed bias mismatch',
     )
@@ -381,8 +359,8 @@ class Qwen3VLVisionParamsTest(absltest.TestCase):
     reloaded = self._save_and_reload(model)
 
     np.testing.assert_array_almost_equal(
-        np.array(model.visual.pos_embed.embedding.value),
-        np.array(reloaded.visual.pos_embed.embedding.value),
+        np.array(model.visual.pos_embed.embedding),
+        np.array(reloaded.visual.pos_embed.embedding),
         decimal=6,
         err_msg='pos_embed mismatch',
     )
@@ -435,8 +413,8 @@ class Qwen3VLVisionParamsTest(absltest.TestCase):
           ('norm2.bias', orig.norm2.bias, loaded.norm2.bias),
       ]:
         np.testing.assert_array_almost_equal(
-            np.array(o_arr.value),
-            np.array(l_arr.value),
+            np.array(o_arr),
+            np.array(l_arr),
             decimal=6,
             err_msg=f'block[{i}].{name} mismatch',
         )
@@ -451,20 +429,20 @@ class Qwen3VLVisionParamsTest(absltest.TestCase):
         o = getattr(getattr(model.visual.merger, attr), sub)
         l = getattr(getattr(reloaded.visual.merger, attr), sub)
         np.testing.assert_array_almost_equal(
-            np.array(o.value),
-            np.array(l.value),
+            np.array(o),
+            np.array(l),
             decimal=6,
             err_msg=f'merger.{attr}.{sub} mismatch',
         )
     np.testing.assert_array_almost_equal(
-        np.array(model.visual.merger.norm.scale.value),
-        np.array(reloaded.visual.merger.norm.scale.value),
+        np.array(model.visual.merger.norm.scale),
+        np.array(reloaded.visual.merger.norm.scale),
         decimal=6,
         err_msg='merger.norm.scale mismatch',
     )
     np.testing.assert_array_almost_equal(
-        np.array(model.visual.merger.norm.bias.value),
-        np.array(reloaded.visual.merger.norm.bias.value),
+        np.array(model.visual.merger.norm.bias),
+        np.array(reloaded.visual.merger.norm.bias),
         decimal=6,
         err_msg='merger.norm.bias mismatch',
     )
@@ -482,20 +460,20 @@ class Qwen3VLVisionParamsTest(absltest.TestCase):
           o = getattr(getattr(orig, attr), sub)
           l = getattr(getattr(loaded, attr), sub)
           np.testing.assert_array_almost_equal(
-              np.array(o.value),
-              np.array(l.value),
+              np.array(o),
+              np.array(l),
               decimal=6,
               err_msg=f'deepstack_mergers[{i}].{attr}.{sub} mismatch',
           )
       np.testing.assert_array_almost_equal(
-          np.array(orig.norm.scale.value),
-          np.array(loaded.norm.scale.value),
+          np.array(orig.norm.scale),
+          np.array(loaded.norm.scale),
           decimal=6,
           err_msg=f'deepstack_mergers[{i}].norm.scale mismatch',
       )
       np.testing.assert_array_almost_equal(
-          np.array(orig.norm.bias.value),
-          np.array(loaded.norm.bias.value),
+          np.array(orig.norm.bias),
+          np.array(loaded.norm.bias),
           decimal=6,
           err_msg=f'deepstack_mergers[{i}].norm.bias mismatch',
       )
