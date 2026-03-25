@@ -234,8 +234,19 @@ class AsyncTimelineTest(absltest.TestCase):
 
     self.mock_async_wait.side_effect = fail_wait
 
-    with self.assertRaisesRegex(RuntimeError, "failed"):
-      t.span("failed", 1.0, ["wait"])
+    with mock.patch.object(timeline.logging, "error") as mock_log_error:
+      t.span("failed_op", 1.0, ["wait"])
+      # Exception is caught and logged, no exception is raised to the caller.
+      mock_log_error.assert_called_once()
+      args, kwargs = mock_log_error.call_args
+      format_str, name, span_id, err = args
+      self.assertEqual(format_str, "Timeline span '%s' (id=%d) failed: %s")
+      self.assertEqual(name, "failed_op")
+      self.assertEqual(span_id, 0)
+      self.assertIsInstance(err, RuntimeError)
+      self.assertEqual(str(err), "failed")
+      self.assertIn("exc_info", kwargs)
+      self.assertIsInstance(kwargs["exc_info"], RuntimeError)
 
   def test_wait_pending_spans_clears_threads(self):
     t = timeline.AsyncTimeline("test_tl", 0.0)
