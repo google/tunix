@@ -111,6 +111,24 @@ class TrajectoryCollectEngine:
     self.valid_statuses = valid_statuses or {
         agent_types.TrajectoryStatus.SUCCEEDED
     }
+    self.env_time = {
+        "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
+        "reset_cpu_time": (
+            0.0
+        ),  # Thread/CPU time (Actual processing time on the worker thread)
+        "step_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
+        "step_cpu_time": (
+            0.0
+        ),  # Thread/CPU time (Actual processing time on the worker thread)
+    }
+    self.reward_time = {
+        "reward_latency": (
+            0.0
+        ),  # Wall-clock time (Total real-world time elapsed)
+        "reward_cpu_time": (
+            0.0
+        ),  # Thread/CPU time (Actual processing time on the worker thread)
+    }
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
       logging.warning(
@@ -118,6 +136,26 @@ class TrajectoryCollectEngine:
           " provided. Context limits will not be enforced.",
           self.max_context_limit,
       )
+
+  async def _run_with_timing(
+      self, func: Callable[..., Any], *args
+  ) -> Tuple[Any, float, float]:
+    """Runs a sync function in an executor and returns (result, wall_time, cpu_time)."""
+
+    def _clocked_wrapper():
+      t_start = time.thread_time()
+      res = func(*args)
+      t_delta = time.thread_time() - t_start
+      return res, t_delta
+
+    loop = asyncio.get_running_loop()
+    wall_start = time.perf_counter()
+
+    # Run the wrapper in the default executor
+    result, cpu_delta = await loop.run_in_executor(None, _clocked_wrapper)
+
+    wall_delta = time.perf_counter() - wall_start
+    return result, wall_delta, cpu_delta
 
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
@@ -190,6 +228,7 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
+      self.agent.trajectory.env_time = self.env_time
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -203,6 +242,8 @@ class TrajectoryCollectEngine:
               "env_masks": getattr(step, "env_masks", []),
               "reward": step.reward,
               "mc_return": step.mc_return,
+              "env_time": self.env_time,
+              "reward_time": self.reward_time,
           }
           for step in self.agent.trajectory.steps
       ]
@@ -242,6 +283,8 @@ class TrajectoryCollectEngine:
           "conversation_masks": np.concatenate(conversation_masks, axis=0),
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
+          "env_time": self.env_time,
+          "reward_time": self.reward_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -307,9 +350,11 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
-    obs, _ = await asyncio.get_event_loop().run_in_executor(
-        None, self.env.reset
-    )
+    (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
+
+    self.env_time["reset_latency"] += wall_time
+    self.env_time["reset_cpu_time"] += cpu_time
+
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
@@ -325,7 +370,7 @@ class TrajectoryCollectEngine:
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
 
-    self._start_ts = time.time()
+    self._start_ts = time.perf_counter()
 
   async def _one_step(self) -> bool:
     """Executes a single step and returns the Step object and Done status.
@@ -354,9 +399,12 @@ class TrajectoryCollectEngine:
       )
       action = []
 
-    obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
-        None, self.env.step, action
+    (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
+        self.env.step, action
     )
+
+    self.env_time["step_latency"] += wall_time
+    self.env_time["step_cpu_time"] += cpu_time
 
     self.agent.update_from_env(obs, rew, done, info)
 
@@ -387,7 +435,7 @@ class TrajectoryCollectEngine:
         cur_step.env_tokens = np.array(e_tokens)
         cur_step.env_masks = np.array(e_masks)
 
-    if time.time() - self._start_ts > self.timeout:
+    if time.perf_counter() - self._start_ts > self.timeout:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
       self.agent.get_current_step().done = True
@@ -407,9 +455,13 @@ class TrajectoryCollectEngine:
       # Skip reward computation in trajectory collection if no reward function
       # is provided or no step is taken.
       return
-    final_reward = await asyncio.get_event_loop().run_in_executor(
-        None, self.final_reward_fn, self.env.task, last_step.model_response
+
+    final_reward, wall_time, cpu_time = await self._run_with_timing(
+        self.final_reward_fn, self.env.task, last_step.model_response
     )
+
+    self.reward_time["reward_latency"] += wall_time
+    self.reward_time["reward_cpu_time"] += cpu_time
     last_step.reward += final_reward
 
   def compute_trajectory_reward(self):

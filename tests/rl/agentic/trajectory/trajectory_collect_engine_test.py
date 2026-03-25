@@ -42,6 +42,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         base_agent.ConversationAgentBase, instance=True
     )
     self.mock_env = mock.create_autospec(self._TestEnv, instance=True)
+
     self.mock_env.max_steps = 10
 
     self.mock_model_call = mock.Mock()
@@ -141,6 +142,13 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(result_traj.steps[0].reward, 1.0)
     self.assertEqual(result_traj.steps[1].reward, 2.5)
 
+    # Check env_time (mocked thread_time delta)
+    self.assertIsInstance(result_traj.env_time, dict)
+    self.assertGreaterEqual(result_traj.env_time['step_latency'], 0.0)
+    self.assertGreaterEqual(result_traj.env_time['reset_latency'], 0.0)
+    self.assertIsInstance(result_traj.reward_time, dict)
+    self.assertGreaterEqual(result_traj.reward_time['reward_latency'], 0.0)
+
     # Check returns (gamma=0.9)
     # G_2 = 2.5
     # G_1 = 1.0 + 0.9 * 2.5 = 1.0 + 2.25 = 3.25
@@ -226,6 +234,16 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'trajectory_reward': (
             3.5
         ),  # 1.0 + 2.0 + 0.5 (final reward from reward_fn)
+        'env_time': {
+            'reset_latency': 0.0,
+            'reset_cpu_time': 0.0,
+            'step_latency': 0.0,
+            'step_cpu_time': 0.0,
+        },
+        'reward_time': {
+            'reward_latency': 0.0,
+            'reward_cpu_time': 0.0,
+        },
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1, 0, 0]),
         'policy_version': None,
         'original_input': {'some': 'task'},
@@ -234,7 +252,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     }
 
     for k, v in expected_tokens.items():
-      if isinstance(v, np.ndarray):
+      if k in ['env_time', 'reward_time']:
+        self.assertIsInstance(token_data[k], dict)
+        for sub_k in v:
+          self.assertGreaterEqual(token_data[k][sub_k], 0.0)
+      elif isinstance(v, np.ndarray):
         np.testing.assert_array_equal(token_data[k], v)
       else:
         self.assertEqual(token_data[k], v, msg=f'Failed for key: {k}')
@@ -436,8 +458,20 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
   def test_collect_timeout(self):
     self.mock_env.max_steps = 10
-    with mock.patch.object(time, 'time') as mock_time:
-      mock_time.side_effect = [100.0, 100.05, 100.15, 100.15]
+    with mock.patch.object(time, 'perf_counter') as mock_perf:
+      # Reset: 3 calls
+      # Step 1: 3 calls
+      # Final reward: 2 calls
+      mock_perf.side_effect = [
+          100.0,
+          100.01,
+          100.02,  # _reset
+          100.03,
+          100.04,
+          100.2,  # _one_step: 100.2 - 100.02 = 0.18 > 0.1
+          100.21,
+          100.22,  # _append_final_reward
+      ]
 
       engine = trajectory_collect_engine.TrajectoryCollectEngine(
           agent=self.mock_agent,

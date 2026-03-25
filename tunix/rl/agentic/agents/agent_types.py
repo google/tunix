@@ -113,12 +113,27 @@ class Trajectory:
     steps: Chronologically ordered sequence of interaction steps.
     reward: Total episode reward (cumulative or final environment score).
     status: Status of the trajectory (e.g., "success", "truncated").
+    env_time: Total time spent in environment steps in seconds.
   """
 
   task: Any = None
   steps: list[Step] = dataclasses.field(default_factory=list)
   reward: float = 0.0
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
+  env_time: dict[str, float] = dataclasses.field(
+      default_factory=lambda: {
+          "reset_latency": 0.0,
+          "reset_cpu_time": 0.0,
+          "step_latency": 0.0,
+          "step_cpu_time": 0.0,
+      }
+  )
+  reward_time: dict[str, float] = dataclasses.field(
+      default_factory=lambda: {
+          "reward_latency": 0.0,
+          "reward_cpu_time": 0.0,
+      }
+  )
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -134,6 +149,8 @@ class Trajectory:
         "steps": [dataclasses.asdict(step) for step in self.steps],
         "reward": float(self.reward),
         "status": self.status.name,
+        "env_time": self.env_time,
+        "reward_time": self.reward_time,
     }
 
 
