@@ -26,6 +26,8 @@ from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optio
 
 from absl import logging
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -70,6 +72,7 @@ class TrajectoryCollectEngine:
       tokenizer=None,
       chat_parser=None,
       valid_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+      perf_v2: Optional[perf_tracer_v2.Tracer] = perf_tracer_v2.NoopTracer(),
   ):
     """Initialize the trajectory collection engine.
 
@@ -96,6 +99,8 @@ class TrajectoryCollectEngine:
         chat_parser: Optional chat parser for formatting messages
         valid_statuses (Set[TrajectoryStatus]): A set of statuses that are
           considered not "penalized" for reward computation.
+        perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
+          to use for performance measurements.
     """
     self.agent = agent
     self.env = env
@@ -116,6 +121,7 @@ class TrajectoryCollectEngine:
     self.valid_statuses = valid_statuses or {
         agent_types.TrajectoryStatus.SUCCEEDED
     }
+    self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
       logging.warning(
@@ -369,9 +375,26 @@ class TrajectoryCollectEngine:
       )
       action = []
 
-    obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
-        None, self.env.step, action
-    )
+    # Add tags for performance tracing.
+    tags = {}
+    if hasattr(self.env, "extra_kwargs"):
+      if "group_id" in self.env.extra_kwargs:
+        tags[perf_constants.GROUP_ID] = self.env.extra_kwargs["group_id"]
+      if "pair_index" in self.env.extra_kwargs:
+        tags[perf_constants.PAIR_INDEX] = self.env.extra_kwargs["pair_index"]
+    if (
+        hasattr(self.env, "task")
+        and self.env.task.get("policy_version") is not None
+    ):
+      tags[perf_constants.STEP] = self.env.task["policy_version"]
+
+    with self.perf_v2.span(
+        perf_constants.ENVIRONMENT,
+        tags=tags,
+    ):
+      obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
+          None, self.env.step, action
+      )
 
     self.agent.update_from_env(obs, rew, done, info)
 

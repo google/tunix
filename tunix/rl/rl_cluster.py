@@ -38,9 +38,9 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
-from tunix.generate import tokenizer_adapter
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -50,6 +50,7 @@ from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
 from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout import mock_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
@@ -362,10 +363,11 @@ class RLCluster:
         "vanilla",
         "vllm",
         "sglang_jax",
+        "mock",
     ]:
       raise ValueError(
-          "`cluster_config.rollout_engine` should be one of `'vanilla'` or"
-          " `'vllm'` or `'sglang_jax'`. Received:"
+          "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
+          "`'vllm'`, `'sglang_jax'`, or `'mock'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
     if isinstance(self.cluster_config.rollout_config, dict):
@@ -455,6 +457,23 @@ class RLCluster:
           self.tokenizer,
           mesh=self.r2m[Role.ROLLOUT],
           rollout_config=loaded_sglang_jax_config,
+      )
+    elif self.cluster_config.rollout_engine == "mock":
+      from tunix.rl.rollout import mock_rollout
+
+      if isinstance(
+          self.cluster_config.rollout_config, base_rollout.RolloutConfig
+      ):
+        loaded_mock_config = self.cluster_config.rollout_config
+      elif isinstance(self.cluster_config.rollout_config, dict):
+        loaded_mock_config = self.cluster_config.rollout_config[Mode.TRAIN]
+      else:
+        raise ValueError("Rollout mock model config is missing!")
+
+      self._rollout = mock_rollout.MockRollout(
+          model=self.rollout_actor,
+          tokenizer=self.tokenizer,
+          rollout_config=loaded_mock_config,
       )
     elif (
         isinstance(self.cluster_config.rollout_engine, type)

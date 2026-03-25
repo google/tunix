@@ -230,6 +230,14 @@ class RolloutConfig:
       default_factory=dict
   )
 
+  # Mock rollout configs.
+
+  # Minimum generation time for mock rollout engine.
+  rollout_mock_min_generation_time: float = 0.1
+
+  # Maximum generation time for mock rollout engine.
+  rollout_mock_max_generation_time: float = 5.0
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""
