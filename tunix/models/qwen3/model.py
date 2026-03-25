@@ -16,14 +16,19 @@
 
 import dataclasses
 import enum
+from functools import partial
 from typing import Tuple
 
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
@@ -102,6 +107,8 @@ class ModelConfig:
   remat_config: RematConfig = RematConfig.NONE
   dtype: jnp.dtype = jnp.float32
   param_dtype: jnp.dtype = jnp.float32
+  use_flash_attention: bool = False
+  flash_attention_block_size: int = 1024
 
   @classmethod
   def qwen3_0p6b(cls):  # qwen3-0.6B
@@ -152,7 +159,7 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
-  qwen3_4b_base = qwen3_4b      # qwen3-4B-base
+  qwen3_4b_base = qwen3_4b  # qwen3-4B-base
 
   @classmethod
   def _qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
@@ -191,7 +198,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  qwen3_8b_base = qwen3_8b    # qwen3-8B-base
+  qwen3_8b_base = qwen3_8b  # qwen3-8B-base
 
   @classmethod
   def qwen3_14b(cls):  # qwen3-14B
@@ -207,7 +214,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  qwen3_14b_base = qwen3_14b   # qwen3-14B-base
+  qwen3_14b_base = qwen3_14b  # qwen3-14B-base
 
   @classmethod
   def qwen3_30b_a3b(cls):  # qwen3-30B-a3b
@@ -264,11 +271,13 @@ class Einsum(nnx.Module):
   ):
     self.einsum_str = einsum_str
     self.shape = shape
+    self.dtype = dtype
     self.w = nnx.Param(
-        nnx.initializers.normal(dtype=param_dtype)(rngs.params(), shape),
+        nnx.initializers.glorot_uniform()(
+            rngs.params(), shape, dtype=param_dtype
+        ),
         sharding=sharding,
     )
-    self.dtype = dtype
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
@@ -469,21 +478,78 @@ class Attention(nnx.Module):
       )
 
     b, t, qh, d = query_proj.shape
-    _, s, kh, _ = key_proj.shape
+    _, _, kh, _ = key_proj.shape
 
-    # GQA
-    query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-    attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
+    # NB: flash attention doesn't work for decoding step
+    if self.config.use_flash_attention and seq_len > 1:
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
 
-    if attn_mask is not None:
-      attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
+      query_proj = query_proj * self.scale
 
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
-    )
+      mesh = pxla.thread_resources.env.physical_mesh
+      causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+      multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
 
-    qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-    qkv = qkv.reshape((b, t, qh, d))
+      block_sizes = splash.BlockSizes(
+          block_q=self.config.flash_attention_block_size,
+          block_kv=self.config.flash_attention_block_size,
+          block_q_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv_compute=self.config.flash_attention_block_size,
+          block_q_dq=self.config.flash_attention_block_size,
+          block_kv_dq=self.config.flash_attention_block_size,
+      )
+
+      shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
+      head_shards = (
+          mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
+      )
+      q_seq_shards = (
+          mesh.shape[shd_t] if shd_t is not None and shd_t in mesh.shape else 1
+      )
+
+      splash_attn_kernel = splash.make_splash_mha(
+          multi_head_mask,
+          block_sizes=block_sizes,
+          head_shards=head_shards,
+          q_seq_shards=q_seq_shards,
+      )
+
+      shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+      kernel_spec = splash_attn_kernel.manual_sharding_spec(
+          shd.NamedSharding(mesh, P(shd_n, shd_t))
+      )
+
+      @partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=(kernel_spec, shd_spec, shd_spec, shd_spec),
+          out_specs=shd_spec,
+          check_rep=False,
+      )
+      def sharded_splash_attn(kernel, q_block, k_block, v_block):
+        return jax.vmap(kernel)(q_block, k_block, v_block)
+
+      qkv = sharded_splash_attn(
+          splash_attn_kernel, query_proj, key_proj, value_proj
+      )
+      qkv = qkv.transpose(0, 2, 1, 3)
+    else:
+      # GQA
+      query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
+      attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
+
+      if attn_mask is not None:
+        attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
+
+      attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
+          key_proj.dtype
+      )
+
+      qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
+      qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)
