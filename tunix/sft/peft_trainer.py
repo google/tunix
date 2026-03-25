@@ -113,8 +113,6 @@ class MetricsBuffer:
     step: The training step number.
     losses: A list of loss values recorded within this step (e.g., across
       gradient accumulation steps).
-    step_time_deltas: A list of time deltas for each computation within this
-      step.
     additional_metrics: Dictionary for storing additional metrics. The key is
       the metric name, and the value is a tuple containing a list of metric
       values and a callable to aggregate them.
@@ -122,7 +120,6 @@ class MetricsBuffer:
 
   step: int
   losses: List[ArrayLike]
-  step_time_deltas: List[float]
   additional_metrics: Dict[
       str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
   ] = dataclasses.field(default_factory=dict)
@@ -131,11 +128,6 @@ class MetricsBuffer:
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
     return np.mean(np.array([np.array(x) for x in self.losses]))
-
-  @property
-  def step_time_delta(self):
-    """Returns the mean of the recorded step time deltas for the step."""
-    return np.mean(self.step_time_deltas)
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -460,7 +452,6 @@ class PeftTrainer:
       self,
       loss: ArrayLike,
       step: int | None = None,
-      step_time_delta: float | None = None,
       additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
@@ -475,21 +466,6 @@ class PeftTrainer:
           self.metrics_prefix,
           "learning_rate",
           jax.device_get(learning_rate),
-          self._mode,
-          step,
-      )
-    if step_time_delta is not None:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "step_time_sec",
-          step_time_delta,
-          self._mode,
-          step,
-      )
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "steps_per_sec",
-          1.0 / (step_time_delta + 1e-9),
           self._mode,
           step,
       )
@@ -509,7 +485,6 @@ class PeftTrainer:
       metrics_buffer: MetricsBuffer | None,
       loss: ArrayLike,
       step: int,
-      step_time_delta: float = 0.0,
       additional_metrics: (
           dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
       ) = None,
@@ -519,12 +494,10 @@ class PeftTrainer:
       metrics_buffer = MetricsBuffer(
           step=step,
           losses=[loss],
-          step_time_deltas=[step_time_delta],
       )
     else:
       assert metrics_buffer.step == step
       metrics_buffer.losses.append(loss)
-      metrics_buffer.step_time_deltas.append(step_time_delta or 0)
     if additional_metrics is not None:
       for k, (v, op) in additional_metrics.items():
         if k not in metrics_buffer.additional_metrics:
@@ -548,7 +521,6 @@ class PeftTrainer:
         self._tqdm_train_metrics,
         step=self._prev_buffered_train_metrics.step,
         loss=self._prev_buffered_train_metrics.loss,
-        step_time=self._prev_buffered_train_metrics.step_time_delta,
     )
     self._prev_buffered_train_metrics = self._buffered_train_metrics
     self._buffered_train_metrics = None
@@ -564,7 +536,6 @@ class PeftTrainer:
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
-        step_time_delta=metrics_buffer.step_time_delta,
         additional_metrics={
             k: op(_to_np_array(v))
             for k, (
@@ -592,7 +563,6 @@ class PeftTrainer:
       metrics: list[str],
       step: int | None = None,
       loss: ArrayLike | None = None,
-      step_time: float | None = None,
   ):
     """Updates the progress bar with the given metrics if available."""
     if self._pbar is not None:
@@ -600,7 +570,7 @@ class PeftTrainer:
       self._pbar.update()
 
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
-      self.training_hooks.on_train_step_end(self, step, loss, step_time)
+      self.training_hooks.on_train_step_end(self, step, loss, 0.0)
 
   def train(
       self,
@@ -725,16 +695,11 @@ class PeftTrainer:
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 
-        current_time = time.perf_counter()
-        step_time_delta = current_time - last_step_completion_time
-        last_step_completion_time = current_time
-
         self._throttler.add_computation(train_loss)
         self._buffered_train_metrics = self._buffer_metrics(
             self._buffered_train_metrics,
             loss=train_loss,
             step=self._train_steps,
-            step_time_delta=step_time_delta,
             additional_metrics={"grad_norm": (grad_norm, np.mean)},
         )
         # NB: put this after self._buffer_metrics is important
