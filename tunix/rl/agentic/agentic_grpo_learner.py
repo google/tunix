@@ -436,7 +436,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     reward_kwargs = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
-
     reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
     with self.rl_cluster.perf_v2.span(
         perf_constants.ADVANTAGE_COMPUTATION,
@@ -459,27 +458,46 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
-    # Log completion lengths.
+    # Log completion lengths, env_time, and reward_time.
     agg_completion_mask = completion_mask.sum(axis=-1)
+
+    metrics_to_log = {
+        "generation/completions/mean_length": (
+            np.mean(agg_completion_mask),
+            np.mean,
+        ),
+        "generation/completions/max_length": (
+            np.max(agg_completion_mask),
+            np.max,
+        ),
+        "generation/completions/min_length": (
+            np.min(agg_completion_mask),
+            np.min,
+        ),
+        "generation/completions/clip_ratio": (
+            clipped_completion_count / len(trajectories),
+            np.mean,
+        ),
+    }
+
+    # Extract time metrics (env_time and reward_time)
+    for time_key, prefix in [
+        ("env_time", "generation/trajectory/env_time"),
+        ("reward_time", "generation/trajectory/reward_time"),
+    ]:
+      time_dicts = [item.traj.get(time_key, {}) for item in trajectories]
+
+      # Safely gather all unique sub-keys (e.g., 'reset_latency') across all trajectories
+      for sub_key in {k for d in time_dicts for k in d.keys()}:
+        vals = [d.get(sub_key, 0.0) for d in time_dicts]
+        metrics_to_log.update({
+            f"{prefix}/{sub_key}/mean": (np.mean(vals), np.mean),
+            f"{prefix}/{sub_key}/max": (np.max(vals), np.max),
+            f"{prefix}/{sub_key}/min": (np.min(vals), np.min),
+        })
+
     self.rl_cluster.buffer_metrics_async(
-        {
-            "generation/completions/mean_length": (
-                np.mean(agg_completion_mask),
-                np.mean,
-            ),
-            "generation/completions/max_length": (
-                np.max(agg_completion_mask),
-                np.max,
-            ),
-            "generation/completions/min_length": (
-                np.min(agg_completion_mask),
-                np.min,
-            ),
-            "generation/completions/clip_ratio": (
-                clipped_completion_count / len(trajectories),
-                np.mean,
-            ),
-        },
+        metrics_to_log,
         mode=mode,
         step=expected_step,
     )
