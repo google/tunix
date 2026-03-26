@@ -250,7 +250,7 @@ class GrpoPipeline(config.HyperParameters):
         reward_fns=self.obtain_reward_fn(),
         algo_config=GrpoConfig(**self.config["grpo_config"]),
     )
-
+    
     tokenizer = grpo_trainer.rl_cluster.tokenizer
     
     # Get dataset splits from config with defaults
