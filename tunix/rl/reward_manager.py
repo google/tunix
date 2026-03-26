@@ -23,7 +23,22 @@ import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import function_registry
 
+
 RewardFn = Callable[..., Any]
+
+
+def _calculate_scalar_reward_log_metrics(
+    rewards: np.ndarray,
+    prefix: str = "rewards",
+    axis: int = 1,
+) -> Dict[str, Any]:
+  """Helper to calculate sum, mean, min, and max log metrics for rewards."""
+  return {
+      f"{prefix}/sum": (np.nansum(rewards, axis=axis), np.mean),
+      f"{prefix}/mean": (np.nanmean(rewards, axis=axis), np.mean),
+      f"{prefix}/min": (np.min(rewards, axis=axis), np.min),
+      f"{prefix}/max": (np.max(rewards, axis=axis), np.max),
+  }
 
 
 class AbstractRewardManager(abc.ABC):
@@ -94,7 +109,6 @@ class SequenceRewardManager(AbstractRewardManager):
   ) -> Dict[str, Any]:
     """Computes the rewards for completions using the provided reward function, and return the sequence-level rewards information for advantage computationand logging."""
     return self._compute_rewards(prompts, completions, **kwargs)
-
   def _compute_rewards(
       self,
       prompts: List[str],
@@ -173,12 +187,9 @@ class SequenceRewardManager(AbstractRewardManager):
     metrics_to_log["completions"] = (completions, None)
 
     # Log the sum/mean rewards for each prompt-completion pair.
-    metrics_to_log["rewards/sum"] = (np.nansum(rewards, axis=1), np.nansum)
-    metrics_to_log["rewards/mean"] = (np.nanmean(rewards, axis=1), np.nanmean)
-
-    # Log the min and max rewards for the prompt-completion pair.
-    metrics_to_log["rewards/min"] = (np.min(rewards, axis=1), np.min)
-    metrics_to_log["rewards/max"] = (np.max(rewards, axis=1), np.max)
+    metrics_to_log.update(
+        _calculate_scalar_reward_log_metrics(rewards, prefix="rewards")
+    )
 
     # Log individual rewards for this trajectory
     for i, reward_fn in enumerate(self.reward_fns):
@@ -186,3 +197,65 @@ class SequenceRewardManager(AbstractRewardManager):
       metrics_to_log[metric_name] = (rewards[:, i], np.mean)
 
     return metrics_to_log
+
+
+@function_registry.register_reward_manager("agentic-sequence-level")
+class AgenticSequenceRewardManager(SequenceRewardManager):  # pytype: disable=base-class-error
+  """Reward manager for agentic settings.
+
+  Supports two reward sources:
+  - Pluggable reward_fns evaluated post-rollout (e.g. deepscaler).
+  - Trajectory rewards from the environment, passed via `trajectory_rewards`
+    kwarg (e.g. deepswe).
+
+  reward_fns is optional. When not provided, only trajectory_rewards are used
+  and the fn computation step is skipped entirely.
+  """
+
+  def __init__(
+      self,
+      reward_fns: RewardFn | List[RewardFn] | None,
+      algo_config: algo_config_lib.AlgorithmConfig,
+      **kwargs,
+  ):
+    if reward_fns is None:
+      self.reward_fns = []
+      self.algo_config = algo_config
+    else:
+      super().__init__(reward_fns, algo_config)  # pytype: disable=attribute-error
+
+  def __call__(
+      self,
+      prompts: List[str],
+      completions: List[str],
+      **kwargs,
+  ) -> Dict[str, Any]:
+    trajectory_rewards = kwargs.pop("trajectory_rewards", None)
+
+    rewards = None
+    log_metrics = {}
+
+    if self.reward_fns:
+      rewards_info = self._compute_rewards(prompts, completions, **kwargs)
+      rewards = rewards_info["rewards"]
+      log_metrics.update(rewards_info["log_metrics"])
+
+    if trajectory_rewards is not None:
+      trajectory_rewards_array = np.asarray(trajectory_rewards)
+      if rewards is None:
+        rewards = trajectory_rewards_array
+      else:
+        rewards += trajectory_rewards_array
+
+      # Log trajectory rewards separately
+      log_metrics.update(
+          _calculate_scalar_reward_log_metrics(trajectory_rewards_array, axis=0)
+      )
+
+    if rewards is None:
+      raise ValueError(
+          "No reward functions provided and no trajectory rewards found in"
+          " kwargs."
+      )
+
+    return {"rewards": rewards, "log_metrics": log_metrics}

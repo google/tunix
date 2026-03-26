@@ -83,6 +83,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   system_prompt: str = ""
   # TODO(tsbao): we need to update the scripts that uses max_tokens_to_generate
   # once this new agentic_rl_learner is used.
+  reward_manager: str = "agentic-sequence-level"
   max_response_length: int = 1024
   max_concurrency: int = 32
   off_policy_steps: int = 0
@@ -121,7 +122,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
       algo_config: TConfig,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | List[RewardFn] | None = None,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       agent_class: Type[
@@ -167,9 +168,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.reward_manager = reward_manager_fn(
         reward_fns=reward_fns,
         algo_config=algo_config,
-    )
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
     self.metric_fns = metric_fns or []
     self.rl_cluster.actor_trainer.is_managed_externally = True
@@ -415,7 +413,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
     engine_kwargs = dict(
         model_call=self._model_call,
-        final_reward_fn=reward.dummy_reward,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,

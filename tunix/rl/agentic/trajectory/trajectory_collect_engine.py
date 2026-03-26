@@ -61,9 +61,6 @@ class TrajectoryCollectEngine:
           Concatenate[Dict[str, str], P], base_rollout.RolloutOutput
       ],
       model_call_kwargs: Optional[Dict[str, Any]] = None,
-      final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
-      ] = None,
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
       timeout: float = 600.0,
@@ -100,9 +97,7 @@ class TrajectoryCollectEngine:
     self.agent = agent
     self.env = env
     self.model_call = model_call
-    self.final_reward_fn = final_reward_fn or (
-        lambda *_: reward_types.RewardOutput(reward=0.0)
-    )
+    self.final_reward_fn = self.env.reward_fn
     self.model_call_kwargs = model_call_kwargs or {}
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
@@ -263,9 +258,6 @@ class TrajectoryCollectEngine:
       pairs: List[Tuple[ConversationAgentBase, BaseTaskEnv]],
       *,
       model_call: Callable[..., base_rollout.RolloutOutput],
-      final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
-      ] = None,
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
       timeout: float = 30.0,
@@ -281,7 +273,6 @@ class TrajectoryCollectEngine:
         pairs (List[Tuple[ConversationAgentBase, BaseTaskEnv]]): List of (agent,
           environment) pairs
         model_call (Callable): Shared model inference function for all pairs
-        final_reward_fn (Optional[Callable]): Shared final reward function
         gamma (float): Discount factor for return calculation
         max_context_limit (Optional[int]): Maximum context limit per episode
         timeout (float): Per-episode timeout in seconds
@@ -298,7 +289,6 @@ class TrajectoryCollectEngine:
           agent,
           env,
           model_call=model_call,
-          final_reward_fn=final_reward_fn,
           gamma=gamma,
           max_context_limit=max_context_limit,
           timeout=timeout,
@@ -320,11 +310,6 @@ class TrajectoryCollectEngine:
     obs, _ = await asyncio.get_event_loop().run_in_executor(
         None, self.env.reset
     )
-    if hasattr(self.env, "compute_final_reward") and callable(
-        self.env.compute_final_reward
-    ):
-      self.final_reward_fn = self.env.compute_final_reward
-
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
@@ -418,12 +403,14 @@ class TrajectoryCollectEngine:
     additional reward signals based on overall episode performance.
     """
     last_step = self.agent.get_current_step()
-    if last_step is None:
+    if last_step is None or self.final_reward_fn is None:
+      # Skip reward computation in trajectory collection if no reward function
+      # is provided or no step is taken.
       return
     final_reward = await asyncio.get_event_loop().run_in_executor(
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
-    last_step.reward += final_reward.reward
+    last_step.reward += final_reward
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.
