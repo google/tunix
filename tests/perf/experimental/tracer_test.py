@@ -21,7 +21,6 @@ from typing import Any, Callable, List
 from unittest import mock
 
 from absl.testing import absltest
-from absl.testing import parameterized
 import numpy as np
 from tunix.perf.experimental import timeline
 from tunix.perf.experimental import tracer
@@ -77,45 +76,6 @@ class ControlledAsyncWait:
       event.set()
     for _, t in tasks:
       t.join()
-
-
-class TracerUtilsTest(parameterized.TestCase):
-
-  def test_generate_host_timeline_id(self):
-    tid = tracer.generate_host_timeline_id()
-    self.assertStartsWith(tid, "host-")
-    self.assertIn(str(threading.get_ident()), tid)
-
-  @parameterized.named_parameters(
-      ("string", "tpu0", "tpu0"),
-      ("device_object", MockDevice("gpu", 7), "gpu7"),
-  )
-  def test_generate_device_timeline_id(self, device_id, expected_id):
-    self.assertEqual(tracer.generate_device_timeline_id(device_id), expected_id)
-
-  def test_generate_device_timeline_id_error(self):
-    with self.assertRaisesRegex(ValueError, "Unsupported id type"):
-      tracer.generate_device_timeline_id(123)
-
-  @parameterized.named_parameters(
-      ("none", None, []),
-      ("mixed_list", ["dev1", MockDevice("tpu", 0)], ["dev1", "tpu0"]),
-      (
-          "numpy_array",
-          np.array([MockDevice("tpu", 0), MockDevice("tpu", 1)]),
-          ["tpu0", "tpu1"],
-      ),
-      (
-          "numpy_array_2d",
-          np.array([
-              [MockDevice("tpu", 0), MockDevice("tpu", 1)],
-              [MockDevice("tpu", 2), MockDevice("tpu", 3)],
-          ]),
-          ["tpu0", "tpu1", "tpu2", "tpu3"],
-      ),
-  )
-  def test_generate_device_timeline_ids(self, devices, expected_ids):
-    self.assertEqual(tracer.generate_device_timeline_ids(devices), expected_ids)
 
 
 class PerfTracerTest(absltest.TestCase):

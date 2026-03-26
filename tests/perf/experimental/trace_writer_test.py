@@ -188,9 +188,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     actual_descriptors = [
         {
             "name": p.track_descriptor.name,
-            "parent_uuid": p.track_descriptor.parent_uuid if i > 0 else None,
+            "parent_uuid": getattr(p.track_descriptor, "parent_uuid", None),
         }
-        for i, p in enumerate(captured_packets[:3])
+        for p in captured_packets[:3]
     ]
     expected_descriptors = [
         {"name": "overlap_timeline", "parent_uuid": None},
@@ -265,6 +265,71 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     self.assertEqual(actual_events, expected_events)
     mock_builder.serialize.assert_called_once()
 
+  @mock.patch.object(trace_writer_lib, "TraceProtoBuilder", autospec=True)
+  def test_write_timelines_grouping(self, mock_builder_cls):
+    mock_builder = mock_builder_cls.return_value
+    mock_builder.serialize.return_value = b""
+    captured_packets = []
+
+    def add_packet_side_effect():
+      p = mock.create_autospec(TracePacket, instance=True)
+      p.track_descriptor = mock.create_autospec(TrackDescriptor, instance=True)
+      p.track_event = mock.create_autospec(TrackEvent, instance=True)
+      captured_packets.append(p)
+      return p
+
+    mock_builder.add_packet.side_effect = add_packet_side_effect
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, role_to_devices={"actor": ["tpu0", "tpu1"]}
+      )
+
+      t_main = tracer.Timeline("host-1", 1000.0)
+      t_main.start_span("main_span", 1001.0)
+
+      t_rollout = tracer.Timeline("host-2", 1000.0)
+      t_rollout.start_span("rollout", 1002.0)
+
+      t_tpu = tracer.Timeline("tpu0", 1000.0)
+      t_tpu.start_span("compute", 1003.0)
+
+      writer.write_timelines({
+          "host-1": t_main,
+          "host-2": t_rollout,
+          "tpu0": t_tpu,
+      })
+
+    main_group = captured_packets[0].track_descriptor
+    rollout_group = captured_packets[1].track_descriptor
+    tpu_group = captured_packets[2].track_descriptor
+    host_1 = captured_packets[3].track_descriptor
+    host_2 = captured_packets[4].track_descriptor
+    tpu0 = captured_packets[5].track_descriptor
+
+    with self.subTest("host_main_threads_group"):
+      self.assertEqual(main_group.name, "Host - Main threads")
+      self.assertEqual(main_group.uuid, 100000)
+
+    with self.subTest("host_rollout_threads_group"):
+      self.assertEqual(rollout_group.name, "Host - Rollout threads")
+      self.assertEqual(rollout_group.uuid, 100001)
+
+    with self.subTest("actor_cluster"):
+      self.assertEqual(tpu_group.name, "Actor Cluster")
+
+    with self.subTest("host_1"):
+      self.assertEqual(host_1.name, "host-1")
+      self.assertEqual(host_1.parent_uuid, 100000)
+
+    with self.subTest("host_2"):
+      self.assertEqual(host_2.name, "host-2")
+      self.assertEqual(host_2.parent_uuid, 100001)
+
+    with self.subTest("tpu0"):
+      self.assertEqual(tpu0.name, "tpu0")
+      self.assertEqual(tpu0.parent_uuid, tpu_group.uuid)
+
   def test_perfetto_trace_writer_integration(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
       writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
@@ -293,15 +358,16 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
         self.assertLen(files, 1)
 
       if files:
+        file_name = files[0]
         with self.subTest("file_name_prefix"):
-          self.assertStartsWith(files[0], "perfetto_trace_v2_")
+          self.assertStartsWith(file_name, "perfetto_trace_v2_")
 
         with self.subTest("file_name_suffix"):
-          self.assertEndsWith(files[0], ".pb")
+          self.assertEndsWith(file_name, ".pb")
 
         with self.subTest("file_content"):
           self.assertGreater(
-              os.path.getsize(os.path.join(tmp_dir, files[0])), 0
+              os.path.getsize(os.path.join(tmp_dir, file_name)), 0
           )
 
   def test_perfetto_trace_writer_invalid_dir(self):
