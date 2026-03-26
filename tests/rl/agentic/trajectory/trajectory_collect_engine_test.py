@@ -141,6 +141,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(result_traj.steps[0].reward, 1.0)
     self.assertEqual(result_traj.steps[1].reward, 2.5)
 
+    # Check env_time (mocked thread_time delta)
+    self.assertGreater(result_traj.env_time, 0.0)
+
     # Check returns (gamma=0.9)
     # G_2 = 2.5
     # G_1 = 1.0 + 0.9 * 2.5 = 1.0 + 2.25 = 3.25
@@ -226,6 +229,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'trajectory_reward': (
             3.5
         ),  # 1.0 + 2.0 + 0.5 (final reward from reward_fn)
+        'env_time': 0.0,
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1, 0, 0]),
         'policy_version': None,
         'original_input': {'some': 'task'},
@@ -234,10 +238,12 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     }
 
     for k, v in expected_tokens.items():
-      if isinstance(v, np.ndarray):
+      if k == "env_time":
+        self.assertGreaterEqual(token_data[k], 0.0)
+      elif isinstance(v, np.ndarray):
         np.testing.assert_array_equal(token_data[k], v)
       else:
-        self.assertEqual(token_data[k], v, msg=f'Failed for key: {k}')
+        self.assertEqual(token_data[k], v, msg=f"Failed for key: {k}")
 
     # The function using the parser is mocked, so the parser itself is not
     # called. Instead, we check that the parser is passed as an argument.

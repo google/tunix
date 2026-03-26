@@ -113,12 +113,14 @@ class Trajectory:
     steps: Chronologically ordered sequence of interaction steps.
     reward: Total episode reward (cumulative or final environment score).
     status: Status of the trajectory (e.g., "success", "truncated").
+    env_time: Total time spent in environment steps in seconds.
   """
 
   task: Any = None
   steps: list[Step] = dataclasses.field(default_factory=list)
   reward: float = 0.0
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
+  env_time: float = 0.0
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -134,6 +136,7 @@ class Trajectory:
         "steps": [dataclasses.asdict(step) for step in self.steps],
         "reward": float(self.reward),
         "status": self.status.name,
+        "env_time": float(self.env_time),
     }
 
 

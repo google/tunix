@@ -111,6 +111,7 @@ class TrajectoryCollectEngine:
     self.valid_statuses = valid_statuses or {
         agent_types.TrajectoryStatus.SUCCEEDED
     }
+    self.env_time: float = 0.0
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
       logging.warning(
@@ -190,6 +191,7 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
+      self.agent.trajectory.env_time = self.env_time
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -203,6 +205,7 @@ class TrajectoryCollectEngine:
               "env_masks": getattr(step, "env_masks", []),
               "reward": step.reward,
               "mc_return": step.mc_return,
+              "env_time": self.env_time,
           }
           for step in self.agent.trajectory.steps
       ]
@@ -242,6 +245,7 @@ class TrajectoryCollectEngine:
           "conversation_masks": np.concatenate(conversation_masks, axis=0),
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
+          "env_time": self.env_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -354,9 +358,21 @@ class TrajectoryCollectEngine:
       )
       action = []
 
-    obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
-        None, self.env.step, action
+    def clocked_env_step(action):
+      t_start = time.thread_time()
+      result = self.env.step(action)
+      t_delta = time.thread_time() - t_start
+      return result, t_delta
+
+    (
+        obs,
+        rew,
+        done,
+        info,
+    ), thread_delta = await asyncio.get_event_loop().run_in_executor(
+        None, clocked_env_step, action
     )
+    self.env_time += thread_delta
 
     self.agent.update_from_env(obs, rew, done, info)
 
