@@ -650,6 +650,7 @@ def grpo_loss_fn(
     )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
+  seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
   ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, effective_completion_mask)
 
   # TODO(sizhi): Refactor this to a separate function.
