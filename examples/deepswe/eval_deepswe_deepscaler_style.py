@@ -140,6 +140,7 @@ from jax.sharding import Mesh
 import numpy as np
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
+from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.qwen3 import model as model_lib
 from tunix.models.qwen3 import params as params_lib
 from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -154,6 +155,7 @@ if not os.path.isdir(MODEL_PATH) or not os.listdir(MODEL_PATH):
   )
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+tokenizer_for_agentic = tok_adapter.TokenizerAdapter(tokenizer)
 chat_parser = parser.QwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
@@ -406,7 +408,7 @@ async def run_evaluation():
       engine_kwargs=dict(
           model_call=model_call,
           timeout=TIMEOUT,
-          tokenizer=tokenizer,
+          tokenizer=tokenizer_for_agentic,
           chat_parser=chat_parser,
       ),
       max_concurrency=MAX_CONCURRENT,
