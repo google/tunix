@@ -459,8 +459,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
-    # Log completion lengths.
+    # Log completion lengths and env_time.
     agg_completion_mask = completion_mask.sum(axis=-1)
+    env_times = [item.traj.get("env_time", 0.0) for item in trajectories]
     self.rl_cluster.buffer_metrics_async(
         {
             "generation/completions/mean_length": (
@@ -479,6 +480,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 clipped_completion_count / len(trajectories),
                 np.mean,
             ),
+            "generation/env_time/mean": (np.mean(env_times), np.mean),
+            "generation/env_time/max": (np.max(env_times), np.max),
+            "generation/env_time/min": (np.min(env_times), np.min),
         },
         mode=mode,
         step=expected_step,
