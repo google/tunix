@@ -23,6 +23,7 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu import megablox
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
 from jax.experimental.shard_map import shard_map
@@ -41,6 +42,45 @@ K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+def round_up_to_base(x: int, base: int, threshold: int | None = None) -> int:
+  if threshold is not None and x < threshold:
+    return threshold
+  return ((x + base - 1) // base) * base
+
+
+def get_global_input_output_offsets(global_send_sizes, num_ep):
+  """Calculates explicit buffer offsets for ragged_all_to_all."""
+  global_input_offsets = jnp.concatenate(
+      [jnp.zeros((num_ep, 1), dtype=jnp.int32), global_send_sizes[:, :-1]],
+      axis=1,
+  )
+  global_input_offsets = jnp.cumsum(global_input_offsets, axis=1)
+
+  global_output_offsets = jnp.concatenate(
+      [jnp.zeros((1, num_ep), dtype=jnp.int32), global_send_sizes[:-1]], axis=0
+  )
+  global_output_offsets = jnp.cumsum(global_output_offsets, axis=0)
+  return global_input_offsets, global_output_offsets
+
+
+@jax.custom_vjp
+def _custom_permute(x, permute_indices):
+  return x[permute_indices]
+
+
+def _custom_permute_fwd(x, permute_indices):
+  return _custom_permute(x, permute_indices), permute_indices
+
+
+def _custom_permute_bwd(res, g):
+  permute_indices = res
+  unpermute_indices = jnp.argsort(permute_indices)
+  return g[unpermute_indices], None
+
+
+_custom_permute.defvjp(_custom_permute_fwd, _custom_permute_bwd)
 
 
 class RematConfig(enum.Enum):
@@ -63,8 +103,8 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
-  exp_weight_cdf: Tuple[str | None, ...]
-  exp_weight_cfd: Tuple[str | None, ...]
+  exp_weight_edf: Tuple[str | None, ...]
+  exp_weight_efd: Tuple[str | None, ...]
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -82,8 +122,8 @@ class ShardingConfig:
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
-        exp_weight_cdf=('fsdp', None, 'tp'),
-        exp_weight_cfd=('fsdp', 'tp', None),
+        exp_weight_edf=('fsdp', None, 'tp'),
+        exp_weight_efd=('fsdp', 'tp', None),
     )
 
 
@@ -596,7 +636,7 @@ class Attention(nnx.Module):
 
 
 class MoELayer(nnx.Module):
-  """MoE layer."""
+  """Sharded Megablox MoE layer."""
 
   def __init__(
       self,
@@ -620,25 +660,25 @@ class MoELayer(nnx.Module):
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
-        sharding=self.shd_config.exp_weight_cdf,
+        sharding=self.shd_config.exp_weight_edf,
     )
     self.up_proj = nnx.Param(
         nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
-        sharding=self.shd_config.exp_weight_cdf,
+        sharding=self.shd_config.exp_weight_edf,
     )
     self.down_proj = nnx.Param(
         nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.hidden_dim, config.embed_dim),
         ),
-        sharding=self.shd_config.exp_weight_cfd,
+        sharding=self.shd_config.exp_weight_efd,
     )
     self.dtype = config.dtype
 
-  def __call__(self, x):
+  def __call__(self, x, use_megablox=True):
     scores = self.router(x).astype(jnp.float32)  # [B,T,E]
     routing_weights, routing_idx = jax.lax.top_k(
         jax.nn.softmax(scores, axis=-1), self.experts_per_tok
@@ -647,36 +687,243 @@ class MoELayer(nnx.Module):
         routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
     ).astype(self.dtype)
 
-    dispatch_mask = jax.nn.one_hot(
-        routing_idx, num_classes=self.num_experts, dtype=self.dtype
-    )  # [B, T, K, E]
-    dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
+    # TODO(tsbao): Incorporate input mask to filter out tokens that shouldn't be dispatched
 
-    dispatched_input = jnp.einsum(
-        'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
-    ).astype(self.dtype)
+    mesh = pxla.thread_resources.env.physical_mesh
 
-    expert_outputs = []
-    for i in range(self.num_experts):
-      expert_input = dispatched_input[:, :, i, :]
-      gate_proj = jnp.astype(self.gate_proj.value[i], self.dtype)
-      up_proj = jnp.astype(self.up_proj.value[i], self.dtype)
-      activations = nnx.silu(
-          jnp.einsum('BTD,DF->BTF', expert_input, gate_proj)
-      ) * jnp.einsum('BTD,DF->BTF', expert_input, up_proj)
-      activations = shard(activations, self.shd_config.act_btf)
-      down_proj = jnp.astype(self.down_proj.value[i], self.dtype)
-      expert_output = jnp.einsum('BTF,FD->BTD', activations, down_proj)
-      expert_outputs.append(expert_output)
+    # -------------------------------------------------------------
+    # Fallback to Vanilla dense routing if CPU or un-meshed environment
+    # -------------------------------------------------------------
+    if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
+      dispatch_mask = jax.nn.one_hot(
+          routing_idx, num_classes=self.num_experts, dtype=self.dtype
+      )  # [B, T, K, E]
+      dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
+      dispatched_input = jnp.einsum(
+          'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
+      ).astype(self.dtype)
 
-    stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
-    routing_weights = jnp.tile(
-        routing_weights[:, :, None, :], (1, 1, self.num_experts, 1)
-    )  # [B, T, E, K]
-    routing_weights = dispatch_mask * routing_weights  # [B, T, E, K]
+      expert_outputs = []
+      for i in range(self.num_experts):
+        expert_input = dispatched_input[:, :, i, :]
+        gate_proj = jnp.astype(self.gate_proj.value[i], self.dtype)
+        up_proj = jnp.astype(self.up_proj.value[i], self.dtype)
+        activations = nnx.silu(
+            jnp.einsum('BTD,DF->BTF', expert_input, gate_proj)
+        ) * jnp.einsum('BTD,DF->BTF', expert_input, up_proj)
+        down_proj = jnp.astype(self.down_proj.value[i], self.dtype)
+        expert_output = jnp.einsum('BTF,FD->BTD', activations, down_proj)
+        expert_outputs.append(expert_output)
 
-    output = jnp.einsum('BTED,BTEK->BTD', stacked_outputs, routing_weights)
-    return output
+      stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
+      routing_weights = jnp.tile(
+          routing_weights[:, :, None, :], (1, 1, self.num_experts, 1)
+      )
+      routing_weights = dispatch_mask * routing_weights
+      return jnp.einsum('BTED,BTEK->BTD', stacked_outputs, routing_weights)
+
+    # -------------------------------------------------------------
+    # Distributed Megablox Execution Path
+    # -------------------------------------------------------------
+    ep_axis = self.shd_config.exp_weight_edf[0]  # Typically 'fsdp' or 'ep'
+
+    # Map global partition specs to local shard_map specs
+    shd_act = P(*self.shd_config.act_btd)
+    # The routing arrays (weights & indices) have shape [B, T, K], lacking the D dim
+    shd_routing = P(*self.shd_config.act_btd[:-1], None)
+    shd_exp_edf = P(*self.shd_config.exp_weight_edf)
+    shd_exp_efd = P(*self.shd_config.exp_weight_efd)
+
+    global_gate_w = self.gate_proj.value.astype(self.dtype)
+    global_up_w = self.up_proj.value.astype(self.dtype)
+    global_down_w = self.down_proj.value.astype(self.dtype)
+
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(
+            shd_act,
+            shd_routing,
+            shd_routing,
+            shd_exp_edf,
+            shd_exp_edf,
+            shd_exp_efd,
+        ),
+        out_specs=shd_act,
+        check_rep=False,
+    )
+    def sharded_megablox_moe(inputs, weights, indices, gate_w, up_w, down_w):
+      tp_axis = self.shd_config.act_btd[-1]
+
+      if tp_axis is not None and tp_axis in mesh.axis_names:
+        inputs = jax.lax.all_gather(
+            inputs, axis_name=tp_axis, tiled=True, axis=2
+        )
+
+      B, T, D_global = inputs.shape
+
+      if ep_axis is not None and ep_axis in mesh.axis_names:
+        num_ep = jax.lax.psum(1, axis_name=ep_axis)
+        ep_shard_idx = jax.lax.axis_index(ep_axis)
+      else:
+        num_ep = 1
+        ep_shard_idx = 0
+
+      num_local_experts = self.num_experts // num_ep
+
+      flat_repeated_inputs = jnp.repeat(
+          inputs.reshape(B * T, D_global), self.experts_per_tok, axis=0
+      )
+      flat_selected_indices = indices.reshape(-1)
+
+      sort_indices = jnp.argsort(flat_selected_indices)
+      unsort_indices = jnp.argsort(sort_indices)
+
+      sorted_inputs = _custom_permute(flat_repeated_inputs, sort_indices)
+      sorted_expert_indices = flat_selected_indices[sort_indices]
+
+      group_sizes = jnp.bincount(sorted_expert_indices, length=self.num_experts)
+
+      if num_ep > 1:
+        global_group_sizes = jax.lax.all_gather(
+            group_sizes, axis_name=ep_axis, tiled=False, axis=0
+        )
+        global_send_sizes = jnp.sum(
+            jnp.reshape(
+                global_group_sizes, (num_ep, num_ep, num_local_experts)
+            ),
+            axis=-1,
+            keepdims=False,
+        )
+        local_send_sizes = global_send_sizes[ep_shard_idx]
+        local_recv_sizes = global_send_sizes[:, ep_shard_idx]
+
+        global_in_offsets, global_out_offsets = get_global_input_output_offsets(
+            global_send_sizes, num_ep
+        )
+        local_input_offsets = global_in_offsets[ep_shard_idx]
+        local_output_offsets = global_out_offsets[ep_shard_idx]
+
+        output_buffer_size = (
+            min(self.experts_per_tok, num_local_experts) * B * T * num_ep
+        )
+        output_buffer = jax.lax.empty(
+            shape=(output_buffer_size, D_global), dtype=inputs.dtype
+        )
+
+        sorted_inputs = jax.lax.ragged_all_to_all(
+            sorted_inputs,
+            output_buffer,
+            local_input_offsets,
+            local_send_sizes,
+            local_output_offsets,
+            local_recv_sizes,
+            axis_name=ep_axis,
+            axis_index_groups=None,
+        )
+
+        group_start_idx = ep_shard_idx * num_local_experts
+        local_expert_group_sizes = jax.lax.dynamic_slice_in_dim(
+            global_group_sizes, group_start_idx, num_local_experts, axis=1
+        )
+        local_group_sizes = jnp.sum(local_expert_group_sizes, axis=0)
+
+        flat_local_expert_group_sizes = local_expert_group_sizes.reshape(-1)
+        local_expert_indices = jnp.mod(
+            jnp.arange(flat_local_expert_group_sizes.shape[0]),
+            num_local_experts,
+        )
+        local_expert_indices = jnp.repeat(
+            local_expert_indices,
+            flat_local_expert_group_sizes,
+            total_repeat_length=sorted_inputs.shape[0],
+        )
+
+        local_expert_sort_indices = jnp.argsort(local_expert_indices)
+        sorted_inputs = _custom_permute(
+            sorted_inputs, local_expert_sort_indices
+        )
+      else:
+        local_group_sizes = group_sizes
+        local_expert_sort_indices = jnp.arange(sorted_inputs.shape[0])
+
+      m, k_dim = sorted_inputs.shape
+      n = gate_w.shape[-1]
+      ffn0_tiling = (
+          round_up_to_base(min(128, m), base=8, threshold=8),
+          round_up_to_base(min(128, k_dim), base=128, threshold=128),
+          round_up_to_base(min(128, n), base=128, threshold=128),
+      )
+      ffn1_tiling = (ffn0_tiling[0], ffn0_tiling[2], ffn0_tiling[1])
+
+      projected = megablox.gmm(
+          sorted_inputs,
+          gate_w,
+          group_sizes=local_group_sizes,
+          tiling=ffn0_tiling,
+          preferred_element_type=inputs.dtype,
+      )
+      middle = jax.nn.silu(projected) * megablox.gmm(
+          sorted_inputs,
+          up_w,
+          group_sizes=local_group_sizes,
+          tiling=ffn0_tiling,
+          preferred_element_type=inputs.dtype,
+      )
+      sorted_outputs = megablox.gmm(
+          middle,
+          down_w,
+          group_sizes=local_group_sizes,
+          tiling=ffn1_tiling,
+          preferred_element_type=inputs.dtype,
+      )
+
+      if num_ep > 1:
+        sorted_outputs = _custom_permute(
+            sorted_outputs, jnp.argsort(local_expert_sort_indices)
+        )
+
+        global_in_offsets, global_out_offsets = get_global_input_output_offsets(
+            global_send_sizes.T, num_ep  # pylint: disable=undefined-variable
+        )
+        local_send_sizes, local_recv_sizes = local_recv_sizes, local_send_sizes  # pylint: disable=undefined-variable
+
+        output_buffer = jax.lax.empty(
+            shape=(B * T * self.experts_per_tok, D_global), dtype=inputs.dtype
+        )
+        sorted_outputs = jax.lax.ragged_all_to_all(
+            sorted_outputs,
+            output_buffer,
+            global_in_offsets[ep_shard_idx],
+            local_send_sizes,
+            global_out_offsets[ep_shard_idx],
+            local_recv_sizes,
+            axis_name=ep_axis,
+            axis_index_groups=None,
+        )
+
+      outputs = _custom_permute(sorted_outputs, unsort_indices)
+      outputs = outputs.reshape(B, T, self.experts_per_tok, D_global).transpose(
+          0, 1, 3, 2
+      )
+
+      final_output = jnp.einsum('btdk,btk->btd', outputs, weights)
+
+      if tp_axis is not None and tp_axis in mesh.axis_names:
+        final_output = jax.lax.psum_scatter(
+            final_output, axis_name=tp_axis, scatter_dimension=2, tiled=True
+        )
+
+      return final_output
+
+    return sharded_megablox_moe(
+        x,
+        routing_weights,
+        routing_idx,
+        global_gate_w,
+        global_up_w,
+        global_down_w,
+    )
 
 
 class MLP(nnx.Module):
