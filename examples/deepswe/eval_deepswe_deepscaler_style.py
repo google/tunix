@@ -13,20 +13,7 @@ Usage:
   #   - MAX_CONCURRENT=8
   #   - ENABLE_GUARD=false
   #   - full evaluation split
-  python examples/deepswe/eval_deepswe_deepscaler_style.py
-
-  # Small test run
-  TASKS_LIMIT=2 MAX_CONCURRENT=1 python examples/deepswe/eval_deepswe_deepscaler_style.py
-
-  # Use SGLang-JAX sampler
-  ROLLOUT_ENGINE=sglang_jax TASKS_LIMIT=10 python examples/deepswe/eval_deepswe_deepscaler_style.py
-
-  # Qwen API mode example (single-instance debug script):
-  USE_API=qwen \
-  API_KEY="your-openrouter-api-key" \
-  API_MODEL="qwen/qwen3-32b" \
-  TASK_INDEX=0 \
-  python3 -u examples/deepswe/debug_eval_deepswe.py
+  python3 examples/deepswe/eval_deepswe_deepscaler_style.py
 """
 
 import asyncio
@@ -171,13 +158,18 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
 devices = jax.devices()
-# Force pure tensor parallelism for eval: DP=1, TP=num_devices.
-mesh_devices = np.array(devices).reshape(1, len(devices))
+# Force pure tensor parallelism for eval: DP=1, TP=8.
+# Qwen3-32B has tensors such as (5120, 8, 128), so TP must not exceed 8 for
+# shardings that partition that dimension on the tp axis.
+TP_SIZE = 8
+mesh_devices = np.array(devices[:TP_SIZE]).reshape(1, TP_SIZE)
 mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
 logger.info(
-    "Using mesh shape fsdp=%d tp=%d (pure TP eval)",
+    "Using mesh shape fsdp=%d tp=%d (pure TP eval, total_devices=%d, used_devices=%d)",
     mesh.shape["fsdp"],
     mesh.shape["tp"],
+    len(devices),
+    TP_SIZE,
 )
 
 if MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
