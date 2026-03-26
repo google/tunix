@@ -18,6 +18,7 @@ Usage:
 
 import asyncio
 from collections import Counter
+import dataclasses
 import json
 import logging
 import os
@@ -75,6 +76,9 @@ SGLANG_MAX_RUNNING_REQUESTS = int(
 OUTPUT_DIR = os.getenv(
     "OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "eval_results")
 )
+TRAJECTORY_LOG_PATH = os.path.join(OUTPUT_DIR, "trajectory.log")
+ANSI_RED = "\033[31m"
+ANSI_RESET = "\033[0m"
 
 # ========================== Logging ==========================
 
@@ -88,6 +92,79 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("deepswe_eval_deepscaler_style")
+
+
+def _write_traj_line(file_obj, line: str = ""):
+  file_obj.write(line + "\n")
+  file_obj.flush()
+
+
+def _normalize_for_json(value):
+  if hasattr(value, "tolist"):
+    return value.tolist()
+  if isinstance(value, dict):
+    return {k: _normalize_for_json(v) for k, v in value.items()}
+  if isinstance(value, list):
+    return [_normalize_for_json(v) for v in value]
+  return value
+
+
+def _append_trajectory_log(entry, traj):
+  os.makedirs(OUTPUT_DIR, exist_ok=True)
+  instance_id = entry.get("instance_id", "unknown")
+  with open(TRAJECTORY_LOG_PATH, "a") as tf:
+    _write_traj_line(tf, "")
+    _write_traj_line(tf, "=" * 60)
+    _write_traj_line(tf, f"# Instance: {instance_id}")
+    _write_traj_line(tf, f"# Repo: {entry.get('repo', 'N/A')}")
+    _write_traj_line(tf, f"# Problem: {entry.get('problem_statement', '')[:200]}")
+    _write_traj_line(tf, "=" * 60)
+
+    for idx, step in enumerate(traj.steps, start=1):
+      action_payload = getattr(getattr(step, "action", None), "action", None)
+      _write_traj_line(tf, "")
+      _write_traj_line(tf, "─" * 60)
+      _write_traj_line(tf, f"Step {idx}/{len(traj.steps)}")
+      if getattr(step, "thought", ""):
+        _write_traj_line(tf, "\n[Thought]")
+        _write_traj_line(tf, str(step.thought))
+      _write_traj_line(tf, "\n[Model Response]")
+      _write_traj_line(tf, str(getattr(step, "model_response", "")))
+      _write_traj_line(tf, "\n[Action]")
+      if action_payload is None:
+        _write_traj_line(tf, "")
+      else:
+        try:
+          _write_traj_line(
+              tf,
+              json.dumps(_normalize_for_json(action_payload), ensure_ascii=False),
+          )
+        except TypeError:
+          _write_traj_line(tf, str(action_payload))
+      info = getattr(step, "info", {}) or {}
+      if info.get("guard_blocked"):
+        _write_traj_line(tf, f"\n[GUARD BLOCKED] {info.get('guard_reason', '')}")
+      _write_traj_line(tf, "\n[Observation]")
+      _write_traj_line(tf, str(getattr(step, "observation", "")))
+      _write_traj_line(
+          tf,
+          f"\n[Reward] {float(getattr(step, 'reward', 0.0))}  "
+          f"[Done] {bool(getattr(step, 'done', False))}",
+      )
+
+    _write_traj_line(tf, "")
+    _write_traj_line(tf, "=" * 60)
+    _write_traj_line(
+        tf, f"{ANSI_RED}FINAL REWARD: {float(traj.reward)}{ANSI_RESET}"
+    )
+    _write_traj_line(tf, f"Total steps: {len(traj.steps)}")
+    _write_traj_line(tf, f"Status: {getattr(traj.status, 'name', str(traj.status))}")
+    _write_traj_line(tf, "[Trajectory JSON]")
+    _write_traj_line(
+        tf,
+        json.dumps(_normalize_for_json(traj.to_dict()), ensure_ascii=False),
+    )
+    _write_traj_line(tf, "=" * 60)
 
 # ========================== JAX / Pathways ==========================
 
@@ -404,6 +481,14 @@ def pairs_generator():
 
 async def run_evaluation():
   """Run evaluation with orchestrator-managed task-level parallelism."""
+  os.makedirs(OUTPUT_DIR, exist_ok=True)
+  with open(TRAJECTORY_LOG_PATH, "w") as tf:
+    _write_traj_line(tf, "# DeepSWE trajectory log")
+    _write_traj_line(tf, f"# Dataset: {DATASET_NAME}:{DATASET_SPLIT}")
+    _write_traj_line(tf, f"# Model: {MODEL_VERSION}")
+    _write_traj_line(tf, f"# Engine: {ROLLOUT_ENGINE}")
+    _write_traj_line(tf, f"# Max concurrent: {MAX_CONCURRENT}")
+
   orchestrator = RolloutOrchestrator(
       engine_kwargs=dict(
           model_call=model_call,
@@ -432,6 +517,8 @@ async def run_evaluation():
   async for batch in orchestrator.yield_batches(batch_size=1):
     for item in batch:
       traj = item.traj
+      entry = entries[item.pair_index]
+      _append_trajectory_log(entry, traj)
       guard_reasons = sorted(
           {
               (getattr(step, "info", {}) or {}).get("guard_reason", "unknown")
@@ -441,7 +528,7 @@ async def run_evaluation():
       )
       result = {
           "pair_index": item.pair_index,
-          "instance_id": entries[item.pair_index].get(
+          "instance_id": entry.get(
               "instance_id", item.pair_index
           ),
           "reward": float(traj.reward),
@@ -465,6 +552,13 @@ async def run_evaluation():
           result["num_steps"],
           result["status"],
           elapsed,
+      )
+      logger.info(
+          "%s[%s] FINAL TRAJECTORY REWARD=%.1f%s",
+          ANSI_RED,
+          result["instance_id"],
+          result["reward"],
+          ANSI_RESET,
       )
 
   await producer
@@ -540,6 +634,7 @@ def save_results(results):
       f.write(json.dumps(record) + "\n")
 
   logger.info("Results saved to %s", output_file)
+  logger.info("Trajectory log -> %s", TRAJECTORY_LOG_PATH)
   return output_file
 
 
