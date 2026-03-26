@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Iterable, Mapping
+import dataclasses
 import time
 from typing import Any
 
@@ -26,12 +27,15 @@ from etils import epath
 from perfetto.trace_builder.proto_builder import TraceProtoBuilder
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import timeline
+from tunix.perf.experimental import timeline_utils
 
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackDescriptor
 from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import TrackEvent
 
 
 Timeline = timeline.Timeline
+
+_UUID_OFFSET = 100_000  # Offset for lane UUIDs.
 
 
 def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
@@ -118,6 +122,19 @@ class NoopTraceWriter(TraceWriter):
     del self, timelines  # Unused.
 
 
+@dataclasses.dataclass
+class TrackInfo:
+  """Information about a track.
+
+  Attributes:
+    name: The name of the track.
+    uuid: The unique identifier for the track in Perfetto.
+  """
+
+  name: str
+  uuid: int | None = None
+
+
 class PerfettoTraceWriter(TraceWriter):
   """A writer for Perfetto trace events."""
 
@@ -138,6 +155,10 @@ class PerfettoTraceWriter(TraceWriter):
     self._role_to_devices = (
         dict(role_to_devices) if role_to_devices is not None else {}
     )
+    self._track_info: dict[str, TrackInfo] = {}
+    self._timeline_tracks: dict[str, str] = {}
+    self._timeline_uuids: dict[str, int] = {}
+
     self._trace_file_path = None
     try:
       trace_dir_path = epath.Path(self._trace_dir)
@@ -158,6 +179,27 @@ class PerfettoTraceWriter(TraceWriter):
       )
       self._trace_file_path = None
 
+  def _get_device_track_name(self, tl_id: str) -> str | None:
+    """Gets a formatted track name for a device timeline.
+
+    Args:
+      tl_id: The timeline ID.
+
+    Returns:
+      A formatted track name. Returns None if the timeline is a host timeline
+      or if the device is not found in the role_to_devices mapping.
+    """
+    if timeline_utils.is_host_timeline(tl_id):
+      return None
+
+    for role, devices in self._role_to_devices.items():
+      for device in devices:
+        device_str = timeline_utils.generate_device_timeline_id(device)
+        if device_str == tl_id:
+          camel_role = "".join(word.capitalize() for word in role.split("_"))
+          return f"{camel_role} Cluster"
+    return None
+
   def write(self, builder: TraceProtoBuilder) -> None:
     """Writes the built trace to the file."""
     if self._trace_file_path is None:
@@ -166,8 +208,6 @@ class PerfettoTraceWriter(TraceWriter):
     try:
       # TODO: b/480134569 -  see if file writing is a bottleneck and explore
       # faster alternatives (e.g., keeping in memory and writing at the end).
-      # TODO: noghabi - once we empty timeline, we can just append the recent
-      # spans to the file without serializing the entire trace.
       self._trace_file_path.write_bytes(builder.serialize())
     except Exception:  # pylint: disable=broad-except
       # Catching broad exceptions to ensure that failures in trace
@@ -177,6 +217,52 @@ class PerfettoTraceWriter(TraceWriter):
           "Failed to write to trace file: %s", self._trace_file_path
       )
 
+  def _init_tracks(
+      self, timelines: Mapping[str, Timeline]
+  ) -> None:
+    """Initializes track info for timelines.
+
+    Args:
+      timelines: A mapping of timeline IDs to timelines.
+    """
+
+    for tl_id in sorted(timelines):
+      if tl_id in self._timeline_tracks:
+        continue
+
+      tl = timelines[tl_id]
+      if not tl.spans:
+        continue
+
+      if timeline_utils.is_host_timeline(tl_id):
+        # Rollout only timelines threads.
+        if timeline_utils.is_timeline_only_of_allowed_type(
+            tl, [perf_constants.ROLLOUT]
+        ):
+          self._track_info["host_rollout"] = TrackInfo(
+              name="Host - Rollout threads",
+              uuid=_UUID_OFFSET + 1,
+          )
+          self._timeline_tracks[tl_id] = "host_rollout"
+        # Main timelines threads.
+        else:
+          self._track_info["host_main"] = TrackInfo(
+              name="Host - Main threads",
+              uuid=_UUID_OFFSET,
+          )
+          self._timeline_tracks[tl_id] = "host_main"
+      else:
+        track_name = self._get_device_track_name(tl_id)
+        if track_name:
+          if not self._track_info.get(track_name):
+            self._track_info[track_name] = TrackInfo(
+                name=track_name,
+                uuid=_UUID_OFFSET + (2 + len(self._track_info)),
+            )
+          self._timeline_tracks[tl_id] = track_name
+        else:
+          logging.warning("Failed to get track name for timeline ID: %s", tl_id)
+
   def write_timelines(self, timelines: Mapping[str, Timeline]) -> None:
     """Writes timelines to the trace file."""
     if not timelines:
@@ -184,30 +270,41 @@ class PerfettoTraceWriter(TraceWriter):
 
     builder = TraceProtoBuilder()
 
+    self._init_tracks(timelines)
+
+    # Write track descriptors for parent tracks.
+    for track_info in self._track_info.values():
+      packet = builder.add_packet()
+      packet.track_descriptor.uuid = track_info.uuid
+      packet.track_descriptor.name = track_info.name
+
     # Sort timelines by ID to ensure consistent track ordering.
     sorted_ids = sorted(timelines)
 
     events = []
 
-    for i, tl_id in enumerate(sorted_ids):
-      # Assign a unique UUID for the track.
-      # We start from 1 because 0 is sometimes reserved or special.
-      # Multiply by a large number to reserve a block of UUIDs for child lanes.
-      tl_uuid = (i + 1) * 1000000
+    for tl_id in sorted_ids:
       tl = timelines[tl_id]
 
-      # Skip empty timelines.
       if not tl.spans:
         continue
 
-      # Track Descriptor for the timeline group
+      # Assign a UUID to the timeline if it hasn't been assigned one yet. Offset
+      # by 2 to account for track descriptor UUIDs.
+      if tl_id not in self._timeline_uuids:
+        self._timeline_uuids[tl_id] = _UUID_OFFSET * (
+            len(self._timeline_uuids) + 2
+        )
+      tl_uuid = self._timeline_uuids[tl_id]
+
       packet = builder.add_packet()
       packet.track_descriptor.uuid = tl_uuid
       packet.track_descriptor.name = tl_id
 
-      # TODO: noghabi - Instead of agnostically splitting into lanes, define
-      # proper groupings for spans, e.g., a better way for combining rollouts
-      # and overlaps of peft_train and reference_inference.
+      if tl_id in self._timeline_tracks:
+        track_info = self._track_info[self._timeline_tracks[tl_id]]
+        packet.track_descriptor.parent_uuid = track_info.uuid
+
       lane_by_span_id, num_lanes = _assign_lanes(tl.spans.values())
 
       if num_lanes > 1:
