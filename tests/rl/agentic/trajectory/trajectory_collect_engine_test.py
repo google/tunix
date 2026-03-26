@@ -23,7 +23,6 @@ from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
-from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.rollout import base_rollout
 
@@ -32,28 +31,27 @@ RolloutOutput = base_rollout.RolloutOutput
 
 class TrajectoryCollectEngineTest(absltest.TestCase):
 
+  class _TestEnv(base_environment.BaseTaskEnv):
+    """Dummy class to expose reward_fn to autospec."""
+
+    reward_fn = None
+
   def setUp(self):
     super().setUp()
     self.mock_agent = mock.create_autospec(
         base_agent.ConversationAgentBase, instance=True
     )
-    self.mock_env = mock.create_autospec(
-        base_environment.BaseTaskEnv, instance=True
-    )
-
+    self.mock_env = mock.create_autospec(self._TestEnv, instance=True)
     self.mock_env.max_steps = 10
 
     self.mock_model_call = mock.Mock()
-    self.mock_final_reward_fn = mock.Mock(
-        return_value=reward_types.RewardOutput(reward=0.5)
-    )
+    self.mock_env.reward_fn = mock.Mock(return_value=0.5)
     self.mock_tokenizer = mock.Mock()
     self.mock_tokenizer.encode.return_value = [1, 2, 3]
     self.mock_chat_parser = mock.Mock()
 
     self.trajectory = agent_types.Trajectory()
     self.mock_agent.trajectory = self.trajectory
-    self.current_step = None
 
     self._chat_history = []
     self.mock_agent.chat_completions = self._chat_history
@@ -119,11 +117,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
   def test_collect_trajectory_mode(self):
     self.mock_env.max_steps = 5
+    self.mock_env.reward_fn.return_value = 0.5
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,
         env=self.mock_env,
         model_call=self.mock_model_call,
-        final_reward_fn=self.mock_final_reward_fn,
         gamma=0.9,
     )
     result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
@@ -132,7 +130,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(self.mock_env.reset.call_count, 1)
     self.assertEqual(self.mock_env.step.call_count, 2)
     self.assertEqual(self.mock_model_call.call_count, 2)
-    self.mock_final_reward_fn.assert_called_once_with(
+    self.mock_env.reward_fn.assert_called_once_with(
         self.mock_env.task, 'response2'
     )
     self.mock_env.close.assert_called_once()
@@ -225,7 +223,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             [201, 202, 301, 302, 203, 204, 303, 304]
         ),
         'conversation_masks': np.array([1, 1, 1, 1, 1, 1, 1, 1]),
-        'trajectory_reward': 3.0,  # 1.0 + 2.0
+        'trajectory_reward': (
+            3.5
+        ),  # 1.0 + 2.0 + 0.5 (final reward from reward_fn)
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1, 0, 0]),
         'policy_version': None,
         'original_input': {'some': 'task'},
@@ -351,7 +351,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       return agent
 
     agent1 = configure_mock_agent('initial1')
-    env1 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
+    env1 = mock.create_autospec(self._TestEnv, instance=True)
+    env1.reward_fn = mock.Mock(return_value=0.5)
     env1.reset.return_value = ('initial1', {})
     env1.step.return_value = ('obs1', 1.0, True, {})
     env1.task = {}
@@ -359,7 +360,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     env1.max_steps = 5
 
     agent2 = configure_mock_agent('initial2')
-    env2 = mock.create_autospec(base_environment.BaseTaskEnv, instance=True)
+    env2 = mock.create_autospec(self._TestEnv, instance=True)
+    env2.reward_fn = mock.Mock(return_value=0.5)
     env2.reset.return_value = ('initial2', {})
     env2.step.side_effect = [
         ('obs2a', 2.0, False, {}),

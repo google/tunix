@@ -63,9 +63,8 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
         defaults to empty dict.
       tool_map (Dict[str, type[BaseTool]]): Mapping of tool names to their
         implementation classes for tool discovery and execution.
-      reward_fn: Reward function that takes (task, action) and returns
-        RewardOutput with `.reward` and `.metadata` fields. If None, defaults to
-        `dummy_reward` with a warning.
+      reward_fn: Reward function that takes (task, action) and returns float. If
+        None, defaults to `dummy_reward` with a warning.
       max_steps (int): Maximum number of interaction steps before forced
         termination. Prevents infinite loops and controls episode length.
       **kwargs: Additional arguments reserved for future extensions.
@@ -73,10 +72,9 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
     if reward_fn is None:
       logging.log_first_n(
           logging.WARNING,
-          "No reward_fn provided, defaulting to dummy_reward().",
+          "No reward_fn provided, skipping trajectory reward computation.",
           1,
       )
-      reward_fn = reward.dummy_reward
 
     # Let BaseTaskEnv handle task, reward_fn, step_count, and max_steps.
     super().__init__(
@@ -140,12 +138,15 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
     # Handle episode termination: compute final reward.
     if done:
       llm_answer = self._extract_llm_answer(action)
-      r_out = self.reward_fn(task=self.task, action=llm_answer)
+      if self.reward_fn is not None:
+        reward_val = self.reward_fn(task=self.task, action=llm_answer)
+      else:
+        reward_val = 0.0
       return base_environment.EnvStepResult(
           observation={},
-          reward=r_out.reward,
+          reward=reward_val,
           done=True,
-          info={"response": action, "metadata": r_out.metadata},
+          info={"response": action},
       )
 
     # Handle continuing episode: execute tools and return intermediate results.
@@ -155,7 +156,7 @@ class ToolEnvironment(base_environment.BaseTaskEnv):
         observation=obs,
         reward=0.0,
         done=False,
-        info={"response": action, "metadata": {}},
+        info={"response": action},
     )
 
   @staticmethod

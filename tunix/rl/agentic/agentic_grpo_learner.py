@@ -140,8 +140,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
-      reward_fns: RewardFn | List[RewardFn],
       algo_config: TGrpoConfig,
+      reward_fns: RewardFn | List[RewardFn] | None = None,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       agent_class: Type[
@@ -287,6 +287,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_masks_list: List[np.ndarray] = []
     old_logprobs_list: List[np.ndarray] = []
     policy_versions_list: List[int] = []
+    trajectory_rewards_list: List[float] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -297,6 +298,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           for message in conversation
           if message["role"] == "assistant"
       )
+
       completion_texts.append(assistant_text)
       completion_tokens_list.append(item.traj.get("conversation_tokens"))
       completion_masks_list.append(item.traj.get("conversation_masks"))
@@ -305,6 +307,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
+      trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -433,10 +436,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     reward_kwargs = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
-    # TODO: b/456528861 - Refactor reward computation to happen within the
-    # environment during rollout, rather than as a post-processing step. This
-    # would align with the standard agentic RL pattern and remove the need for
-    # `dummy_reward`.
+
+    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
     with self.rl_cluster.perf_v2.span(
         perf_constants.ADVANTAGE_COMPUTATION,
         tags=perf_tags,
