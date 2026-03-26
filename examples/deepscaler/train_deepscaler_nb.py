@@ -269,35 +269,35 @@ except wandb.errors.UsageError as e:
 try:
 
   run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb.init(
-    project="tunix",
-    name=run_name,
-    config={
-        "batch_size": BATCH_SIZE,
-        "mini_batch_size": MINI_BATCH_SIZE,
-        "learning_rate": LEARNING_RATE,
-        "B1": B1,
-        "B2": B2,
-        "WARMUP_STEPS": WARMUP_STEPS,
-        "weight_decay": WEIGHT_DECAY,
-        "num_steps": MAX_STEPS,
-        "num_generations": NUM_GENERATIONS,
-        "beta": BETA,
-        "ent_coef": ENT_COEF,
-        "epsilon": EPSILON,
-        "epsilon_high": EPSILON_HIGH,
-        "max_response_length": MAX_RESPONSE_LENGTH,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "top_k": TOP_K,
-        "max_concurrency": MAX_CONCURRENCY,
-        "rollout_engine": ROLLOUT_ENGINE,
-        "dtype_activation": ACTIVATION_DTYPE,
-        "dtype_parameter": MODEL_DTYPE,
-        "dtype_critical_activation": CRITICAL_DTYPE,
-        "importance_sampling": args.importance_sampling,
-    })
-  # wandb.init(project="tunix", id="q0djft6p", resume="must",)
+  # wandb.init(
+  #   project="tunix",
+  #   name=run_name,
+  #   config={
+  #       "batch_size": BATCH_SIZE,
+  #       "mini_batch_size": MINI_BATCH_SIZE,
+  #       "learning_rate": LEARNING_RATE,
+  #       "B1": B1,
+  #       "B2": B2,
+  #       "WARMUP_STEPS": WARMUP_STEPS,
+  #       "weight_decay": WEIGHT_DECAY,
+  #       "num_steps": MAX_STEPS,
+  #       "num_generations": NUM_GENERATIONS,
+  #       "beta": BETA,
+  #       "ent_coef": ENT_COEF,
+  #       "epsilon": EPSILON,
+  #       "epsilon_high": EPSILON_HIGH,
+  #       "max_response_length": MAX_RESPONSE_LENGTH,
+  #       "temperature": TEMPERATURE,
+  #       "top_p": TOP_P,
+  #       "top_k": TOP_K,
+  #       "max_concurrency": MAX_CONCURRENCY,
+  #       "rollout_engine": ROLLOUT_ENGINE,
+  #       "dtype_activation": ACTIVATION_DTYPE,
+  #       "dtype_parameter": MODEL_DTYPE,
+  #       "dtype_critical_activation": CRITICAL_DTYPE,
+  #       "importance_sampling": args.importance_sampling,
+  #   })
+  wandb.init(project="tunix", id="fbj9evwt", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
 
@@ -365,7 +365,8 @@ else:
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt", timestamp, "01")
+# CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt", timestamp, "01")
+CKPT_DIR = "gs://lancewang-dev-supercomputer-testing/tunix/deepscaler/deepscaler_ckpt/20260325_214156_rerun/01"
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
