@@ -87,9 +87,13 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
     for ground_truth in processed_ground_truths:
       if found_correct_answer:
         break
-      is_correct = math_utils.grade_answer_mathd(
-          model_answer, ground_truth
-      ) or math_utils.grade_answer_sympy(model_answer, ground_truth)
+      is_correct = (
+          math_utils.grade_answer_mathd(model_answer, ground_truth)
+          or math_utils.grade_answer_sympy(model_answer, ground_truth)
+          or math_utils.grade_answer_special_handling(
+              model_answer, ground_truth
+          )
+      )
       if is_correct:
         found_correct_answer = True
         reward_value: float = 1.0  # Base reward for a correct answer.

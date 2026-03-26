@@ -14,6 +14,7 @@
 
 """Math utils for evaluating on Math Dataset like Math500 and AIME2024."""
 
+from decimal import Decimal, ROUND_HALF_UP
 import re
 from absl import logging
 from pylatexenc import latex2text
@@ -436,6 +437,193 @@ def extract_boxed_answer(solution: str):
   solution = remove_boxed(solution) if solution is not None else solution
   logging.vlog(4, f"{solution=} in extracted_boxed_answer")
   return solution
+
+
+def _cleanup_invalid_empty_sqrt(expr: str) -> str:
+  """Fix malformed latex like `\\sqrt{}{3}` -> `\\sqrt{3}`."""
+  return re.sub(r"sqrt\{\}", r"sqrt", expr)
+
+
+def _parse_special_decimal_interval(expr: str):
+  """Parse known recurring-decimal special cases to numeric intervals."""
+  expr = expr.replace("$", "").replace(" ", "")
+  m = re.fullmatch(r"([+-]?\d+)\.([0-9]*)\\overline\{([0-9])\}", expr)
+  if m is not None:
+    int_part = m.group(1)
+    non_repeating_decimals = m.group(2)
+    recurring_digit = m.group(3)
+
+    # Only support single-digit recurring blocks, e.g. `16.\overline{6}`.
+    # Map to the interval formed by 1-decimal and 2-decimal rounded values,
+    # so answers like `16.7` and `16.67` can both match.
+    decimal_places = len(non_repeating_decimals)
+    scale = Decimal(10) ** decimal_places
+    value = (
+        Decimal(int_part)
+        + Decimal(non_repeating_decimals or "0") / scale
+        + Decimal(recurring_digit) / (Decimal(9) * scale)
+    )
+
+    rounded_1 = float(value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+    rounded_2 = float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    return (min(rounded_1, rounded_2), max(rounded_1, rounded_2))
+
+  try:
+    value = float(expr)
+    return (value, value)
+  except Exception:
+    return None
+
+
+def _intervals_overlap(
+    interval_a: tuple[float, float], interval_b: tuple[float, float]
+):
+  return not (interval_a[1] < interval_b[0] or interval_b[1] < interval_a[0])
+
+
+def _parse_interval_set(expr: str):
+  """Parse interval unions from either inequality or bracket notation."""
+  expr = expr.lower().strip()
+  expr = expr.replace("$", "")
+  expr = expr.replace("≤", "\\le")
+  expr = expr.replace("\\leq", "\\le")
+  expr = expr.replace("<=", "\\le")
+  expr = expr.replace("\\cup", "|")
+  expr = expr.replace("∪", "|")
+  expr = expr.replace("or", "|")
+  expr = expr.replace(" ", "")
+
+  if not expr:
+    return None
+
+  parts = [part for part in expr.split("|") if part]
+  if not parts:
+    return None
+
+  # First try interval notation: [a,b], (a,b], etc.
+  intervals = []
+  all_interval_notation = True
+  for part in parts:
+    m = re.fullmatch(
+        r"([\[(])([+-]?(?:\d+(?:\.\d+)?|\.\d+)),([+-]?(?:\d+(?:\.\d+)?|\.\d+))([\])])",
+        part,
+    )
+    if m is None:
+      all_interval_notation = False
+      break
+    left = float(m.group(2))
+    right = float(m.group(3))
+    left_closed = m.group(1) == "["
+    right_closed = m.group(4) == "]"
+
+    if left > right:
+      left, right = right, left
+      left_closed, right_closed = right_closed, left_closed
+    intervals.append((left, right, left_closed, right_closed))
+
+  if all_interval_notation:
+    return sorted(intervals)
+
+  # Then try inequalities: -5\lex\le1, -5\lex\le1, etc.
+  intervals = []
+  for part in parts:
+    m = re.fullmatch(
+        r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))\\le[a-z]?\\le([+-]?(?:\d+(?:\.\d+)?|\.\d+))",
+        part,
+    )
+    if m is None:
+      return None
+    left = float(m.group(1))
+    right = float(m.group(2))
+    if left > right:
+      left, right = right, left
+    intervals.append((left, right, True, True))
+
+  return sorted(intervals)
+
+
+def _match_recurring_decimal_special_case(
+    given_clean: str, ground_truth_clean: str
+) -> bool:
+  """Handle recurring decimal overlaps for single-digit overline forms."""
+  if not (
+      re.search(r"[0-9]+\.\s*\\overline\{[0-9]\}", given_clean)
+      or re.search(r"[0-9]+\.\s*\\overline\{[0-9]\}", ground_truth_clean)
+  ):
+    return False
+
+  given_interval = _parse_special_decimal_interval(given_clean)
+  ground_truth_interval = _parse_special_decimal_interval(ground_truth_clean)
+  return (
+      given_interval is not None
+      and ground_truth_interval is not None
+      and _intervals_overlap(given_interval, ground_truth_interval)
+  )
+
+
+def _match_interval_union_special_case(
+    given_clean: str, ground_truth_clean: str
+) -> bool:
+  """Handle inequality unions and interval unions as equivalent sets."""
+  given_intervals = _parse_interval_set(given_clean)
+  ground_truth_intervals = _parse_interval_set(ground_truth_clean)
+  return (
+      given_intervals is not None
+      and ground_truth_intervals is not None
+      and given_intervals == ground_truth_intervals
+  )
+
+
+def _match_invalid_sqrt_special_case(
+    given_answer: str,
+    ground_truth: str,
+    given_clean: str,
+    ground_truth_clean: str,
+) -> bool:
+  """Handle malformed `sqrt{}` cleanup equivalence checks."""
+  if given_clean == given_answer and ground_truth_clean == ground_truth:
+    return False
+
+  given_normalized = _normalize(given_clean)
+  ground_truth_normalized = _normalize(ground_truth_clean)
+  if (
+      given_normalized is not None
+      and ground_truth_normalized is not None
+      and given_normalized == ground_truth_normalized
+  ):
+    return True
+  return (
+      given_normalized is not None
+      and ground_truth_normalized is not None
+      and len(given_normalized) > 0
+      and are_equal_under_sympy(ground_truth_normalized, given_normalized)
+  )
+
+
+def grade_answer_special_handling(given_answer: str, ground_truth: str) -> bool:
+  if given_answer is None or ground_truth is None:
+    return False
+  # Only clean the ground truth for latex errors.
+  ground_truth_clean = _cleanup_invalid_empty_sqrt(ground_truth)
+
+  if given_answer == ground_truth_clean:
+    return True
+
+  # Case 1: recurring decimal overlap special handling.
+  if _match_recurring_decimal_special_case(given_answer, ground_truth_clean):
+    return True
+
+  # Case 2: malformed sqrt{} cleanups should still evaluate as equivalent.
+  if _match_invalid_sqrt_special_case(
+      given_answer, ground_truth, given_answer, ground_truth_clean
+  ):
+    return True
+
+  # Case 3: inequality union vs interval union equivalence.
+  if _match_interval_union_special_case(given_answer, ground_truth_clean):
+    return True
+
+  return False
 
 
 def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:

@@ -152,9 +152,11 @@ def evaluate_correctness(response: Any, ground_truths: Any) -> bool:
     return False
   # Check against all possible correct answers
   for ground_truth in processed_ground_truths:
-    is_correct = math_utils.grade_answer_mathd(
-        model_answer, ground_truth
-    ) or math_utils.grade_answer_sympy(model_answer, ground_truth)
+    is_correct = (
+        math_utils.grade_answer_mathd(model_answer, ground_truth)
+        or math_utils.grade_answer_sympy(model_answer, ground_truth)
+        or math_utils.grade_answer_special_handling(model_answer, ground_truth)
+    )
     if is_correct:
       print(f" {model_answer=} {ground_truth=} IS CORRECT")
       return True
