@@ -50,7 +50,7 @@ DATASET_CACHE = os.getenv("DATASET_CACHE", "/scratch/dataset_cache")
 MODEL_VERSION = os.getenv("MODEL_VERSION", "Qwen/Qwen3-32B")
 MODEL_PATH = os.path.join("/scratch/models/", MODEL_VERSION)
 
-MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "30"))
 MAX_MODEL_LEN = int(os.getenv("MAX_MODEL_LEN", "32768"))
 MAX_RESPONSE_LENGTH = int(
     os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "8192"))
@@ -65,12 +65,15 @@ if os.getenv("ENABLE_GUARD", "false").lower() == "true":
 
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
 
-VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.8"))
+VLLM_HBM_UTILIZATION = float(os.getenv("VLLM_HBM_UTILIZATION", "0.4"))
 VLLM_INIT_RANDOM_WEIGHTS = (
     os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
 )
 VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
-VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", str(MAX_CONCURRENT)))
+VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "2"))
+VLLM_MAX_BATCHED_TOKENS = int(
+    os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888")
+)
 
 SGLANG_MEM_FRACTION_STATIC = float(
     os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.4")
@@ -168,8 +171,14 @@ chat_parser = parser.QwenChatTemplateParser(tokenizer)
 qwen_eos_tokens = [tokenizer.encode("<|im_end|>")[0]]
 
 devices = jax.devices()
-mesh_devices = np.array(devices).reshape(len(devices), 1)
+# Force pure tensor parallelism for eval: DP=1, TP=num_devices.
+mesh_devices = np.array(devices).reshape(1, len(devices))
 mesh = Mesh(mesh_devices, axis_names=("fsdp", "tp"))
+logger.info(
+    "Using mesh shape fsdp=%d tp=%d (pure TP eval)",
+    mesh.shape["fsdp"],
+    mesh.shape["tp"],
+)
 
 if MODEL_VERSION == "Qwen/Qwen3-4B-Instruct-2507":
   model_config = model_lib.ModelConfig.qwen3_4b_instruct_2507()
@@ -226,6 +235,7 @@ elif ROLLOUT_ENGINE == "vllm":
           "model": MODEL_PATH,
           "max_model_len": MAX_MODEL_LEN,
           "max_num_seqs": VLLM_MAX_NUM_SEQS,
+          "max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
           "enable_prefix_caching": True,
           "kv_cache_metrics": True,
           "disable_log_stats": False,
