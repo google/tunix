@@ -27,6 +27,8 @@ from absl import logging as absl_logging
 
 import wandb
 
+from tunix.models import automodel
+
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
 absl_logging.use_python_logging()
@@ -145,7 +147,7 @@ TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
+MAX_PROMPT_LENGTH = 1024 #2048
 MAX_RESPONSE_LENGTH = args.max_response_length
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
@@ -330,9 +332,9 @@ if NOTEBOOK_ENV == "g3":
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
-  CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
+  DATA_PATH_PREFIX = "gs://atwigg-maxtext-test/tunix/data"
+  MODEL_PATH_PREFIX = "gs://atwigg-maxtext-test/tunix/models"
+  CKPT_DIR_PREFIX = "gs://atwigg-maxtext-test/tunix/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_old_logpbs_orig/01")
@@ -340,6 +342,7 @@ print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+MODEL_SOURCE = automodel.ModelSource.HUGGINGFACE
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
@@ -354,17 +357,13 @@ Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
 
 
-DEEPSCALER_DATA_PATH = os.path.join(
-    DATA_PATH_PREFIX, "DeepScaleR-Preview-Dataset/deepscaler.json"
-)
-AIME_2024_DATA_PATH = os.path.join(
-    DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet"
-)
+DEEPSCALER_DATASET = "agentica-org/DeepScaleR-Preview-Dataset"
+AIME_2024_DATASET = "HuggingFaceH4/aime_2024"
 
 
 def create_datasets(
-    train_ds_path: str = DEEPSCALER_DATA_PATH,
-    test_ds_path: str = AIME_2024_DATA_PATH,
+    train_ds_path: str = DEEPSCALER_DATASET,
+    test_ds_path: str = AIME_2024_DATASET,
 ):
   def preprocess_fn(example, index):
     return {
@@ -372,18 +371,14 @@ def create_datasets(
         "ground_truth": example["answer"],
         "data_source": "math",
     }
+  
+  # Load datasets directly from HuggingFace Hub
+  train_ds = datasets_lib.load_dataset(train_ds_path, split="train")
+  test_ds = datasets_lib.load_dataset(test_ds_path, split="train")
 
-  with file_open(train_ds_path) as train_f, file_open(
-      test_ds_path, "rb"
-  ) as test_f:
-    train_df = pd.read_json(train_f)
-    test_df = pd.read_parquet(test_f)
-
-  train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
-  test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
-  if args.shuffle_data:
-    train_ds = train_ds.shuffle(SEED)
-    test_ds = test_ds.shuffle(SEED)
+  # Preprocess to extract and rename fields
+  train_ds = train_ds.map(preprocess_fn, with_indices=True)
+  test_ds = test_ds.map(preprocess_fn, with_indices=True)
 
   def process_item(item):
     question = item["question"]
@@ -403,7 +398,6 @@ def create_datasets(
   train_ds = grain.MapDataset.source(train_ds).map(process_item)
   test_ds = grain.MapDataset.source(test_ds).map(process_item)
   return train_ds, test_ds
-
 
 # %%
 
@@ -446,9 +440,12 @@ else:
   config.remat_config = model_lib.RematConfig.NONE
 
 print("MODEL_PATH: ", MODEL_PATH)
+resolved_model_path = automodel.download_model(MODEL_VERSION, MODEL_PATH, MODEL_SOURCE)
+print("Resolved model path: ", resolved_model_path)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+    resolved_model_path, config, trainer_mesh, dtype=MODEL_DTYPE
 )
+
 
 
 # %%
@@ -481,7 +478,7 @@ if TRAIN_WITH_LORA:
   qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
 else:
   qwen2_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+      resolved_model_path, config, trainer_mesh, dtype=MODEL_DTYPE
   )
 
 # %%
