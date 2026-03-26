@@ -483,6 +483,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     decoded_outputs, out_logprobs, out_tokens = self.detokenize(
         input_strings, outputs
     )
+    if self.config.return_logprobs and (
+        out_logprobs is None or out_logprobs[0] is None
+    ):
+      raise ValueError("Logprobs are not returned from the vLLM.")
 
     max_tokens_length = max(len(x) for x in prompt_ids)
 
@@ -505,5 +509,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0] if len(out_logprobs[0]) else None,
+        logprobs=out_logprobs[0] if self.config.return_logprobs else None,
     )
