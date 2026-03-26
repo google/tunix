@@ -21,6 +21,7 @@ from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from transformers import Any
 from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
@@ -154,7 +155,7 @@ class GrpoPipeline(config.HyperParameters):
         )
     return perf_config
 
-  def _load_and_init_dataset(self, tokenizer, data_config_prefix: str = "", split: str = "train"):
+  def _load_and_init_dataset(self, tokenizer: Any, *, data_config_prefix: str = "", split: str = "train"):
     """Helper function to load and initialize a dataset.
 
     Args:
@@ -260,7 +261,6 @@ class GrpoPipeline(config.HyperParameters):
     dataset = self._load_and_init_dataset(tokenizer, split=train_split)
     
     # Load eval dataset if configured
-    eval_dataset = None
     if (self.config.get("eval_data_source", "") or
         self.config.get("eval_data_module", "")):
       eval_dataset = self._load_and_init_dataset(
@@ -268,6 +268,8 @@ class GrpoPipeline(config.HyperParameters):
           data_config_prefix="eval_",
           split=eval_split
       )
+    else:
+      eval_dataset = None
     
     grpo_trainer.train(dataset, eval_ds=eval_dataset)
 
