@@ -60,6 +60,22 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
           "rollout (group_id=5)",
       ),
       (
+          "environment_with_group_id_and_pair_index",
+          perf_constants.ENVIRONMENT,
+          {
+              perf_constants.GROUP_ID: 5,
+              perf_constants.PAIR_INDEX: 3,
+              perf_constants.STEP: 100,
+          },
+          "environment (step=100, group_id=5, pair_index=3)",
+      ),
+      (
+          "environment_with_missing_pair_index",
+          perf_constants.ENVIRONMENT,
+          {perf_constants.GROUP_ID: 5},
+          "environment (group_id=5)",
+      ),
+      (
           "unknown_span_with_extra_tags",
           "unknown_span",
           {perf_constants.ROLE: "actor", perf_constants.STEP: 50},

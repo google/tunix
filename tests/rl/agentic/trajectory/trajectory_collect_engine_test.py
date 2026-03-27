@@ -19,6 +19,8 @@ from unittest import mock
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -114,6 +116,59 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
   async def _run_collect(self, engine, mode='Trajectory'):
     return await engine.collect(mode=mode)
+
+  def test_get_perf_tags(self):
+    self.mock_env.extra_kwargs = {
+        'group_id': 'test_group',
+        'pair_index': 42,
+    }
+    self.mock_env.task = {
+        'policy_version': 'v1.0',
+    }
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    tags = engine._get_perf_tags()
+    expected_tags = {
+        perf_constants.GROUP_ID: 'test_group',
+        perf_constants.PAIR_INDEX: 42,
+        perf_constants.STEP: 'v1.0',
+    }
+    self.assertEqual(tags, expected_tags)
+
+  def test_get_perf_tags_missing_attributes(self):
+    del self.mock_env.extra_kwargs
+    del self.mock_env.task
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    tags = engine._get_perf_tags()
+    self.assertEqual(tags, {})
+
+  def test_perf_v2_and_noop_used_by_default(self):
+    self.mock_env.max_steps = 1
+    self.mock_env.step.return_value = ('obs1', 1.0, True, {})
+    self.mock_env.extra_kwargs = {'group_id': 'test_group'}
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    self.assertIsInstance(engine.perf_v2, perf_tracer_v2.NoopTracer)
+    with mock.patch.object(engine.perf_v2, 'span', autospec=True) as mock_span:
+      mock_span.return_value.__enter__.return_value = (
+          perf_tracer_v2.AsyncWaitlist()
+      )
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+      mock_span.assert_called_once_with(
+          perf_constants.ENVIRONMENT,
+          tags={perf_constants.GROUP_ID: 'test_group'},
+      )
 
   def test_collect_trajectory_mode(self):
     self.mock_env.max_steps = 5

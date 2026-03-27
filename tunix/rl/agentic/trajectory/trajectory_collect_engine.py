@@ -26,6 +26,8 @@ from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optio
 
 from absl import logging
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -67,6 +69,7 @@ class TrajectoryCollectEngine:
       tokenizer=None,
       chat_parser=None,
       valid_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+      perf_v2: Optional[perf_tracer_v2.Tracer] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -93,6 +96,8 @@ class TrajectoryCollectEngine:
         chat_parser: Optional chat parser for formatting messages
         valid_statuses (Set[TrajectoryStatus]): A set of statuses that are
           considered not "penalized" for reward computation.
+        perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
+          to use for performance measurements. Defaults to a no-op tracer.
     """
     self.agent = agent
     self.env = env
@@ -111,6 +116,7 @@ class TrajectoryCollectEngine:
     self.valid_statuses = valid_statuses or {
         agent_types.TrajectoryStatus.SUCCEEDED
     }
+    self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
     self.env_time: float = 0.0
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
@@ -266,6 +272,7 @@ class TrajectoryCollectEngine:
       max_context_limit: Optional[int] = None,
       timeout: float = 30.0,
       mode: str = "Trajectory",
+      perf_v2: Optional[perf_tracer_v2.Tracer] = None,
   ) -> AsyncGenerator[Tuple[int, Any], None]:
     """Execute multiple agent-environment pairs concurrently.
 
@@ -281,6 +288,8 @@ class TrajectoryCollectEngine:
         max_context_limit (Optional[int]): Maximum context limit per episode
         timeout (float): Per-episode timeout in seconds
         mode (str): Output format. See `collect` method for options.
+        perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
+          to use for performance measurements.
 
     Yields:
         Tuple[int, Any]: `(pair_index, result)`. The type of `result`
@@ -296,6 +305,7 @@ class TrajectoryCollectEngine:
           gamma=gamma,
           max_context_limit=max_context_limit,
           timeout=timeout,
+          perf_v2=perf_v2,
       )
       traj = await engine.collect(mode=mode)
       return i, traj
@@ -331,6 +341,22 @@ class TrajectoryCollectEngine:
 
     self._start_ts = time.time()
 
+  def _get_perf_tags(self) -> Dict[str, Any]:
+    """Extracts performance tracing tags from the environment."""
+    tags = {}
+    if hasattr(self.env, "extra_kwargs"):
+      group_id = self.env.extra_kwargs.get("group_id")
+      if group_id is not None:
+        tags[perf_constants.GROUP_ID] = group_id
+      pair_index = self.env.extra_kwargs.get("pair_index")
+      if pair_index is not None:
+        tags[perf_constants.PAIR_INDEX] = pair_index
+    if hasattr(self.env, "task"):
+      policy_version = self.env.task.get("policy_version")
+      if policy_version is not None:
+        tags[perf_constants.STEP] = policy_version
+    return tags
+
   async def _one_step(self) -> bool:
     """Executes a single step and returns the Step object and Done status.
 
@@ -364,14 +390,20 @@ class TrajectoryCollectEngine:
       t_delta = time.thread_time() - t_start
       return result, t_delta
 
-    (
-        obs,
-        rew,
-        done,
-        info,
-    ), thread_delta = await asyncio.get_event_loop().run_in_executor(
-        None, clocked_env_step, action
-    )
+    tags = self._get_perf_tags()
+    with self.perf_v2.span(
+        perf_constants.ENVIRONMENT,
+        tags=tags,
+    ):
+
+      (
+          obs,
+          rew,
+          done,
+          info,
+      ), thread_delta = await asyncio.get_event_loop().run_in_executor(
+          None, clocked_env_step, action
+      )
     self.env_time += thread_delta
 
     self.agent.update_from_env(obs, rew, done, info)
