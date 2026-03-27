@@ -148,19 +148,6 @@ class VLLMInProcessDriver:
     )
     self._loop_thread.start()
 
-    self._log_thread = threading.Thread(
-        target=self._log_loop, name="VLLMLogStats", daemon=True
-    )
-    self._log_thread.start()
-
-  def _log_loop(self) -> None:
-    while not self._stop_event.is_set():
-      try:
-        self._llm_engine.do_log_stats()
-      except Exception:  # pylint: disable=broad-exception-caught
-        logging.exception("log_stats failed")
-      self._stop_event.wait(self._log_stats_interval_s)
-
   def cancel(self, request_id: str) -> None:
     with self._engine_lock:
       future = self._pending.pop(request_id, None)
@@ -187,9 +174,6 @@ class VLLMInProcessDriver:
     if self._loop_thread is not None:
       self._loop_thread.join()
       self._loop_thread = None
-    if self._log_thread is not None:
-      self._log_thread.join()
-      self._log_thread = None
 
   def pause(self) -> None:
     raise RuntimeError("Pause feature WIP")
