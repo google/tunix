@@ -314,6 +314,10 @@ class Sampler(base_sampler.BaseSampler):
 
   @property
   def dtype(self) -> jnp.dtype:
+    if hasattr(self.transformer, 'config') and hasattr(
+        self.transformer.config, 'dtype'
+    ):
+      return self.transformer.config.dtype
     return self._flattened_transformer_state[0].dtype
 
   def init_sample_state(
