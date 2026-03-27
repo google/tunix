@@ -482,6 +482,8 @@ def grpo_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_logits=False,
+      segment_ids=getattr(train_example, "segment_ids", None),
+      positions=getattr(train_example, "positions", None),
   )
   advantages = train_example.advantages
 
@@ -506,17 +508,22 @@ def grpo_loss_fn(
   coef_1 = jnp.exp(seq_importance_ratio)
   coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
 
+  # Advantages must be broadcast against seq_length.
+  # When seqeunce packing is used, advantages are already 2D [B, seq_length].
+  # When unpacked, they are 1D [B].
+  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+
   # Compute pg_clipfrac
-  pg_losses_1 = -coef_1 * jnp.expand_dims(advantages, 1)
-  pg_losses_2 = -coef_2 * jnp.expand_dims(advantages, 1)
+  pg_losses_1 = -coef_1 * adv
+  pg_losses_2 = -coef_2 * adv
   pg_clipfrac = jnp.sum(
       (pg_losses_2 > pg_losses_1) * completion_mask
   ) / jnp.clip(jnp.sum(completion_mask), min=1)
 
   # TODO(tsbao): We should handle token level advantages.
   per_token_loss = -jnp.minimum(
-      coef_1 * jnp.expand_dims(advantages, 1),
-      coef_2 * jnp.expand_dims(advantages, 1),
+      coef_1 * adv,
+      coef_2 * adv,
   )
 
   # add KL penalty

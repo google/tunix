@@ -158,10 +158,11 @@ class ToyTransformer(nnx.Module):
       self,
       x,
       positions,
-      cache,
-      attention_mask,
+      cache=None,
+      attention_mask=None,
       output_hidden_states=False,
       images=None,
+      decoder_segment_ids: jax.Array | None = None,
   ):
     tokens = x
     x = self.emb(tokens)

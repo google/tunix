@@ -59,6 +59,8 @@ class DAPOlearnerTest(parameterized.TestCase):
     example.advantages = self.advantages
     example.ref_per_token_logps = self.ref_per_token_logps
     example.old_per_token_logps = self.old_per_token_logps
+    example.segment_ids = None
+    example.positions = None
     return example
 
   def test_diff_loss(self):

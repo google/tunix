@@ -30,6 +30,10 @@ class AlgorithmConfig:
   policy_loss_fn: str = "grpo"
   reward_manager: str = "sequence-level"
 
+  # Sequence packing configuration
+  use_sequence_packing: bool = False
+  max_token_len_per_tpu: int = 30000
+
   def __post_init__(self):
     valid_algo_variants = [
         "grpo",
