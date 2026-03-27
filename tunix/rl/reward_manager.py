@@ -17,6 +17,7 @@
 import abc
 from dataclasses import asdict
 import inspect
+import os
 from typing import Any, Callable, Dict, List, Sequence
 from absl import logging
 import numpy as np
@@ -170,6 +171,23 @@ class SequenceRewardManager(AbstractRewardManager):
         "rewards": sum_rewards,
         "log_metrics": log_metrics,
     }
+
+    def _log_one_example(log_metrics: Dict[str, Any]):
+      logging.info("======= example rewards =======")
+
+      # add a snippet of the prompt, completion, and reward
+      def snippet(s: str, k: int = 50):
+        if len(s) <= 2 * k:
+          return s
+        return s[:k] + "..." + s[-k:]
+
+      for k, v in log_metrics.items():
+        logging.info("%s:\t%s", k, snippet(str(v[0][0])))
+      logging.info("=======================")
+
+    if os.getenv("TUNIX_DEBUG_REWARDS"):
+      _log_one_example(log_metrics)
+
     return rewards_info
 
   def _prepare_log_metrics(
