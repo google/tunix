@@ -40,8 +40,8 @@ registry = function_registry.default_registry
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
-  returns: jax.Array
-  old_values: jax.Array
+  returns: jax.Array | None = None
+  old_values: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -554,6 +554,8 @@ def ppo_value_loss_fn(
       pad_id,
       eos_id,
       stop_gradient=False,
+      segment_ids=getattr(train_example, "segment_ids", None),
+      positions=getattr(train_example, "positions", None),
   )
   vpreds = vpreds[:, -logits_to_keep - 1 : -1]
   vpred_clipped = jnp.clip(
@@ -607,6 +609,8 @@ def ppo_policy_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_logits=True,
+      segment_ids=getattr(train_example, "segment_ids", None),
+      positions=getattr(train_example, "positions", None),
   )
 
   advantages = train_example.advantages

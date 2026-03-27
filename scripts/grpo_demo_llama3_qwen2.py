@@ -14,8 +14,8 @@
 
 r"""Demo script for GRPO with Llama3 model.
 
-This script demonstrates how to run GRPO with a Llama3 model. It includes
-training, evaluation, and inference.
+This script demonstrates how to run GRPO with a Llama3 or Qwen2 model. It 
+includes training, evaluation, and inference.
 
 Example usage:
 python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
@@ -77,7 +77,7 @@ parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
 parser.add_argument(
     "--root-dir",
     type=str,
-    required=False,
+    required=True,
     help="The root dir of model, data, etc.",
 )
 parser.add_argument(
@@ -275,6 +275,20 @@ parser.add_argument(
     default=None,
     help="List of target modules to apply LoRA",
 )
+parser.add_argument(
+    "--use-sequence-packing",
+    action="store_true",
+    default=False,
+    required=False,
+    help="Enable sequence packing.",
+)
+parser.add_argument(
+    "--max-token-len-per-tpu",
+    type=int,
+    default=30000,
+    required=False,
+    help="Max token length per TPU when sequence packing is enabled.",
+)
 
 
 # Parse arguments
@@ -284,7 +298,11 @@ args = parser.parse_args()
 def validata_args():
   if args.data_source == "tfds":
     assert args.dataset == "gsm8k"
+  if args.use_sequence_packing:
+    if "qwen2" not in args.model_version.lower():
+      raise ValueError("Sequence packing is currently only supported for Qwen2 models.")
 
+validata_args()
 
 logging.set_verbosity(
     script_utils.DEBUG_LEVELS.get(args.log_level.upper(), logging.WARNING)
@@ -1156,6 +1174,8 @@ grpo_config = grpo_learner.GRPOConfig(
     num_iterations=NUM_ITERATIONS,
     beta=BETA,
     epsilon=EPSILON,
+    use_sequence_packing=args.use_sequence_packing,
+    max_token_len_per_tpu=args.max_token_len_per_tpu,
 )
 
 

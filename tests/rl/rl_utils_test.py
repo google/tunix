@@ -175,6 +175,67 @@ class UtilsTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'memory_kind must be one of'):
       utils.put_params_on_memory_kind(params, 'invalid_kind')
 
+  def test_pack_sequences(self):
+    def _create_mock_train_example(
+        prompt_len: int, completion_len: int
+    ) -> common.TrainExample:
+      return common.TrainExample(
+          prompt_ids=jnp.ones((1, prompt_len), dtype=jnp.int32),
+          prompt_mask=jnp.ones((1, prompt_len), dtype=jnp.int32),
+          completion_ids=jnp.ones((1, completion_len), dtype=jnp.int32) * 2,
+          completion_mask=jnp.ones((1, completion_len), dtype=jnp.int32),
+          advantages=jnp.array([1.5], dtype=jnp.float32),
+          ref_per_token_logps=None,
+          old_per_token_logps=None,
+      )
+
+    # 3 sequences with lengths (P+C): (2+3=5), (1+2=3), (3+4=7)
+    example1 = _create_mock_train_example(2, 3)
+    example2 = _create_mock_train_example(1, 2)
+    example3 = _create_mock_train_example(3, 4)
+
+    item_iterator = iter([[example1], [example2], [example3]])
+
+    # Budget of 10. We expect item 1 (5) and item 2 (3) to fit in the first pack (8).
+    # Item 3 (7) will go to the second pack (because 8+7 > 10).
+    packed_iterator = utils.pack_sequences(
+        item_iterator, max_token_budget=10, pad_id=0
+    )
+
+    packed_batches = list(packed_iterator)
+    self.assertLen(packed_batches, 2)
+
+    pack1 = packed_batches[0][0]
+    self.assertEqual(pack1.prompt_ids.shape, (1, 0))  # prompt_ids is empty
+    self.assertEqual(pack1.completion_ids.shape, (1, 10))  # filled + padded
+    self.assertEqual(pack1.segment_ids.shape, (1, 10))
+    self.assertEqual(pack1.positions.shape, (1, 10))
+
+    # Segment IDs should be (5 ones, 3 twos, 2 padding zeros)
+    expected_segments_1 = jnp.array(
+        [[1] * 5 + [2] * 3 + [0] * 2], dtype=jnp.int32
+    )
+    np.testing.assert_array_equal(pack1.segment_ids, expected_segments_1)
+
+    # Positions should be (0..4, 0..2, 0, 0)
+    expected_positions_1 = jnp.array(
+        [[0, 1, 2, 3, 4, 0, 1, 2, 0, 0]], dtype=jnp.int32
+    )
+    np.testing.assert_array_equal(pack1.positions, expected_positions_1)
+
+    # Completion mask should be 0 for prompts, 1 for completions, 0 for padding
+    # Seq 1: 2 prompts (0), 3 completions (1)
+    # Seq 2: 1 prompt (0), 2 completions (1)
+    expected_mask_1 = jnp.array(
+        [[0, 0, 1, 1, 1, 0, 1, 1, 0, 0]], dtype=jnp.int32
+    )
+    np.testing.assert_array_equal(pack1.completion_mask, expected_mask_1)
+
+    pack2 = packed_batches[1][0]
+    self.assertEqual(pack2.completion_ids.shape, (1, 10))
+    expected_segments_2 = jnp.array([[1] * 7 + [0] * 3], dtype=jnp.int32)
+    np.testing.assert_array_equal(pack2.segment_ids, expected_segments_2)
+
 
 if __name__ == '__main__':
   absltest.main()

@@ -550,7 +550,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
         # deepscaler defaults to using dynamic batch size.
-        # with dynamic batch size, the config that matters are: ppo_max_token_len_per_gpu=30000.
+        # with dynamic batch size, the config that matters are: max_token_len_per_tpu=30000.
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.

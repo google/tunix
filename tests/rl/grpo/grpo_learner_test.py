@@ -629,6 +629,74 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     jax.tree.map_with_path(tc.assert_equal, original_base_params, base_params)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_sequence',
+          max_token_len=266,  # exactly 256 (max_prompt_length) + 10 (max_tokens_to_generate)
+      ),
+      dict(
+          testcase_name='single_sequence_with_padding',
+          max_token_len=300,  # fits 1 sequence, pads to 300
+      ),
+      dict(
+          testcase_name='multiple_sequences',
+          max_token_len=532,  # exactly (256+10) * 2
+      ),
+      dict(
+          testcase_name='large_budget',
+          max_token_len=1000,  # fits multiple sequences, pads to 1000
+      ),
+  )
+  def test_sequence_packing(self, max_token_len):
+    kwargs = {'eval_every_n_steps': 2}
+
+    # Train without sequence packing
+    rl_cluster_unpacked, model_unpacked, original_variables = setup(kwargs)
+    grpo_config_unpacked = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+    )
+    learner_unpacked = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster_unpacked,
+        reward_fns=reward_1,
+        algo_config=grpo_config_unpacked,
+    )
+    # the algorithm config use_sequence_packing is False by default
+    train_ds_1 = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    learner_unpacked.train(train_ds_1, None)
+    params_unpacked = nnx.state(model_unpacked, nnx.Param)
+
+    # Train with sequence packing
+    rl_cluster_packed, model_packed, _ = setup(kwargs)
+    grpo_config_packed = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        use_sequence_packing=True,
+        max_token_len_per_tpu=max_token_len,
+    )
+    learner_packed = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster_packed,
+        reward_fns=reward_1,
+        algo_config=grpo_config_packed,
+    )
+    train_ds_2 = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    learner_packed.train(train_ds_2, None)
+    params_packed = nnx.state(model_packed, nnx.Param)
+
+    # Note: Because the ToyTransformer does not respect attention masks or segment
+    # IDs internally in its Decoder block, the unpacked and packed versions will not
+    # be numerically identical (tokens will attend across sequences in packing).
+    # But we can verify that the packed training successfully completes its updates
+    # without breaking shape assertions.
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_variables, params_packed
+    )
+
+    # We also verify it processed roughly the same number of examples
+    self.assertGreater(learner_packed._iter_steps, 0)
+
+    # TODO: check some equivalence between packed and unpacked.
+
   def test_exception_from_data_preparation(self):
     class _TrainerWithException(grpo_lib.GRPOLearner):
       @override

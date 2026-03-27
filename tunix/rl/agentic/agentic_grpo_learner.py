@@ -567,23 +567,22 @@ def grpo_loss_fn(
       completion_tokens=completion_ids,
       pad_id=pad_id,
       eos_id=eos_id,
+      completion_mask=completion_mask,
       stop_gradient=False,
       return_logits=True,
+      segment_ids=getattr(train_example, "segment_ids", None),
+      positions=getattr(train_example, "positions", None),
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
-  if advantages.ndim != 1:
-    raise ValueError(
-        "Expected advantages to be a 1D array, but got shape"
-        f" {advantages.shape}"
-    )
 
   # Mask out degenerate groups (all-0 sequence advantages).
   # For group-relative advantages, all-0 indicates a no-signal group (e.g. all
   # rewards are equal). Such groups should not contribute to policy, KL, or
   # entropy terms in this loss.
-  if algo_config.degenerate_group_masking:
+  # Skip this if advantages is 2D, as that implies sequence packing.
+  if algo_config.degenerate_group_masking and advantages.ndim == 1:
     num_generations = algo_config.num_generations
     grouped_advantages = advantages.reshape((-1, num_generations))
     invalid_group = jnp.all(jnp.isclose(grouped_advantages, 0.0), axis=-1)
@@ -619,9 +618,14 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
-  advantages = advantages[:, None]
-  pg_loss_1 = -advantages * is_ratio
-  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
+  
+  # Advantages must be broadcast against seq_length.
+  # When sequence packing is used, advantages are already 2D [B, seq_length].
+  # When unpacked, they are 1D [B].
+  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+
+  pg_loss_1 = -adv * is_ratio
+  pg_loss_2 = -adv * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 

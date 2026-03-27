@@ -103,6 +103,8 @@ class TrainExample:
   advantages: jax.Array
   ref_per_token_logps: jax.Array | None
   old_per_token_logps: jax.Array | None
+  segment_ids: jax.Array | None = None
+  positions: jax.Array | None = None
 
 
 def compute_kl_divergence(
@@ -195,10 +197,21 @@ def process_ids(
     pad_id: int,
     eos_id: int,
     completion_mask: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    positions: jax.Array | None = None,
 ):
   """Processes prompt and completion ids."""
 
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
+
+  if segment_ids is not None:
+    # Positions are either provided or must be computed correctly (assumed
+    # provided for packed).
+    if positions is None:
+      positions = jnp.zeros_like(prompt_completion_ids)
+    attn_mask = None  # Relies on decoder_segment_ids inside the model
+    return prompt_completion_ids, positions, attn_mask
+
   prompt_mask = prompt_tokens != pad_id
 
   if completion_mask is None:
@@ -228,24 +241,53 @@ def compute_per_token_logps(
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     return_logits: bool = False,
+    segment_ids: jax.Array | None = None,
+    positions: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities."""
   model = nnx.merge(graphdef, state)
-  input_tokens, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
+  input_tokens, calculated_positions, attn_mask = process_ids(
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      completion_mask,
+      segment_ids,
+      positions,
   )
-  kwargs = {} if images is None else {"images": images}
-  logits, _ = model(
-      input_tokens,
-      positions=positions,
-      attention_mask=attn_mask,
-      cache=None,
-      **kwargs,
-  )
-  logits_to_keep = completion_tokens.shape[1]
+
+  model_kwargs = {
+      "positions": calculated_positions,
+      "cache": None,
+  }
+  if segment_ids is not None:
+    model_kwargs["decoder_segment_ids"] = segment_ids
+  else:
+    model_kwargs["attention_mask"] = attn_mask
+  if images is not None:
+    model_kwargs["images"] = images
+
+  logits, _ = model(input_tokens, **model_kwargs)
+
+  if segment_ids is not None:
+    # For packed sequences, input_tokens is already the full packed array.
+    # We can only predict input_tokens[:, 1:] because we need a preceding token.
+    logits_to_keep = input_tokens.shape[1] - 1
+  else:
+    logits_to_keep = completion_tokens.shape[1]
+
   logits = logits[:, -logits_to_keep - 1 : -1, :]
-  input_tokens = input_tokens[:, -logits_to_keep:]
-  per_token_logps = selective_log_softmax(logits, input_tokens)
+  input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
+  per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
+
+  if segment_ids is not None:
+    # Pad the first token's logp with 0.0, since it has no preceding token to
+    # predict it.
+    per_token_logps = jnp.pad(
+        per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+    )
+    if return_logits:
+      logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
 
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -266,18 +308,27 @@ def compute_score(
     eos_id: int,
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
+    segment_ids: jax.Array | None = None,
+    positions: jax.Array | None = None,
 ):
   """Computes reward using the provided model."""
-  prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
+  prompt_completion_ids, calculated_positions, attn_mask = process_ids(
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      completion_mask,
+      segment_ids,
+      positions,
   )
 
-  out = model(
-      prompt_completion_ids,
-      positions=positions,
-      cache=None,
-      attention_mask=attn_mask,
-  )
+  model_kwargs = {"positions": calculated_positions, "cache": None}
+  if segment_ids is not None:
+    model_kwargs["decoder_segment_ids"] = segment_ids
+  else:
+    model_kwargs["attention_mask"] = attn_mask
+
+  out = model(prompt_completion_ids, **model_kwargs)
   per_token_scores = out[0] if isinstance(out, tuple) else out
   # The model returns a tensor of shape [B, T, 1]. We squeeze the last
   # dimension to get a tensor of shape [B, T].

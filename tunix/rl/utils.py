@@ -16,7 +16,7 @@
 
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, List, Optional
+from typing import Any, Iterator, List, Optional
 
 from absl import logging
 from flax import nnx
@@ -27,6 +27,7 @@ from jax import tree_util
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+from tunix.rl import common
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
@@ -265,6 +266,225 @@ def get_partition_spec(
     return sharding.spec
   else:
     return jax.sharding.PartitionSpec()
+
+
+def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
+  """Unpads a TrainExample into a list of dictionaries with numpy arrays."""
+  res = []
+  batch_size = example.prompt_ids.shape[0]
+
+  p_ids = np.asarray(example.prompt_ids)
+  p_mask = np.asarray(example.prompt_mask)
+  c_ids = np.asarray(example.completion_ids)
+  c_mask = np.asarray(example.completion_mask)
+  adv = np.asarray(example.advantages)
+  adv_is_per_token = adv.ndim == 2
+
+  has_ref = example.ref_per_token_logps is not None
+  if has_ref:
+    ref_logps = np.asarray(example.ref_per_token_logps)
+  has_old = example.old_per_token_logps is not None
+  if has_old:
+    old_logps = np.asarray(example.old_per_token_logps)
+
+  returns_val = getattr(example, "returns", None)
+  has_returns = returns_val is not None
+  if has_returns:
+    returns_np = np.asarray(returns_val)
+
+  old_values_val = getattr(example, "old_values", None)
+  has_old_values = old_values_val is not None
+  if has_old_values:
+    old_values_np = np.asarray(old_values_val)
+
+  policy_version_val = getattr(example, "policy_version", None)
+  has_policy_version = policy_version_val is not None
+  if has_policy_version:
+    policy_version_np = np.asarray(policy_version_val)
+
+  for i in range(batch_size):
+    p_len = int(np.sum(p_mask[i]))
+    c_len = int(np.sum(c_mask[i]))
+
+    item = {
+        "prompt_ids": p_ids[i, :p_len],
+        "prompt_mask": p_mask[i, :p_len],
+        "completion_ids": c_ids[i, :c_len],
+        "completion_mask": c_mask[i, :c_len],
+        "advantages": adv[i, :c_len] if adv_is_per_token else adv[i],
+        "adv_is_per_token": adv_is_per_token,
+        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,
+        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,
+        "returns": returns_np[i, :c_len] if has_returns else None,
+        "old_values": old_values_np[i, :c_len] if has_old_values else None,
+        "policy_version": policy_version_np if has_policy_version else None,
+    }
+    res.append(item)
+  return res
+
+
+def pack_sequences(
+    item_iterator: Iterator[list[common.TrainExample]],
+    max_token_budget: int,
+    pad_id: int = 0,
+) -> Iterator[list[common.TrainExample]]:
+  """Packs a stream of TrainExamples into 1D sequences up to a token budget."""
+  buffer = []
+  current_tokens = 0
+  example_cls = common.TrainExample
+
+  def _flush_buffer() -> list[common.TrainExample]:
+    nonlocal buffer, current_tokens
+    if not buffer:
+      return []
+
+    pad_len = max_token_budget - current_tokens
+
+    packed_c_ids = []
+    packed_c_mask = []
+    packed_adv = []
+    packed_ref_logps = []
+    packed_old_logps = []
+    packed_returns = []
+    packed_old_values = []
+    packed_segment_ids = []
+    packed_positions = []
+
+    has_ref = buffer[0].get("ref_per_token_logps") is not None
+    has_old = buffer[0].get("old_per_token_logps") is not None
+    has_returns = buffer[0].get("returns") is not None
+    has_old_values = buffer[0].get("old_values") is not None
+    has_policy_version = buffer[0].get("policy_version") is not None
+
+    for i, item in enumerate(buffer, start=1):
+      p_ids = item["prompt_ids"]
+      c_ids = item["completion_ids"]
+      seq_len = len(p_ids) + len(c_ids)
+
+      packed_c_ids.extend([p_ids, c_ids])
+      packed_c_mask.extend([np.zeros_like(p_ids), item["completion_mask"]])
+
+      # Expand advantage to shape [c_len] to match completion length
+      if item["adv_is_per_token"]:
+        packed_adv.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            item["advantages"],
+        ])
+      else:
+        packed_adv.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            np.full(len(c_ids), item["advantages"], dtype=np.float32),
+        ])
+
+      if has_ref:
+        packed_ref_logps.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            item["ref_per_token_logps"],
+        ])
+      if has_old:
+        packed_old_logps.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            item["old_per_token_logps"],
+        ])
+      if has_returns:
+        packed_returns.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            item["returns"],
+        ])
+      if has_old_values:
+        packed_old_values.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            item["old_values"],
+        ])
+
+      packed_segment_ids.append(np.full(seq_len, i, dtype=np.int32))
+      packed_positions.append(np.arange(seq_len, dtype=np.int32))
+
+    def _pad(arr_list, val, length):
+      arr = np.concatenate(arr_list) if arr_list else np.array([])
+      return np.pad(arr, (0, length), constant_values=val)
+
+    # Empty prompt arrays
+    p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+    p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+
+    # Pad all lists by pad_len
+    c_ids_arr = jnp.array(_pad(packed_c_ids, pad_id, pad_len))[None, :]
+    c_mask_arr = jnp.array(_pad(packed_c_mask, 0, pad_len))[None, :]
+    adv_arr = jnp.array(_pad(packed_adv, 0.0, pad_len))[None, :]
+    seg_arr = jnp.array(_pad(packed_segment_ids, 0, pad_len))[None, :]
+    pos_arr = jnp.array(_pad(packed_positions, 0, pad_len))[None, :]
+
+    ref_arr = (
+        jnp.array(_pad(packed_ref_logps, 0.0, pad_len))[None, :]
+        if has_ref
+        else None
+    )
+    old_arr = (
+        jnp.array(_pad(packed_old_logps, 0.0, pad_len))[None, :]
+        if has_old
+        else None
+    )
+    ret_arr = (
+        jnp.array(_pad(packed_returns, 0.0, pad_len))[None, :]
+        if has_returns
+        else None
+    )
+    old_val_arr = (
+        jnp.array(_pad(packed_old_values, 0.0, pad_len))[None, :]
+        if has_old_values
+        else None
+    )
+
+    kwargs = dict(
+        prompt_ids=p_ids_arr,
+        prompt_mask=p_mask_arr,
+        completion_ids=c_ids_arr,
+        completion_mask=c_mask_arr,
+        advantages=adv_arr,
+        ref_per_token_logps=ref_arr,
+        old_per_token_logps=old_arr,
+        segment_ids=seg_arr,
+        positions=pos_arr,
+    )
+    if has_returns:
+      kwargs["returns"] = ret_arr
+    if has_old_values:
+      kwargs["old_values"] = old_val_arr
+    if has_policy_version:
+      kwargs["policy_version"] = buffer[0]["policy_version"]
+
+    packed_example = example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
+
+    buffer.clear()
+    current_tokens = 0
+    return [packed_example]
+
+  for item_list in item_iterator:
+    for example in item_list:
+      example_cls = type(example)
+      unpadded_items = unpad_train_example(example)
+      for item in unpadded_items:
+        tokens = len(item["prompt_ids"]) + len(item["completion_ids"])
+
+        # If a single item is strictly larger than budget, we skip or truncate.
+        # Ideally, budget > max_prompt_length + max_response_length.
+        if tokens > max_token_budget:
+          logging.warning(
+              "Skipping single sequence with length %d exceeding budget %d",
+              tokens,
+              max_token_budget,
+          )
+          continue
+
+        if current_tokens + tokens > max_token_budget:
+          yield _flush_buffer()
+
+        buffer.append(item)
+        current_tokens += tokens
+
+  if buffer:
+    yield _flush_buffer()
 
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"
