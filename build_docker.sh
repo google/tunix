@@ -48,37 +48,6 @@ if [[ "$ENGINE" != "sglang_jax" && "$ENGINE" != "vllm" && "$ENGINE" != "none" ]]
     exit 1
 fi
 
-# Default engine
-ENGINE="none"
-LOCAL_IMAGE_NAME=tunix_base_image
-TAG=$(date +%Y%m%d_%H%M%S)
-
-# Parse command line arguments
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --engine=*)
-      ENGINE="${1#*=}"
-      shift
-      ;;
-    --local_image_name=*)
-      LOCAL_IMAGE_NAME="${1#*=}"
-      shift
-      ;;
-    --tag=*)
-      TAG="${1#*=}"
-      shift
-      ;;
-    *)
-      echo "Unknown option: $1"
-      exit 1
-      ;;
-  esac
-done
-
-if [[ "$ENGINE" != "sglang_jax" && "$ENGINE" != "vllm" && "$ENGINE" != "none" ]]; then
-    echo "Error: Invalid engine '$ENGINE'. Must be 'sglang_jax' or 'vllm'."
-    exit 1
-fi
 
 echo "Building base image: $LOCAL_IMAGE_NAME:$TAG with engine: $ENGINE"
 
