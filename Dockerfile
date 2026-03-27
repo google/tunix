@@ -45,6 +45,8 @@ COPY . .
 # Install the project in editable mode
 RUN pip install  --force-reinstall -e .
 
+RUN pip install math-verify[antlr4_13_2]
+
 ARG ENGINE
 # Set a directory to clone sglang-jax or vllm into
 WORKDIR /usr/src

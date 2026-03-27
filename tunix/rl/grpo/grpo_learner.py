@@ -266,7 +266,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         interval.device_end([ref_per_token_logps])
     else:
       ref_per_token_logps = None
-    if self.algo_config.num_iterations > 1:
+    if True:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
       with self.rl_cluster.perf.span(
           "old_actor_inference", devices
