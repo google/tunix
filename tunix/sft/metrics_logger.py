@@ -3,7 +3,7 @@
 import collections
 import dataclasses
 import enum
-from typing import Any, Callable
+from typing import Callable
 
 from absl import logging
 import jax
@@ -28,26 +28,7 @@ class MetricsLoggerOptions:
   project_name: str = "tunix"
   run_name: str = ""
   flush_every_n_steps: int = 100
-  # Keyword arguments for backend initialization. The key is the backend name
-  # (e.g., 'wandb', 'clu', 'tensorboard' or 'custom_backend' which uses custom
-  # LoggingBackend factories) and the value is a dictionary of
-  # keyword arguments to be passed to the backend's constructor.
-  # For example:
-  # backend_kwargs={
-  #   'wandb': {
-  #     'resume': 'must',
-  #     'id': '12345',
-  #     'project': 'my-project',
-  #     'name': 'my-run',
-  #   },
-  #   'tensorboard': {
-  #      'log_dir': '/path/to/log',
-  #      'flush_every_n_steps': 100,
-  #   }
-  # }
-  backend_kwargs: dict[str, dict[str, Any] | list[BackendFactory]] = (
-      dataclasses.field(default_factory=dict)
-  )
+  backend_factories: list[BackendFactory] | None = None
 
   def create_backends(self) -> list[LoggingBackend]:
     """Factory method to create a fresh set of live backends."""
@@ -56,40 +37,28 @@ class MetricsLoggerOptions:
       return []
 
     # Case 1: Override. Use user-provided factories.
-    if (
-        "custom_backend" in self.backend_kwargs
-        and self.backend_kwargs["custom_backend"]
-    ):
-      return [factory() for factory in self.backend_kwargs["custom_backend"]]
+    if self.backend_factories is not None:
+      return [factory() for factory in self.backend_factories]
 
     # Case 2: Defaults.
     active_backends = []
-    kwargs_dict = self.backend_kwargs or {}
 
     if env_utils.is_internal_env():
       if CluBackend is None:
         raise ImportError(
             "Internal environment detected, but CluBackend not available."
         )
-      clu_kwargs = kwargs_dict.get("clu", {})
-      active_backends.append(CluBackend(log_dir=self.log_dir, **clu_kwargs))
+      active_backends.append(CluBackend(log_dir=self.log_dir))
     else:
-      tb_kwargs = kwargs_dict.get("tensorboard", {})
       active_backends.append(
           TensorboardBackend(
               log_dir=self.log_dir,
               flush_every_n_steps=self.flush_every_n_steps,
-              **tb_kwargs,
           )
       )
       try:
-        wandb_kwargs = kwargs_dict.get("wandb", {})
         active_backends.append(
-            WandbBackend(
-                project=self.project_name,
-                name=self.run_name,
-                **wandb_kwargs,
-            )
+            WandbBackend(project=self.project_name, name=self.run_name)
         )
       except ImportError:
         logging.info("WandbBackend skipped: 'wandb' library not installed.")

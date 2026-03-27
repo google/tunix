@@ -44,8 +44,7 @@ class MetricLoggerTest(absltest.TestCase):
     mock_backend_instance = mock.Mock(spec=metrax_logging.LoggingBackend)
     mock_factory = mock.Mock(return_value=mock_backend_instance)
     options = metrics_logger.MetricsLoggerOptions(
-        log_dir=self.log_dir,
-        backend_kwargs={"custom_backend": [mock_factory]},
+        log_dir=self.log_dir, backend_factories=[mock_factory]
     )
 
     logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
@@ -116,8 +115,7 @@ class MetricLoggerTest(absltest.TestCase):
       self.mock_backends[0].assert_called_with(log_dir=new_log_dir)
     else:
       self.mock_backends[0].assert_called_with(
-          log_dir=new_log_dir,
-          flush_every_n_steps=100,
+          log_dir=new_log_dir, flush_every_n_steps=100
       )
 
     logger1.close()
@@ -126,7 +124,7 @@ class MetricLoggerTest(absltest.TestCase):
   @mock.patch.object(jax.monitoring, "record_scalar")
   def test_log_metrics(self, mock_record_scalar):
     options = metrics_logger.MetricsLoggerOptions(
-        log_dir=self.log_dir, backend_kwargs={"custom_backend": []}
+        log_dir=self.log_dir, backend_factories=[]
     )
     logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
     logger.log("test_prefix", "loss", 0.1, metrics_logger.Mode.TRAIN, 1)
@@ -147,7 +145,7 @@ class MetricLoggerTest(absltest.TestCase):
   @mock.patch.object(jax.monitoring, "record_scalar")
   def test_log_perplexity(self, mock_record_scalar):
     options = metrics_logger.MetricsLoggerOptions(
-        log_dir=self.log_dir, backend_kwargs={"custom_backend": []}
+        log_dir=self.log_dir, backend_factories=[]
     )
     logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
     logger.log("test_prefix", "perplexity", 10.0, metrics_logger.Mode.EVAL, 1)
@@ -190,43 +188,6 @@ class MetricLoggerTest(absltest.TestCase):
           "Internal environment detected, but CluBackend not available.",
       ):
         options.create_backends()
-
-  def test_backend_kwargs_are_passed_to_backends(self):
-    """Tests that backend_kwargs are passed to the backends initialization."""
-    mock_wandb = mock.Mock()
-    options = metrics_logger.MetricsLoggerOptions(
-        log_dir=self.log_dir,
-        backend_kwargs={
-            "wandb": {
-                "resume": "must",
-                "id": "12345",
-                "settings": mock_wandb.Settings(console="off"),
-            },
-            "tensorboard": {"flush_interval_s": 10.0},
-            "clu": {"some_arg": "value"},
-        },
-    )
-
-    # Trigger backend creation
-    _ = metrics_logger.MetricsLogger(metrics_logger_options=options)
-
-    if env_utils.is_internal_env():
-      self.mock_backends[0].assert_called_once_with(
-          log_dir=self.log_dir, **options.backend_kwargs["clu"]
-      )
-    else:
-      self.mock_backends[0].assert_called_once_with(
-          log_dir=self.log_dir,
-          flush_every_n_steps=100,
-          **options.backend_kwargs["tensorboard"],
-      )
-      self.mock_backends[1].assert_called_once_with(
-          project="tunix",
-          name="",
-          resume="must",
-          id="12345",
-          settings=mock_wandb.Settings.return_value,
-      )
 
 
 if __name__ == "__main__":
