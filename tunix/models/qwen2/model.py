@@ -108,6 +108,21 @@ class ModelConfig:
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
 
+  @classmethod
+  def qwen2_0_5b(cls):
+    return cls(
+        num_layers=24,
+        vocab_size=151936,
+        embed_dim=896,
+        hidden_dim=4864,
+        num_heads=14,
+        head_dim=64,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        use_tied_embedding=True,
+    )
+
   # qwen2.5-0.5B and qwen2.5-coder-0.5B share the same config.
   @classmethod
   def qwen2p5_0p5b(cls):  # qwen2.5-0.5B
