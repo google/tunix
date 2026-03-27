@@ -94,6 +94,20 @@ class RewardTest(parameterized.TestCase):
     self.assertEqual(result.reward, expected_score)
     self.assertEqual(result.metadata["calculate_correct"], expected_score)
 
+  @parameterized.named_parameters(
+      ("import_os", "__import__('os').popen('id').read()"),
+      ("system_call", "(__import__('os').system('echo pwned') or 42) + 0"),
+      ("eval_nested", "eval('1+1')"),
+      ("open_file", "open('/etc/passwd').read()"),
+      ("dunder_class", "().__class__.__bases__[0].__subclasses__()"),
+  )
+  def test_calculate_reward_rejects_code_injection(self, malicious_question):
+    """Tests that calculate_reward safely rejects code injection attempts."""
+    task = {"question": malicious_question}
+    result = reward.calculate_reward(task, "The answer is 42")
+    # All malicious payloads must be rejected (score 0.0)
+    self.assertEqual(result.reward, 0.0)
+
   def test_combine_rewards(self):
     """Tests the reward combination logic."""
     weights = {"exact_match": 0.7, "dummy": 0.3}
