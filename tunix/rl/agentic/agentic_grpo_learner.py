@@ -604,7 +604,6 @@ def grpo_loss_fn(
     )
   else:
     print("Not masking degenerate groups")
-    effective_completion_mask = completion_mask
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -621,9 +620,9 @@ def grpo_loss_fn(
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
-    seq_importance_ratio = (seq_importance_ratio * effective_completion_mask).sum(
+    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
         axis=-1
-    ) / jnp.clip(effective_completion_mask.sum(-1), min=1)
+    ) / jnp.clip(completion_mask.sum(-1), min=1)
     seq_importance_ratio = (
         per_token_logps
         - jax.lax.stop_gradient(per_token_logps)
@@ -634,14 +633,12 @@ def grpo_loss_fn(
   is_ratio = jnp.exp(seq_importance_ratio)
   advantages = advantages[:, None]
   pg_loss_1 = -advantages * is_ratio
-  pg_loss_2 = -advantages * jnp.clip(
-      is_ratio, 1 - epsilon, 1 + epsilon_high
-  )
+  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
   clipped_fraction = ppo_helpers.masked_mean(
-      jnp.greater(pg_loss_2, pg_loss_1), effective_completion_mask
+      jnp.greater(pg_loss_2, pg_loss_1), completion_mask
   )
 
   pg_loss = ppo_helpers.masked_mean(per_token_loss, completion_mask)
@@ -659,15 +656,15 @@ def grpo_loss_fn(
 
     # Log mean KL.
     aux["kl"] = jnp.astype(
-        (kl * effective_completion_mask).sum() / jnp.clip(effective_completion_mask.sum(), min=1),
+        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
         jnp.float32,
     )
 
   loss = common.aggregate_loss(
-      per_token_loss, effective_completion_mask, loss_aggregation_mode
+      per_token_loss, completion_mask, loss_aggregation_mode
   )
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
-  entropy_loss = ppo_helpers.masked_mean(token_entropy, effective_completion_mask)
+  entropy_loss = ppo_helpers.masked_mean(token_entropy, completion_mask)
   aux["entropy"] = entropy_loss
 
   return loss, aux
