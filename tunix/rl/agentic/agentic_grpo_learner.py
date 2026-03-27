@@ -663,9 +663,7 @@ def grpo_loss_fn(
   is_ratio = jnp.exp(seq_importance_ratio)
   advantages = advantages[:, None]
   pg_loss_1 = -advantages * is_ratio
-  pg_loss_2 = -advantages * jnp.clip(
-      is_ratio, 1 - epsilon, 1 + epsilon_high
-  )
+  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
