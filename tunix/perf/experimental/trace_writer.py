@@ -57,11 +57,12 @@ def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
       perf_constants.REFERENCE_INFERENCE,
       perf_constants.OLD_ACTOR_INFERENCE,
       perf_constants.ADVANTAGE_COMPUTATION,
+      perf_constants.ENVIRONMENT,
   ]:
     if perf_constants.GROUP_ID in tags:
       parts.append(f"group_id={tags[perf_constants.GROUP_ID]}")
 
-  if name == perf_constants.ROLLOUT:
+  if name in [perf_constants.ROLLOUT, perf_constants.ENVIRONMENT]:
     if perf_constants.PAIR_INDEX in tags:
       parts.append(f"pair_index={tags[perf_constants.PAIR_INDEX]}")
 

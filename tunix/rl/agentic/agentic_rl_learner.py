@@ -416,6 +416,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,
+        perf_v2=self.rl_cluster.perf_v2,
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,
