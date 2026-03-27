@@ -487,6 +487,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         mode=mode,
         step=expected_step,
     )
+    self.rl_cluster.buffer_metrics_async(
+        {
+            "advantages/mean": (np.mean(advantages), np.mean),
+            "advantages/std": (np.std(advantages), np.std),
+        },
+        mode=mode,
+        step=expected_step,
+    )
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
           prompts=original_inputs["prompts"],

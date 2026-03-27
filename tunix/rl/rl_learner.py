@@ -26,6 +26,7 @@ from absl import logging
 import jax
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+import time
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
@@ -135,6 +136,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     self._compute_logps_micro_batch_size = (
         self._training_config.compute_logps_micro_batch_size
     )
+
+    self._global_step_start_time = time.time()
     sft_utils.show_hbm_usage(title="RLLearner init")
 
   @abstractmethod
@@ -578,6 +581,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               eval_ds,
               skip_jit,
           )
+          global_step_time = time.time() - self._global_step_start_time
+          logging.info(
+              f"Global step {self.rl_cluster.global_steps} completed in"
+              f" {global_step_time:.2f} seconds."
+          )
 
           if self.should_sync_weights:
             logging.debug(
@@ -596,6 +604,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.global_steps += (
                 1  # manually increment the global steps.
             )
+          self._global_step_start_time = time.time()
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf.export(),
