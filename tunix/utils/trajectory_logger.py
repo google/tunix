@@ -16,9 +16,13 @@
 
 import atexit
 import dataclasses
+import os
 import queue
+import signal
+import sys
 import threading
 import time
+import types
 from typing import Any
 
 from absl import logging
@@ -92,7 +96,6 @@ def log_item(
     logging.warning('Trying to log an empty list, skipping.')
     return
 
-  logging.log_first_n(logging.INFO, f'Logging item to {log_path}', 1)
   if dataclasses.is_dataclass(item) or isinstance(item, (dict, list)):
     serialized_item = _make_serializable(item)
   else:
@@ -111,6 +114,7 @@ def log_item(
   file_stem = item_name if item_name else 'trajectory_log'
   filename = f'{file_stem}_{suffix}.csv' if suffix else f'{file_stem}.csv'
   file_path = log_path / filename
+  logging.log_first_n(logging.INFO, f'Logging item to {file_path}', 1)
   write_header = not file_path.exists()
 
   df = pd.DataFrame(
@@ -143,17 +147,53 @@ class AsyncTrajectoryLogger:
         if item is None:  # Sentinel for stopping
           self._logging_queue.task_done()
           break
+
+        # Batching: drain the queue to log items in groups
+        items = [item]
+        while not self._logging_queue.empty():
+          try:
+            next_item = self._logging_queue.get_nowait()
+            if next_item is None:
+              # Put back the sentinel so the loop terminates next time
+              self._logging_queue.put(None)
+              break
+            items.append(next_item)
+          except queue.Empty:
+            break
+
         try:
-          log_item(self._log_dir, item, self._file_suffix)
+          log_item(self._log_dir, items, self._file_suffix)
         except Exception:  # pylint: disable=broad-except
-          logging.exception('Failed to log trajectory.')
+          logging.exception('Failed to log trajectories.')
         finally:
-          self._logging_queue.task_done()
+          for _ in range(len(items)):
+            self._logging_queue.task_done()
 
     self._logging_thread = threading.Thread(target=_worker, daemon=True)
     self._logging_thread.start()
+
+    # Register cleanup
     atexit.register(self.stop)
+
+    # Register signal handlers for robust termination
+    if threading.current_thread() is threading.main_thread():
+      try:
+        signal.signal(signal.SIGINT, self._handle_signal)
+        signal.signal(signal.SIGTERM, self._handle_signal)
+        signal.signal(signal.SIGHUP, self._handle_signal)
+      except ValueError:
+        logging.warning('Failed to register signal handlers.')
+
     logging.info('Started trajectory logging thread.')
+
+  def _handle_signal(self, signum: int, frame: types.FrameType):
+    """Gracefully stops the logger and exits."""
+    del frame  # Unused.
+    logging.info('Received signal %d, flushing trajectory logger...', signum)
+    self.stop()
+    # Restore default handler and re-send signal to self
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
   def __del__(self):
     """Ensures stop is called when the object is destroyed."""

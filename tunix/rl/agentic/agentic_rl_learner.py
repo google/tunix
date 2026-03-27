@@ -36,9 +36,11 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.rollout import base_rollout
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import base_agent
@@ -81,6 +83,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   system_prompt: str = ""
   # TODO(tsbao): we need to update the scripts that uses max_tokens_to_generate
   # once this new agentic_rl_learner is used.
+  reward_manager: str = "agentic-sequence-level"
   max_response_length: int = 1024
   max_concurrency: int = 32
   off_policy_steps: int = 0
@@ -119,10 +122,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
       algo_config: TConfig,
-      reward_fns: RewardFn | List[RewardFn],
+      reward_fns: RewardFn | List[RewardFn] | None = None,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
-      data_shuffle_seed: int | None = None,
       agent_class: Type[
           base_agent.ConversationAgentBase
       ] = model_agent.ModelAgent,
@@ -139,8 +141,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       algo_config: Configuration object.
       reward_fns: Reward functions.
       chat_parser: A parser to handle chat message formatting.
-      metric_fns: Metric functions.
-      data_shuffle_seed: Seed for data shuffling.
+      metric_fns: A sequence of callables that compute metrics for the
+        completions. Each callable should accept ``prompts``, ``completions``,
+        ``rewards``, ``advantages`` and optional keyword arguments, and return
+        a dictionary of metric names to tuples of
+        ``(metric_value, aggregation_fn)``:
+
+           >>> def metric_fn(
+           ...     prompts, completions, rewards, advantages, **kargs
+           ... ):
+           ...     return {
+           ...       # ...
+           ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
+           ...       # ... }
       agent_class: User defined agent class.
       agent_kwargs: Keyword arguments for the agent class.
       env_class: User defined environment class.
@@ -148,8 +161,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
-    self._patch_rollout_config()
-
+    self._validate_rollout_config()
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
     )
@@ -157,19 +169,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         reward_fns=reward_fns,
         algo_config=algo_config,
     )
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
-    )
     self.metric_fns = metric_fns or []
     self.rl_cluster.actor_trainer.is_managed_externally = True
     if hasattr(self.rl_cluster, "critic_trainer"):
       self.rl_cluster.critic_trainer.is_managed_externally = True
-
-    self._data_shuffle_seed = (
-        jax.random.PRNGKey(data_shuffle_seed)
-        if data_shuffle_seed is not None
-        else None
-    )
 
     self.agent_class = agent_class
     self.agent_kwargs = agent_kwargs or {}
@@ -232,12 +235,27 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.loop = loop_queue.get()
     self._global_step_start_time = time.time()
 
-  def _patch_rollout_config(self):
+  def _validate_rollout_config(self):
+    """Validates that the rollout config is properly aligned with the algo config."""
     rollout_config = self.rl_cluster.cluster_config.rollout_config
     if not isinstance(rollout_config, dict):
-      rollout_config = {"train": rollout_config}
-    for config in rollout_config.values():
-      config.max_tokens_to_generate = self.algo_config.max_response_length
+      configs_to_check = {"train": rollout_config}
+    else:
+      configs_to_check = rollout_config
+
+    for mode, config in configs_to_check.items():
+      if config.max_tokens_to_generate != self.algo_config.max_response_length:
+        raise ValueError(
+            f"RolloutConfig ({mode}) max_tokens_to_generate "
+            f"({config.max_tokens_to_generate}) must match AgenticRLConfig "
+            f"max_response_length ({self.algo_config.max_response_length}). "
+            "Please align these configurations before initializing RLCluster."
+        )
+      if not config.return_logprobs:
+        raise ValueError(
+            f"RolloutConfig ({mode}) must have return_logprobs=True for "
+            "AgenticRLLearner. Please set this before initializing RLCluster."
+        )
 
   def _compute_rewards(
       self,
@@ -276,18 +294,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         **kwargs,
     )
 
-    # Log all metrics for this trajectory in one call
-    if expected_step is not None:
-      # Pass the expected_step explicitly because it is calculated based on
-      # the batch index (predicted step) to align metrics with the correct
-      # training step in the asynchronous execution.
-      self.rl_cluster.buffer_metrics_async(
-          rewards_info["log_metrics"], mode=mode, step=expected_step
-      )
-    else:
-      self.rl_cluster.buffer_metrics_async(
-          rewards_info["log_metrics"], mode=mode
-      )
+    # Pass the expected_step explicitly because it is calculated based on
+    # the batch index (predicted step) to align metrics with the correct
+    # training step in the asynchronous execution.
+    expected_step = 0 if expected_step is None else expected_step
+    self.rl_cluster.buffer_metrics_async(
+        rewards_info["log_metrics"], mode=mode, step=expected_step
+    )
 
     return rewards_info["rewards"]
 
@@ -365,12 +378,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   def _model_call(
       self, chat_lists: List[Dict[str, str]], env: Any = None
-  ) -> str:
+  ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
-    version = self.policy_version
-
     if env:
-      env.task["policy_version"] = version
+      env.task["policy_version"] = self.policy_version
 
     if self.chat_parser:
       chat_lists = self.chat_parser.parse(
@@ -378,19 +389,30 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
+    tags = {}
+    if env and hasattr(env, "extra_kwargs"):
+      if "group_id" in env.extra_kwargs:
+        tags[perf_constants.GROUP_ID] = env.extra_kwargs["group_id"]
+        if self._full_batch_size > 0:
+          tags[perf_constants.STEP] = (
+              env.extra_kwargs["group_id"] // self._full_batch_size
+          )
+      if "pair_index" in env.extra_kwargs:
+        tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
+
     result = self.rl_cluster.generate(
         prompts=chat_lists,
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
+        trace_tags=tags,
     )
 
-    return result.text[0]
+    return result
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
     engine_kwargs = dict(
         model_call=self._model_call,
-        final_reward_fn=reward.dummy_reward,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,
@@ -796,16 +818,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self._rollout_sync_lock.acquire_weight_sync()
           try:
             logging.info("Sync lock acquired. Syncing weights.")
-            self.rl_cluster.sync_weights()
+            with self.rl_cluster.perf_v2.span(
+                perf_constants.WEIGHT_SYNC,
+                self.rl_cluster.perf_v2.all_devices,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                },
+            ):
+              self.rl_cluster.sync_weights()
             self.policy_version += 1
             logging.info(
                 "Weights synced. Policy version incremented to %d.",
                 self.policy_version,
             )
             try:
-              self._put_prompts_to_queue(
-                  prompt_queue, next(full_dataset_iterator)
-              )
+              with self.rl_cluster.perf_v2.span(
+                  perf_constants.DATA_LOADING,
+                  tags={
+                      perf_constants.STEP: self.rl_cluster.global_steps,
+                  },
+              ):
+                batch = next(full_dataset_iterator)
+              self._put_prompts_to_queue(prompt_queue, batch)
             except StopIteration:
               prompt_queue.put(None)
           finally:
@@ -814,11 +848,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else:
           self.rl_cluster.global_steps += 1
           try:
-            self._put_prompts_to_queue(
-                prompt_queue, next(full_dataset_iterator)
-            )
+            with self.rl_cluster.perf_v2.span(
+                perf_constants.DATA_LOADING,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                },
+            ):
+              batch = next(full_dataset_iterator)
+            self._put_prompts_to_queue(prompt_queue, batch)
           except StopIteration:
             prompt_queue.put(None)
+
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf_v2.export(),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
         micro_batches_since_last_sync = 0
         self._global_step_start_time = time.time()
 

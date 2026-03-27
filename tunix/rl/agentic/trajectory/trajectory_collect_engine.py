@@ -31,6 +31,7 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
+from tunix.rl.rollout import base_rollout
 
 P = ParamSpec("P")
 
@@ -39,7 +40,7 @@ ConversationAgentBase = base_agent.ConversationAgentBase
 
 
 class TrajectoryCollectEngine:
-  """Asynchronous trajectory collection engine for agent-environment interactions.
+  """Asynchronous trajectory collection engine for agent-env interactions.
 
   This engine orchestrates complete rollout episodes by managing the interaction
   loop between LLM-based agents and environments. It handles model inference,
@@ -56,11 +57,10 @@ class TrajectoryCollectEngine:
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       *,
-      model_call: Callable[Concatenate[Dict[str, str], P], str],
+      model_call: Callable[
+          Concatenate[Dict[str, str], P], base_rollout.RolloutOutput
+      ],
       model_call_kwargs: Optional[Dict[str, Any]] = None,
-      final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
-      ] = None,
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
       timeout: float = 600.0,
@@ -97,9 +97,7 @@ class TrajectoryCollectEngine:
     self.agent = agent
     self.env = env
     self.model_call = model_call
-    self.final_reward_fn = final_reward_fn or (
-        lambda *_: reward_types.RewardOutput(reward=0.0)
-    )
+    self.final_reward_fn = self.env.reward_fn
     self.model_call_kwargs = model_call_kwargs or {}
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
@@ -113,6 +111,7 @@ class TrajectoryCollectEngine:
     self.valid_statuses = valid_statuses or {
         agent_types.TrajectoryStatus.SUCCEEDED
     }
+    self.env_time: float = 0.0
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
       logging.warning(
@@ -130,14 +129,14 @@ class TrajectoryCollectEngine:
 
     Args:
         mode (str): Output format. Options: 
-        - "Trajectory": return full Trajectory object. 
-        - "Token": return flattened tokenized dict for training. 
-        - "Steps": return stepwise tokenized data only. 
-        - "Conversation": return raw conversation messages (default).
+          - "Trajectory": return full Trajectory object.
+          - "Token": return flattened tokenized dict for training.
+          - "Steps": return stepwise tokenized data only.
+          - "Conversation": return raw conversation messages (default).
 
     Returns:
         Trajectory | dict | list: Depending on mode.
-    """
+    """  # fmt: skip
     await self._reset()
 
     # Initial Prompt Cost
@@ -152,20 +151,19 @@ class TrajectoryCollectEngine:
 
     while True:
       if len(self.agent.trajectory.steps) >= self.max_steps:
-        self.agent.trajectory.status = agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+        self.agent.trajectory.status = (
+            agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+        )
         break
 
       done = await self._one_step()
-      current_step = self.agent.get_current_state()
+      current_step = self.agent.get_current_step()
 
-      if current_step and self.tokenizer and self.chat_parser:
-
-        a_tokens = getattr(current_step, "assistant_tokens", None) or []
-        e_tokens = getattr(current_step, "env_tokens", None) or []
-
-        current_token_count += len(a_tokens)
-        current_token_count += len(e_tokens)
-
+      if current_step:
+        if getattr(current_step, "assistant_tokens", None) is not None:
+          current_token_count += len(current_step.assistant_tokens)
+        if getattr(current_step, "env_tokens", None) is not None:
+          current_token_count += len(current_step.env_tokens)
 
         if (
             self.max_context_limit is not None
@@ -181,8 +179,6 @@ class TrajectoryCollectEngine:
           self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
         break
 
-
-
     await self._append_final_reward()
     self.compute_mc_reward()
     self.compute_trajectory_reward()
@@ -195,6 +191,7 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
+      self.agent.trajectory.env_time = self.env_time
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -206,44 +203,52 @@ class TrajectoryCollectEngine:
               "assistant_masks": getattr(step, "assistant_masks", []),
               "env_tokens": getattr(step, "env_tokens", []),
               "env_masks": getattr(step, "env_masks", []),
-              "conversation_tokens": (
-                  getattr(step, "assistant_tokens", [])
-                  + getattr(step, "env_tokens", [])
-              ),
-              "conversation_masks": (
-                  getattr(step, "assistant_masks", [])
-                  + getattr(step, "env_masks", [])
-              ),
               "reward": step.reward,
               "mc_return": step.mc_return,
+              "env_time": self.env_time,
           }
           for step in self.agent.trajectory.steps
       ]
     elif mode == "Token":
       # flatten all steps into single batch dict
-      conversation_tokens, conversation_masks = [], []
+      conversation_tokens, conversation_masks, logprobs = [], [], []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
 
       for step in self.agent.trajectory.steps:
         # assistant tokens
-        if getattr(step, "assistant_tokens", None):
-          conversation_tokens.extend(step.assistant_tokens)
-          conversation_masks.extend(step.assistant_masks)
+        if getattr(step, "assistant_tokens", None) is not None:
+          conversation_tokens.append(step.assistant_tokens)
+          conversation_masks.append(step.assistant_masks)
 
         # env tokens
-        if getattr(step, "env_tokens", None):
-          conversation_tokens.extend(step.env_tokens)
-          conversation_masks.extend(step.env_masks)
+        if getattr(step, "env_tokens", None) is not None:
+          conversation_tokens.append(step.env_tokens)
+          conversation_masks.append(step.env_masks)
+
+        # logprobs
+        if getattr(step, "logprobs", None) is not None:
+          assert len(step.logprobs) == len(step.assistant_tokens), (
+              f"Logprobs length {len(step.logprobs)} does not match assistant"
+              f" tokens length {len(step.assistant_tokens)}"
+          )
+          logprobs.append(step.logprobs)
+          if getattr(step, "env_tokens", None) is not None:
+            logprobs.append(np.zeros(len(step.env_tokens)))
+
       # TODO(sizhi): (b/484422277)
       is_valid = self.agent.trajectory.status in self.valid_statuses
 
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
-          "conversation_tokens": conversation_tokens,
-          "conversation_masks": conversation_masks,
+          "conversation_tokens": np.concatenate(conversation_tokens, axis=0),
+          "conversation_masks": np.concatenate(conversation_masks, axis=0),
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
+          "env_time": self.env_time,
+          "old_logprobs": (
+              np.concatenate(logprobs, axis=0) if logprobs else None
+          ),
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
@@ -256,10 +261,7 @@ class TrajectoryCollectEngine:
   async def collect_multiple(
       pairs: List[Tuple[ConversationAgentBase, BaseTaskEnv]],
       *,
-      model_call: Callable[..., str],
-      final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
-      ] = None,
+      model_call: Callable[..., base_rollout.RolloutOutput],
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
       timeout: float = 30.0,
@@ -275,7 +277,6 @@ class TrajectoryCollectEngine:
         pairs (List[Tuple[ConversationAgentBase, BaseTaskEnv]]): List of (agent,
           environment) pairs
         model_call (Callable): Shared model inference function for all pairs
-        final_reward_fn (Optional[Callable]): Shared final reward function
         gamma (float): Discount factor for return calculation
         max_context_limit (Optional[int]): Maximum context limit per episode
         timeout (float): Per-episode timeout in seconds
@@ -287,12 +288,11 @@ class TrajectoryCollectEngine:
     """
 
     async def _run_one(i: int, agent: ConversationAgentBase, env: BaseTaskEnv):
-      """Execute a single agent-environment pair with the given configuration."""
+      """Execute a single agent-env pair with the given configuration."""
       engine = TrajectoryCollectEngine(
           agent,
           env,
           model_call=model_call,
-          final_reward_fn=final_reward_fn,
           gamma=gamma,
           max_context_limit=max_context_limit,
           timeout=timeout,
@@ -314,11 +314,6 @@ class TrajectoryCollectEngine:
     obs, _ = await asyncio.get_event_loop().run_in_executor(
         None, self.env.reset
     )
-    if hasattr(self.env, 'compute_final_reward') and callable(
-        self.env.compute_final_reward
-    ):
-      self.final_reward_fn = self.env.compute_final_reward
-
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
@@ -330,7 +325,7 @@ class TrajectoryCollectEngine:
           tokenizer=self.tokenizer,
           parser=self.chat_parser,
           contains_first_msg=True,
-          contains_generation_msg=False,
+          contains_generation_msg=True,
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
 
@@ -347,7 +342,7 @@ class TrajectoryCollectEngine:
         bool: True if the episode is done (either by environment or timeout),
           False otherwise.
     """
-    resp = await asyncio.get_event_loop().run_in_executor(
+    rollout_output = await asyncio.get_event_loop().run_in_executor(
         None,
         self.model_call,
         self.agent.chat_completions,
@@ -355,7 +350,7 @@ class TrajectoryCollectEngine:
         **self.model_call_kwargs,
     )
 
-    action = self.agent.update_from_model(resp).action
+    action = self.agent.update_from_model(rollout_output.text[0]).action
 
     if action is None:
       logging.warning(
@@ -363,13 +358,28 @@ class TrajectoryCollectEngine:
       )
       action = []
 
-    obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
-        None, self.env.step, action
+    def clocked_env_step(action):
+      t_start = time.thread_time()
+      result = self.env.step(action)
+      t_delta = time.thread_time() - t_start
+      return result, t_delta
+
+    (
+        obs,
+        rew,
+        done,
+        info,
+    ), thread_delta = await asyncio.get_event_loop().run_in_executor(
+        None, clocked_env_step, action
     )
+    self.env_time += thread_delta
 
     self.agent.update_from_env(obs, rew, done, info)
 
-    cur_step = self.agent.get_current_state()
+    cur_step = self.agent.get_current_step()
+
+    if cur_step is not None and rollout_output.logprobs is not None:
+      cur_step.logprobs = rollout_output.logprobs[0]
 
     if cur_step is not None and self.tokenizer and self.chat_parser:
       assistant_message, env_messages = (
@@ -378,15 +388,8 @@ class TrajectoryCollectEngine:
 
       # Assistant tokens/masks
       if assistant_message:
-        a_tokens, a_masks = utils.tokenize_and_generate_masks(
-            [assistant_message],
-            tokenizer=self.tokenizer,
-            parser=self.chat_parser,
-            contains_first_msg=False,
-            contains_generation_msg=False,
-        )
-        cur_step.assistant_tokens = a_tokens
-        cur_step.assistant_masks = a_masks
+        cur_step.assistant_tokens = rollout_output.tokens[0]
+        cur_step.assistant_masks = np.ones_like(rollout_output.tokens[0])
 
       # Environment tokens/masks
       if env_messages:
@@ -395,16 +398,15 @@ class TrajectoryCollectEngine:
             tokenizer=self.tokenizer,
             parser=self.chat_parser,
             contains_first_msg=False,
-            contains_generation_msg=False,
+            contains_generation_msg=True,
         )
-        cur_step.env_tokens = e_tokens
-        cur_step.env_masks = e_masks
+        cur_step.env_tokens = np.array(e_tokens)
+        cur_step.env_masks = np.array(e_masks)
 
     if time.time() - self._start_ts > self.timeout:
-
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
-      self.agent.get_current_state().done = True
+      self.agent.get_current_step().done = True
       return True
 
     return done
@@ -416,13 +418,15 @@ class TrajectoryCollectEngine:
     final response and adds it to the last step's reward. This enables
     additional reward signals based on overall episode performance.
     """
-    last_step = self.agent.get_current_state()
-    if last_step is None:
+    last_step = self.agent.get_current_step()
+    if last_step is None or self.final_reward_fn is None:
+      # Skip reward computation in trajectory collection if no reward function
+      # is provided or no step is taken.
       return
     final_reward = await asyncio.get_event_loop().run_in_executor(
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
-    last_step.reward += final_reward.reward
+    last_step.reward += final_reward
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.

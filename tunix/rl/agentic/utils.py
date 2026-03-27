@@ -19,22 +19,23 @@ import threading
 from typing import Any, Optional
 
 import numpy as np
+import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
 
 
-def left_pad(x, length, pad):
-  x = np.asarray(x, dtype=np.int32)
+def left_pad(x, length, pad, dtype=np.int32):
+  x = np.asarray(x, dtype=dtype)
   if x.size >= length:
     return x[-length:]
-  pad_part = np.full(length - x.size, pad, np.int32)
+  pad_part = np.full(length - x.size, pad, dtype)
   return np.concatenate([pad_part, x], axis=0)
 
 
-def right_pad(x, length, pad):
-  x = np.asarray(x, dtype=np.int32)
+def right_pad(x, length, pad, dtype=np.int32):
+  x = np.asarray(x, dtype=dtype)
   if x.size >= length:
     return x[:length]
-  pad_part = np.full(length - x.size, pad, np.int32)
+  pad_part = np.full(length - x.size, pad, dtype)
   return np.concatenate([x, pad_part], axis=0)
 
 
@@ -170,7 +171,7 @@ def convert_single_message(
 
 def tokenize_and_generate_masks(
     messages: list[dict[str, str]],
-    tokenizer: Any,
+    tokenizer: tok_adapter.TokenizerAdapter,
     parser: chat_template_parser.BaseChatTemplateParser,
     contains_first_msg: bool = False,
     contains_generation_msg: bool = False,
@@ -209,6 +210,7 @@ def tokenize_and_generate_masks(
     all_tokens.extend(tokens)
     all_masks.extend(masks)
 
+  all_tokens = tokenizer.dedup_bos_ids(all_tokens)
   return all_tokens, all_masks
 
 

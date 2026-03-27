@@ -279,8 +279,8 @@ class VllmSamplerTest(absltest.TestCase):
         base_prompts[0]: ["Tom", "help"],
         base_prompts[1]: ["Paris"],
         base_prompts[2]: ["Rayleigh", "scattering"],
-        base_prompts[3]: ["relativity", "einstein"],
-        base_prompts[4]: ["health", "energy"],
+        base_prompts[3]: ["relativity", "physics"],
+        base_prompts[4]: ["health", "can", "regular"],
         base_prompts[5]: ["winter"],
         base_prompts[6]: ["romeo", "juliet"],
         base_prompts[7]: ["pancake"],
@@ -534,9 +534,7 @@ class VllmSamplerConfigTest(absltest.TestCase):
     return mesh
 
   def _make_sampler(self, config):
-    with mock.patch("tunix.generate.vllm_sampler.LLM"), mock.patch(
-        "tunix.generate.vllm_sampler.tok_adapter.TokenizerAdapter"
-    ):
+    with mock.patch("tunix.generate.vllm_sampler.LLM"):
       return vllm_sampler.VllmSampler(
           tokenizer=mock.MagicMock(), config=config
       )

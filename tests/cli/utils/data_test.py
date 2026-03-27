@@ -22,7 +22,7 @@ from tunix.cli.utils import data as data_lib
 
 class _FakeTokenizer:
 
-  def tokenize(self, text: str):
+  def encode(self, text: str):
     # Simple tokenization: one token per whitespace-separated chunk
     return text.split()
 

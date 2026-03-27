@@ -15,6 +15,7 @@
 """Tests for agentic_grpo_learner."""
 
 import asyncio
+import functools
 import os
 import queue
 import random
@@ -40,10 +41,10 @@ import orbax.checkpoint as ocp
 from tunix.generate import tokenizer_adapter
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
-from tunix.rl.experimental import agentic_grpo_learner
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
@@ -82,19 +83,22 @@ def _mock_generate(
     apply_chat_template: bool = False,
     mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
     micro_batch_size: int | None = None,
+    trace_tags: dict[str, Any] | None = None,
+    output_logprobs: bool = True,
+    tokenizer: Any | None = None,
 ) -> base_rollout.RolloutOutput:
-  del apply_chat_template, mode, micro_batch_size
+  del apply_chat_template, mode, micro_batch_size, trace_tags
+  assert tokenizer is not None
   batch_size = len(prompts)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
-  tokens = [
-      np.arange(len(text[i].split()), dtype=np.int32) for i in range(batch_size)
-  ]
+  tokens = [tokenizer.encode(text_i) for text_i in text]
+  logprobs = [-np.random.rand(len(tokens[i])) for i in range(batch_size)]
   return base_rollout.RolloutOutput(
       text=text,
       tokens=tokens,
       left_padded_prompt_tokens=np.ones((batch_size, 8), dtype=np.int32),
       logits=None,
-      logprobs=None,
+      logprobs=logprobs if output_logprobs else None,
   )
 
 
@@ -165,20 +169,28 @@ def _dummy_dataset(source=MySource(), batch_size: int = 1):
 class MockChatParser:
 
   def parse(self, messages, add_generation_prompt=False, is_first_msg=False):
-    del add_generation_prompt, is_first_msg
+    del is_first_msg
     if not messages:
       return ""
-    if messages[0]["role"] == "system":
-      return f"System: {messages[0]['content']}"
-    if messages[0]["role"] == "user":
-      return f"User: {messages[0]['content']}"
-    if messages[0]["role"] == "assistant":
-      return f"Assistant: {messages[0]['content']}"
-    return ""
+
+    result = ""
+    for message in messages:
+      if message["role"] == "system":
+        result += f"System: {message['content']}"
+      elif message["role"] == "user":
+        result += f" User: {message['content']}"
+      elif message["role"] == "assistant":
+        result += f" Assistant: {message['content']}"
+      else:
+        raise ValueError(f"Unsupported message role: {message['role']}")
+
+    if add_generation_prompt:
+      result += " " + self.assistant_token
+    return result
 
   @property
   def assistant_token(self):
-    return ""
+    return "Assistant: "
 
 
 class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
@@ -198,6 +210,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     random.seed(42)
+    self.vocab = _mock_vocab()
+    self.tokenizer = tokenizer_adapter.TokenizerAdapter(self.vocab)
+    self._mock_generate = functools.partial(
+        _mock_generate, tokenizer=self.tokenizer
+    )
 
   def test_iterator(self):
     class _MockTrainer(agentic_grpo_learner.GRPOLearner):
@@ -324,6 +341,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -361,6 +380,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         mock.patch.object(
             rl_cluster, "update_actor", wraps=rl_cluster.update_actor
         ) as mock_update_actor,
+        mock.patch.object(
+            rl_cluster,
+            "generate",
+            side_effect=self._mock_generate,
+        ),
     ):
       grpo_learner.train(train_ds)
 
@@ -429,6 +453,85 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     chex.assert_shape(loss, ())
     self.assertIn("kl", aux)
 
+  def test_grpo_loss_fn_masks_zero_advantage_group(self):
+    seq_len = 8
+    prompt_ids = jnp.ones((4, seq_len), dtype=jnp.int32)
+    completion_ids = jnp.ones((4, seq_len), dtype=jnp.int32)
+    completion_mask = jnp.ones((4, seq_len), dtype=jnp.bool_)
+    # First group (2 samples) is degenerate and should be ignored.
+    advantages = jnp.asarray([0.0, 0.0, 1.0, -1.0], dtype=jnp.float32)
+    ref_per_token_logps = jnp.full((4, seq_len), -0.1, dtype=jnp.float32)
+
+    class MockModel(nnx.Module):
+
+      def __init__(self, *, rngs: nnx.Rngs):
+        self.lm_head = 1
+
+      def __call__(self, inputs, positions, cache, attention_mask):
+        return (
+            jnp.full(
+                (*inputs.shape, 32),
+                0.1,
+                dtype=jnp.float32,
+            ),
+            None,
+        )
+
+    train_example = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids,
+        prompt_mask=prompt_ids > -1,
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        ref_per_token_logps=ref_per_token_logps,
+        advantages=advantages,
+        old_per_token_logps=None,
+    )
+
+    valid_only_train_example = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids[2:],
+        prompt_mask=(prompt_ids > -1)[2:],
+        completion_ids=completion_ids[2:],
+        completion_mask=completion_mask[2:],
+        ref_per_token_logps=ref_per_token_logps[2:],
+        advantages=advantages[2:],
+        old_per_token_logps=None,
+    )
+
+    algo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.1,
+        epsilon=0.2,
+        num_generations=2,
+        loss_algo="grpo",
+        loss_agg_mode="token-mean",
+    )
+    policy_loss_fn = function_registry.get_policy_loss_fn(
+        algo_config.policy_loss_fn
+    )
+
+    model = MockModel(rngs=nnx.Rngs(0))
+    full_loss, full_aux = policy_loss_fn(
+        model=model,
+        train_example=train_example,
+        algo_config=algo_config,
+        pad_id=0,
+        eos_id=2,
+    )
+    valid_loss, valid_aux = policy_loss_fn(
+        model=model,
+        train_example=valid_only_train_example,
+        algo_config=algo_config,
+        pad_id=0,
+        eos_id=2,
+    )
+
+    np.testing.assert_allclose(full_loss, valid_loss, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        full_aux["kl"], valid_aux["kl"], rtol=1e-6, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        full_aux["entropy"], valid_aux["entropy"], rtol=1e-6, atol=1e-6
+    )
+
   def test_checkpointing(self):
     ckpt_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, ckpt_dir)
@@ -473,6 +576,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           ),
           rollout_config=base_rollout.RolloutConfig(
               max_prompt_length=32,
+              max_tokens_to_generate=10,
+              return_logprobs=True,
               kv_cache_size=256,
               temperature=0.5,
           ),
@@ -573,6 +678,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           ),
           rollout_config=base_rollout.RolloutConfig(
               max_prompt_length=32,
+              max_tokens_to_generate=10,
+              return_logprobs=True,
               kv_cache_size=256,
               temperature=0.5,
           ),
@@ -678,6 +785,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           training_config=training_config,
           rollout_config=base_rollout.RolloutConfig(
               max_prompt_length=32,
+              max_tokens_to_generate=10,
+              return_logprobs=True,
               kv_cache_size=256,
               temperature=0.5,
           ),
@@ -757,6 +866,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=256,
         ),
     )
@@ -782,6 +893,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           testcase_name="single_reward_fn",
           reward_fns=reward_fn_1,
           loss_algo="grpo",
+          use_old_logprobs=False,
       ),
       dict(
           testcase_name="multiple_reward_fns",
@@ -790,14 +902,16 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
               reward_fn_2,
           ],
           loss_algo="grpo",
+          use_old_logprobs=True,
       ),
       dict(
           testcase_name="single_reward_fn_gspo",
           reward_fns=reward_fn_1,
           loss_algo="gspo-token",
+          use_old_logprobs=True,
       ),
   )
-  def test_grpo_learner(self, reward_fns, loss_algo):
+  def test_grpo_learner(self, reward_fns, loss_algo, use_old_logprobs=False):
     vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
@@ -827,6 +941,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -855,7 +971,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
     eval_ds = _dummy_dataset(batch_size=1)
 
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster,
+        "generate",
+        side_effect=functools.partial(
+            self._mock_generate,
+            output_logprobs=use_old_logprobs,
+        ),
+    ):
       grpo_learner.train(train_ds, eval_ds)
 
     variables = nnx.state(model, nnx.Param)
@@ -915,7 +1038,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertGreater(np.sum(clip_ratio_history), 0)
 
     metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
-    for metric_name in ["loss", "kl", "entropy"]:
+    for metric_name in ["loss", "kl", "entropy", "pg_clipfrac"]:
       self.assertLen(
           metric_logger.get_metric_history("actor", metric_name, "train"),
           grpo_learner.rl_cluster.actor_trainer.train_steps,
@@ -975,6 +1098,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1002,7 +1127,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(MySource(repeat=4), batch_size=2)
     eval_ds = _dummy_dataset(batch_size=1)
 
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster, "generate", side_effect=self._mock_generate
+    ):
       grpo_learner.train(train_ds, eval_ds)
 
     variables = nnx.state(model, nnx.Param)
@@ -1039,7 +1166,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
         ),
-        rollout_config=base_rollout.RolloutConfig(),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=512,
+            return_logprobs=True,
+        ),
     )
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
@@ -1048,7 +1178,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = agentic_grpo_learner.GRPOConfig()
+    grpo_config = agentic_grpo_learner.GRPOConfig(max_response_length=512)
     grpo_learner = agentic_grpo_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
@@ -1102,6 +1232,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1129,16 +1261,20 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
     with (
         mock.patch.object(trajectory_logger, "log_item") as mock_log_item,
-        mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate),
+        mock.patch.object(
+            rl_cluster, "generate", side_effect=self._mock_generate
+        ),
     ):
       grpo_learner.train(train_ds)
       if grpo_learner._trajectory_logger:
         grpo_learner._trajectory_logger.stop()
       self.assertEqual(grpo_learner.rl_cluster.global_steps, 1)
-      self.assertEqual(mock_log_item.call_count, grpo_config.num_generations)
+      self.assertEqual(mock_log_item.call_count, 1)
 
-      for i in range(grpo_config.num_generations):
-        traj = mock_log_item.call_args_list[i][0][1]
+      logged_items = mock_log_item.call_args_list[0][0][1]
+      self.assertLen(logged_items, grpo_config.num_generations)
+
+      for traj in logged_items:
         self.assertIn("conversation_text", traj)
         conversation = traj["conversation_text"]
         assistant_msgs = [m for m in conversation if m["role"] == "assistant"]
@@ -1192,6 +1328,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         ),
         rollout_config=base_rollout.RolloutConfig(
             max_prompt_length=256,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1215,7 +1353,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     self.assertTrue(grpo_learner.should_sync_weights)
     train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster, "generate", side_effect=self._mock_generate
+    ):
       grpo_learner.train(train_ds, None)
 
     base_params = nnx.state(
@@ -1255,7 +1395,6 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             info={"max_steps": self.max_steps},
         )
 
-
     class MockAgent(ConversationAgentBase):
 
       def __init__(self, system_prompt: str):
@@ -1271,7 +1410,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           else:
             observation += " You have reached the maximum number of steps."
         self._messages.append({"role": "user", "content": observation})
-        step = self.get_current_state()
+        step = self.get_current_step()
         if step:
           step.observation = observation
 
@@ -1310,8 +1449,9 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             gradient_accumulation_steps=None,
         ),
         rollout_config=base_rollout.RolloutConfig(
-            max_tokens_to_generate=10,
+            max_tokens_to_generate=128,
             max_prompt_length=32,
+            return_logprobs=True,
             kv_cache_size=1024,
         ),
     )
@@ -1327,7 +1467,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=1,
         loss_algo="grpo",
-        max_response_length=64,
+        max_response_length=128,
         max_concurrency=1,  # so the output is deterministic.
     )
     grpo_learner = agentic_grpo_learner.GRPOLearner(
@@ -1371,22 +1511,37 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(MySource(repeat=10), batch_size=2)
     eval_ds = _dummy_dataset(batch_size=1)
 
-    with mock.patch.object(rl_cluster, "generate", side_effect=_mock_generate):
+    with mock.patch.object(
+        rl_cluster, "generate", side_effect=self._mock_generate
+    ):
       grpo_learner.train(train_ds, eval_ds)
 
     traj = agents[0].trajectory
 
     target_mask = []
     for step in traj.steps:
-      # + 1 for extra token from MockChatParser
-      target_mask.extend([1] * (len(step.model_response.split()) + 1))
-      target_mask.extend([0] * (len(step.observation.split()) + 1))
+      target_mask.extend([1] * (len(step.model_response.split())))
+      # + 2 for user and assistant role token from MockChatParser
+      target_mask.extend([0] * (len(step.observation.split()) + 2))
     target_mask.extend(
         [0] * (grpo_config.max_response_length - len(target_mask))
     )
+    target_mask = target_mask[: grpo_config.max_response_length]
 
     res = processed_results[0][0]
-    np.testing.assert_array_equal(res.completion_mask[0], np.array(target_mask))
+    # Since rollout is async and two generations will be executed concurrently,
+    # the order of the results is not guaranteed.
+    pass_1 = np.array_equal(res.completion_mask[0], np.array(target_mask))
+    pass_2 = np.array_equal(res.completion_mask[1], np.array(target_mask))
+    self.assertTrue(pass_1 or pass_2)
+    decoded_prompt = tokenizer.decode(np.array(res.prompt_ids[0]).tolist())
+    decoded_completion = tokenizer.decode(
+        np.array(res.completion_ids[0]).tolist()
+    )
+    self.assertEqual(decoded_prompt.count("Assistant:"), 1)
+    self.assertEqual(
+        decoded_completion.count("Assistant:"), 3
+    )  # 3 turns including trailing one for last env obs
 
 
 if __name__ == "__main__":

@@ -31,18 +31,18 @@ class SpanTest(absltest.TestCase):
     self.assertEqual(s.duration, float("inf"))
 
   def test_span_with_tags(self):
-    tags_dict = {constants.GLOBAL_STEP: 1, "custom_tag": "value"}
+    tags_dict = {constants.STEP: 1, "custom_tag": "value"}
     s = timeline.Span(name="test_tags", begin=1.0, id=0, tags=tags_dict)
     self.assertEqual(s.tags, tags_dict)
     self.assertIn("tags=", repr(s))
-    self.assertIn("global_step", repr(s))
+    self.assertIn("step", repr(s))
 
   def test_add_tag(self):
     s = timeline.Span(name="test_add_tag", begin=1.0, id=0)
     s.add_tag("foo", "bar")
     self.assertEqual(s.tags, {"foo": "bar"})
-    s.add_tag(constants.GLOBAL_STEP, 100)
-    self.assertEqual(s.tags, {"foo": "bar", "global_step": 100})
+    s.add_tag(constants.STEP, 100)
+    self.assertEqual(s.tags, {"foo": "bar", "step": 100})
 
   def test_add_tag_overwrite_warning(self):
     s = timeline.Span(name="test_add_tag_overwrite", begin=1.0, id=0)
@@ -96,6 +96,42 @@ class TimelineTest(absltest.TestCase):
     # End before begin
     with self.assertRaisesRegex(ValueError, "ended at .* before it began"):
       t.stop_span(1.0)
+
+  def test_snapshot(self):
+    t = timeline.Timeline("test_tl", 0.0)
+
+    snap0 = t.snapshot()
+    with self.subTest("initially_empty"):
+      self.assertEmpty(snap0.spans)
+      self.assertIsNot(snap0, t)
+
+    s1 = t.start_span("span1", 1.0)
+    snap1 = t.snapshot()
+    with self.subTest("active_span_not_in_snapshot"):
+      self.assertEmpty(snap1.spans)
+
+    t.stop_span(2.0)
+    snap2 = t.snapshot()
+    with self.subTest("completed_span_in_snapshot"):
+      self.assertLen(snap2.spans, 1)
+      self.assertEqual(snap2.spans[0].name, "span1")
+      self.assertEqual(snap2.spans[0].end, 2.0)
+
+    s2 = t.start_span("span2", 3.0)
+    s3 = t.start_span("span3", 4.0)
+    t.stop_span(5.0)  # stops s3
+    snap3 = t.snapshot()
+    with self.subTest("nested_active_span_not_in_snapshot"):
+      self.assertLen(snap3.spans, 2)
+      self.assertIn(s1.id, snap3.spans)
+      self.assertIn(s3.id, snap3.spans)
+      self.assertNotIn(s2.id, snap3.spans)
+
+    t.stop_span(6.0)  # stops s2
+    snap4 = t.snapshot()
+    with self.subTest("all_spans_completed"):
+      self.assertLen(snap4.spans, 3)
+      self.assertIn(s2.id, snap4.spans)
 
   def test_nested_timeline_with_tags_repr(self):
     born = 1000.0
@@ -198,8 +234,19 @@ class AsyncTimelineTest(absltest.TestCase):
 
     self.mock_async_wait.side_effect = fail_wait
 
-    with self.assertRaisesRegex(RuntimeError, "failed"):
-      t.span("failed", 1.0, ["wait"])
+    with mock.patch.object(timeline.logging, "error") as mock_log_error:
+      t.span("failed_op", 1.0, ["wait"])
+      # Exception is caught and logged, no exception is raised to the caller.
+      mock_log_error.assert_called_once()
+      args, kwargs = mock_log_error.call_args
+      format_str, name, span_id, err = args
+      self.assertEqual(format_str, "Timeline span '%s' (id=%d) failed: %s")
+      self.assertEqual(name, "failed_op")
+      self.assertEqual(span_id, 0)
+      self.assertIsInstance(err, RuntimeError)
+      self.assertEqual(str(err), "failed")
+      self.assertIn("exc_info", kwargs)
+      self.assertIsInstance(kwargs["exc_info"], RuntimeError)
 
   def test_wait_pending_spans_clears_threads(self):
     t = timeline.AsyncTimeline("test_tl", 0.0)

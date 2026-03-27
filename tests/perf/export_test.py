@@ -35,7 +35,7 @@ def _create_mock_cluster_config_with_perf_metrics(
     *,
     enable_perf_metrics: bool = True,
     enable_trace_writer: bool = True,
-    perf_metrics_log_dir: str = "",
+    perf_metrics_trace_dir: str = "",
 ) -> mock.Mock:
   """Creates a mock ClusterConfig object for testing.
 
@@ -43,7 +43,7 @@ def _create_mock_cluster_config_with_perf_metrics(
     enable_perf_metrics: If True, enables perf metrics.
     enable_trace_writer: If True, enables trace writer to write out the trace
       timeline.
-    perf_metrics_log_dir: The log directory for perf metrics.
+    perf_metrics_trace_dir: The trace directory for perf metrics.
 
   Returns:
     A mock ClusterConfig object.
@@ -71,7 +71,7 @@ def _create_mock_cluster_config_with_perf_metrics(
     mock_options = mock.create_autospec(
         metrics.PerfMetricsOptions, instance=True
     )
-    mock_options.log_dir = perf_metrics_log_dir
+    mock_options.trace_dir = perf_metrics_trace_dir
     mock_options.enable_trace_writer = enable_trace_writer
     mock_training_config.perf_metrics_options = mock_options
   else:
@@ -84,20 +84,20 @@ class ExportTest(parameterized.TestCase):
   @parameterized.named_parameters(
       dict(
           testcase_name="with_export_dir",
-          perf_metrics_log_dir="test_log_dir",
-          expected_log_dir="test_log_dir",
+          perf_metrics_trace_dir="test_trace_dir",
+          expected_log_dir="test_trace_dir",
       ),
       dict(
           testcase_name="without_export_dir",
-          perf_metrics_log_dir="",
+          perf_metrics_trace_dir="",
           expected_log_dir=None,
       ),
   )
   def test_from_cluster_config_trace_writer_enabled(
-      self, perf_metrics_log_dir, expected_log_dir
+      self, perf_metrics_trace_dir, expected_log_dir
   ):
     cluster_config = _create_mock_cluster_config_with_perf_metrics(
-        perf_metrics_log_dir=perf_metrics_log_dir
+        perf_metrics_trace_dir=perf_metrics_trace_dir
     )
     with mock.patch.object(
         export, "PerfettoTraceWriter", autospec=True, spec_set=True
@@ -120,9 +120,9 @@ class ExportTest(parameterized.TestCase):
   def test_from_cluster_config_trace_writer_disabled(
       self, enable_perf_metrics, enable_trace_writer
   ):
-    log_dir = "test_log_dir"
+    trace_dir = "test_trace_dir"
     cluster_config = _create_mock_cluster_config_with_perf_metrics(
-        perf_metrics_log_dir=log_dir,
+        perf_metrics_trace_dir=trace_dir,
         enable_perf_metrics=enable_perf_metrics,
         enable_trace_writer=enable_trace_writer,
     )

@@ -37,16 +37,17 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
+from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
-from tunix.rl.experimental import agentic_rl_learner
 from tunix.rl.ppo import ppo_helpers
 from tunix.utils import trajectory_logger
 
@@ -99,6 +100,9 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
+  degenerate_group_masking: bool = (
+      True  # Whether to mask out degenerate groups with all-0 advantages.
+  )
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -136,11 +140,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
-      reward_fns: RewardFn | List[RewardFn],
       algo_config: TGrpoConfig,
+      reward_fns: RewardFn | List[RewardFn] | None = None,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
-      data_shuffle_seed: int | None = None,
       agent_class: Type[
           base_agent.ConversationAgentBase
       ] = model_agent.ModelAgent,
@@ -174,7 +177,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
            ...       # ...
            ...       "prompt_min_len": (min(len(p) for p in prompts), np.min),
            ...       # ... }
-      data_shuffle_seed: The seed used to shuffle the training data.
       agent_class: The class of the agent to be used.
       agent_kwargs: Keyword arguments to pass to the agent class.
       env_class: The class of the environment to be used.
@@ -184,7 +186,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         metric_fns=metric_fns,
-        data_shuffle_seed=data_shuffle_seed,
         algo_config=algo_config,
         chat_parser=chat_parser,
         agent_class=agent_class,
@@ -230,9 +231,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
-        {"kl": np.mean, "entropy": np.mean}
-    )
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
+        "kl": np.mean,
+        "entropy": np.mean,
+        "pg_loss": np.mean,
+        "pg_clipfrac": np.mean,
+        "ppo_kl": np.mean,
+    })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
@@ -263,6 +268,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     Returns:
       A list of `TrainExample` instances containing all data needed for the
       loss function.
+
+    Raises:
+      ValueError: If `policy_version` is missing from any trajectory task.
+      RuntimeError: If `old_per_token_logps` is not available for off-policy RL.
     """
     logging.debug(
         "Processing results to compute advantage for %d items.",
@@ -273,10 +282,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
     # Extract completions and tokens from the group of G results.
-    completion_texts = []
-    completion_tokens_list = []
-    completion_masks_list = []
-    policy_versions_list = []
+    completion_texts: List[str] = []
+    completion_tokens_list: List[np.ndarray] = []
+    completion_masks_list: List[np.ndarray] = []
+    old_logprobs_list: List[np.ndarray] = []
+    policy_versions_list: List[int] = []
+    trajectory_rewards_list: List[float] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -287,13 +298,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           for message in conversation
           if message["role"] == "assistant"
       )
+
       completion_texts.append(assistant_text)
       completion_tokens_list.append(item.traj.get("conversation_tokens"))
       completion_masks_list.append(item.traj.get("conversation_masks"))
+      old_logprobs_list.append(item.traj.get("old_logprobs"))
       policy_version = item.traj.get("policy_version")
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
+      trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -307,14 +321,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     rollout_config = self.rl_cluster.cluster_config.rollout_config
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
+
     padded_prompt_ids = []
     padded_completion_ids = []
     padded_completion_masks = []
+    padded_old_logprobs = []
 
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
-    for completion_tokens, completion_mask in zip(
-        completion_tokens_list, completion_masks_list
+    for completion_tokens, completion_mask, old_logprobs in zip(
+        completion_tokens_list, completion_masks_list, old_logprobs_list
     ):
       if (
           len(completion_tokens) >= max_response_length
@@ -337,8 +353,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               :max_response_length
           ]
       )
+      if old_logprobs is not None:
+        padded_old_logprobs.append(
+            agentic_utils.right_pad(
+                old_logprobs,
+                length=max_response_length,
+                pad=0.0,
+                dtype=old_logprobs.dtype,
+            )[:max_response_length]
+        )
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
+    prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
     logging.debug(
@@ -347,30 +373,48 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_ids.shape,
     )
 
-    # Masks
-    prompt_mask = prompt_ids != pad_value
-    if self.algo_config.beta != 0.0:
-      ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
-          micro_batch_size=None,
-      )
-    else:
-      ref_per_token_logps = None
-    logging.debug("Ref logps computed.")
-    if self.algo_config.num_iterations > 1:
-      old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          micro_batch_size=1,
-      )
+    if padded_old_logprobs:
+      old_per_token_logps = jnp.asarray(padded_old_logprobs)
     else:
       old_per_token_logps = None
-    logging.debug("Old logps computed.")
-    # Rewards & advantages
 
+    if self.algo_config.num_iterations > 1 and old_per_token_logps is None:
+      raise RuntimeError(
+          "old_per_token_logps is not available for off-policy RL. Enable "
+          " `return_logprobs` in RolloutConfig."
+      )
+
+    # Collect perf tags
+    traj = trajectories[0].traj
+    group_id = traj.get("group_id")
+    if group_id is None:
+      original_input = traj.get("original_input", {})
+      group_id = original_input.get("group_id")
+
+    perf_tags = {
+        perf_constants.STEP: expected_step,
+    }
+    if group_id is not None:
+      perf_tags[perf_constants.GROUP_ID] = group_id
+
+    if self.algo_config.beta != 0.0:
+      with self.rl_cluster.perf_v2.span(
+          perf_constants.REFERENCE_INFERENCE,
+          devices=self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices,
+          tags=perf_tags,
+      ) as interval_v2:
+        ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            pad_id=pad_value,
+            eos_id=eos_value,
+            micro_batch_size=None,
+        )
+        interval_v2.async_end([ref_per_token_logps])
+    else:
+      ref_per_token_logps = None
+
+    # Rewards & advantages
     # Prepare arguments for reward computation by forwarding all training inputs
     # except for prompts, which is passed explicitly.
     original_input = trajectories[0].traj["original_input"]
@@ -392,29 +436,32 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     reward_kwargs = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
-    # TODO: b/456528861 - Refactor reward computation to happen within the
-    # environment during rollout, rather than as a post-processing step. This
-    # would align with the standard agentic RL pattern and remove the need for
-    # `dummy_reward`.
-    rewards = self._compute_rewards(
-        prompts=original_inputs["prompts"],
-        completions=completion_texts,
-        mode=mode,
-        **reward_kwargs,
-        expected_step=expected_step,
-    )
 
-    advantage_estimator = function_registry.get_advantage_estimator(
-        self.algo_config.advantage_estimator
-    )
-    advantages = advantage_estimator(
-        rewards=rewards, num_generations=self.algo_config.num_generations
-    )
+    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
+    with self.rl_cluster.perf_v2.span(
+        perf_constants.ADVANTAGE_COMPUTATION,
+        tags=perf_tags,
+    ):
+      rewards = self._compute_rewards(
+          prompts=original_inputs["prompts"],
+          completions=completion_texts,
+          mode=mode,
+          **reward_kwargs,
+          expected_step=expected_step,
+      )
+
+      advantage_estimator = function_registry.get_advantage_estimator(
+          self.algo_config.advantage_estimator
+      )
+      advantages = advantage_estimator(
+          rewards=rewards, num_generations=self.algo_config.num_generations
+      )
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
-    # Log completion lengths.
+    # Log completion lengths and env_time.
     agg_completion_mask = completion_mask.sum(axis=-1)
+    env_times = [item.traj.get("env_time", 0.0) for item in trajectories]
     self.rl_cluster.buffer_metrics_async(
         {
             "generation/completions/mean_length": (
@@ -433,6 +480,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 clipped_completion_count / len(trajectories),
                 np.mean,
             ),
+            "generation/env_time/mean": (np.mean(env_times), np.mean),
+            "generation/env_time/max": (np.max(env_times), np.max),
+            "generation/env_time/min": (np.min(env_times), np.min),
         },
         mode=mode,
         step=expected_step,
@@ -521,7 +571,27 @@ def grpo_loss_fn(
       return_logits=True,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
+  # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
+  if advantages.ndim != 1:
+    raise ValueError(
+        "Expected advantages to be a 1D array, but got shape"
+        f" {advantages.shape}"
+    )
+
+  # Mask out degenerate groups (all-0 sequence advantages).
+  # For group-relative advantages, all-0 indicates a no-signal group (e.g. all
+  # rewards are equal). Such groups should not contribute to policy, KL, or
+  # entropy terms in this loss.
+  if algo_config.degenerate_group_masking:
+    num_generations = algo_config.num_generations
+    grouped_advantages = advantages.reshape((-1, num_generations))
+    invalid_group = jnp.all(jnp.isclose(grouped_advantages, 0.0), axis=-1)
+    valid_group_mask = jnp.logical_not(invalid_group)
+    valid_sequence_mask = jnp.repeat(valid_group_mask, num_generations)[:, None]
+    completion_mask = completion_mask * valid_sequence_mask.astype(
+        completion_mask.dtype
+    )
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -531,6 +601,11 @@ def grpo_loss_fn(
     )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
+  # Record KL divergence before clipping.
+  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
+
+  seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
+
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
     seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
@@ -543,16 +618,24 @@ def grpo_loss_fn(
     )
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
-  coef_1 = jnp.exp(seq_importance_ratio)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
+  is_ratio = jnp.exp(seq_importance_ratio)
+  advantages = advantages[:, None]
+  pg_loss_1 = -advantages * is_ratio
+  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
-  # TODO(tsbao): We should handle token level advantages.
-  per_token_loss = -jnp.minimum(
-      coef_1 * jnp.expand_dims(advantages, 1),
-      coef_2 * jnp.expand_dims(advantages, 1),
-  ).astype(jnp.float32)
+  per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
-  aux = {"kl": 0.0}
+  clipped_fraction = ppo_helpers.masked_mean(
+      jnp.greater(pg_loss_2, pg_loss_1), completion_mask
+  )
+
+  pg_loss = ppo_helpers.masked_mean(per_token_loss, completion_mask)
+  aux = {
+      "kl": 0.0,
+      "pg_loss": pg_loss,
+      "pg_clipfrac": clipped_fraction,
+      "ppo_kl": ppo_kl,
+  }
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps

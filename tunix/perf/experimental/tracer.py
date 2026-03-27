@@ -25,58 +25,16 @@ import jaxtyping
 import numpy as np
 from tunix.perf import metrics
 from tunix.perf.experimental import timeline
+from tunix.perf.experimental import timeline_utils
 
 
-JaxDevice = Any
+JaxDevice = timeline_utils.JaxDevice
 MetricsT = metrics.MetricsT
 PerfSpanQuery = metrics.PerfSpanQuery
 Span = timeline.Span
 Timeline = timeline.Timeline
 AsyncTimeline = timeline.AsyncTimeline
 BatchAsyncTimelines = timeline.BatchAsyncTimelines
-
-
-def generate_host_timeline_id() -> str:
-  """Generates a string ID for a host timeline."""
-  return f"host-{threading.get_ident()}"
-
-
-def generate_device_timeline_id(device_id: str | JaxDevice) -> str:
-  """Generates a string ID for a device timeline.
-
-  Args:
-    device_id: A string ID or a JAX device object.
-
-  Returns:
-    A string representation of the device ID. For a JAX device object, it will
-    be the platform name followed by the device ID, e.g., "tpu0".
-
-  Raises:
-    ValueError: If the input device_id type is not supported. Only string and
-    JAX
-    device objects (with platform and id attributes) are supported.
-  """
-
-  if isinstance(device_id, str):
-    return device_id
-  elif hasattr(device_id, "platform") and hasattr(device_id, "id"):
-    # if it's a JAX device object, convert to string
-    return f"{device_id.platform}{device_id.id}"
-  else:
-    raise ValueError(f"Unsupported id type: {type(device_id)}")
-
-
-def generate_device_timeline_ids(
-    devices: Sequence[str | JaxDevice] | np.ndarray | None,
-) -> Sequence[str]:
-  """Generates a list of string IDs for a list of devices."""
-  if devices is None:
-    return []
-  if isinstance(devices, np.ndarray):
-    device_list = devices.flatten().tolist()
-  else:
-    device_list = devices
-  return [generate_device_timeline_id(device) for device in device_list]
 
 
 def _synchronize_devices() -> None:
@@ -165,68 +123,75 @@ class PerfTracer(NoopTracer):
     # align all timelines with the same born time.
     self._born = time.perf_counter()
 
-    self._main_thread_id = generate_host_timeline_id()
+    self._main_thread_id = timeline_utils.generate_host_timeline_id()
+    self._timelines_lock = threading.Lock()
 
     self._host_timelines: dict[str, Timeline] = {
         self._main_thread_id: Timeline(self._main_thread_id, self._born)
     }
     self._device_timelines: dict[str, AsyncTimeline] = {}
     if devices is not None:
-      for device_id in generate_device_timeline_ids(devices):
+      for device_id in timeline_utils.generate_device_timeline_ids(devices):
         self._get_or_create_device_timeline(device_id)
     self._collect_on_first_device_per_mesh = collect_on_first_device_per_mesh
 
-  def _get_timelines(self) -> Mapping[str, Timeline]:
-    timelines: dict[str, Timeline] = {}
-    for tl in self._host_timelines.values():
-      timelines[tl.id] = tl
-    for tl in self._device_timelines.values():
-      if tl.id in timelines:
-        raise ValueError(f"Timeline ID collision detected: {tl.id}")
-      timelines[tl.id] = tl
-    return timelines
+  def _get_timeline_snapshots(self) -> Mapping[str, Timeline]:
+    timelines_by_id: dict[str, Timeline] = {}
+    with self._timelines_lock:
+      for tl in self._host_timelines.values():
+        timelines_by_id[tl.id] = tl.snapshot()
+      for tl in self._device_timelines.values():
+        if tl.id in timelines_by_id:
+          raise ValueError(f"Timeline ID collision detected: {tl.id!r}")
+        timelines_by_id[tl.id] = tl.snapshot()
+    return timelines_by_id
 
   def _get_or_create_host_timeline(self, timeline_id: str) -> Timeline:
-    host_timeline = self._host_timelines.get(timeline_id)
-    if host_timeline is None:
-      host_timeline = Timeline(timeline_id, self._born)
-      self._host_timelines[timeline_id] = host_timeline
-    return host_timeline
+    with self._timelines_lock:
+      host_timeline = self._host_timelines.get(timeline_id)
+      if host_timeline is None:
+        host_timeline = Timeline(timeline_id, self._born)
+        self._host_timelines[timeline_id] = host_timeline
+      return host_timeline
 
   def _get_or_create_device_timeline(self, timeline_id: str) -> AsyncTimeline:
-    device_timeline = self._device_timelines.get(timeline_id)
-    if device_timeline is None:
-      device_timeline = AsyncTimeline(timeline_id, self._born)
-      self._device_timelines[timeline_id] = device_timeline
-    return device_timeline
+    with self._timelines_lock:
+      device_timeline = self._device_timelines.get(timeline_id)
+      if device_timeline is None:
+        device_timeline = AsyncTimeline(timeline_id, self._born)
+        self._device_timelines[timeline_id] = device_timeline
+      return device_timeline
 
   def _get_or_create_device_timelines(
       self, ids: Sequence[str | JaxDevice] | np.ndarray | None
   ) -> BatchAsyncTimelines:
     return BatchAsyncTimelines([
         self._get_or_create_device_timeline(id)
-        for id in generate_device_timeline_ids(ids)
+        for id in timeline_utils.generate_device_timeline_ids(ids)
     ])
 
   def synchronize(self) -> None:
     _synchronize_devices()
-    for tl in self._device_timelines.values():
+    with self._timelines_lock:
+      device_timelines = list(self._device_timelines.values())
+    for tl in device_timelines:
       tl.wait_pending_spans()
 
   def print(self) -> None:
     self.synchronize()
-    for tl in self._get_timelines().values():
+    for tl in self._get_timeline_snapshots().values():
       print(f"\n[{tl.id}]")
       print(tl)
 
   def export(self) -> MetricsT:
     if self._export_fn is None:
       return {}
-    return self._export_fn(self._get_timelines())
+    return self._export_fn(self._get_timeline_snapshots())
 
   @property
   def all_devices(self) -> Sequence[str]:
-    return list(self._device_timelines.keys())
+    with self._timelines_lock:
+      return list(self._device_timelines.keys())
 
   @contextlib.contextmanager
   def span(
@@ -248,7 +213,7 @@ class PerfTracer(NoopTracer):
     device_waitlist = AsyncWaitlist()
     try:
       host_timeline = self._get_or_create_host_timeline(
-          generate_host_timeline_id()
+          timeline_utils.generate_host_timeline_id()
       )
       host_timeline.start_span(name, begin, tags=tags)
       yield device_waitlist

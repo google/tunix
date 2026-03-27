@@ -68,6 +68,9 @@ class VllmRollout(base_rollout.BaseRollout):
                 ),
                 "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
                 "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
+                "max_logprobs": (
+                    1
+                ),  # We only need the logprobs of the sampled tokens
                 **rollout_config.rollout_vllm_kwargs,
             },
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
@@ -112,6 +115,7 @@ class VllmRollout(base_rollout.BaseRollout):
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
+      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
     # b/428730696, we cannot return self.output.logprobs yet

@@ -14,7 +14,7 @@ except ImportError:
   Action = cast(Any, None)
 
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
-from tunix.rl.agentic.rewards import reward_types
+
 
 if r2egym:
   R2EGYM_PATH = os.path.dirname(r2egym.__file__)
@@ -111,6 +111,7 @@ class SWEEnv(BaseTaskEnv):
           reward_timeout=self.reward_timeout,
           verbose=self.verbose,
       )
+      self.reward_fn = self.env.compute_reward
     else:
       self.env.reset()
     if self.scaffold == "r2egym":
@@ -150,14 +151,6 @@ class SWEEnv(BaseTaskEnv):
     if self.delete_image and self.env:
       docker_image = self.env.runtime.docker_image
       os.system(f"docker rmi {docker_image}")
-
-    def compute_final_reward(self, *args) -> reward_types.RewardOutput:
-      """Run tests in the Docker container and return reward wrapped in an object."""
-      # Get the raw float/int reward
-      reward_val = float(self.env.compute_reward())
-
-      # Return it wrapped in the object the engine expects
-      return reward_types.RewardOutput(reward=reward_val)
 
   @staticmethod
   def from_dict(extra_info: dict | str) -> "SWEEnv":

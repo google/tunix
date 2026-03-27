@@ -19,7 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from typing import Any, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
+from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
 from absl import logging
 import flax
@@ -34,6 +34,8 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_lib
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
@@ -111,8 +113,6 @@ class MetricsBuffer:
     step: The training step number.
     losses: A list of loss values recorded within this step (e.g., across
       gradient accumulation steps).
-    step_time_deltas: A list of time deltas for each computation within this
-      step.
     additional_metrics: Dictionary for storing additional metrics. The key is
       the metric name, and the value is a tuple containing a list of metric
       values and a callable to aggregate them.
@@ -120,7 +120,6 @@ class MetricsBuffer:
 
   step: int
   losses: List[ArrayLike]
-  step_time_deltas: List[float]
   additional_metrics: Dict[
       str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
   ] = dataclasses.field(default_factory=dict)
@@ -129,11 +128,6 @@ class MetricsBuffer:
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
     return np.mean(np.array([np.array(x) for x in self.losses]))
-
-  @property
-  def step_time_delta(self):
-    """Returns the mean of the recorded step time deltas for the step."""
-    return np.mean(self.step_time_deltas)
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -194,8 +188,9 @@ class PeftTrainer:
       model: nnx.Module,
       optimizer: optax.GradientTransformation,
       training_config: TrainingConfig,
-      metrics_logger: Optional[MetricsLogger] = None,
-      perf_tracer: Optional[perf_trace.Tracer] = None,
+      metrics_logger: MetricsLogger | None = None,
+      perf_tracer: perf_trace.Tracer | None = None,
+      perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
   ):
     self.model = model
     self.config = training_config
@@ -225,6 +220,11 @@ class PeftTrainer:
     self.is_managed_externally = False
     self._perf_tracer = (
         perf_tracer if perf_tracer is not None else perf_trace.NoopTracer()
+    )
+    self._perf_tracer_v2 = (
+        perf_tracer_v2
+        if perf_tracer_v2 is not None
+        else perf_tracer_lib.NoopTracer()
     )
 
     self._train_steps = 0  # represent # of times model has been updated
@@ -265,6 +265,7 @@ class PeftTrainer:
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
+    self._mini_batch_size = None
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -315,7 +316,7 @@ class PeftTrainer:
 
   def _train_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
-  ) -> ArrayLike | Tuple[ArrayLike, Any]:
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
     """Main body for one train step.
 
     Args:
@@ -324,7 +325,8 @@ class PeftTrainer:
       inputs: The training input.
 
     Returns:
-      The loss and auxiliary data if has_aux is True, otherwise the loss.
+      A tuple containing the loss, auxiliary data (or None if has_aux is False),
+      and the gradient norm.
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -353,7 +355,9 @@ class PeftTrainer:
     else:
       return out, None
 
-  def create_train_step_fn(self) -> Callable[..., ArrayLike]:
+  def create_train_step_fn(
+      self,
+  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
     """Creates the train step function."""
     return self._train_step
 
@@ -448,7 +452,6 @@ class PeftTrainer:
       self,
       loss: ArrayLike,
       step: int | None = None,
-      step_time_delta: float | None = None,
       additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
@@ -463,21 +466,6 @@ class PeftTrainer:
           self.metrics_prefix,
           "learning_rate",
           jax.device_get(learning_rate),
-          self._mode,
-          step,
-      )
-    if step_time_delta is not None:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "step_time_sec",
-          step_time_delta,
-          self._mode,
-          step,
-      )
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "steps_per_sec",
-          1.0 / (step_time_delta + 1e-9),
           self._mode,
           step,
       )
@@ -497,7 +485,6 @@ class PeftTrainer:
       metrics_buffer: MetricsBuffer | None,
       loss: ArrayLike,
       step: int,
-      step_time_delta: float = 0.0,
       additional_metrics: (
           dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
       ) = None,
@@ -507,12 +494,10 @@ class PeftTrainer:
       metrics_buffer = MetricsBuffer(
           step=step,
           losses=[loss],
-          step_time_deltas=[step_time_delta],
       )
     else:
       assert metrics_buffer.step == step
       metrics_buffer.losses.append(loss)
-      metrics_buffer.step_time_deltas.append(step_time_delta or 0)
     if additional_metrics is not None:
       for k, (v, op) in additional_metrics.items():
         if k not in metrics_buffer.additional_metrics:
@@ -536,7 +521,6 @@ class PeftTrainer:
         self._tqdm_train_metrics,
         step=self._prev_buffered_train_metrics.step,
         loss=self._prev_buffered_train_metrics.loss,
-        step_time=self._prev_buffered_train_metrics.step_time_delta,
     )
     self._prev_buffered_train_metrics = self._buffered_train_metrics
     self._buffered_train_metrics = None
@@ -552,7 +536,6 @@ class PeftTrainer:
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
-        step_time_delta=metrics_buffer.step_time_delta,
         additional_metrics={
             k: op(_to_np_array(v))
             for k, (
@@ -580,7 +563,6 @@ class PeftTrainer:
       metrics: list[str],
       step: int | None = None,
       loss: ArrayLike | None = None,
-      step_time: float | None = None,
   ):
     """Updates the progress bar with the given metrics if available."""
     if self._pbar is not None:
@@ -588,7 +570,7 @@ class PeftTrainer:
       self._pbar.update()
 
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
-      self.training_hooks.on_train_step_end(self, step, loss, step_time)
+      self.training_hooks.on_train_step_end(self, step, loss, 0.0)
 
   def train(
       self,
@@ -675,22 +657,49 @@ class PeftTrainer:
         if self.training_hooks:
           self.training_hooks.on_train_step_start(self)
 
+        # Collect tags for the span
+        metadata = self.custom_checkpoint_metadata()
+        global_step = metadata.get("global_step")
+
+        if global_step is not None:
+          # Offset by 1 since global_step is incremented for checkpointing.
+          global_step -= 1
+          if global_step > 0:
+            if self._mini_batch_size is None:
+              self._mini_batch_size = max(1, self._train_steps // global_step)
+            mini_batch = self._train_steps % self._mini_batch_size
+          else:
+            mini_batch = self._train_steps
+        else:
+          mini_batch = None
+          global_step = None
+        micro_batch = self._iter_steps % self.config.get_with_default(
+            "gradient_accumulation_steps", 1
+        )
+        tags = {
+            perf_constants.STEP: global_step,
+            perf_constants.ROLE: metadata.get("role"),
+            perf_constants.MICRO_BATCH: micro_batch,
+            perf_constants.MINI_BATCH: mini_batch,
+        }
+
         with self._perf_tracer.span(
-            "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
-        ) as span:
+            "peft_train_step",
+            pxla.thread_resources.env.physical_mesh.devices,
+        ) as span, self._perf_tracer_v2.span(
+            perf_constants.PEFT_TRAIN,
+            pxla.thread_resources.env.physical_mesh.devices,
+            tags=tags,
+        ) as span_v2:
           train_loss, aux, grad_norm = train_step(train_example)
           span.device_end([train_loss])
-
-        current_time = time.perf_counter()
-        step_time_delta = current_time - last_step_completion_time
-        last_step_completion_time = current_time
+          span_v2.async_end([train_loss])
 
         self._throttler.add_computation(train_loss)
         self._buffered_train_metrics = self._buffer_metrics(
             self._buffered_train_metrics,
             loss=train_loss,
             step=self._train_steps,
-            step_time_delta=step_time_delta,
             additional_metrics={"grad_norm": (grad_norm, np.mean)},
         )
         # NB: put this after self._buffer_metrics is important

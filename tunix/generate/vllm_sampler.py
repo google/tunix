@@ -91,7 +91,7 @@ class VllmConfig:
     illegal = self._RESERVED_KEYS & engine_kwargs.keys()
     if illegal:
       raise ValueError(
-          f"VllmConfig fields must be set directly on VllmConfig, not passed"
+          "VllmConfig fields must be set directly on VllmConfig, not passed"
           f" via engine_kwargs: {sorted(illegal)}"
       )
     self._processed_engine_kwargs = engine_kwargs
@@ -138,7 +138,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if config.init_with_random_weights:
       os.environ["JAX_RANDOM_WEIGHTS"] = "1"
 
-    self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+    self.tokenizer = tokenizer
+    if not isinstance(tokenizer, tok_adapter.TokenizerAdapter):
+      self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
     self._driver: VLLMInProcessDriver | None = None
@@ -448,21 +450,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           logging.log_first_n(
               logging.INFO,
               "Received additional kwargs that are not explicitly defined in"
-              f" the method signature: {sampling_kwargs}. These will be forwarded to the"
-              " underlying sampler, but please ensure that they are valid.",
-              1
-          )   
+              f" the method signature: {sampling_kwargs}. These will be"
+              " forwarded to the underlying sampler, but please ensure that"
+              " they are valid.",
+              1,
+          )
           for key, value in sampling_kwargs.items():
             logging.log_first_n(
                 logging.DEBUG,
                 f"Sampler kwargs setting key {key} with value {value}.",
-                len(sampling_kwargs)
+                len(sampling_kwargs),
             )
             setattr(sampling_params, key, value)
         except (AttributeError, TypeError) as e:
           logging.info(
-              f"Failed to update sampling_params with kwargs: {sampling_kwargs}."
-              f" Error: {e}",
+              "Failed to update sampling_params with kwargs:"
+              f" {sampling_kwargs}. Error: {e}",
           )
 
       self.sampling_params = sampling_params
@@ -480,6 +483,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     decoded_outputs, out_logprobs, out_tokens = self.detokenize(
         input_strings, outputs
     )
+    if self.config.return_logprobs and (
+        out_logprobs is None or out_logprobs[0] is None
+    ):
+      raise ValueError("Logprobs are not returned from the vLLM.")
 
     max_tokens_length = max(len(x) for x in prompt_ids)
 
@@ -502,5 +509,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0],
+        logprobs=out_logprobs[0] if self.config.return_logprobs else None,
     )

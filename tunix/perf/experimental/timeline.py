@@ -185,6 +185,16 @@ class Timeline:
         )
       _span.end = end
 
+  def snapshot(self) -> Timeline:
+    """Returns a snapshot of the timeline with only completed spans."""
+    with self._lock:
+      tl = self.__class__(self.id, self.born)
+      tl.spans = dict(self.spans)
+      # Remove any active (uncompleted) spans from the snapshot.
+      for span_id in self._active_spans:
+        tl.spans.pop(span_id, None)
+      return tl
+
   def __repr__(self) -> str:
     out = f"Timeline({self.id}, {self.born:.6f})\n"
     with self._lock:
@@ -252,7 +262,10 @@ class AsyncTimeline(Timeline):
     def on_failure(e: Exception) -> None:
       # TODO(noghabi):Capture the span even if it fails, but add a tag that it
       # failed and process accordingly.
-      raise e
+      # Metrics are best effort and should not raise exceptions.
+      logging.error(
+          "Timeline span '%s' (id=%d) failed: %s", name, span_id, e, exc_info=e
+      )
 
     if not waitlist:
       on_success()
