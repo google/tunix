@@ -34,6 +34,7 @@ from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.rollout import base_rollout
+import json
 
 P = ParamSpec("P")
 
@@ -103,7 +104,7 @@ class TrajectoryCollectEngine:
     self.agent = agent
     self.env = env
     self.model_call = model_call
-    self.final_reward_fn = self.env.reward_fn
+    self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
@@ -380,11 +381,18 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
+<<<<<<< HEAD
     (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
 
     self.env_time["reset_latency"] += wall_time
     self.env_time["reset_cpu_time"] += cpu_time
 
+=======
+    obs, _ = await asyncio.get_event_loop().run_in_executor(
+        None, self.env.reset
+    )
+    self.final_reward_fn = self.env.reward_fn
+>>>>>>> 8f26a09 (update deepswe scripts)
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
@@ -446,11 +454,25 @@ class TrajectoryCollectEngine:
       action = []
 
 
+<<<<<<< HEAD
     tags = self._get_perf_tags()
     with self.perf_v2.span(
         perf_constants.ENVIRONMENT,
         tags=tags,
     ):
+=======
+    (
+        obs,
+        rew,
+        done,
+        info,
+    ), thread_delta = await asyncio.get_event_loop().run_in_executor(
+        None, clocked_env_step, action
+    )
+    self.env_time += thread_delta
+    print(f"\n[DEBUG] Env Observation (Rew: {rew}, Done: {done}):\n{json.dumps(obs, default=str, indent=2)}", flush=True)
+    print(f"\n[DEBUG] Env Info:\n{json.dumps(info, default=str, indent=2)}", flush=True)
+>>>>>>> 8f26a09 (update deepswe scripts)
 
       (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
           self.env.step, action
@@ -506,6 +528,7 @@ class TrajectoryCollectEngine:
     additional reward signals based on overall episode performance.
     """
     last_step = self.agent.get_current_step()
+<<<<<<< HEAD
     if last_step is None or self.final_reward_fn is None or not callable(self.final_reward_fn):
       # Skip reward computation in trajectory collection if no reward function
       # is provided or no step is taken.
@@ -513,6 +536,20 @@ class TrajectoryCollectEngine:
       return
     final_reward, wall_time, cpu_time = await self._run_with_timing(
         self.final_reward_fn, self.env.task, last_step.model_response
+=======
+    if last_step is None or not callable(self.final_reward_fn):
+      # Skip reward computation in trajectory collection if no reward function
+      # is provided or no step is taken.
+      if self.final_reward_fn is not None and not callable(self.final_reward_fn):
+        logging.error(
+            "final_reward_fn is not callable (got %s: %r). Skipping.",
+            type(self.final_reward_fn).__name__,
+            self.final_reward_fn,
+        )
+      return
+    final_reward = await asyncio.get_event_loop().run_in_executor(
+        None, self.final_reward_fn,
+>>>>>>> 8f26a09 (update deepswe scripts)
     )
 <<<<<<< HEAD
 
@@ -520,11 +557,14 @@ class TrajectoryCollectEngine:
     self.reward_time["reward_cpu_time"] += cpu_time
     last_step.reward += final_reward
     print(f"Final reward computed: {final_reward}", flush=True)
+<<<<<<< HEAD
 =======
     last_step.reward += final_reward.reward
     os.write(1, f"Final reward computed: {final_reward.reward}".encode('utf-8'))
 >>>>>>> 6103ef8 (add sglang mapping and more logging, will cleanup later)
 
+=======
+>>>>>>> 8f26a09 (update deepswe scripts)
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.
 

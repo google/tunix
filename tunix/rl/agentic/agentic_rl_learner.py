@@ -405,9 +405,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
 
-    os.write(1,b"chat lists\n")
-    byte_data = (json.dumps(chat_lists, indent=2) + "\n").encode('utf-8')
-    os.write(1, byte_data)
 
     result = self.rl_cluster.generate(
         prompts=chat_lists,

@@ -99,7 +99,7 @@ class SWEEnv(BaseTaskEnv):
 
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
-    os.write(1, f"Initialized SWEEnv group_id: {group_id} pair_index: {pair_index}\n".encode('utf-8'))
+    print(f"Initialized SWEEnv group_id: {group_id} pair_index: {pair_index}", flush=True)
 
   def _initial_observation(self) -> Any:
     if not self.env:
@@ -112,9 +112,9 @@ class SWEEnv(BaseTaskEnv):
           reward_timeout=self.reward_timeout,
           verbose=self.verbose,
       )
-      self.reward_fn = self.env.compute_reward
     else:
       self.env.reset()
+    self.reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
     else:
@@ -125,30 +125,22 @@ class SWEEnv(BaseTaskEnv):
     return self.env.get_task_instruction()
 
   def _step_impl(self, action: Any) -> EnvStepResult:
-    os.write(1, f"Step {self.total_steps} group_id: {self.extra_kwargs.get('group_id', 'None')} pair_index: {self.extra_kwargs.get('pair_index', 'None')}\n".encode('utf-8'))
+    print(f"Step {self.total_steps} group_id: {self.extra_kwargs.get('group_id', 'None')} pair_index: {self.extra_kwargs.get('pair_index', 'None')}", flush=True)
     if isinstance(action, str):
-      os.write(1, f"Received action string: {action}\n".encode('utf-8'))
       action_obj = Action.from_string(action)
     else:
       action_obj = action
 
     if not action_obj.function_name:
-      os.write(1,b"didn't find any function to call\n")
       return EnvStepResult(observation="", reward=0, done=False, info={})
 
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
       raise ValueError("Environment not initialized")
-    os.write(1,b"call r2egym env\n")
     obs, reward, done, info = self.env.step(action_obj)
-    os.write(1, f"Step result - obs: {obs} \n, reward: {reward}, done: {done}, info: {info}\n".encode('utf-8'))
     self.total_steps += 1
 
-    os.write(1, f"observation: {obs}\n".encode())
-    if reward != 0:
-        os.write(1,f"getting non-zero reward: {reward}")
-    if done == True:
-        os.write(1,b'signal done from r2egym env')
+
     return EnvStepResult(
         observation=str(obs), reward=reward, done=done, info=info
     )

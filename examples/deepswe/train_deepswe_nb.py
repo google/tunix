@@ -161,12 +161,6 @@ NODE_SELECTOR_VAL = args.node_selector_val
 # ==========================================
 # 1. Path Setup
 # ==========================================
-<<<<<<< HEAD
-=======
-# Use the absolute path to the ROOT folder 
-pathways_root = os.path.expanduser('~/deepswe/pathways-utils')
-r2egym_root = os.path.expanduser('~/deepswe/r2egym')
->>>>>>> 39a5208 (add sglang mapping and more logging, will cleanup later)
 
 # Use the current working directory as ROOT folder
 workdir = os.getcwd()
@@ -595,21 +589,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
-<<<<<<< HEAD
         checkpoint_root_directory=None,
         checkpointing_options=None,
-=======
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
-    ),
-    rollout_config=base_rollout.RolloutConfig(
-        max_prompt_length=MAX_PROMPT_LENGTH,
-        kv_cache_size=MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH*MAX_TURNS*2 + 256,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        top_k=TOP_K,
-        eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
->>>>>>> 39a5208 (add sglang mapping and more logging, will cleanup later)
     ),
     rollout_config=rollout_engine_config,
 )

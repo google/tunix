@@ -267,7 +267,7 @@ class AgenticSequenceRewardManager(SequenceRewardManager):  # pytype: disable=ba
 
       # Log trajectory rewards separately
       log_metrics.update(
-          _calculate_scalar_reward_log_metrics(trajectory_rewards_array, axis=0)
+          _calculate_scalar_reward_log_metrics(trajectory_rewards_array, prefix="rewards", axis=0)
       )
 
     if rewards is None:
