@@ -42,8 +42,29 @@ with cm:
 # %%
 from typing import Any, Dict, Optional
 import jax
+from jax import numpy as jnp
+from flax import nnx
+import orbax.checkpoint as ocp
 from tqdm.auto import tqdm
 import re
+
+
+def has_safetensors(path):
+  if NOTEBOOK_ENV == "g3":
+    for _, _, filenames in gfile.Walk(path):
+      for filename in filenames:
+        if filename.endswith(".safetensors"):
+          return True
+    return False
+  else:
+    # fsspec for gs:// paths
+    fs, _, _ = fsspec.core.get_fs_token_paths(path)
+    for _, _, filenames in fs.walk(path):
+      for filename in filenames:
+        if filename.endswith(".safetensors"):
+          return True
+    return False
+
 
 # Only used for Math500
 def extract_answer_robust(passage: str) -> str:
@@ -198,26 +219,68 @@ class Qwen25MathEvaluator:
     print(f"Mesh config: {mesh_config}")
     print(f"Available devices: {jax.devices()}")
 
-  def load_model(self):
-    print("Loading model components...")
-
-    print("Loading tokenizer...")
-
-    # Huggingface API doesn't work with gcs, OSS loads from model directly
-    tokenizer_source = self.model_version if NOTEBOOK_ENV != "g3" else self.model_path
-    self.tokenizer = AutoTokenizer.from_pretrained(
-        tokenizer_source, trust_remote_code=True
-    )
-
-    print("Setting up model config...")
-
-
+  def model_from_safe_tensors(self):
     print("Loading model from safe tensors...")
     with self.mesh:
       self.model = qwen2_params_lib.create_model_from_safe_tensors(
           file_dir=self.model_path, config=self.model_config, mesh=self.mesh
       )
 
+  def model_from_orbax_ckpt(self):
+    print(f"Loading model from orbax checkpoint {self.model_path}...")
+    with self.mesh:
+      abs_model: nnx.Module = nnx.eval_shape(
+          lambda: qwen2_lib.Qwen2(self.model_config, rngs=nnx.Rngs(params=0))
+      )
+      abs_state = nnx.state(abs_model)
+      abs_state = jax.tree.map(
+          lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.bfloat16, sharding=s),
+          abs_state,
+          nnx.get_named_sharding(abs_state, self.mesh),
+      )
+      item_handlers = {
+          "model_params": ocp.PyTreeCheckpointHandler(),
+          "optimizer_state": ocp.PyTreeCheckpointHandler(),
+      }
+      checkpointer = ocp.CheckpointManager(
+          self.model_path,
+          item_handlers=item_handlers,
+      )
+      model_cp_args = ocp.args.PyTreeRestore(
+          item=abs_state,
+          restore_args=ocp.checkpoint_utils.construct_restore_args(
+              target=abs_state
+          ),
+      )
+      ckpt = checkpointer.restore(
+          160,
+          args=ocp.args.Composite(
+              model_params=model_cp_args,
+          ),
+      )
+      graphdef, _ = nnx.split(abs_model)
+      new_state = nnx.State(ckpt.model_params)
+      self.model = nnx.merge(graphdef, new_state)
+
+  def load_model(self):
+    print("Loading model components...")
+
+    print("Loading tokenizer...")
+
+    # Huggingface API doesn't work with gcs, OSS loads from model directly
+    tokenizer_source = (
+        self.model_version if NOTEBOOK_ENV != "g3" else self.model_path
+    )
+    self.tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_source, trust_remote_code=True
+    )
+
+    print("Setting up model config...")
+
+    if has_safetensors(self.model_path):
+      self.model_from_safe_tensors()
+    else:
+      self.model_from_orbax_ckpt()
     print("Model loaded successfully!")
     print("Creating sampler...")
     cache_config = sampler_lib.CacheConfig(
@@ -256,6 +319,9 @@ class Qwen25MathEvaluator:
               mapping_config=mapping_config,
           ),
       )
+      # sync weights from self.model to the sampler's internal model
+      print("Syncing model weights to SGLang JAX sampler...")
+      self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
       from tunix.google.stubs import vllm_sampler_stub as vllm_sampler  # pylint: disable=g-import-not-at-top
 
@@ -268,7 +334,7 @@ class Qwen25MathEvaluator:
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
               mesh=self.mesh,
-              hbm_utilization=0.4,
+              hbm_utilization=0.8,
               init_with_random_weights=False,
               mapping_config=mapping_config,
               engine_kwargs={
@@ -276,11 +342,14 @@ class Qwen25MathEvaluator:
                   "max_model_len": (
                       self.max_prompt_length + self.max_generation_steps + 100
                   ),
-                  "max_num_seqs": 10,
-                  "max_num_batched_tokens": 256 * 2 * 1024,
+                  "max_num_seqs": 30,
+                  "max_num_batched_tokens": 30 * 10 * 1024 // 8,
               },
           ),
       )
+      # sync weights from self.model to the sampler's internal model
+      print("Syncing model weights to VLLM sampler...")
+      self.sampler_vllm.update_params(nnx.state(self.model))
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
@@ -568,6 +637,7 @@ else:
 
 MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "MATH-500/test.jsonl")
 AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+
 MODEL_MAPPING = {
     "Qwen/Qwen2.5-1.5B-Instruct": (
         qwen2_lib.ModelConfig.qwen2p5_1p5b(),
@@ -629,6 +699,7 @@ model_version = "agentica-org/DeepScaleR-1.5B-Preview"
 # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 dataset = AIME_2024_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
+
 
 evaluator = Qwen25MathEvaluator(
     model_config=model_config,
