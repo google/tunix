@@ -60,6 +60,11 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
     -   Asynchronous rollout for high-throughput trajectory collection
     -   Trajectory batching and grouping
 
+## News
+
+-   [2026/01] Tunix model now supports efficient kernel execution ([splash attn](https://github.com/google/tunix/blob/main/tunix/models/qwen3/model.py#L150-L151), [GMM MoE](https://github.com/google/tunix/blob/main/tunix/models/qwen3/model.py#L638)).
+-   [2025/12] [Agentic RL Training](https://github.com/google/tunix/tree/main/tunix/rl/agentic) has been released, with efficient support of multi-turn agent-env interaction, tool usage, async rollout, etc.
+
 ## Framework & Infra Highlights
 -   **Modularity**:
     -   Components are designed to be reusable and composable
