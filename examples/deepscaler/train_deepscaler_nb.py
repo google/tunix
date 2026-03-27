@@ -127,8 +127,9 @@ arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument("--lora", action="store_true")
 args, _ = arg_parser.parse_known_args()
-
+print("running with args: ", args)
 # ====== Data ======
 TRAIN_FRACTION = 1.0
 
@@ -138,7 +139,7 @@ SEED = args.seed
 # ====== LoRA ======
 RANK = 64
 ALPHA = 64.0
-TRAIN_WITH_LORA = False
+TRAIN_WITH_LORA = args.lora  # default False
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
