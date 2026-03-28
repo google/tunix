@@ -97,6 +97,7 @@ class TrajectoryStatus(Enum):
   TIMEOUT = auto()  # corresponds to `timeout`
 
   # System Errors
+  ENV_TIMEOUT = auto()  # env.step hung and was killed by asyncio.wait_for
   FAILED = auto()
 
 

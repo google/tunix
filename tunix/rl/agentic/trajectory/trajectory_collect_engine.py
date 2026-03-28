@@ -120,6 +120,7 @@ class TrajectoryCollectEngine:
         agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
         agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
         agent_types.TrajectoryStatus.TIMEOUT,
+        agent_types.TrajectoryStatus.ENV_TIMEOUT,
     }
     printable_set = {status.name for status in self.filter_statuses}
     print(f"Filtered Statuses: {printable_set}", flush=True)
@@ -152,9 +153,19 @@ class TrajectoryCollectEngine:
       )
 
   async def _run_with_timing(
-      self, func: Callable[..., Any], *args
+      self, func: Callable[..., Any], *args, timeout: Optional[float] = None
   ) -> Tuple[Any, float, float]:
-    """Runs a sync function in an executor and returns (result, wall_time, cpu_time)."""
+    """Runs a sync function in an executor and returns (result, wall_time, cpu_time).
+
+    Args:
+      func: Synchronous callable to run in the executor.
+      *args: Positional arguments forwarded to func.
+      timeout: Optional deadline in seconds. If provided and the executor future
+        does not finish in time, asyncio.TimeoutError is re-raised to the caller.
+
+    Raises:
+      asyncio.TimeoutError: When timeout is not None and is exceeded.
+    """
 
     def _clocked_wrapper():
       t_start = time.thread_time()
@@ -165,8 +176,11 @@ class TrajectoryCollectEngine:
     loop = asyncio.get_running_loop()
     wall_start = time.perf_counter()
 
-    # Run the wrapper in the default executor
-    result, cpu_delta = await loop.run_in_executor(None, _clocked_wrapper)
+    fut = loop.run_in_executor(None, _clocked_wrapper)
+    if timeout is not None:
+      result, cpu_delta = await asyncio.wait_for(fut, timeout=timeout)
+    else:
+      result, cpu_delta = await fut
 
     wall_delta = time.perf_counter() - wall_start
     return result, wall_delta, cpu_delta
@@ -456,15 +470,40 @@ class TrajectoryCollectEngine:
       action = []
 
 
-    tags = self._get_perf_tags()
-    with self.perf_v2.span(
-        perf_constants.ENVIRONMENT,
-        tags=tags,
-    ):
+    step_idx = len(self.agent.trajectory.steps)
+    remaining_time = self.timeout - (time.perf_counter() - self._start_ts)
 
-      (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
-          self.env.step, action
-      )
+    tags = self._get_perf_tags()
+    try:
+      with self.perf_v2.span(
+          perf_constants.ENVIRONMENT,
+          tags=tags,
+      ):
+        (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
+            self.env.step, action, timeout=remaining_time
+        )
+    except asyncio.TimeoutError:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
+      if step_idx == 0:
+        logging.error(
+            "%s env.step hung at step 0 (first action) and was killed after"
+            " %.1f s remaining timeout. This trajectory produced no usable"
+            " data. Consider investigating the environment.",
+            self._debug_prefix,
+            remaining_time,
+        )
+      else:
+        logging.error(
+            "%s env.step hung at step %d and was killed after %.1f s"
+            " remaining timeout.",
+            self._debug_prefix,
+            step_idx,
+            remaining_time,
+        )
+      cur_step = self.agent.get_current_step()
+      if cur_step is not None:
+        cur_step.done = True
+      return True
 
     self.env_time["step_latency"] += wall_time
     self.env_time["step_cpu_time"] += cpu_time
