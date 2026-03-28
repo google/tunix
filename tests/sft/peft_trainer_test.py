@@ -598,6 +598,29 @@ class PeftTrainerTest(parameterized.TestCase):
         any_order=False,
     )
 
+  @parameterized.named_parameters(
+      ('shard_input_data_true', True),
+      ('shard_input_data_false', False),
+  )
+  @mock.patch.object(peft_trainer.sharding_utils, 'shard_input', autospec=True)
+  def test_shard_input_data_flag(self, shard_input_data, mock_shard_input):
+    mock_shard_input.side_effect = lambda x, _: x
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=2,
+        shard_input_data=shard_input_data,
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.train(self.train_ds, self.eval_ds)
+
+    if shard_input_data:
+      mock_shard_input.assert_called()
+    else:
+      mock_shard_input.assert_not_called()
+
   def test_loss_fn_with_aux(self):
     def custom_loss_fn(
         model: nnx.Module,
