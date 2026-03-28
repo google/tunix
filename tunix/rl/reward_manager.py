@@ -92,7 +92,7 @@ class SequenceRewardManager(AbstractRewardManager):
       completions: List[str],
       **kwargs,
   ) -> Dict[str, Any]:
-    """Computes the rewards for completions using the provided reward function, and return the sequence-level rewards information for advantage computationand logging."""
+    """Computes the rewards for completions using the provided reward function, and return the sequence-level rewards information for advantage computation and logging."""
     return self._compute_rewards(prompts, completions, **kwargs)
 
   def _compute_rewards(
