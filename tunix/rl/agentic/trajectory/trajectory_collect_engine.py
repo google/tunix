@@ -69,7 +69,12 @@ class TrajectoryCollectEngine:
       tokenizer=None,
       chat_parser=None,
       valid_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+<<<<<<< Updated upstream
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
+=======
+      filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+      overlong_filter: bool = True,
+>>>>>>> Stashed changes
   ):
     """Initialize the trajectory collection engine.
 
@@ -108,16 +113,44 @@ class TrajectoryCollectEngine:
     self.gamma = gamma
     self.max_context_limit = max_context_limit
     self.timeout = timeout
+  
 
     # Tokenizer utilities for stepwise tokenization
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self._start_ts: float = 0.0
-    self.valid_statuses = valid_statuses or {
-        agent_types.TrajectoryStatus.SUCCEEDED
+    self.filter_statuses = filter_statuses or {
+        agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
+        agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+        agent_types.TrajectoryStatus.TIMEOUT,
     }
+<<<<<<< Updated upstream
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
     self.env_time: float = 0.0
+=======
+    printable_set = {status.name for status in self.filter_statuses}
+    print(f"Filtered Statuses: {printable_set}", flush=True)
+  
+    self.overlong_filter = overlong_filter
+    self.env_time = {
+        "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
+        "reset_cpu_time": (
+            0.0
+        ),  # Thread/CPU time (Actual processing time on the worker thread)
+        "step_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
+        "step_cpu_time": (
+            0.0
+        ),  # Thread/CPU time (Actual processing time on the worker thread)
+    }
+    self.reward_time = {
+        "reward_latency": (
+            0.0
+        ),  # Wall-clock time (Total real-world time elapsed)
+        "reward_cpu_time": (
+            0.0
+        ),  # Thread/CPU time (Actual processing time on the worker thread)
+    }
+>>>>>>> Stashed changes
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
       logging.warning(
@@ -178,6 +211,7 @@ class TrajectoryCollectEngine:
           self.agent.trajectory.status = (
               agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
           )
+          print("MAX_CONTEXT_LIMIT_REACHED", flush=True)
           break
 
       if done:
@@ -185,7 +219,14 @@ class TrajectoryCollectEngine:
           self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
         break
 
-    await self._append_final_reward()
+    masked_out = (
+        self.overlong_filter
+        and self.agent.trajectory.status in self.filter_statuses
+    )
+    if not masked_out:
+      await self._append_final_reward()
+    else:
+      print(f"mask out trajectory due to status {self.agent.trajectory.status.name}",flush=True)
     self.compute_mc_reward()
     self.compute_trajectory_reward()
     await self._close()
@@ -241,14 +282,18 @@ class TrajectoryCollectEngine:
           if getattr(step, "env_tokens", None) is not None:
             logprobs.append(np.zeros(len(step.env_tokens)))
 
-      # TODO(sizhi): (b/484422277)
-      is_valid = self.agent.trajectory.status in self.valid_statuses
+      conversation_masks = np.concatenate(conversation_masks, axis=0)
+      final_masks = (
+          np.zeros_like(conversation_masks)
+          if masked_out
+          else conversation_masks
+      )
 
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
           "conversation_tokens": np.concatenate(conversation_tokens, axis=0),
-          "conversation_masks": np.concatenate(conversation_masks, axis=0),
+          "conversation_masks": final_masks,
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
@@ -451,14 +496,23 @@ class TrajectoryCollectEngine:
     additional reward signals based on overall episode performance.
     """
     last_step = self.agent.get_current_step()
+<<<<<<< Updated upstream
     if last_step is None or self.final_reward_fn is None:
+=======
+    if last_step is None or self.final_reward_fn is None or not callable(self.final_reward_fn):
+>>>>>>> Stashed changes
       # Skip reward computation in trajectory collection if no reward function
       # is provided or no step is taken.
+      print("Final reward function is skipped", flush=True)
       return
     final_reward = await asyncio.get_event_loop().run_in_executor(
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
     last_step.reward += final_reward
+<<<<<<< Updated upstream
+=======
+    print(f"Final reward computed: {final_reward}", flush=True)
+>>>>>>> Stashed changes
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.

@@ -82,7 +82,7 @@ parser.add_argument("--train_with_lora", type=bool, default=False)
 # GRPO Config
 parser.add_argument("--num_generations", type=int, default=2)
 parser.add_argument("--num_iterations", type=int, default=1)
-parser.add_argument("--beta", type=float, default=0.001)
+parser.add_argument("--beta", type=float, default=0.0)
 parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
 
@@ -114,11 +114,38 @@ parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
 parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 
 # DeepSWE Agentic Specifics
+<<<<<<< Updated upstream
 parser.add_argument("--max_turns", type=int, default=20)
+=======
+parser.add_argument(
+    "--enable_max_context_limit", 
+    type=bool, 
+    default=True, 
+    help="Whether to enable max context limit, the value will be KV cache size."
+)
+parser.add_argument("--max_turns", type=int, default=50)
+>>>>>>> Stashed changes
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
 parser.add_argument("--max_concurrency", type=int, default=1)
 parser.add_argument("--context_ratio", type=int, default=2)
 
+parser.add_argument("--overlong_filter", type=bool, default=True, 
+                        help="Whether to filter out trajectories that exceed length limits")
+
+from tunix.rl.agentic.agents import agent_types
+VALID_STATUS_NAMES = [status.name for status in agent_types.TrajectoryStatus]
+
+parser.add_argument(
+    "--filter_statuses", 
+    type=str, 
+    nargs="+", 
+    default=None,  # Set default to None
+    choices=VALID_STATUS_NAMES,
+    help="List of trajectory statuses to filter out. Defaults to None."
+)
+
+parser.add_argument("--loss_agg_mode", type=str, default="sequence-mean-token-scale")
+parser.add_argument("--advantage_estimator", type=str, default="rloo")
 
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
@@ -329,6 +356,17 @@ VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS  # 1 * 2 = 2
 
 VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 4
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
+
+OVERLONG_FILTER = args.overlong_filter
+FILTER_STATUSES = (
+    {TrajectoryStatus[name] for name in args.filter_statuses} 
+    if args.filter_statuses is not None 
+    else None
+)
+LOSS_AGG_MODE = args.loss_agg_mode
+ADVANTAGE_ESTIMATOR = args.advantage_estimator 
+ENABLE_MAX_CONTEXT_LIMIT = args.enable_max_context_limit
+
 # %%
 # ==========================================
 # 5. JAX Device & Mesh Setup
@@ -446,7 +484,11 @@ checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
+<<<<<<< Updated upstream
     log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=2
+=======
+    log_dir="gs://sizhi-dev/deepswe", flush_every_n_steps=2
+>>>>>>> Stashed changes
 )
 
 optimizer = optax.adamw(
@@ -563,6 +605,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 # ==========================================
 # 11. Learner & Agent Setup
 # ==========================================
+<<<<<<< Updated upstream
 grpo_config = agentic_grpo_learner.GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
@@ -575,6 +618,30 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
     off_policy_steps=0,
     episode_timeout=PER_TURN_TIMEOUT_SECS * MAX_TURNS,
 )
+=======
+
+config_kwargs = {
+    "num_generations": NUM_GENERATIONS,
+    "num_iterations": NUM_ITERATIONS,
+    "max_response_length": MAX_RESPONSE_LENGTH,
+    "beta": BETA,
+    "epsilon": EPSILON,
+    "system_prompt": SWE_SYSTEM_PROMPT,
+    "max_concurrency": MAX_CONCURRENCY,
+    "epsilon_high": EPSILON_HIGH,
+    "off_policy_steps": 0,
+    "episode_timeout": PER_TURN_TIMEOUT_SECS * MAX_TURNS,
+    "overlong_filter": OVERLONG_FILTER,
+    "filter_statuses": FILTER_STATUSES,
+    "loss_agg_mode": LOSS_AGG_MODE,
+    "advantage_estimator": ADVANTAGE_ESTIMATOR,
+}
+
+if ENABLE_MAX_CONTEXT_LIMIT:
+    config_kwargs["max_context_limit"] = KV_CACHE_SIZE
+
+grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
+>>>>>>> Stashed changes
 
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
@@ -635,6 +702,42 @@ def mixed_type_batch_fn(elements):
 
   return batched_data
 
+<<<<<<< Updated upstream
+=======
+try:
+  import datetime
+  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  wandb_config = {
+        "batch_size": BATCH_SIZE,
+        "mini_batch_size": MINI_BATCH_SIZE,
+        "learning_rate": LEARNING_RATE,
+        "B1": B1,
+        "B2": B2,
+        "WARMUP_STEPS": WARMUP_STEPS,
+        "weight_decay": WEIGHT_DECAY,
+        "num_steps": MAX_STEPS,
+        "num_generations": NUM_GENERATIONS,
+        "beta": BETA,
+        "epsilon": EPSILON,
+        "epsilon_high": EPSILON_HIGH,
+        "max_response_length": MAX_RESPONSE_LENGTH,
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "top_k": TOP_K,
+        "max_concurrency": MAX_CONCURRENCY,
+        "rollout_engine": ROLLOUT_ENGINE,
+        "kv_cache_size": KV_CACHE_SIZE,
+        "overlong_filter": OVERLONG_FILTER,
+    }
+  wandb.init(
+    project="tunix",
+    name=run_name,
+    config=wandb_config)
+  # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
+except Exception as e:
+  print(f"sizhi: W&B initialization failed with error: {e}")
+
+>>>>>>> Stashed changes
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,
