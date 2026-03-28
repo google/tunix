@@ -63,12 +63,10 @@ parser.add_argument("--model_version", type=str, default="Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 
 # Data & Training Flow
-parser.add_argument("--batch_size", type=int, default=1)
-parser.add_argument("--mini_batch_size", type=int, default=1)
-parser.add_argument("--num_batches", type=int, default=20)
-parser.add_argument("--num_test_batches", type=int, default=50)
+parser.add_argument("--batch_size", type=int, default=8)
+parser.add_argument("--mini_batch_size", type=int, default=8)
 parser.add_argument("--train_fraction", type=float, default=1.0)
-parser.add_argument("--max_steps", type=int, default=10)
+parser.add_argument("--max_steps", type=int, default=1000)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
@@ -80,7 +78,7 @@ parser.add_argument("--alpha", type=float, default=64.0)
 parser.add_argument("--train_with_lora", type=bool, default=False)
 
 # GRPO Config
-parser.add_argument("--num_generations", type=int, default=2)
+parser.add_argument("--num_generations", type=int, default=8)
 parser.add_argument("--num_iterations", type=int, default=1)
 parser.add_argument("--beta", type=float, default=0.0)
 parser.add_argument("--epsilon", type=float, default=0.2)
@@ -99,9 +97,9 @@ parser.add_argument("--vllm_utilization", type=float, default=0.4)
 parser.add_argument("--learning_rate", type=float, default=1e-6)
 parser.add_argument("--b1", type=float, default=0.9)
 parser.add_argument("--b2", type=float, default=0.99)
-parser.add_argument("--weight_decay", type=float, default=0.1)
-parser.add_argument("--max_grad_norm", type=float, default=0.1)
-parser.add_argument("--warmup_ratio", type=float, default=0.1)
+parser.add_argument("--weight_decay", type=float, default=0.01)
+parser.add_argument("--max_grad_norm", type=float, default=1)
+# parser.add_argument("--warmup_ratio", type=float, default=0.1)
 
 # Checkpointing
 parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
@@ -110,8 +108,8 @@ parser.add_argument("--save_interval_steps", type=int, default=500)
 
 # Microbatch Sizes
 parser.add_argument("--train_micro_batch_size", type=int, default=1)
-parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
-parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
+parser.add_argument("--rollout_micro_batch_size", type=int, default=8)
+parser.add_argument("--compute_logps_micro_batch_size", type=int, default=8)
 
 # DeepSWE Agentic Specifics
 parser.add_argument(
@@ -122,8 +120,7 @@ parser.add_argument(
 )
 parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
-parser.add_argument("--max_concurrency", type=int, default=1)
-parser.add_argument("--context_ratio", type=int, default=2)
+parser.add_argument("--max_concurrency", type=int, default=1000)
 
 parser.add_argument("--overlong_filter", type=bool, default=True, 
                         help="Whether to filter out trajectories that exceed length limits")
@@ -145,8 +142,16 @@ parser.add_argument("--advantage_estimator", type=str, default="rloo")
 
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
-parser.add_argument("--model_dtype", type=str, default="bfloat16",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
+parser.add_argument("--dtype", type=str, default="bfloat16",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
     help="Data type for the model (e.g., bfloat16, float32)")
+
+parser.add_argument("--param_dtype", type=str, default="float32",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
+    help="Data type for the model (e.g., bfloat16, float32)")
+parser.add_argument("--enable_mixed_precision", type=bool, default=True, help="Whether to enable mixed precision")
+
+parser.add_argument("--use_flash_attention", type=bool, default=True)
+parser.add_argument("--flash_attention_block_size", type:int, default=1024)
+
 
 args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
@@ -295,12 +300,15 @@ DTYPE_MAP = {
     "float32": jnp.float32,
     "int32": jnp.int32,
 }
-MODEL_DTYPE = DTYPE_MAP[args.model_dtype]
+DTYPE = DTYPE_MAP[args.dtype]
+PARAM_DTYPE = DTYPE_MAP[args.PARAM_DTYPE]
+ENABLE_MIXED_PRECISION = args.enable_mixed_precision
+USE_FLASH_ATTENTION = args.use_flash_attention
+FLASH_ATTENTION_BLOCK_SIZE = args.flash_attention_block_size
 ENABLE_REMAT = args.enable_remat
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
-NUM_BATCHES = args.num_batches
-NUM_TEST_BATCHES = args.num_test_batches
+
 
 COMPUTE_LOGPS_MICRO_BATCH_SIZE = args.compute_logps_micro_batch_size
 TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
@@ -317,17 +325,15 @@ MAX_TURNS = args.max_turns
 PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
-CONTEXT_RATIO = args.context_ratio  # Context length can be up to 2x responselength in DeepSWE due to multi-turn interactions and long responses, so we set context ratio to 2 to accommodate this.
-KV_CACHE_SIZE = MAX_PROMPT_LENGTH + (
-    MAX_RESPONSE_LENGTH * CONTEXT_RATIO * MAX_TURNS
-)
+KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
+
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
 B1 = args.b1
 B2 = args.b2
 WEIGHT_DECAY = args.weight_decay
-WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
+# WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
 MAX_GRAD_NORM = args.max_grad_norm
 
 # ====== Checkpoint saving ======
@@ -339,9 +345,6 @@ DO_MEM_PROFILING = args.do_mem_profiling
 ROLLOUT_ENGINE = args.rollout_engine
 CKPT_DIR = args.ckpt_dir
 
-# Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
-
 VLLM_UTILIZATION = args.vllm_utilization
 
 
@@ -350,7 +353,7 @@ VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS  # 1 * 2 = 2
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
-VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 4
+VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
@@ -376,6 +379,12 @@ config = call_model_config(MODEL_VERSION)
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 
+if ENABLE_MIXED_PRECISION:
+  config.param_dtype = PARAM_DTYPE
+
+if USE_FLASH_ATTENTION:
+  config.use_flash_attention = USE_FLASH_ATTENTION
+  config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
 
 devices = jax.devices()
 split = int(len(devices) / 2)
@@ -399,7 +408,7 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 # ==========================================
 
 qwen_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=MODEL_DTYPE
+    MODEL_PATH, config, mesh=train_mesh, dtype=DTYPE
 )
 
 
@@ -483,18 +492,18 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="gs://sizhi-dev/deepswe", flush_every_n_steps=2
 )
 
-optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
+optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
+  learning_rate=LEARNING_RATE,
+  b1=B1,
+  b2=B2,
+  weight_decay=WEIGHT_DECAY
 )
+
+if MAX_GRAD_NORM is not None:
+  optimizer = optax.chain(
+      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      optimizer,
+  )
 
 
 # %%
@@ -718,7 +727,7 @@ train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,
     tokenizer,
     batch_size=BATCH_SIZE,
-    num_batches=NUM_BATCHES,
+    num_batches=None,
     max_prompt_length=MAX_PROMPT_LENGTH,
     fraction=TRAIN_FRACTION,
     num_epochs=NUM_EPOCHS,

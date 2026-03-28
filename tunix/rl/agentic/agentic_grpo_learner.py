@@ -308,6 +308,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
+      print("trajectory reward",trajectory_rewards_list, flush=True)
+
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -459,34 +461,48 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
-    # Log completion lengths and env_time.
+    # Log completion lengths, rewards and env time.
     agg_completion_mask = completion_mask.sum(axis=-1)
-    env_times = [item.traj.get("env_time", 0.0) for item in trajectories]
-    self.rl_cluster.buffer_metrics_async(
-        {
-            "generation/completions/mean_length": (
-                np.mean(agg_completion_mask),
-                np.mean,
-            ),
-            "generation/completions/max_length": (
-                np.max(agg_completion_mask),
-                np.max,
-            ),
-            "generation/completions/min_length": (
-                np.min(agg_completion_mask),
-                np.min,
-            ),
-            "generation/completions/clip_ratio": (
-                clipped_completion_count / len(trajectories),
-                np.mean,
-            ),
-            "generation/env_time/mean": (np.mean(env_times), np.mean),
-            "generation/env_time/max": (np.max(env_times), np.max),
-            "generation/env_time/min": (np.min(env_times), np.min),
-        },
-        mode=mode,
-        step=expected_step,
-    )
+    metrics_to_log = {
+        "generation/completions/mean_length": (
+            np.mean(agg_completion_mask),
+            np.mean,
+        ),
+        "generation/completions/max_length": (
+            np.max(agg_completion_mask),
+            np.max,
+        ),
+        "generation/completions/min_length": (
+            np.min(agg_completion_mask),
+            np.min,
+        ),
+        "generation/completions/clip_ratio": (
+            clipped_completion_count / len(trajectories),
+            np.mean,
+        ),
+    }
+
+    # Extract time metrics (env_time and reward_time)
+    for time_key, prefix in [
+        ("env_time", "generation/trajectory/env_time"),
+        ("reward_time", "generation/trajectory/reward_time"),
+    ]:
+      time_dicts = [item.traj.get(time_key, {}) for item in trajectories]
+
+      # Safely gather all unique sub-keys (e.g., 'reset_latency') across all trajectories
+      for sub_key in {k for d in time_dicts for k in d.keys()}:
+        vals = [d.get(sub_key, 0.0) for d in time_dicts]
+        metrics_to_log.update({
+            f"{prefix}/{sub_key}/mean": (np.mean(vals), np.mean),
+            f"{prefix}/{sub_key}/max": (np.max(vals), np.max),
+            f"{prefix}/{sub_key}/min": (np.min(vals), np.min),
+        })
+        self.rl_cluster.buffer_metrics_async(
+            metrics_to_log,
+            mode=mode,
+            step=expected_step,
+        )
+
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
           prompts=original_inputs["prompts"],

@@ -120,7 +120,8 @@ class Trajectory:
   steps: list[Step] = dataclasses.field(default_factory=list)
   reward: float = 0.0
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
-  env_time: float = 0.0
+  env_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -136,7 +137,8 @@ class Trajectory:
         "steps": [dataclasses.asdict(step) for step in self.steps],
         "reward": float(self.reward),
         "status": self.status.name,
-        "env_time": float(self.env_time),
+        "env_time": self.env_time,
+        "reward_time": self.reward_time,
     }
 
 
