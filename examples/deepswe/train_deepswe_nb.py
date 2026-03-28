@@ -150,7 +150,7 @@ parser.add_argument("--param_dtype", type=str, default="float32",choices=["bfloa
 parser.add_argument("--enable_mixed_precision", type=bool, default=True, help="Whether to enable mixed precision")
 
 parser.add_argument("--use_flash_attention", type=bool, default=True)
-parser.add_argument("--flash_attention_block_size", type:int, default=1024)
+parser.add_argument("--flash_attention_block_size", type=int, default=1024)
 
 
 args, _ = parser.parse_known_args()
@@ -302,7 +302,7 @@ DTYPE_MAP = {
     "int32": jnp.int32,
 }
 DTYPE = DTYPE_MAP[args.dtype]
-PARAM_DTYPE = DTYPE_MAP[args.PARAM_DTYPE]
+PARAM_DTYPE = DTYPE_MAP[args.param_dtype]
 ENABLE_MIXED_PRECISION = args.enable_mixed_precision
 USE_FLASH_ATTENTION = args.use_flash_attention
 FLASH_ATTENTION_BLOCK_SIZE = args.flash_attention_block_size
