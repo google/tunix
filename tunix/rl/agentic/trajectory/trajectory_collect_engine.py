@@ -69,12 +69,8 @@ class TrajectoryCollectEngine:
       tokenizer=None,
       chat_parser=None,
       valid_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
-<<<<<<< Updated upstream
-      perf_v2: Optional[perf_tracer_v2.Tracer] = None,
-=======
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = True,
->>>>>>> Stashed changes
   ):
     """Initialize the trajectory collection engine.
 
@@ -124,10 +120,6 @@ class TrajectoryCollectEngine:
         agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
         agent_types.TrajectoryStatus.TIMEOUT,
     }
-<<<<<<< Updated upstream
-    self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
-    self.env_time: float = 0.0
-=======
     printable_set = {status.name for status in self.filter_statuses}
     print(f"Filtered Statuses: {printable_set}", flush=True)
   
@@ -150,7 +142,6 @@ class TrajectoryCollectEngine:
             0.0
         ),  # Thread/CPU time (Actual processing time on the worker thread)
     }
->>>>>>> Stashed changes
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
       logging.warning(
@@ -496,11 +487,7 @@ class TrajectoryCollectEngine:
     additional reward signals based on overall episode performance.
     """
     last_step = self.agent.get_current_step()
-<<<<<<< Updated upstream
-    if last_step is None or self.final_reward_fn is None:
-=======
     if last_step is None or self.final_reward_fn is None or not callable(self.final_reward_fn):
->>>>>>> Stashed changes
       # Skip reward computation in trajectory collection if no reward function
       # is provided or no step is taken.
       print("Final reward function is skipped", flush=True)
@@ -509,10 +496,7 @@ class TrajectoryCollectEngine:
         None, self.final_reward_fn, self.env.task, last_step.model_response
     )
     last_step.reward += final_reward
-<<<<<<< Updated upstream
-=======
     print(f"Final reward computed: {final_reward}", flush=True)
->>>>>>> Stashed changes
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.

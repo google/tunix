@@ -114,9 +114,6 @@ parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
 parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 
 # DeepSWE Agentic Specifics
-<<<<<<< Updated upstream
-parser.add_argument("--max_turns", type=int, default=20)
-=======
 parser.add_argument(
     "--enable_max_context_limit", 
     type=bool, 
@@ -124,7 +121,6 @@ parser.add_argument(
     help="Whether to enable max context limit, the value will be KV cache size."
 )
 parser.add_argument("--max_turns", type=int, default=50)
->>>>>>> Stashed changes
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
 parser.add_argument("--max_concurrency", type=int, default=1)
 parser.add_argument("--context_ratio", type=int, default=2)
@@ -484,11 +480,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-<<<<<<< Updated upstream
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=2
-=======
     log_dir="gs://sizhi-dev/deepswe", flush_every_n_steps=2
->>>>>>> Stashed changes
 )
 
 optimizer = optax.adamw(
@@ -605,20 +597,6 @@ rl_cluster = rl_cluster_lib.RLCluster(
 # ==========================================
 # 11. Learner & Agent Setup
 # ==========================================
-<<<<<<< Updated upstream
-grpo_config = agentic_grpo_learner.GRPOConfig(
-    num_generations=NUM_GENERATIONS,
-    num_iterations=NUM_ITERATIONS,
-    max_response_length=MAX_RESPONSE_LENGTH,
-    beta=BETA,
-    epsilon=EPSILON,
-    system_prompt=SWE_SYSTEM_PROMPT,
-    max_concurrency=MAX_CONCURRENCY,
-    epsilon_high=EPSILON_HIGH,
-    off_policy_steps=0,
-    episode_timeout=PER_TURN_TIMEOUT_SECS * MAX_TURNS,
-)
-=======
 
 config_kwargs = {
     "num_generations": NUM_GENERATIONS,
@@ -641,7 +619,6 @@ if ENABLE_MAX_CONTEXT_LIMIT:
     config_kwargs["max_context_limit"] = KV_CACHE_SIZE
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
->>>>>>> Stashed changes
 
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
@@ -702,10 +679,9 @@ def mixed_type_batch_fn(elements):
 
   return batched_data
 
-<<<<<<< Updated upstream
-=======
 try:
   import datetime
+  import wandb
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb_config = {
         "batch_size": BATCH_SIZE,
@@ -737,7 +713,6 @@ try:
 except Exception as e:
   print(f"sizhi: W&B initialization failed with error: {e}")
 
->>>>>>> Stashed changes
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,

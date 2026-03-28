@@ -90,12 +90,9 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   num_generations: int = 1
   num_iterations: int = 1
   episode_timeout: float = 1800.0
-<<<<<<< Updated upstream
-=======
   max_context_limit: Optional[float] = None
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
->>>>>>> Stashed changes
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -422,14 +419,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,
-<<<<<<< Updated upstream
-        perf_v2=self.rl_cluster.perf_v2,
-=======
         max_context_limit=self.algo_config.max_context_limit,
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
 
->>>>>>> Stashed changes
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,
