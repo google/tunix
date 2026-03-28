@@ -42,6 +42,9 @@ BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
 
 
+_LOGGED_FILTER_STATUSES: set = set()
+
+
 class TrajectoryCollectEngine:
   """Asynchronous trajectory collection engine for agent-env interactions.
 
@@ -122,8 +125,10 @@ class TrajectoryCollectEngine:
         agent_types.TrajectoryStatus.TIMEOUT,
         agent_types.TrajectoryStatus.ENV_TIMEOUT,
     }
-    printable_set = {status.name for status in self.filter_statuses}
-    print(f"Filtered Statuses: {printable_set}", flush=True)
+    printable_set = frozenset(status.name for status in self.filter_statuses)
+    if printable_set not in _LOGGED_FILTER_STATUSES:
+      _LOGGED_FILTER_STATUSES.add(printable_set)
+      print(f"Filtered Statuses: {set(printable_set)}", flush=True)
   
     self.overlong_filter = overlong_filter
     self.env_time = {
