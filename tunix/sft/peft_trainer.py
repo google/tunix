@@ -76,6 +76,9 @@ class TrainingConfig:
 
   data_sharding_axis: Tuple[str, ...] = ("fsdp",)
 
+  # Whether to shard the inputs inside the training loop.
+  shard_input_data: bool = True
+
   # Controls how many train_steps can be scheduled ahead of time.
   max_inflight_computations: int = 2
 
@@ -649,9 +652,10 @@ class PeftTrainer:
           break
 
         train_example = self._prepare_inputs(train_example)
-        train_example = sharding_utils.shard_input(
-            train_example, self.config.data_sharding_axis
-        )
+        if self.config.shard_input_data:
+          train_example = sharding_utils.shard_input(
+              train_example, self.config.data_sharding_axis
+          )
 
         self._throttler.wait_for_next()
         if self.training_hooks:
@@ -801,9 +805,10 @@ class PeftTrainer:
         if eval_example is None:
           break
         eval_example = self._prepare_inputs(eval_example)
-        eval_example = sharding_utils.shard_input(
-            eval_example, self.config.data_sharding_axis
-        )
+        if self.config.shard_input_data:
+          eval_example = sharding_utils.shard_input(
+              eval_example, self.config.data_sharding_axis
+          )
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
         loss, aux = eval_step_fn(eval_example)
