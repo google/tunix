@@ -127,6 +127,7 @@ arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--ent_coef", type=float, default=1e-4)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
+arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
 arg_parser.add_argument("--temperature", type=float, default=0.8)
 arg_parser.add_argument("--top_p", type=float, default=1.0)
@@ -161,7 +162,7 @@ TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
+MAX_PROMPT_LENGTH = args.max_prompt_length
 MAX_RESPONSE_LENGTH = args.max_response_length
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
