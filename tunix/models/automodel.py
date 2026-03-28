@@ -13,6 +13,7 @@
 # limitations under the License.
 """AutoModel class for Tunix."""
 
+import dataclasses
 import enum
 import gc
 import importlib
@@ -486,6 +487,15 @@ class AutoModel:
     if not model_params:
       # pick corresponding config based on model version
       model_params = call_model_config(naming_info.model_name)
+
+      # Apply any model config field overrides passed via kwargs (e.g.
+      # use_flash_attention, flash_attention_block_size).
+      if dataclasses.is_dataclass(model_params):
+        valid_fields = {f.name for f in dataclasses.fields(model_params)}
+        overrides = {k: v for k, v in kwargs.items() if k in valid_fields}
+        if overrides:
+          logging.info('Applying model config overrides: %s', overrides)
+          model_params = dataclasses.replace(model_params, **overrides)
 
       with mesh:
         model = create_model_from_safe_tensors(

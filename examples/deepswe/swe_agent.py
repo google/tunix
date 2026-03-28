@@ -358,8 +358,6 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   # Regex to match (non-greedily) from `<function=` up to the first `</function>`
   pattern = re.compile(r"(?s)(<function=.*?</function>)")
   match = pattern.search(response_text)
-  print(f"Parsing model response:\n{response_text}", flush=True)
-
   if match:
     action = match.group(1)  # The entire <function=...></function> block
     thought = response_text[: match.start()]  # Everything before the block
@@ -468,8 +466,6 @@ class SWEAgent(ConversationAgentBase):
       thought, action = parse_oai_response(response)
     else:
       thought, action = parse_xml_response(response)
-    print(f"Parsed thought: {thought}", flush=True)
-    print(f"Parsed action: {action}", flush=True)
     action_str = action.to_xml_string()
 
     # Update Trajectory

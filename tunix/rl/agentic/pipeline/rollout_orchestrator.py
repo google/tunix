@@ -22,6 +22,7 @@ groups them into batches for further processing.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from collections.abc import Hashable
 import copy
 import traceback
@@ -83,6 +84,12 @@ class RolloutOrchestrator:
     self.engine_cls = engine_cls
     self.engine_kwargs = engine_kwargs or {}
     self.max_concurrency = max_concurrency
+    self._executor: Optional[concurrent.futures.Executor] = None
+    if max_concurrency:
+      self._executor = concurrent.futures.ThreadPoolExecutor(
+          max_workers=max_concurrency,
+          thread_name_prefix="tce_worker",
+      )
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
     self._group_queue_manager: Optional[GroupQueueManager] = None
@@ -244,6 +251,8 @@ class RolloutOrchestrator:
     self._group_queue_manager = GroupQueueManager(group_size=group_size)
     self._stop.clear()
     self._tasks.clear()
+    if self._executor is not None:
+      self.engine_kwargs["executor"] = self._executor
 
     is_async_stream = hasattr(pairs_stream, "__aiter__")
     if is_async_stream:

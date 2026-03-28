@@ -21,6 +21,7 @@ multi-pair trajectory collection.
 """
 import os
 import asyncio
+import concurrent.futures
 import time
 from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optional, ParamSpec, Set, Tuple
 
@@ -75,6 +76,7 @@ class TrajectoryCollectEngine:
       valid_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = True,
+      executor: Optional[concurrent.futures.Executor] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -109,6 +111,7 @@ class TrajectoryCollectEngine:
     self.model_call = model_call
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
+    self._executor = executor
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
     self.max_context_limit = max_context_limit
@@ -181,7 +184,7 @@ class TrajectoryCollectEngine:
     loop = asyncio.get_running_loop()
     wall_start = time.perf_counter()
 
-    fut = loop.run_in_executor(None, _clocked_wrapper)
+    fut = loop.run_in_executor(self._executor, _clocked_wrapper)
     if timeout is not None:
       result, cpu_delta = await asyncio.wait_for(fut, timeout=timeout)
     else:
@@ -459,7 +462,7 @@ class TrajectoryCollectEngine:
           False otherwise.
     """
     rollout_output = await asyncio.get_event_loop().run_in_executor(
-        None,
+        self._executor,
         self.model_call,
         self.agent.chat_completions,
         self.env,
@@ -612,4 +615,4 @@ class TrajectoryCollectEngine:
     Ensures proper cleanup of environment resources such as network
     connections, file handles, or external processes.
     """
-    await asyncio.get_event_loop().run_in_executor(None, self.env.close)
+    await asyncio.get_event_loop().run_in_executor(self._executor, self.env.close)
