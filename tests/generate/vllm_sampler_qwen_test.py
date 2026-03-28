@@ -30,6 +30,7 @@ from io import StringIO
 import os
 import sys
 import tempfile
+from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -102,10 +103,13 @@ class VllmSamplerQwenTest(absltest.TestCase):
     sys.stderr = stderr_capture
 
     try:
-      # 4. Trigger param update to force mapping of the base model weights
-      sampler.load_checkpoint(nnx.state(base_model))
+      # Mock the RPC calls to delete and reinitialize kv cache
+      with mock.patch.object(sampler.llm, "reset_prefix_cache"), \
+           mock.patch.object(sampler.llm, "collective_rpc"):
+        # 4. Trigger param update to force mapping of the base model weights
+        sampler.load_checkpoint(nnx.state(base_model))
 
-      # 5. Check the mocked logger to see if it was called with mapping errors
+        # 5. Check the mocked logger to see if it was called with mapping errors
     finally:
       # Always restore stderr so we don't break console output for other tests
       sys.stderr = original_stderr

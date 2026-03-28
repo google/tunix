@@ -16,6 +16,7 @@
 
 import atexit
 import dataclasses
+import gc
 from itertools import count
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -175,13 +176,24 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       )
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
-  # TODO(b/434975493): Consider Release KV cache on the fly
   def update_params(
       self,
       updated_weights: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
+
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+      self.llm.collective_rpc("delete_kv_cache") # will free hbm
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    
+    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
+    gc.collect()
+    jax.clear_caches()
+    jax.effects_barrier()
 
     if self.to_hf_key_mappings:
       # Mapped Weight Sync (e.g. Vanilla -> vLLM)
@@ -223,7 +235,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           src_state=updated_weights,
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
+          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
       )
+    
+    if self.llm is not None:
+      self.llm.collective_rpc("reinitialize_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
