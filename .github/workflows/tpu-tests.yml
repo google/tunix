@@ -131,6 +131,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
+      # image: vllm/vllm-tpu:nightly-20260318-a80401e-8d3f8f4 # NEW IMAGE
       image: vllm/vllm-tpu:nightly-a9f13e53dc3511599e873225f0e5adbda07f3993
       options: --privileged
       env:
@@ -151,7 +152,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Tunix , tpu-inference and dependencies
+      - name: Setup Tunix, tpu-inference and dependencies
         run: |
           echo "Current directory:"
           pwd
@@ -160,6 +161,7 @@ jobs:
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
           pip install -e .[dev,test]
           pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
+          pip install importlib-resources # Issue: TODO
           # tpu-inference/Numba needs NumPy 2.3 or less.
           pip install numpy==2.3.5 --force-reinstall
 
