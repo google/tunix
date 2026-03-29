@@ -568,16 +568,16 @@ class TrajectoryCollectEngine:
     if last_step is None or self.final_reward_fn is None or not callable(self.final_reward_fn):
       # Skip reward computation in trajectory collection if no reward function
       # is provided or no step is taken.
-      print("Final reward function is skipped", flush=True)
+      print(f"DEBUG: {self._debug_prefix} Final reward function is skipped", flush=True)
       return
     final_reward, wall_time, cpu_time = await self._run_with_timing(
-        self.final_reward_fn, self.env.task, last_step.model_response
+        self.final_reward_fn
     )
 
     self.reward_time["reward_latency"] += wall_time
     self.reward_time["reward_cpu_time"] += cpu_time
     last_step.reward += final_reward
-    print(f"Final reward computed: {final_reward}", flush=True)
+    print(f"DEBUG: {self._debug_prefix} Final reward computed: {final_reward}", flush=True)
 
 
   def compute_trajectory_reward(self):
