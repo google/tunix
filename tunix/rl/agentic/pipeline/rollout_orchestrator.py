@@ -261,6 +261,7 @@ class RolloutOrchestrator:
       pairs_iterator = iter(pairs_stream)
     active_tasks: set[asyncio.Task] = set()
     stream_exhausted = False
+    completed_count = 0
 
     try:
       logging.debug(
@@ -321,7 +322,13 @@ class RolloutOrchestrator:
           # Remove the completed task from the _tasks list.
           if task in self._tasks:
             self._tasks.remove(task)
+          completed_count += 1
         active_tasks = pending
+        logging.info(
+            "Orchestrator progress: completed=%d active=%d"
+            " stream_exhausted=%s",
+            completed_count, len(active_tasks), stream_exhausted,
+        )
 
       # Wait for any stragglers if we were stopped prematurely
       if self._tasks:

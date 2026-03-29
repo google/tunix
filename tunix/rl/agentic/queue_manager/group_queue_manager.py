@@ -22,6 +22,7 @@ from collections.abc import Hashable
 import dataclasses
 from typing import Deque, Dict, List, Optional
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 
 TrajectoryItem = agent_types.TrajectoryItem
@@ -100,6 +101,10 @@ class GroupQueueManager:
         self._have_ready.set()
 
   async def _get_one_ready_group(self) -> List[TrajectoryItem]:
+    loop = asyncio.get_event_loop()
+    wait_start = loop.time()
+    last_logged = wait_start
+    _LOG_INTERVAL = 30 * 60  # 30 minutes
     while True:
       if self._exc:
         raise self._exc
@@ -107,7 +112,20 @@ class GroupQueueManager:
         return []
       if self._ready_groups:
         return self._ready_groups.popleft()
-      await self._have_ready.wait()
+      now = loop.time()
+      if now - last_logged >= _LOG_INTERVAL:
+        logging.warning(
+            "GroupQueueManager._get_one_ready_group waiting for %.0f min;"
+            " open_buckets=%s ready_groups=%d",
+            (now - wait_start) / 60,
+            {k: len(v) for k, v in self._buckets.items()},
+            len(self._ready_groups),
+        )
+        last_logged = now
+      try:
+        await asyncio.wait_for(self._have_ready.wait(), timeout=_LOG_INTERVAL)
+      except asyncio.TimeoutError:
+        continue
       self._have_ready.clear()
 
   async def get_batch(self, batch_size: int) -> List[TrajectoryItem]:

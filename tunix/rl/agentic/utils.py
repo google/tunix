@@ -18,6 +18,7 @@ import asyncio
 import threading
 from typing import Any, Optional
 
+from absl import logging
 import numpy as np
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_template_parser
@@ -233,8 +234,20 @@ class RolloutSyncLock:
   def acquire_rollout(self):
     """Acquire a rollout lock."""
     with self._mutex:
+      if self._weight_syncs > 0 or self._weight_syncs_waiting > 0:
+        logging.info(
+            "RolloutSyncLock.acquire_rollout: blocking"
+            " (weight_syncs=%d, weight_syncs_waiting=%d, rollouts=%d)",
+            self._weight_syncs, self._weight_syncs_waiting, self._rollouts,
+        )
       while self._weight_syncs > 0 or self._weight_syncs_waiting > 0:
-        self._can_rollout.wait()
+        notified = self._can_rollout.wait(timeout=30.0)
+        if not notified:
+          logging.warning(
+              "RolloutSyncLock.acquire_rollout: still blocked after 30s"
+              " (weight_syncs=%d, weight_syncs_waiting=%d, rollouts=%d)",
+              self._weight_syncs, self._weight_syncs_waiting, self._rollouts,
+          )
       self._rollouts += 1
 
   def release_rollout(self):
@@ -247,10 +260,22 @@ class RolloutSyncLock:
   def acquire_weight_sync(self):
     """Acquire a weight sync lock."""
     with self._mutex:
+      if self._rollouts > 0 or self._weight_syncs > 0:
+        logging.info(
+            "RolloutSyncLock.acquire_weight_sync: blocking"
+            " (rollouts=%d, weight_syncs=%d)",
+            self._rollouts, self._weight_syncs,
+        )
       while self._rollouts > 0 or self._weight_syncs > 0:
         self._weight_syncs_waiting += 1
-        self._can_weight_sync.wait()
+        notified = self._can_weight_sync.wait(timeout=30.0)
         self._weight_syncs_waiting -= 1
+        if not notified:
+          logging.warning(
+              "RolloutSyncLock.acquire_weight_sync: still blocked after 30s"
+              " (rollouts=%d, weight_syncs=%d)",
+              self._rollouts, self._weight_syncs,
+          )
       self._weight_syncs += 1
 
   def release_weight_sync(self):

@@ -619,4 +619,19 @@ class TrajectoryCollectEngine:
     Ensures proper cleanup of environment resources such as network
     connections, file handles, or external processes.
     """
-    await asyncio.get_event_loop().run_in_executor(self._executor, self.env.close)
+    print(f"[DEBUG] {self._debug_prefix} Closing environment.", flush=True)
+    try:
+      await asyncio.wait_for(
+          asyncio.get_event_loop().run_in_executor(
+              self._executor, self.env.close
+          ),
+          timeout=60.0,
+      )
+    except asyncio.TimeoutError:
+      print(
+          f"[ERROR] {self._debug_prefix} env.close() timed out after 60s —"
+          " executor thread may be leaked. This will starve the thread pool"
+          " over time.",
+          flush=True,
+      )
+    print(f"[DEBUG] {self._debug_prefix} Environment closed.", flush=True)
