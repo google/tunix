@@ -120,7 +120,7 @@ parser.add_argument(
 )
 parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
-parser.add_argument("--max_concurrency", type=int, default=1000)
+parser.add_argument("--max_concurrency", type=int, default=200)
 
 parser.add_argument("--overlong_filter", type=bool, default=True, 
                         help="Whether to filter out trajectories that exceed length limits")
