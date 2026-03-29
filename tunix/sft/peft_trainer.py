@@ -324,7 +324,7 @@ class PeftTrainer:
 
   def _train_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
-  ) -> Tuple[ArrayLike, Any | None, ArrayLike]:
+  ) -> Tuple[ArrayLike, Any | None, ArrayLike, ArrayLike]:
     """Main body for one train step.
 
     Args:
@@ -334,7 +334,8 @@ class PeftTrainer:
 
     Returns:
       A tuple containing the loss, auxiliary data (or None if has_aux is False),
-      and the gradient norm.
+      the gradient norm to log, and whether the metric should be logged for the
+      current microbatch.
     """
     inputs = self.gen_model_input_fn(inputs)
 
@@ -344,13 +345,52 @@ class PeftTrainer:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
-    grad_norm = optax.global_norm(grads)
+    grad_norm, should_log_grad_norm = self._get_grad_norm_for_logging(
+        grads, optimizer.opt_state
+    )
     optimizer.update(model, grads)
     if self._has_aux:
       loss, aux = out
-      return loss, aux, grad_norm
+      return loss, aux, grad_norm, should_log_grad_norm
     else:
-      return out, None, grad_norm
+      return out, None, grad_norm, should_log_grad_norm
+
+  def _get_grad_norm_for_logging(
+      self, grads: Any, optimizer_state: Any
+  ) -> Tuple[ArrayLike, ArrayLike]:
+    """Returns the grad norm to log for the current microbatch.
+
+    When gradient accumulation is enabled via `optax.MultiSteps`, the correct
+    global-batch grad norm is the norm of the accumulated gradient that will be
+    passed to the inner optimizer, not the norm of the current microbatch
+    gradient. In that case, this method returns the accumulated grad norm and a
+    flag indicating whether the current microbatch completes the accumulation
+    window. For non-accumulated training it returns the current grad norm and a
+    `True` flag.
+    """
+    pure_grads = nnx.pure(grads)
+    grad_norm = optax.global_norm(pure_grads)
+    if not (
+        self.config.gradient_accumulation_steps is not None
+        and hasattr(optimizer_state, "acc_grads")
+        and hasattr(optimizer_state, "mini_step")
+    ):
+      return grad_norm, jnp.asarray(True)
+
+    pure_acc_grads = nnx.pure(optimizer_state.acc_grads)
+    accumulation_step = optimizer_state.mini_step + 1
+    accumulated_grads = jax.tree.map(
+        lambda grad, acc: acc
+        + (grad - acc)
+        / jnp.asarray(accumulation_step, dtype=acc.dtype),
+      pure_grads,
+      pure_acc_grads,
+    )
+    accumulated_grad_norm = optax.global_norm(accumulated_grads)
+    should_log_grad_norm = optimizer_state.mini_step == (
+        self.config.gradient_accumulation_steps - 1
+    )
+    return accumulated_grad_norm, should_log_grad_norm
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -365,7 +405,7 @@ class PeftTrainer:
 
   def create_train_step_fn(
       self,
-  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike]]:
+  ) -> Callable[..., Tuple[ArrayLike, Any | None, ArrayLike, ArrayLike]]:
     """Creates the train step function."""
     return self._train_step
 
@@ -721,7 +761,9 @@ class PeftTrainer:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          train_loss, aux, grad_norm = train_step(train_example)
+          train_loss, aux, grad_norm, should_log_grad_norm = train_step(
+            train_example
+          )
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 
@@ -730,14 +772,17 @@ class PeftTrainer:
         last_step_completion_time = current_time
 
         self._throttler.add_computation(train_loss)
+        additional_metrics = None
+        if bool(jax.device_get(should_log_grad_norm)):
+          additional_metrics = {
+            "grad_norm": (grad_norm, np.mean),
+          }
         self._buffered_train_metrics = self._buffer_metrics(
-            self._buffered_train_metrics,
-            loss=train_loss,
-            step=self._train_steps,
-            step_time_delta=step_time_delta,
-            additional_metrics={
-                "grad_norm": (grad_norm, np.mean),
-            }
+          self._buffered_train_metrics,
+          loss=train_loss,
+          step=self._train_steps,
+          step_time_delta=step_time_delta,
+          additional_metrics=additional_metrics,
         )
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
