@@ -409,7 +409,7 @@ class TrajectoryCollectEngine:
 
     self.env_time["reset_latency"] += wall_time
     self.env_time["reset_cpu_time"] += cpu_time
-
+    self.final_reward_fn = self.env.reward_fn
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
