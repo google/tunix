@@ -27,19 +27,22 @@ echo "  Batch Size: $batch_size"
 echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
+echo "  Train Split: $train_split"
+echo "  Eval Split: $eval_split"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
   model_config.model_name=${model_name} \
   model_config.model_id=Qwen/${model_name} \
   model_config.model_source=huggingface \
+  model_config.model_download_path="/tmp/models/${model_name}" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}" \
   model_config.mesh.shape="(2,4)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=42 \
   actor_model_config.lora_config.rank=64 \
   actor_model_config.lora_config.alpha=64.0 \
-  actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \
+  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj" \
   actor_model_config.mesh.shape="(2,4)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   rollout_model_config.mesh.shape="(2,4)" \
@@ -51,6 +54,11 @@ python3 -m tunix.cli.grpo_main \
   batch_size=$batch_size \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
+  train_split=$train_split \
+  eval_data_source="tfds" \
+  eval_dataset_name="gsm8k" \
+  eval_num_batches=$num_test_batches \
+  eval_split=$eval_split \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
