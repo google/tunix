@@ -85,11 +85,6 @@ class RolloutOrchestrator:
     self.engine_kwargs = engine_kwargs or {}
     self.max_concurrency = max_concurrency
     self._executor: Optional[concurrent.futures.Executor] = None
-    if max_concurrency:
-      self._executor = concurrent.futures.ThreadPoolExecutor(
-          max_workers=max_concurrency,
-          thread_name_prefix="tce_worker",
-      )
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
     self._group_queue_manager: Optional[GroupQueueManager] = None
@@ -251,7 +246,11 @@ class RolloutOrchestrator:
     self._group_queue_manager = GroupQueueManager(group_size=group_size)
     self._stop.clear()
     self._tasks.clear()
-    if self._executor is not None:
+    if self.max_concurrency:
+      self._executor = concurrent.futures.ThreadPoolExecutor(
+          max_workers=self.max_concurrency,
+          thread_name_prefix="tce_worker",
+      )
       self.engine_kwargs["executor"] = self._executor
 
     is_async_stream = hasattr(pairs_stream, "__aiter__")
@@ -348,6 +347,9 @@ class RolloutOrchestrator:
       # inconsistent state.
       if self._group_queue_manager:
         await asyncio.shield(self._group_queue_manager.prepare_clear())
+      if self._executor is not None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor = None
 
   async def yield_batches(self, batch_size: int):
     """Yields batches of trajectories from the internal queue.

@@ -625,11 +625,11 @@ class TrajectoryCollectEngine:
           asyncio.get_event_loop().run_in_executor(
               self._executor, self.env.close
           ),
-          timeout=60.0,
+          timeout=150.0,
       )
     except asyncio.TimeoutError:
       print(
-          f"[ERROR] {self._debug_prefix} env.close() timed out after 60s —"
+          f"[ERROR] {self._debug_prefix} env.close() timed out after 150s —"
           " executor thread may be leaked. This will starve the thread pool"
           " over time.",
           flush=True,
