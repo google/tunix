@@ -197,6 +197,8 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
+from tunix import PerfMetricsConfig
+from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
 from examples.deepswe.swe_agent import (
     SWE_SYSTEM_PROMPT,
@@ -596,11 +598,19 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
+perf_metrics_config = PerfMetricsConfig(
+    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
+        cluster_config=cluster_config,
+        trace_dir="gs://sizhi-dev/deepswe/traces",
+    ).export_metrics
+)
+
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen_actor,
     reference=qwen_reference,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_metrics_config,
 )
 
 

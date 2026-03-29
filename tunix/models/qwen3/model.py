@@ -576,6 +576,10 @@ class Attention(nnx.Module):
           splash_attn_kernel, query_proj, key_proj, value_proj
       )
       qkv = qkv.transpose(0, 2, 1, 3)
+      # Transpose key/value back to (b, t, kh, d) so the shared cache update
+      # below stores them in the same format as the non-flash path.
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
     else:
       # GQA
       query_proj = query_proj.reshape((b, t, kh, qh // kh, d))

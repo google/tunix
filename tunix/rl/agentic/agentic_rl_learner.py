@@ -425,7 +425,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         max_context_limit=self.algo_config.max_context_limit,
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
-
+        perf_v2=self.rl_cluster.perf_v2,
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,

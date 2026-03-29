@@ -77,6 +77,7 @@ class TrajectoryCollectEngine:
       filter_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
       overlong_filter: bool = True,
       executor: Optional[concurrent.futures.Executor] = None,
+      perf_v2: Optional[perf_tracer_v2.Tracer] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -112,6 +113,7 @@ class TrajectoryCollectEngine:
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     self._executor = executor
+    self.perf_v2 = perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
     self.max_context_limit = max_context_limit
