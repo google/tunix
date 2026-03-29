@@ -260,13 +260,15 @@ class TrajectoryCollectEngine:
         self.overlong_filter
         and self.agent.trajectory.status in self.filter_statuses
     )
-    if not masked_out:
-      await self._append_final_reward()
-    else:
-      print(f"mask out trajectory due to status {self.agent.trajectory.status.name}",flush=True)
-    self.compute_mc_reward()
-    self.compute_trajectory_reward()
-    await self._close()
+    try:
+      if not masked_out:
+        await self._append_final_reward()
+      else:
+        print(f"mask out trajectory due to status {self.agent.trajectory.status.name}",flush=True)
+      self.compute_mc_reward()
+      self.compute_trajectory_reward()
+    finally:
+      await self._close()
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
