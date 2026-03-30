@@ -51,14 +51,9 @@ import numpy as np
 from transformers import AutoProcessor
 from tunix.models.qwen3vl import model as model_lib
 from tunix.models.qwen3vl import params as params_lib
-from tunix.models.qwen3vl.model import get_rope_index
+from tunix.models.qwen3vl.utils import encode_batch
 from tunix.models.qwen3vl.utils import load_processor
-from tunix.models.qwen3vl.vision import compute_grid_data
 from tunix.models.qwen3vl.vision import VisionGridData
-
-# Special token IDs (constant for all Qwen3-VL checkpoints).
-_VIDEO_TOKEN_ID = 151656
-_VISION_START_TOKEN_ID = 151652
 
 
 # ---------------------------------------------------------------------------
@@ -163,37 +158,6 @@ class Qwen3VLSampler:
   @property
   def _dtype(self) -> jnp.dtype:
     return self._flattened_model_state[0].dtype
-
-  # ------------------------------------------------------------------
-  # Input preparation
-  # ------------------------------------------------------------------
-
-  def _prepare_text_inputs(
-      self,
-      prompts: Sequence[str],
-      pad_to_multiple: int = 1,
-  ) -> tuple[np.ndarray, np.ndarray]:
-    """Tokenise prompts and return left-padded input_ids and attention_mask."""
-    tok = self._tokenizer
-    pad_id = (
-        tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    )
-
-    encoded = [tok.encode(p, add_special_tokens=True) for p in prompts]
-    max_len = max(len(e) for e in encoded)
-    if pad_to_multiple > 1:
-      max_len = (
-          (max_len + pad_to_multiple - 1) // pad_to_multiple
-      ) * pad_to_multiple
-
-    input_ids = np.full((len(prompts), max_len), pad_id, dtype=np.int32)
-    attention_mask = np.zeros((len(prompts), max_len), dtype=np.int32)
-    for i, enc in enumerate(encoded):
-      start = max_len - len(enc)
-      input_ids[i, start:] = enc
-      attention_mask[i, start:] = 1
-
-    return input_ids, attention_mask
 
   # ------------------------------------------------------------------
   # Prefill
@@ -456,74 +420,23 @@ class Qwen3VLSampler:
     eos_ids = jnp.array(eos_tokens if eos_tokens else [eos_id])
 
     # --- Prepare inputs ---
-    if images is not None:
-      if not isinstance(images, (list, tuple)):
-        images = [images] * len(prompts)
-      messages_batch = [
-          [{
-              'role': 'user',
-              'content': [
-                  {'type': 'image', 'image': ''},
-                  {'type': 'text', 'text': p},
-              ],
-          }]
-          for p in prompts
-      ]
-      texts = [
-          self._processor.apply_chat_template(
-              m, tokenize=False, add_generation_prompt=True
-          )
-          for m in messages_batch
-      ]
-      # Do NOT truncate: truncation strips image tokens from the text while
-      # the image processor still generates the full patch grid, causing a
-      # token-count mismatch that the processor now validates (5.3.0+).
-      # If the encoded length exceeds cache_size we raise a clear error below.
-      inputs = self._processor(
-          text=texts,
-          images=images,
-          padding=True,
-          return_tensors=None,
-      )
-      input_ids = np.array(inputs['input_ids'], dtype=np.int32)  # [B, L]
-      seq_len_check = input_ids.shape[1]
-      if seq_len_check + max_new_tokens > self._cache_size:
-        raise ValueError(
-            f'Encoded sequence length ({seq_len_check}) + max_new_tokens'
-            f' ({max_new_tokens}) = {seq_len_check + max_new_tokens} exceeds'
-            f' cache_size {self._cache_size}. Pass a larger cache_size to'
-            ' Qwen3VLSampler or reduce the image resolution.'
-        )
-      attention_mask = np.array(
-          inputs['attention_mask'], dtype=np.int32
-      )  # [B, L]
-      pixel_values = np.array(inputs['pixel_values'], dtype=np.float32)
-      image_grid_thw = np.array(
-          inputs['image_grid_thw'], dtype=np.int32
-      )  # [N, 3]
+    image_lists = (
+        [[img] for img in images]
+        if images is not None
+        else [[] for _ in prompts]
+    )
+    batch = encode_batch(
+        self._processor,
+        list(prompts),
+        image_lists,
+        vcfg=self._config.vision_config,
+        max_length=self._cache_size,
+        truncation=False,
+        pad_to_multiple_of=128,
+        padding_side='left',
+    )
 
-      vcfg = self._config.vision_config
-      vision_grid = compute_grid_data(image_grid_thw, vcfg)
-      positions_3d, _ = get_rope_index(
-          input_ids=jnp.array(input_ids),
-          image_grid_thw=jnp.array(image_grid_thw),
-          video_grid_thw=None,
-          attention_mask=jnp.array(attention_mask),
-          spatial_merge_size=vcfg.spatial_merge_size,
-          image_token_id=vcfg.image_pad_id,
-          video_token_id=_VIDEO_TOKEN_ID,
-          vision_start_token_id=_VISION_START_TOKEN_ID,
-      )  # [3, B, L]
-    else:
-      input_ids, attention_mask = self._prepare_text_inputs(prompts)
-      pixel_values = None
-      vision_grid = None
-      attn = jnp.array(attention_mask)
-      positions_1d = jnp.cumsum(attn, axis=-1) - 1
-      positions_1d = jnp.where(attn, positions_1d, 0)
-      positions_3d = jnp.stack([positions_1d] * 3, axis=0)  # [3, B, L]
-
-    seq_len = input_ids.shape[1]
+    seq_len = batch.input_tokens.shape[1]
     total_sampling_steps = seq_len + max_new_tokens
     if total_sampling_steps > self._cache_size:
       raise ValueError(
@@ -533,12 +446,12 @@ class Qwen3VLSampler:
 
     # --- Prefill ---
     state = self._prefill(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        positions_3d=positions_3d,
+        input_ids=batch.input_tokens,
+        attention_mask=batch.input_mask,
+        positions_3d=jnp.array(batch.positions),
         total_sampling_steps=total_sampling_steps,
-        vision_grid=vision_grid,
-        pixel_values=pixel_values,
+        vision_grid=batch.vision_grid,
+        pixel_values=batch.pixel_values,
         sampling_mode=sampling_mode,
         temperature=temperature,
         top_p=top_p if top_p is not None else 1.0,

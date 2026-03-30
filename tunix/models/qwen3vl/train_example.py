@@ -365,7 +365,7 @@ def main():
   model_dir = resolve_model_dir(MODEL_ID)
 
   logger.info('Loading model from %s', model_dir)
-  mesh = jax.make_mesh((1, 2), ('fsdp', 'tp'))
+  mesh = jax.make_mesh((1, 1), ('fsdp', 'tp'))
   base_model = params_lib.create_model_from_safe_tensors(
       model_dir, config, mesh=mesh, dtype=jnp.bfloat16
   )

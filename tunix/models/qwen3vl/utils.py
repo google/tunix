@@ -133,6 +133,7 @@ def encode_batch(
     padding: bool | str = True,
     truncation: bool | str = True,
     pad_to_multiple_of: int | None = None,
+    padding_side: str | None = None,
 ) -> EncodedBatch:
   """Encode a batch of pre-formatted texts with corresponding image lists.
 
@@ -150,20 +151,29 @@ def encode_batch(
     padding: Passed to the processor (e.g. True, "max_length").
     truncation: Passed to the processor.
     pad_to_multiple_of: If set, pad sequence length to the next multiple.
+    padding_side: If set, temporarily overrides the tokenizer's padding_side
+      ("left" or "right"). Useful for inference (left) vs training (right).
 
   Returns:
     EncodedBatch
   """
   flat_images = [img for imgs in images for img in imgs]
-  inputs = processor(
-      text=texts,
-      images=flat_images if flat_images else None,
-      max_length=max_length,
-      padding=padding,
-      truncation=truncation,
-      pad_to_multiple_of=pad_to_multiple_of,
-      return_tensors=None,
-  )
+  tok = processor.tokenizer
+  _orig_padding_side = tok.padding_side
+  if padding_side is not None:
+    tok.padding_side = padding_side
+  try:
+    inputs = processor(
+        text=texts,
+        images=flat_images if flat_images else None,
+        max_length=max_length,
+        padding=padding,
+        truncation=truncation,
+        pad_to_multiple_of=pad_to_multiple_of,
+        return_tensors=None,
+    )
+  finally:
+    tok.padding_side = _orig_padding_side
 
   input_ids = np.array(inputs['input_ids'], dtype=np.int32)  # [B, L]
   input_mask = np.array(inputs['attention_mask'], dtype=np.int32)  # [B, L]

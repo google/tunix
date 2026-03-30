@@ -259,9 +259,15 @@ def _qwen3_state_key_to_safetensors_key(lora_name: str) -> str:
     lora_name: Internal layer path (e.g., 'layers.0.attn.q_proj').
 
   Returns:
-    Safetensors state dict key (e.g., 'model.layers.0.self_attn.q_proj.weight').
+    Safetensors state dict key
+    (e.g., 'model.language_model.layers.0.self_attn.q_proj.weight').
   """
-  return f'model.{lora_name}.weight'.replace('.attn.', '.self_attn.')
+  key = f'model.{lora_name}.weight'.replace('.attn.', '.self_attn.')
+  # In Qwen3-VL the language model layers are nested under 'language_model.'
+  # in the HuggingFace checkpoint (model.language_model.layers.*).
+  if key.startswith('model.layers.'):
+    key = 'model.language_model.' + key[len('model.'):]
+  return key
 
 
 _QWEN3_HUGGINGFACE_TRANSPOSE_RULES = {
