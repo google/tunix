@@ -683,7 +683,7 @@ class RLCluster:
         continue
 
       if agg_value.dtype.kind in {"U", "S"}:
-        logging.info(
+        logging.debug(
             "Skipping logging metric %s (dtype: %s)",
             metric_name,
             agg_value.dtype,

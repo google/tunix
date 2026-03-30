@@ -98,9 +98,22 @@ max_target_length: 256
 num_train_epochs: 1
 train_fraction: 1.0
 num_test_batches: 100
+# Dataset split for training (e.g., "train", "validation")
+train_split: "train"
 # Controls the download flag only when using TFDS datasets. If false, the
 # data_dir used will be set to `None` and chosen by default by tfds.
 tfds_download: True
+
+# Eval dataset configuration (optional)
+eval_data_source: ""
+eval_data_directory: ""
+eval_data_module: ""
+eval_dataset_name: ""
+eval_num_batches: 100
+# Dataset split for evaluation (e.g., "test", "validation")
+eval_split: "test"
+# Controls the download flag for eval TFDS datasets
+eval_tfds_download: True
 
 ############################### Optimizer ###############################
 # Optimizer config
