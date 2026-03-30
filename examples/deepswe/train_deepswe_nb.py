@@ -112,12 +112,6 @@ parser.add_argument("--rollout_micro_batch_size", type=int, default=8)
 parser.add_argument("--compute_logps_micro_batch_size", type=int, default=8)
 
 # DeepSWE Agentic Specifics
-parser.add_argument(
-    "--enable_max_context_limit", 
-    type=bool, 
-    default=True, 
-    help="Whether to enable max context limit, the value will be KV cache size."
-)
 parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
 parser.add_argument("--max_concurrency", type=int, default=200)
@@ -361,13 +355,12 @@ print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
 FILTER_STATUSES = (
-    {TrajectoryStatus[name] for name in args.filter_statuses} 
-    if args.filter_statuses is not None 
+    {TrajectoryStatus[name] for name in args.filter_statuses}
+    if args.filter_statuses is not None
     else None
 )
 LOSS_AGG_MODE = args.loss_agg_mode
-ADVANTAGE_ESTIMATOR = args.advantage_estimator 
-ENABLE_MAX_CONTEXT_LIMIT = args.enable_max_context_limit
+ADVANTAGE_ESTIMATOR = args.advantage_estimator
 
 # %%
 # ==========================================
@@ -634,10 +627,8 @@ config_kwargs = {
     "filter_statuses": FILTER_STATUSES,
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
+    "max_prompt_length": MAX_PROMPT_LENGTH,
 }
-
-if ENABLE_MAX_CONTEXT_LIMIT:
-    config_kwargs["max_context_limit"] = KV_CACHE_SIZE
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 

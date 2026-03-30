@@ -93,7 +93,8 @@ class TrajectoryStatus(Enum):
 
   # Agent Constraints
   MAX_STEPS_REACHED = auto()  # corresponds to `max_steps`
-  MAX_CONTEXT_LIMIT_REACHED = auto()  # corresponds to `max_context_limit`
+  MAX_CONTEXT_LIMIT_REACHED = auto()  # response token budget exhausted; corresponds to `max_response_length`
+  MAX_PROMPT_LIMIT_REACHED = auto()  # accumulated prompt exceeded max_prompt_length; reward still computed
   TIMEOUT = auto()  # corresponds to `timeout`
 
   # System Errors

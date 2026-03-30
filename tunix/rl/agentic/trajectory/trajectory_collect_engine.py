@@ -69,7 +69,7 @@ class TrajectoryCollectEngine:
       ],
       model_call_kwargs: Optional[Dict[str, Any]] = None,
       gamma: float = 1.0,
-      max_context_limit: Optional[int] = None,
+      max_response_length: Optional[int] = None,
       timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
@@ -95,12 +95,10 @@ class TrajectoryCollectEngine:
           float. Defaults to zero if not provided.
         gamma (float): Discount factor for MC reward calculation (1.0 = no
           discounting).
-        max_context_limit (Optional[int]): Maximum number of context tokens to
-          use before forced termination.
         timeout (float): Maximum episode duration in seconds before timeout
           termination
         tokenizer: Optional tokenizer for converting messages to token IDs. This
-          is required if we want to track down `max_context_tokens`.
+          is required if we want to track down token counts.
         chat_parser: Optional chat parser for formatting messages
         valid_statuses (Set[TrajectoryStatus]): A set of statuses that are
           considered not "penalized" for reward computation.
@@ -116,7 +114,7 @@ class TrajectoryCollectEngine:
     self.perf_v2 = perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
-    self.max_context_limit = max_context_limit
+    self.max_response_length = max_response_length
     self.timeout = timeout
   
 
@@ -155,13 +153,13 @@ class TrajectoryCollectEngine:
         ),  # Thread/CPU time (Actual processing time on the worker thread)
     }
 
-    if self.max_context_limit and not (self.tokenizer and self.chat_parser):
+    if self.max_response_length and not (self.tokenizer and self.chat_parser):
       logging.warning(
-          "max_context_limit is set to %d, but no tokenizer or chat_parser is"
-          " provided. Context limits will not be enforced.",
-          self.max_context_limit,
+          "max_response_length is set to %d, but no tokenizer or chat_parser is"
+          " provided. response length limits will not be enforced.",
+          self.max_response_length,
       )
-
+  
   async def _run_with_timing(
       self, func: Callable[..., Any], *args, timeout: Optional[float] = None
   ) -> Tuple[Any, float, float]:
@@ -215,14 +213,6 @@ class TrajectoryCollectEngine:
     """  # fmt: skip
     await self._reset()
 
-    # Initial Prompt Cost
-    current_token_count = 0
-    if (
-        hasattr(self.agent.trajectory, "prompt_tokens")
-        and self.agent.trajectory.prompt_tokens
-    ):
-      current_token_count += len(self.agent.trajectory.prompt_tokens)
-
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
 
     while True:
@@ -233,23 +223,6 @@ class TrajectoryCollectEngine:
         break
 
       done = await self._one_step()
-      current_step = self.agent.get_current_step()
-
-      if current_step:
-        if getattr(current_step, "assistant_tokens", None) is not None:
-          current_token_count += len(current_step.assistant_tokens)
-        if getattr(current_step, "env_tokens", None) is not None:
-          current_token_count += len(current_step.env_tokens)
-
-        if (
-            self.max_context_limit is not None
-            and current_token_count >= self.max_context_limit
-        ):
-          self.agent.trajectory.status = (
-              agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
-          )
-          print("MAX_CONTEXT_LIMIT_REACHED", flush=True)
-          break
 
       if done:
         if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
@@ -355,7 +328,6 @@ class TrajectoryCollectEngine:
       *,
       model_call: Callable[..., base_rollout.RolloutOutput],
       gamma: float = 1.0,
-      max_context_limit: Optional[int] = None,
       timeout: float = 30.0,
       mode: str = "Trajectory",
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
@@ -371,8 +343,6 @@ class TrajectoryCollectEngine:
           environment) pairs
         model_call (Callable): Shared model inference function for all pairs
         gamma (float): Discount factor for return calculation
-        max_context_limit (Optional[int]): Maximum context limit per episode
-        timeout (float): Per-episode timeout in seconds
         mode (str): Output format. See `collect` method for options.
         perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
           to use for performance measurements.
@@ -389,7 +359,6 @@ class TrajectoryCollectEngine:
           env,
           model_call=model_call,
           gamma=gamma,
-          max_context_limit=max_context_limit,
           timeout=timeout,
           perf_v2=perf_v2,
       )
@@ -428,6 +397,7 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.prompt_tokens = prompt_tokens
 
     self._start_ts = time.perf_counter()
+    self._response_token_count = 0
 
   @property
   def _debug_prefix(self) -> str:
@@ -454,6 +424,19 @@ class TrajectoryCollectEngine:
         tags[perf_constants.STEP] = policy_version
     return tags
 
+  def _check_and_set_context_limit_reached(self) -> bool:
+    """Returns True and updates trajectory status if response budget is exhausted."""
+    if (
+        self.max_response_length is not None
+        and self._response_token_count >= self.max_response_length
+    ):
+      self.agent.trajectory.status = (
+          agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+      )
+      print(f"[DEBUG] {self._debug_prefix} MAX_CONTEXT_LIMIT_REACHED", flush=True)
+      return True
+    return False
+
   async def _one_step(self) -> bool:
     """Executes a single step and returns the Step object and Done status.
 
@@ -465,6 +448,9 @@ class TrajectoryCollectEngine:
         bool: True if the episode is done (either by environment or timeout),
           False otherwise.
     """
+    if self._check_and_set_context_limit_reached():
+      return True
+
     rollout_output = await asyncio.get_event_loop().run_in_executor(
         self._executor,
         self.model_call,
@@ -472,9 +458,17 @@ class TrajectoryCollectEngine:
         self.env,
         **self.model_call_kwargs,
     )
-    print(f"\n[DEBUG] {self._debug_prefix} Model Response:\n{json.dumps(rollout_output.text[0], default=str, indent=2)}", flush=True)
+    # Capture prefix before update_from_model so both prints show the same step_idx.
+    debug_prefix = self._debug_prefix
+    print(f"\n[DEBUG] {debug_prefix} Model Response:\n{json.dumps(rollout_output.text[0], default=str, indent=2)}", flush=True)
+
+    if rollout_output.tokens:
+      self._response_token_count += len(rollout_output.tokens[0])
+    if self._check_and_set_context_limit_reached():
+      return True
+
     action = self.agent.update_from_model(rollout_output.text[0]).action
-    print(f"\n[DEBUG] {self._debug_prefix} Agent Action:\n{json.dumps(action, default=str, indent=2)}", flush=True)
+    print(f"\n[DEBUG] {debug_prefix} Agent Action:\n{json.dumps(action, default=str, indent=2)}", flush=True)
     if action is None:
       logging.warning(
           "Agent returned None action, using empty action list as fallback"
@@ -550,6 +544,7 @@ class TrajectoryCollectEngine:
         )
         cur_step.env_tokens = np.array(e_tokens)
         cur_step.env_masks = np.array(e_masks)
+        self._response_token_count += len(e_tokens)
 
     if time.perf_counter() - self._start_ts > self.timeout:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
