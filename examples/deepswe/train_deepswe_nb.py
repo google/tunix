@@ -26,6 +26,9 @@ from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
 from tunix.utils import compat
 import vllm  # pytype: disable=import-error
+import faulthandler
+import signal
+faulthandler.register(signal.SIGINT, all_threads=True)
 
 Dataset = datasets_lib.Dataset
 # ====== Logging Configuration ======
@@ -627,7 +630,6 @@ config_kwargs = {
     "filter_statuses": FILTER_STATUSES,
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
-    "max_prompt_length": MAX_PROMPT_LENGTH,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
@@ -693,6 +695,7 @@ def mixed_type_batch_fn(elements):
 try:
   import datetime
   import wandb
+  settings=wandb.Settings(console="off")
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb_config = {
         "batch_size": BATCH_SIZE,
@@ -719,7 +722,8 @@ try:
   wandb.init(
     project="tunix",
     name=run_name,
-    config=wandb_config)
+    config=wandb_config,
+    settings=settings)
   # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
 except Exception as e:
   print(f"sizhi: W&B initialization failed with error: {e}")
