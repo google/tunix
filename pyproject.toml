@@ -25,6 +25,7 @@ dependencies = [
   "grain",
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
+  "importlib_resources",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",

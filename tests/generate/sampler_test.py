@@ -14,6 +14,7 @@
 
 # Forked from flax/examples/gemma/sampler_test.py
 
+import dataclasses
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -24,12 +25,48 @@ from tunix.generate import utils
 from tunix.tests import test_common as tc
 
 
+@dataclasses.dataclass(kw_only=True, frozen=True)
+class ModelConfigWithDtype(tc.ModelConfig):
+  dtype: jax.numpy.dtype = jax.numpy.bfloat16
+
+
 class SamplerTest(parameterized.TestCase):
 
   def assertReasonableTensor(self, array, expected_shape=None):
     self.assertIsNotNone(array)
     if expected_shape is not None:
       self.assertEqual(array.shape, expected_shape)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='fallback',
+          config_class=tc.ModelConfig,
+          expected_dtype=jax.numpy.float32,
+      ),
+      dict(
+          testcase_name='from_config',
+          config_class=ModelConfigWithDtype,
+          expected_dtype=jax.numpy.bfloat16,
+      ),
+  )
+  def test_dtype(self, config_class, expected_dtype):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=config_class(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    self.assertEqual(sampler.dtype, expected_dtype)
 
   @parameterized.named_parameters(
       dict(

@@ -14,8 +14,8 @@
 
 r"""Demo script for GRPO with Llama3 model.
 
-This script demonstrates how to run GRPO with a Llama3 model. It includes
-training, evaluation, and inference.
+This script demonstrates how to run GRPO with a Llama3 or Qwen2 model. It
+includes training, evaluation, and inference.
 
 Example usage:
 python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
@@ -26,13 +26,10 @@ python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 import argparse
 import json
 import os
-import pprint
 import re
 
 from absl import logging
 from flax import nnx
-import fsspec
-import grain
 import jax
 from jax._src import mesh_utils
 import optax
@@ -77,7 +74,7 @@ parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
 parser.add_argument(
     "--root-dir",
     type=str,
-    required=False,
+    required=True,
     help="The root dir of model, data, etc.",
 )
 parser.add_argument(
@@ -104,8 +101,6 @@ parser.add_argument(
 parser.add_argument(
     "--model-version",
     type=str,
-    # default="meta-llama/Llama-3.1-8B-Instruct"
-    # default="meta-llama/Llama-3.2-3B-Instruct",
     default="meta-llama/Llama-3.2-1B-Instruct",
     required=False,
     help="The model version to use.",
