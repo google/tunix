@@ -275,7 +275,8 @@ try:
   wandb.init(
     project="tunix",
     name=run_name,
-    config=wandb_config)
+    config=wandb_config,
+    settings=wandb.Settings(console="off"))
   # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
