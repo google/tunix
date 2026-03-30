@@ -308,7 +308,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
-      print("trajectory reward",trajectory_rewards_list, flush=True)
+    print("trajectory reward",trajectory_rewards_list, flush=True)
 
 
     # Log trajectory.
