@@ -636,17 +636,16 @@ def grpo_loss_fn(
       "pg_clipfrac": clipped_fraction,
       "ppo_kl": ppo_kl,
   }
+  kl = common.compute_kl_divergence(
+      per_token_logps, train_example.ref_per_token_logps
+  )
+  # Log mean KL.
+  aux["kl"] = jnp.astype(
+      (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+      jnp.float32,
+  )
   if beta is not None and beta != 0.0:
-    kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
-    )
     per_token_loss = per_token_loss + beta * kl
-
-    # Log mean KL.
-    aux["kl"] = jnp.astype(
-        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
-        jnp.float32,
-    )
 
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
