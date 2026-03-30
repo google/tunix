@@ -66,6 +66,9 @@ class _SamplingState:
   # Fixed-size buffer for accumulating the output logits.
   logits_buffer: jnp.ndarray | None  # [B, L, V]
 
+  # Fixed-size buffer for accumulating the output logprobs.
+  logprobs_buffer: jnp.ndarray | None  # [B, L]
+
   # List of tokens that are forbidden to be generated.
   forbidden_token_ids: tuple[int, ...] | None
 
@@ -110,14 +113,21 @@ def sample_top_p(
     temperature: float,
     top_p: float,
     top_k: int | None,
-) -> jnp.ndarray:
+    return_logprobs: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray | None]:
   """Sample a token using top-p sampling."""
   # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
   next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
 
   # Skip softmax and sorting if top_p is 1.0 and top_k is full vocab.
   if top_p >= 1.0 and top_k is None:
-    return jax.random.categorical(key, logits=next_token_logits)
+    next_token = jax.random.categorical(key, logits=next_token_logits)
+    if not return_logprobs:
+      return next_token, None
+    logp = jax.nn.log_softmax(next_token_logits, axis=-1)
+    logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
+    logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
+    return next_token, logp_sampled
 
   probs = jax.nn.softmax(next_token_logits, axis=-1)
   k = probs.shape[-1] if top_k is None else top_k
@@ -128,16 +138,32 @@ def sample_top_p(
   probs_sorted = jnp.where(mask, 0.0, probs_sorted)
   probs_sorted /= jnp.sum(probs_sorted, axis=-1, keepdims=True)
 
-  next_token = jax.random.categorical(key, logits=jnp.log(probs_sorted))
-  next_token = jnp.take_along_axis(indices, next_token[..., None], axis=-1)
+  next_token_idx = jax.random.categorical(key, logits=jnp.log(probs_sorted))
+  next_token = jnp.take_along_axis(indices, next_token_idx[..., None], axis=-1)
   next_token = jnp.squeeze(next_token, axis=-1)
-  return next_token
+
+  if return_logprobs:
+    logp_sampled = jnp.log(
+        jnp.take_along_axis(probs_sorted, next_token_idx[..., None], axis=-1)
+    )
+    logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
+  else:
+    logp_sampled = None
+
+  return next_token, logp_sampled
 
 
-def sample_best(logits):
+def sample_best(
+    logits, return_logprobs: bool = False
+) -> tuple[jnp.ndarray, jnp.ndarray | None]:
   next_token = jnp.argmax(logits[:, -1], axis=-1, keepdims=True)
   next_token = next_token[:, 0]
-  return next_token
+  if not return_logprobs:
+    return next_token, None
+  logp = jax.nn.log_softmax(logits[:, -1].astype(jnp.float32), axis=-1)
+  logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
+  logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
+  return next_token, logp_sampled
 
 
 def _init_cache(
@@ -331,6 +357,7 @@ class Sampler(base_sampler.BaseSampler):
       top_k: Optional[int],
       seed: jax.Array,
       beam_size: Optional[int],
+      include_logprobs: bool = False,
   ) -> _SamplingState:
     """Initializes the sampling state given input prompts."""
     batch_size = all_input_ids.shape[0]
@@ -379,6 +406,14 @@ class Sampler(base_sampler.BaseSampler):
       )
     else:
       logits_buffer = None
+
+    if include_logprobs:
+      logprobs_buffer = jnp.zeros(
+          (batch_size, total_sampling_steps),
+          dtype=jnp.float32,
+      )
+    else:
+      logprobs_buffer = None
     sampling_parameters = {}
     sampling_mode = [None]
 
@@ -402,6 +437,7 @@ class Sampler(base_sampler.BaseSampler):
         token_buffer=token_buffer,
         positions=positions,
         logits_buffer=logits_buffer,
+        logprobs_buffer=logprobs_buffer,
         cache=cache,
         done=done,
         total_sampling_steps=total_sampling_steps,
@@ -436,6 +472,7 @@ class Sampler(base_sampler.BaseSampler):
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
     logits_buffer = sampler_state.logits_buffer
+    logprobs_buffer = sampler_state.logprobs_buffer
     beam_search_state = sampler_state.beam_search_sampling_state
     if sampler_state.forbidden_token_ids:
       logits = logits.at[:, :, sampler_state.forbidden_token_ids].set(-jnp.inf)
@@ -450,22 +487,27 @@ class Sampler(base_sampler.BaseSampler):
           state=beam_search_state,
           pad_token_id=eos[0],
           decoding_step=decoding_step,
+          logprobs_buffer=logprobs_buffer,
       )
       cache = updated_args['cache']
       token_buffer = updated_args['token_buffer']
       done = updated_args['done']
       logits_buffer = updated_args['logits_buffer']
+      logprobs_buffer = updated_args['logprobs_buffer']
     else:
       if sampler_state.sampling_mode == 'greedy':
-        next_token_candidate = sample_best(logits)
+        next_token_candidate, logp = sample_best(
+            logits, return_logprobs=(logprobs_buffer is not None)
+        )
       elif sampler_state.sampling_mode == 'top_p':
         key = jax.random.fold_in(sampler_state.seed, decoding_step)
-        next_token_candidate = sample_top_p(
+        next_token_candidate, logp = sample_top_p(
             logits,
             key,
             sampler_state.temperature,
             sampler_state.sampling_parameters['top_p'],
             sampler_state.sampling_parameters['top_k'],
+            return_logprobs=(logprobs_buffer is not None),
         )
       else:
         raise ValueError(
@@ -474,6 +516,8 @@ class Sampler(base_sampler.BaseSampler):
       token_buffer = token_buffer.at[:, decoding_step + 1].set(
           next_token_candidate
       )
+      if logprobs_buffer is not None:
+        logprobs_buffer = logprobs_buffer.at[:, decoding_step + 1].set(logp)
 
     done = done | jnp.isin(token_buffer[:, decoding_step + 1], eos)
     return _SamplingState(
@@ -482,6 +526,7 @@ class Sampler(base_sampler.BaseSampler):
         token_buffer=token_buffer,
         positions=sampler_state.positions,
         logits_buffer=logits_buffer,
+        logprobs_buffer=logprobs_buffer,
         cache=cache,
         done=done,
         total_sampling_steps=sampler_state.total_sampling_steps,
@@ -583,6 +628,7 @@ class Sampler(base_sampler.BaseSampler):
         token_buffer=token_buffer,
         positions=positions,
         logits_buffer=logits_buffer,
+        logprobs_buffer=sampler_state.logprobs_buffer,
         cache=cache,
         done=done,
         total_sampling_steps=sampler_state.total_sampling_steps,
@@ -671,6 +717,7 @@ class Sampler(base_sampler.BaseSampler):
       max_prompt_length: int | None = None,
       echo: bool = False,
       return_logits: bool = False,
+      return_logprobs: bool = False,
       eos_tokens: Sequence[int] | None = None,
       forbidden_tokens: Iterable[int] | None = None,
       temperature: float = 0.0,
@@ -770,6 +817,7 @@ class Sampler(base_sampler.BaseSampler):
         top_k=top_k,
         seed=seed,
         beam_size=beam_size,
+        include_logprobs=return_logprobs,
     )
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state,
@@ -783,14 +831,18 @@ class Sampler(base_sampler.BaseSampler):
     token_buffers = sampling_state.token_buffer
     logits_buffers = sampling_state.logits_buffer
 
+    final_logprobs_buffer = sampling_state.logprobs_buffer
+
     if sampling_state.sampling_mode == 'beam_search':
       updated_args = beam_search_lib.finalize_beam_search_state(
           sampling_state.beam_search_sampling_state,
           sampling_state.token_buffer,
           sampling_state.logits_buffer,
+          sampling_state.logprobs_buffer,
       )
       token_buffers = updated_args['token_buffer']
       logits_buffers = updated_args['logits_buffer']
+      final_logprobs_buffer = updated_args['logprobs_buffer']
       # delete the sampling state in case the further referece
       # if need more internal states, they should be updated by
       # finalize_beam_search_state
@@ -812,9 +864,39 @@ class Sampler(base_sampler.BaseSampler):
           self.tokenizer.decode(tokens[:length].tolist())
           for tokens, length in zip(out_tokens, lengths)
       ]
+      if return_logprobs:
+        out_logprobs = []
+        for i in range(len(token_buffers)):
+          start_idx = (
+              utils.find_first_non_pad_idx(
+                  token_buffers[i], self.tokenizer.pad_id()
+              )
+              if echo
+              else max_prompt_length
+          )
+          end_idx = (
+              utils.find_first_eos_idx(
+                  token_buffers[i][max_prompt_length:], self.eos_ids
+              )
+              + max_prompt_length
+          )
+          length = end_idx - start_idx
+          # Slice logprobs and pad to max_len
+          sliced_logprobs = jax.device_get(
+              final_logprobs_buffer[i][start_idx:end_idx]
+          )
+          padded_logprobs = np.pad(
+              sliced_logprobs,
+              (0, max_len - length),
+              mode='constant',
+              constant_values=0.0,
+          )
+          out_logprobs.append(padded_logprobs.tolist())
+
     else:
       out_tokens = []
       out_logits = []
+      out_logprobs = []
       for i, token_buffer in enumerate(token_buffers):
         start_idx = (
             utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
@@ -830,6 +912,13 @@ class Sampler(base_sampler.BaseSampler):
         out_tokens.append(jax.device_get(token_buffer[start_idx:end_idx]))
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
+        if return_logprobs:
+          # Extract logprobs for the generated tokens
+          out_logprobs.append(
+              jax.device_get(
+                  final_logprobs_buffer[i][start_idx:end_idx]
+              ).tolist()
+          )
 
       decoded_outputs = [
           self.tokenizer.decode(tokens.tolist()) for tokens in out_tokens
@@ -840,6 +929,7 @@ class Sampler(base_sampler.BaseSampler):
         logits=out_logits if return_logits else [],
         tokens=out_tokens,
         padded_prompt_tokens=all_input_ids,
-        logprobs=None,
+        logprobs=out_logprobs if return_logprobs else None,
     )
     return result
+

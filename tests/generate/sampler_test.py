@@ -317,6 +317,61 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
 
+  def test_logprobs(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    # Test greedy logprobs
+    result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+    )
+    self.assertIsNotNone(result.logprobs)
+    self.assertLen(result.logprobs, 2)
+    for logprobs, tokens in zip(result.logprobs, result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
+    # Test top_p logprobs
+    top_p_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+        temperature=1.0,
+        top_p=0.9,
+    )
+    self.assertIsNotNone(top_p_result.logprobs)
+    self.assertLen(top_p_result.logprobs, 2)
+    for logprobs, tokens in zip(top_p_result.logprobs, top_p_result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
+    # Test beam search logprobs
+    beam_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+        beam_size=2,
+    )
+    self.assertIsNotNone(beam_result.logprobs)
+    self.assertLen(beam_result.logprobs, 2)
+    for logprobs, tokens in zip(beam_result.logprobs, beam_result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
   def test_prompt_padding_bucketization(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
