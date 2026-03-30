@@ -67,6 +67,22 @@ def main(argv):
   STEP = int(argv[2]) if len(argv) > 2 else 0
   FILE_PATH_TO_TRAINED_MODEL = argv[1] if len(argv) > 1 else ""
   print(f"Using FILE_PATH_TO_TRAINED_MODEL={FILE_PATH_TO_TRAINED_MODEL}, STEP={STEP} for checkpoint loading")
+  try:
+    wandb.login()
+    print("linchai: logged in to W&B")
+  except wandb.errors.UsageError as e:
+    # Handle the error, maybe disable W&B logging
+    wandb.init(mode="disabled")
+
+
+  try:
+    import datetime
+    run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb.init(
+    project="tunix",
+    name="eval_" + run_name,
+    settings=wandb.Settings(console="off"))
+
   def has_safetensors(path):
     if NOTEBOOK_ENV == "g3":
       for _, _, filenames in gfile.Walk(path):
@@ -709,6 +725,13 @@ def main(argv):
   print(f"Correct: {results['correct']}/{results['total']}")
   print(f"Accuracy: {results['accuracy']:.2f}%")
   print("=" * 60)
+  
+  
+  try:
+    wandb.finish()
+    print("WandB session finished successfully")
+  except Exception as e:
+    print(f"Warning: Failed to finish WandB session: {e}")
   # # %%
   # # AIME-2024
   # model_version = "agentica-org/DeepScaleR-1.5B-Preview"
