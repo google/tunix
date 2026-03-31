@@ -58,7 +58,7 @@ VLLM_INIT_RANDOM_WEIGHTS = (
     os.getenv("VLLM_INIT_RANDOM_WEIGHTS", "true").lower() == "true"
 )
 VLLM_SERVER_MODE = os.getenv("VLLM_SERVER_MODE", "true").lower() == "true"
-VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "2"))
+VLLM_MAX_NUM_SEQS = int(os.getenv("VLLM_MAX_NUM_SEQS", "128"))
 VLLM_MAX_BATCHED_TOKENS = int(
     os.getenv("VLLM_MAX_BATCHED_TOKENS", "165888")
 )
