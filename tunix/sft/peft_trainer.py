@@ -739,7 +739,7 @@ class PeftTrainer:
             step=self._train_steps,
             step_time_delta=step_time_delta,
             additional_metrics={
-                "grad_norm": (grad_norm, np.mean),
+                "grad_norm": (grad_norm, np.sum),
             }
         )
         # NB: put this after self._buffer_metrics is important
