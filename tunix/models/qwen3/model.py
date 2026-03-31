@@ -16,14 +16,20 @@
 
 import dataclasses
 import enum
+from functools import partial
 from typing import Tuple
 
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu import megablox
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
 from jax.interpreters import pxla
 import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
@@ -36,6 +42,45 @@ K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+def round_up_to_base(x: int, base: int, threshold: int | None = None) -> int:
+  if threshold is not None and x < threshold:
+    return threshold
+  return ((x + base - 1) // base) * base
+
+
+def get_global_input_output_offsets(global_send_sizes, num_ep):
+  """Calculates explicit buffer offsets for ragged_all_to_all."""
+  global_input_offsets = jnp.concatenate(
+      [jnp.zeros((num_ep, 1), dtype=jnp.int32), global_send_sizes[:, :-1]],
+      axis=1,
+  )
+  global_input_offsets = jnp.cumsum(global_input_offsets, axis=1)
+
+  global_output_offsets = jnp.concatenate(
+      [jnp.zeros((1, num_ep), dtype=jnp.int32), global_send_sizes[:-1]], axis=0
+  )
+  global_output_offsets = jnp.cumsum(global_output_offsets, axis=0)
+  return global_input_offsets, global_output_offsets
+
+
+@jax.custom_vjp
+def _custom_permute(x, permute_indices):
+  return x[permute_indices]
+
+
+def _custom_permute_fwd(x, permute_indices):
+  return _custom_permute(x, permute_indices), permute_indices
+
+
+def _custom_permute_bwd(res, g):
+  permute_indices = res
+  unpermute_indices = jnp.argsort(permute_indices)
+  return g[unpermute_indices], None
+
+
+_custom_permute.defvjp(_custom_permute_fwd, _custom_permute_bwd)
 
 
 class RematConfig(enum.Enum):
@@ -58,8 +103,8 @@ class ShardingConfig:
   act_btd: Tuple[str | None, ...]
   act_btf: Tuple[str | None, ...]
   act_btnh: Tuple[str | None, ...]
-  exp_weight_cdf: Tuple[str | None, ...]
-  exp_weight_cfd: Tuple[str | None, ...]
+  exp_weight_edf: Tuple[str | None, ...]
+  exp_weight_efd: Tuple[str | None, ...]
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -77,8 +122,8 @@ class ShardingConfig:
         act_btd=('fsdp', None, None if is_sampling else 'tp'),
         act_btf=('fsdp', None, 'tp'),
         act_btnh=('fsdp', None, 'tp', None),
-        exp_weight_cdf=('fsdp', None, 'tp'),
-        exp_weight_cfd=('fsdp', 'tp', None),
+        exp_weight_edf=('fsdp', None, 'tp'),
+        exp_weight_efd=('fsdp', 'tp', None),
     )
 
 
@@ -100,6 +145,10 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
+  dtype: jnp.dtype = jnp.float32
+  param_dtype: jnp.dtype = jnp.float32
+  use_flash_attention: bool = False
+  flash_attention_block_size: int = 1024
 
   @classmethod
   def qwen3_0p6b(cls):  # qwen3-0.6B
@@ -150,7 +199,7 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
-  qwen3_4b_base = qwen3_4b      # qwen3-4B-base
+  qwen3_4b_base = qwen3_4b  # qwen3-4B-base
 
   @classmethod
   def _qwen3_4b_2507(cls):  # Qwen3-4B-Instruct-2507 and Qwen3-4B-Thinking-2507
@@ -189,7 +238,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  qwen3_8b_base = qwen3_8b    # qwen3-8B-base
+  qwen3_8b_base = qwen3_8b  # qwen3-8B-base
 
   @classmethod
   def qwen3_14b(cls):  # qwen3-14B
@@ -205,7 +254,7 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
-  qwen3_14b_base = qwen3_14b   # qwen3-14B-base
+  qwen3_14b_base = qwen3_14b  # qwen3-14B-base
 
   @classmethod
   def qwen3_30b_a3b(cls):  # qwen3-30B-a3b
@@ -257,16 +306,24 @@ class Einsum(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: Tuple[str | None, ...],
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.einsum_str = einsum_str
     self.shape = shape
+    self.dtype = dtype
     self.w = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), shape), sharding=sharding
+        nnx.initializers.glorot_uniform()(
+            rngs.params(), shape, dtype=param_dtype
+        ),
+        sharding=sharding,
     )
 
   @jax.named_scope('einsum')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.einsum(self.einsum_str, x, self.w.value)
+    x = jnp.astype(x, self.dtype)
+    w = jnp.astype(self.w.value, self.dtype)
+    return jnp.einsum(self.einsum_str, x, w)
 
 
 class Embedder(nnx.Module):
@@ -279,22 +336,30 @@ class Embedder(nnx.Module):
       *,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.input_embedding = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), (vocab_size, embed_dim)),
+        nnx.initializers.normal(dtype=param_dtype)(
+            rngs.params(), (vocab_size, embed_dim)
+        ),
         sharding=shd_config.emb_vd,
     )
     self.shd_config = shd_config
+    self.dtype = dtype
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
+    x = jnp.astype(x, self.dtype)
     x = shard(x, self.shd_config.act_btd)
     return x
 
   @jax.named_scope('embedder_decode')
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.dot(x, self.input_embedding.value.T)
+    x = jnp.astype(x, self.dtype)
+    w = jnp.astype(self.input_embedding.value, self.dtype)
+    return jnp.dot(x, w.T)
 
 
 def apply_rope(
@@ -311,8 +376,8 @@ def apply_rope(
       positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
   )
   sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
-  sin = jnp.sin(sinusoid_inp)
-  cos = jnp.cos(sinusoid_inp)
+  sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
+  cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
 
   first_half, second_half = jnp.split(inputs, 2, axis=-1)
   first_part = first_half * cos - second_half * sin
@@ -331,21 +396,23 @@ class RMSNorm(nnx.Module):
       norm_eps: float = 1e-06,
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim),
+        nnx.initializers.ones_init()(rngs.params(), dim, param_dtype),
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
+    self.dtype = dtype
 
   @jax.named_scope('rms_norm')
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
-    dtype = x.dtype
-    rms = jnp.sqrt(
-        jnp.mean(jnp.astype(x, jnp.float32) ** 2, axis=-1, keepdims=True)
-        + self.norm_eps
+    x = jnp.astype(x, jnp.float32)
+    rms = jnp.sqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.norm_eps)
+    return jnp.astype(
+        jnp.astype(self.w.value, jnp.float32) * (x / rms), self.dtype
     )
-    return jnp.astype(self.w * x / rms, dtype)
 
 
 class Attention(nnx.Module):
@@ -364,36 +431,48 @@ class Attention(nnx.Module):
         shape=(config.embed_dim, config.num_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.q_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
         shape=(config.embed_dim, config.num_kv_heads, config.head_dim),
         rngs=rngs,
         sharding=self.shd_config.kv_weight_dnh,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
         shape=(config.num_heads, config.head_dim, config.embed_dim),
         rngs=rngs,
         sharding=self.shd_config.o_weight_nhd,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.q_norm = RMSNorm(
         config.head_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=self.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.k_norm = RMSNorm(
         config.head_dim,
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=self.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.n_rep = config.num_heads // config.num_kv_heads
     self.scale = self.head_dim**-0.5
@@ -439,23 +518,78 @@ class Attention(nnx.Module):
       )
 
     b, t, qh, d = query_proj.shape
-    _, s, kh, _ = key_proj.shape
+    _, _, kh, _ = key_proj.shape
 
-    # GQA
-    query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-    attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-    attn = attn.reshape((b, qh, t, s))
+    # NB: flash attention doesn't work for decoding step
+    if self.config.use_flash_attention and seq_len > 1:
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
 
-    if attn_mask is not None:
-      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
+      query_proj = query_proj * self.scale
 
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
-    )
+      mesh = pxla.thread_resources.env.physical_mesh
+      causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+      multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
 
-    attn = attn.reshape((b, kh, qh // kh, t, s))
-    qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-    qkv = qkv.reshape((b, t, qh, d))
+      block_sizes = splash.BlockSizes(
+          block_q=self.config.flash_attention_block_size,
+          block_kv=self.config.flash_attention_block_size,
+          block_q_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv_compute=self.config.flash_attention_block_size,
+          block_q_dq=self.config.flash_attention_block_size,
+          block_kv_dq=self.config.flash_attention_block_size,
+      )
+
+      shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
+      head_shards = (
+          mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
+      )
+      q_seq_shards = (
+          mesh.shape[shd_t] if shd_t is not None and shd_t in mesh.shape else 1
+      )
+
+      splash_attn_kernel = splash.make_splash_mha(
+          multi_head_mask,
+          block_sizes=block_sizes,
+          head_shards=head_shards,
+          q_seq_shards=q_seq_shards,
+      )
+
+      shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+      kernel_spec = splash_attn_kernel.manual_sharding_spec(
+          shd.NamedSharding(mesh, P(shd_n, shd_t))
+      )
+
+      @partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=(kernel_spec, shd_spec, shd_spec, shd_spec),
+          out_specs=shd_spec,
+          check_rep=False,
+      )
+      def sharded_splash_attn(kernel, q_block, k_block, v_block):
+        return jax.vmap(kernel)(q_block, k_block, v_block)
+
+      qkv = sharded_splash_attn(
+          splash_attn_kernel, query_proj, key_proj, value_proj
+      )
+      qkv = qkv.transpose(0, 2, 1, 3)
+    else:
+      # GQA
+      query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
+      attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
+
+      if attn_mask is not None:
+        attn = jnp.where(attn_mask[:, None, None, :, :], attn, K_MASK)
+
+      attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
+          key_proj.dtype
+      )
+
+      qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
+      qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)
@@ -502,7 +636,7 @@ class Attention(nnx.Module):
 
 
 class MoELayer(nnx.Module):
-  """MoE layer."""
+  """Sharded Megablox MoE layer."""
 
   def __init__(
       self,
@@ -518,65 +652,278 @@ class MoELayer(nnx.Module):
         out_features=config.num_experts,
         use_bias=False,
         rngs=rngs,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.gate_proj = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
-        sharding=self.shd_config.exp_weight_cdf,
+        sharding=self.shd_config.exp_weight_edf,
     )
     self.up_proj = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.embed_dim, config.hidden_dim),
         ),
-        sharding=self.shd_config.exp_weight_cdf,
+        sharding=self.shd_config.exp_weight_edf,
     )
     self.down_proj = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(),
             (config.num_experts, config.hidden_dim, config.embed_dim),
         ),
-        sharding=self.shd_config.exp_weight_cfd,
+        sharding=self.shd_config.exp_weight_efd,
     )
+    self.dtype = config.dtype
 
-  def __call__(self, x):
+  def __call__(self, x, use_megablox=True):
     scores = self.router(x).astype(jnp.float32)  # [B,T,E]
     routing_weights, routing_idx = jax.lax.top_k(
         jax.nn.softmax(scores, axis=-1), self.experts_per_tok
     )
     routing_weights = (
         routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
-    ).astype(x.dtype)
+    ).astype(self.dtype)
 
-    dispatch_mask = jax.nn.one_hot(
-        routing_idx, num_classes=self.num_experts, dtype=x.dtype
-    )  # [B, T, K, E]
-    dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
+    # TODO(tsbao): Incorporate input mask to filter out tokens that shouldn't be dispatched
 
-    dispatched_input = jnp.einsum(
-        'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
-    ).astype(x.dtype)
+    mesh = pxla.thread_resources.env.physical_mesh
 
-    expert_outputs = []
-    for i in range(self.num_experts):
-      expert_input = dispatched_input[:, :, i, :]
-      activations = nnx.silu(
-          jnp.einsum('BTD,DF->BTF', expert_input, self.gate_proj[i])
-      ) * jnp.einsum('BTD,DF->BTF', expert_input, self.up_proj[i])
-      activations = shard(activations, self.shd_config.act_btf)
-      expert_output = jnp.einsum('BTF,FD->BTD', activations, self.down_proj[i])
-      expert_outputs.append(expert_output)
+    # -------------------------------------------------------------
+    # Fallback to Vanilla dense routing if CPU or un-meshed environment
+    # -------------------------------------------------------------
+    if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
+      dispatch_mask = jax.nn.one_hot(
+          routing_idx, num_classes=self.num_experts, dtype=self.dtype
+      )  # [B, T, K, E]
+      dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
+      dispatched_input = jnp.einsum(
+          'BTID,BTEK->BTED', x[:, :, None, :], dispatch_mask
+      ).astype(self.dtype)
 
-    stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
-    routing_weights = jnp.tile(
-        routing_weights[:, :, None, :], (1, 1, self.num_experts, 1)
-    )  # [B, T, E, K]
-    routing_weights = dispatch_mask * routing_weights  # [B, T, E, K]
+      expert_outputs = []
+      for i in range(self.num_experts):
+        expert_input = dispatched_input[:, :, i, :]
+        gate_proj = jnp.astype(self.gate_proj.value[i], self.dtype)
+        up_proj = jnp.astype(self.up_proj.value[i], self.dtype)
+        activations = nnx.silu(
+            jnp.einsum('BTD,DF->BTF', expert_input, gate_proj)
+        ) * jnp.einsum('BTD,DF->BTF', expert_input, up_proj)
+        down_proj = jnp.astype(self.down_proj.value[i], self.dtype)
+        expert_output = jnp.einsum('BTF,FD->BTD', activations, down_proj)
+        expert_outputs.append(expert_output)
 
-    output = jnp.einsum('BTED,BTEK->BTD', stacked_outputs, routing_weights)
-    return output
+      stacked_outputs = jnp.stack(expert_outputs, axis=2)  # [B, T, E, D]
+      routing_weights = jnp.tile(
+          routing_weights[:, :, None, :], (1, 1, self.num_experts, 1)
+      )
+      routing_weights = dispatch_mask * routing_weights
+      return jnp.einsum('BTED,BTEK->BTD', stacked_outputs, routing_weights)
+
+    # -------------------------------------------------------------
+    # Distributed Megablox Execution Path
+    # -------------------------------------------------------------
+    ep_axis = self.shd_config.exp_weight_edf[0]  # Typically 'fsdp' or 'ep'
+
+    # Map global partition specs to local shard_map specs
+    shd_act = P(*self.shd_config.act_btd)
+    # The routing arrays (weights & indices) have shape [B, T, K], lacking the D dim
+    shd_routing = P(*self.shd_config.act_btd[:-1], None)
+    shd_exp_edf = P(*self.shd_config.exp_weight_edf)
+    shd_exp_efd = P(*self.shd_config.exp_weight_efd)
+
+    global_gate_w = self.gate_proj.value.astype(self.dtype)
+    global_up_w = self.up_proj.value.astype(self.dtype)
+    global_down_w = self.down_proj.value.astype(self.dtype)
+
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(
+            shd_act,
+            shd_routing,
+            shd_routing,
+            shd_exp_edf,
+            shd_exp_edf,
+            shd_exp_efd,
+        ),
+        out_specs=shd_act,
+        check_rep=False,
+    )
+    def sharded_megablox_moe(inputs, weights, indices, gate_w, up_w, down_w):
+      tp_axis = self.shd_config.act_btd[-1]
+
+      if tp_axis is not None and tp_axis in mesh.axis_names:
+        inputs = jax.lax.all_gather(
+            inputs, axis_name=tp_axis, tiled=True, axis=2
+        )
+
+      B, T, D_global = inputs.shape
+
+      if ep_axis is not None and ep_axis in mesh.axis_names:
+        num_ep = jax.lax.psum(1, axis_name=ep_axis)
+        ep_shard_idx = jax.lax.axis_index(ep_axis)
+      else:
+        num_ep = 1
+        ep_shard_idx = 0
+
+      num_local_experts = self.num_experts // num_ep
+
+      flat_repeated_inputs = jnp.repeat(
+          inputs.reshape(B * T, D_global), self.experts_per_tok, axis=0
+      )
+      flat_selected_indices = indices.reshape(-1)
+
+      sort_indices = jnp.argsort(flat_selected_indices)
+      unsort_indices = jnp.argsort(sort_indices)
+
+      sorted_inputs = _custom_permute(flat_repeated_inputs, sort_indices)
+      sorted_expert_indices = flat_selected_indices[sort_indices]
+
+      group_sizes = jnp.bincount(sorted_expert_indices, length=self.num_experts)
+
+      if num_ep > 1:
+        global_group_sizes = jax.lax.all_gather(
+            group_sizes, axis_name=ep_axis, tiled=False, axis=0
+        )
+        global_send_sizes = jnp.sum(
+            jnp.reshape(
+                global_group_sizes, (num_ep, num_ep, num_local_experts)
+            ),
+            axis=-1,
+            keepdims=False,
+        )
+        local_send_sizes = global_send_sizes[ep_shard_idx]
+        local_recv_sizes = global_send_sizes[:, ep_shard_idx]
+
+        global_in_offsets, global_out_offsets = get_global_input_output_offsets(
+            global_send_sizes, num_ep
+        )
+        local_input_offsets = global_in_offsets[ep_shard_idx]
+        local_output_offsets = global_out_offsets[ep_shard_idx]
+
+        output_buffer_size = (
+            min(self.experts_per_tok, num_local_experts) * B * T * num_ep
+        )
+        output_buffer = jax.lax.empty(
+            shape=(output_buffer_size, D_global), dtype=inputs.dtype
+        )
+
+        sorted_inputs = jax.lax.ragged_all_to_all(
+            sorted_inputs,
+            output_buffer,
+            local_input_offsets,
+            local_send_sizes,
+            local_output_offsets,
+            local_recv_sizes,
+            axis_name=ep_axis,
+            axis_index_groups=None,
+        )
+
+        group_start_idx = ep_shard_idx * num_local_experts
+        local_expert_group_sizes = jax.lax.dynamic_slice_in_dim(
+            global_group_sizes, group_start_idx, num_local_experts, axis=1
+        )
+        local_group_sizes = jnp.sum(local_expert_group_sizes, axis=0)
+
+        flat_local_expert_group_sizes = local_expert_group_sizes.reshape(-1)
+        local_expert_indices = jnp.mod(
+            jnp.arange(flat_local_expert_group_sizes.shape[0]),
+            num_local_experts,
+        )
+        local_expert_indices = jnp.repeat(
+            local_expert_indices,
+            flat_local_expert_group_sizes,
+            total_repeat_length=sorted_inputs.shape[0],
+        )
+
+        local_expert_sort_indices = jnp.argsort(local_expert_indices)
+        sorted_inputs = _custom_permute(
+            sorted_inputs, local_expert_sort_indices
+        )
+      else:
+        local_group_sizes = group_sizes
+        local_expert_sort_indices = jnp.arange(sorted_inputs.shape[0])
+
+      m, k_dim = sorted_inputs.shape
+      n = gate_w.shape[-1]
+      ffn0_tiling = (
+          round_up_to_base(min(128, m), base=8, threshold=8),
+          round_up_to_base(min(128, k_dim), base=128, threshold=128),
+          round_up_to_base(min(128, n), base=128, threshold=128),
+      )
+      ffn1_tiling = (ffn0_tiling[0], ffn0_tiling[2], ffn0_tiling[1])
+
+      projected = megablox.gmm(
+          sorted_inputs,
+          gate_w,
+          group_sizes=local_group_sizes,
+          tiling=ffn0_tiling,
+          preferred_element_type=inputs.dtype,
+      )
+      middle = jax.nn.silu(projected) * megablox.gmm(
+          sorted_inputs,
+          up_w,
+          group_sizes=local_group_sizes,
+          tiling=ffn0_tiling,
+          preferred_element_type=inputs.dtype,
+      )
+      sorted_outputs = megablox.gmm(
+          middle,
+          down_w,
+          group_sizes=local_group_sizes,
+          tiling=ffn1_tiling,
+          preferred_element_type=inputs.dtype,
+      )
+
+      if num_ep > 1:
+        sorted_outputs = _custom_permute(
+            sorted_outputs, jnp.argsort(local_expert_sort_indices)
+        )
+
+        global_in_offsets, global_out_offsets = get_global_input_output_offsets(
+            global_send_sizes.T, num_ep  # pylint: disable=undefined-variable
+        )
+        local_send_sizes, local_recv_sizes = local_recv_sizes, local_send_sizes  # pylint: disable=undefined-variable
+
+        output_buffer = jax.lax.empty(
+            shape=(B * T * self.experts_per_tok, D_global), dtype=inputs.dtype
+        )
+        sorted_outputs = jax.lax.ragged_all_to_all(
+            sorted_outputs,
+            output_buffer,
+            global_in_offsets[ep_shard_idx],
+            local_send_sizes,
+            global_out_offsets[ep_shard_idx],
+            local_recv_sizes,
+            axis_name=ep_axis,
+            axis_index_groups=None,
+        )
+
+      outputs = _custom_permute(sorted_outputs, unsort_indices)
+      outputs = outputs.reshape(B, T, self.experts_per_tok, D_global).transpose(
+          0, 1, 3, 2
+      )
+
+      final_output = jnp.einsum('btdk,btk->btd', outputs, weights)
+
+      if tp_axis is not None and tp_axis in mesh.axis_names:
+        final_output = jax.lax.psum_scatter(
+            final_output, axis_name=tp_axis, scatter_dimension=2, tiled=True
+        )
+
+      return final_output
+
+    return sharded_megablox_moe(
+        x,
+        routing_weights,
+        routing_idx,
+        global_gate_w,
+        global_up_w,
+        global_down_w,
+    )
 
 
 class MLP(nnx.Module):
@@ -590,15 +937,17 @@ class MLP(nnx.Module):
   ):
     self.config = config
     self.shd_config = config.shd_config
-    kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
         in_features=config.embed_dim,
         out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, self.shd_config.ffw_weight_df
+            nnx.initializers.zeros_init(),
+            self.shd_config.ffw_weight_df,
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.up_proj = nnx.Linear(
         in_features=config.embed_dim,
@@ -606,8 +955,11 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, self.shd_config.ffw_weight_df
+            nnx.initializers.zeros_init(),
+            self.shd_config.ffw_weight_df,
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.down_proj = nnx.Linear(
         in_features=config.hidden_dim,
@@ -615,8 +967,10 @@ class MLP(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, self.shd_config.ffw_weight_fd
+            nnx.initializers.zeros_init(), self.shd_config.ffw_weight_fd
         ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
   def block(
@@ -651,6 +1005,8 @@ class DecoderLayer(nnx.Module):
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.attn = Attention(
         config=config,
@@ -661,6 +1017,8 @@ class DecoderLayer(nnx.Module):
         norm_eps=config.norm_eps,
         rngs=rngs,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     if config.num_experts is None:
       self.mlp = MLP(
@@ -713,6 +1071,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
         embed_dim=config.embed_dim,
         rngs=rngs,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.layers = compat.ModuleList([
         DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
@@ -723,6 +1083,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
         rngs=rngs,
         norm_eps=config.norm_eps,
         shd_config=shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     if not config.use_tied_embedding:
       self.lm_head = Einsum(
@@ -730,6 +1092,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,
           sharding=shd_config.emb_dv,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
       )
 
   def init_cache(
@@ -738,8 +1102,8 @@ class Qwen3(BackendMappingMixin, nnx.Module):
     """Initializes the cache for the model."""
     config = self.config
     shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
-    k = jnp.zeros(shape, dtype=dtype)
-    v = jnp.zeros(shape, dtype=dtype)
+    k = jnp.zeros(shape, dtype=config.dtype)
+    v = jnp.zeros(shape, dtype=config.dtype)
     end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
     # Jax array is immutable, so updates to each layer creates new arrays.
     return {
@@ -793,7 +1157,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
     else:
       logits = self.lm_head(x)
 
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return jnp.astype(logits, jnp.float32), new_cache  # pytype: disable=bad-return-type
 
   def get_model_input(self):
     """Returns a dummy model input for the transformer.

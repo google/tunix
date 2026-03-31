@@ -262,7 +262,10 @@ class AsyncTimeline(Timeline):
     def on_failure(e: Exception) -> None:
       # TODO(noghabi):Capture the span even if it fails, but add a tag that it
       # failed and process accordingly.
-      raise e
+      # Metrics are best effort and should not raise exceptions.
+      logging.error(
+          "Timeline span '%s' (id=%d) failed: %s", name, span_id, e, exc_info=e
+      )
 
     if not waitlist:
       on_success()

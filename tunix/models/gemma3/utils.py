@@ -110,11 +110,11 @@ def _make_causal_mask(
   Returns:
     Attention mask of shape [B, L, L] (where B=batch dim and L=sequence dim).
   """
-  if len(input_mask.shape) != 2:
+  if len(input_mask.shape) != 2:  # pytype: disable=attribute-error  # jax-arraylike
     raise ValueError(
-        f'Input mask must be 2D (shape [B, L]), but got {input_mask.shape}.'
+        f'Input mask must be 2D (shape [B, L]), but got {input_mask.shape}.'  # pytype: disable=attribute-error  # jax-arraylike
     )
-  seq_len = input_mask.shape[-1]
+  seq_len = input_mask.shape[-1]  # pytype: disable=attribute-error  # jax-arraylike
   causal_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool))
   attn_mask = input_mask[..., None, :]
   attn_mask *= causal_mask[None, ...]

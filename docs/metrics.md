@@ -413,16 +413,23 @@ capabilities, such as exporting aggregated metrics to TensorBoard, are WIP. Once
 the functionality is complete, v2 will be replacing the original version.
 
 ```python
-from tunix.perf import metrics as perf_metrics
-from tunix.perf.experimental import export as perf_export_v2
+from tunix import PerfMetricsConfig
+from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl import rl_cluster
 
-# 1. Create a PerfMetricsConfig object.
-perf_config = perf_metrics.PerfMetricsConfig()
 
-# 2. Create the v2 metrics export function, specifying the trace directory.
-perf_config.custom_export_fn_v2 = (
-    perf_export_v2.PerfMetricsExport(trace_dir="/tmp/perf_trace").export_metrics
+# 1. Define cluster_config (as you would for your RL job)
+cluster_config = rl_cluster.ClusterConfig(
+    training_config=training_config,
+    # ... other configurations
+)
+
+# 2. Create a PerfMetricsConfig with custom_export_fn_v2 defined.
+perf_metrics_config = PerfMetricsConfig(
+    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
+        cluster_config=cluster_config,
+        trace_dir="/tmp/agentic_perf",
+    ).export_metrics
 )
 
 # 3. Pass the config to the RLCluster.

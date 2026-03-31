@@ -100,6 +100,9 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   max_concurrency: int = 16
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
+  degenerate_group_masking: bool = (
+      True  # Whether to mask out degenerate groups with all-0 advantages.
+  )
 
   def __post_init__(self):
     if self.num_generations <= 1:
@@ -137,8 +140,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
-      reward_fns: RewardFn | List[RewardFn],
       algo_config: TGrpoConfig,
+      reward_fns: RewardFn | List[RewardFn] | None = None,
       chat_parser: Any | None = None,
       metric_fns: Sequence[MetricFn] | None = None,
       agent_class: Type[
@@ -231,6 +234,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "entropy": np.mean,
+        "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
     })
@@ -283,6 +287,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_masks_list: List[np.ndarray] = []
     old_logprobs_list: List[np.ndarray] = []
     policy_versions_list: List[int] = []
+    trajectory_rewards_list: List[float] = []
     trajectories_to_log = []
 
     for item in trajectories:
@@ -293,6 +298,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           for message in conversation
           if message["role"] == "assistant"
       )
+
       completion_texts.append(assistant_text)
       completion_tokens_list.append(item.traj.get("conversation_tokens"))
       completion_masks_list.append(item.traj.get("conversation_masks"))
@@ -301,6 +307,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
+      trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -429,10 +436,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     reward_kwargs = {
         key: value for key, value in original_inputs.items() if key != "prompts"
     }
-    # TODO: b/456528861 - Refactor reward computation to happen within the
-    # environment during rollout, rather than as a post-processing step. This
-    # would align with the standard agentic RL pattern and remove the need for
-    # `dummy_reward`.
+
+    reward_kwargs["trajectory_rewards"] = trajectory_rewards_list
     with self.rl_cluster.perf_v2.span(
         perf_constants.ADVANTAGE_COMPUTATION,
         tags=perf_tags,
@@ -454,8 +459,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
-    # Log completion lengths.
+    # Log completion lengths and env_time.
     agg_completion_mask = completion_mask.sum(axis=-1)
+    env_times = [item.traj.get("env_time", 0.0) for item in trajectories]
     self.rl_cluster.buffer_metrics_async(
         {
             "generation/completions/mean_length": (
@@ -474,6 +480,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 clipped_completion_count / len(trajectories),
                 np.mean,
             ),
+            "generation/env_time/mean": (np.mean(env_times), np.mean),
+            "generation/env_time/max": (np.max(env_times), np.max),
+            "generation/env_time/min": (np.min(env_times), np.min),
         },
         mode=mode,
         step=expected_step,
@@ -563,7 +572,26 @@ def grpo_loss_fn(
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
-  advantages = jnp.astype(train_example.advantages, jnp.float32)[:, None]
+  advantages = jnp.astype(train_example.advantages, jnp.float32)
+  if advantages.ndim != 1:
+    raise ValueError(
+        "Expected advantages to be a 1D array, but got shape"
+        f" {advantages.shape}"
+    )
+
+  # Mask out degenerate groups (all-0 sequence advantages).
+  # For group-relative advantages, all-0 indicates a no-signal group (e.g. all
+  # rewards are equal). Such groups should not contribute to policy, KL, or
+  # entropy terms in this loss.
+  if algo_config.degenerate_group_masking:
+    num_generations = algo_config.num_generations
+    grouped_advantages = advantages.reshape((-1, num_generations))
+    invalid_group = jnp.all(jnp.isclose(grouped_advantages, 0.0), axis=-1)
+    valid_group_mask = jnp.logical_not(invalid_group)
+    valid_sequence_mask = jnp.repeat(valid_group_mask, num_generations)[:, None]
+    completion_mask = completion_mask * valid_sequence_mask.astype(
+        completion_mask.dtype
+    )
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -573,7 +601,10 @@ def grpo_loss_fn(
     )
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
+  # Record KL divergence before clipping.
   ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
+
+  seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
@@ -588,6 +619,7 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
+  advantages = advantages[:, None]
   pg_loss_1 = -advantages * is_ratio
   pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
@@ -597,18 +629,23 @@ def grpo_loss_fn(
       jnp.greater(pg_loss_2, pg_loss_1), completion_mask
   )
 
-  aux = {"kl": 0.0, "pg_clipfrac": clipped_fraction, "ppo_kl": ppo_kl}
+  pg_loss = ppo_helpers.masked_mean(per_token_loss, completion_mask)
+  aux = {
+      "kl": 0.0,
+      "pg_loss": pg_loss,
+      "pg_clipfrac": clipped_fraction,
+      "ppo_kl": ppo_kl,
+  }
+  kl = common.compute_kl_divergence(
+      per_token_logps, train_example.ref_per_token_logps
+  )
+  # Log mean KL.
+  aux["kl"] = jnp.astype(
+      (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
+      jnp.float32,
+  )
   if beta is not None and beta != 0.0:
-    kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
-    )
     per_token_loss = per_token_loss + beta * kl
-
-    # Log mean KL.
-    aux["kl"] = jnp.astype(
-        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
-        jnp.float32,
-    )
 
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode

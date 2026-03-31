@@ -26,11 +26,12 @@ from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optio
 
 from absl import logging
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
-from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.rollout import base_rollout
 
 P = ParamSpec("P")
@@ -61,15 +62,13 @@ class TrajectoryCollectEngine:
           Concatenate[Dict[str, str], P], base_rollout.RolloutOutput
       ],
       model_call_kwargs: Optional[Dict[str, Any]] = None,
-      final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
-      ] = None,
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
       timeout: float = 600.0,
       tokenizer=None,
       chat_parser=None,
       valid_statuses: Optional[Set[agent_types.TrajectoryStatus]] = None,
+      perf_v2: Optional[perf_tracer_v2.Tracer] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -96,13 +95,13 @@ class TrajectoryCollectEngine:
         chat_parser: Optional chat parser for formatting messages
         valid_statuses (Set[TrajectoryStatus]): A set of statuses that are
           considered not "penalized" for reward computation.
+        perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
+          to use for performance measurements. Defaults to a no-op tracer.
     """
     self.agent = agent
     self.env = env
     self.model_call = model_call
-    self.final_reward_fn = final_reward_fn or (
-        lambda *_: reward_types.RewardOutput(reward=0.0)
-    )
+    self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
@@ -116,6 +115,8 @@ class TrajectoryCollectEngine:
     self.valid_statuses = valid_statuses or {
         agent_types.TrajectoryStatus.SUCCEEDED
     }
+    self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
+    self.env_time: float = 0.0
 
     if self.max_context_limit and not (self.tokenizer and self.chat_parser):
       logging.warning(
@@ -195,6 +196,7 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
+      self.agent.trajectory.env_time = self.env_time
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -208,6 +210,7 @@ class TrajectoryCollectEngine:
               "env_masks": getattr(step, "env_masks", []),
               "reward": step.reward,
               "mc_return": step.mc_return,
+              "env_time": self.env_time,
           }
           for step in self.agent.trajectory.steps
       ]
@@ -247,6 +250,7 @@ class TrajectoryCollectEngine:
           "conversation_masks": np.concatenate(conversation_masks, axis=0),
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
+          "env_time": self.env_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -263,13 +267,11 @@ class TrajectoryCollectEngine:
       pairs: List[Tuple[ConversationAgentBase, BaseTaskEnv]],
       *,
       model_call: Callable[..., base_rollout.RolloutOutput],
-      final_reward_fn: Optional[
-          Callable[[Dict[str, Any], str], reward_types.RewardOutput]
-      ] = None,
       gamma: float = 1.0,
       max_context_limit: Optional[int] = None,
       timeout: float = 30.0,
       mode: str = "Trajectory",
+      perf_v2: Optional[perf_tracer_v2.Tracer] = None,
   ) -> AsyncGenerator[Tuple[int, Any], None]:
     """Execute multiple agent-environment pairs concurrently.
 
@@ -281,11 +283,12 @@ class TrajectoryCollectEngine:
         pairs (List[Tuple[ConversationAgentBase, BaseTaskEnv]]): List of (agent,
           environment) pairs
         model_call (Callable): Shared model inference function for all pairs
-        final_reward_fn (Optional[Callable]): Shared final reward function
         gamma (float): Discount factor for return calculation
         max_context_limit (Optional[int]): Maximum context limit per episode
         timeout (float): Per-episode timeout in seconds
         mode (str): Output format. See `collect` method for options.
+        perf_v2 (Optional[perf_tracer_v2.Tracer]): Optional performance tracer
+          to use for performance measurements.
 
     Yields:
         Tuple[int, Any]: `(pair_index, result)`. The type of `result`
@@ -298,10 +301,10 @@ class TrajectoryCollectEngine:
           agent,
           env,
           model_call=model_call,
-          final_reward_fn=final_reward_fn,
           gamma=gamma,
           max_context_limit=max_context_limit,
           timeout=timeout,
+          perf_v2=perf_v2,
       )
       traj = await engine.collect(mode=mode)
       return i, traj
@@ -320,11 +323,11 @@ class TrajectoryCollectEngine:
     obs, _ = await asyncio.get_event_loop().run_in_executor(
         None, self.env.reset
     )
-    if hasattr(self.env, "compute_final_reward") and callable(
-        self.env.compute_final_reward
-    ):
-      self.final_reward_fn = self.env.compute_final_reward
-
+    self.final_reward_fn = (
+        self.env.final_reward_fn
+        if hasattr(self.env, "final_reward_fn")
+        else None
+    )
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
@@ -341,6 +344,22 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.prompt_tokens = prompt_tokens
 
     self._start_ts = time.time()
+
+  def _get_perf_tags(self) -> Dict[str, Any]:
+    """Extracts performance tracing tags from the environment."""
+    tags = {}
+    if hasattr(self.env, "extra_kwargs"):
+      group_id = self.env.extra_kwargs.get("group_id")
+      if group_id is not None:
+        tags[perf_constants.GROUP_ID] = group_id
+      pair_index = self.env.extra_kwargs.get("pair_index")
+      if pair_index is not None:
+        tags[perf_constants.PAIR_INDEX] = pair_index
+    if hasattr(self.env, "task"):
+      policy_version = self.env.task.get("policy_version")
+      if policy_version is not None:
+        tags[perf_constants.STEP] = policy_version
+    return tags
 
   async def _one_step(self) -> bool:
     """Executes a single step and returns the Step object and Done status.
@@ -369,9 +388,27 @@ class TrajectoryCollectEngine:
       )
       action = []
 
-    obs, rew, done, info = await asyncio.get_event_loop().run_in_executor(
-        None, self.env.step, action
-    )
+    def clocked_env_step(action):
+      t_start = time.thread_time()
+      result = self.env.step(action)
+      t_delta = time.thread_time() - t_start
+      return result, t_delta
+
+    tags = self._get_perf_tags()
+    with self.perf_v2.span(
+        perf_constants.ENVIRONMENT,
+        tags=tags,
+    ):
+
+      (
+          obs,
+          rew,
+          done,
+          info,
+      ), thread_delta = await asyncio.get_event_loop().run_in_executor(
+          None, clocked_env_step, action
+      )
+    self.env_time += thread_delta
 
     self.agent.update_from_env(obs, rew, done, info)
 
@@ -419,7 +456,9 @@ class TrajectoryCollectEngine:
     the pattern used by rllm's ``AgentExecutionEngine``.
     """
     last_step = self.agent.get_current_step()
-    if last_step is None:
+    if last_step is None or self.final_reward_fn is None:
+      # Skip reward computation in trajectory collection if no reward function
+      # is provided or no step is taken.
       return
 
     if hasattr(self.env, 'compute_final_reward') and callable(
@@ -432,9 +471,9 @@ class TrajectoryCollectEngine:
       return
 
     final_reward = await asyncio.get_event_loop().run_in_executor(
-        None, self.final_reward_fn, self.env.task, last_step.model_response
+        None, self.final_reward_fn
     )
-    last_step.reward += final_reward.reward
+    last_step.reward += final_reward
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.

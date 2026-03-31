@@ -577,14 +577,9 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
 )
 
 
-# Helper for dummy reward function (placeholder)
-def dummy_reward_fn(prompts, completions, **kwargs):
-  return 0
-
-
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_cluster=rl_cluster,
-    reward_fns=dummy_reward_fn,
+    reward_fns=None,
     agent_class=SWEAgent,
     agent_kwargs={},
     env_class=SWEEnv,

@@ -16,9 +16,7 @@ except ImportError:
   Action = cast(Any, None)
 
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
-from tunix.rl.agentic.rewards import reward_types
 
-logger = logging.getLogger(__name__)
 
 if r2egym:
   R2EGYM_PATH = os.path.dirname(r2egym.__file__)
@@ -130,7 +128,7 @@ class SWEEnv(BaseTaskEnv):
     else:
       logger.info("[SWEEnv] reusing existing RepoEnv, calling env.reset() ...")
       self.env.reset()
-      logger.info("[SWEEnv] env.reset() returned in %.1fs", time.time() - t0)
+    self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
       logger.info("[SWEEnv] adding r2egym commands ...")
       self.env.add_commands(R2EGYM_COMMAND_FILES)

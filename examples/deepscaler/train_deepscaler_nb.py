@@ -578,8 +578,9 @@ grpo_config = GRPOConfig(
 
 # Perf Metrics logging
 perf_metrics_config = PerfMetricsConfig(
-    custom_export_fn_v2=PerfMetricsExport(
-        trace_dir="/tmp/agentic_perf"
+    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
+        cluster_config=cluster_config,
+        trace_dir="/tmp/agentic_perf",
     ).export_metrics
 )
 
@@ -601,14 +602,24 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
   del prompts, completions, advantages, kwargs
   solve_all = (rewards > 0.1).all()
   solve_none = (rewards == 0).all()
+  solve_partial = (~solve_all) and (~solve_none)
+  solve_ratio = (rewards > 0.1).mean()
   return {
       "rewards/solve_all": (
           1 if solve_all else 0,
-          np.sum,
+          np.mean,
       ),
       "rewards/solve_none": (
           1 if solve_none else 0,
-          np.sum,
+          np.mean,
+      ),
+      "rewards/solve_partial": (
+          1 if solve_partial else 0,
+          np.mean,
+      ),
+      "rewards/solve_ratio": (
+          solve_ratio,
+          np.mean,
       ),
   }
 
