@@ -43,7 +43,7 @@ MAX_MODEL_LEN = int(os.getenv("MAX_MODEL_LEN", "32768"))
 MAX_RESPONSE_LENGTH = int(
     os.getenv("MAX_RESPONSE_LENGTH", os.getenv("MAX_GENERATION_STEPS", "8192"))
 )
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "8"))
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "256"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "0"))
 
