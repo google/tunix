@@ -37,6 +37,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     """Dummy class to expose reward_fn to autospec."""
 
     reward_fn = None
+    final_reward_fn = None
 
   def setUp(self):
     super().setUp()
@@ -47,7 +48,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_env.max_steps = 10
 
     self.mock_model_call = mock.Mock()
-    self.mock_env.reward_fn = mock.Mock(return_value=0.5)
+    self.mock_env.final_reward_fn = mock.Mock(return_value=0.5)
     self.mock_tokenizer = mock.Mock()
     self.mock_tokenizer.encode.return_value = [1, 2, 3]
     self.mock_chat_parser = mock.Mock()
@@ -185,9 +186,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(self.mock_env.reset.call_count, 1)
     self.assertEqual(self.mock_env.step.call_count, 2)
     self.assertEqual(self.mock_model_call.call_count, 2)
-    self.mock_env.reward_fn.assert_called_once_with(
-        self.mock_env.task, 'response2'
-    )
+    self.mock_env.final_reward_fn.assert_called_once_with()
     self.mock_env.close.assert_called_once()
 
     # Check rewards and returns
@@ -283,7 +282,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         'conversation_masks': np.array([1, 1, 1, 1, 1, 1, 1, 1]),
         'trajectory_reward': (
             3.5
-        ),  # 1.0 + 2.0 + 0.5 (final reward from reward_fn)
+        ),  # 1.0 + 2.0 + 0.5 (final reward from final_reward_fn)
         'env_time': 0.0,
         'old_logprobs': np.array([1, 1, 0, 0, 1, 1, 0, 0]),
         'policy_version': None,
@@ -413,7 +412,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     agent1 = configure_mock_agent('initial1')
     env1 = mock.create_autospec(self._TestEnv, instance=True)
-    env1.reward_fn = mock.Mock(return_value=0.5)
+    env1.final_reward_fn = mock.Mock(return_value=0.5)
     env1.reset.return_value = ('initial1', {})
     env1.step.return_value = ('obs1', 1.0, True, {})
     env1.task = {}
@@ -422,7 +421,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     agent2 = configure_mock_agent('initial2')
     env2 = mock.create_autospec(self._TestEnv, instance=True)
-    env2.reward_fn = mock.Mock(return_value=0.5)
+    env2.final_reward_fn = mock.Mock(return_value=0.5)
     env2.reset.return_value = ('initial2', {})
     env2.step.side_effect = [
         ('obs2a', 2.0, False, {}),

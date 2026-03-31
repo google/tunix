@@ -32,7 +32,6 @@ from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
-from tunix.rl.agentic.rewards import reward_types
 from tunix.rl.rollout import base_rollout
 
 P = ParamSpec("P")
@@ -102,7 +101,7 @@ class TrajectoryCollectEngine:
     self.agent = agent
     self.env = env
     self.model_call = model_call
-    self.final_reward_fn = self.env.reward_fn
+    self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
@@ -324,6 +323,11 @@ class TrajectoryCollectEngine:
     obs, _ = await asyncio.get_event_loop().run_in_executor(
         None, self.env.reset
     )
+    self.final_reward_fn = (
+        self.env.final_reward_fn
+        if hasattr(self.env, "final_reward_fn")
+        else None
+    )
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
 
@@ -456,7 +460,7 @@ class TrajectoryCollectEngine:
       # is provided or no step is taken.
       return
     final_reward = await asyncio.get_event_loop().run_in_executor(
-        None, self.final_reward_fn, self.env.task, last_step.model_response
+        None, self.final_reward_fn
     )
     last_step.reward += final_reward
 
