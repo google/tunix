@@ -891,7 +891,7 @@ class Sampler(base_sampler.BaseSampler):
               mode='constant',
               constant_values=0.0,
           )
-          out_logprobs.append(padded_logprobs.tolist())
+          out_logprobs.append(padded_logprobs)
 
     else:
       out_tokens = []
@@ -915,9 +915,9 @@ class Sampler(base_sampler.BaseSampler):
         if return_logprobs:
           # Extract logprobs for the generated tokens
           out_logprobs.append(
-              jax.device_get(
-                  final_logprobs_buffer[i][start_idx:end_idx]
-              ).tolist()
+              np.array(
+                  jax.device_get(final_logprobs_buffer[i][start_idx:end_idx])
+              )
           )
 
       decoded_outputs = [
