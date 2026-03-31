@@ -390,6 +390,8 @@ def aggregate_loss(
   """
 
   per_token_loss = per_token_loss.astype(jnp.float32)
+  seq_mask = completion_mask.sum(axis=-1)
+  non_zero_rows = jnp.clip((seq_mask > 0).sum(), min=1)
 
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
@@ -398,11 +400,11 @@ def aggregate_loss(
         jnp.clip(completion_mask.sum(), min=1)
     )
   elif loss_agg_mode == "sequence-mean-token-mean":
-    seq_mask = completion_mask.sum(axis=-1)  # per-sequence token count
+    # Average only across sequences with at least one unmasked token.
     seq_loss = ((per_token_loss * completion_mask).sum(axis=-1)) / jnp.clip(
         seq_mask, min=1
     )
-    loss = seq_loss.mean()  # sequence_mean
+    loss = seq_loss.sum() / non_zero_rows
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
@@ -411,10 +413,10 @@ def aggregate_loss(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    loss = seq_loss.mean()
+    loss = seq_loss.sum() / non_zero_rows
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
-    # Get custom normalization factor from kwargs, default to batch size.
-    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
+    # Get custom normalization factor from kwargs, default to non-empty rows.
+    norm = _check_get_norm(kwargs, non_zero_rows)
 
     # Sum the per-sequence sums and normalize
     # TODO(sizhi): Experiment with loss in precision if loss is fp16.
