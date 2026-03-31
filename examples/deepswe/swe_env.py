@@ -168,13 +168,9 @@ class SWEEnv(BaseTaskEnv):
         observation=str(obs), reward=reward, done=done, info=info
     )
 
-  def compute_final_reward(self, *args) -> reward_types.RewardOutput:
-    """Run tests in the Docker container and return reward wrapped in an object."""
-    # Get the raw float/int reward
-    reward_val = float(self.env.compute_reward())
-
-    # Return it wrapped in the object the engine expects
-    return reward_types.RewardOutput(reward=reward_val)
+  def compute_final_reward(self, *args) -> float:
+    """Run tests in the Docker container and return reward."""
+    return float(self.env.compute_reward())
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
