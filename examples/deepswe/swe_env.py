@@ -114,7 +114,7 @@ class SWEEnv(BaseTaskEnv):
       )
     else:
       self.env.reset()
-    self.reward_fn = self.env.compute_reward
+    self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
     else:
