@@ -594,19 +594,11 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
-perf_metrics_config = PerfMetricsConfig(
-    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
-        cluster_config=cluster_config,
-        trace_dir="gs://sizhi-dev/deepswe/traces",
-    ).export_metrics
-)
-
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen_actor,
     reference=qwen_reference,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
-    perf_config=perf_metrics_config,
 )
 
 
