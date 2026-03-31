@@ -244,6 +244,19 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         )
         for completion_ids in rollout_output.tokens
     ])
+
+    if rollout_output.logprobs is not None:
+      old_per_token_logps = np.array([
+          utils.pad_to_length(
+              old_logprobs,
+              target_length=rollout_config.max_tokens_to_generate,
+              pad_value=0.0,
+              dtype=old_logprobs.dtype,
+          )[:rollout_config.max_tokens_to_generate]
+          for old_logprobs in rollout_output.logprobs
+      ])
+    else:
+      old_per_token_logps = None
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
 
     # Assemble masks
