@@ -344,16 +344,40 @@ class PeftTrainer:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
-    # grad_norm = optax.global_norm(grads)
+    per_batch_grad_norm = optax.global_norm(grads)
     # optimizer.update(model, grads)
-    updates = optimizer.update(model, grads)
-    grad_norm = optax.global_norm(updates)
+    # updates = optimizer.update(model, grads)
+    # grad_norm = optax.global_norm(updates)
+    grad_arrays = nnx.pure(nnx.state(grads, optimizer.wrt))
+    current_grad_norm = optax.global_norm(grad_arrays)
+
+    grad_accum_steps = self.config.get_with_default(
+      "gradient_accumulation_steps", 1
+    )
+    acc_grads = 0
+    accumulated_grads = 0
+    if grad_accum_steps > 1 and hasattr(optimizer.opt_state, "acc_grads"):
+      acc_grads = nnx.pure(optimizer.opt_state.acc_grads)
+      accumulated_grads = jax.tree.map(
+        lambda acc, grad: (acc * (grad_accum_steps - 1) + grad) / grad_accum_steps,
+        acc_grads,
+        grad_arrays,
+      )
+      mini_step = nnx.pure(optimizer.opt_state.mini_step)
+      is_update_boundary = mini_step == (grad_accum_steps - 1)
+      grad_norm = jnp.where(
+        is_update_boundary,
+        optax.global_norm(accumulated_grads),
+        jnp.asarray(0.0, dtype=jnp.float32),
+      )
+
+    optimizer.update(model, grads)
 
     if self._has_aux:
       loss, aux = out
-      return loss, aux, grad_norm
+      return loss, aux, grad_norm, current_grad_norm, acc_grads, accumulated_grads
     else:
-      return out, None, grad_norm
+      return out, None, grad_norm, current_grad_norm, acc_grads, accumulated_grads
 
   def _eval_step(
       self, model: nnx.Module, inputs: Any
@@ -724,7 +748,8 @@ class PeftTrainer:
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          train_loss, aux, grad_norm = train_step(train_example)
+          train_loss, aux, grad_norm, current_grad_norm, acc_grads, accumulated_grads = train_step(train_example)
+          print(f"YY {self.optimizer.opt_state.mini_step=} {grad_norm=} {current_grad_norm=}, {optax.global_norm(acc_grads)=}, {optax.global_norm(accumulated_grads)=}")
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 

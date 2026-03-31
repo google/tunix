@@ -405,6 +405,7 @@ def aggregate_loss(
         seq_mask, min=1
     )
     loss = seq_loss.sum() / non_zero_rows
+    print(f"YY {seq_mask=} {seq_loss=} {non_zero_rows=} {loss=}")
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
