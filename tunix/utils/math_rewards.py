@@ -121,11 +121,11 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
 
     reward_value = 0.0
     if "\\boxed" in model_solution:
-      reward_value += 0.05
+      reward_value += 0.0
 
     model_answer = math_utils.extract_answer(model_solution)
     if model_answer is not None:
-      reward_value += 0.05
+      reward_value += 0.0
     else:
       rewards.append(reward_value)
       continue
@@ -179,7 +179,7 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
     if found_exact_or_symbolic:
       reward_value = 1.0
     elif found_numeric_close:
-      reward_value = max(reward_value, 0.3)  # Maximum fallback reward for numerically close answers.
+      reward_value = max(reward_value, 0.0)  # Maximum fallback reward for numerically close answers.
 
     rewards.append(reward_value)
   return rewards
