@@ -344,8 +344,11 @@ class PeftTrainer:
         has_aux=self._has_aux,
     )
     out, grads = grad_fn(model, **inputs)
-    grad_norm = optax.global_norm(grads)
-    optimizer.update(model, grads)
+    # grad_norm = optax.global_norm(grads)
+    # optimizer.update(model, grads)
+    updates = optimizer.update(model, grads)
+    grad_norm = optax.global_norm(updates)
+
     if self._has_aux:
       loss, aux = out
       return loss, aux, grad_norm
