@@ -46,6 +46,9 @@ MAX_RESPONSE_LENGTH = int(
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "256"))
 TIMEOUT = float(os.getenv("TIMEOUT", "600"))
 TASKS_LIMIT = int(os.getenv("TASKS_LIMIT", "0"))
+MAX_CONTEXT_LIMIT = int(
+    os.getenv("MAX_CONTEXT_LIMIT", str(max(1, MAX_MODEL_LEN - 256)))
+)
 
 ENABLE_GUARD = False
 if os.getenv("ENABLE_GUARD", "false").lower() == "true":
@@ -220,7 +223,10 @@ from transformers import AutoTokenizer
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.qwen3 import model as model_lib
 from tunix.models.qwen3 import params as params_lib
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.parser.chat_template_parser import parser
+from tunix.rl.agentic.trajectory import trajectory_collect_engine
+from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 if not os.path.isdir(MODEL_PATH) or not os.listdir(MODEL_PATH):
@@ -358,6 +364,20 @@ if ROLLOUT_ENGINE != "vllm" or not VLLM_SERVER_MODE:
   sampler_lock = threading.Lock()
 
 
+class PromptTooLongError(ValueError):
+  """Raised when a prompt exceeds the model context limit before sampling."""
+
+
+def _is_prompt_overflow_error(exc: Exception) -> bool:
+  message = str(exc)
+  return (
+      "maximum input length" in message
+      or "context length is only" in message
+      or "Prompt too long before sampler call" in message
+      or "input_tokens" in message and "max_model_len" in message
+  )
+
+
 def model_call(chat_completions, env_unused):
   """Model inference via tunix sampler."""
   pair_index = None
@@ -371,28 +391,41 @@ def model_call(chat_completions, env_unused):
       add_generation_prompt=True,
       is_first_msg=True,
   )
+  prompt_token_count = len(tokenizer.encode(prompt))
   logger.info(
-      "[pair=%s instance=%s] model_call start prompt_chars=%d",
+      "[pair=%s instance=%s] model_call start prompt_chars=%d prompt_tokens=%d max_model_len=%d",
       pair_index,
       instance_id,
       len(prompt),
+      prompt_token_count,
+      MAX_MODEL_LEN,
   )
-  t0 = time.time()
-  if sampler_lock is None:
-    out = sampler(
-        prompt,
-        max_generation_steps=MAX_RESPONSE_LENGTH,
-        echo=False,
-        eos_tokens=qwen_eos_tokens,
+  if prompt_token_count >= MAX_MODEL_LEN:
+    raise PromptTooLongError(
+      f"Prompt too long before sampler call: prompt_tokens={prompt_token_count}, "
+      f"max_model_len={MAX_MODEL_LEN}"
     )
-  else:
-    with sampler_lock:
+  t0 = time.time()
+  try:
+    if sampler_lock is None:
       out = sampler(
           prompt,
           max_generation_steps=MAX_RESPONSE_LENGTH,
           echo=False,
           eos_tokens=qwen_eos_tokens,
       )
+    else:
+      with sampler_lock:
+        out = sampler(
+            prompt,
+            max_generation_steps=MAX_RESPONSE_LENGTH,
+            echo=False,
+            eos_tokens=qwen_eos_tokens,
+        )
+  except Exception as exc:
+    if _is_prompt_overflow_error(exc):
+      raise PromptTooLongError(str(exc)) from exc
+    raise
   logger.info(
       "[pair=%s instance=%s] model_call end response_chars=%d (%.1fs)",
       pair_index,
@@ -410,6 +443,41 @@ from swe_agent import SWEAgent
 from swe_env import SWEEnv
 from tunix.rl.agentic import utils as agentic_utils
 from tunix.rl.agentic.pipeline.rollout_orchestrator import RolloutOrchestrator
+
+
+class EvalTrajectoryCollectEngine(
+    trajectory_collect_engine.TrajectoryCollectEngine
+):
+  """Trajectory engine that converts prompt overflows into per-trajectory termination."""
+
+  async def _one_step(self) -> bool:
+    try:
+      return await super()._one_step()
+    except PromptTooLongError as exc:
+      logger.warning(
+          "[pair=%s instance=%s] terminating trajectory due to prompt overflow: %s",
+          self.env.extra_kwargs.get("pair_index"),
+          self.env.entry.get("instance_id", "unknown"),
+          exc,
+      )
+      self.agent.trajectory.status = (
+          agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+      )
+      self._skip_final_reward = True
+      if self.agent.trajectory.steps:
+        self.agent.trajectory.steps[-1].done = True
+      return True
+
+  async def _append_final_reward(self):
+    if getattr(self, "_skip_final_reward", False):
+      return
+    await super()._append_final_reward()
+
+  def compute_trajectory_reward(self):
+    if getattr(self, "_skip_final_reward", False):
+      self.agent.trajectory.reward = 0.0
+      return self.agent.trajectory
+    return super().compute_trajectory_reward()
 
 
 class _EvalLoggingEnvMixin:
@@ -490,9 +558,11 @@ async def run_evaluation():
     _write_traj_line(tf, f"# Max concurrent: {MAX_CONCURRENT}")
 
   orchestrator = RolloutOrchestrator(
+      engine_cls=EvalTrajectoryCollectEngine,
       engine_kwargs=dict(
           model_call=model_call,
           timeout=TIMEOUT,
+          max_context_limit=MAX_CONTEXT_LIMIT,
           tokenizer=tokenizer_for_agentic,
           chat_parser=chat_parser,
       ),
