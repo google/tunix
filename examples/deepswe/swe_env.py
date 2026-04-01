@@ -17,6 +17,7 @@ except ImportError:
 
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
 
+logger = logging.getLogger(__name__)
 
 if r2egym:
   R2EGYM_PATH = os.path.dirname(r2egym.__file__)
