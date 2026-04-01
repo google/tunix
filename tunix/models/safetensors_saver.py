@@ -21,10 +21,37 @@ from typing import Any, Callable
 from flax import nnx
 import jax.numpy as jnp
 import safetensors.numpy as safe_np
-
+from safetensors import safe_open
+import json
 
 def join_path(path) -> str:
   return '.'.join([str(field) for field in path])
+
+def load_base_state(local_model_path): # for sharded check points such as gemma-3-4b...
+    single_file = os.path.join(local_model_path, "model.safetensors")
+    index_file = os.path.join(local_model_path, "model.safetensors.index.json")
+
+    # Case 1: single file
+    if os.path.exists(single_file):
+        return safe_np.load_file(single_file)
+
+    # Case 2: sharded checkpoint
+    if os.path.exists(index_file):
+        with open(index_file, "r") as f:
+            index_data = json.load(f)
+
+        tensors = {}
+        shard_files = set(index_data["weight_map"].values())
+
+        for shard in shard_files:
+            shard_path = os.path.join(local_model_path, shard)
+            with safe_open(shard_path, framework="np") as f:
+                for k in f.keys():
+                    tensors[k] = f.get_tensor(k)
+
+        return tensors
+
+    raise FileNotFoundError("No safetensors found")
 
 
 def save_lora_merged_model_as_safetensors(
@@ -82,7 +109,9 @@ def save_lora_merged_model_as_safetensors(
     lora_layers = custom_layer_extractor_fn(lora_layers)
 
   # Load base model state
-  base_state = safe_np.load_file(local_model_path + '/model.safetensors')
+  # base_state = safe_np.load_file(local_model_path + '/model.safetensors') original
+    base_state = load_base_state(local_model_path)
+    
 
   # Apply LoRA deltas
   for path, (lora_a, lora_b) in lora_layers.items():
