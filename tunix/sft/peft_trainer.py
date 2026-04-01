@@ -378,10 +378,29 @@ class PeftTrainer:
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
-    optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state, optimizer_pspecs
-    )
-    nnx.update(self.optimizer, optimizer_sharded_state)
+    def adjust_pspec(state_leaf, spec_leaf):
+      if not hasattr(state_leaf, 'ndim'):
+        return spec_leaf
+      if spec_leaf is None:
+        return None
+
+      rank = state_leaf.ndim
+      if isinstance(spec_leaf, shd.PartitionSpec) and len(spec_leaf) != rank:
+        logging.warning(
+            "Rank mismatch in optimizer state sharding. "
+            "Array shape: %s, Rank: %d, Incorrect PartitionSpec: %s. Adjusting.",
+            state_leaf.shape, rank, spec_leaf
+        )
+        new_spec = list(spec_leaf)
+        if len(new_spec) > rank:
+          new_spec = new_spec[:rank]
+        else:
+          new_spec.extend([None] * (rank - len(new_spec)))
+        
+        adjusted = shd.PartitionSpec(*new_spec)
+        logging.warning("Adjusted PartitionSpec to: %s", adjusted)
+        return adjusted
+      return spec_leaf
 
   def jit_train_and_eval_step(
       self, skip_jit: bool = False, cache_nnx_graph: bool = False
