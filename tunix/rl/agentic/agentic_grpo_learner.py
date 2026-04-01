@@ -593,6 +593,11 @@ def grpo_loss_fn(
       if hasattr(algo_config, "epsilon_high")
       else epsilon
   )
+  epsilon_c = (
+      algo_config.epsilon_c
+      if hasattr(algo_config, "epsilon_c")
+      else 3.0
+  )
   loss_aggregation_mode = algo_config.loss_agg_mode
 
   completion_ids, completion_mask = (
@@ -670,11 +675,29 @@ def grpo_loss_fn(
   pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
-  pg_loss = ppo_helpers.masked_mean(per_token_loss, effective_completion_mask)
 
   clipped_fraction = ppo_helpers.masked_mean(
       jnp.greater(pg_loss_2, pg_loss_1), effective_completion_mask
   )
+  # dual-clip ppo loss
+  pg_loss_3 = -epsilon_c * advantages
+
+  # pg_clipfrac_lower measures how often dual-clip ppo kicks in.
+  # It kicks in when the standard clipped loss is larger than pg_loss_3
+  # for instances with negative advantages.
+  unreduced_pg_clipfrac_lower = (
+      (per_token_loss > pg_loss_3) & (advantages < 0.0)
+  ).astype(jnp.float32)
+  pg_clipfrac_lower = ppo_helpers.masked_mean(
+      unreduced_pg_clipfrac_lower, completion_mask
+  )
+
+  pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
+  per_token_loss = jnp.where(
+      advantages < 0.0, pg_loss_clipped_dual, per_token_loss
+  )
+
+  pg_loss = ppo_helpers.masked_mean(per_token_loss, effective_completion_mask)
 
   effective_group_ratio = jnp.mean(valid_group_mask.astype(jnp.float32))
   # Strict effective groups are those with mixed correctness outcomes:
@@ -693,6 +716,7 @@ def grpo_loss_fn(
 
   aux = {
       "kl": 0.0,
+      "kl_loss": 0.0,
       "pg_loss": pg_loss,
       "pg_clipfrac": clipped_fraction,
       "ppo_kl": ppo_kl,
@@ -711,6 +735,12 @@ def grpo_loss_fn(
         / jnp.clip(effective_completion_mask.sum(), min=1),
         jnp.float32,
     )
+
+    kl_loss = common.aggregate_loss(
+        kl, completion_mask, loss_aggregation_mode
+    )
+    # Log KL loss.
+    aux["kl_loss"] = kl_loss
 
   loss = common.aggregate_loss(
       per_token_loss, effective_completion_mask, loss_aggregation_mode
