@@ -1,0 +1,106 @@
+I0401 18:08:02.632412 139747303426048 wandb_backend.py:60] W&B run URL: https://wandb.ai/atwigg-d/tunix/runs/ch0aeba2
+I0401 18:08:05.161490 139747303426048 utils.py:167] RLLearner init - Pathways not available. Using default HBM stats collector
+I0401 18:08:05.161979 139747303426048 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.0260974856042666) on TPU_0(process=0,(0,0,0,0))
+I0401 18:08:05.162258 139747303426048 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.026053837569666276) on TPU_1(process=0,(1,0,0,0))
+I0401 18:08:05.162492 139747303426048 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.026053837569666276) on TPU_2(process=0,(0,1,0,0))
+I0401 18:08:05.162593 139747303426048 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.026053837569666276) on TPU_3(process=0,(1,1,0,0))
+I0401 18:08:05.162746 139747303426048 math_dataset.py:164] Using Huggingface data source for dataset: nvidia/OpenMathInstruct-2
+I0401 18:08:05.162852 139747303426048 math_dataset.py:168] Attempting to load dataset nvidia/OpenMathInstruct-2 with data_files: data/train_1M-*.parquet
+I0401 18:08:06.480874 139747303426048 math_dataset.py:175] Successfully loaded dataset: nvidia/OpenMathInstruct-2 with files: data/train_1M-*.parquet
+I0401 18:08:06.481177 139747303426048 grpo_main.py:238] DEBUG: Type of dataset_obj after create_dataset: <class 'datasets.arrow_dataset.Dataset'>
+I0401 18:08:06.481570 139747303426048 grpo_main.py:254] DEBUG: Type of dataset for post_init: <class 'datasets.arrow_dataset.Dataset'>
+I0401 18:08:06.481734 139747303426048 grpo_main.py:267] DEBUG: Remapping columns: problem -> prompts, expected_answer -> answer
+I0401 18:08:06.493006 139747303426048 grpo_main.py:269] DEBUG: Dataset features after remapping: {'prompts': Value('string'), 'answer': Value('string')}
+Filter: 100%|██████████████████| 1000000/1000000 [03:54<00:00, 4260.50 examples/s]
+I0401 18:12:01.293921 139747303426048 rl_learner.py:547] Training with full_batch_size=8, mini_batch_size=8, train_micro_batch_size=1, self._rollout_micro_batch_size=1, self._compute_logps_micro_batch_size=1, grad_acc_steps=8
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-1,7)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='8' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='0' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='9' given_answer_normalized_mathd='9' IS CORRECT
+mathd ground_truth_normalized_mathd='9' given_answer_normalized_mathd='7' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='14' given_answer_normalized_mathd='14' IS CORRECT
+mathd ground_truth_normalized_mathd='14' given_answer_normalized_mathd='7' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='14' given_answer_normalized_mathd='14' IS CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='15' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='56' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='25' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='15' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='15' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='60' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='30' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='15' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='(3,0,2)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='(3,1,0)' IS NOT CORRECT
+I0401 18:16:12.501655 139747303426048 peft_trainer.py:584] Training with mesh: Mesh('fsdp': 2, 'tp': 2, axis_types=(Auto, Auto))
+Traceback (most recent call last):
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/jax/_src/pjit.py", line 833, in pjit_check_aval_sharding
+    s.check_compatible_aval(shape)
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/jax/_src/named_sharding.py", line 178, in check_compatible_aval
+    raise ValueError(
+ValueError: Sharding NamedSharding(mesh=Mesh('fsdp': 2, 'tp': 2, axis_types=(Auto, Auto)), spec=P('fsdp', 'tp', None), memory_kind=device) is only valid for values of rank at least 3, but was applied to a value of rank 2.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/xianglon_google_com/tunix/tunix/cli/grpo_main.py", line 305, in <module>
+    app.run(main)
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/absl/app.py", line 367, in run
+    _run_main(main, args)
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
+    sys.exit(main(argv))
+             ^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/tunix/cli/grpo_main.py", line 301, in main
+    pipeline.run_grpo_trainer()
+  File "/home/xianglon_google_com/tunix/tunix/cli/grpo_main.py", line 283, in run_grpo_trainer
+    grpo_trainer.train(train_ds, eval_ds)
+  File "/home/xianglon_google_com/tunix/tunix/rl/grpo/grpo_learner.py", line 429, in train
+    super().train(train_ds, eval_ds, skip_jit)
+  File "/home/xianglon_google_com/tunix/tunix/rl/rl_learner.py", line 572, in train
+    self._run_global_step(
+  File "/home/xianglon_google_com/tunix/tunix/rl/rl_learner.py", line 629, in _run_global_step
+    self._run_mini_batch_step(
+  File "/home/xianglon_google_com/tunix/tunix/rl/rl_learner.py", line 654, in _run_mini_batch_step
+    self._run_all_micro_batch_steps(
+  File "/home/xianglon_google_com/tunix/tunix/rl/rl_learner.py", line 733, in _run_all_micro_batch_steps
+    self.rl_cluster.update_actor(
+  File "/home/xianglon_google_com/tunix/tunix/rl/rl_cluster.py", line 827, in update_actor
+    self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+  File "/home/xianglon_google_com/tunix/tunix/sft/peft_trainer.py", line 589, in train
+    train_step, eval_step = self.jit_train_and_eval_step(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/tunix/sft/peft_trainer.py", line 406, in jit_train_and_eval_step
+    self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+  File "/home/xianglon_google_com/tunix/tunix/sft/peft_trainer.py", line 381, in _shard_optimizer
+    optimizer_sharded_state = jax.lax.with_sharding_constraint(
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/jax/_src/pjit.py", line 2064, in with_sharding_constraint
+    pjit_check_aval_sharding(
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/jax/_src/pjit.py", line 835, in pjit_check_aval_sharding
+    raise ValueError(
+ValueError: One of with_sharding_constraint arguments is incompatible with its sharding annotation NamedSharding(mesh=Mesh('fsdp': 2, 'tp': 2, axis_types=(Auto, Auto)), spec=P('fsdp', 'tp', None), memory_kind=device): Sharding NamedSharding(mesh=Mesh('fsdp': 2, 'tp': 2, axis_types=(Auto, Auto)), spec=P('fsdp', 'tp', None), memory_kind=device) is only valid for values of rank at least 3, but was applied to a value of rank 2.

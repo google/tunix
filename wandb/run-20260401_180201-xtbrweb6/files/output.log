@@ -1,0 +1,69 @@
+I0401 18:02:03.207231 139932662364160 wandb_backend.py:60] W&B run URL: https://wandb.ai/atwigg-d/tunix/runs/xtbrweb6
+I0401 18:02:05.789238 139932662364160 utils.py:167] RLLearner init - Pathways not available. Using default HBM stats collector
+I0401 18:02:05.789734 139932662364160 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.0260974856042666) on TPU_0(process=0,(0,0,0,0))
+I0401 18:02:05.790033 139932662364160 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.026053837569666276) on TPU_1(process=0,(1,0,0,0))
+I0401 18:02:05.790230 139932662364160 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.026053837569666276) on TPU_2(process=0,(0,1,0,0))
+I0401 18:02:05.790427 139932662364160 utils.py:174] Using 2.5 GiB / 95.7 GiB (0.026053837569666276) on TPU_3(process=0,(1,1,0,0))
+I0401 18:02:05.790575 139932662364160 math_dataset.py:164] Using Huggingface data source for dataset: nvidia/OpenMathInstruct-2
+I0401 18:02:05.790723 139932662364160 math_dataset.py:168] Attempting to load dataset nvidia/OpenMathInstruct-2 with data_files: data/train_1M-*.parquet
+README.md: 6.41kB [00:00, 16.9MB/s]
+data/train_1M-00000-of-00003.parquet: 100%|████| 213M/213M [00:03<00:00, 62.3MB/s]
+data/train_1M-00001-of-00003.parquet: 100%|█████| 213M/213M [00:01<00:00, 118MB/s]
+data/train_1M-00002-of-00003.parquet: 100%|████| 213M/213M [00:03<00:00, 70.8MB/s]
+Generating train split:   7%| | 1000000/13972791 [00:02<00:30, 431863.76 examples/
+I0401 18:02:18.605608 139932662364160 math_dataset.py:175] Successfully loaded dataset: nvidia/OpenMathInstruct-2 with files: data/train_1M-*.parquet
+I0401 18:02:18.605986 139932662364160 grpo_main.py:238] DEBUG: Type of dataset_obj after create_dataset: <class 'datasets.arrow_dataset.Dataset'>
+I0401 18:02:18.606834 139932662364160 grpo_main.py:254] DEBUG: Type of dataset for post_init: <class 'datasets.arrow_dataset.Dataset'>
+I0401 18:02:18.607037 139932662364160 grpo_main.py:267] DEBUG: Remapping columns: problem -> prompts, expected_answer -> answer
+Map: 100%|████████████████████| 1000000/1000000 [00:34<00:00, 28702.12 examples/s]
+I0401 18:02:53.450957 139932662364160 grpo_main.py:269] DEBUG: Dataset features after remapping: {'prompts': Value('string'), 'answer': Value('string')}
+Filter:   0%|                                  | 0/1000000 [00:00<?, ? examples/s]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/xianglon_google_com/tunix/tunix/cli/grpo_main.py", line 305, in <module>
+    app.run(main)
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/absl/app.py", line 367, in run
+    _run_main(main, args)
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/absl/app.py", line 312, in _run_main
+    sys.exit(main(argv))
+             ^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/tunix/cli/grpo_main.py", line 301, in main
+    pipeline.run_grpo_trainer()
+  File "/home/xianglon_google_com/tunix/tunix/cli/grpo_main.py", line 273, in run_grpo_trainer
+    train_ds, eval_ds = data_lib.post_init_dataset(
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/tunix/cli/utils/data.py", line 181, in post_init_dataset
+    dataset = dataset.filter(prompt_length_filter)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 574, in wrapper
+    out: Union["Dataset", "DatasetDict"] = func(self, *args, **kwargs)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/fingerprint.py", line 468, in wrapper
+    out = func(dataset, *args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 4226, in filter
+    indices = self.map(
+              ^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 574, in wrapper
+    out: Union["Dataset", "DatasetDict"] = func(self, *args, **kwargs)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 3632, in map
+    for rank, done, content in Dataset._map_single(**unprocessed_kwargs):
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 3997, in _map_single
+    for i, batch in iter_outputs(shard_iterable):
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 3950, in iter_outputs
+    yield i, apply_function(example, i, offset=offset)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 3871, in apply_function
+    processed_inputs = function(*fn_args, *additional_args, **fn_kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/.venv/lib/python3.12/site-packages/datasets/arrow_dataset.py", line 7268, in get_indices_from_mask_function
+    mask.append(function(example, *additional_args, **fn_kwargs))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xianglon_google_com/tunix/tunix/cli/utils/data.py", line 168, in prompt_length_filter
+    tokens = tokenizer.tokenize(x[prompt_key])
+             ^^^^^^^^^^^^^^^^^^
+AttributeError: 'TokenizerAdapter' object has no attribute 'tokenize'. Did you mean: 'tokenizer'?

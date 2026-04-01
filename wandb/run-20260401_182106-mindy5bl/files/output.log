@@ -1,0 +1,574 @@
+I0401 18:21:07.684163 140655259133952 wandb_backend.py:60] W&B run URL: https://wandb.ai/atwigg-d/tunix/runs/mindy5bl
+I0401 18:21:10.136333 140655259133952 utils.py:167] RLLearner init - Pathways not available. Using default HBM stats collector
+I0401 18:21:10.136792 140655259133952 utils.py:174] Using 9.4 GiB / 95.7 GiB (0.09791229816942613) on TPU_0(process=0,(0,0,0,0))
+I0401 18:21:10.137092 140655259133952 utils.py:174] Using 9.4 GiB / 95.7 GiB (0.09788271970325871) on TPU_1(process=0,(1,0,0,0))
+I0401 18:21:10.137215 140655259133952 utils.py:174] Using 9.4 GiB / 95.7 GiB (0.09788271970325871) on TPU_2(process=0,(0,1,0,0))
+I0401 18:21:10.137417 140655259133952 utils.py:174] Using 9.4 GiB / 95.7 GiB (0.09788271970325871) on TPU_3(process=0,(1,1,0,0))
+I0401 18:21:10.137571 140655259133952 math_dataset.py:164] Using Huggingface data source for dataset: nvidia/OpenMathInstruct-2
+I0401 18:21:10.137713 140655259133952 math_dataset.py:168] Attempting to load dataset nvidia/OpenMathInstruct-2 with data_files: data/train_1M-*.parquet
+I0401 18:21:11.444884 140655259133952 math_dataset.py:175] Successfully loaded dataset: nvidia/OpenMathInstruct-2 with files: data/train_1M-*.parquet
+I0401 18:21:11.445188 140655259133952 grpo_main.py:238] DEBUG: Type of dataset_obj after create_dataset: <class 'datasets.arrow_dataset.Dataset'>
+I0401 18:21:11.445573 140655259133952 grpo_main.py:254] DEBUG: Type of dataset for post_init: <class 'datasets.arrow_dataset.Dataset'>
+I0401 18:21:11.445769 140655259133952 grpo_main.py:267] DEBUG: Remapping columns: problem -> prompts, expected_answer -> answer
+I0401 18:21:11.457021 140655259133952 grpo_main.py:269] DEBUG: Dataset features after remapping: {'prompts': Value('string'), 'answer': Value('string')}
+I0401 18:21:11.546097 140655259133952 rl_learner.py:547] Training with full_batch_size=8, mini_batch_size=8, train_micro_batch_size=1, self._rollout_micro_batch_size=1, self._compute_logps_micro_batch_size=1, grad_acc_steps=8
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='1' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='Nosolution' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-1,7)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-1,7)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-1,5)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-1,7)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' given_answer_normalized_mathd='(-\\frac{\\sqrt{2}}{2},\\frac{7\\sqrt{2}}{2})' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='224' given_answer_normalized_mathd='224' IS CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='0' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='1' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='1' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='1' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='4' IS CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='9' given_answer_normalized_mathd='3' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='9' given_answer_normalized_mathd='10' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='9' given_answer_normalized_mathd='7' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='14' given_answer_normalized_mathd='13' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='14' given_answer_normalized_mathd='14' IS CORRECT
+mathd ground_truth_normalized_mathd='14' given_answer_normalized_mathd='14' IS CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='60' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='48' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='15' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='18' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='30' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='21' given_answer_normalized_mathd='15' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='2 \\text{ small pizzas}, 1 \\text{ medium pizza}, 1 \\text{ large pizza}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='(4,0,4)' IS NOT CORRECT
+I0401 18:25:10.040224 140655259133952 peft_trainer.py:584] Training with mesh: Mesh('fsdp': 2, 'tp': 2, axis_types=(Auto, Auto))
+I0401 18:25:12.394929 140655259133952 peft_trainer.py:594] Compiled train_step cache size: 0
+Actor Training:   0%|                                 | 0/20000 [00:00<?, ?step/s]I0401 18:26:52.755295 140655259133952 peft_trainer.py:735] Train loop finished in: 100.3593 seconds
+I0401 18:26:52.757565 140655259133952 peft_trainer.py:594] Compiled train_step cache size: 1
+I0401 18:26:53.644849 140655259133952 peft_trainer.py:735] Train loop finished in: 0.8871 seconds
+I0401 18:26:53.645615 140655259133952 peft_trainer.py:594] Compiled train_step cache size: 2
+I0401 18:26:54.364189 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7184 seconds
+I0401 18:26:55.083943 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7190 seconds
+I0401 18:26:55.803780 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7191 seconds
+I0401 18:26:56.522145 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7177 seconds
+I0401 18:26:57.241305 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7185 seconds
+I0401 18:26:57.960271 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7182 seconds
+I0401 18:26:57.961009 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U3)
+I0401 18:26:57.961402 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U471)
+I0401 18:26:57.962038 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U4306)
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{4000\\pi}{3}' given_answer_normalized_mathd='\\frac{1250\\pi}{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='70' given_answer_normalized_mathd='70' IS CORRECT
+mathd ground_truth_normalized_mathd='\\begin{pmatrix}15/7\\-6/7\\end{pmatrix}' given_answer_normalized_mathd='\\begin{pmatrix}\\frac{15}{7}\\-\\frac{6}{7}\\end{pmatrix}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\begin{pmatrix}15/7\\-6/7\\end{pmatrix}' given_answer_normalized_mathd='\\begin{pmatrix}-2\\-5\\end{pmatrix}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\begin{pmatrix}15/7\\-6/7\\end{pmatrix}' given_answer_normalized_mathd='\\begin{pmatrix}-2\\-5\\end{pmatrix}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\begin{pmatrix}15/7\\-6/7\\end{pmatrix}' given_answer_normalized_mathd='\\begin{pmatrix}\\frac{15}{7}\\-\\frac{6}{7}\\end{pmatrix}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='24\\pi' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='4\\pi' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='12\\pi' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='8\\pi' IS CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='16\\pi' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='16\\pi\\sqrt{2}+8\\pi' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='\\frac{32\\pi\\sqrt{2}}{3}+8\\pi' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8\\pi' given_answer_normalized_mathd='32\\pi' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2385' IS CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2385' IS CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2385' IS CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2385' IS CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2385' IS CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2403' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2385' IS CORRECT
+mathd ground_truth_normalized_mathd='2385' given_answer_normalized_mathd='2373' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{10}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{11}{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{10}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{10}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{10}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{10}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{10}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='-\\frac{10}{3}' given_answer_normalized_mathd='-\\frac{10}{3}' IS CORRECT
+I0401 18:29:30.072884 140655259133952 peft_trainer.py:735] Train loop finished in: 0.9169 seconds
+I0401 18:29:30.791601 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7179 seconds
+I0401 18:29:31.511010 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7185 seconds
+I0401 18:29:32.228579 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7168 seconds
+I0401 18:29:32.947486 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7182 seconds
+I0401 18:29:33.667793 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7196 seconds
+I0401 18:29:34.386364 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7179 seconds
+I0401 18:29:35.106975 140655259133952 peft_trainer.py:474] Train step 1 training loss: 0.000000  - training perplexity: 1.000000
+W0401 18:29:35.108489 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 1/20000 [04:22<1459:26:42, 262.71s/step, actor_train_loss=I0401 18:29:35.110379 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7232 seconds
+I0401 18:29:35.110782 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:29:35.111088 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U515)
+I0401 18:29:35.111889 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U2899)
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,3,7)' IS CORRECT
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,3,7)' IS CORRECT
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,3,7)' IS CORRECT
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,-2,-3)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,3,7)' IS CORRECT
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,3,7)' IS CORRECT
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,3,7)' IS CORRECT
+mathd ground_truth_normalized_mathd='(-1,3,7)' given_answer_normalized_mathd='(-1,3,7)' IS CORRECT
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 1. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='-\\frac{3}{2}' given_answer_normalized_mathd='2024' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{2}{b-1}' given_answer_normalized_mathd='\\frac{2(b-1)}{3b-5}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{2}{b-1}' given_answer_normalized_mathd='\\frac{2(3b-5)}{-(b-1)(b-7)}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{2}{b-1}' given_answer_normalized_mathd='\\frac{2}{b-1}' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{2}{b-1}' given_answer_normalized_mathd='\\frac{2(3-b)}{3b-5}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{2}{b-1}' given_answer_normalized_mathd='\\frac{2(3-b)}{3b-5}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='14.5' given_answer_normalized_mathd='14.5' IS CORRECT
+mathd ground_truth_normalized_mathd='14.5' given_answer_normalized_mathd='14.5' IS CORRECT
+mathd ground_truth_normalized_mathd='14.5' given_answer_normalized_mathd='6.5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='14.5' given_answer_normalized_mathd='14.5' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{60}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{2}{35663741883750}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{15}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{10}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{12}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{1249950}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{6}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='7.5' given_answer_normalized_mathd='8' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='7.5' given_answer_normalized_mathd='(7.5,\\frac{\\pi}{24}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='7.5' given_answer_normalized_mathd='150' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='7.5' given_answer_normalized_mathd='7.5' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='208' given_answer_normalized_mathd='208' IS CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='120' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+I0401 18:32:46.029788 140655259133952 peft_trainer.py:735] Train loop finished in: 0.9181 seconds
+I0401 18:32:46.748375 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7177 seconds
+I0401 18:32:47.468153 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7191 seconds
+I0401 18:32:48.186999 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7181 seconds
+I0401 18:32:48.906191 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7186 seconds
+I0401 18:32:49.624590 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7177 seconds
+I0401 18:32:50.342115 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7169 seconds
+I0401 18:32:51.061079 140655259133952 peft_trainer.py:474] Train step 2 training loss: 0.000000  - training perplexity: 1.000000
+W0401 18:32:51.062459 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 2/20000 [07:38<1241:13:33, 223.44s/step, actor_train_loss=I0401 18:32:51.064047 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7213 seconds
+I0401 18:32:51.064416 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:32:51.064883 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U1924)
+I0401 18:32:51.065380 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U3712)
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='121' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='55' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='33' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='33' IS NOT CORRECT
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 2. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='11' given_answer_normalized_mathd='-12' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='11' given_answer_normalized_mathd='21' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='11' given_answer_normalized_mathd='-12' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+mathd ground_truth_normalized_mathd='90' given_answer_normalized_mathd='90' IS CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='84' IS CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='84' IS CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='84' IS CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='\\sqrt{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='84' IS CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='84' IS CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='84' IS CORRECT
+mathd ground_truth_normalized_mathd='84' given_answer_normalized_mathd='84' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{\\pi^2}{8}' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{\\pi^2}{8}' given_answer_normalized_mathd='\\frac{\\pi^2}{8}' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{\\pi^2}{8}' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{\\pi^2}{8}' given_answer_normalized_mathd='\\frac{\\pi^2}{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{\\pi^2}{8}' given_answer_normalized_mathd='\\infty' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='10' IS CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='10' IS CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='10' IS CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='10' IS CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='10' IS CORRECT
+I0401 18:35:44.615102 140655259133952 peft_trainer.py:735] Train loop finished in: 0.9192 seconds
+I0401 18:35:45.334589 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7188 seconds
+I0401 18:35:46.052120 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7169 seconds
+I0401 18:35:46.771803 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7190 seconds
+I0401 18:35:47.490628 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7180 seconds
+I0401 18:35:48.209891 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7186 seconds
+I0401 18:35:48.927037 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7165 seconds
+I0401 18:35:49.646441 140655259133952 peft_trainer.py:474] Train step 3 training loss: 0.000001  - training perplexity: 1.000000
+W0401 18:35:49.647760 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 3/20000 [10:37<1127:23:12, 202.96s/step, actor_train_loss=I0401 18:35:49.649435 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7217 seconds
+I0401 18:35:49.649913 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:35:49.650253 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U375)
+I0401 18:35:49.650872 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U3159)
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='\\frac{333}{1111}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='\\frac{333}{1111}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='\\frac{999}{3331}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='0.2991836734693878' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='0.3' IS CORRECT
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='\\frac{3}{100}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='\\frac{2986129861298613}{10000000000000000}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.3' given_answer_normalized_mathd='0.3' IS CORRECT
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 3. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='4+2\\sqrt{3}' given_answer_normalized_mathd='\\sqrt{6}-\\sqrt{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4+2\\sqrt{3}' given_answer_normalized_mathd='\\sqrt{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4+2\\sqrt{3}' given_answer_normalized_mathd='4-2\\sqrt{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='3' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='40' IS CORRECT
+mathd ground_truth_normalized_mathd='40' given_answer_normalized_mathd='25' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1080' given_answer_normalized_mathd='1080' IS CORRECT
+mathd ground_truth_normalized_mathd='1080' given_answer_normalized_mathd='1080' IS CORRECT
+mathd ground_truth_normalized_mathd='1080' given_answer_normalized_mathd='1080' IS CORRECT
+mathd ground_truth_normalized_mathd='1080' given_answer_normalized_mathd='1080' IS CORRECT
+mathd ground_truth_normalized_mathd='1080' given_answer_normalized_mathd='1080' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='140' given_answer_normalized_mathd='140' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='-384' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='-\\frac{1}{4}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='-1104' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='-336' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='0' IS CORRECT
+I0401 18:38:42.181565 140655259133952 peft_trainer.py:735] Train loop finished in: 0.9147 seconds
+I0401 18:38:42.900544 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7183 seconds
+I0401 18:38:43.620088 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7188 seconds
+I0401 18:38:44.339110 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7183 seconds
+I0401 18:38:45.058391 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7185 seconds
+I0401 18:38:45.776178 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7171 seconds
+I0401 18:38:46.494637 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7177 seconds
+I0401 18:38:47.214722 140655259133952 peft_trainer.py:474] Train step 4 training loss: 0.000001  - training perplexity: 1.000001
+W0401 18:38:47.216040 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 4/20000 [13:34<1071:39:01, 192.94s/step, actor_train_loss=I0401 18:38:47.217641 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7223 seconds
+I0401 18:38:47.218028 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:38:47.218320 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U374)
+I0401 18:38:47.218902 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U3689)
+mathd ground_truth_normalized_mathd='5' given_answer_normalized_mathd='1' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='5' given_answer_normalized_mathd='1' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='5' given_answer_normalized_mathd='6' IS NOT CORRECT
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 4. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='0' given_answer_normalized_mathd='10.75' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='8' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='4' IS CORRECT
+mathd ground_truth_normalized_mathd='4' given_answer_normalized_mathd='8' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='21' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='9999' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='9' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='4' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='45' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='12' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='33' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='3' given_answer_normalized_mathd='13' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2777.78' given_answer_normalized_mathd='\\frac{25000}{9}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2777.78' given_answer_normalized_mathd='2777.\\overline{7}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2777.78' given_answer_normalized_mathd='2778' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2777.78' given_answer_normalized_mathd='2778' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2777.78' given_answer_normalized_mathd='2778' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2777.78' given_answer_normalized_mathd='2778' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='2+\\sqrt{2}' IS CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='2-\\sqrt{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='2-\\sqrt{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='2+\\sqrt{2}' IS CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='2-\\sqrt{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='2+\\sqrt{2}' IS CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='0.5857864376269049' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2+\\sqrt{2}' given_answer_normalized_mathd='2+\\sqrt{2}' IS CORRECT
+I0401 18:41:10.539444 140655259133952 peft_trainer.py:735] Train loop finished in: 0.8937 seconds
+I0401 18:41:11.257015 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7169 seconds
+I0401 18:41:11.976109 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7184 seconds
+I0401 18:41:12.694173 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7174 seconds
+I0401 18:41:13.411443 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7167 seconds
+I0401 18:41:14.130083 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7181 seconds
+I0401 18:41:14.847697 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7170 seconds
+I0401 18:41:15.566543 140655259133952 peft_trainer.py:474] Train step 5 training loss: 0.000004  - training perplexity: 1.000004
+W0401 18:41:15.567838 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 5/20000 [16:03<982:18:03, 176.86s/step, actor_train_loss=0I0401 18:41:15.569396 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7211 seconds
+I0401 18:41:15.569783 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:41:15.570092 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U519)
+I0401 18:41:15.570770 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U3782)
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 5. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='1.745945162009247' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='\\frac{3}{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='\\frac{3}{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='1.069' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='\\frac{2\\sqrt{3}}{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='0.35' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2\\sqrt{61}' given_answer_normalized_mathd='2\\sqrt{(a-c+12)^2+(b-d+10)^2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2\\sqrt{61}' given_answer_normalized_mathd='r+R' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2\\sqrt{61}' given_answer_normalized_mathd='2\\sqrt{r^2+R^2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2\\sqrt{61}' given_answer_normalized_mathd='2\\max(r,R)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2\\sqrt{61}' given_answer_normalized_mathd='2\\sqrt{2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2\\sqrt{61}' given_answer_normalized_mathd='\\sqrt{(a-c+12)^2+(b-d+10)^2}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='25' IS CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='25' IS CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='25' IS CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='25' IS CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='25' IS CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='25' given_answer_normalized_mathd='5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{\\pi}{2}' given_answer_normalized_mathd='\\frac{\\pi}{2}' IS CORRECT
+mathd ground_truth_normalized_mathd='June' given_answer_normalized_mathd='May' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='June' given_answer_normalized_mathd='May' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='June' given_answer_normalized_mathd='July' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='June' given_answer_normalized_mathd='August' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='June' given_answer_normalized_mathd='May' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='June' given_answer_normalized_mathd='6a^2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='June' given_answer_normalized_mathd='July' IS NOT CORRECT
+I0401 18:43:57.810847 140655259133952 peft_trainer.py:735] Train loop finished in: 0.9174 seconds
+I0401 18:43:58.529261 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7176 seconds
+I0401 18:43:59.250022 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7201 seconds
+I0401 18:43:59.968718 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7181 seconds
+I0401 18:44:00.687642 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7183 seconds
+I0401 18:44:01.408277 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7199 seconds
+I0401 18:44:02.127722 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7187 seconds
+I0401 18:44:02.847837 140655259133952 peft_trainer.py:474] Train step 6 training loss: 0.000011  - training perplexity: 1.000011
+W0401 18:44:02.849173 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 6/20000 [18:50<964:10:02, 173.60s/step, actor_train_loss=0I0401 18:44:02.850832 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7224 seconds
+I0401 18:44:02.851212 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:44:02.851665 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U1434)
+I0401 18:44:02.852385 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U3847)
+mathd ground_truth_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' given_answer_normalized_mathd='(-\\infty,-2)\\cup(-1,2)\\cup(3,\\infty)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' given_answer_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' IS CORRECT
+mathd ground_truth_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' given_answer_normalized_mathd='(-\\infty,-2)\\cup(-1,2)\\cup[3,\\infty)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' given_answer_normalized_mathd='(-\\infty,-2)\\cup(-1,2)\\cup(3,\\infty)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' given_answer_normalized_mathd='(-2,-1]\\cup(2,3]\\cup[3,\\infty)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' given_answer_normalized_mathd='(-\\infty,-2)\\cup[-1,2)\\cup[3,\\infty)' IS CORRECT
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 6. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{18}{37}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{3}{10}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{33}{100}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='\\frac{1}{3}' given_answer_normalized_mathd='\\frac{1}{3}' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='6' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='-2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='2' IS CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='0' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='2' given_answer_normalized_mathd='3' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='10400' given_answer_normalized_mathd='10400' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='-19' given_answer_normalized_mathd='-19' IS CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='8' IS CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='120' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='96' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='32' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='8 \\text{ slices with pepperoni and } 12 \\text{ slices with mushrooms}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='8 \\text{ slices with pepperoni and } 8 \\text{ slices with mushrooms}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='12' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='(8,8)' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8' given_answer_normalized_mathd='8 \\text{ slices with pepperoni and } 12 \\text{ slices with mushrooms}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='3\\sqrt{3}-5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='3\\sqrt{3}-5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='3\\sqrt{3}-5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='-5+3\\sqrt{3},-5-3\\sqrt{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='-5-3\\sqrt{3},-5+3\\sqrt{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='3\\sqrt{3}-5,-3\\sqrt{3}-5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='-9.196152422706632' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='-5\\pm3\\sqrt{3}' given_answer_normalized_mathd='-5+3\\sqrt{3},-5-3\\sqrt{3}' IS NOT CORRECT
+I0401 18:46:50.786535 140655259133952 peft_trainer.py:735] Train loop finished in: 0.8802 seconds
+I0401 18:46:51.506640 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7194 seconds
+I0401 18:46:52.225908 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7187 seconds
+I0401 18:46:52.943572 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7171 seconds
+I0401 18:46:53.661751 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7176 seconds
+I0401 18:46:54.380934 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7185 seconds
+I0401 18:46:55.100100 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7185 seconds
+I0401 18:46:55.818739 140655259133952 peft_trainer.py:474] Train step 7 training loss: 0.000010  - training perplexity: 1.000010
+W0401 18:46:55.820060 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 7/20000 [21:43<962:58:22, 173.40s/step, actor_train_loss=0I0401 18:46:55.821677 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7209 seconds
+I0401 18:46:55.822057 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:46:55.822347 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U335)
+I0401 18:46:55.822959 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U3415)
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='320' IS CORRECT
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='400' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='320' IS CORRECT
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='320' IS CORRECT
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='320' IS CORRECT
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='320' IS CORRECT
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='320' IS CORRECT
+mathd ground_truth_normalized_mathd='320' given_answer_normalized_mathd='320' IS CORRECT
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 7. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='29.630' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='9.877' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='22.222' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='29.629' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='29.630' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='66.7' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='29.629' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='66.667' given_answer_normalized_mathd='29.630' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='0' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='6' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='16' given_answer_normalized_mathd='16' IS CORRECT
+mathd ground_truth_normalized_mathd='8.5' given_answer_normalized_mathd='8\\leqx<9' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8.5' given_answer_normalized_mathd='8<x<9' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8.5' given_answer_normalized_mathd='8.5' IS CORRECT
+mathd ground_truth_normalized_mathd='8.5' given_answer_normalized_mathd='8.5' IS CORRECT
+mathd ground_truth_normalized_mathd='8.5' given_answer_normalized_mathd='\\frac{17}{4}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='8.5' given_answer_normalized_mathd='8.5' IS CORRECT
+mathd ground_truth_normalized_mathd='8.5' given_answer_normalized_mathd='8.5' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='8' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='7' given_answer_normalized_mathd='7' IS CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='102' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='92' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='75' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='60' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='92' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='92' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='108' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='68' given_answer_normalized_mathd='82' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4\\sqrt{19}' given_answer_normalized_mathd='6\\sqrt{14}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4\\sqrt{19}' given_answer_normalized_mathd='2\\sqrt{21}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4\\sqrt{19}' given_answer_normalized_mathd='6\\sqrt{14}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4\\sqrt{19}' given_answer_normalized_mathd='2\\sqrt{14}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4\\sqrt{19}' given_answer_normalized_mathd='6\\sqrt{14}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='4\\sqrt{19}' given_answer_normalized_mathd='2\\sqrt{69}' IS NOT CORRECT
+I0401 18:49:43.530622 140655259133952 peft_trainer.py:735] Train loop finished in: 0.8506 seconds
+I0401 18:49:44.250158 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7188 seconds
+I0401 18:49:44.969842 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7190 seconds
+I0401 18:49:45.688005 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7175 seconds
+I0401 18:49:46.406870 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7182 seconds
+I0401 18:49:47.125515 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7180 seconds
+I0401 18:49:47.848400 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7222 seconds
+I0401 18:49:48.568233 140655259133952 peft_trainer.py:474] Train step 8 training loss: 0.000013  - training perplexity: 1.000013
+W0401 18:49:48.569543 140655259133952 progress_bar.py:71] Metric steps_per_sec not found for mode train. Not logging metric.
+Actor Training:   0%| | 8/20000 [24:36<961:46:55, 173.19s/step, actor_train_loss=0I0401 18:49:48.571160 140655259133952 peft_trainer.py:735] Train loop finished in: 0.7221 seconds
+I0401 18:49:48.571540 140655259133952 rl_cluster.py:686] Skipping logging metric trajectory_ids (dtype: <U4)
+I0401 18:49:48.571852 140655259133952 rl_cluster.py:686] Skipping logging metric prompts (dtype: <U342)
+I0401 18:49:48.572829 140655259133952 rl_cluster.py:686] Skipping logging metric completions (dtype: <U4099)
+mathd ground_truth_normalized_mathd='0.2' given_answer_normalized_mathd='0.25' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.2' given_answer_normalized_mathd='0.20' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='0.2' given_answer_normalized_mathd='0.25' IS NOT CORRECT
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 0 that is less than the current step 8. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='0' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='6' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='11' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='3' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='12' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='10' given_answer_normalized_mathd='6' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='352.5' IS CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='337.5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='367.5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='352.5' IS CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='352.5' IS CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='352.5' IS CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='352.5' IS CORRECT
+mathd ground_truth_normalized_mathd='352.5' given_answer_normalized_mathd='352.5' IS CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\sqrt{\\frac{2\\pi\\sqrt{3}}{3}}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\sqrt{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\sqrt{\\frac{\\pi\\sqrt{3}}{3}}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\sqrt{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\sqrt{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\frac{\\sqrt{6\\pi}}{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\sqrt{3}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='\\sqrt{\\frac{2\\pi}{\\sqrt{3}}}' given_answer_normalized_mathd='\\sqrt{\\frac{2\\sqrt{3}\\pi}{3}}' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='|a-b|' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='1' IS CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='1' IS CORRECT
+mathd ground_truth_normalized_mathd='1' given_answer_normalized_mathd='2' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='280' given_answer_normalized_mathd='280' IS CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='13' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='8' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='7' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='11' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='5' IS NOT CORRECT
+mathd ground_truth_normalized_mathd='6' given_answer_normalized_mathd='0' IS NOT CORRECT

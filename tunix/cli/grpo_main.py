@@ -31,7 +31,6 @@ from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
-from typing import Any
 
 GrpoConfig = grpo_learner.GrpoConfig
 
@@ -146,16 +145,13 @@ class GrpoPipeline(config.HyperParameters):
               f" {custom_export_fn_path_v2}"
           )
       else:
-        perf_config.custom_export_fn_v2 = (
-            perf_export_v2.PerfMetricsExport.from_cluster_config(
-                cluster_config=cluster_config,
-                enable_trace_writer=perf_metrics_options.enable_trace_writer,
-                trace_dir=perf_metrics_options.trace_dir,
-            ).export_metrics
-        )
+        perf_config.custom_export_fn_v2 = perf_export_v2.PerfMetricsExport(
+            enable_trace_writer=perf_metrics_options.enable_trace_writer,
+            trace_dir=perf_metrics_options.trace_dir,
+        ).export_metrics
     return perf_config
 
-  def create_rl_cluster(self, tokenizer):
+  def create_rl_cluster(self):
     # Should not use LoRA for reference model.
     if self.config["reference_model_config"].get("lora_config"):
       logging.warning(
@@ -181,6 +177,10 @@ class GrpoPipeline(config.HyperParameters):
           jax.tree.map(jnp.copy, params),
       )
 
+    tokenizer = model_lib.create_tokenizer(
+        self.config["tokenizer_config"], tokenizer_path
+    )
+
     cluster_config = self.create_cluster_config()
     perf_config = self.create_perf_config(cluster_config)
     return rl_cluster_lib.RLCluster(
@@ -191,95 +191,86 @@ class GrpoPipeline(config.HyperParameters):
         perf_config=perf_config,
     )
 
-  def compute_params(self, dataset):
-    rl_training_config: dict[str, Any] = self.config.get(
-        "rl_training_config", {}
-    )
-
-    # Return early if max_steps is already specified.
-    max_steps = None
-    if rl_training_config.get("max_steps"):
-      max_steps = rl_training_config.get("max_steps")
-    elif not hasattr(dataset, "__len__"):
-      raise ValueError(
-          "max_steps must be specified since the dataset length cannot be"
-          " determined."
-      )
-
-    dataset_length = len(dataset)
-
-    batch_size = self.config.get("batch_size", 1)
-    num_batches = self.config.get("num_batches")
-    if not num_batches:
-      num_batches = dataset_length // batch_size
-      logging.info(
-          "Dynamically computed num_batches=%d with batch_size=%d",
-          num_batches,
-          batch_size,
-      )
-    num_train_epochs = self.config.get("num_train_epochs")
-    if not num_train_epochs:
-      num_train_epochs = 1
-
-    train_fraction = self.config.get("train_fraction")
-    if not train_fraction:
-      train_fraction = 0.8
-    elif train_fraction <= 0.0 and train_fraction > 1.0:
-      logging.warning(
-          f"train_fraction {train_fraction:.2f} out of expected range. Setting"
-          " to 0.8"
-      )
-      train_fraction = 0.8
-
-    allowed_max_steps = int(num_batches * num_train_epochs * train_fraction)
-    if not max_steps:
-      max_steps = allowed_max_steps
-    elif max_steps > allowed_max_steps:
-      raise ValueError(
-          "Maximum allowed value for max_steps is %d", allowed_max_steps
-      )
-
-    rl_training_config["max_steps"] = max_steps
-    actor_opt: dict[str, Any] = rl_training_config.get(
-        "actor_optimizer_config", {}
-    )
-    if actor_opt and not actor_opt.get("decay_steps"):
-      actor_opt["decay_steps"] = max_steps
-    if actor_opt and not actor_opt.get("warmup_steps"):
-      warmup_ratio = self.config.get("warmup_ratio", 0.1)
-      warmup_steps = self.config.get("warmup_steps", warmup_ratio * max_steps)
-      actor_opt["warmup_steps"] = warmup_steps
-    logging.info(
-        "Dynamically computed max_steps=%d based on dataset length %d",
-        max_steps,
-        dataset_length,
-    )
-
   def run_grpo_trainer(self):
-    tokenizer = model_lib.create_tokenizer(
-        self.config["tokenizer_config"],
-        self.config["tokenizer_config"]["tokenizer_path"],
+    grpo_trainer = grpo_learner.GrpoLearner(
+        rl_cluster=self.create_rl_cluster(),
+        reward_fns=self.obtain_reward_fn(),
+        algo_config=GrpoConfig(**self.config["grpo_config"]),
     )
+
+    tokenizer = grpo_trainer.rl_cluster.tokenizer
+    from absl import logging
+
+    dataset_obj = None
+
+    data_source = self.config.get("data_source", "tfds") # Use .get for safety
+    dataset_name = self.config.get("dataset_name", "gsm8k")
 
     if self.config.get("data_module", None):
-      dataset = data_lib.get_dataset_from_module(
+      dataset_obj = data_lib.get_dataset_from_module(
           self.config["data_module"],
           tokenizer,
       )
-    elif self.config["data_source"] == "local":
-      dataset = example_data.create_dataset(
-          data_source=self.config["data_source"],
+    elif data_source == "local":
+      dataset_obj = example_data.create_dataset(
+          data_source=data_source,
           dataset=self.config["data_directory"],
           tokenizer=tokenizer,
       )
-    else:
-      dataset = example_data.create_dataset(
-          data_source="tfds",
-          dataset=self.config["dataset_name"],
+    elif data_source == "huggingface":
+      dataset_obj = example_data.create_dataset(
+          data_source=data_source,
+          dataset=dataset_name,
           tfds_download=self.config["tfds_download"],
       )
-    self.compute_params(dataset)
-    dataset, _ = data_lib.post_init_dataset(
+    elif data_source == "tfds":
+       dataset_obj = example_data.create_dataset(
+          data_source=data_source,
+          dataset=dataset_name,
+          tfds_download=self.config["tfds_download"],
+      )
+    else:
+      raise ValueError(f"Unsupported data_source: {data_source}")
+
+    if dataset_obj is None:
+        raise ValueError("Failed to create dataset_obj.")
+
+    logging.info("DEBUG: Type of dataset_obj after create_dataset: %s", type(dataset_obj))
+    if isinstance(dataset_obj, dict):
+        logging.info("DEBUG: Keys of dataset_obj dict: %s", dataset_obj.keys())
+        if 'train' in dataset_obj:
+            logging.info("DEBUG: Extracting 'train' split from DatasetDict")
+            dataset = dataset_obj['train']
+        else:
+            available_splits = list(dataset_obj.keys())
+            if not available_splits:
+                 raise ValueError("Loaded dataset is a dict but it's empty.")
+            first_split = available_splits[0]
+            logging.warning("No 'train' key found in DatasetDict, using first key: %s", first_split)
+            dataset = dataset_obj[first_split]
+    else:
+        dataset = dataset_obj
+
+    logging.info("DEBUG: Type of dataset for post_init: %s", type(dataset))
+    if not hasattr(dataset, 'filter'):
+         raise TypeError(f"The final dataset object (type: {type(dataset)}) does not have the expected dataset methods.")
+
+    # --- BEGIN COLUMN REMAPPING ---
+    prompt_key_orig = self.config.get("prompt_key", "problem")
+    label_key_orig = self.config.get("label_key", "expected_answer")
+
+    def rename_columns(example):
+        return {
+            "prompts": example[prompt_key_orig],
+            "answer": example[label_key_orig], # Remap to "answer" for math_rewards.py
+        }
+    logging.info("DEBUG: Remapping columns: %s -> prompts, %s -> answer", prompt_key_orig, label_key_orig)
+    dataset = dataset.map(rename_columns, remove_columns=dataset.column_names)
+    logging.info("DEBUG: Dataset features after remapping: %s", dataset.features)
+    # --- END COLUMN REMAPPING ---
+
+
+    train_ds, eval_ds = data_lib.post_init_dataset(
         dataset,
         tokenizer,
         batch_size=self.config["batch_size"],
@@ -287,15 +278,9 @@ class GrpoPipeline(config.HyperParameters):
         max_prompt_length=self.config["rollout_config"].get(
             "max_prompt_length", None
         ),
+        prompt_key="prompts",  # Corrected: Use the remapped key
     )
-    rl_cluster = self.create_rl_cluster(tokenizer)
-    grpo_trainer = grpo_learner.GrpoLearner(
-        rl_cluster=rl_cluster,
-        reward_fns=self.obtain_reward_fn(),
-        algo_config=GrpoConfig(**self.config["grpo_config"]),
-    )
-    grpo_trainer.train(dataset)
-
+    grpo_trainer.train(train_ds, eval_ds)
 
 def _setup_jax_pathways(pathways_bns: str):
   """Sets up Jax with Pathways."""
