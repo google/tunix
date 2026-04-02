@@ -13,6 +13,7 @@
 # limitations under the License.
 import os
 import pathlib
+import re
 import tempfile
 from typing import Any, Dict, List, cast
 import unittest
@@ -606,6 +607,60 @@ class ConfigTest(parameterized.TestCase):
           config.initialize(argv)
       else:
         config.initialize(argv)
+
+
+  def test_shell_script_keys_exist_in_base_config(self):
+    """All top-level CLI keys used in shell scripts must exist in base_config.yaml.
+
+    This prevents regressions where a config key is removed from base_config.yaml
+    while still being referenced in run scripts, which would cause the scripts to
+    fail at the key-validation step in _update_from_env_and_command_line.
+    """
+    # Get valid top-level keys from base_config.yaml via the existing initialize path.
+    hp = config.initialize(["", "base_config.yaml"])
+    valid_keys = set(hp.config.keys())
+
+    # Find all shell scripts under examples/.
+    examples_dir = pathlib.Path(__file__).parent.parent.parent / "examples"
+    shell_scripts = list(examples_dir.rglob("*.sh"))
+    self.assertNotEmpty(shell_scripts, "No shell scripts found under examples/.")
+
+    # Matches the top-level key from a CLI override line such as:
+    #   batch_size=8   or   model_config.model_name=foo
+    # The key is the identifier before the first '.' or '='.
+    top_level_key_re = re.compile(r"^\s+([a-z][a-z0-9_]*)(?:[.=])")
+
+    errors = []
+    for script_path in shell_scripts:
+      content = script_path.read_text()
+      in_python_cmd = False
+      for line in content.splitlines():
+        # Detect the start of a `python3 -m tunix.cli.*` invocation.
+        if re.search(r"python3?\s+-m\s+tunix\.cli\.", line):
+          in_python_cmd = True
+          continue
+        if not in_python_cmd:
+          continue
+
+        is_continuation = line.rstrip().endswith("\\")
+        stripped = line.strip().rstrip("\\").strip()
+
+        # Only inspect lines that are key=value config overrides.
+        if "=" in stripped and not stripped.startswith("#"):
+          m = top_level_key_re.match(line)
+          if m:
+            key = m.group(1)
+            # override_config_file is consumed before key validation; skip it.
+            if key != "override_config_file" and key not in valid_keys:
+              errors.append(
+                  f"{script_path.name}: key '{key}' not in base_config.yaml"
+              )
+
+        # A line without a trailing backslash ends the python command.
+        if not is_continuation:
+          in_python_cmd = False
+
+    self.assertEmpty(errors, "\n".join(errors))
 
 
 if __name__ == "__main__":

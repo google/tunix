@@ -217,6 +217,7 @@ class GrpoPipeline(config.HyperParameters):
           num_batches,
           batch_size,
       )
+    self.config["num_batches"] = num_batches
     num_train_epochs = self.config.get("num_train_epochs")
     if not num_train_epochs:
       num_train_epochs = 1

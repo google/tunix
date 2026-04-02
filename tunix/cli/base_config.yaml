@@ -101,6 +101,10 @@ batch_size: 16
 max_target_length: 256
 num_train_epochs: 1
 train_fraction: 1.0
+# You could leave this as 0, and the num_batches will be auto calculated as
+# floor(dataset_length / batch_size). Set to a positive integer to cap the
+# number of batches used per epoch.
+num_batches: 0
 num_test_batches: 100
 # Controls the download flag only when using TFDS datasets. If false, the
 # data_dir used will be set to `None` and chosen by default by tfds.
