@@ -138,6 +138,15 @@ class MetricsBuffer:
     return np.mean(self.step_time_deltas)
 
 
+@dataclasses.dataclass(slots=True, frozen=True)
+class CompletedMetrics:
+  """Aggregated metrics emitted for a completed trainer step."""
+
+  step: int
+  mode: str
+  metrics: Dict[str, ArrayLike]
+
+
 def _calculate_global_batch_size(train_example: Any) -> int:
   """Calculates the global batch size from a training example.
 
@@ -270,6 +279,7 @@ class PeftTrainer:
     self._buffered_train_metrics: MetricsBuffer | None = None
     self._prev_buffered_train_metrics: MetricsBuffer | None = None
     self._buffered_eval_metrics: MetricsBuffer | None = None
+    self._completed_metrics: list[CompletedMetrics] = []
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -491,36 +501,21 @@ class PeftTrainer:
       additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
-    perplexity = np.exp(jax.device_get(loss))
-    self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)
-    self.metrics_logger.log(
-        self.metrics_prefix, "perplexity", perplexity, self._mode, step
+    metrics = self._prepare_metrics_for_logging(
+        loss,
+        step_time_delta=step_time_delta,
+        additional_metrics=additional_metrics,
     )
-    learning_rate = self._try_get_learning_rate()
-    if learning_rate is not None:
+    for metric_name, metric_value in metrics.items():
       self.metrics_logger.log(
           self.metrics_prefix,
-          "learning_rate",
-          jax.device_get(learning_rate),
-          self._mode,
-          step,
-      )
-    if step_time_delta is not None:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "step_time_sec",
-          step_time_delta,
-          self._mode,
-          step,
-      )
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "steps_per_sec",
-          1.0 / (step_time_delta + 1e-9),
+          metric_name,
+          metric_value,
           self._mode,
           step,
       )
 
+    perplexity = metrics["perplexity"]
     if self._mode == sft_metrics_logger.Mode.TRAIN:
       logging.info(
           "Train step %d training loss: %f  - training perplexity: %f",
@@ -528,8 +523,36 @@ class PeftTrainer:
           loss,
           perplexity,
       )
-    for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)
+    if self.is_managed_externally:
+      self._completed_metrics.append(
+          CompletedMetrics(step=step, mode=str(self._mode), metrics=metrics)
+      )
+
+  def _prepare_metrics_for_logging(
+      self,
+      loss: ArrayLike,
+      step_time_delta: float | None = None,
+      additional_metrics: dict[str, ArrayLike] | None = None,
+  ) -> dict[str, ArrayLike]:
+    """Flattens trainer metrics into a single aggregated dictionary."""
+    metrics = {
+        "loss": loss,
+        "perplexity": np.exp(jax.device_get(loss)),
+    }
+    learning_rate = self._try_get_learning_rate()
+    if learning_rate is not None:
+      metrics["learning_rate"] = jax.device_get(learning_rate)
+    if step_time_delta is not None:
+      metrics["step_time_sec"] = step_time_delta
+      metrics["steps_per_sec"] = 1.0 / (step_time_delta + 1e-9)
+    metrics.update(additional_metrics or {})
+    return metrics
+
+  def drain_completed_metrics(self) -> list[CompletedMetrics]:
+    """Returns completed step metrics accumulated since the last drain."""
+    completed_metrics = self._completed_metrics
+    self._completed_metrics = []
+    return completed_metrics
 
   def _buffer_metrics(
       self,

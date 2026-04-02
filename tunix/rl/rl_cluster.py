@@ -543,7 +543,9 @@ class RLCluster:
                 "global_step": self.global_steps + 1,
                 "role": Role.CRITIC.value,
             },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-            metrics_logger=self._rl_metrics_logger,
+            metrics_logger=metrics_logger.MetricsLogger(
+              emit_to_monitoring=False
+            ),
             perf_tracer=self._perf,
             perf_tracer_v2=self._perf_v2,
         )
@@ -567,7 +569,9 @@ class RLCluster:
               "global_step": self.global_steps + 1,
               "role": Role.ACTOR.value,
           },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-          metrics_logger=self._rl_metrics_logger,
+              metrics_logger=metrics_logger.MetricsLogger(
+                emit_to_monitoring=False
+              ),
           perf_tracer=self._perf,
           perf_tracer_v2=self._perf_v2,
       )
@@ -664,11 +668,30 @@ class RLCluster:
     return self._perf_v2
 
   def close(self):
-    for m in self._buffered_train_metrics + self._buffered_eval_metrics:
-      self._log_metrics(m)
     self.actor_trainer.close()
     if getattr(self, "critic_trainer", None):
       self.critic_trainer.close()
+
+    self._buffer_completed_trainer_metrics(self.actor_trainer)
+    if getattr(self, "critic_trainer", None):
+      self._buffer_completed_trainer_metrics(self.critic_trainer)
+
+    for m in self._buffered_train_metrics + self._buffered_eval_metrics:
+      self._log_metrics(m)
+    self._rl_metrics_logger.close()
+
+  def _buffer_completed_trainer_metrics(
+      self, trainer: peft_trainer.PeftTrainer
+  ) -> None:
+    """Moves completed trainer-step metrics into global-step RL buffers."""
+    for completed_metrics in trainer.drain_completed_metrics():
+      self.buffer_metrics(
+          {
+              f"{trainer.metrics_prefix}/{metric_name}": (metric_value, np.mean)
+              for metric_name, metric_value in completed_metrics.metrics.items()
+          },
+          mode=Mode(completed_metrics.mode),
+      )
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
@@ -833,6 +856,7 @@ class RLCluster:
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+      self._buffer_completed_trainer_metrics(self.actor_trainer)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
@@ -840,6 +864,7 @@ class RLCluster:
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
       with self._perf.span_group("critic_training"):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
+      self._buffer_completed_trainer_metrics(self.critic_trainer)
       self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
   def generate(

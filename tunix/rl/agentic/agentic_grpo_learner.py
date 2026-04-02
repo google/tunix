@@ -266,7 +266,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
-        "kl": np.mean,
         "entropy": np.mean,
         "entropy_coef": np.mean,
         "effective_entropy": np.mean,
@@ -275,6 +274,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
+        "pg_clipfrac_lower": np.mean,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
@@ -717,39 +717,43 @@ def grpo_loss_fn(
   strict_effective_group_ratio = jnp.mean(strict_group_mask.astype(jnp.float32))
 
   aux = {
-      "kl": 0.0,
       "kl_loss": 0.0,
+      "pg_clipfrac_lower": pg_clipfrac_lower,
       "pg_loss": pg_loss,
       "pg_clipfrac": clipped_fraction,
       "ppo_kl": ppo_kl,
       "effective_group_ratio": effective_group_ratio,
       "strict_effective_group_ratio": strict_effective_group_ratio,
   }
-  if beta is not None and beta != 0.0:
-    kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps, algo_config.kl_loss_mode,
-    )
-    per_token_loss = per_token_loss + beta * kl
-
-    # Log mean KL.
-    aux["kl"] = jnp.astype(
-        (kl * effective_completion_mask).sum()
-        / jnp.clip(effective_completion_mask.sum(), min=1),
-        jnp.float32,
-    )
-
-    kl_loss = common.aggregate_loss(
-        kl, completion_mask, loss_aggregation_mode
-    )
-    # Log KL loss.
-    aux["kl_loss"] = kl_loss
-
-  loss = common.aggregate_loss(
-      per_token_loss, effective_completion_mask, loss_aggregation_mode
+  kl = common.compute_kl_divergence(
+      per_token_logps, train_example.ref_per_token_logps
   )
+  kl_loss = common.aggregate_loss(
+      kl, completion_mask, loss_aggregation_mode
+  )
+  # Log KL loss.
+  aux["kl_loss"] = kl_loss
+  loss = common.aggregate_loss(
+      per_token_loss, completion_mask, loss_aggregation_mode
+  )
+
+  if beta is not None and beta != 0.0:
+    loss = loss + beta * kl_loss
+
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
-  entropy_loss = ppo_helpers.masked_mean(token_entropy, effective_completion_mask)
+#   entropy_loss = ppo_helpers.masked_mean(token_entropy, effective_completion_mask)
+  entropy_loss = common.aggregate_loss(
+      token_entropy, completion_mask, loss_aggregation_mode
+  )
   entropy_coef = jnp.asarray(ent_coef, dtype=jnp.float32)
+
+  aux["entropy"] = entropy_loss
+  aux["entropy_coef"] = entropy_coef
+  # Effective entropy over only groups with non-degenerate advantages.
+  aux["effective_entropy"] = ppo_helpers.masked_mean(
+      token_entropy, effective_completion_mask
+  )
+
   if ent_coef != 0.0:
     target_ratio = jnp.asarray(
         getattr(algo_config, "ent_target_effective_group_ratio", 1.0),
@@ -771,13 +775,6 @@ def grpo_loss_fn(
     entropy_scale = jnp.clip(1.0 + adapt_gain * ratio_gap, min_scale, max_scale)
     entropy_coef = entropy_coef * entropy_scale
     loss = loss - entropy_coef * entropy_loss
-  aux["entropy"] = entropy_loss
-  aux["entropy_coef"] = entropy_coef
-
-  # Effective entropy over only groups with non-degenerate advantages.
-  aux["effective_entropy"] = ppo_helpers.masked_mean(
-      token_entropy, effective_completion_mask
-  )
 
   return loss, aux
 

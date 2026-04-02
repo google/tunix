@@ -14,6 +14,7 @@
 
 import functools
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 from absl.testing import absltest
@@ -532,6 +533,27 @@ class RlClusterTest(parameterized.TestCase):
 
     self.assertTrue(invoked)
     self.assertEqual(nn_partitioning.get_axis_rules(), ())
+
+    def test_buffer_completed_trainer_metrics_prefixes_metrics(self):
+        rl_cluster = object.__new__(rl_cluster_lib.RLCluster)
+        rl_cluster.buffer_metrics = mock.Mock()
+
+        trainer = SimpleNamespace(
+                metrics_prefix="actor",
+                drain_completed_metrics=lambda: [
+                        SimpleNamespace(mode="train", metrics={"loss": 1.0, "kl": 0.2})
+                ],
+        )
+
+        rl_cluster._buffer_completed_trainer_metrics(trainer)
+
+        rl_cluster.buffer_metrics.assert_called_once_with(
+                {
+                        "actor/loss": (1.0, np.mean),
+                        "actor/kl": (0.2, np.mean),
+                },
+                mode=rl_cluster_lib.Mode.TRAIN,
+        )
 
 
 if __name__ == '__main__':

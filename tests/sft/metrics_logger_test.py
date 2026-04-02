@@ -143,6 +143,31 @@ class MetricLoggerTest(absltest.TestCase):
     self.assertAlmostEqual(history[1], 0.05)
 
   @mock.patch.object(jax.monitoring, "record_scalar")
+  def test_can_disable_monitoring_emission(self, mock_record_scalar):
+    options = metrics_logger.MetricsLoggerOptions(
+        log_dir=self.log_dir, backend_factories=[]
+    )
+    logger = metrics_logger.MetricsLogger(
+        metrics_logger_options=options,
+        emit_to_monitoring=False,
+    )
+
+    logger.log("test_prefix", "loss", 0.1, metrics_logger.Mode.TRAIN, 1)
+
+    mock_record_scalar.assert_not_called()
+    self.assertTrue(logger.metric_exists("test_prefix", "loss", "train"))
+
+  @mock.patch.object(jax.monitoring, "clear_event_listeners")
+  def test_close_skips_listener_clear_when_unregistered(
+      self, mock_clear_event_listeners
+  ):
+    logger = metrics_logger.MetricsLogger(emit_to_monitoring=False)
+
+    logger.close()
+
+    mock_clear_event_listeners.assert_not_called()
+
+  @mock.patch.object(jax.monitoring, "record_scalar")
   def test_log_perplexity(self, mock_record_scalar):
     options = metrics_logger.MetricsLoggerOptions(
         log_dir=self.log_dir, backend_factories=[]

@@ -88,16 +88,20 @@ class MetricsLogger:
   def __init__(
       self,
       metrics_logger_options: MetricsLoggerOptions | None = None,
+      emit_to_monitoring: bool = True,
   ):
     self._metrics = {}
+    self._emit_to_monitoring = emit_to_monitoring
     self._backends = (
         metrics_logger_options.create_backends()
         if metrics_logger_options
         else []
     )
+    self._registered_listeners = False
     if metrics_logger_options and jax.process_index() == 0:
       for backend in self._backends:
         jax.monitoring.register_scalar_listener(backend.log_scalar)
+      self._registered_listeners = bool(self._backends)
 
   def log(
       self,
@@ -114,9 +118,10 @@ class MetricsLogger:
     )
     mode_metrics[metric_name].append(scalar_value)
 
-    jax.monitoring.record_scalar(
+    if self._emit_to_monitoring:
+      jax.monitoring.record_scalar(
         f"{metrics_prefix}/{mode}/{metric_name}", scalar_value, step=step
-    )
+      )
 
   def metric_exists(
       self, metrics_prefix, metric_name: str, mode: Mode | str
@@ -155,8 +160,9 @@ class MetricsLogger:
     """Closes all registered logging backends."""
     for backend in self._backends:
       backend.close()
-    try:
-      jax.monitoring.clear_event_listeners()
-    except Exception:  # pylint: disable=broad-exception-caught
-      # We didn't register the scalar listener, so this is expected.
-      pass
+    if self._registered_listeners:
+      try:
+        jax.monitoring.clear_event_listeners()
+      except Exception:  # pylint: disable=broad-exception-caught
+        # We didn't register the scalar listener, so this is expected.
+        pass
