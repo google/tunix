@@ -594,6 +594,10 @@ if __name__ == "__main__":
         logger.error("[%s] FAILED: %s", instance_id, e)
         traceback.print_exc()
         reward = 0.0
+        _write_traj(tf, f"{'=' * 60}")
+        _write_traj(tf, f"FINAL REWARD: {reward}")
+        _write_traj(tf, f"ERROR: {e}")
+        _write_traj(tf, f"{'=' * 60}")
 
       results.append({"instance_id": instance_id, "reward": reward})
       logger.info("[%s] reward=%.1f", instance_id, reward)
