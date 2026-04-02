@@ -3,6 +3,7 @@
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
 
 import contextlib
+import json
 import logging
 import math
 import os
@@ -141,6 +142,7 @@ arg_parser.add_argument("--model_dtype", type=parse_dtype, default=jnp.float32)
 arg_parser.add_argument("--dtype", type=parse_dtype, default=jnp.float32)
 arg_parser.add_argument("--critical_dtype", type=parse_dtype, default=jnp.float32)
 arg_parser.add_argument("--importance_sampling", type=bool, default=False)
+arg_parser.add_argument("--rllm_index_file", type=str, default=None)
 
 args, _ = arg_parser.parse_known_args()
 
@@ -400,6 +402,61 @@ def create_datasets(
     train_ds_path: str = DEEPSCALER_DATA_PATH,
     test_ds_path: str = AIME_2024_DATA_PATH,
 ):
+  def load_rllm_indices(index_path: str) -> list[int]:
+    import fsspec
+
+    def load_payload(json_path: str):
+      with fsspec.open(json_path, "r") as index_f:
+        return json.load(index_f)
+
+    fs, resolved_path = fsspec.core.url_to_fs(index_path)
+
+    if fs.isdir(resolved_path):
+      candidate_paths = sorted(fs.glob(f"{resolved_path.rstrip('/')}/*.json"))
+      if not candidate_paths:
+        raise ValueError(
+            "No JSON files found in rllm index directory: "
+            f"{index_path}"
+        )
+      if len(candidate_paths) > 1:
+        preferred_candidates = [
+            path for path in candidate_paths if path.endswith("rllm_deepscaler_order.json")
+        ]
+        if len(preferred_candidates) == 1:
+          resolved_json_path = preferred_candidates[0]
+        else:
+          raise ValueError(
+              "Multiple JSON files found in rllm index directory; please "
+              f"pass the exact file path instead: {candidate_paths}"
+          )
+      else:
+        resolved_json_path = candidate_paths[0]
+
+      if index_path.startswith("gs://"):
+        json_path = f"gs://{resolved_json_path}"
+      else:
+        json_path = resolved_json_path
+      payload = load_payload(json_path)
+    else:
+      payload = load_payload(index_path)
+
+    if isinstance(payload, list):
+      return [int(index) for index in payload]
+
+    if "source_indices" in payload:
+      return [int(index) for index in payload["source_indices"]]
+
+    if "flat_source_indices" in payload:
+      return [int(index) for index in payload["flat_source_indices"]]
+
+    if "epoch_source_indices" in payload and payload["epoch_source_indices"]:
+      return [int(index) for index in payload["epoch_source_indices"][0]]
+
+    raise ValueError(
+        "Unsupported rllm index file format. Expected a JSON list or a JSON "
+        "object containing `flat_source_indices`."
+    )
+
   def preprocess_fn(example, index):
     return {
         "question": example["problem"],
@@ -412,6 +469,14 @@ def create_datasets(
   ) as test_f:
     train_df = pd.read_json(train_f)
     test_df = pd.read_parquet(test_f)
+
+  if args.rllm_index_file:
+    if args.shuffle_data:
+      raise ValueError(
+          "`--shuffle_data` and `--rllm_index_file` are mutually exclusive."
+      )
+    rllm_indices = load_rllm_indices(args.rllm_index_file)
+    train_df = train_df.iloc[rllm_indices].reset_index(drop=True)
 
   train_ds = Dataset.from_pandas(train_df).map(preprocess_fn, with_indices=True)
   test_ds = Dataset.from_pandas(test_df).map(preprocess_fn, with_indices=True)
