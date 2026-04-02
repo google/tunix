@@ -85,6 +85,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     max_concurrency: Maximum number of concurrent rollout engines.
     off_policy_steps: Number of off-policy steps can be accepted before a policy
       update.
+    kl_loss_mode: e.g. kl, mse_kl or low_var_kl
   """
 
   algo_variant: str = "agentic_grpo"
@@ -97,6 +98,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       # refactored to a separate loss fn.
       "grpo"
   )
+  kl_loss_mode: str = "kl"
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
@@ -725,7 +727,7 @@ def grpo_loss_fn(
   }
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
+        per_token_logps, train_example.ref_per_token_logps, algo_config.kl_loss_mode,
     )
     per_token_loss = per_token_loss + beta * kl
 
