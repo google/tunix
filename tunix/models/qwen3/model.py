@@ -86,6 +86,7 @@ _custom_permute.defvjp(_custom_permute_fwd, _custom_permute_bwd)
 class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
+  DECODER = enum.auto()  # Remat the entire decoder layer (attn + ffw).
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -107,21 +108,23 @@ class ShardingConfig:
   exp_weight_efd: Tuple[str | None, ...]
 
   @staticmethod
-  def get_default_sharding(is_sampling: bool = False):
+  def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
+    sp = 'sp' if (not is_sampling and enable_sp) else None
+    zero = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),
-        emb_dv=(fsdp, 'tp'),
-        q_weight_dnh=(fsdp, 'tp', None),
-        kv_weight_dnh=(fsdp, 'tp', None),
-        o_weight_nhd=('tp', None, fsdp),
-        ffw_weight_df=(fsdp, 'tp'),
-        ffw_weight_fd=('tp', fsdp),
+        emb_vd=('tp', zero),
+        emb_dv=(zero, 'tp'),
+        q_weight_dnh=(zero, 'tp', None),
+        kv_weight_dnh=(zero, 'tp', None),
+        o_weight_nhd=('tp', None, zero),
+        ffw_weight_df=(zero, 'tp'),
+        ffw_weight_fd=('tp', zero),
         rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
+        act_btd=('fsdp', None if is_sampling else 'tp', None),
+        act_btf=('fsdp', sp, 'tp'),
+        act_btnh=('fsdp', sp, 'tp', None),
         exp_weight_edf=('fsdp', None, 'tp'),
         exp_weight_efd=('fsdp', 'tp', None),
     )
@@ -558,6 +561,7 @@ class Attention(nnx.Module):
       )
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+      unsharded_seq = P(shd_b, shd_n, None, shd_h)
       kernel_spec = splash_attn_kernel.manual_sharding_spec(
           shd.NamedSharding(mesh, P(shd_n, shd_t))
       )
@@ -565,7 +569,7 @@ class Attention(nnx.Module):
       @partial(
           shard_map,
           mesh=mesh,
-          in_specs=(kernel_spec, shd_spec, shd_spec, shd_spec),
+          in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
           out_specs=shd_spec,
           check_rep=False,
       )
@@ -576,10 +580,6 @@ class Attention(nnx.Module):
           splash_attn_kernel, query_proj, key_proj, value_proj
       )
       qkv = qkv.transpose(0, 2, 1, 3)
-      # Transpose key/value back to (b, t, kh, d) so the shared cache update
-      # below stores them in the same format as the non-flash path.
-      key_proj = key_proj.transpose(0, 2, 1, 3)
-      value_proj = value_proj.transpose(0, 2, 1, 3)
     else:
       # GQA
       query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
@@ -984,7 +984,7 @@ class MLP(nnx.Module):
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
     activations = shard(activations, self.shd_config.act_btf)
     outputs = self.down_proj(activations)
-    return outputs
+    return shard(outputs, self.shd_config.act_btd)
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
@@ -1004,6 +1004,7 @@ class DecoderLayer(nnx.Module):
       rngs: nnx.Rngs,
       shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
+    self.config = config
     self.input_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
@@ -1034,8 +1035,8 @@ class DecoderLayer(nnx.Module):
           config=config,
           rngs=rngs,
       )
-
-  def __call__(
+      
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -1056,6 +1057,22 @@ class DecoderLayer(nnx.Module):
     outputs = residual + outputs
     return cache, outputs
 
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.config.remat_config == RematConfig.DECODER:
+      # nnx.remat needs to be applied to the unbound function and take self
+      # as the first argument.
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
+
 
 class Qwen3(BackendMappingMixin, nnx.Module):
   """Qwen3 model."""
@@ -1067,26 +1084,25 @@ class Qwen3(BackendMappingMixin, nnx.Module):
       config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
     self.config = config
     self.embedder = Embedder(
         vocab_size=config.vocab_size,
         embed_dim=config.embed_dim,
         rngs=rngs,
-        shd_config=shd_config,
+        shd_config=self.config.shd_config,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
     self.layers = compat.ModuleList([
-        DecoderLayer(config=config, rngs=rngs, shd_config=shd_config)
+        DecoderLayer(config=config, rngs=rngs, shd_config=self.config.shd_config)
         for _ in range(config.num_layers)
     ])
     self.final_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
         norm_eps=config.norm_eps,
-        shd_config=shd_config,
+        shd_config=self.config.shd_config,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
@@ -1095,7 +1111,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
           einsum_str='BTD,DV->BTV',
           shape=(config.embed_dim, config.vocab_size),
           rngs=rngs,
-          sharding=shd_config.emb_dv,
+          sharding=self.config.shd_config.emb_dv,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
