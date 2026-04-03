@@ -417,6 +417,8 @@ class PeftTrainer:
       )
 
     optimizer_sharded_state = jax.device_put(optimizer_state, dst_shardings)
+    if self.config.optimizer_offload:
+      jax.block_until_ready(optimizer_sharded_state)
     nnx.update(self.optimizer, optimizer_sharded_state)
 
   def jit_train_and_eval_step(
