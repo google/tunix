@@ -73,6 +73,8 @@ parser.add_argument("--max_steps", type=int, default=1000)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
+parser.add_argument("--remat_policy", type=str, default="decoder", choices=["block", "decoder"],
+                    help="Remat policy when enable_remat is True: 'block' remats the attention block, 'decoder' remats the full decoder layer.")
 
 # LoRA
 # LoRA Config
@@ -306,6 +308,7 @@ ENABLE_MIXED_PRECISION = args.enable_mixed_precision
 USE_FLASH_ATTENTION = args.use_flash_attention
 FLASH_ATTENTION_BLOCK_SIZE = args.flash_attention_block_size
 ENABLE_REMAT = args.enable_remat
+REMAT_POLICY = args.remat_policy
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 
@@ -376,7 +379,11 @@ from tunix.models.automodel import call_model_config
 config = call_model_config(MODEL_VERSION)
 
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.DECODER
+  _REMAT_POLICY_MAP = {
+      "block": model_lib.RematConfig.BLOCK,
+      "decoder": model_lib.RematConfig.DECODER,
+  }
+  config.remat_config = _REMAT_POLICY_MAP[REMAT_POLICY]
 
 if ENABLE_MIXED_PRECISION:
   config.param_dtype = PARAM_DTYPE
@@ -690,27 +697,23 @@ try:
   settings=wandb.Settings(console="off")
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb_config = {
-        "batch_size": BATCH_SIZE,
-        "mini_batch_size": MINI_BATCH_SIZE,
-        "learning_rate": LEARNING_RATE,
-        "B1": B1,
-        "B2": B2,
-        "WARMUP_STEPS": WARMUP_STEPS,
-        "weight_decay": WEIGHT_DECAY,
-        "num_steps": MAX_STEPS,
-        "num_generations": NUM_GENERATIONS,
-        "beta": BETA,
-        "epsilon": EPSILON,
-        "epsilon_high": EPSILON_HIGH,
-        "max_response_length": MAX_RESPONSE_LENGTH,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "top_k": TOP_K,
-        "max_concurrency": MAX_CONCURRENCY,
-        "rollout_engine": ROLLOUT_ENGINE,
-        "kv_cache_size": KV_CACHE_SIZE,
-        "overlong_filter": OVERLONG_FILTER,
-    }
+      **vars(args),
+      # Derived values not present in args
+      "kv_cache_size": KV_CACHE_SIZE,
+      "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
+      "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+      # Stringify set so wandb can serialize it
+      "filter_statuses": (
+          [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
+      ),
+      # Mesh topology
+      "num_devices": len(devices),
+      "device_split": split,
+      "rollout_mesh_fsdp": rollout_fsdp,
+      "rollout_mesh_tp": rollout_tp,
+      "train_mesh_fsdp": train_fsdp,
+      "train_mesh_tp": train_tp,
+  }
   wandb.init(
     project="tunix",
     name=run_name,
