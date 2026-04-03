@@ -376,7 +376,7 @@ from tunix.models.automodel import call_model_config
 config = call_model_config(MODEL_VERSION)
 
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  config.remat_config = model_lib.RematConfig.DECODER
 
 if ENABLE_MIXED_PRECISION:
   config.param_dtype = PARAM_DTYPE

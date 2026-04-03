@@ -74,6 +74,9 @@ class TrainingConfig:
   # Configs for performance metrics.
   perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
 
+  # Whether to offload the optimizer states to CPU.
+  optimizer_offload: bool = False
+
   data_sharding_axis: Tuple[str, ...] = ("fsdp",)
 
   # Controls how many train_steps can be scheduled ahead of time.
@@ -129,36 +132,29 @@ class MetricsBuffer:
     """Returns the mean of the recorded losses for the step."""
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
+OPTIMIZER_OFFLOAD_THRESHOLD = 1024 * 1024
 
-def _calculate_global_batch_size(train_example: Any) -> int:
-  """Calculates the global batch size from a training example.
+def get_optimizer_cpu_sharding(
+    path, arr, pspecs, mesh
+) -> jax.sharding.NamedSharding:
+  path_str = ".".join([
+      str(getattr(p, "name", getattr(p, "key", getattr(p, "idx", p))))
+      for p in path
+  ])
+  spec = getattr(pspecs, "value", pspecs)
+  if spec is None:
+    return None
 
-  Args:
-    train_example: A training example, which can be a dataclass, a dict, or an
-      object with attributes.
+  is_large = getattr(arr, "size", 0) > OPTIMIZER_OFFLOAD_THRESHOLD
+  is_sharded = any(axis is not None for axis in spec)
+  is_acc_grads = "acc_grads" in path_str
+  is_float = jnp.issubdtype(arr.dtype, jnp.floating)
 
-  Returns:
-    The global batch size.
+  if is_large and is_sharded and not is_acc_grads and is_float:
+    return jax.sharding.NamedSharding(mesh, spec, memory_kind="pinned_host")
 
-  Raises:
-    TypeError: If the batch size cannot be determined from the training example.
-  """
-  if dataclasses.is_dataclass(train_example):
-    attributes = dataclasses.asdict(train_example)
-  elif isinstance(train_example, dict):
-    attributes = train_example
-  else:
-    attributes = vars(train_example)
+  return jax.sharding.NamedSharding(mesh, spec)
 
-  for field_value in attributes.values():
-    if isinstance(field_value, (jax.Array, np.ndarray)):
-      # Assume the first array we find has the batch dimension.
-      return field_value.shape[0]
-
-  raise TypeError(
-      "Could not automatically determine batch size. No JAX or NumPy "
-      "array found in the training example."
-  )
 
 
 class PeftTrainer:
@@ -337,7 +333,37 @@ class PeftTrainer:
     )
     out, grads = grad_fn(model, **inputs)
     grad_norm = optax.global_norm(grads)
+
+    # 1. Load optimizer state from CPU to TPU.
+    if self.config.optimizer_offload:
+      state = nnx.state(optimizer, nnx.optimizer.OptState)
+      pspecs = nnx.get_partition_spec(state)
+      mesh = pxla.thread_resources.env.physical_mesh
+      if not mesh.empty:
+        dst_shardings = jax.tree_util.tree_map(
+            lambda x: jax.sharding.NamedSharding(mesh, x),
+            pspecs,
+        )
+        optimizer_sharded_state = jax.device_put(state, dst_shardings)
+        nnx.update(optimizer, optimizer_sharded_state)
+
+    # 2. Update model.
     optimizer.update(model, grads)
+
+    # 3. Load optimizer state from TPU to CPU.
+    if self.config.optimizer_offload:
+      state = nnx.state(optimizer, nnx.optimizer.OptState)
+      pspecs = nnx.get_partition_spec(state)
+      mesh = pxla.thread_resources.env.physical_mesh
+      if not mesh.empty:
+        dst_shardings = jax.tree_util.tree_map_with_path(
+            functools.partial(get_optimizer_cpu_sharding, mesh=mesh),
+            state,
+            pspecs,
+        )
+        optimizer_sharded_state = jax.device_put(state, dst_shardings)
+        nnx.update(optimizer, optimizer_sharded_state)
+
     if self._has_aux:
       loss, aux = out
       return loss, aux, grad_norm
@@ -378,9 +404,19 @@ class PeftTrainer:
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
 
-    optimizer_sharded_state = jax.lax.with_sharding_constraint(
-        optimizer_state, optimizer_pspecs
-    )
+    if self.config.optimizer_offload:
+      dst_shardings = jax.tree_util.tree_map_with_path(
+          functools.partial(get_optimizer_cpu_sharding, mesh=mesh),
+          optimizer_state,
+          optimizer_pspecs,
+      )
+    else:
+      dst_shardings = jax.tree_util.tree_map(
+          lambda x: jax.sharding.NamedSharding(mesh, x),
+          optimizer_pspecs,
+      )
+
+    optimizer_sharded_state = jax.device_put(optimizer_state, dst_shardings)
     nnx.update(self.optimizer, optimizer_sharded_state)
 
   def jit_train_and_eval_step(
@@ -618,9 +654,7 @@ class PeftTrainer:
     last_step_completion_time = time.perf_counter()
     while True:
       self._prof.maybe_activate(self._iter_steps)
-      with jax.profiler.StepTraceAnnotation(
-          "train", step_num=self._iter_steps
-      ):
+      with jax.profiler.StepTraceAnnotation("train", step_num=self._iter_steps):
         train_example = None
         if self.data_hooks:
           train_example = self.data_hooks.load_next_train_batch(self)
