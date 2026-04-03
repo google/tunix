@@ -19,7 +19,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 
 Params = Mapping[str, Any]
 
@@ -35,15 +35,13 @@ def load_and_format_params(path: str) -> Params:
 
 def load_metadata(path: str) -> Any | None:
   """Loads metadata from a checkpoint path."""
-  checkpointer = ocp.StandardCheckpointer()
-  metadata = checkpointer.metadata(path)
-  return metadata
+  metadata = ocp.pytree_metadata(path)
+  return metadata.metadata
 
 
 def _load_params(path: str) -> Params:
   """Loads parameters from a checkpoint path."""
-  checkpointer = ocp.StandardCheckpointer()
-  params = checkpointer.restore(path)
+  params = ocp.load_pytree(path)
   return params
 
 
