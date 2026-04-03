@@ -86,6 +86,9 @@ class TrainingConfig:
   # Progress bar description.
   pbar_description: str | None = "Training"
 
+  # Sequence packing configuration.
+  max_seq_token_per_tpu: int | None = None
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -183,6 +186,8 @@ class PeftTrainer:
     data_hooks: The data hooks to use.
   """
 
+  supports_sequence_packing = False
+
   def __init__(
       self,
       model: nnx.Module,
@@ -192,6 +197,15 @@ class PeftTrainer:
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
   ):
+    # TODO(noghabi): Implement sequence packing for SFT and remove this check.
+    if (
+        training_config.max_seq_token_per_tpu is not None
+        and not self.supports_sequence_packing
+    ):
+      raise ValueError(
+          "Sequence packing is not supported in SFT PeftTrainer yet."
+      )
+
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)

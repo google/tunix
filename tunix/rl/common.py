@@ -103,6 +103,8 @@ class TrainExample:
   advantages: jax.Array
   ref_per_token_logps: jax.Array | None
   old_per_token_logps: jax.Array | None
+  segment_ids: jax.Array | None = None
+  segment_positions: jax.Array | None = None
 
 
 def compute_kl_divergence(
@@ -195,10 +197,37 @@ def process_ids(
     pad_id: int,
     eos_id: int,
     completion_mask: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    segment_positions: jax.Array | None = None,
 ):
-  """Processes prompt and completion ids."""
+  """Processes prompt and completion ids.
 
+  Args:
+    prompt_tokens: jax.Array token IDs for prompt. If sequence packing is
+      enabled, prompt_tokens will be empty (shape [B, 0]), because prompts and
+      completions are already concatenated into completion_tokens.
+    completion_tokens: jax.Array token IDs for completion. If sequence packing
+      is enabled, completion_tokens functions as a unified 1D buffer holding
+      pre-concatenated mixed prompt and completion boundaries padded
+      sequentially.
+    pad_id: pad token identifier.
+    eos_id: end of sequence identifier.
+    completion_mask: optional attention weights mapping completion sequences.
+    segment_ids: optional 1D sequential document identifiers used for packing.
+    segment_positions: optional 1D local position indices used for packing.
+  """
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
+
+  if segment_ids is not None:
+    # Positions are either provided or must be computed correctly (assumed
+    # provided for packed).
+    if segment_positions is None:
+      raise ValueError(
+          "segment_positions must be explicitly provided for packed sequences. "
+      )
+    attn_mask = None  # Relies on segment_ids inside the model
+    return prompt_completion_ids, segment_positions, attn_mask
+
   prompt_mask = prompt_tokens != pad_id
 
   if completion_mask is None:
@@ -228,24 +257,83 @@ def compute_per_token_logps(
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     return_logits: bool = False,
+    segment_ids: jax.Array | None = None,
+    segment_positions: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
-  """Computes the per-token log probabilities."""
+  """Computes the per-token log probabilities.
+
+  Args:
+    graphdef: Flax NNX GraphDef.
+    state: Flax NNX State.
+    prompt_tokens: jax.Array token IDs for prompt. If sequence packing is
+      enabled, prompt_tokens will be empty (shape [B, 0]), because prompts and
+      completions are already concatenated into completion_tokens.
+    completion_tokens: jax.Array token IDs for completion. If sequence packing
+      is enabled, completion_tokens functions as a unified 1D buffer holding
+      pre-concatenated mixed prompt and completion boundaries padded
+      sequentially.
+    pad_id: pad token identifier.
+    eos_id: end of sequence identifier.
+    images: optional images array.
+    completion_mask: optional completion mask array.
+    stop_gradient: whether to stop gradient.
+    return_logits: whether to return logits.
+    segment_ids: optional 1D sequential document identifiers used for packing.
+    segment_positions: optional 1D local position indices used for packing.
+
+  Returns:
+    per_token_logps: jax.Array token-level logarithmic values.
+      Without sequence packing, returns log probs for completion tokens only,
+      with shape `[B, completion_len]`. With sequence packing, returns log
+      probs for the full packed sequence padded out (since prompts and
+      completions of multiple sequences are concatenated), with shape `[B,
+      FullSeqLen]`.
+    logits: optional output tensor associated directly when tracking
+    derivatives.
+  """
   model = nnx.merge(graphdef, state)
-  input_tokens, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
+  input_tokens, calculated_positions, attn_mask = process_ids(
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      completion_mask,
+      segment_ids,
+      segment_positions,
   )
-  kwargs = {} if images is None else {"images": images}
-  logits, _ = model(
-      input_tokens,
-      positions=positions,
-      attention_mask=attn_mask,
-      cache=None,
-      **kwargs,
-  )
-  logits_to_keep = completion_tokens.shape[1]
+
+  model_kwargs = {
+      "positions": calculated_positions,
+      "cache": None,
+      "attention_mask": attn_mask,
+  }
+  if segment_ids is not None:
+    model_kwargs["segment_ids"] = segment_ids
+  if images is not None:
+    model_kwargs["images"] = images
+
+  logits, _ = model(input_tokens, **model_kwargs)
+
+  if segment_ids is not None:
+    # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
+    # Since predicting token[i] requires logit[i-1], we skip the first token.
+    # This shrinks the output shape to [Batch, FullSeqLen - 1]
+    logits_to_keep = input_tokens.shape[1] - 1
+  else:
+    logits_to_keep = completion_tokens.shape[1]
+
   logits = logits[:, -logits_to_keep - 1 : -1, :]
-  input_tokens = input_tokens[:, -logits_to_keep:]
-  per_token_logps = selective_log_softmax(logits, input_tokens)
+  input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
+  per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
+
+  if segment_ids is not None:
+    # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
+    # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
+    per_token_logps = jnp.pad(
+        per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+    )
+    if return_logits:
+      logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
 
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -266,18 +354,27 @@ def compute_score(
     eos_id: int,
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
+    segment_ids: jax.Array | None = None,
+    segment_positions: jax.Array | None = None,
 ):
   """Computes reward using the provided model."""
-  prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
+  prompt_completion_ids, calculated_positions, attn_mask = process_ids(
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      completion_mask,
+      segment_ids,
+      segment_positions,
   )
 
-  out = model(
-      prompt_completion_ids,
-      positions=positions,
-      cache=None,
-      attention_mask=attn_mask,
-  )
+  model_kwargs = {"positions": calculated_positions, "cache": None}
+  if segment_ids is not None:
+    model_kwargs["segment_ids"] = segment_ids
+  else:
+    model_kwargs["attention_mask"] = attn_mask
+
+  out = model(prompt_completion_ids, **model_kwargs)
   per_token_scores = out[0] if isinstance(out, tuple) else out
   # The model returns a tensor of shape [B, T, 1]. We squeeze the last
   # dimension to get a tensor of shape [B, T].
