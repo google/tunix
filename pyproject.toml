@@ -31,6 +31,7 @@ dependencies = [
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "orbax-checkpoint>=0.11.35",
   "pillow",  # Image processing
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
