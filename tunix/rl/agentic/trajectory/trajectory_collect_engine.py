@@ -451,12 +451,16 @@ class TrajectoryCollectEngine:
     if self._check_and_set_context_limit_reached():
       return True
 
+    max_generation_steps = (
+        self.max_response_length - self._response_token_count
+        if self.max_response_length is not None
+        else None
+    )
     rollout_output = await asyncio.get_event_loop().run_in_executor(
         self._executor,
-        self.model_call,
-        self.agent.chat_completions,
-        self.env,
-        **self.model_call_kwargs,
+        lambda: self.model_call(
+            self.agent.chat_completions, self.env, max_generation_steps=max_generation_steps
+        ),
     )
     # Capture prefix before update_from_model so both prints show the same step_idx.
     debug_prefix = self._debug_prefix

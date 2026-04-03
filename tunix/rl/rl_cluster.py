@@ -841,6 +841,7 @@ class RLCluster:
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
       trace_tags: Mapping[str, Any] | None = None,
+      max_generation_steps: int | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -887,6 +888,12 @@ class RLCluster:
         rollout_config = self.cluster_config.rollout_config[mode]
       else:
         rollout_config = self.cluster_config.rollout_config
+
+      if max_generation_steps is not None:
+        rollout_config = dataclasses.replace(
+            rollout_config,
+            max_tokens_to_generate=max_generation_steps,
+        )
 
       base_tags = {
           perf_constants.ROLE: Role.ROLLOUT.value,

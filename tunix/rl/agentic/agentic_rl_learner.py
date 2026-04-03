@@ -380,7 +380,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     return agent, env
 
   def _model_call(
-      self, chat_lists: List[Dict[str, str]], env: Any = None
+      self, chat_lists: List[Dict[str, str]], env: Any = None, max_generation_steps: int | None = None
   ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
     if env:
@@ -410,6 +410,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
+        max_generation_steps=max_generation_steps,
     )
 
     return result
