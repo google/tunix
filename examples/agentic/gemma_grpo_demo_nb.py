@@ -38,7 +38,8 @@ if ENV == 'oss':
 import jax
 from jax import numpy as jnp
 import optax
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
+from tunix.sft import checkpoint_options
 
 # %%
 if ENV == 'g3':
@@ -306,8 +307,7 @@ def get_ref_model():
         abs_state,
         nnx.get_named_sharding(abs_state, mesh),
     )
-    checkpointer = ocp.StandardCheckpointer()
-    restored_params = checkpointer.restore(ckpt_path, target=abs_state)
+    restored_params = ocp.load_pytree(ckpt_path, abstract_pytree=abs_state)
 
     graph_def, _ = nnx.split(abs_gemma)
     gemma = nnx.merge(graph_def, restored_params)
@@ -499,8 +499,11 @@ def check_numbers(prompts, completions, answer, **kargs):
 
 # %%
 # Ckpt saving
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+checkpointing_options = checkpoint_options.create_checkpointing_options(
+    save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+        SAVE_INTERVAL_STEPS
+    ),
+    preservation_policy=ocp.training.preservation_policies.LatestN(MAX_TO_KEEP),
 )
 
 # %%
