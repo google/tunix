@@ -26,7 +26,7 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 from tunix.models import safetensors_saver
 from tunix.models.gemma3 import model as model_lib
 
@@ -89,7 +89,7 @@ def create_model_from_checkpoint(
   abs_model = nnx.eval_shape(
       lambda: model_lib.Gemma3(model_config, rngs=nnx.Rngs(0))
   )
-  params = ocp.StandardCheckpointer().restore(checkpoint_path)
+  params = ocp.load_pytree(checkpoint_path)
   params = map_from_upstream_checkpoint(
       params, text_only=model_config.vision_config is None
   )

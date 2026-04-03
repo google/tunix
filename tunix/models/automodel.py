@@ -23,7 +23,7 @@ from absl import logging
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 from tunix.models import naming
 
 
@@ -132,12 +132,8 @@ def _get_gemma_base_model(
       abs_state,
       nnx.get_named_sharding(abs_state, mesh),
   )
-  checkpointer = ocp.StandardCheckpointer()
-  restored_params = checkpointer.restore(
-      os.path.join(intermediate_ckpt_dir, 'state'),
-      target=abs_state,
-  )
-
+  base_path = os.path.join(intermediate_ckpt_dir, 'state')
+  restored_params = ocp.load_pytree(base_path, abstract_pytree=abs_state)
   graph_def, _ = nnx.split(abs_model)
   model = nnx.merge(graph_def, restored_params)
   return model, model_params
@@ -198,12 +194,12 @@ def create_gemma_model_with_nnx_conversion(
 
     model, params = create_gemma_model_from_params(params_path, model_name)
 
-    checkpointer = ocp.StandardCheckpointer()
     _, state = nnx.split(model)
-    checkpointer.save(
-        os.path.join(intermediate_ckpt_dir, 'state'), state, force=True
+    ocp.save_pytree(
+        os.path.join(intermediate_ckpt_dir, 'state'),
+        state,
+        overwrite=True,
     )
-    checkpointer.wait_until_finished()
     del model, params, state
     gc.collect()
 
