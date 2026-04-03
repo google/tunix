@@ -411,43 +411,6 @@ train_devices = np.array(devices[split:]).reshape(train_fsdp, train_tp)
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 
-# %%
-# ==========================================
-# 5b. W&B Initialization
-# (must be before RLCluster so WandbBackend reuses this run instead of creating one without config)
-# ==========================================
-try:
-  import datetime
-  import wandb
-  settings = wandb.Settings()
-  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb_config = {
-      **vars(args),
-      # Derived values not present in args
-      "kv_cache_size": KV_CACHE_SIZE,
-      "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
-      "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-      # Stringify set so wandb can serialize it
-      "filter_statuses": (
-          [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
-      ),
-      # Mesh topology
-      "num_devices": len(devices),
-      "device_split": split,
-      "rollout_mesh_fsdp": rollout_fsdp,
-      "rollout_mesh_tp": rollout_tp,
-      "train_mesh_fsdp": train_fsdp,
-      "train_mesh_tp": train_tp,
-  }
-  wandb.init(
-      project="tunix",
-      name=run_name,
-      config=wandb_config,
-      settings=settings,
-  )
-  # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
-except Exception as e:
-  print(f"sizhi: W&B initialization failed with error: {e}")
 
 # %%
 # ==========================================
@@ -745,6 +708,36 @@ train_dataset, _ = data_lib.post_init_dataset(
     custom_batch_fn=mixed_type_batch_fn,
 )
 
+
+# W&B init must be AFTER RLCluster (whose WandbBackend calls wandb.init()
+# internally). Calling it here ensures our run replaces the WandbBackend's
+# throwaway run, so we get both config logging and console capture.
+try:
+  import datetime
+  import wandb
+  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  wandb_config = {
+      **vars(args),
+      "kv_cache_size": KV_CACHE_SIZE,
+      "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
+      "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+      "filter_statuses": (
+          [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
+      ),
+      "num_devices": len(devices),
+      "device_split": split,
+      "rollout_mesh_fsdp": rollout_fsdp,
+      "rollout_mesh_tp": rollout_tp,
+      "train_mesh_fsdp": train_fsdp,
+      "train_mesh_tp": train_tp,
+  }
+  wandb.init(
+      project="tunix",
+      name=run_name,
+      config=wandb_config,
+  )
+except Exception as e:
+  print(f"sizhi: W&B initialization failed with error: {e}")
 
 print("Starting training...")
 agentic_grpo_learner.train(train_dataset=train_dataset)
