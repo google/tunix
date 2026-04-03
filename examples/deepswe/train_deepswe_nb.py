@@ -419,7 +419,7 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 try:
   import datetime
   import wandb
-  settings = wandb.Settings(console="off")
+  settings = wandb.Settings()
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb_config = {
       **vars(args),
