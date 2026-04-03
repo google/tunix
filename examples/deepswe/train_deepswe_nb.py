@@ -104,6 +104,8 @@ parser.add_argument("--b1", type=float, default=0.9)
 parser.add_argument("--b2", type=float, default=0.99)
 parser.add_argument("--weight_decay", type=float, default=0.01)
 parser.add_argument("--max_grad_norm", type=float, default=1)
+parser.add_argument("--optimizer_offload", type=bool, default=True,
+                    help="Whether to offload optimizer states to CPU (pinned host memory).")
 # parser.add_argument("--warmup_ratio", type=float, default=0.1)
 
 # Checkpointing
@@ -338,6 +340,7 @@ B2 = args.b2
 WEIGHT_DECAY = args.weight_decay
 # WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
 MAX_GRAD_NORM = args.max_grad_norm
+OPTIMIZER_OFFLOAD = args.optimizer_offload
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = args.save_interval_steps
@@ -596,6 +599,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=None,
         checkpointing_options=None,
+        optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
 )
