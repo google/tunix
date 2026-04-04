@@ -389,7 +389,7 @@ if ENABLE_REMAT:
   config.remat_config = _REMAT_POLICY_MAP[REMAT_POLICY]
 
 if ENABLE_MIXED_PRECISION:
-  config.param_dtype = PARAM_DTYPE
+  config.dtype = DTYPE
 
 if USE_FLASH_ATTENTION:
   config.use_flash_attention = USE_FLASH_ATTENTION
