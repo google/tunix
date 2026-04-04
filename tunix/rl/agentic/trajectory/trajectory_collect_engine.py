@@ -619,9 +619,9 @@ class TrajectoryCollectEngine:
     connections, file handles, or external processes.
     """
     print(f"[DEBUG] {self._debug_prefix} Closing environment.", flush=True)
-    for k, v in self.env_time:
+    for k, v in self.env_time.items():
       print(f"[DEBUG] {self._debug_prefix} {k=} {v=}")
-    for k, v in self.reward_time:
+    for k, v in self.reward_time.items():
       print(f"[DEBUG] {self._debug_prefix} {k=} {v=}")
 
     try:
