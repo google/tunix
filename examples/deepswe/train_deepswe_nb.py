@@ -69,7 +69,7 @@ parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--batch_size", type=int, default=8)
 parser.add_argument("--mini_batch_size", type=int, default=8)
 parser.add_argument("--train_fraction", type=float, default=1.0)
-parser.add_argument("--max_steps", type=int, default=1000)
+parser.add_argument("--max_steps", type=int, default=50)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
@@ -104,7 +104,7 @@ parser.add_argument("--b1", type=float, default=0.9)
 parser.add_argument("--b2", type=float, default=0.99)
 parser.add_argument("--weight_decay", type=float, default=0.01)
 parser.add_argument("--max_grad_norm", type=float, default=1)
-parser.add_argument("--optimizer_offload", type=bool, default=True,
+parser.add_argument("--optimizer_offload", type=bool, default=False,
                     help="Whether to offload optimizer states to CPU (pinned host memory).")
 # parser.add_argument("--warmup_ratio", type=float, default=0.1)
 
@@ -115,8 +115,8 @@ parser.add_argument("--save_interval_steps", type=int, default=500)
 
 # Microbatch Sizes
 parser.add_argument("--train_micro_batch_size", type=int, default=1)
-parser.add_argument("--rollout_micro_batch_size", type=int, default=8)
-parser.add_argument("--compute_logps_micro_batch_size", type=int, default=8)
+parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
+parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 
 # DeepSWE Agentic Specifics
 parser.add_argument("--max_turns", type=int, default=50)

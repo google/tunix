@@ -619,6 +619,11 @@ class TrajectoryCollectEngine:
     connections, file handles, or external processes.
     """
     print(f"[DEBUG] {self._debug_prefix} Closing environment.", flush=True)
+    for k, v in self.env_time:
+      print(f"[DEBUG] {self._debug_prefix} {k=} {v=}")
+    for k, v in self.reward_time:
+      print(f"[DEBUG] {self._debug_prefix} {k=} {v=}")
+
     try:
       await asyncio.wait_for(
           asyncio.get_event_loop().run_in_executor(
