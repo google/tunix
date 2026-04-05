@@ -96,8 +96,10 @@ tokenizer_config:
 data_source: ""
 data_directory: ""
 data_module: ""
+data_config: {}
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
+prompt_key: "prompts"
 max_target_length: 256
 num_train_epochs: 1
 train_fraction: 1.0
@@ -211,8 +213,23 @@ rollout_config:
 ############################### Other RL  Config ###############################
 
 rollout_engine: "vanilla"
+sglang_jax_config: {}
+vllm_config: {}
 
 offload_to_cpu: false
+
+training_mode: "grpo"
+
+chat_parser_config:
+  type: "default"
+
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+
+agentic_grpo_config: {}
 
  ############################# Reward Fns #############################
 

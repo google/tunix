@@ -581,7 +581,7 @@ class Attention(nnx.Module):
       sin: jaxtyping.Array,
       cos: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.BLOCK:
+    if self.config.remat_config == RematConfig.BLOCK or self.config.remat_config == RematConfig.BLOCK.value:
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
       return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
@@ -658,7 +658,7 @@ class MLP(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.config.remat_config == RematConfig.BLOCK:
+    if self.config.remat_config == RematConfig.BLOCK or self.config.remat_config == RematConfig.BLOCK.value:
       return nnx.remat(self.block.__func__)(self, x)
     else:
       return self.block(x)
@@ -728,7 +728,7 @@ class DecoderLayer(nnx.Module):
       sin,
       cos,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.DECODER:
+    if self.config.remat_config == RematConfig.DECODER or self.config.remat_config == RematConfig.DECODER.value:
       return nnx.remat(self.block.__func__)(self, x, cache, attn_mask, sin, cos)
     else:
       return self.block(x, cache, attn_mask, sin, cos)

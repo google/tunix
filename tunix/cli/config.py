@@ -68,6 +68,25 @@ _yaml_types_to_parser = {
 }
 
 
+def _normalize_cli_override(schema_value: Any, override_value: Any) -> Any:
+  """Restores empty string overrides that OmegaConf parses as None.
+
+  OmegaConf.from_cli interprets CLI values like key="" as None. For string
+  fields we want to preserve the user's intent and treat that as an empty
+  string, including for nested dictionary overrides.
+  """
+  if override_value is None and isinstance(schema_value, str):
+    return ""
+  if isinstance(schema_value, (collections.abc.Mapping, omegaconf.DictConfig)) and isinstance(
+      override_value, (collections.abc.Mapping, omegaconf.DictConfig)
+  ):
+    normalized = {}
+    for key, value in override_value.items():
+      normalized[key] = _normalize_cli_override(schema_value.get(key), value)
+    return normalized
+  return override_value
+
+
 def get_project_root() -> pathlib.Path:
   """Returns the project root folder.
 
@@ -530,24 +549,8 @@ class HyperParameters:
           f"Check if the arguments match the signature of optax.{opt_type}: {e}"
       ) from e
 
-  def create_mesh(self, model_key: str):
-    """Validate and extract mesh configuration from a dictionary.
-
-    Expects raw_keys to contain a 'mesh' key, which is a dictionary with 'shape'
-    and 'axis_names' keys.
-
-    Args:
-      model_key: A model key that contain raw mesh configuration. For example,
-        in rl, there are actor_model, critic_model and reference_model, each of
-        them could have different mesh configuration.
-
-    Returns:
-      A tuple containing (axis_shapes, axis_names), both as tuples.
-
-    Raises:
-      ValueError: If the mesh configuration is missing, malformed, or invalid.
-    """
-
+  def _parse_mesh_config(self, model_key: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Validate and parse mesh configuration for a model key."""
     mesh_config = self.config[model_key].get("mesh")
     if not mesh_config:
 
@@ -581,7 +584,6 @@ class HyperParameters:
           f" {mesh_config.get('axis_names')}"
       ) from e
 
-    # Validate axis_shapes
     if not isinstance(axis_shapes, tuple):
       raise ValueError(
           f"'mesh.shape' must be a list or tuple, got {type(axis_shapes)}."
@@ -591,7 +593,6 @@ class HyperParameters:
           f"All elements in mesh.shape must be integers, got {axis_shapes}."
       )
 
-    # Validate axis_names
     if not isinstance(axis_names, tuple):
       raise ValueError(
           f"'mesh.axis_names' must be a tuple, got {type(axis_names)}."
@@ -601,24 +602,56 @@ class HyperParameters:
           f"All elements in mesh.axis_names must be strings, got {axis_names}."
       )
 
-    # Validate lengths match
     if len(axis_shapes) != len(axis_names):
       raise ValueError(
           f"mesh.shape {axis_shapes} and mesh.axis_names {axis_names} "
           "must have the same length."
       )
+    return tuple(axis_shapes), tuple(axis_names)
 
-    # Validate mesh shape <= device count
-    num_devices = jax.device_count()
+  def create_mesh(self, model_key: str, devices: Sequence[Any] | None = None):
+    """Validate and extract mesh configuration from a dictionary.
+
+    Expects raw_keys to contain a 'mesh' key, which is a dictionary with 'shape'
+    and 'axis_names' keys.
+
+    Args:
+      model_key: A model key that contain raw mesh configuration. For example,
+        in rl, there are actor_model, critic_model and reference_model, each of
+        them could have different mesh configuration.
+      devices: Optional explicit device subset to use for the mesh. When
+        provided, the mesh shape must exactly match the number of assigned
+        devices.
+
+    Returns:
+      A tuple containing (axis_shapes, axis_names), both as tuples.
+
+    Raises:
+      ValueError: If the mesh configuration is missing, malformed, or invalid.
+    """
+
+    axis_shapes, axis_names = self._parse_mesh_config(model_key)
+    num_devices = len(devices) if devices is not None else jax.device_count()
     if np.prod(axis_shapes) > num_devices:
       raise ValueError(
           f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
           f"but found {num_devices}."
       )
+    if devices is not None:
+      if np.prod(axis_shapes) != num_devices:
+        raise ValueError(
+            f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
+            f"but was assigned {num_devices}."
+        )
+      return jax.sharding.Mesh(
+          np.array(list(devices)).reshape(axis_shapes),
+          axis_names,
+          axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
+      )
     return jax.make_mesh(
-        tuple(axis_shapes),
-        tuple(axis_names),
-        axis_types=(jax.sharding.AxisType.Auto,) * len(tuple(axis_names)),
+        axis_shapes,
+        axis_names,
+        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
     )
 
   def obtain_training_config_dict(self, key):
@@ -736,6 +769,8 @@ class HyperParameters:
       else:
         new_proposal = os.environ.get(yaml_key_to_env_key(k))
 
+      new_proposal = _normalize_cli_override(raw_data_from_yaml[k], new_proposal)
+
       # If specified value is not one of type in base config yaml or is not
       # consumed by to type parser, error out
       # TODO(b/477343879): ensure Type checking for values with no defaults such
@@ -750,8 +785,6 @@ class HyperParameters:
 
       # Take the config value
       if new_proposal is None:
-        # This allows users to set empty strings via CLI, otherwise parsed as
-        # "None"
         raw_keys[k] = None
       elif isinstance(new_proposal, type(raw_data_from_yaml[k])):
         raw_keys[k] = new_proposal  # take the raw data, no type conversion

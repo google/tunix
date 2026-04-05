@@ -679,7 +679,7 @@ class Attention(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.remat_config == RematConfig.BLOCK:
+    if self.remat_config == RematConfig.BLOCK or self.remat_config == RematConfig.BLOCK.value:
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
       return nnx.remat(self.block.__func__)(

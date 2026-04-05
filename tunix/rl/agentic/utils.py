@@ -111,6 +111,8 @@ def convert_messages_to_string(
   for k, v in message.items():
     if isinstance(v, np.ndarray):
       processed_messages[k] = v.item()
+    elif k == "content" and v is None:
+      processed_messages[k] = ""
     else:
       processed_messages[k] = v
 
