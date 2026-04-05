@@ -66,6 +66,7 @@ with cm:
   from tunix.rl.agentic.trajectory import trajectory_collect_engine
   from tunix.rl.agentic.parser.chat_template_parser import parser
   from tunix.rl import rl_cluster as rl_cluster_lib
+  from tunix.rl.ray import ray_rl_cluster as ray_rl_cluster_lib
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
@@ -82,6 +83,11 @@ except:
   pass
 
 print("jax devices: ", jax.devices())
+
+# ====== Ray / Pathways backend selection ======
+# Set USE_RAY=True (or pass --use_ray) to run trainer and rollout engine in
+# separate Ray processes instead of colocated Pathways workers.
+# When USE_RAY=False (default), the existing single-process behaviour is kept.
 
 # %%
 import argparse
@@ -111,6 +117,25 @@ arg_parser.add_argument(
 )
 arg_parser.add_argument(
     "--kl_loss_mode", type=str, default="low_var_kl"
+)
+arg_parser.add_argument(
+    "--use_ray",
+    action="store_true",
+    default=False,
+    help="Use Ray to run trainer and rollout engine in separate processes.",
+)
+arg_parser.add_argument(
+    "--ray_weight_sync",
+    type=str,
+    default="numpy_direct",
+    choices=["numpy_direct", "ray_object_store", "file"],
+    help="Weight sync strategy when --use_ray is set.",
+)
+arg_parser.add_argument(
+    "--ray_weight_sync_path",
+    type=str,
+    default="/tmp/tunix_ray_weights",
+    help="Shared path for file-based weight sync (only used with --ray_weight_sync=file).",
 )
 args, _ = arg_parser.parse_known_args()
 
@@ -603,14 +628,39 @@ perf_metrics_config = PerfMetricsConfig(
 )
 
 # %%
-# RL cluster
-rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen2_actor,
-    reference=qwen2_ref,
-    tokenizer=tokenizer,
-    cluster_config=cluster_config,
-    perf_config=perf_metrics_config,
-)
+# RL cluster — choose between single-process (Pathways/JAX) and Ray-based.
+if args.use_ray:
+  from tunix.rl.ray import weight_sync as weight_sync_lib  # pylint: disable=g-import-not-at-top
+
+  _weight_sync_strategy = {
+      "numpy_direct": weight_sync_lib.NumpyDirectSync(),
+      "ray_object_store": weight_sync_lib.RayObjectStoreSync(),
+      "file": weight_sync_lib.FileWeightSync(path=args.ray_weight_sync_path),
+  }[args.ray_weight_sync]
+
+  ray_cluster_config = ray_rl_cluster_lib.RayClusterConfig(
+      role_to_mesh=cluster_config.role_to_mesh,
+      rollout_engine=cluster_config.rollout_engine,
+      offload_to_cpu=cluster_config.offload_to_cpu,
+      training_config=cluster_config.training_config,
+      rollout_config=cluster_config.rollout_config,
+      weight_sync_strategy=_weight_sync_strategy,
+  )
+  rl_cluster = ray_rl_cluster_lib.RayRLCluster(
+      actor=qwen2_actor,
+      reference=qwen2_ref,
+      tokenizer=tokenizer,
+      cluster_config=ray_cluster_config,
+      perf_config=perf_metrics_config,
+  )
+else:
+  rl_cluster = rl_cluster_lib.RLCluster(
+      actor=qwen2_actor,
+      reference=qwen2_ref,
+      tokenizer=tokenizer,
+      cluster_config=cluster_config,
+      perf_config=perf_metrics_config,
+  )
 
 show_hbm_usage("after RLCluster creation")
 
