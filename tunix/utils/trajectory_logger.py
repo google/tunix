@@ -123,9 +123,14 @@ def log_item(
   )
   if str(file_path).startswith('gs://'):
     if file_path.exists():
+      old_df = None
       with file_path.open('r') as f:
-        old_df = pd.read_csv(f)
-      df = pd.concat([old_df, df], ignore_index=True)
+        try:
+          old_df = pd.read_csv(f, engine='python')
+        except Exception as e:  # pylint: disable=broad-except
+          logging.exception('Failed to read old CSV file. with error: %s', e)
+      if old_df is not None:
+        df = pd.concat([old_df, df], ignore_index=True)
     with file_path.open('w') as f:
       df.to_csv(f, header=True, index=False)
   else:
