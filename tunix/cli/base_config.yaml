@@ -36,7 +36,7 @@ model_config: &base_model_config
   # If download checkpoint from kaggle, specify your kaggle credentials `KAGGLE_USERNAME` and `KAGGLE_KEY ` in envrionment variable.
 
   ################################## HF ##################################
-  # If download checkpoint from huggingface, specifcy your hf credentials `HF_TOKEN` in environnebt variable. 
+  # If download checkpoint from huggingface, specifcy your hf credentials `HF_TOKEN` in environnebt variable.
 
   ################################## NNX ##################################
   # Integer seed to create `nnx.Rngs` to mangage the random state.
@@ -45,7 +45,7 @@ model_config: &base_model_config
   # Display model
   model_display: false
 
-  # Directory used for NNX conversion if downloaded Gemma/Gemma2 from Kaggle source. 
+  # Directory used for NNX conversion if downloaded Gemma/Gemma2 from Kaggle source.
   intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
 
   # Flash Attention configuration
@@ -92,12 +92,14 @@ tokenizer_config:
 
 ################################## DATASET ##################################
 # Translation_dataset  "Helsinki-NLP/opus-100" or "mtnt/en-fr" for SFT
-# Math_dataset "gsm8k" for grpo 
+# Math_dataset "gsm8k" for grpo
 data_source: ""
 data_directory: ""
 data_module: ""
+data_config: {}
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
+prompt_key: "prompts"
 max_target_length: 256
 num_train_epochs: 1
 train_fraction: 1.0
@@ -118,7 +120,7 @@ optimizer_config: &base_optimizer_config
   opt_type: "adamw"
 
   # == Optax Optimizer Scheduler ==
-  # Belows are function parameters for optax optimizer scheduler. Make sure you specified the corresponding parameters for your schedule_type. 
+  # Belows are function parameters for optax optimizer scheduler. Make sure you specified the corresponding parameters for your schedule_type.
 
   schedule_type: "warmup_cosine_decay_schedule"
   value: 1e-5
@@ -167,12 +169,12 @@ training_config: &base_training_config
   data_sharding_axis: ["fsdp"]
   max_inflight_computations: 2
 
-rl_training_config: 
+rl_training_config:
   <<: *base_training_config
   actor_optimizer_config:
     <<: *base_optimizer_config
 
-  critic_optimizer_config: null 
+  critic_optimizer_config: null
 ############################### GRPO Config ###############################
 grpo_config:
   # The number of times the policy generates multiple responses for a given prompt
@@ -197,7 +199,7 @@ grpo_config:
 rollout_config:
   total_generation_steps: 768
 
-  max_prompt_length: 256 
+  max_prompt_length: 256
 
   # Important to keep a high-ish temperature for varied, diverse responses during
   # training.
@@ -211,11 +213,26 @@ rollout_config:
 ############################### Other RL  Config ###############################
 
 rollout_engine: "vanilla"
+sglang_jax_config: {}
+vllm_config: {}
 
-offload_to_cpu: false 
+offload_to_cpu: false
+
+training_mode: "grpo"
+
+chat_parser_config:
+  type: "default"
+
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+
+agentic_grpo_config: {}
 
  ############################# Reward Fns #############################
 
-verl_compatible: false 
-reward_functions: 
+verl_compatible: false
+reward_functions:
  - tunix/cli/reward_fn/gsm8k.py

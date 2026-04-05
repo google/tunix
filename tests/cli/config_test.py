@@ -317,6 +317,29 @@ class ConfigTest(parameterized.TestCase):
         ),
     )
 
+    def test_create_mesh_with_assigned_devices(self):
+        raw_keys = {
+                "model_config": {
+                        "mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}
+                }
+        }
+        hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
+        assigned_devices = ["d0", "d1", "d2", "d3"]
+
+        class FakeMesh:
+
+            def __init__(self, devices, axis_names, axis_types=None):
+                self.devices = devices
+                self.axis_names = axis_names
+                self.axis_types = axis_types
+
+        with mock.patch.object(jax.sharding, "Mesh", side_effect=FakeMesh):
+            mesh = hp.create_mesh("model_config", devices=assigned_devices)
+
+        self.assertEqual(mesh.devices.shape, (2, 2))
+        self.assertSequenceEqual(mesh.devices.flatten().tolist(), assigned_devices)
+        self.assertEqual(mesh.axis_names, ("x", "y"))
+
   @parameterized.named_parameters(
       dict(
           testcase_name="shape_invalid_literal",
