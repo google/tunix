@@ -24,6 +24,8 @@ import logging
 import math
 import sys
 from absl import logging as absl_logging
+from tunix.utils import math_utils
+from datetime import datetime
 
 import wandb
 
@@ -105,10 +107,16 @@ print("jax devices: ", jax.devices())
 
 # %%
 import argparse
+def parse_dtype(x):
+    try:
+        return getattr(jnp, x)
+    except AttributeError:
+        raise ValueError(f"Invalid dtype: {x}")
 
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
 arg_parser.add_argument("--batch_size", type=int, default=128)
 arg_parser.add_argument("--mini_batch_size", type=int, default=128)
+arg_parser.add_argument("--train_micro_batch_size", type=int, default=2)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -116,23 +124,28 @@ arg_parser.add_argument("--weight_decay", type=float, default=0.01)
 arg_parser.add_argument("--num_batches", type=int, default=312)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
+arg_parser.add_argument("--ent_coef", type=float, default=1e-4)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
+arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
-arg_parser.add_argument("--temperature", type=float, default=0.6)
-arg_parser.add_argument("--top_p", type=float, default=1)
+arg_parser.add_argument("--temperature", type=float, default=0.8)
+arg_parser.add_argument("--top_p", type=float, default=1.0)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
-arg_parser.add_argument("--shuffle_data", type=bool, default=True)
+arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
-arg_parser.add_argument(
-    "--loss_agg_mode", type=str, default="token-mean"
-)
-arg_parser.add_argument(
-    "--kl_loss_mode", type=str, default="low_var_kl"
-)
+arg_parser.add_argument("--loss_agg_mode", type=str, default="sequence-mean-token-mean")
+arg_parser.add_argument("--flash_attn", type=bool, default=False)
+arg_parser.add_argument("--model_dtype", type=parse_dtype, default=jnp.float32)
+arg_parser.add_argument("--dtype", type=parse_dtype, default=jnp.float32)
+arg_parser.add_argument("--critical_dtype", type=parse_dtype, default=jnp.float32)
+arg_parser.add_argument("--importance_sampling", type=bool, default=False)
+
 args, _ = arg_parser.parse_known_args()
+PROFILER_PATH="gs://lancewang-dev-supercomputer-testing/tunix/rl/grpo"
+ENABLE_PROFILER=True
+ENABLE_MAXTEXT=True
 
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -178,15 +191,18 @@ NUM_ITERATIONS = 1
 # Important to keep a high enough value for this, otherwise, the KL divergence
 # can increase unchecked.
 BETA = args.beta
+ENT_COEF = args.ent_coef
 # Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to PPO, for
 # stable updates.
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
+ENABLE_FLASH_ATTN=args.flash_attn
 ENABLE_REMAT = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
+TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
 NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -203,8 +219,13 @@ MAX_CONCURRENCY = args.max_concurrency
 
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
+LOSS_AGG_MODE = args.loss_agg_mode
+# ACTIVATION_DTYPE = jnp.float32
+# MODEL_DTYPE = jnp.float32
+ACTIVATION_DTYPE = args.dtype
+MODEL_DTYPE = args.model_dtype
+# CRITICAL_DTYPE = args.critical_dtype
 
-MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -222,7 +243,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 10
+SAVE_INTERVAL_STEPS = 20
 MAX_TO_KEEP = 4
 DO_MEM_PROFILING = False
 
@@ -250,9 +271,12 @@ except wandb.errors.UsageError as e:
 
 
 try:
-  import datetime
-  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb_config = {
+
+  run_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  wandb.init(
+    project="tunix",
+    name=run_name,
+    config={
         "batch_size": BATCH_SIZE,
         "mini_batch_size": MINI_BATCH_SIZE,
         "learning_rate": LEARNING_RATE,
@@ -263,6 +287,7 @@ try:
         "num_steps": MAX_STEPS,
         "num_generations": NUM_GENERATIONS,
         "beta": BETA,
+        "ent_coef": ENT_COEF,
         "epsilon": EPSILON,
         "epsilon_high": EPSILON_HIGH,
         "max_response_length": MAX_RESPONSE_LENGTH,
@@ -271,12 +296,11 @@ try:
         "top_k": TOP_K,
         "max_concurrency": MAX_CONCURRENCY,
         "rollout_engine": ROLLOUT_ENGINE,
-    }
-  wandb.init(
-    project="tunix",
-    name=run_name,
-    config=wandb_config,
-    settings=wandb.Settings(console="off"))
+        "dtype_activation": ACTIVATION_DTYPE,
+        "dtype_parameter": MODEL_DTYPE,
+        # "dtype_critical_activation": CRITICAL_DTYPE,
+        "importance_sampling": args.importance_sampling,
+    })
   # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
 except Exception as e:
   print(f"linchai: W&B initialization failed with error: {e}")
@@ -315,7 +339,6 @@ trainer_mesh = jax.sharding.Mesh(
     axis_names=TRAINER_MESH[1],
     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
 )
-print(f"ZZ {trainer_devices_list=} {trainer_mesh.devices=}")
 
 # %%
 try:
@@ -339,17 +362,27 @@ if NOTEBOOK_ENV == "g3":
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
   DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
-  CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
+  MODEL_PATH_PREFIX = "gs://tunix/models"
+  # CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
+  CKPT_DIR_PREFIX = "gs://lancewang-dev-supercomputer-testing/tunix/deepscaler"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_old_logpbs_orig/01")
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt", timestamp, "01")
+# CKPT_DIR = "gs://lancewang-dev-supercomputer-testing/tunix/deepscaler/deepscaler_ckpt/20260325_214156_rerun/01"
 print(f"Checkpoint directory: {CKPT_DIR}")
 
-MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+# MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+MODEL_VERSION = "Qwen/Qwen3-0.6B"
+MAXTEXT_MODEL_VERSION = "qwen3-0.6b"
+MODEL_PATH = "Qwen/Qwen3-0.6B"
 
-print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
+# MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+# MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
+# MODEL_PATH = "gs://tunix/models/qwen2_5/torch/1.5b-it"
+
+print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, ENT_COEF={ENT_COEF}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
@@ -448,15 +481,27 @@ show_hbm_usage("Done with loading datasets")
 
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config.use_flash_attention = ENABLE_FLASH_ATTN
+config.param_dtype = MODEL_DTYPE
+config.dtype = ACTIVATION_DTYPE
+# config.critical_dtype = CRITICAL_DTYPE
+
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 else:
   config.remat_config = model_lib.RematConfig.NONE
 
-print("MODEL_PATH: ", MODEL_PATH)
-qwen2_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-)
+if ENABLE_MAXTEXT:
+    # MAXTEXT_CONFIGS_DIR = "/usr/src/maxtext/src/maxtext/configs"
+    MAXTEXT_CONFIGS_DIR = "/usr/github/maxtext/src/maxtext/configs"
+    base_output_directory = "gs://nicogrande-maxtext-logs/debug/logs/run/rl/from-pretrained/lance"
+    import maxtext as mt
+    config= mt.pyconfig(model_name=MAXTEXT_MODEL_VERSION, base_output_directory=base_output_directory, base_config=f"{MAXTEXT_CONFIGS_DIR}/post_train/rl.yml", skip_jax_distributed_system=True)
+    qwen2_ref, trainer_mesh= mt.get_maxtext_model(config) # ref_mesh and train_mesh are the same for us
+else:
+  qwen2_ref = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+  )
 
 
 # %%
@@ -488,9 +533,24 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
 else:
-  qwen2_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-  )
+  if ENABLE_MAXTEXT:
+    # MAXTEXT_CONFIGS_DIR = "/usr/src/maxtext/src/maxtext/configs"
+    MAXTEXT_CONFIGS_DIR = "/usr/github/maxtext/src/maxtext/configs"
+    base_output_directory = "gs://nicogrande-maxtext-logs/debug/logs/run/rl/from-pretrained/lance"
+    import maxtext as mt
+    # from maxtext.utils import model_creation_utils as mt
+    # argv =    ["",
+    #             f"{MAXTEXT_CONFIGS_DIR}/post_train/rl.yml",
+    #             # f"load_parameters_path={MODEL_CHECKPOINT_PATH}/0/items",
+    #             f"model_name={MAXTEXT_MODEL_VERSION}",
+    #             f"hf_access_token={args.hf_token}",
+    #         ]
+    config= mt.pyconfig(model_name=MAXTEXT_MODEL_VERSION,  base_output_directory=base_output_directory, base_config=f"{MAXTEXT_CONFIGS_DIR}/post_train/rl.yml", skip_jax_distributed_system=True)
+    qwen2_actor, _= mt.get_maxtext_model(config) # ref_mesh and train_mesh are the same for us
+  else:
+    qwen2_actor = params_lib.create_model_from_safe_tensors(
+        MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+    )
 
 # %%
 show_hbm_usage("after loading qwen2_actor")
@@ -508,16 +568,9 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 )
 
 # Metrics logger
-wandb_config = vars(args)
-wandb_config.update({
-    "WARMUP_STEPS": WARMUP_STEPS,
-    "num_steps": MAX_STEPS,
-    "rollout_engine": ROLLOUT_ENGINE,
-})
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="gs://linchai-bucket-dev/tensorboard/grpo",
-    flush_every_n_steps=20,
-    backend_kwargs={"wandb": {"config": wandb_config}},
+  #  log_dir="gs://linchai-bucket-dev/tensorboard/grpo", flush_every_n_steps=20
+  log_dir="gs://lancewang-dev-supercomputer-testing/tunix/pw", flush_every_n_steps=1
 )
 
 # %%
@@ -554,7 +607,7 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "return_logprobs": True,
+    "return_logprobs": args.importance_sampling,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -568,7 +621,6 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_chunked_prefill_size": 2048,
     "rollout_sglang_jax_max_running_requests": BATCH_SIZE,
     "rollout_sglang_jax_page_size": 128,
-    "rollout_sglang_jax_use_sort_for_toppk_minp": False,
 }
 
 vllm_rollout_dict = {
@@ -586,6 +638,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": True,
+        "generation_config": "vllm",
     },
 }
 
@@ -603,12 +656,26 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
+if ENABLE_MAXTEXT:
+  from maxtext.configs import pyconfig
+  vllm_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
+  argv_list = ["", str(vllm_config_path), "log_config=False"]
+  vllm_config = pyconfig.initialize(argv_list)
+  role_to_logical_axis_rule = {
+        rl_cluster_lib.Role.ACTOR: config.logical_axis_rules,
+        rl_cluster_lib.Role.REFERENCE: config.logical_axis_rules,
+        rl_cluster_lib.Role.ROLLOUT: None,
+  }
+else:
+  role_to_logical_axis_rule = None
+
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
         rl_cluster_lib.Role.REFERENCE: trainer_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
+    role_to_logical_axis_rule=role_to_logical_axis_rule,
     rollout_engine=ROLLOUT_ENGINE,
     offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
@@ -621,19 +688,19 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=2,
+        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
         # profiler
-        # profiler_options = profiler.ProfilerOptions(
-          # profiler_steps=1,
-          # skip_first_n_steps=1,
-          # set_profile_options=False,
-          # log_dir=PROFILER_PATH,
-        # ) if ENABLE_PROFILER else None,
+        profiler_options = profiler.ProfilerOptions(
+          profiler_steps=3,
+          skip_first_n_steps=1,
+          set_profile_options=False,
+          log_dir=PROFILER_PATH,
+        ) if ENABLE_PROFILER else None,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -643,20 +710,19 @@ grpo_config = GRPOConfig(
     num_iterations=NUM_ITERATIONS,
     max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
+    # ent_coef=ENT_COEF,
     epsilon=EPSILON,
     epsilon_high=EPSILON_HIGH,
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
-    loss_agg_mode=args.loss_agg_mode,
-    kl_loss_mode=args.kl_loss_mode,
+    loss_agg_mode=LOSS_AGG_MODE,
 )
 
 # Perf Metrics logging
 perf_metrics_config = PerfMetricsConfig(
-    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
-        cluster_config=cluster_config,
-        trace_dir="/tmp/agentic_perf",
+    custom_export_fn_v2=PerfMetricsExport(
+        trace_dir="/tmp/agentic_perf"
     ).export_metrics
 )
 
