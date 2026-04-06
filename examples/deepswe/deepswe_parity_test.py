@@ -140,9 +140,14 @@ def _load_tunix_modules(repo_root: Path):
   _ensure_package("tunix.rl.agentic.agents")
   _ensure_package("tunix.rl.agentic.parser")
   _ensure_package("tunix.rl.agentic.parser.chat_template_parser")
+  _ensure_package("tunix.generate")
   _ensure_package("examples")
   _ensure_package("examples.deepswe")
 
+  _load_module(
+      "tunix.generate.tokenizer_adapter",
+      repo_root / "tunix/generate/tokenizer_adapter.py",
+  )
   _load_module(
       "tunix.rl.agentic.agents.agent_types",
       repo_root / "tunix/rl/agentic/agents/agent_types.py",
@@ -309,12 +314,13 @@ def _scenario() -> dict[str, Any]:
   }
 
 
-def _compare(label: str, lhs: Any, rhs: Any, failures: list[str]) -> None:
+def _compare(label: str, lhs: Any, rhs: Any, failures: list[str], verbose: bool = True) -> None:
   if lhs != rhs:
     failures.append(label)
     print(f"[FAIL] {label}")
-    print("  tunix:", _render_diff_value(lhs))
-    print("  rllm :", _render_diff_value(rhs))
+    if verbose:
+      print("  tunix:", _render_diff_value(lhs))
+      print("  rllm :", _render_diff_value(rhs))
   else:
     print(f"[ OK ] {label}")
 
@@ -448,9 +454,11 @@ def _run_parity_scenario(tokenizer_path: str, dump_json: Path | None = None) -> 
   TunixSWEAgent = tunix_swe_agent_module.SWEAgent
   RllmSWEAgent = rllm_swe_agent_module.SWEAgent
 
-  tokenizer = _load_real_tokenizer(tokenizer_path)
-  tunix_chat_parser = tunix_parser_module.QwenChatTemplateParser(tokenizer)
-  rllm_chat_parser = rllm_parser_module.QwenChatTemplateParser(tokenizer)
+  raw_tokenizer = _load_real_tokenizer(tokenizer_path)
+  tok_adapter_module = sys.modules["tunix.generate.tokenizer_adapter"]
+  tokenizer = tok_adapter_module.TokenizerAdapter(raw_tokenizer)
+  tunix_chat_parser = tunix_parser_module.QwenChatTemplateParser(raw_tokenizer)
+  rllm_chat_parser = rllm_parser_module.QwenChatTemplateParser(raw_tokenizer)
   scenario = _scenario()
 
   tunix_agent = TunixSWEAgent()
@@ -553,30 +561,40 @@ def _run_parity_scenario(tokenizer_path: str, dump_json: Path | None = None) -> 
   }
 
   print("\n=== CUMULATIVE TRAINING SAMPLE ===")
+
+  # Print final_chat_completions for both sides (excluding token ids).
+  for label, sample in [("tunix", tunix_sample), ("rllm", rllm_sample)]:
+    print(f"\n--- {label} final_chat_completions ---")
+    for msg in sample["final_chat_completions"]:
+      print(f"  [{msg.get('role', '?')}] {msg.get('content', '')[:500]}")
+
   _compare(
       "final_chat_completions",
       tunix_sample["final_chat_completions"],
       rllm_sample["final_chat_completions"],
       failures,
   )
-  _compare("prompt_ids", tunix_sample["prompt_ids"], rllm_sample["prompt_ids"], failures)
+  _compare("prompt_ids", tunix_sample["prompt_ids"], rllm_sample["prompt_ids"], failures, verbose=False)
   _compare(
       "response_ids",
       tunix_sample["response_ids"],
       rllm_sample["response_ids"],
       failures,
+      verbose=False,
   )
   _compare(
       "response_mask",
       tunix_sample["response_mask"],
       rllm_sample["response_mask"],
       failures,
+      verbose=False,
   )
   _compare(
       "old_logprobs",
       tunix_sample["old_logprobs"],
       rllm_sample["old_logprobs"],
       failures,
+      verbose=False,
   )
   _compare(
       "trajectory_reward",
@@ -585,13 +603,29 @@ def _run_parity_scenario(tokenizer_path: str, dump_json: Path | None = None) -> 
       failures,
   )
 
+  # Write tunix and rllm samples to separate files for inspection.
+  output_dir = Path(__file__).parent / "parity_output"
+  output_dir.mkdir(parents=True, exist_ok=True)
+  tunix_out = output_dir / "tunix_sample.json"
+  rllm_out = output_dir / "rllm_sample.json"
+  tunix_out.write_text(
+      json.dumps(tunix_sample, ensure_ascii=False, indent=2) + "\n",
+      encoding="utf-8",
+  )
+  rllm_out.write_text(
+      json.dumps(rllm_sample, ensure_ascii=False, indent=2) + "\n",
+      encoding="utf-8",
+  )
+  print(f"\nWrote tunix sample to {tunix_out}")
+  print(f"Wrote rllm  sample to {rllm_out}")
+
   if dump_json is not None:
     dump_json.parent.mkdir(parents=True, exist_ok=True)
     dump_json.write_text(
         json.dumps(parity_dump, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"\nWrote parity dump to {dump_json}")
+    print(f"Wrote parity dump to {dump_json}")
 
   if failures:
     print("\nParity FAILED.")

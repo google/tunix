@@ -121,7 +121,6 @@ Reminder:
 - Required parameters MUST be specified
 - Only call one function at a time
 - VERY IMPORTANT: Each response must include both reasoning (as natural text) and function call (in above format) to solve the task.
-</IMPORTANT>
 """
 
 SWEAGENT_SYSTEM_PROMPT = """You are a programming agent who is provided a github issue and repository bash environment and is tasked to solve certain tasks (e.g., file localization, testcase generation, code repair and editing etc) to resolve the issue.
