@@ -118,7 +118,7 @@ arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
+arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
 arg_parser.add_argument("--temperature", type=float, default=0.6)
 arg_parser.add_argument("--top_p", type=float, default=1)
@@ -127,7 +127,7 @@ arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
-    "--loss_agg_mode", type=str, default="token-mean"
+    "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
 )
 arg_parser.add_argument(
     "--kl_loss_mode", type=str, default="low_var_kl"
@@ -222,8 +222,8 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 10
-MAX_TO_KEEP = 4
+SAVE_INTERVAL_STEPS = 5
+MAX_TO_KEEP = 100
 DO_MEM_PROFILING = False
 
 # ====== Inference ======
@@ -271,6 +271,8 @@ try:
         "top_k": TOP_K,
         "max_concurrency": MAX_CONCURRENCY,
         "rollout_engine": ROLLOUT_ENGINE,
+        "loss_agg_mode": args.loss_agg_mode,
+        "kl_loss_mode": args.kl_loss_mode,
     }
   wandb.init(
     project="tunix",
@@ -343,7 +345,7 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_old_logpbs_orig/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/new_head_vllm_seq_token_mean/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -554,7 +556,7 @@ base_rollout_dict = {
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
-    "return_logprobs": True,
+    "return_logprobs": False,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 

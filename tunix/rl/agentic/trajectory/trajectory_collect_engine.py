@@ -280,6 +280,7 @@ class TrajectoryCollectEngine:
           conversation_masks.append(step.env_masks)
 
         # logprobs
+        step["logprobs"] = None
         if getattr(step, "logprobs", None) is not None:
           assert len(step.logprobs) == len(step.assistant_tokens), (
               f"Logprobs length {len(step.logprobs)} does not match assistant"

@@ -384,10 +384,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_ids.shape,
     )
 
-    if padded_old_logprobs:
-      old_per_token_logps = jnp.asarray(padded_old_logprobs)
-    else:
-      old_per_token_logps = None
+    # if padded_old_logprobs:
+    #   old_per_token_logps = jnp.asarray(padded_old_logprobs)
+    # else:
+    old_per_token_logps = None
 
     if self.algo_config.num_iterations > 1 and old_per_token_logps is None:
       raise RuntimeError(
