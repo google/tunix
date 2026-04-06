@@ -43,6 +43,7 @@ WORKDIR /app
 # Copy the project files to the image
 COPY . .
 
+RUN pip install math-verify[antlr4_13_2]
 # Install the project in editable mode
 RUN pip install  --force-reinstall -e .
 
@@ -87,8 +88,6 @@ RUN pip install --force-reinstall protobuf==6.33.5
 # RUN rm -rf tpu-inference && git clone https://github.com/vllm-project/tpu-inference.git
 # RUN cd tpu-inference && git checkout lance-ds && pip install -e .
 
-WORKDIR /app
-RUN pip install --force-reinstall protobuf==6.33.5
 
 
 # Set the default command to bash

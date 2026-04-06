@@ -90,7 +90,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   algo_variant: str = "agentic_grpo"
   advantage_estimator: str = "agentic_grpo"
   policy_loss_fn: str = "agentic_grpo"
-  loss_agg_mode: str = "sequence-mean-token-mean"
+  loss_agg_mode: str = "token-mean"
   loss_algo: (
       str
   ) = (  # grpo or gspo-token # TODO(sizhi): Remove this option once gspo is
@@ -245,6 +245,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
+        "pg_loss": np.mean,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl"

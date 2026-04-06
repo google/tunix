@@ -188,10 +188,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         }
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
-      "kl": np.mean,
-      "entropy": np.mean,
-      "pg_clipfrac": np.mean,
-      "ppo_kl": np.mean,
+        "kl": np.mean,
+        "entropy": np.mean,
+        "pg_clipfrac": np.mean,
+        "ppo_kl": np.mean,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
@@ -586,6 +586,26 @@ def grpo_loss_fn(
         jnp.float32,
     )
 
+  # dual-clip ppo loss
+  if epsilon_c is not None:
+    pg_loss_3 = -epsilon_c * advantages
+    
+    # pg_clipfrac_lower measures how often dual-clip ppo kicks in.
+    # It kicks in when the standard clipped loss is larger than pg_loss_3
+    # for instances with negative advantages.
+    unreduced_pg_clipfrac_lower = (
+        (per_token_loss > pg_loss_3) & (advantages < 0.0)
+    ).astype(jnp.float32)
+    pg_clipfrac_lower = ppo_helpers.masked_mean(
+        unreduced_pg_clipfrac_lower, completion_mask
+    )
+    aux["pg_clipfrac_lower"] = pg_clipfrac_lower
+
+    pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
+    per_token_loss = jnp.where(
+        advantages < 0.0, pg_loss_clipped_dual, per_token_loss
+    )
+  
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )

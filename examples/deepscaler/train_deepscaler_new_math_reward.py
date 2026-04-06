@@ -49,16 +49,16 @@ absl_logging.set_stderrthreshold("info")
 print("Logging configured at INFO level.")
 
 
-# Check if this is a multiprocessing child
-if "multiprocessing" in sys.modules or len(sys.argv) > 1:
-  print("Set to CPU for multiprocessing child process.")
-  os.environ["JAX_PLATFORMS"] = "cpu"
-  # Hide TPUs
-  os.environ["TPU_VISIBLE_DEVICES"] = ""
-  # Hide GPUs (just in case)
-  os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-  # Prevent JAX from pre-allocating memory if it does get imported
-  os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# # Check if this is a multiprocessing child
+# if "multiprocessing" in sys.modules or len(sys.argv) > 1:
+#   print("Set to CPU for multiprocessing child process.")
+#   os.environ["JAX_PLATFORMS"] = "cpu"
+#   # Hide TPUs
+#   os.environ["TPU_VISIBLE_DEVICES"] = ""
+#   # Hide GPUs (just in case)
+#   os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+#   # Prevent JAX from pre-allocating memory if it does get imported
+#   os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 def main():
 
@@ -111,20 +111,21 @@ def main():
   import argparse
 
   arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
-  arg_parser.add_argument("--batch_size", type=int, default=128)
-  arg_parser.add_argument("--mini_batch_size", type=int, default=128)
+  arg_parser.add_argument("--batch_size", type=int, default=64)
+  arg_parser.add_argument("--mini_batch_size", type=int, default=64)
   arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
   arg_parser.add_argument("--b1", type=float, default=0.9)
   arg_parser.add_argument("--b2", type=float, default=0.99)
   arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-  arg_parser.add_argument("--num_batches", type=int, default=312)
+  arg_parser.add_argument("--num_batches", type=int, default=600)
   arg_parser.add_argument("--num_generations", type=int, default=8)
-  arg_parser.add_argument("--beta", type=float, default=0.0)
+  arg_parser.add_argument("--beta", type=float, default=0.005)
   arg_parser.add_argument("--epsilon", type=float, default=0.2)
   arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
+  arg_parser.add_argument("--prompt_length", type=int, default=1024)
   arg_parser.add_argument("--max_response_length", type=int, default=8192)
   arg_parser.add_argument("--temperature", type=float, default=0.6)
-  arg_parser.add_argument("--top_p", type=float, default=1)
+  arg_parser.add_argument("--top_p", type=float, default=0.95)
   arg_parser.add_argument("--top_k", type=int, default=None)
   arg_parser.add_argument("--max_concurrency", type=int, default=768)
   arg_parser.add_argument("--shuffle_data", type=bool, default=True)
@@ -220,7 +221,7 @@ def main():
 
   # ====== Checkpoint saving ======
   SAVE_INTERVAL_STEPS = 10
-  MAX_TO_KEEP = 4
+  MAX_TO_KEEP = 100
   DO_MEM_PROFILING = False
 
   # ====== Inference ======
@@ -341,7 +342,7 @@ def main():
     CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
   print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-  CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_old_logpbs_orig_new_math_reward/01")
+  CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/dual_clip_math_verify/01")
   print(f"Checkpoint directory: {CKPT_DIR}")
 
   MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"

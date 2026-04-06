@@ -107,15 +107,15 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
   results = []
   pool = ctx.Pool(processes=num_procs, initializer=silent_worker_init)
   try:
-    jobs = [pool.apply_async(compute_reward, a) for a in args_list]
+    jobs = [pool.apply_async(compute_reward, (a[0], a[1])) for a in args_list]
     for i, job in enumerate(jobs):
       try:
         # Wait up to 15 seconds for this specific result
         res = job.get(timeout=15)
         results.append(res)
-      except mp.TimeoutError:
+      except multiprocessing.TimeoutError:
         print(f"⚠️ Reward worker {i} timed out. Assigning 0.0 reward.")
-      results.append(0.0) 
+        results.append(0.0) 
       except Exception as e:
         print(f"❌ Reward worker {i} failed with error: {e}. Assigning 0.0.")
         results.append(0.0)
@@ -123,7 +123,5 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
     pool.close() # Prevents new tasks
     pool.terminate()
     pool.join()  # Waits for workers to exit and cleans up semaphores
-  
-
   print(f"Final rewards: {results}")
   return results

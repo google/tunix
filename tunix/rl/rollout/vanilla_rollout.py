@@ -44,6 +44,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
     )
 
+  
   def generate(
       self,
       prompts: list[str],
@@ -62,13 +63,14 @@ class VanillaRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,
         pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
+        return_logprobs=rollout_config.return_logprobs,
     )
     return base_rollout.RolloutOutput(
         text=output.text,
         logits=output.logits,
         tokens=output.tokens,
         left_padded_prompt_tokens=output.padded_prompt_tokens,
-        logprobs=None,
+        logprobs=output.logprobs,
     )
 
   def get_per_token_logps(
