@@ -86,6 +86,7 @@ _custom_permute.defvjp(_custom_permute_fwd, _custom_permute_bwd)
 class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
+  DECODER = enum.auto()  # Remat the entire decoder layer (attn + ffw).
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -1002,6 +1003,7 @@ class DecoderLayer(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.input_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
@@ -1033,7 +1035,7 @@ class DecoderLayer(nnx.Module):
           rngs=rngs,
       )
 
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -1053,6 +1055,18 @@ class DecoderLayer(nnx.Module):
     outputs = self.mlp(attn_output)
     outputs = residual + outputs
     return cache, outputs
+
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.config.remat_config == RematConfig.DECODER:
+      return nnx.remat(self.block.__func__)(self, x, segment_pos, cache, attn_mask)
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
 
 
 class Qwen3(BackendMappingMixin, nnx.Module):
