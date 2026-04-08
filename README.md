@@ -62,6 +62,7 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
 
 ## News
 
+-   [2026/04] Gemma4 models are supported in Tunix! Stay tuned for upcoming training recipes.
 -   [2026/01] Tunix model now supports efficient kernel execution ([splash attn](https://github.com/google/tunix/blob/main/tunix/models/qwen3/model.py#L150-L151), [GMM MoE](https://github.com/google/tunix/blob/main/tunix/models/qwen3/model.py#L638)).
 -   [2025/12] [Agentic RL Training](https://github.com/google/tunix/tree/main/tunix/rl/agentic) has been released, with efficient support of multi-turn agent-env interaction, tool usage, async rollout, etc.
 
