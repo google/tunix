@@ -44,6 +44,15 @@ class BackendMappingMixin:
     return mapping
 
   @classmethod
+  def key_reference_mappings(cls, backend: str | None = None):
+    mapping = cls.mapping_for(backend).get('key_reference_mappings')
+    if mapping is None:
+      raise RuntimeError(
+          f'{backend} key_reference_mappings missing for {cls.__name__}.'
+      )
+    return mapping
+
+  @classmethod
   def lora_to_hf_mappings(cls, backend: str | None = None):
     return cls.mapping_for(backend).get('lora_to_hf_mappings')
 
@@ -73,6 +82,7 @@ class MappingConfig:
   """
 
   to_hf_mappings: Optional[Dict[str, Any]] = None
+  key_reference_mappings: Optional[Dict[str, Any]] = None
   lora_to_hf_mappings: Optional[Dict[str, Any]] = None
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None

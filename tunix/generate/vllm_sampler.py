@@ -156,6 +156,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.llm = LLM(**self.args)
 
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
+    self.key_reference_mappings = dict(
+        config.mapping_config.key_reference_mappings or {}
+    )
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
 
@@ -190,7 +193,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
-    
+
     # Synchronization point before weight sync
     jax.effects_barrier()
 
@@ -200,6 +203,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           src_state=updated_weights,
           dst_state=self.transformer_state,
           key_mappings=self.to_hf_key_mappings,
+          key_reference_mappings=self.key_reference_mappings,
           key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,
           reshard_fn=reshard.reshard_pytree,
@@ -213,6 +217,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               if not self._model_runner
               else self._model_runner.model_config.get_head_size()
           ),
+          tp_size=self.args.get("tensor_parallel_size", 1),
       )
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
@@ -237,7 +242,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
-    
+
     if self.llm is not None:
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:
