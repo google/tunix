@@ -117,9 +117,48 @@ class RolloutOrchestrator:
   ):
     """Collects one trajectory and queues it."""
     pair_idx = env.extra_kwargs["pair_index"]
+    print(
+        f"[DEBUG] queue_episode start pair_index={pair_idx}"
+        f" env_group_id={env.extra_kwargs.get('group_id')}",
+        flush=True,
+    )
+    print(
+        f"[DEBUG] collect start pair_index={pair_idx}"
+        f" env_group_id={env.extra_kwargs.get('group_id')}"
+        f" collect_mode={collect_mode}",
+        flush=True,
+    )
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+    print(
+        f"[DEBUG] collect end pair_index={pair_idx}"
+        f" env_group_id={env.extra_kwargs.get('group_id')}"
+        f" traj_type={type(traj).__name__}",
+        flush=True,
+    )
+    print(
+        f"[DEBUG] group_key start pair_index={pair_idx}"
+        f" env_group_id={env.extra_kwargs.get('group_id')}",
+        flush=True,
+    )
     gid = group_key_fn(pair_idx, env, traj)
+    print(
+        f"[DEBUG] group_key end group_id={gid} pair_index={pair_idx}",
+        flush=True,
+    )
+    print(
+        f"[DEBUG] start_step start group_id={gid} pair_index={pair_idx}",
+        flush=True,
+    )
     start_step = start_step_fn() if start_step_fn else 0
+    print(
+        f"[DEBUG] start_step end group_id={gid} pair_index={pair_idx}"
+        f" start_step={start_step}",
+        flush=True,
+    )
+    print(
+        f"[DEBUG] item build start group_id={gid} pair_index={pair_idx}",
+        flush=True,
+    )
     item = TrajectoryItem(
         pair_index=pair_idx,
         group_id=gid,
@@ -127,7 +166,23 @@ class RolloutOrchestrator:
         traj=traj,
         metadata={"generation_id": pair_idx},
     )
+    print(
+        f"[DEBUG] item build end group_id={gid} pair_index={pair_idx}",
+        flush=True,
+    )
+    print(
+        f"[DEBUG] queue put start group_id={gid} pair_index={pair_idx}",
+        flush=True,
+    )
     await manager.put(item)
+    print(
+        f"[DEBUG] queue put end group_id={gid} pair_index={pair_idx}",
+        flush=True,
+    )
+    print(
+        f"[DEBUG] queue_episode end group_id={gid} pair_index={pair_idx}",
+        flush=True,
+    )
     return 1
 
   async def _runner(

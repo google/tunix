@@ -243,6 +243,10 @@ class TrajectoryCollectEngine:
     finally:
       await self._close()
 
+    print(
+        f"[DEBUG] {self._debug_prefix} collect post_close mode={mode}",
+        flush=True,
+    )
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
           f"Unsupported mode: {mode}, currently supported modes: "
@@ -271,6 +275,11 @@ class TrajectoryCollectEngine:
           for step in self.agent.trajectory.steps
       ]
     elif mode == "Token":
+      print(
+          f"[DEBUG] {self._debug_prefix} token flatten start"
+          f" steps={len(self.agent.trajectory.steps)}",
+          flush=True,
+      )
       # flatten all steps into single batch dict
       conversation_tokens, conversation_masks, logprobs = [], [], []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
@@ -296,24 +305,81 @@ class TrajectoryCollectEngine:
           if getattr(step, "env_tokens", None) is not None:
             logprobs.append(np.zeros(len(step.env_tokens)))
 
-      conversation_masks = np.concatenate(conversation_masks, axis=0)
+      print(
+          f"[DEBUG] {self._debug_prefix} token flatten collected"
+          f" token_chunks={len(conversation_tokens)}"
+          f" mask_chunks={len(conversation_masks)}"
+          f" logprob_chunks={len(logprobs)}",
+          flush=True,
+      )
+      conversation_tokens = [
+          np.asarray(tokens) for tokens in conversation_tokens if len(tokens) > 0
+      ]
+      conversation_masks = [
+          np.asarray(masks) for masks in conversation_masks if len(masks) > 0
+      ]
+      logprobs = [
+          np.asarray(step_logprobs)
+          for step_logprobs in logprobs
+          if len(step_logprobs) > 0
+      ]
+      print(
+          f"[DEBUG] {self._debug_prefix} token mask concat start",
+          flush=True,
+      )
+      conversation_masks = (
+          np.concatenate(conversation_masks, axis=0)
+          if conversation_masks
+          else np.array([], dtype=np.int32)
+      )
+      print(
+          f"[DEBUG] {self._debug_prefix} token mask concat end"
+          f" mask_len={len(conversation_masks)}",
+          flush=True,
+      )
       final_masks = (
           np.zeros_like(conversation_masks)
           if masked_out
           else conversation_masks
       )
 
+      print(
+          f"[DEBUG] {self._debug_prefix} token concat start",
+          flush=True,
+      )
+      flattened_tokens = (
+          np.concatenate(conversation_tokens, axis=0)
+          if conversation_tokens
+          else np.array([], dtype=np.int32)
+      )
+      print(
+          f"[DEBUG] {self._debug_prefix} token concat end"
+          f" token_len={len(flattened_tokens)}",
+          flush=True,
+      )
+      print(
+          f"[DEBUG] {self._debug_prefix} logprob concat start",
+          flush=True,
+      )
+      flattened_logprobs = np.concatenate(logprobs, axis=0) if logprobs else None
+      print(
+          f"[DEBUG] {self._debug_prefix} logprob concat end"
+          f" logprob_len={len(flattened_logprobs) if flattened_logprobs is not None else 'None'}",
+          flush=True,
+      )
+      print(
+          f"[DEBUG] {self._debug_prefix} token return",
+          flush=True,
+      )
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
-          "conversation_tokens": np.concatenate(conversation_tokens, axis=0),
+          "conversation_tokens": flattened_tokens,
           "conversation_masks": final_masks,
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
-          "old_logprobs": (
-              np.concatenate(logprobs, axis=0) if logprobs else None
-          ),
+          "old_logprobs": flattened_logprobs,
           "policy_version": self.env.task.get("policy_version"),
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
