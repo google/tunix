@@ -14,9 +14,10 @@
 
 """Simple utils used by RL algorithms."""
 
+import dataclasses
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, Iterator, List, Optional
+from typing import Any, Iterator, List, Optional, Sequence
 
 from absl import logging
 from flax import nnx
@@ -162,7 +163,7 @@ def get_batch_slice(tree: Any, batch_slice: slice) -> Any:
   )
 
 
-def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
+def merge_micro_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
   """Merges micro-batch dictionaries into a single batch.
 
   Concatenates values from a list of micro-batch dicts. Values are concatenated
@@ -178,11 +179,12 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
   merged = {}
-
-  for key in batches[0].keys():
+  first_batch, *_ = batches
+  for key in first_batch.keys():
     all_values = [item[key] for item in batches]
+    first_value, *_ = all_values
 
-    if isinstance(all_values[0], list):
+    if isinstance(first_value, list):
       merged[key] = list(chain.from_iterable(all_values))
     else:
       merged[key] = tree_util.tree_map(
@@ -332,19 +334,42 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
 
 
 def pack_sequences(
-    item_iterator: Iterator[list[common.TrainExample]],
+    item_iterator: Iterator[Sequence[common.TrainExample]],
     max_token_budget: int,
     pad_id: int = 0,
+    num_packs: int = 1,
 ) -> Iterator[list[common.TrainExample]]:
-  """Packs a stream of TrainExamples into 1D sequences up to a token budget."""
+  """Packs a stream of TrainExamples into 1D sequences up to a token budget.
+
+  Optionally stacks ``num_packs`` packs along the batch axis to produce a
+  shardable batch of shape ``[num_packs, max_token_budget]``.
+
+  Args:
+    item_iterator: An iterator that yields lists of TrainExamples (one
+      micro-batch per element).
+    max_token_budget: The maximum number of tokens allowed per packed sequence.
+    pad_id: The token ID to use for padding. Defaults to 0.
+    num_packs: When ``> 1``, packs are accumulated and concatenated along the
+      batch axis so each yielded batch contains ``num_packs`` sequences of
+      shape ``[num_packs, max_token_budget]``. Set this to the FSDP mesh axis
+      size to ensure the yielded batch is shardable by JAX. Trailing packs are
+      padded with dummy zero-mask data when the total number of packs is not a
+      multiple of ``num_packs``. Defaults to 1.
+
+  Yields:
+    A list of size 1 containing a single TrainExample whose arrays are stacked
+    along the batch axis to shape ``[num_packs, max_token_budget]``.
+  """
   buffer = []
   current_tokens = 0
   example_cls = common.TrainExample
+  pending_packs: List[common.TrainExample] = []
 
-  def _flush_buffer() -> list[common.TrainExample]:
+  def _build_pack() -> common.TrainExample | None:
+    """Builds a single packed TrainExample from the current buffer."""
     nonlocal buffer, current_tokens
     if not buffer:
-      return []
+      return None
 
     # TODO(noghabi): Pad to the next power of 2 instead of user defined
     # max_token_budget if the seq is short. This will incur an additional
@@ -419,8 +444,8 @@ def pack_sequences(
         completion_ids=c_ids_arr,
         completion_mask=c_mask_arr,
         advantages=adv_arr,
-        ref_per_token_logps=None,  # Will be overridden if present in tracked_per_token_keys.
-        old_per_token_logps=None,  # Will be overridden if present in tracked_per_token_keys.
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
         segment_ids=seg_arr,
         segment_positions=pos_arr,
     )
@@ -433,7 +458,46 @@ def pack_sequences(
 
     buffer.clear()
     current_tokens = 0
-    return [packed_example]
+    return packed_example
+
+  def _stack_pending() -> list[common.TrainExample]:
+    """Pad ``pending_packs`` with dummies and concatenate along batch axis."""
+    if not pending_packs:
+      return []
+    # Pad with all-zero dummy packs so total count is a multiple of num_packs.
+    # Dummy packs have completion_mask=0 everywhere, so they contribute 0 to
+    # the loss/denominator. policy_version is inherited from the template so
+    # downstream rollout-version bookkeeping does not see spurious sentinels.
+    template = pending_packs[0]
+    while len(pending_packs) % num_packs != 0:
+      dummy = jax.tree.map(
+          lambda x: jnp.zeros_like(x) if x is not None else None, template
+      )
+      if getattr(template, "policy_version", None) is not None:
+        dummy = dataclasses.replace(
+            dummy, policy_version=template.policy_version
+        )
+      pending_packs.append(dummy)
+    stacked = jax.tree.map(
+        lambda first_x, *rest: None
+        if first_x is None
+        else jnp.concatenate((first_x, *rest), axis=0),
+        *pending_packs,
+    )
+    pending_packs.clear()
+    return [stacked]
+
+  def _emit() -> list[common.TrainExample]:
+    """Builds a pack from the current buffer and yields when ready."""
+    pack = _build_pack()
+    if pack is None:
+      return []
+    if num_packs == 1:
+      return [pack]
+    pending_packs.append(pack)
+    if len(pending_packs) >= num_packs:
+      return _stack_pending()
+    return []
 
   for item_list in item_iterator:
     for example in item_list:
@@ -453,13 +517,20 @@ def pack_sequences(
           continue
 
         if current_tokens + tokens > max_token_budget:
-          yield _flush_buffer()
+          out = _emit()
+          if out:
+            yield out
 
         buffer.append(item)
         current_tokens += tokens
 
-  if buffer:
-    yield _flush_buffer()
+  # Flush any remaining buffered items, then any pending packs.
+  out = _emit()
+  if out:
+    yield out
+  out = _stack_pending()
+  if out:
+    yield out
 
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"

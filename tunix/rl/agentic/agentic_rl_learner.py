@@ -762,13 +762,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
     )
-    if self._training_config.max_seq_token_per_tpu is not None:
+    if self.algo_config.use_sequence_packing:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh[
+          rl_cluster_lib.Role.ACTOR
+      ]
+      # The packed batch size must be a multiple of the FSDP mesh axis size.
+      pack_size = mesh.shape.get("fsdp", 1)
+
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d",
-          self._training_config.max_seq_token_per_tpu,
+          "Using sequence packing with max_token_len_per_tpu: %d, "
+          " pack_size: %d",
+          self.algo_config.max_token_len_per_tpu,
+          pack_size,
       )
+
       train_data_gen = rl_utils.pack_sequences(
-          train_data_gen, self._training_config.max_seq_token_per_tpu
+          train_data_gen,
+          self.algo_config.max_token_len_per_tpu,
+          num_packs=pack_size,
       )
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
