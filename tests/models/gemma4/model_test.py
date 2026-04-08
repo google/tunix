@@ -52,30 +52,33 @@ class ModelTest(absltest.TestCase):
     self.assertEqual(logits.shape, (2, 32, config.num_embed))
     print(f"{logits.shape=}")
 
-  # def test_forward_pass_moe(self):
-  #   config = model_lib.ModelConfig.gemma4_26b_a4b()
-  #   config.num_layers = 1
-  #   config.embed_dim = 256
-  #   config.hidden_dim = 512
-  #   config.num_heads = 4
-  #   config.head_dim = 64
-  #   config.num_kv_heads = 1
-  #   config.num_experts = 4
-  #   config.num_experts_per_tok = 2
-  #   config.expert_dim = 128
+  def test_forward_pass_moe(self):
+    config = model_lib.ModelConfig.gemma4_26b_a4b()
+    config.num_layers = 1
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 1
+    config.num_experts = 4
+    config.num_experts_per_tok = 2
+    config.expert_dim = 128
 
-  #   rngs = nnx.Rngs(0)
-  #   model = model_lib.Gemma4(config, rngs=rngs)
+    rngs = nnx.Rngs(0)
+    model = model_lib.Gemma4(config, rngs=rngs)
 
-  #   tokens = jax.random.randint(
-  #       jax.random.PRNGKey(0), (2, 32), 0, config.num_embed
-  #   )
-  #   positions = jnp.tile(
-  #       jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
-  #   )
-  #   logits, _ = model(tokens, positions=positions)
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0), (2, 32), 0, config.num_embed
+    )
+    positions = jnp.tile(
+        jnp.arange(tokens.shape[1])[None, :], (tokens.shape[0], 1)
+    )
+    attn_mask = jnp.tril(
+        jnp.ones((tokens.shape[1], tokens.shape[1]), dtype=jnp.bool_)
+    )[None, ...]
+    logits, _ = model(tokens, positions=positions, attention_mask=attn_mask)
 
-  #   self.assertEqual(logits.shape, (2, 32, config.num_embed))
+    self.assertEqual(logits.shape, (2, 32, config.num_embed))
 
 
 if __name__ == "__main__":

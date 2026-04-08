@@ -178,7 +178,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
-          r"layers.\1.moe_pre_ffw_norm.scale" if cfg.enable_moe else r"layers.\1.pre_ffw_norm.scale",
+          r"layers.\1.pre_ffw_norm.scale",
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.post_feedforward_layernorm\.weight": (
@@ -186,15 +186,15 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.post_feedforward_layernorm_2\.weight": (
-          r"layers.\1.dense_post_ffw_norm.scale",
-          None,
-      ),
-      r"(?:model\.language_model\.)?layers\.([0-9]+)\.post_feedforward_layernorm_1\.weight": (
           r"layers.\1.moe_post_ffw_norm.scale",
           None,
       ),
+      r"(?:model\.language_model\.)?layers\.([0-9]+)\.post_feedforward_layernorm_1\.weight": (
+          r"layers.\1.dense_post_ffw_norm.scale",
+          None,
+      ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.pre_feedforward_layernorm_2\.weight": (
-          r"layers.\1.pre_ffw_norm.scale",
+          r"layers.\1.moe_pre_ffw_norm.scale",
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.layer_scalar": (

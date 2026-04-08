@@ -97,6 +97,7 @@ class ShardingConfig:
         per_layer_input_embedding=('tp', None, fsdp),
     )
 
+
 # TODO: support flash attention
 # TODO: handle mixed precision
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -221,39 +222,38 @@ class ModelConfig:
         ),
     )
 
-  # # TODO: 26b-a4b is not fully ready yet.
-  # @classmethod
-  # def gemma4_26b_a4b(
-  #     cls,
-  #     sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-  # ) -> 'ModelConfig':
-  #   return cls(
-  #       num_layers=30,
-  #       num_embed=262144,
-  #       embed_dim=2816,
-  #       hidden_dim=2112,  # Dense shared MLP branch
-  #       num_heads=16,
-  #       head_dim=256,
-  #       num_kv_heads=8,
-  #       num_global_kv_heads=2,
-  #       sliding_window_size=1024,
-  #       shd_config=sharding_config,
-  #       enable_moe=True,
-  #       num_experts=128,
-  #       expert_dim=704,
-  #       num_experts_per_tok=8,
-  #       moe_dense_hidden_dim=2112,
-  #       k_eq_v_global=True,
-  #       global_rope_proportion=0.25,
-  #       attention_pattern=(
-  #           AttentionType.LOCAL_SLIDING,
-  #           AttentionType.LOCAL_SLIDING,
-  #           AttentionType.LOCAL_SLIDING,
-  #           AttentionType.LOCAL_SLIDING,
-  #           AttentionType.LOCAL_SLIDING,
-  #           AttentionType.GLOBAL,
-  #       ),
-  #   )
+  @classmethod
+  def gemma4_26b_a4b(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls(
+        num_layers=30,
+        num_embed=262144,
+        embed_dim=2816,
+        hidden_dim=2112,  # Dense shared MLP branch
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=8,
+        num_global_kv_heads=2,
+        sliding_window_size=1024,
+        shd_config=sharding_config,
+        enable_moe=True,
+        num_experts=128,
+        expert_dim=704,
+        num_experts_per_tok=8,
+        moe_dense_hidden_dim=2112,
+        k_eq_v_global=True,
+        global_rope_proportion=0.25,
+        attention_pattern=(
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.LOCAL_SLIDING,
+            AttentionType.GLOBAL,
+        ),
+    )
 
 
 class Embedder(nnx.Module):
