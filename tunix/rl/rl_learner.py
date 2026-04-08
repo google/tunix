@@ -719,12 +719,23 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_gen = queue_iterator()
     if self._training_config.max_seq_token_per_tpu is not None:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh[
+          rl_cluster_lib.Role.ACTOR
+      ]
+      # The packed batch size must be a multiple of the FSDP and DP mesh axis
+      # sizes.
+      pack_size = mesh.shape.get("fsdp", 1) * mesh.shape.get("dp", 1)
+
       logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d",
+          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          " pack_size: %d",
           self._training_config.max_seq_token_per_tpu,
+          pack_size,
       )
       train_data_gen = rl_utils.pack_sequences(
-          train_data_gen, self._training_config.max_seq_token_per_tpu
+          train_data_gen,
+          self._training_config.max_seq_token_per_tpu,
+          num_packs=pack_size,
       )
 
     curr_eval_ds = None
