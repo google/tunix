@@ -38,6 +38,10 @@ class AlgorithmConfig:
   # for the rest of the step.
   kl_clamp_value: float | None = None
 
+  # Sequence packing configuration
+  use_sequence_packing: bool = False
+  max_token_len_per_tpu: int = 30_000
+
   def __post_init__(self):
     valid_algo_variants = [
         "grpo",

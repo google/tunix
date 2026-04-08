@@ -672,14 +672,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     params_unpacked = nnx.state(model_unpacked, nnx.Param)
 
     # Train with sequence packing
-    kwargs_packed = {
-        'eval_every_n_steps': 2,
-        'max_seq_token_per_tpu': max_token_len,
-    }
-    rl_cluster_packed, model_packed, _ = setup(kwargs_packed)
+    rl_cluster_packed, model_packed, _ = setup(kwargs)
     grpo_config_packed = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=1,
+        use_sequence_packing=True,
+        max_token_len_per_tpu=max_token_len,
     )
     learner_packed = grpo_lib.GRPOLearner(
         rl_cluster=rl_cluster_packed,
