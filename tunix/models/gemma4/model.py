@@ -67,7 +67,6 @@ class ShardingConfig:
   per_layer_model_projection: Tuple[str | None, ...]
   per_layer_input_gate: Tuple[str | None, ...]
   per_layer_projection: Tuple[str | None, ...]
-  per_layer_projection_norm: Tuple[str | None, ...]
   per_layer_input_embedding: Tuple[str | None, ...]
 
   @staticmethod
@@ -93,13 +92,11 @@ class ShardingConfig:
         per_layer_model_projection=(fsdp, None, 'tp'),
         per_layer_input_gate=(fsdp, 'tp'),
         per_layer_projection=('tp', fsdp),
-        per_layer_projection_norm=('tp',),
         per_layer_input_embedding=('tp', None, fsdp),
     )
 
 
 # TODO: support flash attention
-# TODO: handle mixed precision
 @dataclasses.dataclass(slots=True, kw_only=True)
 class ModelConfig:
   """Transformer config."""
@@ -282,13 +279,15 @@ class Embedder(nnx.Module):
           sharding=config.shd_config.per_layer_model_projection,
           w_scale=(float(self.embed_dim) ** -0.5),
           rngs=rngs,
+          dtype=self.config.dtype,
           param_dtype=self.param_dtype,
       )
 
       self.per_layer_projection_norm = RMSNorm(
           config.per_layer_input_dim,
           rngs=rngs,
-          sharding=config.shd_config.per_layer_projection_norm,
+          sharding=config.shd_config,
+          dtype=self.config.dtype,
           param_dtype=self.param_dtype,
       )
       self.per_layer_input_embedding = nnx.Param(
@@ -302,6 +301,8 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
+    x = jnp.astype(x, self.config.dtype)
+    x = shard(x, self.config.shd_config.act_btd)
     return x
 
   def encode_per_layer_input(
@@ -317,7 +318,9 @@ class Embedder(nnx.Module):
     return (x + y) * jax.lax.rsqrt(2.0).astype(x.dtype)
 
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    return jnp.dot(x, self.input_embedding.value.T)
+    x = jnp.astype(x, self.config.dtype)
+    w = jnp.astype(self.input_embedding.value, self.config.dtype)
+    return jnp.dot(x, w.T)
 
 
 class Einsum(nnx.Module):
@@ -330,10 +333,12 @@ class Einsum(nnx.Module):
       *,
       rngs: nnx.Rngs,
       sharding: Tuple[str | None, ...],
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
       w_scale: float | None = None,
   ):
     self.einsum_str = einsum_str
+    self.dtype = dtype
     self.w_scale = w_scale
 
     self.shape = shape
@@ -346,6 +351,8 @@ class Einsum(nnx.Module):
     w = self.w.value
     if self.w_scale is not None:
       w = w * self.w_scale
+    x = jnp.astype(x, self.dtype)
+    w = jnp.astype(w, self.dtype)
     return jnp.einsum(self.einsum_str, x, w)
 
 
@@ -405,21 +412,23 @@ class RMSNorm(nnx.Module):
       dim: int,
       *,
       rngs: nnx.Rngs,
-      sharding: tuple[str | None, ...] = (),
-      param_dtype: jnp.dtype = jnp.bfloat16,
+      sharding: ShardingConfig = ShardingConfig.get_default_sharding(),
+      dtype: jnp.dtype,
+      param_dtype: jnp.dtype,
   ):
     self.scale = nnx.Param(
         nnx.initializers.ones_init()(rngs.params(), dim).astype(param_dtype),
-        sharding=sharding,
+        sharding=sharding.rms_norm_weight,
     )
+    self.dtype = dtype
 
   def __call__(self, x: jaxtyping.Array) -> jaxtyping.Array:
+    x = jnp.astype(x, jnp.float32)
     var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-    normed_inputs = x * jax.lax.rsqrt(var + 1e-06)
+    normed_inputs = x * jax.lax.rsqrt(var + 1e-06).astype(x.dtype)
     scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
     normed_inputs = normed_inputs * scale
-
-    return normed_inputs
+    return normed_inputs.astype(self.dtype)
 
 
 def apply_rope(
@@ -558,6 +567,7 @@ class Attention(nnx.Module):
         shape=(config.num_heads, self.head_dim, config.embed_dim),
         rngs=rngs,
         sharding=config.shd_config.o_weight_nhd,
+        dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
     self.q_einsum = Einsum(
@@ -565,6 +575,7 @@ class Attention(nnx.Module):
         shape=(config.num_heads, config.embed_dim, self.head_dim),
         rngs=rngs,
         sharding=config.shd_config.q_weight_ndh,
+        dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
 
@@ -581,6 +592,7 @@ class Attention(nnx.Module):
           ),
           rngs=rngs,
           sharding=config.shd_config.q_weight_ndh,
+          dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
     else:
@@ -596,13 +608,22 @@ class Attention(nnx.Module):
           sharding=(None, None, 'fsdp', None)
           if self.num_kv_heads == 1
           else config.shd_config.kv_weight_cndh,
+          dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
     self._query_norm = RMSNorm(
-        self.head_dim, rngs=rngs, param_dtype=config.param_dtype
+        self.head_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self._key_norm = RMSNorm(
-        self.head_dim, rngs=rngs, param_dtype=config.param_dtype
+        self.head_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
   def block(
@@ -686,18 +707,20 @@ class Attention(nnx.Module):
         ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)
       attn_mask = sliding_mask * attn_mask
 
-    padded_logits = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
-    probs = jax.nn.softmax(padded_logits, axis=-1).astype(key_proj.dtype)
+    attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
+    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
+        key_proj.dtype
+    )
 
     if self.use_gqa:
-      b, t, kg, s = probs.shape
+      b, t, kg, s = attn.shape
       n_groups = kg // self.num_kv_heads
-      probs_reshaped = probs.reshape((b, t, self.num_kv_heads, n_groups, s))
+      probs_reshaped = attn.reshape((b, t, self.num_kv_heads, n_groups, s))
       encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs_reshaped, value_proj)
       b, t, k, g, h = encoded.shape
       encoded = encoded.reshape((b, t, k * g, h))
     else:
-      encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
+      encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
@@ -759,14 +782,40 @@ class FeedForward(nnx.Module):
     self.config = config
     h_dim = hidden_dim if hidden_dim is not None else config.hidden_dim
     self.gate_proj = nnx.Linear(
-        config.embed_dim, h_dim, use_bias=False, rngs=rngs
+        config.embed_dim,
+        h_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(),
+            config.shd_config.ffw_weight_df,
+        ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
     self.up_proj = nnx.Linear(
-        config.embed_dim, h_dim, use_bias=False, rngs=rngs
+        config.embed_dim,
+        h_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(),
+            config.shd_config.ffw_weight_df,
+        ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.down_proj = nnx.Linear(
-        h_dim, config.embed_dim, use_bias=False, rngs=rngs
+        h_dim,
+        config.embed_dim,
+        use_bias=False,
+        rngs=rngs,
+        kernel_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), config.shd_config.ffw_weight_fd
+        ),
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
   def __call__(self, x):
@@ -788,7 +837,11 @@ class DecoderLayer(nnx.Module):
     self.config = config
     self.skip_scale = nnx.Param(jnp.ones((1,), dtype=config.param_dtype))
     self.pre_attention_norm = RMSNorm(
-        config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
     self.attn = Attention(
@@ -797,29 +850,53 @@ class DecoderLayer(nnx.Module):
         rngs=rngs,
     )
     self.post_attention_norm = RMSNorm(
-        config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.pre_ffw_norm = RMSNorm(
-        config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
     self.mlp = FeedForward(config=config, hidden_dim=hidden_dim, rngs=rngs)
 
     if config.enable_moe:
       self.moe_pre_ffw_norm = RMSNorm(
-          config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
       )
       self.moe = moe.MoERagged(
           config=config,
           rngs=rngs,
       )
       self.moe_post_ffw_norm = RMSNorm(
-          config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
       )
       self.dense_post_ffw_norm = RMSNorm(
-          config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
       )
     self.post_ffw_norm = RMSNorm(
-        config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
     if config.per_layer_input_dim > 0:
@@ -829,6 +906,7 @@ class DecoderLayer(nnx.Module):
           shape=(config.embed_dim, config.per_layer_input_dim),
           sharding=config.shd_config.per_layer_input_gate,
           rngs=rngs,
+          dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
 
@@ -837,11 +915,16 @@ class DecoderLayer(nnx.Module):
           shape=(config.per_layer_input_dim, config.embed_dim),
           sharding=config.shd_config.per_layer_projection,
           rngs=rngs,
+          dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
 
       self.post_per_layer_input_norm = RMSNorm(
-          config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+          config.embed_dim,
+          rngs=rngs,
+          sharding=config.shd_config,
+          dtype=config.dtype,
+          param_dtype=config.param_dtype,
       )
 
 
@@ -932,7 +1015,11 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       )
 
     self.final_norm = RMSNorm(
-        config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
+        config.embed_dim,
+        rngs=rngs,
+        sharding=config.shd_config,
+        dtype=config.dtype,
+        param_dtype=config.param_dtype,
     )
 
   def __call__(
@@ -982,7 +1069,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
-    logits = self.embedder.decode(x)
+    logits = self.embedder.decode(x).astype(jnp.float32)
 
     if self.config.final_logit_softcap is not None:
       logits /= self.config.final_logit_softcap

@@ -77,117 +77,6 @@ def _expert_collect(
   return xs_reshaped
 
 
-class MoE(nnx.Module):
-  """Mixture of Experts (MoE) module with top-k routing using NNX."""
-
-  def __init__(
-      self,
-      features: int,
-      hidden_dim: int,
-      num_experts: int,
-      num_experts_per_datapoint: int,
-      *,
-      rngs: nnx.Rngs,
-  ):
-    self.features = features
-    self.hidden_dim = hidden_dim
-    self.num_experts = num_experts
-    self.num_experts_per_datapoint = num_experts_per_datapoint
-
-    self.router_logits = nnx.Param(
-        nnx.initializers.normal()(rngs.params(), (features, num_experts))
-    )
-    self.linear = nnx.Param(
-        nnx.initializers.normal()(
-            rngs.params(), (num_experts, hidden_dim, features)
-        )
-    )
-    self.gating_einsum = nnx.Param(
-        nnx.initializers.normal()(
-            rngs.params(), (num_experts, 2, hidden_dim, features)
-        )
-    )
-    self.per_expert_scale = nnx.Param(jnp.ones((num_experts,)))
-    self.router_scale = nnx.Param(jnp.ones((features,)))
-
-  def _router(self, router_logits: jax.Array):
-    router_logits = router_logits.astype(jnp.float32)
-    router_probs = jax.nn.softmax(router_logits, axis=-1)
-    _, choices = jax.lax.approx_max_k(
-        router_logits,
-        k=self.num_experts_per_datapoint,
-    )
-    weights = router_probs / _renormalization_factor(router_probs, choices)
-    return weights, choices
-
-  def _run_ffw_and_routing(
-      self,
-      x: jax.Array,
-      expert_choices: jax.Array,
-      expert_weights: jax.Array,
-  ):
-    (
-        xs_tokens_per_expert,
-        sorted_xs,
-        xs_reverse_argsort,
-        xs_combine_weights,
-    ) = _expert_dispatch(x, expert_choices, expert_weights)
-
-    group_ends = jnp.cumsum(xs_tokens_per_expert[: self.num_experts])
-    broadcast_sorted_xs = jnp.repeat(
-        jnp.expand_dims(sorted_xs, (0, 1)), self.num_experts, axis=1
-    )
-
-    out_gating = jnp.einsum(
-        'gecd,ekfd->kgecf', broadcast_sorted_xs, self.gating_einsum.value
-    )
-    x1, x2 = out_gating
-
-    activation = nnx.gelu(x1) * x2
-    expert_outputs = jnp.einsum('gecf,efd->gecd', activation, self.linear.value)
-    expert_outputs = jnp.squeeze(expert_outputs, axis=0)
-
-    per_expert = self.per_expert_scale.value.astype(expert_outputs.dtype)
-    expert_outputs = expert_outputs * per_expert[:, None, None]
-
-    ar = jnp.arange(sorted_xs.shape[0])
-    group_starts = jnp.concatenate([jnp.array([0]), group_ends[:-1]])
-    masks = (ar[None, :] >= group_starts[:, None]) & (
-        ar[None, :] < group_ends[:, None]
-    )
-    masks = jnp.expand_dims(masks, axis=-1)
-    out = jnp.sum(expert_outputs * masks, axis=0)
-    out = _expert_collect(
-        out,
-        xs_reverse_argsort=xs_reverse_argsort,
-        xs_combine_weights=xs_combine_weights,
-    )
-    out = jnp.einsum(
-        'blkd,blk->bld',
-        out,
-        xs_combine_weights,
-        preferred_element_type=out.dtype,
-    )
-    return out
-
-  def __call__(self, x):
-    var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-    router_input = x * jax.lax.rsqrt(var + 1e-06)
-
-    root_size = jax.lax.rsqrt(
-        jnp.array(self.features, dtype=router_input.dtype)
-    )
-    router_input = (
-        router_input
-        * root_size
-        * self.router_scale.value.astype(router_input.dtype)
-    )
-    logits = jnp.einsum('gsd,de->gse', router_input, self.router_logits.value)
-    weights, choices = self._router(logits)
-    out = self._run_ffw_and_routing(x, choices, weights)
-    return out
-
-
 class MoERagged(nnx.Module):
   """Mixture of Experts using ragged_dot."""
 
@@ -197,30 +86,35 @@ class MoERagged(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.features = config.embed_dim
     self.hidden_dim = config.expert_dim
     self.num_experts = config.num_experts
     self.num_experts_per_datapoint = config.num_experts_per_tok
 
     self.router_logits = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(), (self.features, self.num_experts)
         )
     )
     self.gating_einsum = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(), (self.num_experts, 2, self.hidden_dim, self.features)
         ),
         sharding=config.shd_config.exp_weight_edf,
     )
     self.linear = nnx.Param(
-        nnx.initializers.normal()(
+        nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(), (self.num_experts, self.hidden_dim, self.features)
         ),
         sharding=config.shd_config.exp_weight_efd,
     )
-    self.per_expert_scale = nnx.Param(jnp.ones((self.num_experts,)))
-    self.router_scale = nnx.Param(jnp.ones((self.features,)))
+    self.per_expert_scale = nnx.Param(
+        jnp.ones((self.num_experts,), dtype=config.param_dtype)
+    )
+    self.router_scale = nnx.Param(
+        jnp.ones((self.features,), dtype=config.param_dtype)
+    )
 
   def _router(self, router_logits: jax.Array):
     router_logits = router_logits.astype(jnp.float32)
@@ -252,7 +146,9 @@ class MoERagged(nnx.Module):
     )
 
     gate_out = jax.lax.ragged_dot(
-        sorted_xs, w_gate, group_sizes=xs_tokens_per_expert
+        sorted_xs,
+        w_gate.astype(self.config.dtype),
+        group_sizes=xs_tokens_per_expert,
     )
 
     gate_out = gate_out.reshape(gate_out.shape[0], 2, self.hidden_dim)
@@ -261,7 +157,9 @@ class MoERagged(nnx.Module):
     activation = nnx.gelu(x1) * x2
 
     expert_outputs = jax.lax.ragged_dot(
-        activation, self.linear.value, group_sizes=xs_tokens_per_expert
+        activation,
+        self.linear.value.astype(self.config.dtype),
+        group_sizes=xs_tokens_per_expert,
     )
 
     expert_indices = jnp.repeat(
@@ -287,8 +185,8 @@ class MoERagged(nnx.Module):
     return out
 
   def __call__(self, x):
-    var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-    router_input = x * jax.lax.rsqrt(var + 1e-06)
+    var = jnp.mean(jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True)
+    router_input = x * jax.lax.rsqrt(var + 1e-06).astype(x.dtype)
 
     root_size = jax.lax.rsqrt(
         jnp.array(self.features, dtype=router_input.dtype)
@@ -298,7 +196,11 @@ class MoERagged(nnx.Module):
         * root_size
         * self.router_scale.value.astype(router_input.dtype)
     )
-    logits = jnp.einsum('gsd,de->gse', router_input, self.router_logits.value)
+    logits = jnp.einsum(
+        'gsd,de->gse',
+        router_input,
+        self.router_logits.value.astype(router_input.dtype),
+    )
     weights, choices = self._router(logits)
     out = self._run_ffw_and_routing(x, choices, weights)
     return out
