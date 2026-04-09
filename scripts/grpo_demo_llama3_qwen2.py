@@ -46,6 +46,9 @@ from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen2 import params as qwen2_params
 from tunix.models.qwen3 import model as qwen3_lib
 from tunix.models.qwen3 import params as qwen3_params
+from tunix.perf import export as perf_export
+from tunix.perf import metrics as perf_metrics
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
@@ -269,6 +272,24 @@ parser.add_argument(
     type=str,
     default=None,
     help="List of target modules to apply LoRA",
+)
+parser.add_argument(
+    "--enable-perf-v1",
+    action="store_true",
+    default=False,
+    help="Enable PerfMetrics v1.",
+)
+parser.add_argument(
+    "--enable-perf-v2",
+    action="store_true",
+    default=False,
+    help="Enable PerfMetrics v2.",
+)
+parser.add_argument(
+    "--trace-dir",
+    type=str,
+    default="/tmp/perf_traces",
+    help="Directory to write Perfetto trace files to.",
 )
 
 
@@ -1154,12 +1175,30 @@ grpo_config = grpo_learner.GRPOConfig(
 )
 
 
+perf_config = (
+    perf_metrics.PerfMetricsConfig()
+    if (args.enable_perf_v1 or args.enable_perf_v2)
+    else None
+)
+if args.enable_perf_v1:
+  perf_config.custom_export_fn = (
+      perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+  )
+if args.enable_perf_v2:
+  perf_config.custom_export_fn_v2 = (
+      perf_export_v2.PerfMetricsExport.from_cluster_config(
+          cluster_config=cluster_config,
+          trace_dir=args.trace_dir,
+      ).export_metrics
+  )
+
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=training_model,
     reference=ref_model,
     tokenizer=model_tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_config,
 )
 
 # GRPO Trainer
