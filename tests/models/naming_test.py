@@ -17,6 +17,7 @@ import inspect
 from absl.testing import absltest
 from absl.testing import parameterized
 import requests
+import tenacity
 from tunix.models import naming
 from tunix.models.gemma import model as gemma_model
 from tunix.models.gemma3 import model as gemma3_model
@@ -598,19 +599,40 @@ class TestNaming(parameterized.TestCase):
     ):
       naming.get_model_name_from_model_id('google/')
 
+  @tenacity.retry(
+      stop=tenacity.stop_after_attempt(3),
+      wait=tenacity.wait_exponential(multiplier=1, min=2, max=10),
+      retry=(
+          tenacity.retry_if_exception_type((
+              requests.exceptions.ConnectionError,
+              requests.exceptions.Timeout,
+          ))
+          | tenacity.retry_if_result(
+              lambda response: response.status_code >= 500
+          )
+      ),
+      reraise=True,
+  )
+  def _head_huggingface_model(self, model_id: str) -> requests.Response:
+    return requests.head(
+        f'https://huggingface.co/{model_id}',
+        allow_redirects=True,
+        timeout=10,
+    )
+
   @parameterized.named_parameters(_get_test_cases_for_model_id_exists())
   def test_model_id_exists_on_huggingface(self, model_id: str):
     if env_utils.is_internal_env():
       self.skipTest('Skipping Hugging Face check in internal environment')
 
-    with requests.head(f'https://huggingface.co/{model_id}') as response:
-      self.assertEqual(
-          response.status_code,
-          200,
-          f'Model {model_id!r} not found on Hugging Face (status code:'
-          f' {response.status_code}). Please ensure that the model config added'
-          ' matches exaclty to a valid model id on Hugging Face.',
-      )
+    response = self._head_huggingface_model(model_id)
+    self.assertEqual(
+        response.status_code,
+        200,
+        f'Model {model_id!r} not found on Hugging Face (status code:'
+        f' {response.status_code}). Please ensure that the model config added'
+        ' matches exaclty to a valid model id on Hugging Face.',
+    )
 
   @parameterized.named_parameters(
       _get_test_cases_for_get_model_family_and_version()
