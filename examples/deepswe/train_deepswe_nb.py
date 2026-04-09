@@ -20,7 +20,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from kubernetes import client, config as k8s_config
 import numpy as np
 import optax
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
@@ -169,6 +169,7 @@ if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
 from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
 from tunix.sft import utils as sft_utils
+from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
@@ -448,8 +449,13 @@ dataset = dataset.map(
 # ==========================================
 # 9. Optimizer & Checkpointing
 # ==========================================
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+checkpointing_options = checkpoint_options.create_checkpointing_options(
+    save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+        SAVE_INTERVAL_STEPS
+    ),
+    preservation_policy=ocp.training.preservation_policies.LatestN(
+        MAX_TO_KEEP
+    ),
 )
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=2

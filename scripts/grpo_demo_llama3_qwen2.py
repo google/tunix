@@ -33,7 +33,7 @@ from flax import nnx
 import jax
 from jax._src import mesh_utils
 import optax
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 import qwix
 from tqdm.auto import tqdm
 import transformers
@@ -52,6 +52,7 @@ from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
+from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.sft import utils
@@ -1056,8 +1057,11 @@ show_hbm_usage("After creating a raw sampler")
 
 
 # Ckpt saving
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+checkpointing_options = checkpoint_options.create_checkpointing_options(
+    save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+        SAVE_INTERVAL_STEPS
+    ),
+    preservation_policy=ocp.training.preservation_policies.LatestN(MAX_TO_KEEP),
 )
 # Metrics logger
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
@@ -1260,8 +1264,7 @@ abs_params = jax.tree.map(
     lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
     nnx.state(training_model, filter_type),
 )
-checkpointer = ocp.StandardCheckpointer()
-trained_lora_params = checkpointer.restore(trained_ckpt_path, target=abs_params)
+trained_lora_params = ocp.load_pytree(trained_ckpt_path, abstract_pytree=abs_params)
 
 nnx.update(
     training_model,
