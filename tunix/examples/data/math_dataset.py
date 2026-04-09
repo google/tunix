@@ -15,6 +15,7 @@
 import logging
 import os
 
+import datasets as hf_datasets
 import grain
 import tensorflow_datasets as tfds
 # For OSS usage
@@ -118,6 +119,34 @@ def get_tfds_dataset(
   dataset = grain.MapDataset.source(data).shuffle(seed=shuffle_seed)
   return dataset
 
+def _parse_huggingface_dataset_name(
+    dataset_name: str,
+) -> tuple[str, str | None]:
+  """Parses a Hugging Face dataset name into dataset/config components."""
+  if "/" in dataset_name:
+    return dataset_name, "default"
+
+  if ":" in dataset_name:
+    name, config_name = dataset_name.split(":", maxsplit=1)
+    return name, config_name or None
+
+  return dataset_name, None
+
+
+def get_huggingface_dataset(
+    dataset_name: str,
+    split: str,
+    shuffle_seed: int = 42,
+) -> grain.MapDataset:
+  """Gets a dataset from Hugging Face Datasets."""
+  hf_dataset_name, config_name = _parse_huggingface_dataset_name(dataset_name)
+  data = hf_datasets.load_dataset(
+      hf_dataset_name,
+      config_name,
+      split=split,
+  )
+  data = data.shuffle(seed=shuffle_seed)
+  return grain.MapDataset.source(data)
 
 def create_dataset(
     data_source: str,
@@ -150,6 +179,8 @@ def create_dataset(
   # parquet dataset
   if data_source == "local" and dataset.endswith(".parquet"):
     ds = grain.experimental.ParquetIterDataset(dataset)
+  elif data_source == "huggingface":
+    ds = get_huggingface_dataset(dataset_name=dataset, split=split)
   # tfds dataset
   elif data_source == "tfds" and dataset in ["gsm8k"]:
     data_dir = os.path.join("./data", split) if tfds_download else None
