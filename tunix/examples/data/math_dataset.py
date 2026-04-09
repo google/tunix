@@ -78,9 +78,9 @@ def apply_template(
         item[key] = value.decode("utf-8")
 
     return {
-        "prompts": _apply_template(item["question"]),
-        "question": item["question"],
-        "answer": extract_hash_answer(item["answer"]),
+        "prompts": _apply_template(item["problem"]),
+        "question": item["problem"],
+        "answer": extract_hash_answer(item["expected_answer"]),
     }
 
   return dataset.map(_process_element)
@@ -144,6 +144,8 @@ def get_huggingface_dataset(
       hf_dataset_name,
       config_name,
       split=split,
+      # data_files="data/train_1M-*.parquet", 
+      # verification_mode="no_checks"  # Skip split validation
   )
   data = data.shuffle(seed=shuffle_seed)
   return grain.MapDataset.source(data)
