@@ -15,6 +15,8 @@
 """Main entry point for GRPO training."""
 
 import dataclasses
+import os
+from typing import Any
 from absl import app
 from absl import flags
 from absl import logging
@@ -31,7 +33,6 @@ from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
-from typing import Any
 
 GrpoConfig = grpo_learner.GrpoConfig
 
@@ -304,9 +305,19 @@ def _setup_jax_pathways(pathways_bns: str):
   jax.config.update("jax_backend_target", pathways_bns)
 
 
+def _setup_pathways_on_cloud():
+  import pathwaysutils  # pylint: disable=g-import-not-at-top
+
+  pathwaysutils.initialize()
+
+
 def main(argv, **kwargs):
   if _PATHWAYS_BNS.value:
     _setup_jax_pathways(_PATHWAYS_BNS.value)
+
+  if os.getenv("JAX_PLATFORMS") == "proxy":
+    _setup_pathways_on_cloud()
+
   pipeline = GrpoPipeline(argv, **kwargs)
   logging.info(
       "--- Launching GRPO pipeline with following config ---\n"
