@@ -166,11 +166,6 @@ class ClusterConfig:
       random weights instead of loading from the given path.
     rollout_vllm_tpu_backend_type: The TPU Jax backend type for vllm rollout
       engine, E.g. "jax", "torchax" or "pytorch_xla".
-    rollout_vllm_swap_space_size_gb: The swap space size (in GiB) for vllm
-      rollout engine. This is the amount of CPU memory (RAM) to allocate for
-      swapping KV cache blocks from the TPU/GPU memory (HBM). A larger value
-      allows for larger batch sizes and longer sequences, potentially at the
-      cost of increased latency if swapping occurs.
   """
 
   role_to_mesh: dict[Role, Mesh]

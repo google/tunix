@@ -115,10 +115,6 @@ settings are specific to vLLM:
         coordinate with the other models. For disaggregated setup, users can set
         it to a number close to 1 to make full utilization of the HBM.
 
--   `rollout_vllm_swap_space_size_gb`
-
-    -   CPU swap space (GiB) for KV cache spilling.
-
 -   `rollout_vllm_server_mode`
 
     -   `False`: batch inference mode (`vllm.LLM(...)`).
@@ -219,7 +215,6 @@ The CLI support for vLLM rollout engine is WIP.
 
 - Lower `rollout_vllm_hbm_utilization`.
 - Reduce `max_prompt_length` and/or `max_tokens_to_generate`.
-- Increase `rollout_vllm_swap_space_size_gb` (trade-off: may increase latency if swapping occurs).
 
 #### Data parallel issues
 

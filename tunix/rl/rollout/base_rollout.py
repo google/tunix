@@ -136,9 +136,6 @@ class RolloutConfig:
   # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
   rollout_vllm_tpu_backend_type: str | None = None
 
-  # Swap space size for vLLM rollout engine, in GiB.
-  rollout_vllm_swap_space_size_gb: float = 4.0
-
   # Whether to enable asynchronous scheduling for vLLM rollout engine.
   rollout_vllm_async_scheduling: bool = False
 
