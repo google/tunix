@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.examples.data import math_dataset
@@ -134,6 +136,41 @@ class ApplyTemplateTest(parameterized.TestCase):
     self.assertIsInstance(result["answer"], str)
     self.assertEqual(result["question"], "byte-q")
     self.assertEqual(result["answer"], "byte-a")
+
+
+class HuggingFaceDatasetTest(absltest.TestCase):
+
+  def test_parse_huggingface_dataset_name_supports_gsm8k_alias(self):
+    dataset_name, config_name = math_dataset._parse_huggingface_dataset_name(
+        "openai/gsm8k"
+    )
+
+    self.assertEqual(dataset_name, "openai/gsm8k")
+    self.assertEqual(config_name, "default")
+
+  def test_create_dataset_uses_huggingface_loader(self):
+    raw_dataset = _BaseDataset([
+        {"question": "Q3", "answer": "#### 42"},
+    ])
+
+    with mock.patch.object(
+        math_dataset,
+        "get_huggingface_dataset",
+        return_value=raw_dataset,
+    ) as mock_loader:
+      dataset = math_dataset.create_dataset(
+          data_source="huggingface",
+          dataset="openai/gsm8k",
+          split="test",
+      )
+
+    mock_loader.assert_called_once_with(
+        dataset_name="openai/gsm8k",
+        split="test",
+    )
+    self.assertEqual(dataset[0]["question"], "Q3")
+    self.assertEqual(dataset[0]["answer"], "42")
+    self.assertIn("Q3", dataset[0]["prompts"])
 
 
 if __name__ == "__main__":

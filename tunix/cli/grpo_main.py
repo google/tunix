@@ -273,12 +273,23 @@ class GrpoPipeline(config.HyperParameters):
           dataset=self.config["data_directory"],
           tokenizer=tokenizer,
       )
-    else:
+    elif self.config["data_source"] == "tfds":
       dataset = example_data.create_dataset(
-          data_source="tfds",
+          data_source=self.config["data_source"],
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
+          split=self.config.get("train_split", self.config.get("split", "train")),
       )
+    elif self.config["data_source"] == "huggingface":
+      dataset = example_data.create_dataset(
+          data_source=self.config["data_source"],
+          dataset=self.config["dataset_name"],
+          tokenizer=tokenizer,
+          split=self.config.get("train_split", self.config.get("split", "train")),
+      )
+    else:
+      raise ValueError(f"Unsupported data_source {self.config['data_source']}")
+
     self.compute_params(dataset)
     dataset, _ = data_lib.post_init_dataset(
         dataset,
