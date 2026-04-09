@@ -16,12 +16,19 @@
 
 import dataclasses
 import enum
+from functools import partial
 import itertools
 from typing import Tuple
 import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from jax.experimental.shard_map import shard_map
+from jax.interpreters import pxla
+import jax.sharding as shd
+from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma4 import moe
@@ -96,7 +103,6 @@ class ShardingConfig:
     )
 
 
-# TODO: support flash attention
 @dataclasses.dataclass(slots=True, kw_only=True)
 class ModelConfig:
   """Transformer config."""
@@ -130,6 +136,8 @@ class ModelConfig:
   remat_config: RematConfig = RematConfig.NONE
   param_dtype: jnp.dtype = jnp.float32
   dtype: jnp.dtype = jnp.float32
+  use_flash_attention: bool = False
+  flash_attention_block_size: int = 1024
 
   # MoE config
   enable_moe: bool = False
@@ -682,45 +690,111 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
-    if self.use_gqa:
-      b, t, kg, h = query_proj.shape
-      n_groups = kg // self.num_kv_heads
-      query_reshaped = query_proj.reshape(
-          (b, t, self.num_kv_heads, n_groups, h)
-      )
-      logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_reshaped, key_proj)
-      b, t, k, g, s = logits.shape
-      logits = logits.reshape((b, t, k * g, s))
-    else:
-      logits = jnp.einsum('BTNH,BSNH->BTNS', query_proj, key_proj)
+    b, t, qh, d = query_proj.shape
+    _, _, kh, _ = key_proj.shape
 
-    if self.attn_type == AttentionType.LOCAL_SLIDING:
-      if segment_pos.shape[1] == 1:  # for decoding
-        sliding_mask = create_sliding_window_mask(
-            attn_mask,
-            sliding_window_size=self.config.sliding_window_size,
+    if self.config.use_flash_attention and seq_len > 1:
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
+
+      mesh = pxla.thread_resources.env.physical_mesh
+      if self.attn_type == AttentionType.LOCAL_SLIDING:
+        mask = mask_lib.LocalMask(
+            (seq_len, seq_len),
+            window_size=(self.config.sliding_window_size - 1, 0),
+            offset=0,
         )
-      else:  # for prefill
-        all_ones = jnp.ones_like(attn_mask)
-        sliding_mask = jnp.triu(
-            all_ones, -1 * self.config.sliding_window_size + 1
-        ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)
-      attn_mask = sliding_mask * attn_mask
+      else:
+        mask = mask_lib.CausalMask((seq_len, seq_len))
 
-    attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
-    )
+      multi_head_mask = mask_lib.MultiHeadMask([mask for _ in range(qh)])
 
-    if self.use_gqa:
-      b, t, kg, s = attn.shape
-      n_groups = kg // self.num_kv_heads
-      probs_reshaped = attn.reshape((b, t, self.num_kv_heads, n_groups, s))
-      encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs_reshaped, value_proj)
-      b, t, k, g, h = encoded.shape
-      encoded = encoded.reshape((b, t, k * g, h))
+      block_sizes = splash.BlockSizes(
+          block_q=self.config.flash_attention_block_size,
+          block_kv=self.config.flash_attention_block_size,
+          block_q_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv=self.config.flash_attention_block_size,
+          block_kv_dkv_compute=self.config.flash_attention_block_size,
+          block_q_dq=self.config.flash_attention_block_size,
+          block_kv_dq=self.config.flash_attention_block_size,
+      )
+
+      shd_b, shd_t, shd_n, shd_h = self.config.shd_config.act_btnh
+      head_shards = (
+          mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
+      )
+      q_seq_shards = (
+          mesh.shape[shd_t] if shd_t is not None and shd_t in mesh.shape else 1
+      )
+
+      splash_attn_kernel = splash.make_splash_mha(
+          multi_head_mask,
+          block_sizes=block_sizes,
+          head_shards=head_shards,
+          q_seq_shards=q_seq_shards,
+      )
+
+      shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+      unsharded_seq = P(shd_b, shd_n, None, shd_h)
+      kernel_spec = splash_attn_kernel.manual_sharding_spec(
+          shd.NamedSharding(mesh, P(shd_n, shd_t))
+      )
+
+      @partial(
+          shard_map,
+          mesh=mesh,
+          in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
+          out_specs=shd_spec,
+          check_rep=False,
+      )
+      def sharded_splash_attn(kernel, q_block, k_block, v_block):
+        return jax.vmap(kernel)(q_block, k_block, v_block)
+
+      qkv = sharded_splash_attn(
+          splash_attn_kernel, query_proj, key_proj, value_proj
+      )
+      encoded = qkv.transpose(0, 2, 1, 3)
     else:
-      encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
+      if self.use_gqa:
+        b, t, kg, h = query_proj.shape
+        n_groups = kg // self.num_kv_heads
+        query_reshaped = query_proj.reshape(
+            (b, t, self.num_kv_heads, n_groups, h)
+        )
+        logits = jnp.einsum('BTKGH,BSKH->BTKGS', query_reshaped, key_proj)
+        b, t, k, g, s = logits.shape
+        logits = logits.reshape((b, t, k * g, s))
+      else:
+        logits = jnp.einsum('BTNH,BSNH->BTNS', query_proj, key_proj)
+
+      if self.attn_type == AttentionType.LOCAL_SLIDING:
+        if segment_pos.shape[1] == 1:  # for decoding
+          sliding_mask = create_sliding_window_mask(
+              attn_mask,
+              sliding_window_size=self.config.sliding_window_size,
+          )
+        else:  # for prefill
+          all_ones = jnp.ones_like(attn_mask)
+          sliding_mask = jnp.triu(
+              all_ones, -1 * self.config.sliding_window_size + 1
+          ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)
+        attn_mask = sliding_mask * attn_mask
+
+      attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
+      attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
+          key_proj.dtype
+      )
+
+      if self.use_gqa:
+        b, t, kg, s = attn.shape
+        n_groups = kg // self.num_kv_heads
+        probs_reshaped = attn.reshape((b, t, self.num_kv_heads, n_groups, s))
+        encoded = jnp.einsum('BTKGS,BSKH->BTKGH', probs_reshaped, value_proj)
+        b, t, k, g, h = encoded.shape
+        encoded = encoded.reshape((b, t, k * g, h))
+      else:
+        encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
@@ -1022,6 +1096,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         param_dtype=config.param_dtype,
     )
 
+  @nnx.jit
   def __call__(
       self,
       tokens,
