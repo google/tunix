@@ -315,10 +315,21 @@ def _setup_jax_pathways(pathways_bns: str):
   jax.config.update("jax_xla_backend", "pathways")
   jax.config.update("jax_backend_target", pathways_bns)
 
+import os
+from typing import Any
+
+def _setup_pathways_on_cloud():
+  import pathwaysutils  # pylint: disable=g-import-not-at-top
+
+  pathwaysutils.initialize()
 
 def main(argv, **kwargs):
   if _PATHWAYS_BNS.value:
     _setup_jax_pathways(_PATHWAYS_BNS.value)
+
+  if os.getenv("JAX_PLATFORMS") == "proxy":
+    _setup_pathways_on_cloud()
+
   pipeline = GrpoPipeline(argv, **kwargs)
   logging.info(
       "--- Launching GRPO pipeline with following config ---\n"
