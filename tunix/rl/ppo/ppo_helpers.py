@@ -161,5 +161,5 @@ def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
     A JAX array of shape `[batch_size, seq_len]`, containing the entropy values.
   """
   log_probs = jax.nn.log_softmax(logits, axis=-1)
-  probs = jax.nn.softmax(log_probs)
+  probs = jnp.exp(log_probs)
   return -jnp.sum(probs * log_probs, axis=-1)
