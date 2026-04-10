@@ -1,0 +1,213 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# DeepScaleR colocate recipe: DeepSeek-R1-Distill-Qwen-1.5B on math reasoning
+#
+# Colocate mode: rollout and training share ALL devices on a single mesh.
+# The agentic training loop blocks the consumer (trainer) until the producer
+# (rollout engine) has finished ALL rollouts for the current batch, preventing
+# resource contention between rollout and training on shared devices.
+#
+# Use this config when rollout and training must share the same device pool
+# (e.g., single-host TPU or GPU setups without a dedicated rollout partition).
+#
+# Usage:
+#   python -m tunix.cli.grpo_main \
+#       examples/deepscaler/configs/deepseek_r1_distill_qwen_1.5b_colocate.yaml
+#
+# Override individual keys on the command line, e.g.:
+#   python -m tunix.cli.grpo_main \
+#       examples/deepscaler/configs/deepseek_r1_distill_qwen_1.5b_colocate.yaml \
+#       rollout_engine=sglang_jax \
+#       agentic_grpo_config.num_generations=4
+
+# ========================
+# Model
+# ========================
+model_config:
+  model_name: "deepseek_r1_distill_qwen_1_5b"
+  model_id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  model_source: "huggingface"
+  # model_path: "gs://tunix/models/DeepSeek-R1-Distill-Qwen-1.5B"
+  rng_seed: 42
+  model_display: false
+
+# ========================
+# Colocate mesh: all roles share the same device mesh.
+# split_mesh_config.enabled must be false so that actor and rollout meshes
+# are identical — this causes can_enable_async_rollout=False in the learner,
+# which activates the batch-blocking colocate mode.
+# ========================
+actor_model_config:
+  mesh:
+    shape: "(4,1)"
+    axis_names: "('fsdp','tp')"
+
+reference_model_config:
+  mesh:
+    shape: "(4,1)"
+    axis_names: "('fsdp','tp')"
+
+rollout_model_config:
+  mesh:
+    same_as: actor
+
+tokenizer_config:
+  tokenizer_type: "huggingface"
+  tokenizer_path: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  add_bos: false
+  add_eos: false
+
+# ========================
+# Data module
+# ========================
+data_module: "tunix.cli.recipes.deepscaler_data"
+data_config:
+  train_data_path: "gs://tunix/data/DeepScaleR-Preview-Dataset/deepscaler.json"
+  eval_data_path: "gs://tunix/data/HuggingFaceH4/aime_2024/train-00000-of-00001.parquet"
+  shuffle: false
+  seed: 42
+
+prompt_key: "prompts"
+
+# ========================
+# Training loop
+# ========================
+seed: 42
+batch_size: 128
+num_batches: 312
+num_train_epochs: 3
+train_fraction: 0.8
+
+# ========================
+# Reward functions
+# ========================
+reward_functions:
+  - "tunix/utils/math_rewards.py"
+
+verl_compatible: false
+training_mode: "agentic_grpo"
+
+# ========================
+# Rollout engine
+# One of: "vanilla", "vllm", "sglang_jax"
+# In colocate mode the rollout engine runs on the same devices as the trainer.
+# sglang_jax is recommended; vllm also works with server_mode: true.
+# ========================
+rollout_engine: "sglang_jax"
+offload_to_cpu: false
+
+rollout_config:
+  max_prompt_length: 2048
+  total_generation_steps: 8192  # = max_response_length
+  temperature: 0.8
+  top_p: 0.95
+  top_k: null
+
+# SGLang-JAX config (used when rollout_engine=sglang_jax)
+sglang_jax_config:
+  mem_fraction_static: 0.8
+  init_with_random_weights: true
+  disable_radix_cache: true
+  enable_deterministic_sampling: false
+  chunked_prefill_size: 2048
+  page_size: 128
+  use_sort_for_toppk_minp: false
+
+# vLLM config (used when rollout_engine=vllm)
+vllm_config:
+  hbm_utilization: 0.4
+  tpu_backend_type: "jax"
+  server_mode: true
+  async_scheduling: true
+  max_num_seqs: 768
+  kwargs:
+    kv_cache_metrics: true
+    disable_log_stats: false
+    enable_prefix_caching: true
+
+# ========================
+# Chat parser
+# ========================
+chat_parser_config:
+  type: "default"
+
+# ========================
+# Agent / env
+# ========================
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+
+# ========================
+# Kubernetes (not used for DeepScaleR)
+# ========================
+kubernetes_config: null
+
+# ========================
+# Split mesh — DISABLED for colocate mode.
+# With enabled: false, roles are not assigned to separate device partitions.
+# The rollout mesh uses ``same_as: actor`` above, which makes the learner
+# receive the *same Python object* for both the actor and rollout meshes.
+# Identity (``is``) comparison in AgenticRLLearner.__init__ detects this and
+# activates colocate mode: rollout → compute ref-logprobs → train runs
+# sequentially per rollout micro-batch, with no device contention.
+# ========================
+split_mesh_config:
+  enabled: false
+
+# ========================
+# Agentic GRPO algorithm
+# ========================
+agentic_grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 768
+  off_policy_steps: 0
+  loss_agg_mode: "token-mean"
+  kl_loss_mode: "low_var_kl"
+  # max_response_length is auto-derived from rollout_config.total_generation_steps
+  # when not set.  Uncomment to override explicitly.
+  # max_response_length: 8192
+
+# ========================
+# RL training
+# ========================
+rl_training_config:
+  eval_every_n_steps: 1000
+  mini_batch_size: 128
+  train_micro_batch_size: 2
+  actor_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 1.0e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+  metrics_logging_options:
+    log_dir: "/tmp/tensorboard/deepscaler_colocate"
+    flush_every_n_steps: 20
+  checkpointing_options:
+    save_interval_steps: 500
+    max_to_keep: 4
+  checkpoint_root_directory: "/tmp/tunix/checkpoints/deepscaler_colocate"

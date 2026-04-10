@@ -12,7 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Main entry point for GRPO training."""
+"""Main entry point for GRPO training.
+
+Supports two training modes selected via the ``training_mode`` config key:
+
+  ``grpo`` (default)
+    Non-agentic GRPO using ``tunix.rl.grpo.grpo_learner.GrpoLearner``.
+    Config block: ``grpo_config``.
+
+  ``agentic_grpo``
+    Agentic GRPO using ``tunix.rl.agentic.agentic_grpo_learner.GRPOLearner``.
+    Config block: ``agentic_grpo_config``.
+    Colocate mode is activated automatically when the actor and rollout meshes
+    are the same device mesh, or can be forced with
+    ``agentic_grpo_config.force_colocate_mode=true``.
+"""
 
 import dataclasses
 from absl import app
@@ -29,6 +43,7 @@ from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 from typing import Any
@@ -74,12 +89,21 @@ class GrpoPipeline(config.HyperParameters):
     return base_rollout.RolloutConfig(**filtered_config)
 
   def create_role_to_mesh(self):
-    default_mesh = self.create_mesh("actor_model_config")
-    actor_mesh = reference_mesh = rollout_mesh = default_mesh
+    actor_mesh = self.create_mesh("actor_model_config")
+    reference_mesh = actor_mesh
+    rollout_mesh = actor_mesh
     if "reference_model_config" in self.config:
-      reference_mesh = self.create_mesh("reference_model_config")
+      ref_mesh_cfg = self.config["reference_model_config"].get("mesh", {})
+      if ref_mesh_cfg.get("same_as") == "actor":
+        reference_mesh = actor_mesh  # same Python object → detected as colocate
+      else:
+        reference_mesh = self.create_mesh("reference_model_config")
     if "rollout_model_config" in self.config:
-      rollout_mesh = self.create_mesh("rollout_model_config")
+      rollout_mesh_cfg = self.config["rollout_model_config"].get("mesh", {})
+      if rollout_mesh_cfg.get("same_as") == "actor":
+        rollout_mesh = actor_mesh  # same Python object → detected as colocate
+      else:
+        rollout_mesh = self.create_mesh("rollout_model_config")
     return {
         rl_cluster_lib.Role.ACTOR: actor_mesh,
         rl_cluster_lib.Role.REFERENCE: reference_mesh,
@@ -255,29 +279,32 @@ class GrpoPipeline(config.HyperParameters):
         dataset_length,
     )
 
-  def run_grpo_trainer(self):
-    tokenizer = model_lib.create_tokenizer(
-        self.config["tokenizer_config"],
-        self.config["tokenizer_config"]["tokenizer_path"],
-    )
-
+  def _load_dataset(self, tokenizer):
+    """Loads and returns the raw (pre-batched) dataset."""
     if self.config.get("data_module", None):
-      dataset = data_lib.get_dataset_from_module(
+      return data_lib.get_dataset_from_module(
           self.config["data_module"],
           tokenizer,
       )
-    elif self.config["data_source"] == "local":
-      dataset = example_data.create_dataset(
+    elif self.config.get("data_source") == "local":
+      return example_data.create_dataset(
           data_source=self.config["data_source"],
           dataset=self.config["data_directory"],
           tokenizer=tokenizer,
       )
     else:
-      dataset = example_data.create_dataset(
+      return example_data.create_dataset(
           data_source="tfds",
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
       )
+
+  def run_grpo_trainer(self):
+    tokenizer = model_lib.create_tokenizer(
+        self.config["tokenizer_config"],
+        self.config["tokenizer_config"]["tokenizer_path"],
+    )
+    dataset = self._load_dataset(tokenizer)
     self.compute_params(dataset)
     dataset, _ = data_lib.post_init_dataset(
         dataset,
@@ -296,12 +323,95 @@ class GrpoPipeline(config.HyperParameters):
     )
     grpo_trainer.train(dataset)
 
+  def _create_agentic_grpo_config(self) -> agentic_grpo_learner.GRPOConfig:
+    """Builds a GRPOConfig for the agentic learner from the YAML config.
+
+    ``max_response_length`` is auto-derived from ``rollout_config.total_
+    generation_steps`` when not explicitly set so users only need to specify
+    one value.  Unknown keys are silently filtered out so the YAML can carry
+    extra metadata without breaking the dataclass constructor.
+    """
+    raw = dict(self.config.get("agentic_grpo_config", {}))
+
+    # Auto-derive max_response_length from total_generation_steps when absent.
+    if "max_response_length" not in raw:
+      rollout_cfg = self.config.get("rollout_config", {})
+      if "total_generation_steps" in rollout_cfg:
+        raw["max_response_length"] = rollout_cfg["total_generation_steps"]
+
+    # Filter to only fields accepted by GRPOConfig.
+    valid_fields = {f.name for f in dataclasses.fields(agentic_grpo_learner.GRPOConfig)}
+    filtered = {k: v for k, v in raw.items() if k in valid_fields}
+    return agentic_grpo_learner.GRPOConfig(**filtered)
+
+  def run_agentic_grpo_trainer(self):
+    """Runs the agentic GRPO training loop.
+
+    Key differences from the non-agentic runner:
+
+    * ``return_logprobs=True`` is forced in the rollout config (required by
+      ``AgenticRLLearner._validate_rollout_config``).
+    * ``rollout_vllm_server_mode=True`` is forced when the rollout engine is
+      vLLM (also required by the validator).
+    * The dataset is passed directly to ``GRPOLearner.train`` without the
+      post-init batching step because the agentic learner handles prompt
+      iteration internally.
+    * Colocate mode (all rollouts finish before ref-logprob computation and
+      training) is activated automatically when the actor and rollout meshes
+      are identical, or by setting
+      ``agentic_grpo_config.force_colocate_mode: true`` in the config.
+    """
+    # Force rollout settings required by the agentic learner.
+    rollout_cfg = self.config.setdefault("rollout_config", {})
+    rollout_cfg["return_logprobs"] = True
+    if self.config.get("rollout_engine") == "vllm":
+      rollout_cfg["rollout_vllm_server_mode"] = True
+
+    tokenizer = model_lib.create_tokenizer(
+        self.config["tokenizer_config"],
+        self.config["tokenizer_config"]["tokenizer_path"],
+    )
+    dataset = self._load_dataset(tokenizer)
+    self.compute_params(dataset)
+    dataset, _ = data_lib.post_init_dataset(
+        dataset,
+        tokenizer,
+        batch_size=self.config["batch_size"],
+        num_batches=self.config.get("num_batches", None),
+        max_prompt_length=self.config["rollout_config"].get(
+            "max_prompt_length", None
+        ),
+    )
+
+    rl_cluster = self.create_rl_cluster(tokenizer)
+    algo_config = self._create_agentic_grpo_config()
+
+    logging.info(
+        "Launching agentic GRPO with algo_config: %r  "
+        "(force_colocate_mode=%s)",
+        algo_config,
+        algo_config.force_colocate_mode,
+    )
+
+    grpo_trainer = agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=self.obtain_reward_fn(),
+        algo_config=algo_config,
+    )
+    grpo_trainer.train(dataset)
+
 
 def _setup_jax_pathways(pathways_bns: str):
   """Sets up Jax with Pathways."""
   flags.FLAGS.pathways_ifrt = True
   jax.config.update("jax_xla_backend", "pathways")
   jax.config.update("jax_backend_target", pathways_bns)
+
+
+_TRAINING_MODE_TO_RUNNER = {
+    "grpo": "run_grpo_trainer",
+    "agentic_grpo": "run_agentic_grpo_trainer",
+}
 
 
 def main(argv, **kwargs):
@@ -313,7 +423,14 @@ def main(argv, **kwargs):
       "%r\n--------------------------",
       pipeline.config,
   )
-  pipeline.run_grpo_trainer()
+  training_mode = pipeline.config.get("training_mode", "grpo")
+  runner_name = _TRAINING_MODE_TO_RUNNER.get(training_mode)
+  if runner_name is None:
+    raise ValueError(
+        f"Unknown training_mode '{training_mode}'. "
+        f"Supported modes: {list(_TRAINING_MODE_TO_RUNNER)}"
+    )
+  getattr(pipeline, runner_name)()
 
 
 if __name__ == "__main__":

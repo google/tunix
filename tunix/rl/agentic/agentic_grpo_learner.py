@@ -418,7 +418,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=None,
+            micro_batch_size=self._compute_logps_micro_batch_size,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:

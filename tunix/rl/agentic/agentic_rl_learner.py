@@ -196,15 +196,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
     )
 
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
-    self.can_enable_async_rollout = (
+    # Colocate mode: detected when the actor and rollout meshes are the *same
+    # Python object* (set via ``same_as: actor`` in the rollout mesh config).
+    # Value-equal meshes that were constructed independently are NOT considered
+    # colocate — this lets users share a subset of devices across roles without
+    # accidentally triggering colocate mode.
+    self.colocate_mode = (
         self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
-        != self.rl_cluster.cluster_config.role_to_mesh[
+        is self.rl_cluster.cluster_config.role_to_mesh[
             rl_cluster_lib.Role.ROLLOUT
         ]
     )
+    self.can_enable_async_rollout = not self.colocate_mode
 
     self._rollout_micro_batch_size = (
         self._training_config.rollout_micro_batch_size
@@ -440,6 +443,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_iterator: Iterable[TrainingInputT] | AsyncIterator[TrainingInputT],
       num_generations: int = 1,
       collect_mode: str = "Token",
+      group_id_offset: int = 0,
   ):
     """Generates trajectory groups using the orchestrator pattern.
 
@@ -448,6 +452,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_iterator: An iterable yielding single `TrainingInputT` examples.
       num_generations: The number of episodes to run per agent-environment pair.
       collect_mode: The mode for trajectory collection (e.g., "Token").
+      group_id_offset: Added to the base group ID so that multiple calls
+        within the same global step produce unique group IDs (used in colocate
+        mode where rollout is chunked into micro batches).
 
     Yields:
       A list of trajectories for a group.
@@ -458,7 +465,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       """Yield (agent, env) pairs with unique group_id per original prompt."""
       # TODO (tsbao): fix the group id when we can resume from mid global step
       # with mini-batch.
-      group_id = self.rl_cluster.global_steps * self._full_batch_size
+      group_id = (
+          self.rl_cluster.global_steps * self._full_batch_size + group_id_offset
+      )
       if is_async_iterator:
         async for single_example in prompt_iterator:
           # Create agent-env pairs in parallel for a group to handle potential
@@ -591,7 +600,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue: queue.Queue[TrainingInputT | None],
       train_data_queue,
   ):
-    """Produces training examples from prompts in the dataset_iterator."""
+    """Produces training examples from prompts in the dataset_iterator.
+
+    Used in disaggregated (non-colocate) mode only.  The rollout engine runs
+    on a separate submesh so rollout and training can overlap freely.
+    """
     loop = asyncio.get_running_loop()
     async_queue_iter = self._AsyncQueueIterator(prompt_queue, loop)
 
@@ -630,6 +643,38 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # unblocked.
       prompt_queue.put(None)
 
+  async def _collect_rollout_groups(
+      self,
+      individual_prompts: list[TrainingInputT],
+      group_id_offset: int = 0,
+  ) -> list[list[Any]]:
+    """Collects a bounded set of rollout groups for use in colocate mode.
+
+    Runs the orchestrator until all prompts in ``individual_prompts`` have
+    been rolled out (one group = ``num_generations`` trajectories per prompt),
+    then returns.  Because the list is finite the async generator terminates
+    naturally and no background tasks are left running.
+
+    Args:
+      individual_prompts: List of single-prompt ``TrainingInputT`` dicts.
+      group_id_offset: Offset added to the base group ID so that multiple
+        calls within the same global step produce unique group IDs.
+
+    Returns:
+      List of trajectory groups, one entry per prompt in ``individual_prompts``.
+    """
+    orchestrator = self._build_orchestrator()
+    raw_groups = []
+    async for group in self._orchestrator_producer(
+        orchestrator=orchestrator,
+        prompt_iterator=iter(individual_prompts),
+        num_generations=self.algo_config.num_generations,
+        collect_mode="Token",
+        group_id_offset=group_id_offset,
+    ):
+      raw_groups.append(group)
+    return raw_groups
+
   def _data_consumer_batch_generator(
       self, queue: queue_lib.AbstractDataQueue, batch_size: int
   ):
@@ -640,6 +685,204 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if not batch:
         return  # The iterator is exhausted.
       yield batch
+
+  def _run_eval(
+      self,
+      all_eval_prompts: list[TrainingInputT],
+      training_config,
+  ) -> list[Any] | None:
+    """Runs eval rollouts and returns eval examples, or None if not due."""
+    if (
+        not all_eval_prompts
+        or self.rl_cluster.actor_trainer.train_steps
+        % training_config.eval_every_n_steps
+        != 0
+    ):
+      return None
+
+    self._eval_iter_steps = 0
+    eval_orchestrator = self._build_orchestrator()
+
+    async def _eval_runner_async(orch):
+      eval_examples = []
+      async for batch in self._orchestrator_producer(
+          orch,
+          all_eval_prompts,
+          num_generations=self._num_generations(),
+      ):
+        eval_example = self._batch_to_train_example(
+            batch, rl_cluster_lib.Mode.EVAL
+        )
+        eval_examples.extend(eval_example)
+      return eval_examples
+
+    eval_future = asyncio.run_coroutine_threadsafe(
+        _eval_runner_async(eval_orchestrator), self.loop
+    )
+    eval_examples = eval_future.result()
+    self._eval_iter_steps += 1
+    return eval_examples
+
+  def _run_colocate_training(
+      self,
+      full_dataset_iterator: Iterator[TrainingInputT],
+      all_eval_prompts: list[TrainingInputT],
+      full_batch_size: int,
+      train_micro_batch_size: int,
+      skip_jit: bool,
+  ) -> None:
+    """Sequential colocate training loop.
+
+    Colocate mode is used when the rollout engine and the actor/reference
+    models share the same device mesh.  To prevent device contention the loop
+    is fully sequential:
+
+      For each rollout micro-batch within a full batch:
+        1. **Rollout** – run the orchestrator for exactly
+           ``rollout_micro_batch_size`` prompts (×``num_generations`` episodes
+           each) and wait for all trajectories to complete.
+        2. **Compute** – compute reference log-probs and advantages for the
+           collected trajectories.  No rollout is active during this phase so
+           there is no device contention.  The computation is chunked at the
+           ``compute_logps_micro_batch_size`` granularity passed to
+           ``get_ref_per_token_logps``.
+        3. **Train** – apply gradient updates in ``train_micro_batch_size``
+           chunks, then repeat for ``num_iterations`` iterations.
+
+      After all rollout micro-batches in a full batch are processed:
+        – Sync weights (if the rollout engine holds a separate copy).
+        – Advance ``global_steps`` and log timing.
+    """
+    rollout_mbs = self._rollout_micro_batch_size
+    training_config = self.rl_cluster.cluster_config.training_config
+
+    logging.info(
+        "Colocate mode: rollout_micro_batch_size=%d, "
+        "compute_logps_micro_batch_size=%s, train_micro_batch_size=%d",
+        rollout_mbs,
+        self._compute_logps_micro_batch_size,
+        train_micro_batch_size,
+    )
+
+    for batch in full_dataset_iterator:
+      if (
+          training_config.max_steps
+          and self.rl_cluster.global_steps >= training_config.max_steps
+      ):
+        logging.info(
+            "Colocate mode: reached max_steps %d, stopping.",
+            training_config.max_steps,
+        )
+        break
+
+      current_batch_size = len(next(iter(batch.values())))
+      if current_batch_size != full_batch_size:
+        logging.warning(
+            "Colocate mode: partial batch (%d vs %d), stopping.",
+            current_batch_size,
+            full_batch_size,
+        )
+        break
+
+      # Split the full batch into individual single-prompt dicts.
+      individual_prompts = list(
+          self._create_micro_batch_iterator(iter([batch]), 1)
+      )
+
+      all_train_examples: list[Any] = []
+
+      # ── Rollout micro-batch loop ──────────────────────────────────────────
+      for mb_start in range(0, full_batch_size, rollout_mbs):
+        micro_prompts = individual_prompts[mb_start : mb_start + rollout_mbs]
+        group_id_offset = mb_start  # ensures unique group IDs within a step
+
+        # Phase 1 – Rollout (pure rollout, no device compute for ref-logprobs).
+        logging.info(
+            "Colocate mode [step %d]: rolling out prompts [%d:%d].",
+            self.rl_cluster.global_steps,
+            mb_start,
+            mb_start + len(micro_prompts),
+        )
+        raw_groups = asyncio.run_coroutine_threadsafe(
+            self._collect_rollout_groups(micro_prompts, group_id_offset),
+            self.loop,
+        ).result()
+
+        # Phase 2 – Compute: ref-logprobs + advantages.
+        # All rollouts for this micro-batch are done; no device contention.
+        logging.info(
+            "Colocate mode [step %d]: computing ref-logprobs for %d groups.",
+            self.rl_cluster.global_steps,
+            len(raw_groups),
+        )
+        for raw_group in raw_groups:
+          train_examples = self._batch_to_train_example(
+              batch_results=raw_group,
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+          all_train_examples.extend(train_examples)
+
+      # Phase 3 – Train: gradient updates over all examples for this step,
+      # repeated num_iterations times and chunked at train_micro_batch_size.
+      logging.info(
+          "Colocate mode [step %d]: training on %d examples "
+          "(num_iterations=%d, train_micro_batch_size=%d).",
+          self.rl_cluster.global_steps,
+          len(all_train_examples),
+          self.algo_config.num_iterations,
+          train_micro_batch_size,
+      )
+      current_eval_dataset = self._run_eval(all_eval_prompts, training_config)
+
+      for _ in range(self.algo_config.num_iterations):
+        self._iter_steps += 1
+        for i in range(0, len(all_train_examples), train_micro_batch_size):
+          micro_batch = all_train_examples[i : i + train_micro_batch_size]
+          merged = jax.tree.map(
+              lambda *xs: jnp.concatenate(xs, axis=0), *micro_batch
+          )
+          self.rl_cluster.update_actor(
+              [merged], current_eval_dataset, skip_jit
+          )
+          if hasattr(self.rl_cluster, "critic_trainer"):
+            self.rl_cluster.update_critic(
+                [merged], current_eval_dataset, skip_jit
+            )
+          # Only pass eval dataset on the first update to avoid redundant evals.
+          current_eval_dataset = None
+
+      # ── End-of-step bookkeeping ───────────────────────────────────────────
+      global_step_time = time.time() - self._global_step_start_time
+      logging.info(
+          "Colocate mode: global step %d completed in %.2f s.",
+          self.rl_cluster.global_steps,
+          global_step_time,
+      )
+      self.rl_cluster.buffer_metrics_async(
+          {"perf/global_step_time": (global_step_time, np.mean)},
+          mode=rl_cluster_lib.Mode.TRAIN,
+          step=self.rl_cluster.global_steps,
+      )
+
+      if self.should_sync_weights:
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.WEIGHT_SYNC,
+            self.rl_cluster.perf_v2.all_devices,
+            tags={perf_constants.STEP: self.rl_cluster.global_steps},
+        ):
+          self.rl_cluster.sync_weights()
+        self.policy_version += 1
+        logging.info(
+            "Colocate mode: weights synced, policy version now %d.",
+            self.policy_version,
+        )
+
+      self.rl_cluster.global_steps += 1
+      self.rl_cluster.buffer_metrics(
+          self.rl_cluster.perf_v2.export(),
+          mode=rl_cluster_lib.Mode.TRAIN,
+      )
+      self._global_step_start_time = time.time()
 
   def train(
       self,
@@ -675,36 +918,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     full_batch_size = len(next(iter(first_item.values())))
     self._full_batch_size = full_batch_size
-    # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
     train_micro_batch_size = (
         self._training_config.train_micro_batch_size or mini_batch_size
     )
-    # Rollout and compute_logps micro batch sizes have to be 1 since we only
-    # process inidividual prompts.
-    self._rollout_micro_batch_size = 1
-    self._compute_logps_micro_batch_size = 1
-    for v, n in [
-        (self._rollout_micro_batch_size, f"{self._rollout_micro_batch_size=}"),
-        (
-            self._compute_logps_micro_batch_size,
-            f"{self._compute_logps_micro_batch_size=}",
-        ),
-        (mini_batch_size, f"{mini_batch_size=}"),
-    ]:
-      rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
-    grad_acc_steps = self._training_config.get_with_default(
-        "gradient_accumulation_steps", 1
-    )
-
-    logging.info(  # pylint: disable=logging-fstring-interpolation
-        f"Training with {full_batch_size=}, {mini_batch_size=},"
-        f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
-    )
-
-    logging.info("Starting AgenticRLLearner training loop.")
-    full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
 
     all_eval_prompts = (
         list(self._create_micro_batch_iterator(iter(eval_dataset), 1))
@@ -712,135 +929,161 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         else []
     )
 
-    training_config = self.rl_cluster.cluster_config.training_config
+    full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
 
-    train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
-
-    # 1. Start producer thread to generate rollouts and training examples.
-    orchestrator = self._build_orchestrator()
-
-    prompt_queue = queue.Queue()
-    initial_buffer_size = self.algo_config.off_policy_steps + 1
-    logging.info(
-        "Prefilling prompt queue with %d batches.", initial_buffer_size
-    )
-    for _ in range(initial_buffer_size):
-      try:
-        self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
-      except StopIteration:
-        prompt_queue.put(None)
-        break
-
-    producer_future = asyncio.run_coroutine_threadsafe(
-        self._producer(orchestrator, prompt_queue, train_data_queue),
-        self.loop,
-    )
-
-    # 2. Consume training examples and train.
-    train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue, train_micro_batch_size
-    )
-    micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
-    for train_micro_batch in train_data_gen:
-      if (
-          self._training_config.max_steps
-          and self.rl_cluster.global_steps >= self._training_config.max_steps
-      ):
-        logging.info(
-            "Reached max_steps: %d >= %d",
-            self.rl_cluster.global_steps,
-            self._training_config.max_steps,
-        )
-        prompt_queue.put(None)
-        break
-      self._iter_steps += 1
-
-      # TODO(tsbao): Re-enable this once off-policy filtering is needed.
-      # Filter out examples that are too old (off-policy).
-      # filtered_train_micro_batch = self._filter_outdated_offpolicy_examples(
-      #     train_micro_batch
-      # )
-      # if not filtered_train_micro_batch:
-      #   continue
-      # train_micro_batch = filtered_train_micro_batch
-
-      merged_train_micro_batch = jax.tree.map(
-          lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+    if self.colocate_mode:
+      # ── Colocate path ────────────────────────────────────────────────────
+      # Rollout and training share the same mesh.  Use rollout_micro_batch_size
+      # from the training config (default: full_batch_size) to control how many
+      # prompts are rolled out before switching to compute + train.
+      self._rollout_micro_batch_size = (
+          self._training_config.rollout_micro_batch_size or full_batch_size
+      )
+      # compute_logps_micro_batch_size is forwarded to get_ref_per_token_logps
+      # to control how many completion rows are processed in one JAX call.
+      self._compute_logps_micro_batch_size = (
+          self._training_config.compute_logps_micro_batch_size
+      )
+      rl_utils.check_divisibility(
+          self._rollout_micro_batch_size,
+          full_batch_size,
+          f"{self._rollout_micro_batch_size=}",
+          f"{full_batch_size=}",
+      )
+      logging.info(
+          "Colocate mode: full_batch_size=%d, rollout_micro_batch_size=%d, "
+          "compute_logps_micro_batch_size=%s, train_micro_batch_size=%d",
+          full_batch_size,
+          self._rollout_micro_batch_size,
+          self._compute_logps_micro_batch_size,
+          train_micro_batch_size,
+      )
+      self._run_colocate_training(
+          full_dataset_iterator,
+          all_eval_prompts,
+          full_batch_size,
+          train_micro_batch_size,
+          skip_jit,
+      )
+    else:
+      # ── Disaggregated path (original async producer-consumer) ─────────────
+      # Rollout runs on a separate submesh; rollout and training can overlap.
+      # In off-policy mode the producer may be N+1 steps ahead of training.
+      self._rollout_micro_batch_size = 1
+      self._compute_logps_micro_batch_size = 1
+      grad_acc_steps = self._training_config.get_with_default(
+          "gradient_accumulation_steps", 1
+      )
+      logging.info(
+          "Disagg mode: full_batch_size=%d, mini_batch_size=%d, "
+          "train_micro_batch_size=%d, grad_acc_steps=%d",
+          full_batch_size,
+          mini_batch_size,
+          train_micro_batch_size,
+          grad_acc_steps,
       )
 
-      # --- Evaluation Logic ---
-      current_eval_dataset = None
-      if (
-          all_eval_prompts
-          and self.rl_cluster.actor_trainer.train_steps
-          % training_config.eval_every_n_steps
-          == 0
-      ):
-        self._eval_iter_steps = 0
-        eval_orchestrator = self._build_orchestrator()
+      train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+      orchestrator = self._build_orchestrator()
 
-        async def _eval_runner_async(current_eval_orchestrator):
-          eval_examples = []
-          async for batch in self._orchestrator_producer(
-              current_eval_orchestrator,
-              all_eval_prompts,
-              num_generations=self._num_generations(),
-          ):
-            eval_example = self._batch_to_train_example(
-                batch,
-                rl_cluster_lib.Mode.EVAL,
-            )
-            eval_examples.extend(eval_example)
-          return eval_examples
-
-        eval_future = asyncio.run_coroutine_threadsafe(
-            _eval_runner_async(eval_orchestrator), self.loop
-        )
-        eval_examples = eval_future.result()
-        self._eval_iter_steps += 1
-        current_eval_dataset = eval_examples
-
-      # --- Training Step ---
-      self.rl_cluster.update_actor(
-          [merged_train_micro_batch], current_eval_dataset, skip_jit
+      prompt_queue = queue.Queue()
+      initial_buffer_size = self.algo_config.off_policy_steps + 1
+      logging.info(
+          "Prefilling prompt queue with %d batches.", initial_buffer_size
       )
-      if hasattr(self.rl_cluster, "critic_trainer"):
-        self.rl_cluster.update_critic(
+      for _ in range(initial_buffer_size):
+        try:
+          self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
+        except StopIteration:
+          prompt_queue.put(None)
+          break
+
+      producer_future = asyncio.run_coroutine_threadsafe(
+          self._producer(orchestrator, prompt_queue, train_data_queue),
+          self.loop,
+      )
+
+      train_data_gen = self._data_consumer_batch_generator(
+          train_data_queue, train_micro_batch_size
+      )
+      micro_batches_since_last_sync = 0
+      micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
+      training_config = self.rl_cluster.cluster_config.training_config
+
+      for train_micro_batch in train_data_gen:
+        if (
+            self._training_config.max_steps
+            and self.rl_cluster.global_steps >= self._training_config.max_steps
+        ):
+          logging.info(
+              "Reached max_steps: %d >= %d",
+              self.rl_cluster.global_steps,
+              self._training_config.max_steps,
+          )
+          prompt_queue.put(None)
+          break
+        self._iter_steps += 1
+
+        merged_train_micro_batch = jax.tree.map(
+            lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+        )
+
+        current_eval_dataset = self._run_eval(all_eval_prompts, training_config)
+
+        self.rl_cluster.update_actor(
             [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              [merged_train_micro_batch], current_eval_dataset, skip_jit
+          )
 
-      # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
-        global_step_time = time.time() - self._global_step_start_time
-        logging.info(
-            f"Global step {self.rl_cluster.global_steps} completed in"
-            f" {global_step_time:.2f} seconds."
-        )
-        self.rl_cluster.buffer_metrics_async(
-            {"perf/global_step_time": (global_step_time, np.mean)},
-            mode=rl_cluster_lib.Mode.TRAIN,
-            step=self.rl_cluster.global_steps,
-        )
-        if self.should_sync_weights:
-          logging.info("Requesting sync lock to sync weights...")
-          self._rollout_sync_lock.acquire_weight_sync()
-          try:
-            logging.info("Sync lock acquired. Syncing weights.")
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.WEIGHT_SYNC,
-                self.rl_cluster.perf_v2.all_devices,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                },
-            ):
-              self.rl_cluster.sync_weights()
-            self.policy_version += 1
-            logging.info(
-                "Weights synced. Policy version incremented to %d.",
-                self.policy_version,
-            )
+        micro_batches_since_last_sync += 1
+        if micro_batches_since_last_sync == micro_batches_per_full_batch:
+          global_step_time = time.time() - self._global_step_start_time
+          logging.info(
+              f"Global step {self.rl_cluster.global_steps} completed in"
+              f" {global_step_time:.2f} seconds."
+          )
+          self.rl_cluster.buffer_metrics_async(
+              {"perf/global_step_time": (global_step_time, np.mean)},
+              mode=rl_cluster_lib.Mode.TRAIN,
+              step=self.rl_cluster.global_steps,
+          )
+          if self.should_sync_weights:
+            logging.info("Requesting sync lock to sync weights...")
+            self._rollout_sync_lock.acquire_weight_sync()
+            try:
+              logging.info("Sync lock acquired. Syncing weights.")
+              with self.rl_cluster.perf_v2.span(
+                  perf_constants.WEIGHT_SYNC,
+                  self.rl_cluster.perf_v2.all_devices,
+                  tags={
+                      perf_constants.STEP: self.rl_cluster.global_steps,
+                  },
+              ):
+                self.rl_cluster.sync_weights()
+              self.policy_version += 1
+              logging.info(
+                  "Weights synced. Policy version incremented to %d.",
+                  self.policy_version,
+              )
+              try:
+                with self.rl_cluster.perf_v2.span(
+                    perf_constants.DATA_LOADING,
+                    tags={
+                        perf_constants.STEP: self.rl_cluster.global_steps,
+                    },
+                ):
+                  batch = next(full_dataset_iterator)
+                self._put_prompts_to_queue(prompt_queue, batch)
+              except StopIteration:
+                prompt_queue.put(None)
+            finally:
+              self._rollout_sync_lock.release_weight_sync()
+              logging.info("Sync lock released.")
+          else:
+            self.rl_cluster.global_steps += 1
             try:
               with self.rl_cluster.perf_v2.span(
                   perf_constants.DATA_LOADING,
@@ -852,31 +1095,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               self._put_prompts_to_queue(prompt_queue, batch)
             except StopIteration:
               prompt_queue.put(None)
-          finally:
-            self._rollout_sync_lock.release_weight_sync()
-            logging.info("Sync lock released.")
-        else:
-          self.rl_cluster.global_steps += 1
-          try:
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.DATA_LOADING,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                },
-            ):
-              batch = next(full_dataset_iterator)
-            self._put_prompts_to_queue(prompt_queue, batch)
-          except StopIteration:
-            prompt_queue.put(None)
 
-        self.rl_cluster.buffer_metrics(
-            self.rl_cluster.perf_v2.export(),
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
-        micro_batches_since_last_sync = 0
-        self._global_step_start_time = time.time()
+          self.rl_cluster.buffer_metrics(
+              self.rl_cluster.perf_v2.export(),
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+          micro_batches_since_last_sync = 0
+          self._global_step_start_time = time.time()
 
-    _ = producer_future.result()
+      _ = producer_future.result()
+
     self.rl_cluster.close()
 
   def _put_prompts_to_queue(
