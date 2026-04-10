@@ -85,6 +85,12 @@ parser.add_argument("--num_iterations", type=int, default=1)
 parser.add_argument("--beta", type=float, default=0.001)
 parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
+parser.add_argument(
+    "--advantage_estimator",
+    type=str,
+    default="agentic_grpo",
+    choices=["agentic_grpo", "agentic_rloo"],
+)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=4096)
@@ -306,7 +312,7 @@ B2 = args.b2
 WEIGHT_DECAY = args.weight_decay
 WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
 MAX_GRAD_NORM = args.max_grad_norm
-
+ADVANTAGE_ESTIMATOR = args.advantage_estimator
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = args.save_interval_steps
 MAX_TO_KEEP = args.max_to_keep
@@ -574,6 +580,7 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
     epsilon_high=EPSILON_HIGH,
     off_policy_steps=0,
     episode_timeout=PER_TURN_TIMEOUT_SECS * MAX_TURNS,
+    advantage_estimator=ADVANTAGE_ESTIMATOR,
 )
 
 

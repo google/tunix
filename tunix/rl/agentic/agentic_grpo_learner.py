@@ -731,5 +731,34 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
   return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
 
 
+@function_registry.register_advantage_estimator("agentic_rloo")
+def compute_rloo_advantages(
+    rewards: jax.Array, num_generations: int
+) -> jax.Array:
+  """Compute RLOO (REINFORCE Leave-One-Out) advantages.
+
+  RLOO computes a baseline for each completion by averaging the rewards of all
+  other completions to the same prompt.
+
+  Args:
+    rewards: reward functions output.
+    num_generations: Number of generations.
+
+  Returns:
+    RLOO advantages.
+  """
+  if num_generations < 2:
+    # RLOO requires at least 2 samples to calculate a baseline.
+    return jnp.zeros_like(rewards)
+
+  reshaped_rewards = rewards.reshape(-1, num_generations)
+  loo_mean = (
+      reshaped_rewards.sum(axis=-1, keepdims=True) - reshaped_rewards
+  ) / (num_generations - 1)
+  rloo_advantages = reshaped_rewards - loo_mean
+
+  return rloo_advantages.flatten()
+
+
 GrpoConfig = GRPOConfig
 GrpoLearner = GRPOLearner

@@ -1780,6 +1780,21 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         decoded_completion.count("Assistant:"), 3
     )  # 3 turns including trailing one for last env obs
 
+  def test_compute_rloo_advantages(self):
+    rewards = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    advantages = agentic_grpo_learner.compute_rloo_advantages(
+        rewards, num_generations=3
+    )
+    expected_value = jnp.array([-1.5, 0.0, 1.5, -1.5, 0.0, 1.5])
+    np.testing.assert_allclose(advantages, expected_value)
+
+  def test_compute_rloo_advantages_low_generations(self):
+    rewards = jnp.array([1.0, 2.0])
+    advantages = agentic_grpo_learner.compute_rloo_advantages(
+        rewards, num_generations=1
+    )
+    np.testing.assert_allclose(advantages, jnp.zeros_like(rewards))
+
 
 if __name__ == "__main__":
   absltest.main()
