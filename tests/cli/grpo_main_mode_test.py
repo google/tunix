@@ -211,6 +211,142 @@ train_fraction: 1.0
 
 class DispatchTest(absltest.TestCase):
 
+  def test_agentic_nullable_string_can_be_overridden_from_cli(self):
+    extra = """
+training_mode: "agentic_grpo"
+data_module: "tunix.cli.recipes.deepscaler_data"
+data_config:
+  train_data_path: "gs://fake/train.json"
+  eval_data_path: "gs://fake/eval.parquet"
+prompt_key: "prompts"
+reward_functions: []
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+  context_ratio: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    pipeline = _make_pipeline_with_cli_args(
+        extra,
+        ["agent_class_path=examples.deepswe.swe_agent.SWEAgent"],
+    )
+
+    self.assertEqual(
+        pipeline.config["agent_class_path"],
+        "examples.deepswe.swe_agent.SWEAgent",
+    )
+
+  def test_agentic_nullable_dict_can_be_overridden_from_cli(self):
+    extra = """
+training_mode: "agentic_grpo"
+data_module: "tunix.cli.recipes.deepscaler_data"
+data_config:
+  train_data_path: "gs://fake/train.json"
+  eval_data_path: "gs://fake/eval.parquet"
+prompt_key: "prompts"
+reward_functions: []
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+  context_ratio: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    pipeline = _make_pipeline_with_cli_args(
+        extra,
+        [
+            "kubernetes_config.node_selector_key=cloud.google.com/gke-nodepool",
+            "kubernetes_config.node_selector_val=deepswe-cpu-pool",
+        ],
+    )
+
+    self.assertEqual(
+        pipeline.config["kubernetes_config"],
+        {
+            "node_selector_key": "cloud.google.com/gke-nodepool",
+            "node_selector_val": "deepswe-cpu-pool",
+        },
+    )
+
+  def test_agentic_nullable_string_can_be_overridden_from_env(self):
+    extra = """
+training_mode: "agentic_grpo"
+data_module: "tunix.cli.recipes.deepscaler_data"
+data_config:
+  train_data_path: "gs://fake/train.json"
+  eval_data_path: "gs://fake/eval.parquet"
+prompt_key: "prompts"
+reward_functions: []
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+  context_ratio: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    with mock.patch.dict(
+        os.environ,
+        {"T_AGENT_CLASS_PATH": "examples.deepswe.swe_agent.SWEAgent"},
+    ):
+      pipeline = _make_pipeline_with_cli_args(extra, [])
+
+    self.assertEqual(
+        pipeline.config["agent_class_path"],
+        "examples.deepswe.swe_agent.SWEAgent",
+    )
+
   def test_standard_grpo_dispatches_to_standard(self):
     extra = """
 grpo_config:

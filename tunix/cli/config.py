@@ -87,6 +87,28 @@ def _normalize_cli_override(schema_value: Any, override_value: Any) -> Any:
   return override_value
 
 
+def _can_override_nullable_schema(override_value: Any) -> bool:
+  """Returns whether a null-default schema key can accept the override.
+
+  Nullable schema fields do not provide enough type information to route
+  through `_yaml_types_to_parser`. In that case, preserve the CLI-parsed value
+  directly, or the raw string from the environment.
+  """
+  return isinstance(
+      override_value,
+      (
+          str,
+          int,
+          float,
+          bool,
+          collections.abc.Mapping,
+          list,
+          omegaconf.dictconfig.DictConfig,
+          omegaconf.listconfig.ListConfig,
+      ),
+  )
+
+
 def get_project_root() -> pathlib.Path:
   """Returns the project root folder.
 
@@ -770,6 +792,18 @@ class HyperParameters:
         new_proposal = os.environ.get(yaml_key_to_env_key(k))
 
       new_proposal = _normalize_cli_override(raw_data_from_yaml[k], new_proposal)
+
+      if raw_data_from_yaml[k] is None:
+        if new_proposal is None:
+          raw_keys[k] = None
+          continue
+        if _can_override_nullable_schema(new_proposal):
+          raw_keys[k] = copy.deepcopy(new_proposal)
+          continue
+        raise ValueError(
+            f"For key '{k}', nullable schema can't accept value of type"
+            f" {type(new_proposal)} from the CLI or ENV"
+        )
 
       # If specified value is not one of type in base config yaml or is not
       # consumed by to type parser, error out

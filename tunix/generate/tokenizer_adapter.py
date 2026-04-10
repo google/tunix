@@ -135,6 +135,15 @@ class TokenizerAdapter:
   def tokenizer(self) -> Any:
     return self._tokenizer
 
+  def __getattr__(self, name: str) -> Any:
+    """Delegate unknown attributes to the wrapped tokenizer.
+
+    This keeps the adapter compatible with callers that expect Hugging Face
+    tokenizer attributes such as bos_token/eos_token while still using the
+    normalized adapter interface for encode/decode/id helpers.
+    """
+    return getattr(self._tokenizer, name)
+
   def apply_chat_template(
       self,
       messages: list[dict[str, str]],
