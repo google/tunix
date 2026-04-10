@@ -378,7 +378,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_ids.shape,
     )
 
-    if padded_old_logprobs:
+    if len(padded_old_logprobs) == len(padded_completion_ids):
       old_per_token_logps = jnp.asarray(padded_old_logprobs)
     else:
       old_per_token_logps = None
