@@ -297,7 +297,7 @@ class Sampler(base_sampler.BaseSampler):
 
         return (
             jnp.shape(x) == jnp.shape(y)
-            and jnp.dtype(x) == jnp.dtype(y)
+            and x.dtype == y.dtype
             and equivalent_sharding(x, y)
         )
 
