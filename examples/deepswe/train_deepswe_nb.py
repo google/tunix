@@ -521,7 +521,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 )
 
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="gs://sizhi-dev/deepswe", flush_every_n_steps=2
+    log_dir="/tmp/deepswe_logs", flush_every_n_steps=2
 )
 
 optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
