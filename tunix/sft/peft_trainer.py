@@ -570,7 +570,7 @@ class PeftTrainer:
       self._pbar.update()
 
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
-      self.training_hooks.on_train_step_end(self, step, loss, 0.0)
+      self.training_hooks.on_train_step_end(self, step, loss)
 
   def train(
       self,
@@ -618,9 +618,7 @@ class PeftTrainer:
     last_step_completion_time = time.perf_counter()
     while True:
       self._prof.maybe_activate(self._iter_steps)
-      with jax.profiler.StepTraceAnnotation(
-          "train", step_num=self._iter_steps
-      ):
+      with jax.profiler.StepTraceAnnotation("train", step_num=self._iter_steps):
         train_example = None
         if self.data_hooks:
           train_example = self.data_hooks.load_next_train_batch(self)
