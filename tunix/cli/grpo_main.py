@@ -604,6 +604,7 @@ class GrpoPipeline(config.HyperParameters):
           dataset=self.config["dataset_name"],
           tokenizer=tokenizer,
           split=self.config.get("train_split", self.config.get("split", "train")),
+          data_file=self.config.get("data_file"),
       )
     else:
       raise ValueError(f"Unsupported data_source {self.config['data_source']}")

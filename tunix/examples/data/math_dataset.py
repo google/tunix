@@ -14,6 +14,7 @@
 
 import logging
 import os
+from typing import Any
 
 import datasets as hf_datasets
 import grain
@@ -137,14 +138,18 @@ def _parse_huggingface_dataset_name(
 def get_huggingface_dataset(
     dataset_name: str,
     split: str,
+    data_file: Any | None = None,
     shuffle_seed: int = 42,
 ) -> grain.MapDataset:
   """Gets a dataset from Hugging Face Datasets."""
   hf_dataset_name, config_name = _parse_huggingface_dataset_name(dataset_name)
+  load_dataset_kwargs = {"split": split}
+  if data_file is not None:
+    load_dataset_kwargs["data_files"] = data_file
   data = hf_datasets.load_dataset(
       hf_dataset_name,
       config_name,
-      split=split,
+      **load_dataset_kwargs,
   )
   data = data.shuffle(seed=shuffle_seed)
   return grain.MapDataset.source(data)
@@ -156,6 +161,7 @@ def create_dataset(
     tokenizer=None,
     tfds_download: bool = True,
     split: str = "train",
+  data_file: Any | None = None,
 ):
   """Creates a dataset based on the given name.
 
@@ -172,6 +178,9 @@ def create_dataset(
     tfds_download: the download flag when using TFDS datasets. If false, the
       data_dir used will be set to `None` and chosen by default by tfds.
     split: The dataset split to use (e.g., "train", "test").
+    data_file: Optional Hugging Face `data_files` selector used to restrict
+      which source files are downloaded. This is ignored for TFDS and local
+      datasets.
 
   Returns:
     A batched grain.MapDataset or grain.experimental.ParquetIterDataset.
@@ -183,7 +192,11 @@ def create_dataset(
   if data_source == "local" and dataset.endswith(".parquet"):
     ds = grain.experimental.ParquetIterDataset(dataset)
   elif data_source == "huggingface":
-    ds = get_huggingface_dataset(dataset_name=dataset, split=split)
+    ds = get_huggingface_dataset(
+        dataset_name=dataset,
+        split=split,
+        data_file=data_file,
+    )
   # tfds dataset
   elif data_source == "tfds" and dataset in ["gsm8k"]:
     data_dir = os.path.join("./data", split) if tfds_download else None

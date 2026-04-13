@@ -167,10 +167,63 @@ class HuggingFaceDatasetTest(absltest.TestCase):
     mock_loader.assert_called_once_with(
         dataset_name="openai/gsm8k",
         split="test",
+        data_file=None,
     )
     self.assertEqual(dataset[0]["question"], "Q3")
     self.assertEqual(dataset[0]["answer"], "42")
     self.assertIn("Q3", dataset[0]["prompts"])
+
+  def test_create_dataset_passes_data_file_to_huggingface_loader(self):
+    raw_dataset = _BaseDataset([
+        {"question": "Q4", "answer": "#### 7"},
+    ])
+
+    with mock.patch.object(
+        math_dataset,
+        "get_huggingface_dataset",
+        return_value=raw_dataset,
+    ) as mock_loader:
+      math_dataset.create_dataset(
+          data_source="huggingface",
+          dataset="openai/gsm8k",
+          split="train",
+          data_file="train_socratic.jsonl",
+      )
+
+    mock_loader.assert_called_once_with(
+        dataset_name="openai/gsm8k",
+        split="train",
+        data_file="train_socratic.jsonl",
+    )
+
+  def test_get_huggingface_dataset_passes_data_files_to_loader(self):
+    shuffled_dataset = mock.Mock()
+    shuffled_dataset.shuffle.return_value = shuffled_dataset
+
+    with mock.patch.object(
+        math_dataset.hf_datasets,
+        "load_dataset",
+        return_value=shuffled_dataset,
+    ) as mock_load_dataset, mock.patch.object(
+        math_dataset.grain.MapDataset,
+        "source",
+        return_value="grain-dataset",
+    ) as mock_source:
+      dataset = math_dataset.get_huggingface_dataset(
+          dataset_name="openai/gsm8k",
+          split="train",
+          data_file="train_socratic.jsonl",
+      )
+
+    mock_load_dataset.assert_called_once_with(
+      "openai/gsm8k",
+      "default",
+      split="train",
+      data_files="train_socratic.jsonl",
+    )
+    shuffled_dataset.shuffle.assert_called_once_with(seed=42)
+    mock_source.assert_called_once_with(shuffled_dataset)
+    self.assertEqual(dataset, "grain-dataset")
 
 
 if __name__ == "__main__":

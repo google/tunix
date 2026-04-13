@@ -98,6 +98,9 @@ data_directory: ""
 data_module: ""
 data_config: {}
 dataset_name: "Helsinki-NLP/opus-100"
+# Optional Hugging Face `data_files` selector to limit which source files are
+# downloaded. This is not used by the TFDS path in tunix.
+data_file: null
 batch_size: 16
 prompt_key: "prompts"
 max_target_length: 256
