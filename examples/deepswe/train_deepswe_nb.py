@@ -126,6 +126,16 @@ parser.add_argument("--max_concurrency", type=int, default=200)
 parser.add_argument("--overlong_filter", type=bool, default=True, 
                         help="Whether to filter out trajectories that exceed length limits")
 
+# Mesh / Topology Config Override
+parser.add_argument("--rollout_mesh_fsdp", type=int, default=None, 
+                    help="Optional override for rollout mesh FSDP dimension.")
+parser.add_argument("--rollout_mesh_tp", type=int, default=None, 
+                    help="Optional override for rollout mesh TP dimension.")
+parser.add_argument("--train_mesh_fsdp", type=int, default=None, 
+                    help="Optional override for train mesh FSDP dimension.")
+parser.add_argument("--train_mesh_tp", type=int, default=None, 
+                    help="Optional override for train mesh TP dimension.")
+
 from tunix.rl.agentic.agents import agent_types
 VALID_STATUS_NAMES = [status.name for status in agent_types.TrajectoryStatus]
 
@@ -371,6 +381,7 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 
+
 # %%
 # ==========================================
 # 5. JAX Device & Mesh Setup
@@ -400,17 +411,26 @@ split = int(len(devices) / 2)
 
 # Favor TP for now.
 # TODO(sizhi): Experiment with DP vs TP for rollout.
-rollout_tp = np.gcd(split, config.num_kv_heads)
-rollout_fsdp = split // rollout_tp
+if args.rollout_mesh_fsdp is not None and args.rollout_mesh_tp is not None:
+  rollout_fsdp = args.rollout_mesh_fsdp
+  rollout_tp = args.rollout_mesh_tp
+else:
+  rollout_tp = np.gcd(split, config.num_kv_heads)
+  rollout_fsdp = split // rollout_tp
 rollout_devices = np.array(devices[:split]).reshape(rollout_fsdp, rollout_tp)
 
-train_fsdp = np.gcd(split, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
-train_tp = split // train_fsdp
+if args.train_mesh_fsdp is not None and args.train_mesh_tp is not None:
+  train_fsdp = args.train_mesh_fsdp
+  train_tp = args.train_mesh_tp
+else:
+  train_fsdp = np.gcd(split, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
+  train_tp = split // train_fsdp
 train_devices = np.array(devices[split:]).reshape(train_fsdp, train_tp)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
-
+print(f"*** Rollout Mesh *** | FSDP: {rollout_fsdp}, TP: {rollout_tp} | Shape: {rollout_mesh.shape}")
+print(f"*** Train Mesh *** | FSDP: {train_fsdp}, TP: {train_tp} | Shape: {train_mesh.shape}")
 
 # %%
 # ==========================================
