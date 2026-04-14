@@ -127,7 +127,7 @@ jobs:
           exit "${code:-0}"
         fi
 
-  run_dev:
+  run_dev_others:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
@@ -181,43 +181,6 @@ jobs:
             --train-mini-batch-size=2 \
             --train-micro-batch-size=2 \
             --rollout-engine=vanilla
-      - name: Run vllm tests
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          unset JAX_PLATFORMS
-          pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
-          pytest tests/generate/vllm_driver_test.py -v --tb=short
-          pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
-          while read -r test; do
-            pytest -s "$test" -v --tb=short
-          done < test_collections.txt
-
-      - name: Run install sglang-jax && test
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          ## because sglang-jax has codes like jax.local_devices('cpu')
-          # TODO(lancewang): Re-enable this test once the bug is fixed.
-          unset JAX_PLATFORMS
-          pip list | egrep 'jax|flax|libtpu'
-          cd ..
-          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . --force-reinstall && cd ../..
-          # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
-          pip install qwix --force-reinstall
-          # TODO(b/470113586): Remove this test once the bug is fixed.
-          pip install jax[tpu]==0.8.1 flax==0.12.4 --force-reinstall
-          pip list | egrep 'jax|flax|libtpu'
-
-          # Install bookworm, vllm container defaults to bullseye causes segfault for sglang-jax.
-          cat >/etc/apt/sources.list <<'EOF'
-          deb http://deb.debian.org/debian bookworm main contrib non-free
-          deb http://deb.debian.org/debian bookworm-updates main contrib non-free
-          deb http://security.debian.org/debian-security bookworm-security main contrib non-free
-          EOF
-          apt-get update; apt-get install -y less
-
-          cd tunix && python tests/generate/sglang_jax_sampler_test.py && python tests/generate/sglang_jax_lora_test.py
       - name: Run tunix SFT integration tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -254,3 +217,113 @@ jobs:
           python -m pip install torch
           JAX_PLATFORMS=cpu python -m pytest tests/model_alignment/ -v --tb=short
           unset JAX_PLATFORMS
+
+  run_dev_vllm:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [linux-x86-ct5lp-224-8tpu]
+    environment: testing
+    container:
+      image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
+      options: --privileged
+      env:
+        CLOUD_TPU_ACCELERATOR: v5e-8
+        JAX_PLATFORMS: tpu,cpu
+    steps:
+      # Cache Hugging Face hub
+      - name: Cache HF hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            hf-${{ runner.os }}-
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Tunix , tpu-inference and dependencies
+        run: |
+          echo "Current directory:"
+          pwd
+          pip install --upgrade pip setuptools wheel
+
+          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
+          pip install -e .[dev,test]
+          pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
+          # tpu-inference/Numba needs NumPy 2.3 or less.
+          pip install numpy==2.3.5 --force-reinstall
+      - name: Run vllm tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          unset JAX_PLATFORMS
+          pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
+          pytest tests/generate/vllm_driver_test.py -v --tb=short
+          pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
+          while read -r test; do
+            pytest -s "$test" -v --tb=short
+          done < test_collections.txt
+
+  run_dev_sglang:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [linux-x86-ct5lp-224-8tpu]
+    environment: testing
+    container:
+      image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
+      options: --privileged
+      env:
+        CLOUD_TPU_ACCELERATOR: v5e-8
+        JAX_PLATFORMS: tpu,cpu
+    steps:
+      # Cache Hugging Face hub
+      - name: Cache HF hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            hf-${{ runner.os }}-
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Tunix , tpu-inference and dependencies
+        run: |
+          echo "Current directory:"
+          pwd
+          pip install --upgrade pip setuptools wheel
+
+          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
+          pip install -e .[dev,test]
+          pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
+          # tpu-inference/Numba needs NumPy 2.3 or less.
+          pip install numpy==2.3.5 --force-reinstall
+      - name: Run install sglang-jax && test
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          ## because sglang-jax has codes like jax.local_devices('cpu')
+          # TODO(lancewang): Re-enable this test once the bug is fixed.
+          unset JAX_PLATFORMS
+          pip list | egrep 'jax|flax|libtpu'
+          cd ..
+          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . --force-reinstall && cd ../..
+          # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
+          pip install qwix --force-reinstall
+          # TODO(b/470113586): Remove this test once the bug is fixed.
+          pip install jax[tpu]==0.8.1 flax==0.12.4 --force-reinstall
+          pip list | egrep 'jax|flax|libtpu'
+
+          # Install bookworm, vllm container defaults to bullseye causes segfault for sglang-jax.
+          cat >/etc/apt/sources.list <<'EOF'
+          deb http://deb.debian.org/debian bookworm main contrib non-free
+          deb http://deb.debian.org/debian bookworm-updates main contrib non-free
+          deb http://security.debian.org/debian-security bookworm-security main contrib non-free
+          EOF
+          apt-get update; apt-get install -y less
+
+          cd tunix && python tests/generate/sglang_jax_sampler_test.py && python tests/generate/sglang_jax_lora_test.py
