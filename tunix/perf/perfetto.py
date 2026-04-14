@@ -163,6 +163,11 @@ class PerfettoTraceWriter:
     self._export_dir = export_dir or DEFAULT_EXPORT_DIR
     self._trace_file_path = None
     try:
+      if self._export_dir.startswith("gs://"):
+        raise ValueError(
+            "GCS paths are not supported for perfetto trace dumping in"
+            f" PerfettoTraceWriter v1: {self._export_dir}"
+        )
       os.makedirs(self._export_dir, exist_ok=True)
       trace_file_name = f"perfetto_trace_{int(time.time())}.pb"
       self._trace_file_path = os.path.join(self._export_dir, trace_file_name)
