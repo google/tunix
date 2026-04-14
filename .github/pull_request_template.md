@@ -18,4 +18,4 @@ Resolves #\<issue_number_goes_here\>
 - [ ] I have added all appropriate doc-strings/documentation.
 - [ ] My PR is based on the latest changes of the main branch (if unsure, rebase the code).
 - [ ] I have signed the [Contributor License Agreement](https://cla.developers.google.com/about).
-- [ ] I have followed [Contribution Guidelines](https://github.com/google/tunix/blob/main/CONTRIBUTING.md).
+- [ ] I have followed [Contribution Guidelines](https://github.com/google/tunix/blob/main/docs/contributing.md).

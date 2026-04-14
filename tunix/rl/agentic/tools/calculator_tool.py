@@ -23,11 +23,8 @@ from typing import Any
 
 from tunix.rl.agentic.tools import base_tool
 
-ToolOutput = base_tool.ToolOutput
-BaseTool = base_tool.BaseTool
 
-
-class CalculatorTool(BaseTool):
+class CalculatorTool(base_tool.BaseTool):
   """A basic calculator tool that performs arithmetic operations.
 
   Supports the four fundamental arithmetic operations: addition, subtraction,
@@ -73,7 +70,7 @@ class CalculatorTool(BaseTool):
         },
     }
 
-  def apply(self, **kwargs: Any) -> ToolOutput:
+  def apply(self, **kwargs: Any) -> base_tool.ToolOutput:
     """Execute the arithmetic operation with the provided operands and operator.
 
     Performs the requested calculation while handling edge cases and potential
@@ -81,8 +78,8 @@ class CalculatorTool(BaseTool):
     common failure scenarios like division by zero.
 
     Args:
-        **kwargs: Keyword arguments containing 'a' (float), 'b' (float),
-            and 'op' (str).
+        **kwargs: Keyword arguments containing 'a' (float), 'b' (float), and
+          'op' (str).
 
     Returns:
         ToolOutput: Result containing either the calculated value or
@@ -93,17 +90,19 @@ class CalculatorTool(BaseTool):
     op = kwargs.get("op")
 
     if a is None or b is None or op is None:
-      return ToolOutput(
+      return base_tool.ToolOutput(
           name=self.name,
           error="Missing required arguments: 'a', 'b', and 'op'",
       )
     if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
-      return ToolOutput(
+      return base_tool.ToolOutput(
           name=self.name,
           error="Operands 'a' and 'b' must be numbers (int or float)",
       )
     if not isinstance(op, str):
-      return ToolOutput(name=self.name, error="Operator 'op' must be a string")
+      return base_tool.ToolOutput(
+          name=self.name, error="Operator 'op' must be a string"
+      )
 
     # pylint: disable=broad-exception-caught
     try:
@@ -115,14 +114,18 @@ class CalculatorTool(BaseTool):
         result = a * b
       elif op == "/":
         if b == 0:
-          return ToolOutput(
+          return base_tool.ToolOutput(
               name=self.name, error="Division by zero is not allowed"
           )
         result = a / b
       else:
-        return ToolOutput(name=self.name, error=f"Unsupported operator: {op}")
+        return base_tool.ToolOutput(
+            name=self.name, error=f"Unsupported operator: {op}"
+        )
 
-      return ToolOutput(name=self.name, output=str(result))
+      return base_tool.ToolOutput(name=self.name, output=str(result))
 
     except Exception as e:
-      return ToolOutput(name=self.name, error=f"{type(e).__name__}: {e}")
+      return base_tool.ToolOutput(
+          name=self.name, error=f"{type(e).__name__}: {e}"
+      )

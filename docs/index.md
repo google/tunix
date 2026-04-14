@@ -1,15 +1,24 @@
-# Tunix: A JAX-native LLM Post-Training Library
-
-```{include} ../README.md
+```{include} intro.md
 :start-line: 2
 ```
 
 ```{toctree}
 :maxdepth: 2
 
-code-of-conduct.md
+quickstart.md
+design.md
+agentic_rl.md
+performance.md
+reliability.md
+launching.md
+rollout.md
+algorithms.md
+models.md
+metrics.md
+examples.md
+talks.md
 contributing.md
-programming_guide.md
+code-of-conduct.md
 gallery.rst
 ```
 

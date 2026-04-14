@@ -46,7 +46,6 @@ class TrainingHooks(ABC):
       train_ctx: "PeftTrainer.PeftTrainer",
       train_step: int,
       train_loss: float,
-      step_time: float,
   ):
     """Called at the end of a training step."""
     pass

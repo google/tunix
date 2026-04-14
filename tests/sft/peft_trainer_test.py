@@ -13,8 +13,11 @@
 # limitations under the License.
 
 """Peft trainer unittest."""
+
+import contextlib
 import functools
 import os
+import tempfile
 from typing import Any, Tuple
 from unittest import mock
 from absl.testing import absltest
@@ -83,6 +86,11 @@ class PeftTrainerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
+    try:
+      self.temp_path = self.create_tempdir().full_path
+    except Exception:
+      self.temp_path = tempfile.TemporaryDirectory().name
+
     # CPU env setup to simulate multi device env. Won't affect TPU env. But
     # need to be careful not to use self.num_cpus in TPU env.
     self.num_cpus = 4
@@ -118,7 +126,11 @@ class PeftTrainerTest(parameterized.TestCase):
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
 
-  def test_basic_training(self):
+  @parameterized.named_parameters(
+      ('cache_nnx_graph', True),
+      ('no_cache_nnx_graph', False),
+  )
+  def test_basic_training(self, cache_nnx_graph: bool):
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     rngs = nnx.Rngs(0)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
@@ -129,7 +141,7 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer.PeftTrainer(model, optimizer, config)
     trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
 
-    trainer.train(self.train_ds, self.eval_ds)
+    trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=cache_nnx_graph)
     variables = nnx.state(model, nnx.Param)
 
     jax.tree.map_with_path(tc.assert_not_equal, original_variables, variables)
@@ -153,36 +165,92 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds)  # No eval dataset.
 
-  def test_shard_input_on_already_sharded_input_is_noop(self):
-    """Tests that _shard_input is a no-op if data is already sharded."""
-    devices = np.array(jax.local_devices()[:2])
-    mesh = shd.Mesh(devices, axis_names=('data',))
-    pspec = shd.PartitionSpec('data')
+  @parameterized.named_parameters(
+      ('lora_disabled_distributed', False, True),
+      ('lora_disabled_single_device', False, False),
+      ('lora_enabled_distributed', True, True),
+      ('lora_enabled_single_device', True, False),
+  )
+  def test_checkpoint_save_and_restore(
+      self, enable_lora: bool, distributed: bool
+  ):
+    def create_model_and_optimizer():
+      rngs = nnx.Rngs(0)
+      if distributed:
+        model, _ = create_sharded_model(tc.ToyTransformer, rngs, self.mesh)
+      else:
+        model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+      if enable_lora:
+        model = tc.get_lora_model(model)
 
-    # Manually shard the input data onto the mesh
-    sharded_input = jax.tree.map(
-        lambda x: jax.device_put(x, shd.NamedSharding(mesh, pspec)),
-        self.train_ds,
-    )
+      optimizer = optax.inject_hyperparams(optax.adamw)(
+          learning_rate=optax.constant_schedule(TEST_LEARNING_RATE)
+      )
+      return model, optimizer
 
     config = peft_trainer.TrainingConfig(
-        eval_every_n_steps=1,
+        eval_every_n_steps=2,
         max_steps=100,
-        data_sharding_axis=('data',),
-    )
-    trainer = peft_trainer.PeftTrainer(
-        tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0)),
-        optax.sgd(1e-3),
-        config,
+        checkpoint_root_directory=f'{self.temp_path}/{self.id()}/checkpoints',
     )
 
-    with compat.set_mesh(mesh):
-      processed_input = trainer._shard_input(sharded_input[0])
+    model, optimizer = create_model_and_optimizer()
+    original_model_state = jax.tree.map(
+        jnp.copy, nnx.state(model, nnx.LoRAParam if enable_lora else nnx.Param)
+    )
 
-    # Output objects are same as input objects if no new sharding operation was
-    # performed, as that would create new jax.Array objects.
-    self.assertIs(processed_input.input_tokens, sharded_input[0].input_tokens)
-    self.assertIs(processed_input.input_mask, sharded_input[0].input_mask)
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    ctx = self.mesh if distributed else contextlib.nullcontext()
+
+    with ctx:
+      trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
+    trained_model_state = nnx.state(
+        model, nnx.LoRAParam if enable_lora else nnx.Param
+    )
+    trained_opt_state = nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_model_state, trained_model_state
+    )
+
+    # Resume from checkpoint with a new model and optimizer, and check that
+    # the model and optimizer states are the same as the trained ones.
+    new_model, new_optimizer = create_model_and_optimizer()
+
+    resumed_trainer = peft_trainer.PeftTrainer(new_model, new_optimizer, config)
+    resumed_model_state = nnx.state(
+        resumed_trainer.model, nnx.LoRAParam if enable_lora else nnx.Param
+    )
+    resumed_opt_state = nnx.state(
+        resumed_trainer.optimizer, nnx.optimizer.OptState
+    )
+
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_model_state, resumed_model_state
+    )
+    jax.tree.map_with_path(
+        tc.assert_equal, trained_opt_state, resumed_opt_state
+    )
+
+    resumed_trainer = resumed_trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    )
+    with ctx:
+      resumed_trainer.train(self.train_ds, self.eval_ds, cache_nnx_graph=True)
+
+    resumed_opt_state = nnx.state(
+        resumed_trainer.optimizer, nnx.optimizer.OptState
+    )
+
+    jax.tree.map(
+        lambda x, y: self.assertTrue(
+            x.sharding.is_equivalent_to(y.sharding, ndim=x.ndim)
+        ),
+        trained_opt_state,
+        resumed_opt_state,
+    )
 
   def test_basic_training_with_hooks(self):
     train_ds = dummy_datasets(batch_size=4, repeat=2)
@@ -204,7 +272,7 @@ class PeftTrainerTest(parameterized.TestCase):
         [mock.call.on_train_start(trainer)]
         + [mock.call.on_train_step_start(trainer) for _ in range(4)]
         + [
-            mock.call.on_train_step_end(trainer, mock.ANY, mock.ANY, mock.ANY)
+            mock.call.on_train_step_end(trainer, mock.ANY, mock.ANY)
             for _ in range(4)
         ]
         + [mock.call.on_eval_step_start(trainer) for _ in range(4)]
@@ -419,7 +487,7 @@ class PeftTrainerTest(parameterized.TestCase):
         gradient_accumulation_steps=None,
         learning_rate_schedule=learning_rate_schedule,
     )
-    (params_with_grad_accumulation, grad_accu_trainer) = train(
+    params_with_grad_accumulation, grad_accu_trainer = train(
         dummy_datasets(batch_size=2, repeat=4),
         gradient_accumulation_steps=2,
         learning_rate_schedule=learning_rate_schedule,
@@ -504,16 +572,23 @@ class PeftTrainerTest(parameterized.TestCase):
     # and does not have any unexpected calls.
     mock_checkpoint_manager.assert_has_calls(
         [
-            mock.call.maybe_restore(mock.ANY, restore_only_lora_params=True),
+            mock.call.maybe_restore(
+                mock.ANY, mock.ANY, restore_only_lora_params=True
+            ),
             *[
                 mock.call.save(
-                    i, mock.ANY, save_only_lora_params=True, custom_metadata={}
+                    i,
+                    mock.ANY,
+                    mock.ANY,
+                    save_only_lora_params=True,
+                    custom_metadata={},
                 )
                 for i in expected_save_steps
             ],
             mock.call.latest_step(),
             mock.call.save(
                 expected_save_steps[-1],
+                mock.ANY,
                 mock.ANY,
                 save_only_lora_params=True,
                 force=True,

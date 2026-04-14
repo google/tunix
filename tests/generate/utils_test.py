@@ -14,10 +14,13 @@
 # limitations under the License.
 
 from absl.testing import parameterized
+from absl.testing import absltest
+from flax import nnx
 import jax
 from jax import sharding
 import jax.numpy as jnp
 import numpy as np
+from unittest import mock
 from tunix.generate import utils
 from tunix.rl import reshard
 
@@ -169,7 +172,8 @@ class UtilsTest(parameterized.TestCase):
 
   def test_transfer_state_with_mappings_tranpose_and_sharding_device(self):
     device_count = len(jax.devices())
-    assert device_count % 2 == 0, "This example assumes even number of devices"
+    if device_count < 2 or device_count % 2 != 0:
+      self.skipTest("This example assumes even number of devices >= 2")
 
     devices_array = np.array(jax.devices()).reshape((device_count // 2, 2))
     mesh = Mesh(devices_array, axis_names=("data", "model"))
@@ -246,34 +250,54 @@ class UtilsTest(parameterized.TestCase):
   def test_transfer_state_with_padding(self):
     # Create source module with smaller head dim
     src = MockState(
-        {"decoder.layers.5.attn.o_proj": MockParam(jnp.ones((2, 4, 64)))}
+        {"decoder.layers.5.attn.k_proj": MockParam(jnp.ones((2, 4, 64)))}
     )
     dst = MockState(
-        {"decoder.layers.5.attn.o_proj": MockParam(jnp.zeros((2, 4, 128)))}
+        {"decoder.layers.5.attn.k_proj": MockParam(jnp.zeros((2, 4, 128)))}
     )
 
     mappings = {
-        "decoder.layers.5.attn.o_proj": ("decoder.layers.5.attn.o_proj", None),
+        "decoder.layers.5.attn.k_proj": ("decoder.layers.5.attn.k_proj", None),
     }
 
     new_tgt_state = utils.transfer_state_with_mappings(src, dst, mappings)
 
     # Validate shape
     self.assertEqual(
-        new_tgt_state.params["decoder.layers.5.attn.o_proj"].shape, (2, 4, 128)
+        new_tgt_state.params["decoder.layers.5.attn.k_proj"].shape, (2, 4, 128)
     )
     # Validate original values copied correctly
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layers.5.attn.o_proj"][:, :, :64], 1.0
+            new_tgt_state.params["decoder.layers.5.attn.k_proj"][:, :, :64], 1.0
         )
     )
     # Validate padded values are zero
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layers.5.attn.o_proj"][:, :, 64:], 0.0
+            new_tgt_state.params["decoder.layers.5.attn.k_proj"][:, :, 64:], 0.0
         )
     )
+
+  def test_transfer_state_with_bias_padding_and_reshape(self):
+    """Test rank mismatch, reshape and padding for attention bias."""
+    src_key = "layers.0.attn.q_bias"
+    src_q_bias = jnp.ones((256,), dtype=jnp.float32)
+    src = MockState({src_key: MockParam(src_q_bias)})
+    dst = MockState(
+        {src_key: MockParam(jnp.zeros((4, 128), dtype=jnp.float32))}
+    )
+
+    mappings = {src_key: (src_key, None)}
+
+    result = utils.transfer_state_with_mappings(
+        src, dst, mappings, num_kv_heads=2, head_dim=128
+    )
+
+    # Verify shape
+    self.assertEqual(result.params[src_key].shape, (4, 128))
+    # Verify values are repeated correctly
+    self.assertTrue(jnp.allclose(result.params[src_key], 1.0))
 
   def test_transfer_state_with_scanned_layers(self):
     """Comprehensive test for scanned layers covering multiple scenarios."""
@@ -684,3 +708,743 @@ class UtilsTest(parameterized.TestCase):
       # Should not raise an error
       result = utils.transfer_state_with_mappings(src, dst, mappings)
       self.assertEqual(result.params[key].shape, (4, 128))
+
+  def test_transfer_state_directly_simple_transfer(self):
+    """Tests direct state transfer with matching structures."""
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([1.0, 2.0]))))
+    )
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array([0.0, 0.0]))))
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['weight'][...],
+        jnp.array([1.0, 2.0]),
+    )
+
+  def test_transfer_state_directly_unwraps_base_and_model(self):
+    """Tests unwrapping of 'base' from src and 'model' from dst."""
+    # Source has 'base' wrapper
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))))
+        )
+    )
+    # Dest has 'model' wrapper
+    dst_state = nnx.Dict(
+        model=nnx.Dict(
+            decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0))))
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['model']['decoder']['layer0']['weight'][...],
+        jnp.array(1.0),
+    )
+
+  def test_transfer_state_directly_intersects_keys(self):
+    """Tests that only common keys are transferred; extras are ignored."""
+    mock_reshard = lambda source, target: source
+
+    # Scenario 1: Source has more keys than destination, with no unique keys in destination
+    src_state_more_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(2.0))),
+            layer2=nnx.Dict(weight=nnx.Param(jnp.array(3.0))),  # Extra in src
+        )
+    )
+    dst_state_fewer_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(0.0))),
+        )
+    )
+
+    utils.transfer_state_directly(
+        src_state_more_keys, dst_state_fewer_keys, reshard_fn=mock_reshard
+    )
+
+    np.testing.assert_array_equal(
+        dst_state_fewer_keys['decoder']['layer0']['weight'][...],
+        jnp.array(1.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state_fewer_keys['decoder']['layer1']['weight'][...],
+        jnp.array(2.0),
+    )
+    self.assertFalse(hasattr(dst_state_fewer_keys['decoder'], 'layer2'))
+
+    # Scenario 2: Destination has more keys than source, with no unique keys in source
+    src_state_fewer_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(10.0))),
+        )
+    )
+    dst_state_more_keys = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(20.0))),  # Extra in dst
+            layer2=nnx.Dict(weight=nnx.Param(jnp.array(30.0))),  # Extra in dst
+        )
+    )
+
+    utils.transfer_state_directly(
+        src_state_fewer_keys, dst_state_more_keys, reshard_fn=mock_reshard
+    )
+
+    np.testing.assert_array_equal(
+        dst_state_more_keys['decoder']['layer0']['weight'][...],
+        jnp.array(10.0),
+    )
+    # Extra keys in dst should be preserved
+    np.testing.assert_array_equal(
+        dst_state_more_keys['decoder']['layer1']['weight'][...],
+        jnp.array(20.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state_more_keys['decoder']['layer2']['weight'][...],
+        jnp.array(30.0),
+    )
+
+    # Original test case: Mixed extras in src and dst
+    src_state_mixed = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.array(1.0))),
+            layer1=nnx.Dict(weight=nnx.Param(jnp.array(2.0))),  # Extra in src
+        ),
+        rngs=nnx.Dict(),  # Extra in src
+    )
+    dst_state_mixed = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+        kv_cache=nnx.Dict(),  # Extra in dst
+    )
+
+    utils.transfer_state_directly(
+        src_state_mixed, dst_state_mixed, reshard_fn=mock_reshard
+    )
+
+    # Common key should be updated
+    np.testing.assert_array_equal(
+        dst_state_mixed['decoder']['layer0']['weight'][...], jnp.array(1.0)
+    )
+    # Extra key in dst should be preserved
+    self.assertIn('kv_cache', dst_state_mixed)
+    # Extra key in src ('layer1') should NOT be added to dst.
+    self.assertFalse(hasattr(dst_state_mixed['decoder'], 'layer1'))
+
+  def test_transfer_state_directly_with_plain_dicts(self):
+    """Tests transfer with plain dicts and various variables."""
+    src_state = {
+        'decoder': {
+            'layer0': {
+                    'weight': nnx.Param(jnp.array(1.0)),
+                    'some_variable': nnx.Variable(jnp.array([1, 2])),
+                },
+            'extra_layer': {
+                'sub': {
+                    'value': nnx.Param(jnp.array(3.0))
+                }
+            },
+        },
+        'some_other_variable': nnx.Variable(jnp.array(42)),
+    }
+    dst_state = {
+        'decoder': {
+            'layer0': {
+                    'weight': nnx.Param(jnp.array(0.0)),
+                    'some_variable': nnx.Variable(jnp.array([0, 0])),
+                },
+            'layer1': {
+                'weight': nnx.Param(jnp.array(0.0))
+            },  # untouched
+            'extra_layer': {
+                'sub': {
+                    'value': nnx.Param(jnp.array(0.0))
+                }
+            },
+        },
+        'some_other_variable': nnx.Variable(jnp.array(0)),
+        'untouched_variable': nnx.Variable(jnp.array(-1)),  # untouched
+    }
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['weight'][...], jnp.array(1.0)
+    )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['some_variable'][...], jnp.array([1, 2])
+    )
+
+    np.testing.assert_array_equal(
+        dst_state['decoder']['extra_layer']['sub']['value'][...],
+        jnp.array(3.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state['some_other_variable'][...], jnp.array(42)
+    )
+
+    # Check that layer1 was not touched
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer1']['weight'][...], jnp.array(0.0)
+    )
+    # Check that untouched_variable was not touched
+    np.testing.assert_array_equal(
+        dst_state['untouched_variable'][...], jnp.array(-1)
+    )
+
+  def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
+    """Test repeating num_heads dimension (non-last axis) for attention weights."""
+    # Source k_proj: (model_dim=16, num_heads=2, head_dim=128)
+    # Target k_proj: (model_dim=16, num_heads * head_dim=512)
+    src_k_proj = jnp.arange(16 * 2 * 128, dtype=jnp.float32).reshape(16, 2, 128)
+    k_src_key = "layers.0.attn.k_proj.w"
+    k_dst_key = "layers.0.self_attn.k_proj.w"
+
+    # Source o_proj: (model_dim=16, head_dim=128,num_heads=2)
+    # Target o_proj: (model_dim=16, num_heads * head_dim=512)
+    src_o_proj = jnp.arange(16 * 128 * 2, dtype=jnp.float32).reshape(16, 128, 2)
+    o_src_key = "layers.0.attn.o_proj.w"
+    o_dst_key = "layers.0.self_attn.o_proj.w"
+
+    src = MockState({
+        k_src_key: MockParam(src_k_proj),
+        o_src_key: MockParam(src_o_proj),
+    })
+    dst = MockState({
+        k_dst_key: MockParam(jnp.zeros((16, 512), dtype=jnp.float32)),
+        o_dst_key: MockParam(jnp.zeros((16, 512), dtype=jnp.float32)),
+    })
+
+    mappings = {
+        k_src_key: (k_dst_key, None),
+        o_src_key: (o_dst_key, None),
+    }
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    # Verify shapes
+    self.assertEqual(result.params[k_dst_key].shape, (16, 512))
+    self.assertEqual(result.params[o_dst_key].shape, (16, 512))
+
+    # Verify k_proj: heads are repeated on axis 1
+    expected_k = jnp.repeat(src_k_proj, 2, axis=1).reshape(16, 512)
+    np.testing.assert_allclose(result.params[k_dst_key], expected_k, atol=1e-1)
+
+    # Verify o_proj: heads are repeated on axis 2
+    expected_o = jnp.repeat(src_o_proj, 2, axis=2).reshape(16, 512)
+    np.testing.assert_allclose(result.params[o_dst_key], expected_o, atol=1e-1)
+
+  def test_transfer_state_with_interleaved_scanned_layers(self):
+    """Test transfer with interleaved scanned layers using regex in mappings."""
+    num_src_layers = 2
+    num_tgt_layers = 4
+    embed_dim = 4
+    vocab_size = 8
+
+    # Source state: 2 layers
+    # src[0] = 1.0 (maps to tgt[0])
+    # src[1] = 2.0 (maps to tgt[2])
+    src_weights = jnp.stack(
+        [
+            jnp.full((embed_dim, vocab_size), i + 1, dtype=jnp.float32)
+            for i in range(num_src_layers)
+        ],
+        axis=0,
+    )
+    src_state = MockState({
+        "base.decoder.layers.layers_0.GptOssAttention.query.kernel": MockParam(
+            src_weights
+        ),
+    })
+
+    # Target state: 4 layers, all zeros initially
+    target_params = {}
+    for i in range(num_tgt_layers):
+      target_params[f"decoder.layer.{i}.weight"] = MockParam(
+          jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32)
+      )
+    tgt_state = MockState(target_params)
+
+    # Mappings: Transfer only layers 0 and 2 from source to target
+    mappings = {
+        "base.decoder.layers.layers_0.GptOssAttention.query.kernel": (
+            "decoder.layer.(0|2).weight",
+            ("layer", None, None),
+        ),
+    }
+    transpose_keys = {"kernel": (1, 0)}
+
+    new_tgt_state = utils.transfer_state_with_mappings(
+        src_state,
+        tgt_state,
+        key_mappings=mappings,
+        transpose_keys=transpose_keys,
+    )
+
+    # Verify: Layer 0 and 2 should be transferred and transposed
+
+    # Layer 0 comes from src[0] -> Value 1.0
+    expected_layer_0 = jnp.full((vocab_size, embed_dim), 1.0, dtype=jnp.float32)
+
+    # Layer 2 comes from src[1] -> Value 2.0
+    expected_layer_2 = jnp.full((vocab_size, embed_dim), 2.0, dtype=jnp.float32)
+
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.0.weight"], expected_layer_0
+        ),
+        "Interleaved layer 0 mismatch",
+    )
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.2.weight"], expected_layer_2
+        ),
+        "Interleaved layer 2 mismatch",
+    )
+
+    # Layers 1 and 3 should remain zero (not mapped)
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.1.weight"],
+            jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32),
+        ),
+        "Non-interleaved layer 1 should be zero",
+    )
+    self.assertTrue(
+        jnp.allclose(
+            new_tgt_state.params["decoder.layer.3.weight"],
+            jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32),
+        ),
+        "Non-interleaved layer 3 should be zero",
+    )
+
+  def test_transfer_state_with_mappings_syncs_implicit_tied_lm_head(self):
+    src = MockState({
+        "model.embed_tokens.weight": MockParam(
+            jnp.arange(12, dtype=jnp.float32).reshape(3, 4)
+        ),
+    })
+    dst = MockState({
+        "model.embed.embedding": MockParam(
+            jnp.zeros((3, 4), dtype=jnp.float32)
+        ),
+        "model.lm_head": MockParam(jnp.full((3, 4), -1.0, dtype=jnp.float32)),
+    })
+    mappings = {
+        "model.embed_tokens.weight": ("model.embed.embedding", None),
+    }
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    np.testing.assert_array_equal(
+        result.params["model.embed.embedding"],
+        src.params["model.embed_tokens.weight"].value,
+    )
+    np.testing.assert_array_equal(
+        result.params["model.lm_head"],
+        src.params["model.embed_tokens.weight"].value,
+    )
+
+  def test_transfer_state_with_mappings_keeps_explicit_lm_head_mapping(self):
+    src = MockState({
+        "model.embed_tokens.weight": MockParam(
+            jnp.arange(12, dtype=jnp.float32).reshape(3, 4)
+        ),
+        "lm_head": MockParam(jnp.full((3, 4), 7.0, dtype=jnp.float32)),
+    })
+    dst = MockState({
+        "model.embed.embedding": MockParam(
+            jnp.zeros((3, 4), dtype=jnp.float32)
+        ),
+        "model.lm_head": MockParam(jnp.full((3, 4), -1.0, dtype=jnp.float32)),
+    })
+    mappings = {
+        "model.embed_tokens.weight": ("model.embed.embedding", None),
+        "lm_head": ("model.lm_head", None),
+    }
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    np.testing.assert_array_equal(
+        result.params["model.embed.embedding"],
+        src.params["model.embed_tokens.weight"].value,
+    )
+    np.testing.assert_array_equal(
+        result.params["model.lm_head"],
+        src.params["lm_head"].value,
+    )
+
+  def test_transfer_state_with_mappings_syncs_when_lm_head_mapping_unused(self):
+    src = MockState({
+        "model.embed_tokens.weight": MockParam(
+            jnp.arange(12, dtype=jnp.float32).reshape(3, 4)
+        ),
+    })
+    dst = MockState({
+        "model.embed.embedding": MockParam(
+            jnp.zeros((3, 4), dtype=jnp.float32)
+        ),
+        "model.lm_head": MockParam(jnp.full((3, 4), -1.0, dtype=jnp.float32)),
+    })
+    mappings = {
+        "model.embed_tokens.weight": ("model.embed.embedding", None),
+        "lm_head": ("model.lm_head", None),
+    }
+
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+
+    np.testing.assert_array_equal(
+        result.params["model.embed.embedding"],
+        src.params["model.embed_tokens.weight"].value,
+    )
+    np.testing.assert_array_equal(
+        result.params["model.lm_head"],
+        src.params["model.embed_tokens.weight"].value,
+    )
+
+  def test_transfer_state_directly_scanned_layers(self):
+    """Tests transfer from scanned 'layers' in source to 'layers_X' in dest."""
+    # Source has 'layers' containing stacked weights (shape (2, ...))
+    src_state = nnx.Dict(
+        base=nnx.Dict(
+            decoder=nnx.Dict(
+                layers=nnx.Dict(
+                    mlp=nnx.Dict(
+                         # Stacked weight for 2 layers: 0->10.0, 1->20.0
+                        weight=nnx.Param(jnp.array([10.0, 20.0]))
+                    )
+                )
+            )
+        )
+    )
+    # Dest has 'layers_0', 'layers_1' unrolled
+    dst_state = nnx.Dict(
+        model=nnx.Dict(
+            decoder=nnx.Dict(
+                layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+                layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+            )
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    np.testing.assert_array_equal(
+        dst_state['model']['decoder']['layers_0']['mlp']['weight'][...], # Use [...]
+        jnp.array(10.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state['model']['decoder']['layers_1']['mlp']['weight'][...], # Use [...]
+        jnp.array(20.0),
+    )
+
+  def test_transfer_state_directly_implicit_layers_container(self):
+    """Tests transfer when source IS the layers container (GPT-OSS style)."""
+    # Use nnx.Dict for consistency
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            mlp=nnx.Dict(weight=nnx.Param(jnp.array([100.0, 200.0])))
+        )
+    )
+
+    dst_state = nnx.Dict(
+        layers=nnx.Dict(
+            layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+            layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.array(0.0)))),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    np.testing.assert_array_equal(
+        dst_state['layers']['layers_0']['mlp']['weight'][...],
+        jnp.array(100.0),
+    )
+    np.testing.assert_array_equal(
+        dst_state['layers']['layers_1']['mlp']['weight'][...],
+        jnp.array(200.0),
+    )
+
+  def test_transfer_state_directly_with_dtype_casting(self):
+    """Tests that transfer_state_directly correctly casts dtypes (e.g., f32 to bf16)."""
+    # Source state in float32
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(
+                weight=nnx.Param(jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32))
+            ),
+            # Scanned layers in float32
+            layers=nnx.Dict(
+                mlp=nnx.Dict(
+                    weight=nnx.Param(jnp.array([[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32))
+                )
+            )
+        )
+    )
+
+    # Destination state in bfloat16
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(
+                weight=nnx.Param(jnp.zeros((3,), dtype=jnp.bfloat16))
+            ),
+            # Unrolled layers in bfloat16
+            layers_0=nnx.Dict(
+                mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16)))
+            ),
+            layers_1=nnx.Dict(
+                mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((2,), dtype=jnp.bfloat16)))
+            )
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    # Verify direct mapping cast
+    self.assertEqual(dst_state['decoder']['layer0']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['decoder']['layer0']['weight'][...],
+        jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+
+    # Verify scanned layer mapping cast
+    self.assertEqual(dst_state['decoder']['layers_0']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['decoder']['layers_0']['mlp']['weight'][...],
+        jnp.array([10.0, 11.0], dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+    self.assertEqual(dst_state['decoder']['layers_1']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['decoder']['layers_1']['mlp']['weight'][...],
+        jnp.array([20.0, 21.0], dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+
+  def test_transfer_state_directly_scanned_layers_casting(self):
+    """Tests transfer from scanned layers container with dtype casting."""
+    # Source has scanned layers in float32
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            mlp=nnx.Dict(
+                weight=nnx.Param(jnp.array([100.0, 200.0], dtype=jnp.float32))
+            )
+        )
+    )
+
+    # Destination has unrolled layers_X in bfloat16
+    dst_state = nnx.Dict(
+        layers=nnx.Dict(
+            layers_0=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16)))),
+            layers_1=nnx.Dict(mlp=nnx.Dict(weight=nnx.Param(jnp.zeros((), dtype=jnp.bfloat16)))),
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    # Verify casting and slicing for implicit layers
+    self.assertEqual(dst_state['layers']['layers_0']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['layers']['layers_0']['mlp']['weight'][...],
+        jnp.array(100.0, dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+    self.assertEqual(dst_state['layers']['layers_1']['mlp']['weight'].dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        dst_state['layers']['layers_1']['mlp']['weight'][...],
+        jnp.array(200.0, dtype=jnp.bfloat16),
+        atol=1e-2
+    )
+
+  def test_transfer_state_directly_repeats_kv_heads(self):
+    """Tests that direct-match weights are repeated when dst has more heads."""
+    src = jnp.array([[1., 2., 3., 4., 5., 6., 7., 8.],
+                     [3., 4., 5., 6., 7., 8., 9., 10.]], dtype=jnp.float32)
+    src_state = nnx.Dict(
+        attn=nnx.Dict(
+            kv_weight=nnx.Param(src)
+        )
+    )
+    dst_state = nnx.Dict(
+        attn=nnx.Dict(
+            kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32))
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    expected = jnp.repeat(src, 2, axis=0)
+    np.testing.assert_array_equal(
+        dst_state['attn']['kv_weight'][...],
+        expected,
+    )
+
+  def test_transfer_state_directly_repeats_scanned_kv_heads(self):
+    """Tests that scanned weights are tiled when dst has more heads than src."""
+    # Source: scanned layers, kv_weight shape [2, 2, 8] (layers=2, heads=2, dim=8)
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.ones((2, 2, 8), dtype=jnp.float32))
+            )
+        )
+    )
+    # Destination: unrolled layers, each with kv_weight shape [4, 8]
+    dst_state = nnx.Dict(
+        layers_0=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32))
+            )
+        ),
+        layers_1=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 8), dtype=jnp.float32))
+            )
+        ),
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    expected = jnp.repeat(jnp.ones((2, 8), dtype=jnp.float32), 2, axis=0)
+    np.testing.assert_array_equal(
+        dst_state['layers_0']['attn']['kv_weight'][...],
+        expected,
+    )
+    np.testing.assert_array_equal(
+        dst_state['layers_1']['attn']['kv_weight'][...],
+        expected,
+    )
+
+  def test_slice_scanned_param_with_repeatable_target(self):
+    """_slice_scanned_param finds scan axis even when post-slice shape needs repeat."""
+    # src: (embed=4, layers=3, kv_heads=2, head_dim=8)
+    # tgt: (embed=4, kv_heads=4, head_dim=8) — 2x repeat on kv_heads axis
+    src = jnp.arange(4 * 3 * 2 * 8, dtype=jnp.float32).reshape(4, 3, 2, 8)
+    tgt = jnp.zeros((4, 4, 8), dtype=jnp.float32)
+    result = utils._unstack_scanned_param(src, tgt, key_path='test')[1]
+    # Should return layer 1 slice: shape (4, 2, 8)
+    np.testing.assert_equal(result.shape, (4, 2, 8))
+    np.testing.assert_array_equal(result, src[:, 1, :, :])
+
+  def test_transfer_state_directly_scanned_with_repeated_kv_heads(self):
+    """Scanned src + KV-head-repeated dst transfer works end-to-end."""
+    # src: scanned, shape (2, 2, 4) = (embed, layers, kv_heads*head_dim combined)
+    # Use small shapes: embed=4, layers=2, kv_heads=2, head_dim=4
+    # scanned param shape: (4, 2, 2, 4)
+    layer0 = jnp.array([[1., 2., 3., 4.], [5., 6., 7., 8.]], dtype=jnp.float32)  # (2, 4)
+    layer1 = jnp.array([[9., 10., 11., 12.], [13., 14., 15., 16.]], dtype=jnp.float32)
+    # Stack into scanned shape (2, 2, 4): [layer0, layer1] on axis 0
+    scanned = jnp.stack([layer0, layer1], axis=0)  # (2, 2, 4)
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(scanned)
+            )
+        )
+    )
+    # dst: unrolled, each layer has (4, 4) — 2x repeat on kv_heads axis
+    dst_state = nnx.Dict(
+        layers_0=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 4), dtype=jnp.float32))
+            )
+        ),
+        layers_1=nnx.Dict(
+            attn=nnx.Dict(
+                kv_weight=nnx.Param(jnp.zeros((4, 4), dtype=jnp.float32))
+            )
+        ),
+    )
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0)
+
+    expected_0 = jnp.repeat(layer0, 2, axis=0)  # (4, 4)
+    expected_1 = jnp.repeat(layer1, 2, axis=0)
+    np.testing.assert_array_equal(dst_state['layers_0']['attn']['kv_weight'][...], expected_0)
+    np.testing.assert_array_equal(dst_state['layers_1']['attn']['kv_weight'][...], expected_1)
+
+  def test_sglang_jax_1d_kv_bias_alignment(self):
+    """Test 1-D KV bias alignment for sglang_jax rollout engine."""
+    src_key = "layers.0.attn.k_bias"
+    src_k_bias = jnp.arange(128, dtype=jnp.float32)
+    src = MockState({src_key: MockParam(src_k_bias)})
+    dst = MockState(
+        {src_key: MockParam(jnp.zeros((1024,), dtype=jnp.float32))}
+    )
+    mappings = {src_key: (src_key, None)}
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        mappings,
+        rollout_engine="sglang_jax",
+        num_kv_heads=1,
+        head_dim=128,
+    )
+
+    self.assertEqual(result.params[src_key].shape, (1024,))
+    expected = jnp.tile(src_k_bias, 8)
+    self.assertTrue(jnp.allclose(result.params[src_key], expected))
+
+
+class ResolveParallelismSizesTest(parameterized.TestCase):
+
+  def _make_mesh(self, total_devices):
+    """Returns a mock mesh with the given total device count."""
+    mesh = mock.MagicMock()
+    mesh.shape = {"axis": total_devices}
+    return mesh
+
+  @parameterized.named_parameters(
+      ("tp_and_dp_inferred_no_ep", 8, -1, -1, 1, 8, 1, 1),
+      ("tp_and_dp_inferred_with_ep", 8, -1, -1, 2, 4, 1, 2),
+      ("tp_inferred_with_ep", 8, -1, 2, 2, 2, 2, 2),
+      ("dp_inferred_with_ep", 8, 2, -1, 2, 2, 2, 2),
+      ("all_explicit", 8, 4, 2, 1, 4, 2, 1),
+  )
+  def test_resolve_parallelism_sizes(
+      self,
+      total_devices,
+      tp_in,
+      dp_in,
+      ep_in,
+      expected_tp,
+      expected_dp,
+      expected_ep,
+  ):
+    mesh = self._make_mesh(total_devices)
+    tp, dp, ep = utils.resolve_parallelism_sizes(
+        mesh=mesh,
+        tensor_parallel_size=tp_in,
+        data_parallel_size=dp_in,
+        expert_parallel_size=ep_in,
+    )
+    self.assertEqual(tp, expected_tp)
+    self.assertEqual(dp, expected_dp)
+    self.assertEqual(ep, expected_ep)
+
+  def test_resolve_parallelism_sizes_indivisible_ep_raises(self):
+    mesh = self._make_mesh(8)
+    with self.assertRaisesRegex(ValueError, "expert_parallel_size"):
+      utils.resolve_parallelism_sizes(mesh=mesh, expert_parallel_size=3)
+
+
+if __name__ == "__main__":
+  absltest.main()

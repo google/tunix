@@ -14,21 +14,15 @@
 
 """RL Environment for single-turn task-based agent interactions."""
 
-import logging
 from typing import Any, Dict
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.rewards import reward
 
 
-BaseTaskEnv = base_environment.BaseTaskEnv
-EnvStepResult = base_environment.EnvStepResult
-Action = agent_types.Action
-dummy_reward = reward.dummy_reward
-
-
-class TaskEnvironment(BaseTaskEnv):
+class TaskEnvironment(base_environment.BaseTaskEnv):
   """Reinforcement learning environment for single-turn agent interactions.
 
   This environment is designed for tasks where the agent receives an
@@ -42,7 +36,7 @@ class TaskEnvironment(BaseTaskEnv):
 
   def __init__(
       self,
-      task: Dict[str, Any] | None = None,
+      single_example: Dict[str, Any],
       *,
       reward_fn=None,
       **kwargs,
@@ -50,29 +44,27 @@ class TaskEnvironment(BaseTaskEnv):
     """Initialize the task environment.
 
     Args:
-      task (Dict[str, Any] | None): Task specification containing problem
-        description, ground truth, or other parameters.
-      reward_fn: Reward function that takes (task, action) and returns
-        RewardOutput with `.reward` and `.metadata` fields. If None, defaults to
-        `dummy_reward`.
+      single_example: A single prompt.
+      reward_fn: RewardFunction to be used in environment. Optional.
       **kwargs: Extra arguments ignored by this environment but accepted for
         compatibility with a common environment config interface.
     """
     if reward_fn is None:
-      logging.warning("No reward_fn provided, defaulting to dummy_reward().")
-      reward_fn = dummy_reward
+      logging.log_first_n(
+          logging.WARNING,
+          "No reward_fn provided.",
+          1,
+      )
 
-    # Single-turn environment: max_steps is 1 by default.
-    max_steps = kwargs.pop("max_steps", 1)
     super().__init__(
-        task=task, reward_fn=reward_fn, max_steps=max_steps, **kwargs
+        task=single_example, reward_fn=reward_fn, max_steps=1, **kwargs
     )
 
   def _initial_observation(self) -> Dict[str, Any]:
     """Reset the environment and return the task as the initial observation."""
     return self.task
 
-  def _step_impl(self, action: Any) -> EnvStepResult:
+  def _step_impl(self, action: Any) -> base_environment.EnvStepResult:
     """Process the agent's action, calculate reward, and terminate.
 
     In a single-turn environment, any action terminates the episode. We assume
@@ -85,14 +77,17 @@ class TaskEnvironment(BaseTaskEnv):
       An `EnvStepResult` containing an empty observation, the calculated reward,
       done=True, and info including the agent's response and reward metadata.
     """
-    if isinstance(action, Action):
+    if isinstance(action, agent_types.Action):
       action = action.action
-    r_out = self.reward_fn(task=self.task, action=action)
-    return EnvStepResult(
+    if self.reward_fn is not None:
+      reward_val = self.reward_fn(task=self.task, action=action)
+    else:
+      reward_val = 0.0
+    return base_environment.EnvStepResult(
         observation={},
-        reward=r_out.reward,
+        reward=reward_val,
         done=True,
-        info={"response": action, "metadata": r_out.metadata},
+        info={"response": action},
     )
 
   @classmethod
@@ -118,5 +113,5 @@ class TaskEnvironment(BaseTaskEnv):
       env_args: A dictionary containing environment configuration.
     """
     reward_fn = env_args.pop("reward_fn", None)
-    task = env_args
-    return cls(task=task, reward_fn=reward_fn)
+    group_id = env_args.pop("group_id", None)
+    return cls(single_example=env_args, reward_fn=reward_fn, group_id=group_id)

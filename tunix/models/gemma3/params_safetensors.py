@@ -1,5 +1,16 @@
 # Copyright 2025 Google LLC
-# Licensed under the Apache License, Version 2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Loads Gemma3 parameters from safetensors files."""
 
@@ -13,89 +24,192 @@ from tunix.models.gemma3 import model as model_lib
 
 def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
   """Mapping of torch_keys to (nnx_keys, (permute_rule, reshape_rule))."""
-  return {
-      r"model\.embed_tokens\.weight": ("embedder.input_embedding", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+  mapping = {
+      r"(?:language_model\.)?model\.embed_tokens\.weight": (
+          "embedder.input_embedding", None
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
           r"tmp.layers.\1.attn.q",
           ((1, 0), (cfg.embed_dim, cfg.num_heads, cfg.head_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
           r"tmp.layers.\1.attn.k",
           ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
           r"tmp.layers.\1.attn.v",
           ((1, 0), (cfg.embed_dim, cfg.num_kv_heads, cfg.head_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.o_proj\.weight": (
           r"layers.\1.attn.attn_vec_einsum.w",
           ((1, 0), (cfg.num_heads, cfg.head_dim, cfg.embed_dim)),
       ),
-      r"model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.gate_proj\.weight": (
           r"layers.\1.mlp.gate_proj.kernel",
           ((1, 0), None),
       ),
-      r"model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.up_proj\.weight": (
           r"layers.\1.mlp.up_proj.kernel",
           ((1, 0), None),
       ),
-      r"model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.mlp\.down_proj\.weight": (
           r"layers.\1.mlp.down_proj.kernel",
           ((1, 0), None),
       ),
-      r"model\.layers\.([0-9]+)\.input_layernorm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.input_layernorm\.weight": (
           r"layers.\1.pre_attention_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.post_attention_layernorm\.weight": (
           r"layers.\1.post_attention_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.(post_feedforward_layernorm|post_ffn_layernorm|post_ffw_layernorm)\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.(post_feedforward_layernorm|post_ffn_layernorm|post_ffw_layernorm)\.weight": (
           r"layers.\1.post_ffw_norm.scale",
           None,
       ),
-      r"model\.norm\.weight": ("final_norm.scale", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
+      r"(?:language_model\.)?model\.norm\.weight": ("final_norm.scale", None),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.q_norm\.weight": (
           r"layers.\1.attn._query_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.k_norm\.weight": (
           r"layers.\1.attn._key_norm.scale",
           None,
       ),
       r"lm_head\.weight": ("unused.lm_head.weight", None),
       r"lm_head\.bias": ("unused.lm_head.bias", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.bias": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.bias": (
           r"unused.layers.\1.attn.\2.bias",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.input_layernorm\.bias": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.input_layernorm\.bias": (
           r"unused.layers.\1.input_layernorm.bias",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.post_attention_layernorm\.bias": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.post_attention_layernorm\.bias": (
           r"unused.layers.\1.post_attention_layernorm.bias",
           None,
       ),
-      r"model\.rotary_emb\..*": ("unused.rotary_emb", None),
-      r"model\.layers\.([0-9]+)\.self_attn\.rotary_emb\..*": (
+      r"(?:language_model\.)?model\.rotary_emb\..*": (
+          "unused.rotary_emb", None
+      ),
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.rotary_emb\..*": (
           r"unused.layers.\1.attn.rotary_emb",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.self_attn\.qkv_proj\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.self_attn\.qkv_proj\.weight": (
           r"unused.layers.\1.attn.qkv_proj.weight",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.pre_feedforward_layernorm\.weight": (
           r"layers.\1.pre_ffw_norm.scale",
           None,
       ),
-      r"model\.layers\.([0-9]+)\.(pre_ffn_layernorm|pre_ffw_layernorm)\.weight": (
+      r"(?:language_model\.)?model\.layers\.([0-9]+)\.(pre_ffn_layernorm|pre_ffw_layernorm)\.weight": (
           r"layers.\1.pre_ffw_norm.scale",
           None,
       ),
   }
+
+  # Vision Tower (SigLIP).
+  if cfg.vision_config is not None:
+    mapping.update({
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.weight": (
+            "vision_encoder.siglip_encoder.embedding.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.bias": (
+            "vision_encoder.siglip_encoder.embedding.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.embeddings\.position_embedding\.weight": (
+            "vision_encoder.siglip_encoder.pos_embedding",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.weight": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.bias": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.bias",
+            None,
+        ),
+        # Multi-modal Projector
+        r"multi_modal_projector\.mm_input_projection_weight": (
+            "embedder.mm_input_projection.w",
+            None,
+        ),
+        r"multi_modal_projector\.mm_soft_emb_norm\.weight": (
+            "embedder.mm_soft_embedding_norm.scale",
+            None,
+        ),
+    })
+  return mapping
 
 
 def _make_preprocess_fn(cfg: model_lib.ModelConfig):
@@ -196,6 +310,7 @@ def create_model_from_safe_tensors(
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
+    mode: str = "auto",
 ):
   return safetensors_loader.load_and_create_model(
       file_dir=file_dir,
@@ -205,4 +320,5 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=_make_preprocess_fn(config),
       dtype=dtype,
+      mode=mode,
   )

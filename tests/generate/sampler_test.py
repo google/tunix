@@ -14,6 +14,7 @@
 
 # Forked from flax/examples/gemma/sampler_test.py
 
+import dataclasses
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -24,12 +25,48 @@ from tunix.generate import utils
 from tunix.tests import test_common as tc
 
 
+@dataclasses.dataclass(kw_only=True, frozen=True)
+class ModelConfigWithDtype(tc.ModelConfig):
+  dtype: jax.numpy.dtype = jax.numpy.bfloat16
+
+
 class SamplerTest(parameterized.TestCase):
 
   def assertReasonableTensor(self, array, expected_shape=None):
     self.assertIsNotNone(array)
     if expected_shape is not None:
       self.assertEqual(array.shape, expected_shape)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='fallback',
+          config_class=tc.ModelConfig,
+          expected_dtype=jax.numpy.float32,
+      ),
+      dict(
+          testcase_name='from_config',
+          config_class=ModelConfigWithDtype,
+          expected_dtype=jax.numpy.bfloat16,
+      ),
+  )
+  def test_dtype(self, config_class, expected_dtype):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=config_class(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    self.assertEqual(sampler.dtype, expected_dtype)
 
   @parameterized.named_parameters(
       dict(
@@ -110,6 +147,66 @@ class SamplerTest(parameterized.TestCase):
           np.testing.assert_equal(
               result_padded.tokens[i].shape[0], max_generation_steps
           )
+
+  def test_multimodal_samples(self):
+    vocab = tc.MockVocab(is_multimodal=True)
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(
+            vocab_size=vocab.GetPieceSize(), vision_config=tc.VisionConfig()
+        ),
+        rngs=nnx.Rngs(42),
+    )
+
+    class DummyImageProcessor:
+
+      def __call__(self, images):
+        # returns dummy processed images
+        return np.ones((len(images), 1, 32, 32, 3), dtype=np.float32)
+
+    image_processor = DummyImageProcessor()
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+        image_processor=image_processor,  # pytype: disable=wrong-arg-types
+    )
+
+    max_generation_steps = 8
+
+    # We pass in 2 strings and 2 corresponding dummy images
+    images = [
+        np.zeros((32, 32, 3)),
+        np.zeros((32, 32, 3)),
+    ]
+
+    result = sampler(
+        [
+            'quantization <soi> <img> <img> Tunix',
+            '<soi> <img> <img> Parallax distributed',
+        ],
+        max_generation_steps=max_generation_steps,
+        return_logits=True,
+        max_prompt_length=8,
+        echo=True,
+        images=images,
+    )
+
+    self.assertIsNotNone(result)
+    self.assertReasonableTensor(result.tokens)
+    self.assertReasonableTensor(result.logits)
+    np.testing.assert_allclose(
+        result.tokens,
+        np.array([
+            [1, 21, 23, 22, 22, 14, 8, 25, 8, 25, 8, 25, 8, 25],
+            [1, 23, 22, 22, 15, 18, 8, 25, 8, 25, 8, 25, 8, 25],
+        ]),
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -219,6 +316,61 @@ class SamplerTest(parameterized.TestCase):
     )
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
+
+  def test_logprobs(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+    # Test greedy logprobs
+    result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+    )
+    self.assertIsNotNone(result.logprobs)
+    self.assertLen(result.logprobs, 2)
+    for logprobs, tokens in zip(result.logprobs, result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
+    # Test top_p logprobs
+    top_p_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+        temperature=1.0,
+        top_p=0.9,
+    )
+    self.assertIsNotNone(top_p_result.logprobs)
+    self.assertLen(top_p_result.logprobs, 2)
+    for logprobs, tokens in zip(top_p_result.logprobs, top_p_result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
+
+    # Test beam search logprobs
+    beam_result = sampler(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        return_logprobs=True,
+        beam_size=2,
+    )
+    self.assertIsNotNone(beam_result.logprobs)
+    self.assertLen(beam_result.logprobs, 2)
+    for logprobs, tokens in zip(beam_result.logprobs, beam_result.tokens):
+      self.assertNotEmpty(logprobs)
+      self.assertLen(logprobs, tokens.shape[0])
 
   def test_prompt_padding_bucketization(self):
     vocab = tc.MockVocab()
@@ -412,11 +564,46 @@ class SamplerTest(parameterized.TestCase):
         eos_tokens=[7, 21],
         temperature=0.9,
         top_p=1.0,
-        seed=42,
+        seed=0,
     )
     np.testing.assert_equal(
-        result.tokens, [np.array([8, 14, 5]), np.array([14])]
+        result.tokens, [np.array([14]), np.array([12, 1, 17])]
     )
+
+  def test_forbidden_token_ids(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=128,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    vocab_size = vocab.GetPieceSize()
+    num_allowed_tokens = vocab_size // 4
+    forbidden_tokens = set(range(num_allowed_tokens, vocab_size))
+    # EOS is forbidden so we are sure to get a full length generation.
+    forbidden_tokens.add(vocab.eos_id())
+    max_generation_steps = 100
+
+    result = sampler(
+        ['input string'],
+        max_generation_steps=max_generation_steps,
+        return_logits=False,
+        forbidden_tokens=forbidden_tokens,
+        temperature=1.0,  # Ensure some randomness
+        seed=123,
+    )
+    self.assertLen(result.tokens[0], max_generation_steps)
+    self.assertNoCommonElements(result.tokens[0], forbidden_tokens)
 
 
 if __name__ == '__main__':

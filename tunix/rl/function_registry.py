@@ -15,9 +15,11 @@
 
 import threading
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from absl import logging
 
 _POLICY_LOSS_FN_CATEGORY = "policy_loss_fn"
 _ADVANTAGE_ESTIMATOR_CATEGORY = "advantage_estimator"
+_REWARD_MANAGER_CATEGORY = "reward_manager"
 
 
 class FunctionRegistry:
@@ -26,6 +28,7 @@ class FunctionRegistry:
   DEFAULT_ALLOWED_CATEGORIES: FrozenSet[str] = frozenset({
       _POLICY_LOSS_FN_CATEGORY,
       _ADVANTAGE_ESTIMATOR_CATEGORY,
+      _REWARD_MANAGER_CATEGORY,
   })
 
   def __init__(self, allowed_categories: Optional[Iterable[str]] = None):
@@ -72,9 +75,11 @@ class FunctionRegistry:
           self._registry[category] = {}
 
         if name in self._registry[category]:
-          raise ValueError(
-              f"Function '{name}' is already registered in category"
-              f" '{category}'."
+          logging.warning(
+              "Function '%s' is already registered in category '%s'. "
+              "Overwriting with new function.",
+              name,
+              category,
           )
         self._registry[category][name] = func
       return func
@@ -135,3 +140,15 @@ def register_advantage_estimator(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
   """Returns a decorator to register an advantage estimator function by name."""
   return default_registry.register(_ADVANTAGE_ESTIMATOR_CATEGORY, name)
+
+
+def get_reward_manager(name: str) -> Callable[..., Any]:
+  """Returns the reward manager function by name."""
+  return default_registry.get(_REWARD_MANAGER_CATEGORY, name)
+
+
+def register_reward_manager(
+    name: str,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+  """Returns a decorator to register a reward manager function by name."""
+  return default_registry.register(_REWARD_MANAGER_CATEGORY, name)

@@ -20,10 +20,10 @@ import importlib
 import inspect
 import os
 import pathlib
-from pathlib import Path  # pylint: disable=g-importing-member
 import shutil
 import stat
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, Iterator, Sequence
+
 from absl import logging
 import dotenv
 import jax
@@ -31,11 +31,19 @@ import numpy as np
 import omegaconf
 import optax
 import orbax.checkpoint as ocp
+from tunix.perf import metrics as perf_metrics
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
+_SUPPORTED_MODEL_SOURCES = (
+    "kaggle",
+    "huggingface",
+    "gcs",
+    "internal",
+    "",
+)
 
 
 def yaml_key_to_env_key(s: str) -> str:
@@ -49,6 +57,7 @@ def string_to_bool(s: str) -> bool:
     return False
   raise ValueError(f"Can't convert {s} to bool")
 
+
 _yaml_types_to_parser = {
     str: str,
     int: int,
@@ -59,13 +68,54 @@ _yaml_types_to_parser = {
 }
 
 
-def get_project_root() -> Path:
+def _normalize_cli_override(schema_value: Any, override_value: Any) -> Any:
+  """Restores empty string overrides that OmegaConf parses as None.
+
+  OmegaConf.from_cli interprets CLI values like key="" as None. For string
+  fields we want to preserve the user's intent and treat that as an empty
+  string, including for nested dictionary overrides.
+  """
+  if override_value is None and isinstance(schema_value, str):
+    return ""
+  if isinstance(schema_value, (collections.abc.Mapping, omegaconf.DictConfig)) and isinstance(
+      override_value, (collections.abc.Mapping, omegaconf.DictConfig)
+  ):
+    normalized = {}
+    for key, value in override_value.items():
+      normalized[key] = _normalize_cli_override(schema_value.get(key), value)
+    return normalized
+  return override_value
+
+
+def _can_override_nullable_schema(override_value: Any) -> bool:
+  """Returns whether a null-default schema key can accept the override.
+
+  Nullable schema fields do not provide enough type information to route
+  through `_yaml_types_to_parser`. In that case, preserve the CLI-parsed value
+  directly, or the raw string from the environment.
+  """
+  return isinstance(
+      override_value,
+      (
+          str,
+          int,
+          float,
+          bool,
+          collections.abc.Mapping,
+          list,
+          omegaconf.dictconfig.DictConfig,
+          omegaconf.listconfig.ListConfig,
+      ),
+  )
+
+
+def get_project_root() -> pathlib.Path:
   """Returns the project root folder.
 
   It searches up from the current file until it finds a marker file like '.git',
   'pyproject.toml', or 'setup.py'.
   """
-  current_path = Path(__file__).resolve().parent
+  current_path = pathlib.Path(__file__).resolve().parent
   # List of files that define the root of your project
   root_markers = [
       "LICENSE",
@@ -78,20 +128,72 @@ def get_project_root() -> Path:
       return parent
 
   # Fallback: if no marker is found, return the current working directory
-  return Path.cwd()
+  return pathlib.Path.cwd()
+
+
+def _dict_to_cli_args(
+    d: collections.abc.Mapping[str, Any], parent_key: str = "", sep: str = "."
+) -> Iterator[str]:
+  """Converts a dictionary to an Iterator string of CLI arguments."""
+  for k, v in d.items():
+    new_key = f"{parent_key}{sep}{k}" if parent_key else k
+    if isinstance(v, (collections.abc.Mapping, omegaconf.DictConfig)):
+      if v:
+        yield from _dict_to_cli_args(v, parent_key=new_key, sep=sep)
+      else:
+        yield f"{new_key}={{}}"
+    else:
+      yield f"{new_key}={v}"
 
 
 class HyperParameters:
-  """Loads, merges, overrides, validates, and prepares the configuration for pipeline execution."""
+  """Loads, merges, overrides, validates, and prepares the configuration for pipeline execution.
+
+  Configurations are merged from multiple sources. The following order of
+  precedence applies, with later sources overriding earlier ones:
+  1. Base Config File: The first positional argument, path to a YAML config
+  file.
+  2. Config File Override: An optional `override_config_file=/path/to/file.yaml`
+     argument. Values in this file override values in the base config file.
+  3. CLI Arguments: `key=value` pairs provided as arguments override values
+     from both the base config and the config file override.
+
+  Environment variables prefixed with `T_` can also be used to set parameters,
+  but it is an error to set a parameter via both an environment variable and
+  a command-line argument or override file.
+  """
 
   def __init__(self, argv: list[str], **kwargs):
     # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
 
     dotenv.load_dotenv()
     raw_keys = collections.OrderedDict()
-    config_name = argv[1]
-    raw_data_from_yaml = self._load_config_from_yaml(config_name)
+
+    if len(argv) < 2 or "=" in argv[1]:
+      raise ValueError(
+          "The first argument must be a path to a base config file."
+      )
+
+    # Handle relative paths used in example scripts as a special case.
+    # TODO(noghabi): Remove this once the example scripts are updated.
+    if argv[1] == "base_config.yaml":
+      base_config_file = pathlib.Path(__file__).parent / argv[1]
+    else:
+      base_config_file = argv[1]
+    raw_data_from_yaml = self._load_config_from_yaml(base_config_file)
     self._validate_env_variable(raw_data_from_yaml)
+    base_model_config = raw_data_from_yaml.get("model_config", {})
+
+    config_file_override = None
+    cli_overrides = []
+    for arg in argv[2:]:
+      if arg.startswith("override_config_file="):
+        if config_file_override is not None:
+          raise ValueError("Only one override_config_file argument is allowed.")
+        _, config_file_override = arg.split("=", 1)
+      else:
+        cli_overrides.append(arg)
+
     self.replace_keys = {
         "lora_config",
         "training_config",
@@ -99,17 +201,81 @@ class HyperParameters:
         "profiler_options",
         "rl_training_config",
     }
+
+    all_overrides = []
+    if config_file_override:
+      next_conf = self._load_config_from_yaml(config_file_override)
+      all_overrides.extend(_dict_to_cli_args(next_conf))
+
+    # First we apply the file overrides, then the overrides from the command
+    # line making the command line the highest priority.
+    all_overrides.extend(cli_overrides)
+
     keys_from_env_and_command_line = self._update_from_env_and_command_line(
-        raw_keys, raw_data_from_yaml, argv, **kwargs
+        raw_keys, raw_data_from_yaml, all_overrides, **kwargs
     )
     logging.info(
         "Updating keys from env and command line: %s",
         keys_from_env_and_command_line,
     )
     self.config = raw_keys
+    # Inherit missing keys from model_config to actor_model_config, etc.
+    # Also update keys that were not explicitly overridden
+    current_model_config = self.config.get("model_config", {})
+    for config_key in [
+        "actor_model_config",
+        "reference_model_config",
+        "rollout_model_config",
+    ]:
+      if config_key in self.config:
+        for k, v in current_model_config.items():
+          if k not in self.config[config_key] or self.config[config_key][
+              k
+          ] == base_model_config.get(k):
+            self.config[config_key][k] = v
     self._validate_tokenizer()
     self._validate_model_source(raw_keys)
     self.check_supported_workflow()
+    self._validate_perf_metrics(entry_point=argv[0])
+
+  def _validate_perf_metrics(self, entry_point: str):
+    """Validates that perf metrics are only enabled for GRPO.
+
+    Args:
+      entry_point: The entry point of the pipeline.
+
+    Raises:
+      ValueError: If perf metrics are enabled but the entry point is not
+        "grpo_main".
+    """
+    perf_config = self.config.get("training_config", {}).get(
+        "perf_metrics_options", {}
+    )
+
+    if perf_config:
+      if not entry_point.endswith("grpo_main"):
+        raise ValueError(
+            "Perf metrics are currently only supported for GRPO training"
+            " (grpo_main)."
+        )
+      custom_export_fn_path = perf_config.get("custom_export_fn_path")
+      if (
+          custom_export_fn_path
+          and self._get_function_from_path(custom_export_fn_path) is None
+      ):
+        raise ValueError(
+            "Could not load custom export function from"
+            f" {custom_export_fn_path}"
+        )
+      custom_export_fn_path_v2 = perf_config.get("custom_export_fn_path_v2")
+      if (
+          custom_export_fn_path_v2
+          and self._get_function_from_path(custom_export_fn_path_v2) is None
+      ):
+        raise ValueError(
+            "Could not load custom export function v2 from"
+            f" {custom_export_fn_path_v2}"
+        )
 
   def _validate_tokenizer(self):
     """Validate the tokenizer configuration.
@@ -140,10 +306,12 @@ class HyperParameters:
           "model_download_path"
       )
     if not os.path.isdir(model_download_path):
-      logging.error(f"Error: '{model_download_path}' is not a valid directory.")
+      logging.error(
+          "Error: '%r' is not a valid directory.", model_download_path
+      )
       return
 
-    logging.info(f"Clearing contents of '{model_download_path}'...")
+    logging.info("Clearing contents of '%s'...", model_download_path)
     for item in os.listdir(model_download_path):
       item_path = os.path.join(model_download_path, item)
       try:
@@ -155,15 +323,15 @@ class HyperParameters:
           except OSError:
             pass  # Continue and let os.remove() raise the error if it fails
           os.remove(item_path)
-          logging.info(f"  Removed file/link: {item_path}")
+          logging.info("  Removed file/link: %s", item_path)
         elif os.path.isdir(item_path):
           # shutil.rmtree can also handle permission issues internally
           # by providing an onerror handler if needed.
           shutil.rmtree(item_path)
-          logging.info(f"  Removed directory: {item_path}")
-      except (OSError, shutil.Error) as e:
-        logging.info(f"  Failed to delete {item_path}. Reason: {e}")
-    logging.info(f"Finished clearing '{model_download_path}'.")
+          logging.info("  Removed directory: %s", item_path)
+      except (OSError, shutil.Error):
+        logging.warning("  Failed to delete %s.", item_path, exc_info=True)
+    logging.info("Finished clearing '%r'.", model_download_path)
 
   def _validate_model_source(self, raw_keys: collections.OrderedDict[str, Any]):
     """Validate the checkpoint source and intermediate checkpoint."""
@@ -171,10 +339,10 @@ class HyperParameters:
     model_source = model_config.get("model_source")
     intermediate_ckpt = model_config.get("intermediate_ckpt_dir")
 
-    if model_source not in ["kaggle", "huggingface", "gcs", ""]:
+    if model_source not in _SUPPORTED_MODEL_SOURCES:
       raise ValueError(
-          f"Invalid model_source: {model_source}. Must be 'kaggle',"
-          " 'huggingface', 'gcs' or ''."
+          f"Invalid model_source: {model_source!r}. Must be one of"
+          f" {_SUPPORTED_MODEL_SOURCES}."
       )
 
     if model_source in ["kaggle", "huggingface"] and not intermediate_ckpt:
@@ -192,19 +360,23 @@ class HyperParameters:
     model_config = self.config["model_config"]
     model_name = model_config["model_name"]
     model_source = model_config["model_source"]
-    supported_sources = collections.defaultdict(lambda: ["huggingface"])
-    supported_sources["gemma"] = ["kaggle"]
-    supported_sources["gemma2"] = ["kaggle"]
-    supported_sources["gemma3"] = ["gcs"]
+    supported_sources = collections.defaultdict(
+        lambda: ["huggingface", "internal"]
+    )
+    # TODO(b/467448875): Add support for other sources, such as kaggle for other
+    # models.
+    supported_sources["gemma"] = ["kaggle", "internal"]
+    supported_sources["gemma2"] = ["kaggle", "internal"]
+    supported_sources["gemma3"] = ["gcs", "internal"]
 
-    if model_name.startswith("gemma3"):
+    if model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
       expected_sources = supported_sources["gemma3"]
       if model_source not in expected_sources:
         raise ValueError(
             f"Model '{model_name}' must use source(s) {expected_sources}, but"
             f" got '{model_source}'."
         )
-    elif model_name.startswith("gemma2"):
+    elif model_name.startswith("gemma2") or model_name.startswith("gemma-2"):
       expected_sources = supported_sources["gemma2"]
       if model_source not in expected_sources:
         raise ValueError(
@@ -387,33 +559,20 @@ class HyperParameters:
     opt_kwargs = self._extract_kwargs(
         opt_func, optimizer_config, config_path_info, learning_rate_val
     )
+    # Wrap the optimizer function with inject_hyperparams so that
+    # the learning rate can be tracked and logged during training.
+    injected_opt_func = optax.inject_hyperparams(opt_func)
     # Call the optimizer function with the extracted kwargs
     try:
-      return opt_func(**opt_kwargs)
+      return injected_opt_func(**opt_kwargs)
     except TypeError as e:
       raise TypeError(
           f"Error calling {opt_type} with arguments {opt_kwargs}. "
           f"Check if the arguments match the signature of optax.{opt_type}: {e}"
       ) from e
 
-  def create_mesh(self, model_key: str):
-    """Validate and extract mesh configuration from a dictionary.
-
-    Expects raw_keys to contain a 'mesh' key, which is a dictionary with 'shape'
-    and 'axis_names' keys.
-
-    Args:
-      model_key: A model key that contain raw mesh configuration. For example,
-        in rl, there are actor_model, critic_model and reference_model, each of
-        them could have different mesh configuration.
-
-    Returns:
-      A tuple containing (axis_shapes, axis_names), both as tuples.
-
-    Raises:
-      ValueError: If the mesh configuration is missing, malformed, or invalid.
-    """
-
+  def _parse_mesh_config(self, model_key: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Validate and parse mesh configuration for a model key."""
     mesh_config = self.config[model_key].get("mesh")
     if not mesh_config:
 
@@ -447,7 +606,6 @@ class HyperParameters:
           f" {mesh_config.get('axis_names')}"
       ) from e
 
-    # Validate axis_shapes
     if not isinstance(axis_shapes, tuple):
       raise ValueError(
           f"'mesh.shape' must be a list or tuple, got {type(axis_shapes)}."
@@ -457,7 +615,6 @@ class HyperParameters:
           f"All elements in mesh.shape must be integers, got {axis_shapes}."
       )
 
-    # Validate axis_names
     if not isinstance(axis_names, tuple):
       raise ValueError(
           f"'mesh.axis_names' must be a tuple, got {type(axis_names)}."
@@ -467,24 +624,56 @@ class HyperParameters:
           f"All elements in mesh.axis_names must be strings, got {axis_names}."
       )
 
-    # Validate lengths match
     if len(axis_shapes) != len(axis_names):
       raise ValueError(
           f"mesh.shape {axis_shapes} and mesh.axis_names {axis_names} "
           "must have the same length."
       )
+    return tuple(axis_shapes), tuple(axis_names)
 
-    # Validate mesh shape <= device count
-    num_devices = jax.device_count()
+  def create_mesh(self, model_key: str, devices: Sequence[Any] | None = None):
+    """Validate and extract mesh configuration from a dictionary.
+
+    Expects raw_keys to contain a 'mesh' key, which is a dictionary with 'shape'
+    and 'axis_names' keys.
+
+    Args:
+      model_key: A model key that contain raw mesh configuration. For example,
+        in rl, there are actor_model, critic_model and reference_model, each of
+        them could have different mesh configuration.
+      devices: Optional explicit device subset to use for the mesh. When
+        provided, the mesh shape must exactly match the number of assigned
+        devices.
+
+    Returns:
+      A tuple containing (axis_shapes, axis_names), both as tuples.
+
+    Raises:
+      ValueError: If the mesh configuration is missing, malformed, or invalid.
+    """
+
+    axis_shapes, axis_names = self._parse_mesh_config(model_key)
+    num_devices = len(devices) if devices is not None else jax.device_count()
     if np.prod(axis_shapes) > num_devices:
       raise ValueError(
           f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
           f"but found {num_devices}."
       )
+    if devices is not None:
+      if np.prod(axis_shapes) != num_devices:
+        raise ValueError(
+            f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
+            f"but was assigned {num_devices}."
+        )
+      return jax.sharding.Mesh(
+          np.array(list(devices)).reshape(axis_shapes),
+          axis_names,
+          axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
+      )
     return jax.make_mesh(
-        tuple(axis_shapes),
-        tuple(axis_names),
-        axis_types=(jax.sharding.AxisType.Auto,) * len(tuple(axis_names)),
+        axis_shapes,
+        axis_names,
+        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
     )
 
   def obtain_training_config_dict(self, key):
@@ -508,7 +697,7 @@ class HyperParameters:
 
     constructed_training_config = collections.defaultdict()
     for key, value in training_config.items():
-      if key == "checkpoint_options" and value:
+      if key == "checkpointing_options" and value:
         try:
           constructed_training_config[key] = ocp.CheckpointManagerOptions(
               **value
@@ -530,6 +719,16 @@ class HyperParameters:
             raise ValueError(f"Invalid profiler options: {value}") from e
         else:
           constructed_training_config[key] = None
+      elif key == "perf_metrics_options":
+        if value:
+          try:
+            constructed_training_config[key] = perf_metrics.PerfMetricsOptions(
+                **value
+            )
+          except ValueError as e:
+            raise ValueError(f"Invalid perf metrics options: {value}") from e
+        else:
+          constructed_training_config[key] = None
       elif "optimizer_config" in key:
         continue
       else:
@@ -541,12 +740,12 @@ class HyperParameters:
       self,
       raw_keys: collections.OrderedDict[str, Any],
       raw_data_from_yaml: dict[str, Any],
-      argv: list[str],
+      overrides: list[str],
       **kwargs,
   ):
     """Update the configuration from command line."""
 
-    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
+    cli_cfg = omegaconf.OmegaConf.from_cli(overrides)
 
     raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(
         cli_cfg, resolve=True
@@ -592,8 +791,24 @@ class HyperParameters:
       else:
         new_proposal = os.environ.get(yaml_key_to_env_key(k))
 
+      new_proposal = _normalize_cli_override(raw_data_from_yaml[k], new_proposal)
+
+      if raw_data_from_yaml[k] is None:
+        if new_proposal is None:
+          raw_keys[k] = None
+          continue
+        if _can_override_nullable_schema(new_proposal):
+          raw_keys[k] = copy.deepcopy(new_proposal)
+          continue
+        raise ValueError(
+            f"For key '{k}', nullable schema can't accept value of type"
+            f" {type(new_proposal)} from the CLI or ENV"
+        )
+
       # If specified value is not one of type in base config yaml or is not
       # consumed by to type parser, error out
+      # TODO(b/477343879): ensure Type checking for values with no defaults such
+      # as lora_config
       if (not isinstance(new_proposal, type(raw_data_from_yaml[k]))) and (
           type(raw_data_from_yaml[k]) not in _yaml_types_to_parser
       ):
@@ -604,8 +819,6 @@ class HyperParameters:
 
       # Take the config value
       if new_proposal is None:
-        # This allows users to set empty strings via CLI, otherwise parsed as
-        # "None"
         raw_keys[k] = None
       elif isinstance(new_proposal, type(raw_data_from_yaml[k])):
         raw_keys[k] = new_proposal  # take the raw data, no type conversion
@@ -694,49 +907,68 @@ class HyperParameters:
               f"We received env {environment_var} but it isn't all uppercase."
           )
 
-  def _load_config_from_yaml(self, config_name: str):
+  def _load_config_from_yaml(self, config_path: str):
     """Try Loading and validate the configuration from the YAML file."""
 
-    path = pathlib.Path(__file__).parent / config_name
     try:
-      config_oconf = omegaconf.OmegaConf.load(path)
+      config_oconf = omegaconf.OmegaConf.load(config_path)
     except FileNotFoundError as e:
-      raise ValueError(f"Config {config_name} not found.") from e
+      raise ValueError(f"Config {config_path} not found.") from e
 
     return config_oconf
 
-  def obtain_reward_fn(self) -> List[Callable[..., Any]]:
+  def obtain_reward_fn(self) -> list[Callable[..., Any]]:
     """Obtain reward function from the config."""
     project_root = get_project_root()
     reward_fns = []
     for reward_fn_path in self.config["reward_functions"]:
-      full_path = str(project_root / reward_fn_path)
-      module_name = os.path.splitext(os.path.basename(full_path))[0]
-      # load from source
-      loader = importlib.machinery.SourceFileLoader(module_name, full_path)
-      spec = importlib.util.spec_from_loader(module_name, loader)
 
-      if spec is None:
-        raise ImportError(f"Cannot find spec for module at {full_path}")
-      if spec.loader is None:
-        raise ImportError(f"Spec for module {module_name} has no loader")
+      module = None
+      # If the path is relative, try importing the module directly.
+      if "/" not in reward_fn_path:
+        try:
+          module = importlib.import_module(reward_fn_path)
+          module_name = module.__name__
+        except Exception as e:
+          logging.warning(
+              "'%s' import failed: %s", reward_fn_path, e, exc_info=True
+          )
+          module = None
 
-      module = importlib.util.module_from_spec(spec)
+      # Try importing the module from the project root.
+      if module is None:
+        full_path = str(project_root / reward_fn_path)
+        module_name = os.path.splitext(os.path.basename(full_path))[0]
+        # load from source
+        loader = importlib.machinery.SourceFileLoader(module_name, full_path)
+        spec = importlib.util.spec_from_loader(module_name, loader)
 
-      try:
-        spec.loader.exec_module(module)
-      except Exception as e:
-        raise ImportError(
-            f"Failed to execute module {module_name} from {full_path}: {e}"
+        if spec is None:
+          raise ImportError(f"Cannot find spec for module at {full_path}")
+        if spec.loader is None:
+          raise ImportError(f"Spec for module {module_name} has no loader")
+
+        module = importlib.util.module_from_spec(spec)
+
+        try:
+          spec.loader.exec_module(module)
+        except Exception as e:
+          raise ImportError(
+              f"Failed to execute module {module_name} from {full_path}"
+          ) from e
+      if module is None:
+        raise RuntimeError(
+            f"Module from path '{reward_fn_path}' failed to load."
         )
 
+      loaded_module = module
       if self.config["verl_compatible"]:
 
         def reward_fn(prompts, completions, reward_model, **kwargs):
           del prompts, kwargs
           ground_truths = reward_model["ground_truth"]
           return [
-              module.compute_score(c, gt)
+              loaded_module.compute_score(c, gt)
               for c, gt in zip(completions, ground_truths)
           ]
 
@@ -776,6 +1008,7 @@ class HyperParameters:
     except (ImportError, AttributeError, ValueError) as e:
       logging.warning("Error importing '%s': %s", path_str, e)
       return None
+
 
 def initialize(argv, **kwargs):
   return HyperParameters(argv, **kwargs)

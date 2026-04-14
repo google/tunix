@@ -16,10 +16,10 @@
 
 import copy
 import json
-import logging
-from typing import Any
+from typing import Any, Dict
 import uuid
 
+from absl import logging
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.parser.tool_parser import tool_parser_base
@@ -28,19 +28,7 @@ from tunix.rl.agentic.tools import base_tool
 from tunix.rl.agentic.tools import tool_manager
 
 
-ToolManager = tool_manager.ToolManager
-BaseTool = base_tool.BaseTool
-ToolParser = tool_parser_base.ToolParser
-Trajectory = agent_types.Trajectory
-Step = agent_types.Step
-Action = agent_types.Action
-ConversationAgentBase = base_agent.ConversationAgentBase
-get_tool_parser = tool_parser_registry.get_tool_parser
-
-logger = logging.getLogger(__name__)
-
-
-class ToolAgent(ConversationAgentBase):
+class ToolAgent(base_agent.ConversationAgentBase):
   """Agent implementation that supports tool usage within ConversationAgentBase.
 
   This agent extends the base conversation agent functionality to enable
@@ -54,13 +42,15 @@ class ToolAgent(ConversationAgentBase):
       self,
       system_prompt: str,
       tool_parser_name: str = "qwen",
-      tool_map: dict[str, type[BaseTool]] | None = None,
+      tool_map: dict[str, type[base_tool.BaseTool]] | None = None,
   ):
     # Tool management system for routing and executing tool calls.
-    self.tool_manager = ToolManager(tool_map=tool_map or {})
+    self.tool_manager = tool_manager.ToolManager(tool_map=tool_map or {})
 
     # Parser component for converting LLM responses to structured tool calls.
-    parser_cls: type[ToolParser] = get_tool_parser(tool_parser_name)
+    parser_cls: type[tool_parser_base.ToolParser] = (
+        tool_parser_registry.get_tool_parser(tool_parser_name)
+    )
     self.tool_parser = parser_cls()
 
     # Generate tool prompt by injecting JSON Schema into parser template.
@@ -78,11 +68,18 @@ class ToolAgent(ConversationAgentBase):
   def _init_messages(self, system_prompt: str) -> None:
     """Initialize conversation history with system prompt + tools prompt."""
     # Build a single string with tools prompt appended to system prompt.
-    content = system_prompt + (self.tools_prompt or "")
+    content = (system_prompt or "") + (self.tools_prompt or "")
     self._messages = [{"role": "system", "content": content}]
 
-  def _observation_to_messages(self, observation: Any) -> None:
+  def _observation_to_messages(
+      self,
+      observation: Any,
+      reward: float,
+      done: bool,
+      info: Dict[str, Any],
+  ) -> None:
     """Convert environment observation into messages, including tool outputs."""
+    del reward, done, info  # Unused in this implementation.
     if isinstance(observation, dict):
       if "tool_outputs" in observation:
         # Handle structured tool execution results.
@@ -90,15 +87,15 @@ class ToolAgent(ConversationAgentBase):
           self._messages.append({
               "role": "tool",
               "tool_call_id": call_id,
-              "content": "Tool returned result: " + output,
+              "content": "Tool returned result: " + (output or ""),
           })
       elif "question" in observation:
         self._messages.append({
             "role": "user",
-            "content": observation["question"],
+            "content": observation["question"] or "",
         })
       else:
-        logger.warning("Unknown dict observation format: %s", observation)
+        logging.warning("Unknown dict observation format: %s", observation)
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})
 
@@ -106,7 +103,7 @@ class ToolAgent(ConversationAgentBase):
   # Interaction with Model
   # ─────────────────────────────────────────────────────────────
 
-  def update_from_model(self, response: str, **kwargs) -> Action:
+  def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
     """Parse LLM response to extract tool calls and create structured action.
 
     Attempts to parse the model response for tool calls using the configured
@@ -126,7 +123,7 @@ class ToolAgent(ConversationAgentBase):
     try:
       tool_calls = self.tool_parser.parse(response)
     except Exception as e:
-      logger.warning("ToolParser failed: %s", e)
+      logging.warning("ToolParser failed: %s", e)
       tool_calls = []
 
     # Fallback mechanism: if no tool calls detected, use finish function.
@@ -153,12 +150,11 @@ class ToolAgent(ConversationAgentBase):
     self._messages.append({"role": "assistant", "content": response})
 
     # Record complete step with conversation context and parsed action.
-    step = Step(
+    step = agent_types.Step(
         chat_completions=copy.deepcopy(self._messages),
-        action=Action(action=tool_calls_dict),
-        observation=self._obs_cache,
+        action=agent_types.Action(action=tool_calls_dict),
         model_response=response,
     )
     self._trajectory.steps.append(step)
 
-    return Action(action=tool_calls_dict)
+    return agent_types.Action(action=tool_calls_dict)

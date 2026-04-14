@@ -1,6 +1,6 @@
 [project]
 name = "google-tunix"
-version = "0.1.6"
+version = "0.1.7"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
@@ -23,21 +23,25 @@ dependencies = [
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
   "grain",
+  "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
+  "importlib_resources",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "pillow",  # Image processing
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
-  "qwix",
+  "perfetto",  # Perfetto trace writer for metrics export
+  "qwix>=0.1.5",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
   "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
-  "hf_transfer",  # Huggingface caching in CI
+  "tenacity",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +61,12 @@ prod = [
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
+]
+test = [
+  "pytest",
+  "pytest-xdist",
+  "gcsfs",
+  "chex",
 ]
 
 [project.urls]
@@ -90,7 +100,6 @@ pyink-annotation-pragmas = [
   "@test",
 ]
 pyink-ipynb-indentation = 2
-pyink-ipynb-unicode-escape = true
 
 [tool.isort]
 profile = "google"       # or "black", etc.

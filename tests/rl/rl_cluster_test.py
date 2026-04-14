@@ -20,6 +20,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import chex
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import jax
 from jax import numpy as jnp
 import numpy as np
@@ -36,6 +37,11 @@ PreTrainedTokenizerBase = tokenization_utils_base.PreTrainedTokenizerBase
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 Mesh = jax.sharding.Mesh
+
+
+def _dummy_export_fn(*args, **kwargs) -> None:
+  """Provides a dummy export function for testing."""
+  del args, kwargs
 
 
 class RlClusterTest(parameterized.TestCase):
@@ -125,17 +131,58 @@ class RlClusterTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='2d_mesh',
+          testcase_name='2d_mesh_perf_v1_only',
           reshape_dims=(-1, 1),
           mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={'v1': _dummy_export_fn},
+          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
       ),
       dict(
-          testcase_name='3d_mesh',
+          testcase_name='3d_mesh_perf_v1_only',
           reshape_dims=(1, -1, 1),
           mesh_axes=('data', 'fsdp', 'tp'),
+          export_fns_by_version={'v1': _dummy_export_fn},
+          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
+      ),
+      dict(
+          testcase_name='2d_mesh_perf_v2_only',
+          reshape_dims=(-1, 1),
+          mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={'v2': _dummy_export_fn},
+          expected_perf_type=rl_cluster_lib.perf_trace.NoopTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.PerfTracer,
+      ),
+      dict(
+          testcase_name='2d_mesh_both_v1_and_v2',
+          reshape_dims=(-1, 1),
+          mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={
+              'v1': _dummy_export_fn,
+              'v2': _dummy_export_fn,
+          },
+          expected_perf_type=rl_cluster_lib.perf_trace.PerfTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.PerfTracer,
+      ),
+      dict(
+          testcase_name='2d_mesh_no_perf',
+          reshape_dims=(-1, 1),
+          mesh_axes=('fsdp', 'tp'),
+          export_fns_by_version={},
+          expected_perf_type=rl_cluster_lib.perf_trace.NoopTracer,
+          expected_perf_v2_type=rl_cluster_lib.perf_tracer_v2.NoopTracer,
       ),
   )
-  def test_init_with_perf_config(self, reshape_dims, mesh_axes):
+  def test_init_with_perf_config(
+      self,
+      *,
+      reshape_dims,
+      mesh_axes,
+      export_fns_by_version,
+      expected_perf_type,
+      expected_perf_v2_type,
+  ):
     mesh = Mesh(np.array(jax.devices()).reshape(*reshape_dims), mesh_axes)
     cluster_config = rl_cluster_lib.ClusterConfig(
         role_to_mesh={
@@ -162,14 +209,18 @@ class RlClusterTest(parameterized.TestCase):
     model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
-    perf_config = rl_cluster_lib.perf_metrics.PerfMetricsConfig()
+    perf_config = rl_cluster_lib.perf_metrics.PerfMetricsConfig(
+        custom_export_fn=export_fns_by_version.get('v1'),
+        custom_export_fn_v2=export_fns_by_version.get('v2'),
+    )
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=model,
         tokenizer=vocab,
         cluster_config=cluster_config,
         perf_config=perf_config,
     )
-    self.assertIsInstance(rl_cluster.perf, rl_cluster_lib.perf_trace.PerfTracer)
+    self.assertIsInstance(rl_cluster.perf, expected_perf_type)
+    self.assertIsInstance(rl_cluster.perf_v2, expected_perf_v2_type)
 
   def test_batch_size_config(self):
     cfg = rl_cluster_lib.RLTrainingConfig(
@@ -392,6 +443,95 @@ class RlClusterTest(parameterized.TestCase):
     self.assertIsInstance(rl_cluster.rollout, CustomRolloutEngine)
     self.assertEqual(rl_cluster.rollout.my_arg, 0)
     self.assertEqual(rl_cluster.rollout.config, cluster_config.rollout_config)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='no_rule',
+          role_to_logical_axis_rules=None,
+          expected_logical_axis_rules=(),
+      ),
+      dict(
+          testcase_name='missing_role',
+          role_to_logical_axis_rules={
+              rl_cluster_lib.Role.ACTOR: ['fsdp'],
+          },
+          expected_logical_axis_rules=(),
+      ),
+      dict(
+          testcase_name='with_rule',
+          role_to_logical_axis_rules={
+              rl_cluster_lib.Role.REFERENCE: ['fsdp'],
+          },
+          expected_logical_axis_rules=['fsdp'],
+      ),
+  )
+  def test_logical_axis_rules_cm(
+      self, role_to_logical_axis_rules, expected_logical_axis_rules
+  ):
+    mesh = Mesh(np.array(jax.devices()).reshape(1, -1), ('fsdp', 'tp'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        role_to_logical_axis_rule=role_to_logical_axis_rules,
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    ref_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    invoked = False
+
+    def mock_fn(*args, **kwargs):  # pylint: disable=unused-argument
+      nonlocal invoked
+      invoked = True
+      self.assertEqual(
+          nn_partitioning.get_axis_rules(), expected_logical_axis_rules
+      )
+      return jnp.zeros((1, 1))
+
+    self.assertEqual(nn_partitioning.get_axis_rules(), ())
+
+    old_fn = rl_cluster.inference_worker.get_ref_per_token_logps
+    try:
+      rl_cluster.inference_worker.get_ref_per_token_logps = mock_fn
+      rl_cluster.get_ref_per_token_logps(
+          prompt_tokens=jnp.zeros((1, 1)),
+          completion_tokens=jnp.zeros((1, 1)),
+          pad_id=0,
+          eos_id=1,
+          micro_batch_size=1,
+      )
+    finally:
+      rl_cluster.inference_worker.get_ref_per_token_logps = old_fn
+
+    self.assertTrue(invoked)
+    self.assertEqual(nn_partitioning.get_axis_rules(), ())
 
 
 if __name__ == '__main__':

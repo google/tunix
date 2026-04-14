@@ -32,10 +32,10 @@ Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
 
 
-def check_positive(value: int | None, name: str):
+def is_positive_integer(value: int | None, name: str):
   """Checks if the value is positive."""
-  if value is not None and value <= 0:
-    raise ValueError(f"{name} must be positive.")
+  if value is not None and (not isinstance(value, int) or value <= 0):
+    raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 
 def check_divisibility(
@@ -178,7 +178,8 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
       merged[key] = list(chain.from_iterable(all_values))
     else:
       merged[key] = tree_util.tree_map(
-          lambda *xs: np.concatenate(xs), *all_values
+          lambda *xs: np.concatenate([np.atleast_1d(x) for x in xs]),
+          *all_values,
       )
 
   return merged
@@ -191,9 +192,15 @@ def put_params_on_memory_kind(
   """Puts params on the given memory kind."""
   if memory_kind not in ["device", "pinned_host", "unpinned_host"]:
     raise ValueError(
-        "`memory_kind` must be one of `device`, `pinned_host`, or "
-        f"`unpinned_host`. Received: {memory_kind}."
+        "memory_kind must be one of device, pinned_host, or "
+        f"unpinned_host. Received: {memory_kind}."
     )
+  if not jax.tree_util.tree_leaves(params):
+    logging.debug(
+        "put_params_on_memory_kind received an empty parameter tree. "
+        "Skipping device transfer."
+    )
+    return params
   original_shardings = jax.tree.map(lambda x: x.sharding, params)
   logging.info("original_shardings: %s", original_shardings)
   is_on_device = jax.tree_util.tree_reduce(
@@ -260,13 +267,4 @@ def get_partition_spec(
     return jax.sharding.PartitionSpec()
 
 
-def maybe_move(arr: jax.Array, mesh: jax.sharding.Mesh) -> jax.Array:
-  """Replaces the array to the new mesh if it's not already there."""
-  if not mesh.devices.size or not mesh.devices.any():
-    return arr
-  if not arr.sharding.device_set.issubset(set(mesh.devices.flatten())):
-    dest_sharding = jax.sharding.NamedSharding(
-        mesh, get_partition_spec(arr.sharding)
-    )
-    return jax.device_put(arr, dest_sharding)
-  return arr
+VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"

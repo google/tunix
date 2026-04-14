@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Base class for samplers."""
+
 import abc
 import dataclasses
 from typing import List, Optional
@@ -20,6 +21,7 @@ from typing import List, Optional
 from flax import nnx
 from flax.nnx import statelib
 import jax
+import numpy as np
 
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
@@ -36,10 +38,12 @@ class SamplerOutput:
   logits: Optional[list[jax.Array] | jax.Array]
 
   # Tokens corresponding to the generated samples.
-  tokens: list[jax.Array] | jax.Array
+  # Since tokens need to be transfered to RAM for decoding, we use numpy array
+  # here.
+  tokens: list[np.ndarray] | np.ndarray
 
   # Left padded prompt tokens.
-  padded_prompt_tokens: jax.Array
+  padded_prompt_tokens: np.ndarray
 
   logprobs: Optional[list[float]]
 
@@ -60,7 +64,7 @@ class BaseSampler(ABC):
   @abstractmethod
   def __call__(
       self,
-      input_strings: List[str],
+      input_strings: str | List[str],
       max_generation_steps,
       max_prompt_length=None,
       temperature=0.0,
@@ -76,5 +80,5 @@ class BaseSampler(ABC):
     """Returns a list of generated samples for the input strings."""
 
   @abstractmethod
-  def tokenize(self, input_string: str) -> jax.Array | list[int]:
+  def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Returns the tokenized the input string."""

@@ -316,7 +316,7 @@ class PPOLearnerTest(parameterized.TestCase):
           config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
           rngs=nnx.Rngs(2),
       )
-      reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
+      reward_model = tc.ToyTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
     mesh = pxla.thread_resources.env.physical_mesh
     default_rollout_config = base_rollout.RolloutConfig(
@@ -403,13 +403,14 @@ class PPOLearnerTest(parameterized.TestCase):
     )
 
     for metric_name in [
-        'score/mean',
-        'reward/mean',
-        'reward_kl_penalty',
+        'rewards/score/mean',
+        'rewards/reward/mean',
+        'rewards/reward_kl_penalty',
     ]:
+      prefix, metric_name = metric_name.split('/', maxsplit=1)
       self.assertLen(
           ppo_learner.rl_cluster._rl_metrics_logger.get_metric_history(
-              'global', metric_name, 'train'
+              prefix, metric_name, 'train'
           ),
           ppo_learner.rl_cluster.global_steps,
       )
@@ -586,7 +587,7 @@ class PPOLearnerTest(parameterized.TestCase):
     reward_model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(2)
     )
-    reward_model = tc.MockTransformerWithScoreHead(reward_model, nnx.Rngs(1))
+    reward_model = tc.ToyTransformerWithScoreHead(reward_model, nnx.Rngs(1))
 
     mesh = pxla.thread_resources.env.physical_mesh
     cluster_config = rl_cluster_lib.ClusterConfig(

@@ -31,7 +31,6 @@ import dataclasses
 from typing import Any, Callable, Dict
 
 
-ABC = abc.ABC
 abstractmethod = abc.abstractmethod
 
 
@@ -56,7 +55,7 @@ class EnvStepResult:
   info: Dict[str, Any]
 
 
-class BaseEnv(ABC):
+class BaseEnv(abc.ABC):
   """Abstract base class for reinforcement learning environments.
 
   This class defines the minimal standard interface for environments used in
@@ -256,7 +255,7 @@ class BaseTaskEnv(BaseEnv):
     self.max_steps = max_steps
     self.step_count = 0
     # Allow subclasses to store any extra initialization arguments if needed.
-    self._extra_kwargs = kwargs
+    self.extra_kwargs = kwargs
 
   # ---------- Template methods to be implemented by subclasses ----------
 

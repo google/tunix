@@ -11,12 +11,17 @@ class BackendMappingMixin:
   """Provides helper methods to retrieve backend-specific weight mappings."""
 
   DEFAULT_BACKEND = 'vllm_jax'
+  # Subclasses can override this to explicitly set the path
+  BACKEND_PACKAGE_PATH = None
 
   @classmethod
   def _backend_registry(cls) -> Dict[str, Any]:
-    module = cls.__module__
+    # Use the explicit path if provided, otherwise fallback to the module path
+    module = cls.BACKEND_PACKAGE_PATH or cls.__module__
+
     package_name = module.rsplit('.', 1)[0] if '.' in module else module
     package = importlib.import_module(package_name)
+
     return getattr(package, 'BACKEND_MAPPINGS', {})
 
   @classmethod
@@ -48,6 +53,11 @@ class BackendMappingMixin:
     return result or None
 
   @classmethod
+  def lora_to_hf_transpose_keys(cls, backend: str | None = None):
+    result = cls.mapping_for(backend).get('lora_to_hf_transpose_keys')
+    return result or None
+
+  @classmethod
   def to_hf_hook_fns(cls, backend: str | None = None):
     return cls.mapping_for(backend).get('to_hf_hook_fns')
 
@@ -66,6 +76,7 @@ class MappingConfig:
   lora_to_hf_mappings: Optional[Dict[str, Any]] = None
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
+  lora_to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
 
   @classmethod
   def build(
@@ -90,6 +101,7 @@ class MappingConfig:
         'lora_to_hf_mappings',
         'to_hf_hook_fns',
         'to_hf_transpose_keys',
+        'lora_to_hf_transpose_keys',
     )
 
     values: Dict[str, Any] = {}
@@ -116,6 +128,7 @@ class MappingConfig:
         lora_to_hf_mappings=resolved.get('lora_to_hf_mappings'),
         to_hf_hook_fns=resolved.get('to_hf_hook_fns'),
         to_hf_transpose_keys=resolved.get('to_hf_transpose_keys'),
+        lora_to_hf_transpose_keys=resolved.get('lora_to_hf_transpose_keys'),
     )
 
   @classmethod
@@ -143,6 +156,7 @@ class MappingConfig:
         lora_to_hf_mappings=maybe_call('lora_to_hf_mappings'),
         to_hf_hook_fns=maybe_call('to_hf_hook_fns'),
         to_hf_transpose_keys=maybe_call('to_hf_transpose_keys'),
+        lora_to_hf_transpose_keys=maybe_call('lora_to_hf_transpose_keys'),
     )
 
     for key, value in overrides.items():

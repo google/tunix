@@ -63,7 +63,7 @@ with adhoc_context:
   from tunix.models.gemma import model as gemma_lib
   from tunix.sft import utils
   from tunix.utils import script_utils
-  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
+  from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from flax import nnx
   from tunix.cli.utils import model as model_utils
 
@@ -194,16 +194,11 @@ GENERATION_CONFIGS = {
 
 
 # %%
-# ------------------------------------------------------------------------------
-# Section 2: Utility Functions
-# ------------------------------------------------------------------------------
-# %%
 # Check initial memory usage
 show_hbm_usage()
-
 # %%
 # ------------------------------------------------------------------------------
-# Section 3: Data Preprocessing
+# Section 2: Data Preprocessing
 # ------------------------------------------------------------------------------
 # Data preprocessing
 #
@@ -272,7 +267,7 @@ for ele in train_dataset[:1]:
 
 # %%
 # ------------------------------------------------------------------------------
-# Section 4: Model Loading
+# Section 3: Model Loading
 # ------------------------------------------------------------------------------
 # Load policy model and reference model
 #
@@ -303,7 +298,7 @@ def get_ref_model():
     model_config = MODEL_CONFIG[MODEL_VERSION]()
     ckpt_path = os.path.join(NNX_CKPT_DIR, MODEL_VERSION)
     abs_gemma: nnx.Module = nnx.eval_shape(
-        lambda: gemma_lib.Transformer(model_config, rngs=nnx.Rngs(params=0))
+        lambda: gemma_lib.Gemma(model_config, rngs=nnx.Rngs(params=0))
     )
     abs_state = nnx.state(abs_gemma)
     abs_state = jax.tree.map(
@@ -318,11 +313,12 @@ def get_ref_model():
     gemma = nnx.merge(graph_def, restored_params)
     return gemma, mesh, None
   else:  # oss
-    model_name = f'gemma2-{MODEL_VERSION}'
+    model_name = f'gemma-2-{MODEL_VERSION}'
     model_config_dict = {
         'model_name': model_name,
         'model_source': 'kaggle',
-        'model_id': f'google/gemma-2/flax/{model_name}',
+        'model_id': f'google/{model_name}',
+        'model_path': f'google/gemma-2/flax/gemma2-{MODEL_VERSION}',
         'model_download_path': MODEL_DOWNLOAD_PATH,
         'intermediate_ckpt_dir': NNX_CKPT_DIR,
         'model_display': False,
@@ -356,7 +352,7 @@ nnx.display(lora_gemma)
 show_hbm_usage()
 # %%
 # ------------------------------------------------------------------------------
-# Section 5: Reward Functions
+# Section 4: Reward Functions
 # ------------------------------------------------------------------------------
 # This section defines the reward functions used to score the model's generated
 # responses. First, we define a RegEx to check if the output format is correct.
@@ -492,7 +488,7 @@ def check_numbers(prompts, completions, answer, **kargs):
 
 # %%
 # ------------------------------------------------------------------------------
-# Section 6: Training Setup
+# Section 5: Training Setup
 # ------------------------------------------------------------------------------
 # Configure the trainer, optimizer, and other components for the GRPO run.
 
@@ -612,7 +608,7 @@ grpo_trainer = GRPOLearner(
 
 # %%
 # ------------------------------------------------------------------------------
-# Section 7: Execute Training
+# Section 6: Execute Training
 # ------------------------------------------------------------------------------
 with script_utils.profile_and_capture_log(
     'gemma_benchmark', enable_profile=DO_MEM_PROFILING

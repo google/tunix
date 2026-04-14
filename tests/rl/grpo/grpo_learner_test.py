@@ -32,6 +32,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.perf import trace as trace_lib
+from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
@@ -146,6 +147,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         self.algo_config = grpo_config
         self._data_shuffle_seed = None
         self.rl_cluster = types.SimpleNamespace(
+            global_steps=0,
             cluster_config=types.SimpleNamespace(
                 training_config=types.SimpleNamespace(
                     rollout_micro_batch_size=1,
@@ -154,6 +156,7 @@ class GRPOLearnerTest(parameterized.TestCase):
             ),
             buffer_metrics=lambda x, mode: None,
             perf=trace_lib.NoopTracer(),
+            perf_v2=perf_tracer_v2.NoopTracer(),
         )
         self._rollout_micro_batch_size = 1
         self._compute_logps_micro_batch_size = 1
@@ -324,17 +327,18 @@ class GRPOLearnerTest(parameterized.TestCase):
         'rewards/min',
         'rewards/max',
         *rewards_metrics,
-        'test_metric',
+        'global/test_metric',
     ]:
       if metric_name == 'rewards/reward_2' and not isinstance(reward_fns, list):
         continue
+      prefix, metric_name = metric_name.split('/', maxsplit=1)
       self.assertLen(
-          rl_metric_logger.get_metric_history('global', metric_name, 'train'),
+          rl_metric_logger.get_metric_history(prefix, metric_name, 'train'),
           grpo_learner.rl_cluster.global_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
-          rl_metric_logger.get_metric_history('global', metric_name, 'eval'),
+          rl_metric_logger.get_metric_history(prefix, metric_name, 'eval'),
           grpo_learner.rl_cluster.actor_trainer.train_steps
           / kwargs['eval_every_n_steps'],
           msg=f'metric_name: {metric_name}',
@@ -1091,7 +1095,10 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertEqual(
         grpo_learner2.rl_cluster.actor_trainer._restored_custom_metadata,
-        {'global_step': grpo_learner.rl_cluster.global_steps},
+        {
+            'global_step': grpo_learner.rl_cluster.global_steps,
+            'role': rl_cluster_lib.Role.ACTOR.value,
+        },
     )
     # double the batch size it should also work with checkpoint resumption.
     batch_size *= 2
@@ -1158,8 +1165,6 @@ class GRPOLearnerTest(parameterized.TestCase):
         [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
     )
     np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
-
-
 
 if __name__ == '__main__':
   absltest.main()

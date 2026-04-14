@@ -20,20 +20,22 @@ import abc
 from concurrent import futures
 import itertools
 import math
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
-from typing import Generic, TypeVar
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
 import jax
-import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
+from tunix.rl import function_registry
+from tunix.rl import reward_manager
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
+
 
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
@@ -80,9 +82,15 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_cluster = rl_cluster
     self.algo_config = algo_config
-    self.reward_fns = (
-        [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
+
+    reward_manager_fn = function_registry.get_reward_manager(
+        algo_config.reward_manager
     )
+    self.reward_manager = reward_manager_fn(
+        reward_fns=reward_fns,
+        algo_config=algo_config,
+    )
+
     self.metric_fns = metric_fns or []
     self.rl_cluster.actor_trainer.is_managed_externally = True
     if hasattr(self.rl_cluster, "critic_trainer"):
@@ -160,7 +168,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       mode: rl_cluster_lib.Mode,
       step: int | None = None,
       **kwargs,
-  ) -> jax.Array:
+  ) -> np.ndarray:
     """Computes the rewards for completions using the provided reward functions.
 
     Args:
@@ -171,10 +179,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       **kwargs: Additional keyword arguments passed to the reward functions.
 
     Returns:
-      A JAX array (shape `[num_prompts]`) of scalar rewards for
+      A numpy array (shape `[B]`) of scalar rewards for
       each prompt-completion pair. The rewards are the sum across all the
-      provided
-      reward functions.
+      provided reward functions.
 
     Raises:
         RuntimeError: If 'r' reward is None, indicating a failure to obtain the
@@ -185,59 +192,20 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
 
-    num_prompts = len(prompts)
-    num_reward_fns = len(self.reward_fns)
-    rewards = np.zeros((num_prompts, num_reward_fns))
+    rewards_info = self.reward_manager(
+        prompts=prompts,
+        completions=completions,
+        **kwargs,
+    )
 
-    # Compute all rewards for each prompt-completion pair.
-    for i, reward_fn in enumerate(self.reward_fns):
-      r = reward_fn(prompts=prompts, completions=completions, **kwargs)
+    if step is not None:
+      self.rl_cluster.buffer_metrics_async(
+          rewards_info["log_metrics"], mode=mode, step=step
+      )
+    else:
+      self.rl_cluster.buffer_metrics(rewards_info["log_metrics"], mode=mode)
 
-      if r is None:
-        raise RuntimeError(
-            f"Failed to obtain result from {reward_fn.__name__}. Result is"
-            " None."
-        )
-      if isinstance(r, list) and len(r) != len(prompts):
-        raise RuntimeError(
-            f"Length mismatch after {reward_fn.__name__}: "
-            f"len(r)={len(r)}, len(prompts)={num_prompts}. "
-            f"Content of r: {r}"
-        )
-
-      rewards[:, i] = np.array(r)
-
-    # Sum rewards across all reward functions for each prompt.
-    sum_rewards = np.nansum(rewards, axis=1)
-
-    # Log all metrics in a single loop
-    for j, (prompt, completion) in enumerate(zip(prompts, completions)):
-      metrics_to_log = {}
-
-      # Log prompts and completions.
-      metrics_to_log["prompts"] = (prompt, None)
-      metrics_to_log["completions"] = (completion, None)
-
-      # Log the summed rewards for this trajectory.
-      trajectory_sum = sum_rewards[j]
-      metrics_to_log["rewards/sum"] = (trajectory_sum, np.mean)
-      metrics_to_log["rewards/min"] = (np.min(rewards[j]), np.min)
-      metrics_to_log["rewards/max"] = (np.max(rewards[j]), np.max)
-
-      # Log individual rewards for this trajectory
-      for i, reward_fn in enumerate(self.reward_fns):
-        metric_name = f"rewards/{reward_fn.__name__}"
-        metrics_to_log[metric_name] = (rewards[j, i], np.mean)
-
-      # Log all metrics for this trajectory in one call
-      if step is not None:
-        self.rl_cluster.buffer_metrics_async(
-            metrics_to_log, mode=mode, step=step
-        )
-      else:
-        self.rl_cluster.buffer_metrics(metrics_to_log, mode=mode)
-
-    return jnp.array(sum_rewards)
+    return rewards_info["rewards"]
 
   def _process_accumulated_batches(
       self,
@@ -416,7 +384,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        with self.rl_cluster.perf.span("data_loading"):
+        with self.rl_cluster.perf.span(
+            "data_loading"
+        ), self.rl_cluster.perf_v2.span(
+            perf_constants.DATA_LOADING,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+            },
+        ):
           # Fetch one training micro-batch
           example = next(iterator)
           cur_batch_size = len(example["prompts"])
@@ -542,6 +517,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           buffer[key] = buffer[key][micro_batch_size:]
 
         yield micro_batch
+
   def train(
       self,
       train_ds: Iterable[TrainingInputT],
@@ -613,9 +589,19 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           )
 
           if self.should_sync_weights:
-            logging.debug(f"Syncing weights at global step {self.rl_cluster.global_steps} mini batch step {self._iter_steps}")
+            logging.debug(
+                "Syncing weights at global step"
+                f" {self.rl_cluster.global_steps} mini batch step"
+                f" {self._iter_steps}"
+            )
             with self.rl_cluster.perf.span(
                 "weight_sync", self.rl_cluster.perf.all_devices
+            ), self.rl_cluster.perf_v2.span(
+                perf_constants.WEIGHT_SYNC,
+                self.rl_cluster.perf_v2.all_devices,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                },
             ):
               with jax.profiler.StepTraceAnnotation(
                   "sync_sampler_weights", step_num=initial_steps
@@ -628,6 +614,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf.export(),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf_v2.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
 

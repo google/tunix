@@ -16,7 +16,6 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.rl import algorithm_config
 
-
 class AlgorithmConfigTest(parameterized.TestCase):
 
   def test_defaults_are_valid(self):
@@ -30,12 +29,19 @@ class AlgorithmConfigTest(parameterized.TestCase):
       self.fail(f"Default AlgorithmConfig values raised ValueError: {e}")
 
   @parameterized.named_parameters(
-      dict(testcase_name="gspo_gae_ppo", algo="gspo", adv="gae", loss="ppo"),
+      dict(
+          testcase_name="gspo_gae_ppo", algo="gspo-token", adv="gae", loss="ppo"
+      ),
       dict(
           testcase_name="grpo_grpo_grpo", algo="grpo", adv="grpo", loss="grpo"
       ),
       dict(testcase_name="ppo_gae_ppo", algo="ppo", adv="gae", loss="ppo"),
-      dict(testcase_name="gspo_grpo_ppo", algo="gspo", adv="grpo", loss="ppo"),
+      dict(
+          testcase_name="gspo_grpo_ppo",
+          algo="gspo-token",
+          adv="grpo",
+          loss="ppo",
+      ),
   )
   def test_valid_combinations(self, algo: str, adv: str, loss: str):
     """Tests various valid combinations of core algorithm parameters."""
@@ -54,7 +60,6 @@ class AlgorithmConfigTest(parameterized.TestCase):
       )
 
   @parameterized.named_parameters(
-      dict(testcase_name="invalid_algo_dapo", value="dapo"),
       dict(testcase_name="invalid_algo_else", value="something_else"),
   )
   def test_invalid_algo_variant(self, value: str):
@@ -91,12 +96,14 @@ class AlgorithmConfigTest(parameterized.TestCase):
     """Ensures that positional arguments are not allowed."""
     with self.assertRaises(TypeError):
       # Attempt to initialize with positional arguments
-      algorithm_config.AlgorithmConfig("grpo", "grpo", "grpo")
+      algorithm_config.AlgorithmConfig("grpo-token", "grpo", "grpo")
 
     # Check that standard keyword initialization works
     try:
       algorithm_config.AlgorithmConfig(
-          algo_variant="gspo", advantage_estimator="gae", policy_loss_fn="ppo"
+          algo_variant="gspo-token",
+          advantage_estimator="gae",
+          policy_loss_fn="ppo",
       )
     except TypeError:
       self.fail("Keyword arguments failed for kw_only dataclass")
@@ -116,6 +123,24 @@ class AlgorithmConfigTest(parameterized.TestCase):
     # so we can assign invalid values after creation.
     config.algo_variant = "invalid_after_init"
     self.assertEqual(config.algo_variant, "invalid_after_init")
+
+  def test_config_logging(self):
+    """Tests that configuration is logged correctly upon initialization."""
+    # assertLogs catches logs at the specified level or higher
+    with self.assertLogs(level="INFO") as log:
+      algorithm_config.AlgorithmConfig(
+          algo_variant="gspo-token",
+          advantage_estimator="gae",
+          policy_loss_fn="ppo",
+      )
+
+    # log.output is a list of strings like ['INFO:root:message...']
+    full_log_output = "\n".join(log.output)
+
+    self.assertIn("Initializing AlgorithmConfig", full_log_output)
+    self.assertIn("algo_variant: gspo", full_log_output)
+    self.assertIn("advantage_estimator: gae", full_log_output)
+    self.assertIn("policy_loss_fn: ppo", full_log_output)
 
 
 if __name__ == "__main__":

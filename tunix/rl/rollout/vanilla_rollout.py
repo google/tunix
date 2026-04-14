@@ -21,7 +21,6 @@ from typing import Any, Optional, Tuple
 
 from flax import nnx
 import jax
-import jax.numpy as jnp
 import jaxtyping
 from tunix.generate import sampler
 from tunix.rl import common
@@ -61,7 +60,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
         seed=rollout_config.seed,
-        pad_output=True,
+        pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
     )
     return base_rollout.RolloutOutput(
@@ -79,8 +78,10 @@ class VanillaRollout(base_rollout.BaseRollout):
       completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
+    graphdef, state = self._sampler.model_def_and_state()
     return common.compute_per_token_logps(
-        self.model(),
+        graphdef,
+        state,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         pad_id=self.pad_id(),

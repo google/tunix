@@ -35,7 +35,6 @@ class SglangJaxRollout(base_rollout.BaseRollout):
       mesh: jax.sharding.Mesh,
       rollout_config: base_rollout.RolloutConfig,
   ):
-    self.mesh = mesh
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
         model=model,
@@ -45,14 +44,28 @@ class SglangJaxRollout(base_rollout.BaseRollout):
         tokenizer=tokenizer,
         config=sglang_jax_sampler.SglangJaxConfig(
             mesh=mesh,
-            context_length=rollout_config.rollout_sglang_jax_context_length,
+            mapping_config=mapping_config,
             model_version=rollout_config.rollout_sglang_jax_model_version,
+            context_length=rollout_config.rollout_sglang_jax_context_length,
             mem_fraction_static=rollout_config.rollout_sglang_jax_mem_fraction_static,
             init_with_random_weights=rollout_config.rollout_sglang_jax_init_with_random_weights,
             disable_radix_cache=rollout_config.rollout_sglang_jax_disable_radix_cache,
             enable_deterministic_sampling=rollout_config.rollout_sglang_jax_enable_deterministic_sampling,
-            mapping_config=mapping_config,
+            use_sort_for_toppk_minp=rollout_config.rollout_sglang_jax_use_sort_for_toppk_minp,
+            enable_static_lora=rollout_config.rollout_sglang_jax_enable_static_lora,
+            enable_single_process=rollout_config.rollout_sglang_jax_enable_single_process,
+            lora_target_modules=rollout_config.rollout_sglang_jax_lora_target_modules,
+            max_lora_rank=rollout_config.rollout_sglang_jax_max_lora_rank,
+            lora_scaling=rollout_config.rollout_sglang_jax_lora_scaling,
+            precompile_bs_paddings=rollout_config.rollout_sglang_jax_precompile_bs_paddings,
+            precompile_token_paddings=rollout_config.rollout_sglang_jax_precompile_token_paddings,
+            chunked_prefill_size=rollout_config.rollout_sglang_jax_chunked_prefill_size,
+            page_size=rollout_config.rollout_sglang_jax_page_size,
+            load_format=rollout_config.rollout_sglang_jax_load_format,
+            max_running_requests=rollout_config.rollout_sglang_jax_max_running_requests,
+            log_level=rollout_config.rollout_sglang_jax_log_level,
         ),
+        **rollout_config.rollout_sglang_jax_kwargs,
     )
     state = nnx.state(model)
     self._sampler.load_checkpoint(state)
@@ -74,6 +87,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
         seed=rollout_config.seed,
         echo=False,
         pad_output=True,
+        **kwargs,
     )
 
     return base_rollout.RolloutOutput(
@@ -115,3 +129,6 @@ class SglangJaxRollout(base_rollout.BaseRollout):
 
   def model(self) -> nnx.Module:
     return self._sampler.transformer
+
+  def model_state(self):
+    return self._sampler.transformer_state
