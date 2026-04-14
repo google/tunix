@@ -386,19 +386,16 @@ if USE_FLASH_ATTENTION:
   config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
 
 devices = jax.devices()
-split = int(len(devices) / 2)
+if len(devices) != 64:
+  raise ValueError(f"Expected 64 devices, got {len(devices)}.")
+rollout_fsdp = 12
+rollout_tp = 4
+train_fsdp = 4
+train_tp = 4
+split = rollout_fsdp * rollout_tp
 
-# Favor TP for now.
-# TODO(sizhi): Experiment with DP vs TP for rollout.
-rollout_tp = np.gcd(split, config.num_kv_heads)
-rollout_fsdp = split // rollout_tp
 rollout_devices = np.array(devices[:split]).reshape(rollout_fsdp, rollout_tp)
-
-train_fsdp = np.gcd(split, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
-train_tp = np.gcd(split // train_fsdp, config.num_kv_heads)
-train_devices = np.array(
-    devices[split : split + train_fsdp * train_tp]
-).reshape(train_fsdp, train_tp)
+train_devices = np.array(devices[split:]).reshape(train_fsdp, train_tp)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
