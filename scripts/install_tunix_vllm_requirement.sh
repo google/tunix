@@ -1,4 +1,4 @@
-# !/bin/bash
+#!/bin/bash
 
 # Copyright 2023–2025 Google LLC
 #
@@ -16,29 +16,20 @@
 
 # This script installs the dependencies for running GRPO with MaxText+Tunix+vLLM on TPUs
 
-set -e
+set -euo pipefail
 set -x
 
-python -m ensurepip --default-pip
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REQ_FILE=${REQ_FILE:-"${ROOT_DIR}/requirements/requirements.txt"}
+SPECIAL_REQ_FILE=${SPECIAL_REQ_FILE:-"${ROOT_DIR}/requirements/special_requirements.txt"}
 
-pip uninstall -y jax jaxlib libtpu
+python3 -m ensurepip --default-pip
+python3 -m pip install --upgrade pip setuptools wheel
 
 pip install aiohttp==3.12.15
 
 # Install Python packages that enable pip to authenticate with Google Artifact Registry automatically.
 pip install keyring keyrings.google-artifactregistry-auth
 
-# Install vLLM for Jax and TPUs from GitHub repository
-git clone https://github.com/vllm-project/vllm.git /tmp/vllm
-cd /tmp/vllm
-VLLM_TARGET_DEVICE="tpu" pip install -e .
-
-# Install tpu-commons from the artifact registry
-pip install --no-cache-dir --pre \
-    --index-url https://us-python.pkg.dev/cloud-tpu-images/maxtext-rl/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \
-    --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \
-    tpu-commons==0.1.1
-
-pip install numba==0.61.2
+VLLM_TARGET_DEVICE="tpu" python3 -m pip install -r "${REQ_FILE}"
+python3 -m pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall

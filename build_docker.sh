@@ -31,8 +31,24 @@ build_ai_image() {
     echo "Building Tunix Image at commit hash ${COMMIT_HASH}..."
 
     DOCKER_COMMAND="docker"
-    if ! docker info >/dev/null 2>&1; then
-        DOCKER_COMMAND="sudo docker"
+    if docker info >/dev/null 2>&1; then
+        DOCKER_COMMAND="docker"
+    else
+        # Avoid invoking sudo interactively which can prompt for a password.
+        # Check whether non-interactive sudo would work (no password).
+        if sudo -n docker info >/dev/null 2>&1; then
+            DOCKER_COMMAND="sudo docker"
+        else
+            cat <<'MSG'
+Docker does not appear usable from this account and the build would prompt for a password.
+
+Run the build with sufficient privileges (will prompt): sudo bash build_docker.sh
+On Linux, add your user to the docker group so sudo isn't required (you must re-login):
+  sudo usermod -aG docker "$USER" && newgrp docker
+
+MSG
+            exit 1
+        fi
     fi
 
     $DOCKER_COMMAND build \
@@ -48,4 +64,4 @@ echo "*************************
 "
 
 echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}.
-It only has the dependencies installed. "
+It now installs Tunix and the pinned vLLM and tpu-inference dependencies from requirements/requirements.txt. "

@@ -83,6 +83,7 @@ pip install "git+https://github.com/google/tunix#egg=google-tunix[prod]"
 # For GPU/CPU
 pip install git+https://github.com/google/tunix
 # Then install JAX for GPU or CPU as described above.
+
 ```
 
 ### Option 3: From Source
@@ -110,13 +111,39 @@ These need to be installed manually.
 
 **vLLM on TPU**
 
-The TPU-inference supported version of vLLM is not on PyPI yet. Please follow
-the instructions to install manually from
-[vLLM TPU docs](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/)
-or use the Docker image `vllm/vllm-tpu:v0.11.1` and then run:
+The TPU-inference supported version of `vllm` is not always available as a
+single PyPI release, and installing the TPU build sometimes requires extra pip flags
+so that `libtpu` wheels (hosted by the JAX project) can be resolved. You can
+install the pinned vLLM + TPU requirements from this repository using one of
+the raw requirement-file URLs below.
+
+Install from remote:
 
 ```sh
-pip install tpu-inference
+pip install -r https://github.com/google/tunix/raw/main/requirements/requirements.txt
+pip install -r https://github.com/google/tunix/raw/main/requirements/special_requirements.txt
+```
+
+Or (direct raw.githubusercontent URL):
+
+```sh
+pip install -r https://raw.githubusercontent.com/google/tunix/main/requirements/requirements.txt
+pip install -r https://raw.githubusercontent.com/google/tunix/main/requirements/special_requirements.txt
+```
+
+If you prefer a single-line install that directly overrides `tpu-inference`, you can also run:
+
+```sh
+pip install vllm @git+https://github.com/vllm-project/vllm.git@<commit>
+pip install --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \\
+            --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \\
+            --pre \\
+            tpu-inference@git+https://github.com/vllm-project/tpu-inference.git@<commit>
+```
+
+Or install from source:
+```sh
+bash scripts/install_tunix_vllm_requirements.sh
 ```
 
 **SGLang-Jax**

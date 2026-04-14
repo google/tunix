@@ -7,7 +7,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y git python3 python3-pip && \
+    apt-get install -y build-essential git python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
@@ -35,8 +35,13 @@ WORKDIR /app
 # Copy the project files to the image
 COPY . .
 
+ENV VLLM_TARGET_DEVICE=tpu
+
+RUN pip install -r /app/requirements/requirements.txt
+RUN pip install --force-reinstall -r /app/requirements/special_requirements.txt
+
 # Install the project in editable mode
-RUN pip install  --force-reinstall .
+RUN pip install --force-reinstall .
 
 # Set the default command to bash
 CMD ["bash"]
