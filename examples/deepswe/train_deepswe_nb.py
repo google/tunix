@@ -417,32 +417,45 @@ if USE_FLASH_ATTENTION:
 devices = jax.devices()
 total_devices = len(devices)
 
-# Calculate the split boundary based on the argument (e.g., 64 * 0.75 = 48)
-num_rollout_devices = int(total_devices * args.rollout_split_fraction)
-num_train_devices = total_devices - num_rollout_devices
-
-# Favor TP for now.
-# TODO(sizhi): Experiment with DP vs TP for rollout.
+# 1. Resolve Rollout Mesh Dimensions
 if args.rollout_mesh_fsdp is not None and args.rollout_mesh_tp is not None:
-  rollout_fsdp = args.rollout_mesh_fsdp
-  rollout_tp = args.rollout_mesh_tp
+    # Explicit args take priority
+    rollout_fsdp = args.rollout_mesh_fsdp
+    rollout_tp = args.rollout_mesh_tp
+    num_rollout_devices = rollout_fsdp * rollout_tp
 else:
-  rollout_tp = np.gcd(num_rollout_devices, config.num_kv_heads)
-  rollout_fsdp = num_rollout_devices // rollout_tp
-  
-rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_fsdp, rollout_tp)
+    # Fallback to the split fraction
+    num_rollout_devices = int(total_devices * args.rollout_split_fraction)
+    rollout_tp = np.gcd(num_rollout_devices, config.num_kv_heads)
+    rollout_fsdp = num_rollout_devices // rollout_tp
 
+# 2. Resolve Train Mesh Dimensions
 if args.train_mesh_fsdp is not None and args.train_mesh_tp is not None:
-  train_fsdp = args.train_mesh_fsdp
-  train_tp = args.train_mesh_tp
+    # Explicit args take priority
+    train_fsdp = args.train_mesh_fsdp
+    train_tp = args.train_mesh_tp
+    num_train_devices = train_fsdp * train_tp
 else:
-  train_fsdp = np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
-  train_tp = num_train_devices // train_fsdp
+    # Fallback to whatever is left over
+    num_train_devices = total_devices - num_rollout_devices
+    train_fsdp = np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
+    train_tp = num_train_devices // train_fsdp
 
-train_devices = np.array(devices[num_rollout_devices:]).reshape(train_fsdp, train_tp)
+# 3. Sanity Check
+if num_rollout_devices + num_train_devices > total_devices:
+    raise ValueError(
+        f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
+        f"train devices, but cluster only has {total_devices} available."
+    )
+
+# 4. Route to Meshes
+rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_fsdp, rollout_tp)
+train_devices = np.array(devices[num_rollout_devices:num_rollout_devices + num_train_devices]).reshape(train_fsdp, train_tp)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
+
+
 print(f"*** Rollout Mesh *** | FSDP: {rollout_fsdp}, TP: {rollout_tp} | Shape: {rollout_mesh.shape}")
 print(f"*** Train Mesh *** | FSDP: {train_fsdp}, TP: {train_tp} | Shape: {train_mesh.shape}")
 
