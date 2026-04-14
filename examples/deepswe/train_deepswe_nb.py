@@ -135,6 +135,8 @@ parser.add_argument("--train_mesh_fsdp", type=int, default=None,
                     help="Optional override for train mesh FSDP dimension.")
 parser.add_argument("--train_mesh_tp", type=int, default=None, 
                     help="Optional override for train mesh TP dimension.")
+parser.add_argument("--train_mesh_sp", type=int, default=None, 
+                    help="Optional override for train mesh SP dimension.")
 
 parser.add_argument(
     "--rollout_split_fraction", 
@@ -434,7 +436,8 @@ if args.train_mesh_fsdp is not None and args.train_mesh_tp is not None:
     # Explicit args take priority
     train_fsdp = args.train_mesh_fsdp
     train_tp = args.train_mesh_tp
-    num_train_devices = train_fsdp * train_tp
+    train_sp = args.train_mesh_sp
+    num_train_devices = train_fsdp * train_tp * train_sp
 else:
     # Fallback to whatever is left over
     num_train_devices = total_devices - num_rollout_devices
@@ -450,14 +453,14 @@ if num_rollout_devices + num_train_devices > total_devices:
 
 # 4. Route to Meshes
 rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_fsdp, rollout_tp)
-train_devices = np.array(devices[num_rollout_devices:num_rollout_devices + num_train_devices]).reshape(train_fsdp, train_tp)
+train_devices = np.array(devices[num_rollout_devices:num_rollout_devices + num_train_devices]).reshape(train_fsdp, train_sp, train_tp)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
-train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
+train_mesh = Mesh(train_devices, axis_names=("fsdp", "sp", "tp"))
 
 
 print(f"*** Rollout Mesh *** | FSDP: {rollout_fsdp}, TP: {rollout_tp} | Shape: {rollout_mesh.shape}")
-print(f"*** Train Mesh *** | FSDP: {train_fsdp}, TP: {train_tp} | Shape: {train_mesh.shape}")
+print(f"*** Train Mesh *** | FSDP: {train_fsdp}, SP: {train_sp} TP: {train_tp} | Shape: {train_mesh.shape}")
 
 # %%
 # ==========================================
@@ -765,6 +768,7 @@ try:
       "rollout_mesh_fsdp": rollout_fsdp,
       "rollout_mesh_tp": rollout_tp,
       "train_mesh_fsdp": train_fsdp,
+      "train_mesh_sp": train_sp,
       "train_mesh_tp": train_tp,
   }
   wandb.init(
