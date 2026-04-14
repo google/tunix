@@ -179,7 +179,7 @@ try:
 except ImportError as e:
   print(f"❌ Still missing a module: {e}")
 
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
+if pathwaysutils is not None and "proxy" in os.getenv("JAX_PLATFORMS", ""):
   pathwaysutils.initialize()
 
 # %%
