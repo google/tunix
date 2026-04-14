@@ -395,8 +395,10 @@ rollout_fsdp = split // rollout_tp
 rollout_devices = np.array(devices[:split]).reshape(rollout_fsdp, rollout_tp)
 
 train_fsdp = np.gcd(split, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
-train_tp = split // train_fsdp
-train_devices = np.array(devices[split:]).reshape(train_fsdp, train_tp)
+train_tp = np.gcd(split // train_fsdp, config.num_kv_heads)
+train_devices = np.array(
+    devices[split : split + train_fsdp * train_tp]
+).reshape(train_fsdp, train_tp)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
