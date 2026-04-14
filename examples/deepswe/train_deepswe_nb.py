@@ -436,7 +436,7 @@ if args.train_mesh_fsdp is not None and args.train_mesh_tp is not None:
     # Explicit args take priority
     train_fsdp = args.train_mesh_fsdp
     train_tp = args.train_mesh_tp
-    train_sp = args.train_mesh_sp
+    train_sp = args.train_mesh_sp or 1
     num_train_devices = train_fsdp * train_tp * train_sp
 else:
     # Fallback to whatever is left over
