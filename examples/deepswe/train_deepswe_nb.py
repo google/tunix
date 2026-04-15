@@ -420,29 +420,45 @@ devices = jax.devices()
 total_devices = len(devices)
 
 # 1. Resolve Rollout Mesh Dimensions
-if args.rollout_mesh_fsdp is not None and args.rollout_mesh_tp is not None:
-    # Explicit args take priority
-    rollout_fsdp = args.rollout_mesh_fsdp
-    rollout_tp = args.rollout_mesh_tp
-    num_rollout_devices = rollout_fsdp * rollout_tp
+# Each explicitly-provided dim becomes an axis in the mesh; unspecified dims are
+# dropped (not defaulted to 1), so passing only --rollout_mesh_fsdp yields a 1D mesh.
+# If nothing is provided, fall back to the split-fraction heuristic (2D: fsdp+tp).
+rollout_fsdp = args.rollout_mesh_fsdp
+rollout_tp = args.rollout_mesh_tp
+if rollout_fsdp is not None or rollout_tp is not None:
+    rollout_dims = []
+    if rollout_fsdp is not None:
+        rollout_dims.append(("fsdp", rollout_fsdp))
+    if rollout_tp is not None:
+        rollout_dims.append(("tp", rollout_tp))
 else:
-    # Fallback to the split fraction
     num_rollout_devices = int(total_devices * args.rollout_split_fraction)
-    rollout_tp = np.gcd(num_rollout_devices, config.num_kv_heads)
+    rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
     rollout_fsdp = num_rollout_devices // rollout_tp
+    rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 
 # 2. Resolve Train Mesh Dimensions
-if args.train_mesh_fsdp is not None and args.train_mesh_tp is not None:
-    # Explicit args take priority
-    train_fsdp = args.train_mesh_fsdp
-    train_tp = args.train_mesh_tp
-    train_sp = args.train_mesh_sp or 1
-    num_train_devices = train_fsdp * train_tp * train_sp
+# Same rule: each provided dim becomes an axis; unspecified dims are dropped.
+# Supports fsdp-only, fsdp+sp, fsdp+tp, fsdp+sp+tp, etc. If nothing is provided,
+# fall back to leftover devices (2D: fsdp+tp).
+train_fsdp = args.train_mesh_fsdp
+train_sp = args.train_mesh_sp
+train_tp = args.train_mesh_tp
+if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
+    train_dims = []
+    if train_fsdp is not None:
+        train_dims.append(("fsdp", train_fsdp))
+    if train_sp is not None:
+        train_dims.append(("sp", train_sp))
+    if train_tp is not None:
+        train_dims.append(("tp", train_tp))
 else:
-    # Fallback to whatever is left over
     num_train_devices = total_devices - num_rollout_devices
-    train_fsdp = np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
+    train_fsdp = int(np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS))
     train_tp = num_train_devices // train_fsdp
+    train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+num_train_devices = int(np.prod([d for _, d in train_dims]))
 
 # 3. Sanity Check
 if num_rollout_devices + num_train_devices > total_devices:
@@ -452,15 +468,22 @@ if num_rollout_devices + num_train_devices > total_devices:
     )
 
 # 4. Route to Meshes
-rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_fsdp, rollout_tp)
-train_devices = np.array(devices[num_rollout_devices:num_rollout_devices + num_train_devices]).reshape(train_fsdp, train_sp, train_tp)
+rollout_axis_names = tuple(name for name, _ in rollout_dims)
+rollout_shape = tuple(d for _, d in rollout_dims)
+train_axis_names = tuple(name for name, _ in train_dims)
+train_shape = tuple(d for _, d in train_dims)
 
-rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
-train_mesh = Mesh(train_devices, axis_names=("fsdp", "sp", "tp"))
+rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
+train_devices = np.array(
+    devices[num_rollout_devices:num_rollout_devices + num_train_devices]
+).reshape(train_shape)
+
+rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
+train_mesh = Mesh(train_devices, axis_names=train_axis_names)
 
 
-print(f"*** Rollout Mesh *** | FSDP: {rollout_fsdp}, TP: {rollout_tp} | Shape: {rollout_mesh.shape}")
-print(f"*** Train Mesh *** | FSDP: {train_fsdp}, SP: {train_sp} TP: {train_tp} | Shape: {train_mesh.shape}")
+print(f"*** Rollout Mesh *** | dims: {rollout_dims} | Shape: {rollout_mesh.shape}")
+print(f"*** Train Mesh *** | dims: {train_dims} | Shape: {train_mesh.shape}")
 
 # %%
 # ==========================================
@@ -601,8 +624,8 @@ vllm_rollout_dict = {
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
-    "tensor_parallel_size": rollout_mesh.shape["tp"],
-    "data_parallel_size": rollout_mesh.shape["fsdp"],
+    "tensor_parallel_size": rollout_mesh.shape.get("tp", 1),
+    "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
