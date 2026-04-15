@@ -447,12 +447,10 @@ train_sp = args.train_mesh_sp
 train_tp = args.train_mesh_tp
 if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
     train_dims = []
-    if train_fsdp is not None:
-        train_dims.append(("fsdp", train_fsdp))
+    train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
     if train_sp is not None:
         train_dims.append(("sp", train_sp))
-    if train_tp is not None:
-        train_dims.append(("tp", train_tp))
+    train_dims.append(("tp", train_tp if train_tp is not None else 1))
 else:
     num_train_devices = total_devices - num_rollout_devices
     train_fsdp = int(np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS))
@@ -484,6 +482,9 @@ train_mesh = Mesh(train_devices, axis_names=train_axis_names)
 
 print(f"*** Rollout Mesh *** | dims: {rollout_dims} | Shape: {rollout_mesh.shape}")
 print(f"*** Train Mesh *** | dims: {train_dims} | Shape: {train_mesh.shape}")
+
+if train_sp is not None:
+    config.shd_config = model_lib.ShardingConfig.get_default_sharding(enable_sp=True)
 
 # %%
 # ==========================================
