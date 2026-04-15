@@ -69,10 +69,12 @@ parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--batch_size", type=int, default=8)
 parser.add_argument("--mini_batch_size", type=int, default=8)
 parser.add_argument("--train_fraction", type=float, default=1.0)
-parser.add_argument("--max_steps", type=int, default=1000)
+parser.add_argument("--max_steps", type=int, default=50)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
+parser.add_argument("--remat_policy", type=str, default="decoder", choices=["block", "decoder"],
+                    help="Remat policy when enable_remat is True: 'block' remats the attention block, 'decoder' remats the full decoder layer.")
 
 # LoRA
 # LoRA Config
@@ -102,6 +104,8 @@ parser.add_argument("--b1", type=float, default=0.9)
 parser.add_argument("--b2", type=float, default=0.99)
 parser.add_argument("--weight_decay", type=float, default=0.01)
 parser.add_argument("--max_grad_norm", type=float, default=1)
+parser.add_argument("--optimizer_offload", type=bool, default=False,
+                    help="Whether to offload optimizer states to CPU (pinned host memory).")
 # parser.add_argument("--warmup_ratio", type=float, default=0.1)
 
 # Checkpointing
@@ -111,8 +115,8 @@ parser.add_argument("--save_interval_steps", type=int, default=500)
 
 # Microbatch Sizes
 parser.add_argument("--train_micro_batch_size", type=int, default=1)
-parser.add_argument("--rollout_micro_batch_size", type=int, default=8)
-parser.add_argument("--compute_logps_micro_batch_size", type=int, default=8)
+parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
+parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 
 # DeepSWE Agentic Specifics
 parser.add_argument("--max_turns", type=int, default=50)
@@ -121,6 +125,26 @@ parser.add_argument("--max_concurrency", type=int, default=200)
 
 parser.add_argument("--overlong_filter", type=bool, default=True, 
                         help="Whether to filter out trajectories that exceed length limits")
+
+# Mesh / Topology Config Override
+parser.add_argument("--rollout_mesh_fsdp", type=int, default=None, 
+                    help="Optional override for rollout mesh FSDP dimension.")
+parser.add_argument("--rollout_mesh_tp", type=int, default=None, 
+                    help="Optional override for rollout mesh TP dimension.")
+parser.add_argument("--train_mesh_fsdp", type=int, default=None, 
+                    help="Optional override for train mesh FSDP dimension.")
+parser.add_argument("--train_mesh_tp", type=int, default=None, 
+                    help="Optional override for train mesh TP dimension.")
+parser.add_argument("--train_mesh_sp", type=int, default=None, 
+                    help="Optional override for train mesh SP dimension.")
+
+parser.add_argument(
+    "--rollout_split_fraction", 
+    type=float, 
+    default=0.5, 
+    help="Fraction of total devices to allocate to the rollout mesh. Default is 0.5 (1:1 ratio)."
+)
+
 
 from tunix.rl.agentic.agents import agent_types
 VALID_STATUS_NAMES = [status.name for status in agent_types.TrajectoryStatus]
@@ -179,7 +203,7 @@ try:
 except ImportError as e:
   print(f"❌ Still missing a module: {e}")
 
-if pathwaysutils is not None and "proxy" in os.getenv("JAX_PLATFORMS", ""):
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
 
 # %%
@@ -197,7 +221,7 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as template_pars
 from tunix import PerfMetricsConfig
 from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from swe_agent import (
+from examples.deepswe.swe_agent import (
     SWE_SYSTEM_PROMPT,
     SWE_SYSTEM_PROMPT_FN_CALL,
     SWE_USER_PROMPT,
@@ -207,8 +231,8 @@ from swe_agent import (
 )
 
 # Assumed custom imports based on usage
-from swe_agent import SWEAgent
-from swe_env import SWEEnv
+from examples.deepswe.swe_agent import SWEAgent
+from examples.deepswe.swe_env import SWEEnv
 
 # %%
 # ==========================================
@@ -306,6 +330,7 @@ ENABLE_MIXED_PRECISION = args.enable_mixed_precision
 USE_FLASH_ATTENTION = args.use_flash_attention
 FLASH_ATTENTION_BLOCK_SIZE = args.flash_attention_block_size
 ENABLE_REMAT = args.enable_remat
+REMAT_POLICY = args.remat_policy
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 
@@ -335,6 +360,7 @@ B2 = args.b2
 WEIGHT_DECAY = args.weight_decay
 # WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
 MAX_GRAD_NORM = args.max_grad_norm
+OPTIMIZER_OFFLOAD = args.optimizer_offload
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = args.save_interval_steps
@@ -365,6 +391,7 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 
+
 # %%
 # ==========================================
 # 5. JAX Device & Mesh Setup
@@ -376,29 +403,64 @@ from tunix.models.automodel import call_model_config
 config = call_model_config(MODEL_VERSION)
 
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  _REMAT_POLICY_MAP = {
+      "block": model_lib.RematConfig.BLOCK,
+      "decoder": model_lib.RematConfig.DECODER,
+  }
+  config.remat_config = _REMAT_POLICY_MAP[REMAT_POLICY]
 
 if ENABLE_MIXED_PRECISION:
-  config.param_dtype = PARAM_DTYPE
+  config.dtype = DTYPE
 
 if USE_FLASH_ATTENTION:
   config.use_flash_attention = USE_FLASH_ATTENTION
   config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
 
 devices = jax.devices()
-if len(devices) != 64:
-  raise ValueError(f"Expected 64 devices, got {len(devices)}.")
-rollout_fsdp = 12
-rollout_tp = 4
-train_fsdp = 4
-train_tp = 4
-split = rollout_fsdp * rollout_tp
+total_devices = len(devices)
 
-rollout_devices = np.array(devices[:split]).reshape(rollout_fsdp, rollout_tp)
-train_devices = np.array(devices[split:]).reshape(train_fsdp, train_tp)
+# 1. Resolve Rollout Mesh Dimensions
+if args.rollout_mesh_fsdp is not None and args.rollout_mesh_tp is not None:
+    # Explicit args take priority
+    rollout_fsdp = args.rollout_mesh_fsdp
+    rollout_tp = args.rollout_mesh_tp
+    num_rollout_devices = rollout_fsdp * rollout_tp
+else:
+    # Fallback to the split fraction
+    num_rollout_devices = int(total_devices * args.rollout_split_fraction)
+    rollout_tp = np.gcd(num_rollout_devices, config.num_kv_heads)
+    rollout_fsdp = num_rollout_devices // rollout_tp
+
+# 2. Resolve Train Mesh Dimensions
+if args.train_mesh_fsdp is not None and args.train_mesh_tp is not None:
+    # Explicit args take priority
+    train_fsdp = args.train_mesh_fsdp
+    train_tp = args.train_mesh_tp
+    train_sp = args.train_mesh_sp or 1
+    num_train_devices = train_fsdp * train_tp * train_sp
+else:
+    # Fallback to whatever is left over
+    num_train_devices = total_devices - num_rollout_devices
+    train_fsdp = np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
+    train_tp = num_train_devices // train_fsdp
+
+# 3. Sanity Check
+if num_rollout_devices + num_train_devices > total_devices:
+    raise ValueError(
+        f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
+        f"train devices, but cluster only has {total_devices} available."
+    )
+
+# 4. Route to Meshes
+rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_fsdp, rollout_tp)
+train_devices = np.array(devices[num_rollout_devices:num_rollout_devices + num_train_devices]).reshape(train_fsdp, train_sp, train_tp)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
-train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
+train_mesh = Mesh(train_devices, axis_names=("fsdp", "sp", "tp"))
+
+
+print(f"*** Rollout Mesh *** | FSDP: {rollout_fsdp}, TP: {rollout_tp} | Shape: {rollout_mesh.shape}")
+print(f"*** Train Mesh *** | FSDP: {train_fsdp}, SP: {train_sp} TP: {train_tp} | Shape: {train_mesh.shape}")
 
 # %%
 # ==========================================
@@ -487,8 +549,9 @@ dataset = dataset.map(
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
+
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="gs://sizhi-dev/deepswe", flush_every_n_steps=2
+    log_dir="/tmp/deepswe_logs", flush_every_n_steps=2
 )
 
 optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
@@ -588,6 +651,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=None,
         checkpointing_options=None,
+        optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -689,27 +753,24 @@ try:
   settings=wandb.Settings(console="off")
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb_config = {
-        "batch_size": BATCH_SIZE,
-        "mini_batch_size": MINI_BATCH_SIZE,
-        "learning_rate": LEARNING_RATE,
-        "B1": B1,
-        "B2": B2,
-        "WARMUP_STEPS": WARMUP_STEPS,
-        "weight_decay": WEIGHT_DECAY,
-        "num_steps": MAX_STEPS,
-        "num_generations": NUM_GENERATIONS,
-        "beta": BETA,
-        "epsilon": EPSILON,
-        "epsilon_high": EPSILON_HIGH,
-        "max_response_length": MAX_RESPONSE_LENGTH,
-        "temperature": TEMPERATURE,
-        "top_p": TOP_P,
-        "top_k": TOP_K,
-        "max_concurrency": MAX_CONCURRENCY,
-        "rollout_engine": ROLLOUT_ENGINE,
-        "kv_cache_size": KV_CACHE_SIZE,
-        "overlong_filter": OVERLONG_FILTER,
-    }
+      **vars(args),
+      # Derived values not present in args
+      "kv_cache_size": KV_CACHE_SIZE,
+      "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
+      "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+      # Stringify set so wandb can serialize it
+      "filter_statuses": (
+          [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
+      ),
+      # Mesh topology
+      "num_devices": len(devices),
+      "device_split": split,
+      "rollout_mesh_fsdp": rollout_fsdp,
+      "rollout_mesh_tp": rollout_tp,
+      "train_mesh_fsdp": train_fsdp,
+      "train_mesh_sp": train_sp,
+      "train_mesh_tp": train_tp,
+  }
   wandb.init(
     project="tunix",
     name=run_name,
