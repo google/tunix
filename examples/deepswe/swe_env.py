@@ -102,9 +102,14 @@ class SWEEnv(BaseTaskEnv):
     print(f"Initialized SWEEnv group_id: {group_id} pair_index: {pair_index}", flush=True)
 
   def _initial_observation(self) -> Any:
+    gid = self.extra_kwargs.get('group_id')
+    pid = self.extra_kwargs.get('pair_index')
+    tag = f"[group={gid} pair={pid}]"
     if not self.env:
       # Initialize environment if not created yet.
+      print(f"[DEBUG] {tag} _initial_observation: creating EnvArgs ...", flush=True)
       env_args = EnvArgs(ds=self.entry)
+      print(f"[DEBUG] {tag} _initial_observation: calling RepoEnv() backend={self.backend} ...", flush=True)
       self.env = RepoEnv(
           env_args,
           backend=self.backend,
@@ -112,8 +117,11 @@ class SWEEnv(BaseTaskEnv):
           reward_timeout=self.reward_timeout,
           verbose=self.verbose,
       )
+      print(f"[DEBUG] {tag} _initial_observation: RepoEnv() done", flush=True)
     else:
+      print(f"[DEBUG] {tag} _initial_observation: calling self.env.reset() ...", flush=True)
       self.env.reset()
+      print(f"[DEBUG] {tag} _initial_observation: self.env.reset() done", flush=True)
     self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
@@ -122,7 +130,10 @@ class SWEEnv(BaseTaskEnv):
     self.total_steps = 0
 
     # Polls docker runtime to get task instruction.
-    return self.env.get_task_instruction()
+    print(f"[DEBUG] {tag} _initial_observation: calling get_task_instruction() ...", flush=True)
+    obs = self.env.get_task_instruction()
+    print(f"[DEBUG] {tag} _initial_observation: get_task_instruction() done", flush=True)
+    return obs
 
   def _step_impl(self, action: Any) -> EnvStepResult:
     print(f"Step {self.total_steps} group_id: {self.extra_kwargs.get('group_id', 'None')} pair_index: {self.extra_kwargs.get('pair_index', 'None')}", flush=True)
