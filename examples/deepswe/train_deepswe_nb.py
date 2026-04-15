@@ -764,7 +764,6 @@ try:
       ),
       # Mesh topology
       "num_devices": len(devices),
-      "device_split": split,
       "rollout_mesh_fsdp": rollout_fsdp,
       "rollout_mesh_tp": rollout_tp,
       "train_mesh_fsdp": train_fsdp,

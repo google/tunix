@@ -376,7 +376,12 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
+    print(f"{self._debug_prefix} env.reset starting", flush=True)
     (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
+    print(
+        f"{self._debug_prefix} env.reset done in {wall_time:.1f}s",
+        flush=True,
+    )
 
     self.env_time["reset_latency"] += wall_time
     self.env_time["reset_cpu_time"] += cpu_time
@@ -456,12 +461,14 @@ class TrajectoryCollectEngine:
         if self.max_response_length is not None
         else None
     )
+    print(f"{self._debug_prefix} model_call starting", flush=True)
     rollout_output = await asyncio.get_event_loop().run_in_executor(
         self._executor,
         lambda: self.model_call(
             self.agent.chat_completions, self.env, max_generation_steps=max_generation_steps
         ),
     )
+    print(f"{self._debug_prefix} model_call done", flush=True)
     # Capture prefix before update_from_model so both prints show the same step_idx.
     debug_prefix = self._debug_prefix
     print(f"\n[DEBUG] {debug_prefix} Model Response:\n{json.dumps(rollout_output.text[0], default=str, indent=2)}", flush=True)
