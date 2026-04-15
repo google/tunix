@@ -211,28 +211,36 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
+    print(f"[DEBUG] collect: calling _reset() ...", flush=True)
     await self._reset()
+    print(f"[DEBUG] collect: _reset() done, entering main loop. max_steps={self.max_steps}", flush=True)
 
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
 
     while True:
-      if len(self.agent.trajectory.steps) >= self.max_steps:
+      step_count = len(self.agent.trajectory.steps)
+      print(f"[DEBUG] collect: loop top step_count={step_count}/{self.max_steps}", flush=True)
+      if step_count >= self.max_steps:
         self.agent.trajectory.status = (
             agent_types.TrajectoryStatus.MAX_STEPS_REACHED
         )
         break
 
+      print(f"[DEBUG] collect: calling _one_step() ...", flush=True)
       done = await self._one_step()
+      print(f"[DEBUG] collect: _one_step() returned done={done}, status={self.agent.trajectory.status.name}", flush=True)
 
       if done:
         if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
           self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
         break
 
+    print(f"[DEBUG] collect: loop exited, status={self.agent.trajectory.status.name}", flush=True)
     masked_out = (
         self.overlong_filter
         and self.agent.trajectory.status in self.filter_statuses
     )
+    print(f"[DEBUG] collect: masked_out={masked_out}, calling reward/mc computation ...", flush=True)
     try:
       if not masked_out:
         await self._append_final_reward()
@@ -243,6 +251,7 @@ class TrajectoryCollectEngine:
     finally:
       await self._close()
 
+    print(f"[DEBUG] collect: post_close, returning mode={mode}", flush=True)
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
           f"Unsupported mode: {mode}, currently supported modes: "
@@ -376,15 +385,20 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
+    print(f"[DEBUG] _reset: calling env.reset() (executor={self._executor}) ...", flush=True)
     (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
+    print(f"[DEBUG] _reset: env.reset() done in wall={wall_time:.2f}s cpu={cpu_time:.2f}s", flush=True)
 
     self.env_time["reset_latency"] += wall_time
     self.env_time["reset_cpu_time"] += cpu_time
     self.final_reward_fn = self.env.final_reward_fn if hasattr(self.env, "final_reward_fn") else None
+    print(f"[DEBUG] _reset: final_reward_fn={'set' if self.final_reward_fn else 'None'}, calling agent.reset() ...", flush=True)
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
+    print(f"[DEBUG] _reset: agent updated from env, chat_completions len={len(self.agent.chat_completions)}", flush=True)
 
     if self.tokenizer is not None and self.chat_parser is not None:
+      print(f"[DEBUG] _reset: tokenizing initial prompt messages ...", flush=True)
       # Get the current messages (usually System + User)
       init_messages = self.agent.chat_completions
       prompt_tokens, _ = utils.tokenize_and_generate_masks(
@@ -395,9 +409,11 @@ class TrajectoryCollectEngine:
           contains_generation_msg=True,
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
+      print(f"[DEBUG] _reset: prompt tokenization done, prompt_tokens len={len(prompt_tokens)}", flush=True)
 
     self._start_ts = time.perf_counter()
     self._response_token_count = 0
+    print(f"[DEBUG] _reset: complete. timeout={self.timeout}s max_steps={self.max_steps} max_response_length={self.max_response_length}", flush=True)
 
   @property
   def _debug_prefix(self) -> str:
@@ -456,12 +472,14 @@ class TrajectoryCollectEngine:
         if self.max_response_length is not None
         else None
     )
+    print(f"[DEBUG] L475 submitting model_call to executor, step={len(self.agent.trajectory.steps)}", flush=True)
     rollout_output = await asyncio.get_event_loop().run_in_executor(
         self._executor,
         lambda: self.model_call(
             self.agent.chat_completions, self.env, max_generation_steps=max_generation_steps
         ),
     )
+    print(f"[DEBUG] L480 model_call returned", flush=True)
     # Capture prefix before update_from_model so both prints show the same step_idx.
     debug_prefix = self._debug_prefix
     print(f"\n[DEBUG] {debug_prefix} Model Response:\n{json.dumps(rollout_output.text[0], default=str, indent=2)}", flush=True)
@@ -483,6 +501,7 @@ class TrajectoryCollectEngine:
     step_idx = len(self.agent.trajectory.steps)
     remaining_time = self.timeout - (time.perf_counter() - self._start_ts)
 
+    print(f"[DEBUG] L503 calling env.step(), remaining_time={remaining_time:.1f}s", flush=True)
     tags = self._get_perf_tags()
     try:
       with self.perf_v2.span(
@@ -492,6 +511,7 @@ class TrajectoryCollectEngine:
         (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
             self.env.step, action, timeout=remaining_time
         )
+      print(f"[DEBUG] L513 env.step() returned, done={done}", flush=True)
     except asyncio.TimeoutError:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
       if step_idx == 0:
