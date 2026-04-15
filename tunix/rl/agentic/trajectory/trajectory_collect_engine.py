@@ -176,19 +176,24 @@ class TrajectoryCollectEngine:
     """
 
     def _clocked_wrapper():
+      print(f"[DEBUG] _run_with_timing._clocked_wrapper: entered, calling {func.__name__}", flush=True)
       t_start = time.thread_time()
       res = func(*args)
       t_delta = time.thread_time() - t_start
+      print(f"[DEBUG] _run_with_timing._clocked_wrapper: {func.__name__} returned in cpu={t_delta:.2f}s", flush=True)
       return res, t_delta
 
     loop = asyncio.get_running_loop()
     wall_start = time.perf_counter()
 
+    print(f"[DEBUG] _run_with_timing: calling loop.run_in_executor for {func.__name__}, timeout={timeout}", flush=True)
     fut = loop.run_in_executor(self._executor, _clocked_wrapper)
+    print(f"[DEBUG] _run_with_timing: fut created, now awaiting (timeout={timeout}) ...", flush=True)
     if timeout is not None:
       result, cpu_delta = await asyncio.wait_for(fut, timeout=timeout)
     else:
       result, cpu_delta = await fut
+    print(f"[DEBUG] _run_with_timing: await done for {func.__name__}, wall={time.perf_counter()-wall_start:.2f}s", flush=True)
 
     wall_delta = time.perf_counter() - wall_start
     return result, wall_delta, cpu_delta
