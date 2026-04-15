@@ -346,6 +346,30 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_collect_token_mode_empty_steps(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+    ]
+    self.mock_env.max_steps = 0  # No steps will be taken
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_context_limit=1024,
+    )
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertEmpty(self.mock_agent.trajectory.steps)
+    np.testing.assert_array_equal(
+        token_data['conversation_tokens'], np.array([], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        token_data['conversation_masks'], np.array([], dtype=np.int32)
+    )
+    self.assertIsNone(token_data['old_logprobs'])
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_with_incomplete_tokenizer_config_skips_tokenization(
       self, mock_tokenize
   ):

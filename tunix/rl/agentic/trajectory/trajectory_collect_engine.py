@@ -288,7 +288,30 @@ class TrajectoryCollectEngine:
           logprobs.append(step.logprobs)
           if getattr(step, "env_tokens", None) is not None:
             logprobs.append(np.zeros(len(step.env_tokens)))
-      conversation_masks = np.concatenate(conversation_masks, axis=0)
+
+      conversation_tokens = [
+          np.asarray(tokens)
+          for tokens in conversation_tokens
+          if len(tokens) > 0
+      ]
+      conversation_masks = [
+          np.asarray(masks) for masks in conversation_masks if len(masks) > 0
+      ]
+      logprobs = [
+          np.asarray(step_logprobs)
+          for step_logprobs in logprobs
+          if len(step_logprobs) > 0
+      ]
+      conversation_masks = (
+          np.concatenate(conversation_masks, axis=0)
+          if conversation_masks
+          else np.array([], dtype=np.int32)
+      )
+      conversation_tokens = (
+          np.concatenate(conversation_tokens, axis=0)
+          if conversation_tokens
+          else np.array([], dtype=np.int32)
+      )
       final_masks = (
           np.zeros_like(conversation_masks)
           if masked_out
@@ -298,7 +321,7 @@ class TrajectoryCollectEngine:
       return {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
-          "conversation_tokens": np.concatenate(conversation_tokens, axis=0),
+          "conversation_tokens": conversation_tokens,
           "conversation_masks": final_masks,
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
@@ -386,9 +409,9 @@ class TrajectoryCollectEngine:
     self.env_time["reset_latency"] += wall_time
     self.env_time["reset_cpu_time"] += cpu_time
     self.final_reward_fn = (
-          self.env.final_reward_fn
-          if hasattr(self.env, "final_reward_fn")
-          else None
+        self.env.final_reward_fn
+        if hasattr(self.env, "final_reward_fn")
+        else None
     )
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})

@@ -304,9 +304,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       trajectories_to_log.append(item.traj)
       conversation = item.traj.get("conversation_text") or []
       assistant_text = next(
-          message["content"]
-          for message in conversation
-          if message["role"] == "assistant"
+          (
+              message["content"]
+              for message in conversation
+              if message["role"] == "assistant"
+          ),
+          "",
       )
 
       completion_texts.append(assistant_text)
@@ -383,7 +386,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_ids.shape,
     )
 
-    if padded_old_logprobs:
+    if padded_old_logprobs and len(padded_old_logprobs) == len(
+        completion_tokens_list
+    ):
       old_per_token_logps = jnp.asarray(padded_old_logprobs)
     else:
       old_per_token_logps = None
