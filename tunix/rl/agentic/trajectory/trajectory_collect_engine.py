@@ -211,18 +211,24 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
+    print(f"[DEBUG] collect: calling _reset() ...", flush=True)
     await self._reset()
+    print(f"[DEBUG] collect: _reset() done, entering main loop. max_steps={self.max_steps}", flush=True)
 
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
 
     while True:
-      if len(self.agent.trajectory.steps) >= self.max_steps:
+      step_count = len(self.agent.trajectory.steps)
+      print(f"[DEBUG] collect: loop top step_count={step_count}/{self.max_steps}", flush=True)
+      if step_count >= self.max_steps:
         self.agent.trajectory.status = (
             agent_types.TrajectoryStatus.MAX_STEPS_REACHED
         )
         break
 
+      print(f"[DEBUG] collect: calling _one_step() ...", flush=True)
       done = await self._one_step()
+      print(f"[DEBUG] collect: _one_step() returned done={done}", flush=True)
 
       if done:
         if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
@@ -442,13 +448,17 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
+    print(f"[DEBUG] _reset: calling env.reset() ...", flush=True)
     (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
+    print(f"[DEBUG] _reset: env.reset() done in {wall_time:.2f}s (cpu={cpu_time:.2f}s)", flush=True)
 
     self.env_time["reset_latency"] += wall_time
     self.env_time["reset_cpu_time"] += cpu_time
     self.final_reward_fn = self.env.final_reward_fn if hasattr(self.env, "final_reward_fn") else None
+    print(f"[DEBUG] _reset: agent.reset() ...", flush=True)
     self.agent.reset()
     self.agent.update_from_env(observation=obs, reward=0.0, done=False, info={})
+    print(f"[DEBUG] _reset: agent updated from env, chat_completions len={len(self.agent.chat_completions)}", flush=True)
 
     if self.tokenizer is not None and self.chat_parser is not None:
       # Get the current messages (usually System + User)
@@ -464,6 +474,7 @@ class TrajectoryCollectEngine:
 
     self._start_ts = time.perf_counter()
     self._response_token_count = 0
+    print(f"[DEBUG] _reset: complete. executor={self._executor}", flush=True)
 
   @property
   def _debug_prefix(self) -> str:
@@ -517,12 +528,27 @@ class TrajectoryCollectEngine:
     if self._check_and_set_context_limit_reached():
       return True
 
+    step_idx = len(self.agent.trajectory.steps)
+    n_msgs = len(self.agent.chat_completions)
+    print(
+        f"[DEBUG] _one_step: step_idx={step_idx} submitting model_call to executor,"
+        f" chat_completions len={n_msgs}, executor={self._executor},"
+        f" model_call_kwargs={list(self.model_call_kwargs.keys())}",
+        flush=True,
+    )
+    t0 = time.perf_counter()
     rollout_output = await asyncio.get_event_loop().run_in_executor(
         self._executor,
         self.model_call,
         self.agent.chat_completions,
         self.env,
         **self.model_call_kwargs,
+    )
+    print(
+        f"[DEBUG] _one_step: step_idx={step_idx} model_call returned in"
+        f" {time.perf_counter()-t0:.2f}s,"
+        f" rollout_output type={type(rollout_output).__name__}",
+        flush=True,
     )
     # Capture prefix before update_from_model so both prints show the same step_idx.
     debug_prefix = self._debug_prefix
