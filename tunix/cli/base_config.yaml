@@ -93,7 +93,7 @@ tokenizer_config:
 ################################## DATASET ##################################
 # Translation_dataset  "Helsinki-NLP/opus-100" or "mtnt/en-fr" for SFT
 # Math_dataset "gsm8k" for grpo
-data_source: ""
+data_source: "tfds"
 data_directory: ""
 data_module: ""
 dataset_name: "Helsinki-NLP/opus-100"
