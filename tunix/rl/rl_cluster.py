@@ -411,12 +411,14 @@ class RLCluster:
         raise ValueError("Rollout vllm model version or path is missing!")
 
       # TODO(linchai): maybe support offloading for vllm rollout.
+      import sys
       with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
         # vLLM handles model initialization and loading internally, so we need
         # to provide logical axis rules for vLLM to correctly shard the model on
         # the rollout mesh. This is important for out-of-tree models in vLLM
         # that are implemented with custom logical axis rules, like is the case
         # for MaxText models.
+        print("[_init_cluster] Creating VllmRollout (entering mesh context)..."); sys.stdout.flush()
         self._rollout = vllm_rollout.VllmRollout(
             self.rollout_actor,
             self.tokenizer,
@@ -424,6 +426,7 @@ class RLCluster:
             mesh=self.r2m[Role.ROLLOUT],
             rollout_config=loaded_vllm_config,
         )
+        print("[_init_cluster] VllmRollout created."); sys.stdout.flush()
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
@@ -510,6 +513,8 @@ class RLCluster:
           )
 
     # 2. Initialize inference worker.
+    import sys
+    print("[_init_cluster] Rollout done. Initializing InferenceWorker..."); sys.stdout.flush()
     inference_models = {}
     if self.critic is not None:
       inference_models["critic"] = self.critic
@@ -520,6 +525,7 @@ class RLCluster:
       inference_models["reward"] = self.reward
       del self.reward
     self._inference_worker = inference_worker.InferenceWorker(inference_models)
+    print("[_init_cluster] InferenceWorker created. Initializing actor trainer..."); sys.stdout.flush()
 
     # 3. Initialize trainer.
     if (
@@ -572,6 +578,7 @@ class RLCluster:
       )
     del self.rollout_actor
     del self.train_actor
+    print("[_init_cluster] Actor trainer created. _init_cluster complete."); sys.stdout.flush()
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def _propagate_backbone_sharing_map(self):

@@ -35,11 +35,14 @@ class VllmRollout(base_rollout.BaseRollout):
       mesh: jax.sharding.Mesh,
       rollout_config: base_rollout.RolloutConfig,
   ):
+    import sys
+    print("[VllmRollout.__init__] Building MappingConfig..."); sys.stdout.flush()
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
         model=model,
         backend="vllm_jax",
     )
+    print("[VllmRollout.__init__] MappingConfig built. Creating VllmSampler..."); sys.stdout.flush()
     self._sampler = vllm_sampler.VllmSampler(
         tokenizer=tokenizer,
         config=vllm_sampler.VllmConfig(
@@ -76,8 +79,11 @@ class VllmRollout(base_rollout.BaseRollout):
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
     )
+    print("[VllmRollout.__init__] VllmSampler created. Getting model state for checkpoint load..."); sys.stdout.flush()
     state = nnx.state(model)
+    print("[VllmRollout.__init__] Calling load_checkpoint (weight sync)..."); sys.stdout.flush()
     self._sampler.load_checkpoint(state)
+    print("[VllmRollout.__init__] load_checkpoint done."); sys.stdout.flush()
 
   @property
   def mesh(self) -> jax.sharding.Mesh:
