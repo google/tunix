@@ -379,7 +379,7 @@ VLLM_MAX_NUM_SEQS = 128
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
-VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+VLLM_MAX_BATCHED_TOKENS = 65536
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
