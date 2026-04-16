@@ -375,9 +375,7 @@ VLLM_UTILIZATION = args.vllm_utilization
 
 
 # 2. Max number of sequences to be processed in parallel by vllm.
-# VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS 
-VLLM_MAX_NUM_SEQS = 128 
-# 1 * 2 = 2
+VLLM_MAX_NUM_SEQS = 128
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
@@ -623,7 +621,7 @@ sglang_jax_rollout_dict = {
 
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
-    "rollout_vllm_hbm_utilization": 0.4,
+    "rollout_vllm_hbm_utilization": 6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
