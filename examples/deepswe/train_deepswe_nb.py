@@ -416,10 +416,8 @@ if USE_FLASH_ATTENTION:
   config.use_flash_attention = USE_FLASH_ATTENTION
   config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
 
-print("[STEP 5] Getting JAX devices..."); sys.stdout.flush()
 devices = jax.devices()
 total_devices = len(devices)
-print(f"[STEP 5] Found {total_devices} JAX devices: {devices}"); sys.stdout.flush()
 
 # 1. Resolve Rollout Mesh Dimensions
 # Each explicitly-provided dim becomes an axis in the mesh; unspecified dims are
@@ -813,14 +811,12 @@ try:
       "train_mesh_sp": train_sp,
       "train_mesh_tp": train_tp,
   }
-  print("[STEP wandb] Calling wandb.init..."); sys.stdout.flush()
   wandb.init(
     project="tunix",
     name=run_name,
     config=wandb_config,
     settings=settings)
   # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
-  print("[STEP wandb] wandb.init done."); sys.stdout.flush()
 except Exception as e:
   print(f"sizhi: W&B initialization failed with error: {e}")
 

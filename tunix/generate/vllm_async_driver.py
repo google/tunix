@@ -22,6 +22,7 @@ where multiprocessing is undesirable (e.g. JAX integration).
 from __future__ import annotations
 
 from concurrent.futures import Future
+import faulthandler
 import os
 import threading
 import time
@@ -102,6 +103,10 @@ class VLLMInProcessDriver:
       while not _done.wait(timeout=30):
         t += 30
         print(f"[VLLMInProcessDriver.from_engine_args] still inside LLMEngine.from_engine_args()... ({t}s elapsed)"); sys.stdout.flush()
+        if t % 300 == 0:
+          print("[VLLMInProcessDriver.from_engine_args] dumping Python thread stacks..."); sys.stdout.flush()
+          faulthandler.dump_traceback(file=sys.stdout, all_threads=True)
+          sys.stdout.flush()
     _hb = threading.Thread(target=_heartbeat, daemon=True)
     _hb.start()
 
