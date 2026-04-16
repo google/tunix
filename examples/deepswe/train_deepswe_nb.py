@@ -30,7 +30,6 @@ import faulthandler
 import signal
 faulthandler.register(signal.SIGINT, all_threads=True)
 
-print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 Dataset = datasets_lib.Dataset
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
