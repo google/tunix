@@ -375,7 +375,9 @@ VLLM_UTILIZATION = args.vllm_utilization
 
 
 # 2. Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS  # 1 * 2 = 2
+# VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS 
+VLLM_MAX_NUM_SEQS = 128 
+# 1 * 2 = 2
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
