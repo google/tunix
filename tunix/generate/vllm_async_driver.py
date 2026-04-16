@@ -89,21 +89,26 @@ class VLLMInProcessDriver:
       stream_callback: Optional[StreamCallback] = None,
       auto_start: bool = True,
   ) -> "VLLMInProcessDriver":
+    import sys
     logging.debug(
         f"Creating VLLMInProcessDriver with engine_args: {engine_args} and"
         f" usage_context: {usage_context}"
     )
+    print("[VLLMInProcessDriver.from_engine_args] Calling LLMEngine.from_engine_args()..."); sys.stdout.flush()
     llm_engine = LLMEngine.from_engine_args(
         engine_args,
         usage_context=usage_context,
         enable_multiprocessing=False,
     )
-    return cls(
+    print("[VLLMInProcessDriver.from_engine_args] LLMEngine created. Starting driver..."); sys.stdout.flush()
+    driver = cls(
         llm_engine,
         poll_interval_s=poll_interval_s,
         stream_callback=stream_callback,
         auto_start=auto_start,
     )
+    print("[VLLMInProcessDriver.from_engine_args] Driver started."); sys.stdout.flush()
+    return driver
 
   def submit_request(
       self,
