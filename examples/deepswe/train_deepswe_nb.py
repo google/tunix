@@ -416,8 +416,10 @@ if USE_FLASH_ATTENTION:
   config.use_flash_attention = USE_FLASH_ATTENTION
   config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
 
+print("[STEP 5] Getting JAX devices..."); sys.stdout.flush()
 devices = jax.devices()
 total_devices = len(devices)
+print(f"[STEP 5] Found {total_devices} JAX devices: {devices}"); sys.stdout.flush()
 
 # 1. Resolve Rollout Mesh Dimensions
 # Each explicitly-provided dim becomes an axis in the mesh; unspecified dims are
@@ -491,9 +493,11 @@ if train_sp is not None:
 # 6. Model Initialization
 # ==========================================
 
+print("[STEP 6] Creating qwen_reference model from safe tensors..."); sys.stdout.flush()
 qwen_reference = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, mesh=train_mesh, dtype=DTYPE
 )
+print("[STEP 6] qwen_reference created."); sys.stdout.flush()
 
 
 def get_lora_model(base_model, model_mesh):
@@ -520,6 +524,7 @@ def get_lora_model(base_model, model_mesh):
   return lora_model
 
 
+print("[STEP 6b] Creating qwen_actor (LoRA or copy)..."); sys.stdout.flush()
 if TRAIN_WITH_LORA:
   qwen_actor = get_lora_model(qwen_reference, train_mesh)
 else:
@@ -528,24 +533,28 @@ else:
       graph_def,
       jax.tree.map(jnp.copy, params),
   )
+print("[STEP 6b] qwen_actor created."); sys.stdout.flush()
 sft_utils.show_hbm_usage()
 
 # %%
 # ==========================================
 # 7. Tokenizer & Parser
 # ==========================================
+print("[STEP 7] Loading tokenizer..."); sys.stdout.flush()
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_PATH, local_files_only=True, trust_remote_code=True
 )
+print("[STEP 7] Tokenizer loaded."); sys.stdout.flush()
 
 chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
+print("[STEP 7] Chat parser created."); sys.stdout.flush()
 
 
 # %%
 # ==========================================
 # 8. Data Loading
 # ==========================================
-print("Loading Dataset...")
+print("[STEP 8] Loading Dataset..."); sys.stdout.flush()
 
 dataset = load_dataset(
     "R2E-Gym/R2E-Gym-V1",
@@ -553,6 +562,7 @@ dataset = load_dataset(
     cache_dir=DATASET_CACHE,
     trust_remote_code=True,
 )
+print(f"[STEP 8] Dataset loaded: {len(dataset)} examples."); sys.stdout.flush()
 
 def transform(entry):
   for k, v in entry.items():
@@ -561,10 +571,12 @@ def transform(entry):
   return entry
 
 
+print("[STEP 8b] Applying transform to dataset..."); sys.stdout.flush()
 dataset = dataset.map(
     transform,
     keep_in_memory=True,
 )
+print("[STEP 8b] Transform done."); sys.stdout.flush()
 
 # %%
 # ==========================================
@@ -656,6 +668,7 @@ elif ROLLOUT_ENGINE == "vanilla":
 else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
+print("[STEP 10] Building cluster_config..."); sys.stdout.flush()
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: train_mesh,
@@ -681,12 +694,14 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
+print("[STEP 10] cluster_config built. Creating RLCluster..."); sys.stdout.flush()
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen_actor,
     reference=qwen_reference,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
+print("[STEP 10] RLCluster created."); sys.stdout.flush()
 
 
 # %%
@@ -711,8 +726,9 @@ config_kwargs = {
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
 }
 
+print("[STEP 11] Building GRPOConfig..."); sys.stdout.flush()
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
-
+print("[STEP 11] GRPOConfig built. Creating GRPOLearner..."); sys.stdout.flush()
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_cluster=rl_cluster,
@@ -724,6 +740,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
+print("[STEP 11] GRPOLearner created."); sys.stdout.flush()
 
 
 # %%
@@ -731,8 +748,10 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 # 11. process dataset and start training
 # ==========================================
 
+print("[STEP 12] Shuffling dataset and building grain dataset..."); sys.stdout.flush()
 dataset = dataset.shuffle(seed=SEED)
 grain_dataset = grain.MapDataset.source(dataset)
+print("[STEP 12] grain_dataset ready."); sys.stdout.flush()
 
 def mixed_type_batch_fn(elements):
   """elements: A list of dicts."""
@@ -794,16 +813,19 @@ try:
       "train_mesh_sp": train_sp,
       "train_mesh_tp": train_tp,
   }
+  print("[STEP wandb] Calling wandb.init..."); sys.stdout.flush()
   wandb.init(
     project="tunix",
     name=run_name,
     config=wandb_config,
     settings=settings)
   # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
+  print("[STEP wandb] wandb.init done."); sys.stdout.flush()
 except Exception as e:
   print(f"sizhi: W&B initialization failed with error: {e}")
 
 
+print("[STEP 12b] Calling post_init_dataset..."); sys.stdout.flush()
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,
     tokenizer,
@@ -815,10 +837,11 @@ train_dataset, _ = data_lib.post_init_dataset(
     prompt_key="problem_statement",
     custom_batch_fn=mixed_type_batch_fn,
 )
+print("[STEP 12b] post_init_dataset done."); sys.stdout.flush()
 
-
-print("Starting training...")
+print("[STEP 13] Starting training..."); sys.stdout.flush()
 agentic_grpo_learner.train(train_dataset=train_dataset)
+print("[STEP 13] Training finished."); sys.stdout.flush()
 
 
 # %%
