@@ -95,11 +95,22 @@ class VLLMInProcessDriver:
         f" usage_context: {usage_context}"
     )
     print("[VLLMInProcessDriver.from_engine_args] Calling LLMEngine.from_engine_args()..."); sys.stdout.flush()
+
+    _done = threading.Event()
+    def _heartbeat():
+      t = 0
+      while not _done.wait(timeout=30):
+        t += 30
+        print(f"[VLLMInProcessDriver.from_engine_args] still inside LLMEngine.from_engine_args()... ({t}s elapsed)"); sys.stdout.flush()
+    _hb = threading.Thread(target=_heartbeat, daemon=True)
+    _hb.start()
+
     llm_engine = LLMEngine.from_engine_args(
         engine_args,
         usage_context=usage_context,
         enable_multiprocessing=False,
     )
+    _done.set()
     print("[VLLMInProcessDriver.from_engine_args] LLMEngine created. Starting driver..."); sys.stdout.flush()
     driver = cls(
         llm_engine,
