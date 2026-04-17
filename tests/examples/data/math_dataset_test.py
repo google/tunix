@@ -148,6 +148,14 @@ class HuggingFaceDatasetTest(absltest.TestCase):
     self.assertEqual(dataset_name, "openai/gsm8k")
     self.assertEqual(config_name, "default")
 
+  def test_parse_huggingface_dataset_name_supports_explicit_config(self):
+    dataset_name, config_name = math_dataset._parse_huggingface_dataset_name(
+        "openai/gsm8k:main"
+    )
+
+    self.assertEqual(dataset_name, "openai/gsm8k")
+    self.assertEqual(config_name, "main")
+
   def test_create_dataset_uses_huggingface_loader(self):
     raw_dataset = _BaseDataset([
         {"question": "Q3", "answer": "#### 42"},

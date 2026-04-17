@@ -124,12 +124,12 @@ def _parse_huggingface_dataset_name(
     dataset_name: str,
 ) -> tuple[str, str | None]:
   """Parses a Hugging Face dataset name into dataset/config components."""
-  if "/" in dataset_name:
-    return dataset_name, "default"
-
   if ":" in dataset_name:
     name, config_name = dataset_name.split(":", maxsplit=1)
     return name, config_name or None
+
+  if "/" in dataset_name:
+    return dataset_name, "default"
 
   return dataset_name, None
 

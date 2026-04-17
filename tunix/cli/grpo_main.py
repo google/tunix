@@ -51,10 +51,8 @@ from tunix.perf import export as perf_export
 from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
 
-GrpoConfig = grpo_learner.GrpoConfig
 
 _PATHWAYS_BNS = flags.DEFINE_string(
     "pathways_bns", None, "BNS address of the Pathways server."
@@ -85,6 +83,10 @@ class GrpoPipeline(config.HyperParameters):
     ``batch_fn`` used as ``custom_batch_fn`` in post_init_dataset.
   * ``kubernetes_config``: optional Kubernetes env-var and kube-config setup.
   """
+
+  def __init__(self, argv: list[str], **kwargs):
+    self.data_module: ModuleType | None = None
+    super().__init__(argv, **kwargs)
 
   # ------------------------------------------------------------------
   # Mesh
@@ -555,16 +557,22 @@ class GrpoPipeline(config.HyperParameters):
   # Standard GRPO training
   # ------------------------------------------------------------------
 
-  def _run_standard_grpo(self):
-    """Execute standard (non-agentic) GRPO training."""
-    tokenizer = model_lib.create_tokenizer(
+  def _get_tokenizer(self):
+    return model_lib.create_tokenizer(
         self.config["tokenizer_config"],
         self.config["tokenizer_config"]["tokenizer_path"],
     )
 
+  def _get_data_module(self,):
+    if self.data_module is None:
+      self.data_module = importlib.import_module(self.config["data_module"])
+    return self.data_module
+
+  def _get_dataset(self, tokenizer):
     if self.config.get("data_module", None):
+      data_module = self.config.get("data_module", None)
       dataset = data_lib.get_dataset_from_module(
-          self.config["data_module"],
+          data_module,
           tokenizer,
       )
     elif self.config["data_source"] == "local":
@@ -590,23 +598,7 @@ class GrpoPipeline(config.HyperParameters):
     else:
       raise ValueError(f"Unsupported data_source {self.config['data_source']}")
 
-    self.compute_params(dataset)
-    dataset, _ = data_lib.post_init_dataset(
-        dataset,
-        tokenizer,
-        batch_size=self.config["batch_size"],
-        num_batches=self.config.get("num_batches", None),
-        max_prompt_length=self.config["rollout_config"].get(
-            "max_prompt_length", None
-        ),
-    )
-    rl_cluster = self.create_rl_cluster(tokenizer)
-    grpo_trainer = grpo_learner.GrpoLearner(
-        rl_cluster=rl_cluster,
-        reward_fns=self.obtain_reward_fn(),
-        algo_config=GrpoConfig(**self.config["grpo_config"]),
-    )
-    grpo_trainer.train(dataset)
+    return dataset
 
   # ------------------------------------------------------------------
   # Agentic GRPO helpers
@@ -653,16 +645,17 @@ class GrpoPipeline(config.HyperParameters):
     module_path, class_name = dotted_path.rsplit(".", 1)
     return getattr(importlib.import_module(module_path), class_name)
 
-  def _load_raw_dataset(self):
+  def _load_raw_dataset(self, tokenizer):
     """Load a raw grain.MapDataset from data_module.
 
     The module must expose ``create_dataset(**data_config) -> grain.MapDataset``
     and optionally a ``batch_fn`` used as ``custom_batch_fn``.
     """
-    module = importlib.import_module(self.config["data_module"])
-    data_config = dict(self.config.get("data_config", {}))
-    dataset = module.create_dataset(**data_config)
-    batch_fn = getattr(module, "batch_fn", None)
+    dataset = self._get_dataset(tokenizer)
+    data_module = (
+      self._get_data_module() if self.config.get("data_module", None) else None
+    )
+    batch_fn = getattr(data_module, "batch_fn", None) if data_module else None
     return dataset, batch_fn
 
   def _setup_kubernetes(self) -> None:
@@ -688,19 +681,15 @@ class GrpoPipeline(config.HyperParameters):
   # Agentic GRPO training
   # ------------------------------------------------------------------
 
-  def _run_agentic_grpo(self):
+  def _run(self, mode: str = "grpo"):
     """Execute agentic GRPO training (DeepScaleR, DeepSWE, etc.)."""
-    from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner  # pylint: disable=g-import-not-at-top
-
     self._setup_kubernetes()
 
-    tokenizer = model_lib.create_tokenizer(
-        self.config["tokenizer_config"],
-        self.config["tokenizer_config"]["tokenizer_path"],
-    )
+    tokenizer = self._get_tokenizer()
+
     chat_parser = self._create_chat_parser(tokenizer)
 
-    raw_dataset, custom_batch_fn = self._load_raw_dataset()
+    raw_dataset, custom_batch_fn = self._load_raw_dataset(tokenizer)
     self.compute_params(raw_dataset)
 
     dataset, _ = data_lib.post_init_dataset(
@@ -716,6 +705,23 @@ class GrpoPipeline(config.HyperParameters):
     )
 
     rl_cluster = self.create_rl_cluster(tokenizer)
+
+    if mode == "grpo":
+      from tunix.rl.grpo import grpo_learner
+
+      grpo_trainer = grpo_learner.GrpoLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=self.obtain_reward_fn(),
+          algo_config=grpo_learner.GrpoConfig(**self.config["grpo_config"]),
+      )
+      grpo_trainer.train(dataset)
+      return
+
+    # agentic GRPO
+    if mode != "agentic_grpo":
+      raise ValueError(f"Unsupported training_mode {mode!r}")
+
+    from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner  # pylint: disable=g-import-not-at-top
     algo_config = self._create_agentic_grpo_config()
 
     reward_fns = (

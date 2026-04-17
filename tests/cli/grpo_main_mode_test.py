@@ -362,10 +362,9 @@ verl_compatible: false
 """
     pipeline = _make_pipeline(extra)
     self.assertEqual(pipeline.config.get("training_mode", "grpo"), "grpo")
-    # _run_standard_grpo should be called; we verify no AttributeError on dispatch
-    with mock.patch.object(pipeline, "_run_standard_grpo") as mock_std:
+    with mock.patch.object(pipeline, "_run") as mock_run:
       pipeline.run_grpo_trainer()
-      mock_std.assert_called_once()
+      mock_run.assert_called_once_with(mode="grpo")
 
   def test_agentic_grpo_dispatches_to_agentic(self):
     extra = """
@@ -403,9 +402,9 @@ vllm_config:
 """
     pipeline = _make_pipeline(extra)
     self.assertEqual(pipeline.config["training_mode"], "agentic_grpo")
-    with mock.patch.object(pipeline, "_run_agentic_grpo") as mock_ag:
+    with mock.patch.object(pipeline, "_run") as mock_run:
       pipeline.run_grpo_trainer()
-      mock_ag.assert_called_once()
+      mock_run.assert_called_once_with(mode="agentic_grpo")
 
   def test_unknown_mode_raises(self):
     # Build pipeline with standard config then manually set bad mode
@@ -423,8 +422,35 @@ verl_compatible: false
 """
     pipeline = _make_pipeline(extra)
     pipeline.config["training_mode"] = "bad_mode"
-    with self.assertRaisesRegex(ValueError, "Unknown training_mode"):
-      pipeline.run_grpo_trainer()
+    raw_dataset = mock.Mock()
+    raw_dataset.__len__ = mock.Mock(return_value=1)
+    with mock.patch.object(pipeline, "_setup_kubernetes"):
+      with mock.patch.object(pipeline, "_get_tokenizer", return_value=mock.sentinel.tokenizer):
+        with mock.patch.object(
+            pipeline,
+            "_create_chat_parser",
+            return_value=mock.sentinel.chat_parser,
+        ):
+          with mock.patch.object(
+              pipeline,
+              "_load_raw_dataset",
+              return_value=(raw_dataset, None),
+          ):
+            with mock.patch.object(pipeline, "compute_params"):
+              with mock.patch.object(
+                  grpo_main.data_lib,
+                  "post_init_dataset",
+                  return_value=(mock.sentinel.dataset, None),
+              ):
+                with mock.patch.object(
+                    pipeline,
+                    "create_rl_cluster",
+                    return_value=mock.sentinel.rl_cluster,
+                ):
+                  with self.assertRaisesRegex(
+                      ValueError, "Unsupported training_mode 'bad_mode'"
+                  ):
+                    pipeline.run_grpo_trainer()
 
 
 # ---------------------------------------------------------------------------
