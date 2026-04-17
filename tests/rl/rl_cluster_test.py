@@ -32,6 +32,7 @@ from tunix.generate import mappings
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout import mock_rollout
 from tunix.tests import test_common as tc
 
 # Some tests relying on SGLang and vLLM cannot run in run_prod environment.
@@ -467,6 +468,48 @@ class RlClusterTest(parameterized.TestCase):
           tokenizer=tc.MockVocab(),
           cluster_config=cluster_config,
       )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_config',
+          rollout_config=base_rollout.RolloutConfig(
+              max_tokens_to_generate=10, kv_cache_size=1024
+          ),
+          expected_train_config=base_rollout.RolloutConfig(
+              max_tokens_to_generate=10, kv_cache_size=1024
+          ),
+      ),
+      dict(
+          testcase_name='dict_config',
+          rollout_config={
+              rl_cluster_lib.Mode.TRAIN: base_rollout.RolloutConfig(
+                  max_tokens_to_generate=10, kv_cache_size=1024
+              ),
+              rl_cluster_lib.Mode.EVAL: base_rollout.RolloutConfig(
+                  max_tokens_to_generate=20, kv_cache_size=2048
+              ),
+          },
+          expected_train_config=base_rollout.RolloutConfig(
+              max_tokens_to_generate=10, kv_cache_size=1024
+          ),
+      ),
+  )
+  def test_init_mock_rollout_engine(
+      self,
+      rollout_config,
+      expected_train_config,
+  ):
+    with mock.patch.object(
+        mock_rollout.MockRollout, '__init__', autospec=True, return_value=None
+    ) as mock_init:
+      rl_cluster = self._create_test_rl_cluster(
+          mock_rollout.MockRollout, rollout_config
+      )
+
+      mock_init.assert_called_once()
+      self.assertIsInstance(rl_cluster.rollout, mock_rollout.MockRollout)
+      called_kwargs = mock_init.call_args.kwargs
+      self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
 
   @parameterized.named_parameters(
       dict(
