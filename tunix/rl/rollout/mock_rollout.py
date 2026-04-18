@@ -50,7 +50,16 @@ class MockRollout(base_rollout.BaseRollout):
   new optimizations, or collecting mock perf metric traces at scale.
 
   Behaviors mocked:
-    * Text Generation: Produces sequences of random dummy words.
+    * Text Generation: Produces sequences of random dummy words. The length
+        can be configured via `length_distribution` kwarg.
+        Supported modes:
+          - "uniform": Random length. Defaults to full range [1, max_tokens].
+          - "normal": Bell curve. Defaults to mean = max_tokens / 2.
+          - "skewed": Right-skewed (LLM-like). Defaults to mean = max_tokens /
+          4.
+          - "fixed": Exactly `mean` tokens.
+        Users can optionally override the shape by specifying `length_mean`
+        and `length_std`.
     * Tokenization: Uses the provided tokenizer to encode/decode the dummy text,
       or falls back to generating random token IDs if no tokenizer is provided.
     * Latency: Simulates inference delay by sleeping for a random duration
@@ -67,6 +76,13 @@ class MockRollout(base_rollout.BaseRollout):
       (default: 1.0).
     max_generation_time (float): Maximum simulated generation delay in seconds
       (default: 10.0).
+    length_distribution (str): Distribution for generated sequence length.
+      Supported: "uniform", "normal", "skewed", "fixed" (default: "uniform").
+    length_mean (float): Mean for the length distribution. This is optional,
+      since reasonable defaults are provided for each distribution mode.
+    length_std (float): Standard deviation for the length distribution. This is
+      optional, since reasonable defaults are provided for each distribution
+      mode.
   """
 
   def __init__(
@@ -86,6 +102,9 @@ class MockRollout(base_rollout.BaseRollout):
     self._eos_id = eos_id if eos_id is not None else 1
     self._min_generation_time = kwargs.get("min_generation_time", 1.0)
     self._max_generation_time = kwargs.get("max_generation_time", 10.0)
+    self._length_distribution = kwargs.get("length_distribution", "uniform")
+    self._length_mean = kwargs.get("length_mean")
+    self._length_std = kwargs.get("length_std")
 
     seed_val = None
     if rollout_config is not None and rollout_config.seed is not None:
@@ -112,6 +131,73 @@ class MockRollout(base_rollout.BaseRollout):
             logging.WARNING, "Tokenization failed in mock_rollout: %s", 100, e
         )
     return None
+
+  def _get_target_length(self, max_tokens: int) -> int:
+    """Calculates the target length for generation based on distribution config."""
+    if max_tokens <= 1:
+      return max_tokens
+
+    distribution = self._length_distribution
+    mu = self._length_mean
+    sigma = self._length_std
+    np_rng = self._np_rng
+    rng = self._rng
+
+    if distribution == "uniform":
+      if mu is None and sigma is None:
+        return rng.randint(1, max_tokens)
+      else:
+        # Calculate bounds [a, b] for uniform distribution given mean and std.
+        # For U(a, b), mean = (a+b)/2 and var = (b-a)^2 / 12.
+        # So b-a = std * sqrt(12) = 2 * std * sqrt(3).
+        # Thus a = mean - std * sqrt(3) and b = mean + std * sqrt(3).
+        mu_val = mu if mu is not None else (1 + max_tokens) / 2.0
+        sigma_val = (
+            sigma if sigma is not None else (max_tokens - 1) / np.sqrt(12.0)
+        )
+        a = mu_val - np.sqrt(3.0) * sigma_val
+        b = mu_val + np.sqrt(3.0) * sigma_val
+        length = int(np_rng.uniform(a, b + 1))
+        return max(1, min(length, max_tokens))
+
+    elif distribution == "normal" or distribution == "skewed":
+      if mu is None:
+        mu = max_tokens / 2.0 if distribution == "normal" else max_tokens / 4.0
+      if sigma is None:
+        sigma = (
+            max_tokens / 6.0 if distribution == "normal" else max_tokens / 8.0
+        )
+
+      # We use a Beta distribution in [0, 1] to sample lengths, then scale to
+      # [1, M]. We use the method of moments to find alpha and beta parameters
+      # that match the desired mean and variance for the scaled distribution.
+      M = float(max_tokens)
+      m = (mu - 1.0) / (M - 1.0)
+      m = max(0.01, min(m, 0.99))
+
+      v = (sigma**2) / ((M - 1.0) ** 2)
+      v = max(1e-5, min(v, m * (1.0 - m) - 1e-5))
+
+      alpha = m * (m * (1.0 - m) / v - 1.0)
+      beta_val = (1.0 - m) * (m * (1.0 - m) / v - 1.0)
+
+      alpha = max(0.1, alpha)
+      beta_val = max(0.1, beta_val)
+
+      sample = np_rng.beta(alpha, beta_val)
+      length = int(1 + (M - 1.0) * sample)
+      return max(1, min(length, max_tokens))
+
+    elif distribution == "fixed":
+      mu_val = mu if mu is not None else max_tokens / 2.0
+      return max(1, min(int(mu_val), max_tokens))
+
+    else:
+      logging.warning(
+          "Unknown length distribution %r, falling back to uniform",
+          distribution,
+      )
+      return rng.randint(1, max_tokens)
 
   def generate(
       self,
@@ -156,9 +242,8 @@ class MockRollout(base_rollout.BaseRollout):
         dtype=np.int32,
     )
 
-    for i in range(batch_size):
-      prompt = prompts[i]
-      target_length = rng.randint(1, max_tokens)
+    for i, prompt in enumerate(prompts):
+      target_length = self._get_target_length(max_tokens)
       chosen_words = rng.choices(_DUMMY_WORDS, k=target_length)
       text = " ".join(chosen_words)
 

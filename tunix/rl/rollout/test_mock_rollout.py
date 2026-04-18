@@ -128,6 +128,20 @@ class MockRolloutTest(parameterized.TestCase):
     self.assertLen(out.tokens[0], len(out.text[0].split()))
 
   @mock.patch.object(mock_rollout.time, "sleep", autospec=True)
+  def test_generate_prompt_truncation(self, mock_sleep):
+    tokenizer = FakeTokenizer(vocab_size=100)
+    m = self._create_mock_rollout(tokenizer=tokenizer)
+    rc = dataclasses.replace(self.base_rc, max_prompt_length=3)
+    # FakeTokenizer encodes string length, so "long_prompt" is 11 tokens.
+    out = m.generate(["long_prompt"], rollout_config=rc)
+
+    self.assertEqual(out.left_padded_prompt_tokens.shape, (1, 3))
+    # It should be truncated, so no pad_id is present at the start.
+    self.assertFalse(
+        np.any(out.left_padded_prompt_tokens == tokenizer.pad_id())
+    )
+
+  @mock.patch.object(mock_rollout.time, "sleep", autospec=True)
   def test_generate_reproducibility_with_seed(self, mock_sleep):
     rollout_config = dataclasses.replace(self.base_rc, seed=42)
     m1 = self._create_mock_rollout(rollout_config=rollout_config)
@@ -180,19 +194,24 @@ class MockRolloutTest(parameterized.TestCase):
     m.update_params({"dummy": "tree"})
 
   @parameterized.named_parameters(
-      ("without_tokenizer", None, 5, 10),
-      (
-          "with_callable_tokenizer_methods",
-          FakeTokenizer(pad_id=7, eos_id=14),
-          7,
-          14,
-      ),
-      (
-          "with_property_tokenizer_attributes",
-          FakeTokenizerProperties(pad_id=8, eos_id=16),
-          8,
-          16,
-      ),
+      {
+          "testcase_name": "without_tokenizer",
+          "tokenizer": None,
+          "expected_pad_id": 5,
+          "expected_eos_id": 10,
+      },
+      {
+          "testcase_name": "with_callable_tokenizer_methods",
+          "tokenizer": FakeTokenizer(pad_id=7, eos_id=14),
+          "expected_pad_id": 7,
+          "expected_eos_id": 14,
+      },
+      {
+          "testcase_name": "with_property_tokenizer_attributes",
+          "tokenizer": FakeTokenizerProperties(pad_id=8, eos_id=16),
+          "expected_pad_id": 8,
+          "expected_eos_id": 16,
+      },
   )
   def test_pad_id_eos_id(self, tokenizer, expected_pad_id, expected_eos_id):
     if tokenizer is None:
@@ -208,6 +227,181 @@ class MockRolloutTest(parameterized.TestCase):
     dummy_model = {"weights": [1, 2, 3]}
     m = self._create_mock_rollout(rollout_actor=dummy_model)
     self.assertEqual(m.model(), dummy_model)
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "uniform_default",
+          "dist": "uniform",
+          "mean": None,
+          "std": None,
+          "expected_min": 1,
+          "expected_max": 15,
+      },
+      {
+          "testcase_name": "uniform_custom",
+          "dist": "uniform",
+          "mean": 10.0,
+          "std": 2.0,
+          "expected_min": 6,
+          "expected_max": 14,
+      },
+      {
+          "testcase_name": "normal_default",
+          "dist": "normal",
+          "mean": None,
+          "std": None,
+          "expected_min": 1,
+          "expected_max": 15,
+      },
+      {
+          "testcase_name": "skewed_default",
+          "dist": "skewed",
+          "mean": None,
+          "std": None,
+          "expected_min": 1,
+          "expected_max": 15,
+      },
+      {
+          "testcase_name": "fixed",
+          "dist": "fixed",
+          "mean": 8.0,
+          "std": None,
+          "expected_min": 8,
+          "expected_max": 8,
+      },
+  )
+  @mock.patch.object(mock_rollout.time, "sleep", autospec=True)
+  def test_generate_distributions(
+      self, mock_sleep, dist, mean, std, expected_min, expected_max
+  ):
+    m = self._create_mock_rollout(
+        length_distribution=dist,
+        length_mean=mean,
+        length_std=std,
+    )
+    out = m.generate(["prompt"] * 5, rollout_config=self.base_rc)
+
+    self.assertLen(out.text, 5)
+    lengths = [len(tokens) for tokens in out.tokens]
+    # Verify all lengths are within bounds
+    self.assertTrue(
+        all(expected_min <= length <= expected_max for length in lengths),
+        f"Lengths {lengths} not in bounds [{expected_min}, {expected_max}] for"
+        f" dist={dist}",
+    )
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "normal_custom",
+          "dist": "normal",
+          "mean": 200.0,
+          "std": 30.0,
+          "expected_mean": 200.0,
+          "expected_std": 30.0,
+      },
+      {
+          "testcase_name": "skewed_custom",
+          "dist": "skewed",
+          "mean": 100.0,
+          "std": 20.0,
+          "expected_mean": 100.0,
+          "expected_std": 20.0,
+      },
+      {
+          "testcase_name": "normal_default",
+          "dist": "normal",
+          "mean": None,
+          "std": None,
+          "expected_mean": 250.0,
+          "expected_std": 500.0 / 6.0,
+      },
+      {
+          "testcase_name": "skewed_default",
+          "dist": "skewed",
+          "mean": None,
+          "std": None,
+          "expected_mean": 125.0,
+          "expected_std": 500.0 / 8.0,
+      },
+  )
+  @mock.patch.object(mock_rollout.time, "sleep", autospec=True)
+  def test_generate_distributions_statistical(
+      self, mock_sleep, dist, mean, std, expected_mean, expected_std
+  ):
+    rc = dataclasses.replace(
+        self.base_rc,
+        max_tokens_to_generate=500,
+    )
+    m = self._create_mock_rollout(
+        length_distribution=dist,
+        length_mean=mean,
+        length_std=std,
+    )
+    # Generate a large batch to check statistics
+    batch_size = 1000
+    out = m.generate(["prompt"] * batch_size, rollout_config=rc)
+
+    lengths = [len(tokens) for tokens in out.tokens]
+    empirical_mean = np.mean(lengths)
+    empirical_std = np.std(lengths)
+
+    # Check that empirical values are close to expected
+    self.assertAlmostEqual(empirical_mean, expected_mean, delta=10.0)
+    self.assertAlmostEqual(empirical_std, expected_std, delta=5.0)
+
+  @mock.patch.object(mock_rollout.logging, "warning", autospec=True)
+  @mock.patch.object(mock_rollout.time, "sleep", autospec=True)
+  def test_generate_unknown_distribution_fallback(
+      self, mock_sleep, mock_warning
+  ):
+    m = self._create_mock_rollout(length_distribution="unknown_dist")
+    out = m.generate(["prompt"], rollout_config=self.base_rc)
+    self.assertLen(out.text, 1)
+    self.assertBetween(
+        len(out.tokens[0]), 1, self.base_rc.max_tokens_to_generate
+    )
+    mock_warning.assert_called_once_with(
+        "Unknown length distribution %r, falling back to uniform",
+        "unknown_dist",
+    )
+
+  @mock.patch.object(mock_rollout.time, "sleep", autospec=True)
+  def test_generate_tokenizer_returns_empty(self, mock_sleep):
+    class EmptyTokenizer:
+
+      def encode(self, text):
+        return []
+
+      def decode(self, tokens):
+        return ""
+
+    tokenizer = EmptyTokenizer()
+    m = self._create_mock_rollout(tokenizer=tokenizer)
+    out = m.generate(["prompt"], rollout_config=self.base_rc)
+
+    self.assertLen(out.text, 1)
+    self.assertLen(out.tokens[0], 1)
+
+  @mock.patch.object(mock_rollout.time, "sleep", autospec=True)
+  def test_generate_empty_prompts(self, mock_sleep):
+    m = self._create_mock_rollout()
+    out = m.generate([], rollout_config=self.base_rc)
+
+    self.assertEmpty(out.text)
+    self.assertEmpty(out.logits)
+    self.assertEmpty(out.tokens)
+    self.assertEqual(
+        out.left_padded_prompt_tokens.shape, (0, self.base_rc.max_prompt_length)
+    )
+    self.assertEmpty(out.logprobs)
+
+  def test_get_target_length_max_tokens_one(self):
+    m = self._create_mock_rollout(length_distribution="skewed")
+    length = m._get_target_length(max_tokens=1)
+    self.assertEqual(length, 1)
+
+    length = m._get_target_length(max_tokens=0)
+    self.assertEqual(length, 0)
 
 
 if __name__ == "__main__":
