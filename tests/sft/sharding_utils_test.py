@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
 from tunix.sft import sharding_utils
+from unittest import mock
 
 # CPU environment setup to simulate multi device env.
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=8'
@@ -128,6 +129,27 @@ class ShardingUtilsTest(parameterized.TestCase):
     with mesh:
       x_resharded = sharding_utils.shard_input(x_sharded, ('tp',))
     self.assertIsNot(x_sharded, x_resharded)
+
+  @mock.patch('tunix.sft.sharding_utils.jax.make_array_from_process_local_data')
+  def test_global_array_noop(self, mock_make_array):
+    mock_make_array.side_effect = ValueError(
+        "device_put's first argument must be a fully addressable array, but got value with devices {TpuDevice(id=0..."
+    )
+    device_cnt = jax.device_count()
+    mesh = shd.Mesh(
+        np.array(jax.devices()).reshape(1, device_cnt),
+        axis_names=('fsdp', 'tp'),
+    )
+
+    x = mock.MagicMock(spec=jax.Array)
+    x.is_fully_addressable = False
+    x.ndim = 3
+
+    with mesh:
+      x_resharded = sharding_utils.shard_input(x, ('fsdp',))
+
+    self.assertIs(x, x_resharded)
+    mock_make_array.assert_not_called()
 
 if __name__ == '__main__':
   absltest.main()
