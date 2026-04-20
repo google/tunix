@@ -206,6 +206,10 @@ except ImportError as e:
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
 
+# backend = "sizhi-test-pathways-head-0-0.sizhi-test:29001"
+# jax.config.update("jax_platform_name", "pathways")
+# jax.config.update("jax_backend_target", backend)
+
 # %%
 # ==========================================
 # 2. Imports from Custom Modules
@@ -623,7 +627,7 @@ sglang_jax_rollout_dict = {
 
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
-    "rollout_vllm_hbm_utilization": 0.4,
+    "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
