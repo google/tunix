@@ -154,9 +154,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       self.llm = LLM(**self.args)
 
-    self.to_hf_key_mappings = {}
-    self.to_hf_transpose_keys = None
-    self.to_hf_hook_fns = None
+    self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
+    self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
+    self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
+    self.to_hf_preprocess_fn = getattr(config.mapping_config, 'to_hf_preprocess_fn', None)
 
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
@@ -197,6 +198,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if self.to_hf_key_mappings:
       # Mapped Weight Sync (e.g. Vanilla -> vLLM)
+      import copy
+      vllm_state = copy.deepcopy(self.transformer_state)
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,
@@ -214,7 +217,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               if not self._model_runner
               else self._model_runner.model_config.get_head_size()
           ),
+          tp_size=self.args.get("tensor_parallel_size", 1),
       )
+      sampler_model_state = self.transformer_state
+      import jax.numpy as jnp
+      for k, v in vllm_state.items():
+        if not jnp.array_equal(vllm_state[k], sampler_model_state[k]):
+          print(f"Parameter '{k}' successfully mapped and NOT match the sampler model state., shape: {vllm_state[k].shape} and sampler shape: {sampler_model_state[k].shape}, vllm _value: {vllm_state[k]}, sampler model value: {sampler_model_state[k]}")
+        else:
+          print(f"Parameter '{k}' successfully mapped and match the sampler model state.")
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
@@ -318,7 +329,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   @property
   def transformer_state(self):
+    members = [m for m in dir(self._model_runner) if not m.startswith('__')]
+    print("members key: ", members.keys() if isinstance(members, dict) else members)
+    print("members: ", members, "member types: ", {m: type(getattr(self._model_runner, m)) for m in members})
     if hasattr(self._model_runner, "state"):
+      print("type of model runner state: ", type(self._model_runner.state))
+      # print(self._model_runner.state)
+      print("model runner state members: ", self._model_runner.state.keys())
+      for key in self._model_runner.state.keys():
+        print(f"Key: {key}, type: {type(self._model_runner.state[key])}, shape: {getattr(self._model_runner.state[key], 'shape', 'N/A')}")
       return self._model_runner.state
     else:
       raise AttributeError("vLLM model runner doesn't have state.")

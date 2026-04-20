@@ -786,6 +786,7 @@ class DecoderLayer(nnx.Module):
   ):
 
     self.config = config
+    self.skip_scale = nnx.Param(jnp.ones((1,), dtype=config.param_dtype))
     self.pre_attention_norm = RMSNorm(
         config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
     )
@@ -843,7 +844,6 @@ class DecoderLayer(nnx.Module):
           config.embed_dim, rngs=rngs, param_dtype=config.param_dtype
       )
 
-    self.skip_scale = nnx.Param(jnp.ones((1,), dtype=config.param_dtype))
 
   def __call__(
       self,
@@ -890,6 +890,8 @@ class DecoderLayer(nnx.Module):
 
 class Gemma4(BackendMappingMixin, nnx.Module):
   """Gemma4 model."""
+  
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config

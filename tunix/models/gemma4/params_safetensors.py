@@ -48,7 +48,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
       r"(?:model\.language_model\.)?embed_tokens_per_layer\.weight": (
-          "embedder.per_layer_input_embedding.value",
+          "embedder.per_layer_input_embedding",
           (None, (cfg.num_embed, cfg.num_layers, cfg.per_layer_input_dim)),
       ),
       r"(?:model\.language_model\.)?per_layer_model_projection\.weight": (
@@ -198,7 +198,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.layer_scalar": (
-          r"layers.\1.skip_scale.value",
+          r"layers.\1.skip_scale",
           None,
       ),
       r"(?:model\.language_model\.)?norm\.weight": ("final_norm.scale", None),
@@ -296,6 +296,7 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
     out = dict(tensors)
 
     for key in list(out):
+      print(f"Processing key: {key} with shape {out[key].shape}")
       m = q_pat.fullmatch(key) or k_pat.fullmatch(key) or v_pat.fullmatch(key)
       if not m:
         continue

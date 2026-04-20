@@ -49,6 +49,9 @@ class MockParam:
 
   def __init__(self, value):
     self.value = value
+  @property
+  def shape(self):
+    return self.value.shape
 
 
 class Logprob:
@@ -1111,7 +1114,28 @@ class UtilsTest(parameterized.TestCase):
         result.params["model.lm_head"],
         src.params["model.embed_tokens.weight"].value,
     )
-
+  def test_transfer_vllm_torchax_model_mapping(self):
+    src = MockState({
+        "embedder.input_embedding": MockParam(
+            jnp.arange(12, dtype=jnp.float32).reshape(3, 4)
+        ),
+    })
+    dst = MockState({
+        "vllm_model.language_model.model.embed_tokens.weight": MockParam(
+            jnp.zeros((3, 4), dtype=jnp.float32)
+        ),
+    })
+    
+    mappings = {
+        "embedder.input_embedding": ("vllm_model.language_model.model.embed_tokens.weight", None),
+    }
+    result = utils.transfer_state_with_mappings(src, dst, mappings)
+    
+    np.testing.assert_array_equal(
+        result.params["vllm_model.language_model.model.embed_tokens.weight"],
+        src.params["embedder.input_embedding"].value,
+    )
+    
   def test_transfer_state_directly_scanned_layers(self):
     """Tests transfer from scanned 'layers' in source to 'layers_X' in dest."""
     # Source has 'layers' containing stacked weights (shape (2, ...))

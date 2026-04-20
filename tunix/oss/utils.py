@@ -43,11 +43,13 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
     import tempfile  # pylint: disable=g-import-not-at-top
 
     if target_dir is None:
-      target_dir = tempfile.gettempdir()
+      target_dir = "/mnt/disks/linchai-data/tmp_dir"
     local_dir = os.path.join(target_dir, prefix)
+    print(f"Downloading from GCS: {file_dir} to local directory: {local_dir}")
+    local_dir = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-31B-it/snapshots/419b2efe421994fdfd3394e621983d4cc511cd4f/"
 
-    fsspec_fs = fsspec.filesystem('gs')
-    fsspec_fs.get(file_dir, local_dir, recursive=True)
+    # fsspec_fs = fsspec.filesystem('gs')
+    # fsspec_fs.get(file_dir, local_dir, recursive=True)
 
     return local_dir
   except ImportError as e:

@@ -163,6 +163,7 @@ def load_and_create_model_orig(
 
   if file_dir.startswith('gs://'):
     file_dir = load_file_from_gcs(file_dir)
+  logging.info('Loading model to directory: %s', file_dir)
 
   files = list(epath.Path(file_dir).expanduser().glob('*.safetensors'))
 
@@ -179,6 +180,15 @@ def load_and_create_model_orig(
 
   graph_def, abs_state = nnx.split(model)
   state_dict = abs_state.to_pure_dict()
+  from flax import traverse_util
+
+  # Flatten the dictionary to get paths as tuples
+  flat_dict = traverse_util.flatten_dict(state_dict)
+
+  # Get the keys as joined strings
+  keys = ["/".join(map(str, key)) for key in flat_dict.keys()]
+
+  print("Flattend keys: ", keys)
 
   if mesh is not None:
     sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
@@ -258,8 +268,12 @@ def load_and_create_model_orig(
     def make_update_tensor_fn(current_file_tensors):
       def update_tensor(path, param, shard=None):
         current_path_key = path_to_key(path)
+        print(f"Attempting to update tensor for key: {current_path_key}, param shape: {param.shape}, shard: {shard}")
         if current_path_key in current_file_tensors:
           loaded_arr = current_file_tensors[current_path_key]
+          print(f"Loaded array shape for key {current_path_key}: {loaded_arr.shape}, dtype: {loaded_arr.dtype}, loaded-array type: {type(loaded_arr)}")
+          if current_path_key == "embedder.input_embedding":
+            print(f"laoded_array value: {loaded_arr}")
           if loaded_arr.shape != param.shape:
             raise ValueError(
                 f'Shape mismatch for {current_path_key}: got'
@@ -269,12 +283,21 @@ def load_and_create_model_orig(
             return jax.device_put(loaded_arr, shard)
           else:
             return jax.device_put(loaded_arr, jax.devices()[0])
+        else:
+          logging.warning(
+              f'Key {current_path_key} not found in loaded tensors for current file.'
+          )
         return param
 
       return update_tensor
 
     current_file_update_tensor = make_update_tensor_fn(file_loaded_tensors)
 
+    print(f"state_dict: {list(state_dict.keys())}")
+    
+    print(f"file_loaded_tensors: {list(file_loaded_tensors.keys())}")
+    for k, v in file_loaded_tensors.items():
+      print(f"Updating tensor for key: {k}, value shape: {v.shape if isinstance(v, jnp.ndarray) else type(v)}, value type: {type(v)}")
     if sharding_dict is not None:
       state_dict = jax.tree.map_with_path(
           current_file_update_tensor, state_dict, sharding_dict
@@ -452,11 +475,12 @@ def load_and_create_model(
   Returns:
     An NNX model instance with weights loaded from the safetensors files.
   """
-  if mode == 'auto':
-    if env_utils.is_internal_env() or env_utils.is_pathways_initialized():
-      mode = 'original'
-    else:
-      mode = 'optimized'
+  # if mode == 'auto':
+  #   if env_utils.is_internal_env() or env_utils.is_pathways_initialized():
+  #     mode = 'original'
+  #   else:
+  #     mode = 'optimized'
+  mode = 'original'
 
   # TODO(tunix-dev): Fix optimized mode when pathways is initialized.
   if mode == 'optimized':

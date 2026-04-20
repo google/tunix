@@ -5,6 +5,7 @@ import grain
 import pandas as pd
 import os
 import fsspec
+import numpy as np
 
 import transformers
 from tunix.generate import mappings
@@ -37,6 +38,8 @@ except Exception:
 with cm:
   from tunix.models.qwen2 import model as qwen2_lib
   from tunix.models.qwen2 import params as qwen2_params_lib
+  from tunix.models.gemma4 import model as gemma4_lib
+  from tunix.models.gemma4 import params_safetensors as gemma4_params_lib
   from tunix.generate import sampler as sampler_lib
   from tunix.utils import math_utils
 # %%
@@ -209,7 +212,8 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
+    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
     self.sampler = None
@@ -221,14 +225,12 @@ class Qwen25MathEvaluator:
 
   def model_from_safe_tensors(self):
     print("Loading model from safe tensors...")
-    with self.mesh:
-      self.model = qwen2_params_lib.create_model_from_safe_tensors(
-          file_dir=self.model_path, config=self.model_config, mesh=self.mesh
-      )
+    with self.trainer_mesh:
+      self.model = gemma4_params_lib.create_model_from_safe_tensors(file_dir=self.model_path, config=self.model_config, mesh=self.trainer_mesh)
 
   def model_from_orbax_ckpt(self):
     print(f"Loading model from orbax checkpoint {self.model_path}...")
-    with self.mesh:
+    with self.trainer_mesh:
       abs_model: nnx.Module = nnx.eval_shape(
           lambda: qwen2_lib.Qwen2(self.model_config, rngs=nnx.Rngs(params=0))
       )
@@ -236,7 +238,7 @@ class Qwen25MathEvaluator:
       abs_state = jax.tree.map(
           lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.bfloat16, sharding=s),
           abs_state,
-          nnx.get_named_sharding(abs_state, self.mesh),
+          nnx.get_named_sharding(abs_state, self.trainer_mesh),
       )
       item_handlers = {
           "model_params": ocp.PyTreeCheckpointHandler(),
@@ -307,12 +309,12 @@ class Qwen25MathEvaluator:
       self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(
           tokenizer=self.tokenizer,
           config=sglang_jax_sampler.SglangJaxConfig(
-              mesh=self.mesh,
+              mesh=self.rollout_mesh,
               context_length=self.max_prompt_length
               + self.max_generation_steps
               + 100,
               model_version=self.model_version,
-              mem_fraction_static=0.4,
+              mem_fraction_static=0.3,
               init_with_random_weights=False,
               disable_radix_cache=True,
               enable_deterministic_sampling=False,
@@ -323,32 +325,38 @@ class Qwen25MathEvaluator:
       print("Syncing model weights to SGLang JAX sampler...")
       self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
-      from tunix.google.stubs import vllm_sampler_stub as vllm_sampler  # pylint: disable=g-import-not-at-top
+      from tunix.generate import vllm_sampler   # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
           model=self.model,
           backend="vllm_jax",
       )
+      
+      from tunix.sft import utils as sft_utils
+      sft_utils.show_hbm_usage(title="Before creating VLLM sampler")
       self.sampler_vllm = vllm_sampler.VllmSampler(
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
-              mesh=self.mesh,
-              hbm_utilization=0.8,
+              mesh=self.rollout_mesh,
+              hbm_utilization=0.65,
               init_with_random_weights=False,
               mapping_config=mapping_config,
               engine_kwargs={
                   "model": self.model_version,
                   "max_model_len": (
-                      self.max_prompt_length + self.max_generation_steps + 100
+                      512+128
                   ),
-                  "max_num_seqs": 30,
-                  "max_num_batched_tokens": 30 * 10 * 1024 // 8,
+                  "max_num_seqs": 1,
+                  "max_num_batched_tokens": 1 * 512,
               },
           ),
       )
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to VLLM sampler...")
+      state_dict = nnx.state(self.model).to_pure_dict()
+      for k, v in state_dict.items():
+        print(f"Original State dict key: {k}, value shape: {jax.tree.map(lambda x: x.shape if isinstance(x, jnp.ndarray) else type(x), v)}, value values: {jax.tree.map(lambda x: x if not isinstance(x, jnp.ndarray) else 'array', v)}")
       self.sampler_vllm.update_params(nnx.state(self.model))
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
@@ -519,7 +527,10 @@ class Qwen25MathEvaluator:
     debug_count = 0
 
     # Evaluate batch by batch
+    max_batches = 1
     for batch_idx, batch in enumerate(tqdm(dataset, desc="Evaluating")):
+      if batch_idx >= max_batches:
+        break
       prompts = batch["prompt"]
 
       questions = batch["question"]
@@ -651,13 +662,27 @@ MODEL_MAPPING = {
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
+    "google/gemma-4-31B-it": (
+      gemma4_lib.ModelConfig.gemma4_31b(),
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-31B-it/snapshots/439edf5652646a0d1bd8b46bfdc1d3645761a445",
+    ),
+    "google/gemma-4-E2B-it": (
+      gemma4_lib.ModelConfig.gemma4_e2b(),
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf",
+    ),
+    "google/gemma-4-E4B-it": (
+      gemma4_lib.ModelConfig.gemma4_e4b(),
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c",
+    ),
+    
 }
 
-mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
+mesh_config = [[1, 4], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
-model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+model_version = "google/gemma-4-E4B-it"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -667,8 +692,9 @@ evaluator = Qwen25MathEvaluator(
     model_path=model_path,
     dataset=dataset,
     mesh_config=mesh_config,
-    max_prompt_length=1024,  # Increased
-    max_generation_steps=1024,  # Increased
+    max_prompt_length=256,  # Increased
+    max_generation_steps=256,  # Increased
+    sampler_type="vllm", 
 )
 
 evaluator.load_model()
@@ -693,45 +719,45 @@ print(f"Dataset: {dataset}")
 print(f"Correct: {results['correct']}/{results['total']}")
 print(f"Accuracy: {results['accuracy']:.2f}%")
 print("=" * 60)
-# %%
-# AIME-2024
-model_version = "agentica-org/DeepScaleR-1.5B-Preview"
-# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-dataset = AIME_2024_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
+# # %%
+# # AIME-2024
+# model_version = "agentica-org/DeepScaleR-1.5B-Preview"
+# # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# dataset = AIME_2024_DATA_PATH
+# model_config, model_path = MODEL_MAPPING[model_version]
 
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=2048,  # Increased
-    max_generation_steps=32768,  # Increased
-)
+# evaluator = Qwen25MathEvaluator(
+#     model_config=model_config,
+#     model_version=model_version,
+#     model_path=model_path,
+#     dataset=dataset,
+#     mesh_config=mesh_config,
+#     max_prompt_length=2048,  # Increased
+#     max_generation_steps=32768,  # Increased
+# )
 
-evaluator.load_model()
+# evaluator.load_model()
 
-print("\nStarting evaluation...")
+# print("\nStarting evaluation...")
 
-results = evaluator.evaluate(
-    batch_size=1,
-    num_batches=None,
-    temperature=0.6,
-    top_k=None,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
+# results = evaluator.evaluate(
+#     batch_size=1,
+#     num_batches=None,
+#     temperature=0.6,
+#     top_k=None,
+#     top_p=0.95,
+#     num_passes=1,
+#     debug_first_n=5,
+# )
 
-# Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
-# %%
+# # Print results
+# print("\n" + "=" * 60)
+# print("Evaluation Results")
+# print("=" * 60)
+# print(f"Model: {model_path}")
+# print(f"Dataset: {dataset}")
+# print(f"Correct: {results['correct']}/{results['total']}")
+# print(f"Accuracy: {results['accuracy']:.2f}%")
+# print("=" * 60)
+# # %%
