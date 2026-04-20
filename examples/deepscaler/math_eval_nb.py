@@ -349,6 +349,8 @@ class Qwen25MathEvaluator:
                   ),
                   "max_num_seqs": 16,
                   "max_num_batched_tokens": 16 * 10 * 1024 // 8,
+                  "max_num_seqs": 1,
+                  "max_num_batched_tokens": 1 * 512,
               },
           ),
       )
@@ -528,9 +530,12 @@ class Qwen25MathEvaluator:
 
     # Evaluate batch by batch
     # max_batches = 1
+    max_batches = 1
     for batch_idx, batch in enumerate(tqdm(dataset, desc="Evaluating")):
       # if batch_idx >= max_batches:
       #   break
+      if batch_idx >= max_batches:
+        break
       prompts = batch["prompt"]
 
       questions = batch["question"]
@@ -662,31 +667,13 @@ MODEL_MAPPING = {
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
-    "google/gemma-4-31B-it": (
-      gemma4_lib.ModelConfig.gemma4_31b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-31B-it/snapshots/439edf5652646a0d1bd8b46bfdc1d3645761a445",
-    ),
-    "google/gemma-4-E2B-it": (
-      gemma4_lib.ModelConfig.gemma4_e2b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf",
-    ),
-    "google/gemma-4-E4B-it": (
-      gemma4_lib.ModelConfig.gemma4_e4b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c",
-    ),
-    "google/gemma-4-26B-A4B-it": (
-      gemma4_lib.ModelConfig.gemma4_e4b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842",
-    ),
-    
 }
 
 mesh_config = [[1, 4], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
-# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-model_version = "google/gemma-4-31B-it"
+model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -698,6 +685,9 @@ evaluator = Qwen25MathEvaluator(
     mesh_config=mesh_config,
     max_prompt_length=1024,  # Increased
     max_generation_steps=1024,  # Increased
+    sampler_type="vllm", 
+    max_prompt_length=256,  # Increased
+    max_generation_steps=256,  # Increased
     sampler_type="vllm", 
 )
 
