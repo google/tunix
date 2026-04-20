@@ -212,8 +212,8 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[4:]).reshape(1, 4), axis_names=["fsdp", "tp"])
-    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(1, 4), axis_names=["fsdp", "tp"])
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[4:6]).reshape(1, 2), axis_names=["fsdp", "tp"])
+    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
     self.sampler = None
@@ -667,13 +667,31 @@ MODEL_MAPPING = {
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
+    "google/gemma-4-31B-it": (
+      gemma4_lib.ModelConfig.gemma4_31b(),
+      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-31B-it/snapshots/439edf5652646a0d1bd8b46bfdc1d3645761a445",
+    ),
+    "google/gemma-4-E2B-it": (
+      gemma4_lib.ModelConfig.gemma4_e2b(),
+      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf",
+    ),
+    "google/gemma-4-E4B-it": (
+      gemma4_lib.ModelConfig.gemma4_e4b(),
+      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c",
+    ),
+    "google/gemma-4-26B-A4B-it": (
+      gemma4_lib.ModelConfig.gemma4_26b_a4b(),
+      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842",
+    ),
+    
 }
 
 mesh_config = [[1, 4], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
-model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+model_version = "google/gemma-4-26B-A4B-it"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 

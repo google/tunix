@@ -1,0 +1,36 @@
+Traceback (most recent call last):
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 812, in backends
+    backend = _init_backend(platform)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 896, in _init_backend
+    backend = registration.factory()
+              ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 230, in tpu_client_timer_callback
+    client = make_tpu_client(
+             ^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 207, in make_tpu_client
+    return _jax.get_c_api_client(
+           ^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: FAILED_PRECONDITION: TPU initialization failed: open(/dev/vfio/1): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/1
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/mnt/linchai_data/workspace/tunix/examples/deepscaler/math_eval_nb.py", line 693, in <module>
+    evaluator = Qwen25MathEvaluator(
+                ^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/linchai_data/workspace/tunix/examples/deepscaler/math_eval_nb.py", line 215, in __init__
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[4:6]).reshape(1, 2), axis_names=["fsdp", "tp"])
+                                                   ^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 1010, in devices
+    return get_backend(backend).devices()
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 944, in get_backend
+    return _get_backend_uncached(platform)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 923, in _get_backend_uncached
+    bs = backends()
+         ^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 828, in backends
+    raise RuntimeError(err_msg)
+RuntimeError: Unable to initialize backend 'tpu': FAILED_PRECONDITION: TPU initialization failed: open(/dev/vfio/1): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/1 (set JAX_PLATFORMS='' to automatically choose an available backend)
