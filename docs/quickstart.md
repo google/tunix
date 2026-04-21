@@ -291,6 +291,18 @@ out_data = sampler(
 )
 ```
 
+## Trajectory Logging
+
+During reinforcement learning (RL) training, it is often useful to analyze the generated trajectories (prompts, responses, rewards, etc.). Tunix provides an `AsyncTrajectoryLogger` to log this data asynchronously to CSV files without blocking the training loop. It's enabled in AgenticGRPOLearner by default, if you provide a log directory in your cluster configuration's training config.
+
+```python
+# In your cluster configuration setup
+cluster_config.training_config.metrics_logging_options.log_dir = "./logs/rl"
+# GCS paths are also supported
+```
+
+When enabled, the learner will automatically log trajectories during the training process.
+
 ## Next Steps
 
 Now that you've completed the quick start, you can explore other training

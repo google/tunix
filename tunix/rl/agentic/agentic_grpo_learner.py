@@ -73,6 +73,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
+    entropy_coef: Entropy coefficient for the policy loss.
     kl_loss_mode: Method for computing the KL loss.
     force_compute_kl: Whether to force compute KL divergence for logging
       even when it would normally be skipped (e.g., when beta is 0.0).
@@ -100,6 +101,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
+  entropy_coef: float | None = None
   kl_loss_mode: str = "kl"
   force_compute_kl: bool = False
   epsilon: float = 0.2
@@ -724,6 +726,9 @@ def grpo_loss_fn(
       token_entropy, completion_mask, loss_aggregation_mode
   )
   aux["entropy"] = entropy_loss
+
+  if algo_config.entropy_coef is not None and algo_config.entropy_coef > 0.0:
+    loss = loss - algo_config.entropy_coef * entropy_loss
 
   return loss, aux
 

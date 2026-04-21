@@ -113,12 +113,13 @@ arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=312)
+arg_parser.add_argument("--num_batches", type=int, default=600)
 arg_parser.add_argument("--num_generations", type=int, default=8)
-arg_parser.add_argument("--beta", type=float, default=0.0)
+arg_parser.add_argument("--beta", type=float, default=0.001)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_response_length", type=int, default=8192)
+arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
+arg_parser.add_argument("--max_response_length", type=int, default=12288)
 arg_parser.add_argument("--temperature", type=float, default=0.6)
 arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
@@ -126,6 +127,13 @@ arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 args, _ = arg_parser.parse_known_args()
+arg_parser.add_argument(
+    "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
+)
+arg_parser.add_argument(
+    "--kl_loss_mode", type=str, default="low_var_kl"
+)
+
 
 # ====== Data ======
 TRAIN_FRACTION = 1.0
@@ -145,7 +153,7 @@ TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
+MAX_PROMPT_LENGTH = args.max_prompt_length
 MAX_RESPONSE_LENGTH = args.max_response_length
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
@@ -215,8 +223,8 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 10
-MAX_TO_KEEP = 4
+SAVE_INTERVAL_STEPS = 5
+MAX_TO_KEEP = 100
 DO_MEM_PROFILING = False
 
 # ====== Inference ======
@@ -264,6 +272,8 @@ try:
         "top_k": TOP_K,
         "max_concurrency": MAX_CONCURRENCY,
         "rollout_engine": ROLLOUT_ENGINE,
+        "loss_agg_mode": args.loss_agg_mode,
+        "kl_loss_mode": args.kl_loss_mode,
     }
   wandb.init(
     project="tunix",
@@ -336,11 +346,11 @@ else:
   CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/from_step60/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/vllm_16k_with_step40_retrain/01")
 print(f"Checkpoint directory: {CKPT_DIR}")
 
 MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+# MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 MODEL_PATH = "gs://linchai-bucket-dev/rl/checkpoints/deepscaler_ckpt_eval/"
 
 print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
@@ -475,7 +485,7 @@ def restore_from_ckpt():
         ),
     )
     ckpt = checkpointer.restore(
-        60,
+        40,
         args=ocp.args.Composite(
             model_params=model_cp_args,
         ),
@@ -484,7 +494,9 @@ def restore_from_ckpt():
     new_state = nnx.State(ckpt.model_params)
     return nnx.merge(graphdef, new_state)
 
-qwen2_ref = restore_from_ckpt()
+qwen2_ref = params_lib.create_model_from_safe_tensors(
+    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+)
 
 
 # %%
@@ -665,7 +677,8 @@ grpo_config = GRPOConfig(
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
-    degenerate_group_masking=False,
+    loss_agg_mode=args.loss_agg_mode,
+    kl_loss_mode=args.kl_loss_mode,
 )
 
 # # Perf Metrics logging
