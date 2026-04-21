@@ -375,11 +375,11 @@ VLLM_UTILIZATION = args.vllm_utilization
 
 
 # 2. Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 128
+VLLM_MAX_NUM_SEQS = 256
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
-VLLM_MAX_BATCHED_TOKENS = 65536
+VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
@@ -631,7 +631,7 @@ sglang_jax_rollout_dict = {
 
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
-    "rollout_vllm_hbm_utilization": 0.6,
+    "rollout_vllm_hbm_utilization": 0.8,
     "rollout_vllm_init_with_random_weights": True,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
