@@ -202,7 +202,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       vllm_state = copy.deepcopy(self.transformer_state)
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
-          dst_state=self.transformer_state,
+          dst_state=vllm_state,
           key_mappings=self.to_hf_key_mappings,
           key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,
@@ -219,13 +219,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           ),
           tp_size=self.args.get("tensor_parallel_size", 1),
       )
-      sampler_model_state = self.transformer_state
-      import jax.numpy as jnp
-      for k, v in vllm_state.items():
-        if not jnp.array_equal(vllm_state[k], sampler_model_state[k]):
-          print(f"Parameter '{k}' successfully mapped and NOT match the sampler model state., shape: {vllm_state[k].shape} and sampler shape: {sampler_model_state[k].shape}, vllm _value: {vllm_state[k]}, sampler model value: {sampler_model_state[k]}")
-        else:
-          print(f"Parameter '{k}' successfully mapped and match the sampler model state.")
+      # sampler_model_state = self.transformer_state
+      # import jax.numpy as jnp
+      # for k, v in vllm_state.items():
+      #   if not jnp.array_equal(vllm_state[k], sampler_model_state[k]):
+      #     print(f"Parameter '{k}' successfully mapped and NOT match the sampler model state., shape: {vllm_state[k].shape} and sampler shape: {sampler_model_state[k].shape}, vllm _value: {vllm_state[k]}, sampler model value: {sampler_model_state[k]}")
+      #   else:
+      #     print(f"Parameter '{k}' successfully mapped and match the sampler model state.")
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
