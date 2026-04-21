@@ -347,10 +347,8 @@ class Qwen25MathEvaluator:
                   "max_model_len": (
                       self.max_prompt_length + self.max_generation_steps + 100
                   ),
-                  "max_num_seqs": 16,
-                  "max_num_batched_tokens": 16 * 10 * 1024 // 8,
-                  "max_num_seqs": 1,
-                  "max_num_batched_tokens": 1 * 512,
+                  "max_num_seqs": 8,
+                  "max_num_batched_tokens": 8 * 1024,
               },
           ),
       )
@@ -530,12 +528,9 @@ class Qwen25MathEvaluator:
 
     # Evaluate batch by batch
     # max_batches = 1
-    max_batches = 1
     for batch_idx, batch in enumerate(tqdm(dataset, desc="Evaluating")):
       # if batch_idx >= max_batches:
       #   break
-      if batch_idx >= max_batches:
-        break
       prompts = batch["prompt"]
 
       questions = batch["question"]

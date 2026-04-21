@@ -746,13 +746,13 @@ def _align_shape(
     elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
       print(f"Reshaping moe.gating_einsum on {src_key}: {val.shape} -> {tgt_shape}")
       tp_size = kwargs["tp_size"]
-      gate, up = jnp.split(val, 2, axis=1)
-      num_experts, expert_dim, embed_dim = gate.shape[0], gate.shape[1], gate.shape[2]
+      num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
+      gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
       chunk_size = expert_dim // tp_size
       padded_expert_chunk_dim = ((chunk_size + 127)//128)*128
       pad_amount = padded_expert_chunk_dim - chunk_size
-      gate_chunks = gate.reshape(num_experts, tp_size, -1, embed_dim)
-      up_chunks = up.reshape(num_experts, tp_size, -1, embed_dim)
+      gate_chunks = gate_chunks.reshape(num_experts, tp_size, -1, embed_dim)
+      up_chunks = up_chunks.reshape(num_experts, tp_size, -1, embed_dim)
       if pad_amount > 0:
         gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
         up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
