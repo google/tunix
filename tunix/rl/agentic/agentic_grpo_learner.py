@@ -69,7 +69,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     policy_loss_fn: Name of the policy loss function.
     loss_agg_mode: Method for aggregating the loss. Supported values:
       "token-mean", "sequence-mean-token-mean", "sequence-mean-token-scale",
-      "sequence-mean-token-sum-norm".
+      "seq-mean-token-sum", "sequence-mean-token-sum-norm".
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.

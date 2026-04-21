@@ -552,6 +552,8 @@ class TrajectoryCollectEngine:
     if cur_step is not None and rollout_output.logprobs is not None:
       cur_step.logprobs = rollout_output.logprobs[0]
 
+    step_timed_out = time.perf_counter() - self._start_ts > self.timeout
+
     if cur_step is not None and self.tokenizer and self.chat_parser:
       assistant_message, env_messages = (
           utils.get_recent_assistant_user_messages(self.agent.chat_completions)
@@ -562,8 +564,9 @@ class TrajectoryCollectEngine:
         cur_step.assistant_tokens = rollout_output.tokens[0]
         cur_step.assistant_masks = np.ones_like(rollout_output.tokens[0])
 
-      # Environment tokens/masks
-      if env_messages:
+      # Align with rLLM: terminal-step environment messages are not appended to
+      # the response token stream when the step ends the trajectory.
+      if env_messages and not done and not step_timed_out:
         e_tokens, e_masks = utils.tokenize_and_generate_masks(
             env_messages,
             tokenizer=self.tokenizer,
@@ -575,7 +578,7 @@ class TrajectoryCollectEngine:
         cur_step.env_masks = np.array(e_masks)
         self._response_token_count += len(e_tokens)
 
-    if time.perf_counter() - self._start_ts > self.timeout:
+    if step_timed_out:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
       self.agent.get_current_step().done = True
