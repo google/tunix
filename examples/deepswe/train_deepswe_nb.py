@@ -632,7 +632,7 @@ sglang_jax_rollout_dict = {
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
     "rollout_vllm_hbm_utilization": 0.6,
-    "rollout_vllm_init_with_random_weights": False,
+    "rollout_vllm_init_with_random_weights": True,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
