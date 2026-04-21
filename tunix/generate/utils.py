@@ -514,15 +514,18 @@ def fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tp_siz
     gate, up = gate.T, up.T
     hidden_dim = gate.shape[0]
     chunk_size = hidden_dim // tp_size
-    padded_chunk_size = ((chunk_size + 127)//128)*128
-    pad_amount = padded_chunk_size - chunk_size
+    # padded_chunk_size = ((chunk_size + 127)//128)*128
+    # pad_amount = padded_chunk_size - chunk_size
     gate_chunks = gate.reshape(tp_size, chunk_size, gate.shape[1])
     up_chunks = up.reshape(tp_size, chunk_size, up.shape[1])
-    if pad_amount > 0:
-      gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, pad_amount), (0, 0)))
-      up_chunks = jnp.pad(up_chunks, ((0, 0), (0, pad_amount), (0, 0)))
+    # if pad_amount > 0:
+    #   gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, pad_amount), (0, 0)))
+    #   up_chunks = jnp.pad(up_chunks, ((0, 0), (0, pad_amount), (0, 0)))
     gate_up = jnp.stack([gate_chunks, up_chunks], axis=1)
-    gate_up = gate_up.reshape(2 * padded_chunk_size * tp_size, gate.shape[1])
+    # if pad_amount > 0:
+    #   gate_up = gate_up.reshape(2 * padded_chunk_size * tp_size, gate.shape[1])
+    # else:
+    gate_up = gate_up.reshape(2 * hidden_dim, gate.shape[1])
     match = re.search(r"layers\.(\d+)\.mlp\.gate_proj\.kernel", fuse_sources[tgt_path][0][0])
     assert match, f"Source key '{fuse_sources[tgt_path][0][0]}' does not match expected pattern for QKV fusion."
     layer_idx = match.group(1)
@@ -740,6 +743,24 @@ def _align_shape(
       # reshape from (num_head, head_dim, model_dim) to (model_dim, num_head * head_dim) for vec_einsum.
       print(f"Reshaping attention vec_einsum on {src_key}: {val.shape} -> {tgt_shape}")
       return val.reshape((val.shape[0] * val.shape[1], val.shape[2])).T
+    elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
+      print(f"Reshaping moe.gating_einsum on {src_key}: {val.shape} -> {tgt_shape}")
+      tp_size = kwargs["tp_size"]
+      gate, up = jnp.split(val, 2, axis=1)
+      num_experts, expert_dim, embed_dim = gate.shape[0], gate.shape[1], gate.shape[2]
+      chunk_size = expert_dim // tp_size
+      padded_expert_chunk_dim = ((chunk_size + 127)//128)*128
+      pad_amount = padded_expert_chunk_dim - chunk_size
+      gate_chunks = gate.reshape(num_experts, tp_size, -1, embed_dim)
+      up_chunks = up.reshape(num_experts, tp_size, -1, embed_dim)
+      if pad_amount > 0:
+        gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+        up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+      val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
+      val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
+      val_chunks = val_chunks.transpose(0, 2, 1)
+      print(f"Reshaping moe.gating_einsum on {src_key}: {val_chunks.shape} -> {tgt_shape}")
+      return val_chunks
     else:
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
@@ -763,7 +784,7 @@ def _align_shape(
     val_2d = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
     val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
     return jnp.reshape(val_2d, tgt_shape)
-  elif re.compile(r'layers\..*\.per_layer_input_gate\.w').match(src_key) or re.compile(r'layers\..*\.per_layer_projection\.w').match(src_key):
+  elif re.compile(r'layers\..*\.per_layer_input_gate\.w').match(src_key) or re.compile(r'layers\..*\.per_layer_projection\.w').match(src_key) or re.compile(r'layers\..*\.moe\.router_logits').match(src_key):
     return val.T
   attention_patterns = [
       r'.*(q|k|v|o)_proj.*',

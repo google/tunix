@@ -212,7 +212,7 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[4:6]).reshape(1, 2), axis_names=["fsdp", "tp"])
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
     self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
@@ -339,7 +339,7 @@ class Qwen25MathEvaluator:
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
               mesh=self.rollout_mesh,
-              hbm_utilization=0.65,
+              hbm_utilization=0.53,
               init_with_random_weights=False,
               mapping_config=mapping_config,
               engine_kwargs={
@@ -681,7 +681,7 @@ MODEL_MAPPING = {
     ),
     "google/gemma-4-26B-A4B-it": (
       gemma4_lib.ModelConfig.gemma4_26b_a4b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842",
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842",
     ),
     
 }
@@ -703,9 +703,6 @@ evaluator = Qwen25MathEvaluator(
     mesh_config=mesh_config,
     max_prompt_length=1024,  # Increased
     max_generation_steps=1024,  # Increased
-    sampler_type="vllm", 
-    max_prompt_length=256,  # Increased
-    max_generation_steps=256,  # Increased
     sampler_type="vllm", 
 )
 
