@@ -17,7 +17,9 @@ from typing import Any
 
 from env import FrozenLakeEnv  # noqa: E402
 
-from rllm.core import Action, BaseAgent, register_agent
+import copy
+from tunix.rl.agentic.agents import agent_types
+from tunix.rl.agentic.agents import base_agent
 
 logger = logging.getLogger(__name__)
 
@@ -132,47 +134,70 @@ Now it is your turn, please show your thinking process and put the final action 
 """
 
 
-@register_agent("frozenlake")
-class FrozenLakeAgent(BaseAgent):
-    def __init__(self, use_multistep_prompt: bool | None = False):
-        self.step: int = 0
-        self.multistep_prompt: bool | None = use_multistep_prompt
-        self.last_observation: Any = None
-        self.reset()
+class FrozenLakeAgent(base_agent.ConversationAgentBase):
+  def __init__(self, use_multistep_prompt: bool | None = False):
+    self.multistep_prompt = use_multistep_prompt
+    system_prompt = SYSTEM_PROMPT if not use_multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT
+    super().__init__(system_prompt=system_prompt)
+    self.last_observation = None
 
-    @property
-    def system_prompt(self):
-        return SYSTEM_PROMPT if not self.multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT
+  def _init_messages(self, system_prompt: str) -> None:
+    """Initialize conversation history with a system prompt.
 
-    def process_observation(self, observation: Any, reward: float, done: bool, info: dict, **kwargs):
-        new_obs_str = str(observation)
-        # Base message for the user
-        new_obs_str = "Current Observation: \n" + new_obs_str
-        if not done:
-            new_obs_str += (
-                "\n" + "You have not achieved the goal, P has not reached G yet. Please give the next action."
-            )
+    Subclasses may override this to inject additional content (e.g., tool
+    documentation) into the initial system message.
 
-        # Check if the observation is the same as the previous step's observation
-        # This check only makes sense if we have completed at least one step (i.e., received a model response and acted)
-        if self.last_observation and self.last_observation == new_obs_str:
-            new_obs_str += "\nYour last response is invalid. Your position didn't change at all. You may need to recheck your thinking process, action outputted, and the format of response. Remember, you should only output the NEXT ACTION at each interation in the ``` ```. For example, if you want to move up, you should output ```Up```."
-        self.last_observation = new_obs_str
-        return new_obs_str
+    Args:
+      system_prompt: The system prompt to use.
+    """
+    self._messages = [{"role": "system", "content": system_prompt or ""}]
 
-    def process_action(self, action: str):
-        DIRECTION_MAP = {"left": 1, "down": 2, "right": 3, "up": 4}
 
-        thought = action
-        action_str = str(FrozenLakeEnv.INVALID_ACTION)
+  @property
+  def system_prompt(self):
+    return SYSTEM_PROMPT if not self.multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT
 
-        matches = re.findall(r"```(.*?)```", action, re.DOTALL)
+  def update_from_env(
+    self,
+    observation: Any,
+    reward: float,
+    done: bool,
+    info: dict[str, Any] | None = None,
+    **kwargs,
+  ) -> None:
+    new_obs_str = str(observation)
+    # Base message for the user
+    new_obs_str = "Current Observation: \n" + new_obs_str
+    if not done:
+      new_obs_str += "\n" + "You have not achieved the goal, P has not reached G yet. Please give the next action."
 
-        if matches:
-            last_match_content = matches[-1].strip()
-            last_match_index = action.rfind(f"```{last_match_content}```")
-            if last_match_index != -1:
-                thought = action[:last_match_index].strip()
+    # Check if the observation is the same as the previous step's observation
+    if self.last_observation and self.last_observation == new_obs_str:
+      new_obs_str += "\nYour last response is invalid. Your position didn't change at all. You may need to recheck your thinking process, action outputted, and the format of response. Remember, you should only output the NEXT ACTION at each interation in the ``` ```. For example, if you want to move up, you should output ```Up```."
+    self.last_observation = new_obs_str
+
+    super().update_from_env(new_obs_str, reward, done, info)
+    self.cur_step = Step(observation=new_obs_str)
+
+  def _observation_to_messages(
+      self, observation: Any, reward: float, done: bool, info: dict[str, Any]
+  ) -> None:
+
+    self._messages.append({"role": "user", "content": str(observation)})
+
+  def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
+    DIRECTION_MAP = {"left": 1, "down": 2, "right": 3, "up": 4}
+
+    thought = response
+    action_str = str(FrozenLakeEnv.INVALID_ACTION)
+
+    matches = re.findall(r"```(.*?)```", response, re.DOTALL)
+
+    if matches:
+      last_match_content = matches[-1].strip()
+      last_match_index = response.rfind(f"```{last_match_content}```")
+      if last_match_index != -1:
+        thought = response[:last_match_index].strip()
 
             extracted_text = last_match_content.lower()
 
@@ -181,8 +206,20 @@ class FrozenLakeAgent(BaseAgent):
             elif extracted_text.isdigit() and int(extracted_text) in DIRECTION_MAP.values():
                 action_str = str(int(extracted_text))
 
-        return Action(thought=thought, action=action_str)
+    # Add assistant's response to conversation history.
+    self._messages.append({"role": "assistant", "content": response})
 
-    def reset(self) -> None:
-        self.step = 0
-        self.last_observation = None
+    # Record complete step with conversation context and parsed action.
+    cur_step = self._trajectory.steps[-1]
+    cur_step.thought = thought
+    cur_step.action = action_str
+    cur_step.model_response = response
+
+    self.step += 1
+    return agent_types.Action(action=cur_step.action)
+
+  def reset(self) -> None:
+    self._trajectory = agent_types.Trajectory()
+    self._init_messages(self.system_prompt)
+    self.step = 0
+    self.last_observation = None
