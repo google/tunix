@@ -198,11 +198,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if self.to_hf_key_mappings:
       # Mapped Weight Sync (e.g. Vanilla -> vLLM)
-      import copy
-      vllm_state = copy.deepcopy(self.transformer_state)
+      # import copy
+      # vllm_state = copy.deepcopy(self.transformer_state)
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
-          dst_state=vllm_state,
+          dst_state=self.transformer_state,
           key_mappings=self.to_hf_key_mappings,
           key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,

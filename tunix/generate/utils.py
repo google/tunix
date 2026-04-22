@@ -355,7 +355,7 @@ def build_flat_dict(
   # PRE-COMPILE MAPPINGS
   # Convert target string patterns into Python Regex objects for fast matching.
   for src, (tgt, sharding) in mappings.items():
-    print(f"Compiling mapping from source '{src}' to target pattern '{tgt}' with sharding {sharding}")
+    # print(f"Compiling mapping from source '{src}' to target pattern '{tgt}' with sharding {sharding}")
     # Scenario A: The mapping already contains regex special characters (manual
     # filtering). The assumption is that `src` does not contain regex
     # characters like `()`; only `tgt` can contain them.
@@ -376,7 +376,7 @@ def build_flat_dict(
     path = keys if isinstance(keys, str) else '.'.join(str(key) for key in keys)
     mapped = False
     for src, regex, sharding in compiled_mappings:
-      print(f"Trying to match path '{path}' against pattern '{regex.pattern}' for source '{src}' with sharding {sharding}")
+      # print(f"Trying to match path '{path}' against pattern '{regex.pattern}' for source '{src}' with sharding {sharding}")
       matched = regex.match(path)
       if matched:
         # Extract wildcards if any
@@ -414,10 +414,10 @@ def build_flat_dict(
           if is_fused_path(path):
             if path in fused_tgt_map:
               fused_tgt_map[path].append(actual_src)
-              print(f"Adding to existing fused mapping for target '{path}': source '{actual_src}' with original source pattern '{src}'")
+              # print(f"Adding to existing fused mapping for target '{path}': source '{actual_src}' with original source pattern '{src}'")
             else:
               fused_tgt_map[path] = [actual_src]
-            print(f"Mapping fused parameter '{path}' to source '{actual_src}' with original source pattern '{src}' and sharding {sharding}")
+            # print(f"Mapping fused parameter '{path}' to source '{actual_src}' with original source pattern '{src}' and sharding {sharding}")
 
         mapped = True
         if not is_fused_path(path):
@@ -462,7 +462,7 @@ def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
 
 
 def fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tp_size):
-  print(f"tp_size: {tp_size}")
+  # print(f"tp_size: {tp_size}")
   if tgt_path in fuse_sources:
     fuse_sources[tgt_path].append((src_key, src_val))
   else:
@@ -557,7 +557,7 @@ def _unroll_scanned_layers(
   fuse_sources = {}
   for src_keys, src_val in src_state.flat_state():
     src_key = '.'.join(str(k) for k in src_keys)
-    print(f"_unroll_scanned_layers source key '{src_key}', value: {src_val}")
+    # print(f"_unroll_scanned_layers source key '{src_key}', value: {src_val}")
 
     # Skip RNG parameters silently
     if 'rng' in src_key:
@@ -569,11 +569,11 @@ def _unroll_scanned_layers(
       logging.error('No mapping for source key: %s', src_key)
       continue
     tgt_param, tgt_path, sharding_spec = src_to_tgt_map[src_key]
-    print(f'Processing source key "{src_key}" with target path "{tgt_path}" with sharding spec "{sharding_spec}"')
+    # print(f'Processing source key "{src_key}" with target path "{tgt_path}" with sharding spec "{sharding_spec}"')
 
     # Check if this is a scanned layer that needs unrolling
     layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
-    print(f'Layer axis for key "{src_key}": {layer_axis}')
+    # print(f'Layer axis for key "{src_key}": {layer_axis}')
 
     if layer_axis is not None:
       # Unroll the scanned layer dimension
@@ -586,15 +586,15 @@ def _unroll_scanned_layers(
         unscanned_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
     else:
       # No unrolling needed
-      print(f'Processing source key "{src_key}" with value shape {src_val.value.shape if hasattr(src_val, "value") else type(src_val)}')
+      # print(f'Processing source key "{src_key}" with value shape {src_val.value.shape if hasattr(src_val, "value") else type(src_val)}')
       if tgt_path in fused_tgt_map:
         assert src_key in fused_tgt_map[tgt_path], f"Source key '{src_key}' should be part of the fused mapping for target '{tgt_path}' but it's not. Fused mapping keys: {fused_tgt_map[tgt_path]}"
-        print(f"{src_key=}, {tgt_path=}, {tgt_param.sharding=}, {src_val.value.sharding=}")
+        # print(f"{src_key=}, {tgt_path=}, {tgt_param.sharding=}, {src_val.value.sharding=}")
         fuse_sources = fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tp_size)
-        print(f"fuse_sources for target '{tgt_path}': {[k for k, v in fuse_sources.items()]}")
+        # print(f"fuse_sources for target '{tgt_path}': {[k for k, v in fuse_sources.items()]}")
         if isinstance(fuse_sources[tgt_path], tuple):
           unscanned_flat[(fuse_sources[tgt_path][0], tgt_path)] = (fuse_sources[tgt_path][1], tgt_param)
-          print(f"Fused parameter for target '{tgt_path}' from sources '{fuse_sources[tgt_path][0]}' with shape {fuse_sources[tgt_path][1].shape} and sharding {tgt_param.sharding}")
+          # print(f"Fused parameter for target '{tgt_path}' from sources '{fuse_sources[tgt_path][0]}' with shape {fuse_sources[tgt_path][1].shape} and sharding {tgt_param.sharding}")
       else:
         unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
 
@@ -613,7 +613,7 @@ def _apply_transpose(
 
   last_key = src_key.split('.')[-1]
   last_three_keys = '.'.join(src_key.split('.')[-3:])
-  print(f"Checking if transpose is needed for {src_key} with last key {last_key} and last three keys {last_three_keys}")
+  # print(f"Checking if transpose is needed for {src_key} with last key {last_key} and last three keys {last_three_keys}")
   all_key = src_key
   target_key = ''
   if last_key in transpose_keys and 'lora' not in last_key:
@@ -704,10 +704,10 @@ def _align_shape(
         new_tgt_shape = tgt_shape
 
     elif src_key == 'embedder.per_layer_input_embedding': 
-      print(f"Reshaping per_layer_input_embedding on {src_key}: {val.shape} -> {tgt_shape}, val type: {type(val)}")
+      # print(f"Reshaping per_layer_input_embedding on {src_key}: {val.shape} -> {tgt_shape}, val type: {type(val)}")
       return jnp.reshape(val, (val.shape[0], -1))
     elif src_key == 'embedder.per_layer_model_projection.w':
-      print(f"Reshaping per_layer_model_projection on {src_key}: {val.shape} -> {tgt_shape}, val type: {type(val)}")
+      # print(f"Reshaping per_layer_model_projection on {src_key}: {val.shape} -> {tgt_shape}, val type: {type(val)}")
       val = jnp.reshape(val, (val.shape[0], -1))
       return val.T
     elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
@@ -741,10 +741,10 @@ def _align_shape(
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
     elif re.compile(r'layers\..*\.attn_vec_einsum\.w').match(src_key):
       # reshape from (num_head, head_dim, model_dim) to (model_dim, num_head * head_dim) for vec_einsum.
-      print(f"Reshaping attention vec_einsum on {src_key}: {val.shape} -> {tgt_shape}")
+      # print(f"Reshaping attention vec_einsum on {src_key}: {val.shape} -> {tgt_shape}")
       return val.reshape((val.shape[0] * val.shape[1], val.shape[2])).T
     elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
-      print(f"Reshaping moe.gating_einsum on {src_key}: {val.shape} -> {tgt_shape}")
+      # print(f"Reshaping moe.gating_einsum on {src_key}: {val.shape} -> {tgt_shape}")
       tp_size = kwargs["tp_size"]
       num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
       gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
@@ -759,7 +759,7 @@ def _align_shape(
       val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
       val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
       val_chunks = val_chunks.transpose(0, 2, 1)
-      print(f"Reshaping moe.gating_einsum on {src_key}: {val_chunks.shape} -> {tgt_shape}")
+      # print(f"Reshaping moe.gating_einsum on {src_key}: {val_chunks.shape} -> {tgt_shape}")
       return val_chunks
     else:
       raise ShapeMismatchError(
@@ -914,7 +914,7 @@ def flatten_to_tuples(d):
 
 def unflatten_from_tuples(flat_list, dst_state):
   for path, value in flat_list:
-    print(f"Processing path: {path} with value = {value }")
+    # print(f"Processing path: {path} with value = {value }")
     dst_state[path] = value
   return dst_state
 
@@ -956,8 +956,8 @@ def transfer_state_with_mappings(
   else:
     tgt_flat_list = dst_state.flat_state()
     tgt_key_idx_mapping = None
-  for k, v in tgt_flat_list:
-    print(f"Target flat key: {k}, value shape: {v.shape}, value: {v}")
+  # for k, v in tgt_flat_list:
+  #   print(f"Target flat key: {k}, value shape: {v.shape}, value: {v}")
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
@@ -977,9 +977,9 @@ def transfer_state_with_mappings(
   # {fused_tgt_key: (src_key, src_val, sharding_spec)}
   fused_tgt_map = {}
   src_to_tgt_map, fused_tgt_map = build_flat_dict(tgt_flat_list, key_mappings, fused_tgt_map)
-  for tgt, src_list in fused_tgt_map.items():
-    if len(src_list) > 1:
-      print(f"Fused target key '{tgt}' is mapped from multiple source keys: {src_list}. This requires special handling.")
+  # for tgt, src_list in fused_tgt_map.items():
+  #   if len(src_list) > 1:
+  #     print(f"Fused target key '{tgt}' is mapped from multiple source keys: {src_list}. This requires special handling.")
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map, fused_tgt_map, kwargs['tp_size'])
@@ -991,17 +991,17 @@ def transfer_state_with_mappings(
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
     # Apply transpose if configured
-    print(f'Processing unscanned_src_to_tgt_flat: {flat_src_key} -> {flat_tgt_key} with initial shape {val.shape}')
+    # print(f'Processing unscanned_src_to_tgt_flat: {flat_src_key} -> {flat_tgt_key} with initial shape {val.shape}')
     val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
-    if flat_src_key == "embedder.input_embedding":
-      print(f"src val {val}, tgt_param {tgt_param} ")
+    # if flat_src_key == "embedder.input_embedding":
+    #   print(f"src val {val}, tgt_param {tgt_param} ")
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
-    print(f'Aligning shape for {flat_src_key} -> {flat_tgt_key}: {val.shape} -> {tgt_param.shape}')
+    # print(f'Aligning shape for {flat_src_key} -> {flat_tgt_key}: {val.shape} -> {tgt_param.shape}')
     tgt_shape = tgt_param.value.shape if hasattr(tgt_param, 'value') else tgt_param.shape
     tgt_dtype = tgt_param.value.dtype if hasattr(tgt_param, 'value') else tgt_param.dtype
     val = _align_shape(
@@ -1031,8 +1031,8 @@ def transfer_state_with_mappings(
         key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
         for key, tgt_params in tgt_flat_list
     }
-    for k, v in tgt_flat_dict.items():
-      print(f"tgt_flat_dict key: {k}, value {v}")
+    # for k, v in tgt_flat_dict.items():
+    #   print(f"tgt_flat_dict key: {k}, value {v}")
     resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for tgt_key, tgt_param in tgt_flat_list:
@@ -1043,7 +1043,7 @@ def transfer_state_with_mappings(
         tgt_param.value = resharded_values_flat_dict[tgt_key]
       else:
         tgt_flat_list[tgt_key_idx_mapping[tgt_key]] = (tgt_key, resharded_values_flat_dict[tgt_key])
-        print(f"After resharding, assigned {tgt_key} with shape {tgt_param.shape} and value {tgt_param}")  
+        # print(f"After resharding, assigned {tgt_key} with shape {tgt_param.shape} and value {tgt_param}")  
 
   if isinstance(dst_state, dict):
     return unflatten_from_tuples(tgt_flat_list, dst_state)

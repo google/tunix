@@ -12,15 +12,12 @@ from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-from kubernetes import client, config as k8s_config
 import numpy as np
 import optax
 from orbax import checkpoint as ocp
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
-from tunix.utils import compat
-import vllm  # pytype: disable=import-error
 
 Dataset = datasets_lib.Dataset
 # ====== Logging Configuration ======
@@ -52,7 +49,6 @@ parser = argparse.ArgumentParser(description="Frozenlake Training")
 # General Config
 parser.add_argument("--models_base_dir", type=str, default="models")
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--model_version", type=str, default="gemma4-26B-a4B-it")
 
 # Data & Training Flow
 parser.add_argument("--batch_size", type=int, default=1)
@@ -126,21 +122,10 @@ from examples.frozenlake.agent import (
 )
 from examples.frozenlake.env import FrozenLakeEnv
 
-# %%
-# ==========================================
-# 3. Environment Configuration
-# ==========================================
-workdir = "/mnt/disk/linchai-data/"
-DATASET_CACHE = os.getenv(
-    "DATASET_CACHE", os.path.join(workdir, "dataset_cache")
-)
-os.makedirs(DATASET_CACHE, exist_ok=True)
-
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-MODELS_BASE_DIR = os.path.join(workdir, args.models_base_dir)
-MODEL_PATH = os.path.join(MODELS_BASE_DIR, MODEL_VERSION)
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
 
 print(f"Looking for local model at: {MODEL_PATH}...")
 
@@ -149,11 +134,6 @@ TRAIN_FRACTION = args.train_fraction
 
 # ====== Reproducibility ======
 SEED = args.seed
-
-# ====== LoRA ======
-RANK = args.rank
-ALPHA = args.alpha
-TRAIN_WITH_LORA = args.train_with_lora
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -184,9 +164,10 @@ NUM_EPOCHS = args.num_epochs
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + (
-    MAX_RESPONSE_LENGTH * CONTEXT_RATIO * MAX_TURNS
+    MAX_RESPONSE_LENGTH
 )
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
+MAX_CONCURRENCY = 16
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
 B1 = args.b1
@@ -221,7 +202,7 @@ import jax
 import jax.numpy as jnp
 from tunix.models.automodel import call_model_config
 
-config = call_model_config(MODEL_VERSION)
+config = model_lib.ModelConfig.gemma4_26b_a4b()
 
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
@@ -242,13 +223,11 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 # ==========================================
 
 gemma4_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=MODEL_DTYPE
+    MODEL_PATH, config, mesh=train_mesh, dtype=jnp.float32
 )
 
-graph_def, params = nnx.split(gemma4_reference)
-gemma4_actor = nnx.merge(
-    graph_def,
-    jax.tree.map(jnp.copy, params),
+gemma4_actor = params_lib.create_model_from_safe_tensors(
+    MODEL_PATH, config, mesh=train_mesh, dtype=jnp.float32
 )
 sft_utils.show_hbm_usage()
 
@@ -274,8 +253,8 @@ dataset_path = "/mnt/disks/linchai-data/tunix/examples/frozenlake/data/frozenlak
 train_dataset = pd.read_parquet(os.path.join(dataset_path, "train.parquet"))
 test_dataset = pd.read_parquet(os.path.join(dataset_path, "test.parquet"))
 
-dataset = dataset.shuffle(seed=SEED)
-grain_dataset = grain.MapDataset.source(dataset)
+train_dataset = grain.MapDataset.source(train_dataset)
+test_dataset = grain.MapDataset.source(test_dataset)
 
 train_dataset, _ = data_lib.post_init_dataset(
     train_dataset,
@@ -329,7 +308,7 @@ base_rollout_dict = {
 }
 
 sglang_jax_rollout_dict = {
-    "rollout_sglang_jax_model_version": MODEL_PATH,  # Uses local absolute path
+    "rollout_sglang_jax_model_version": "google/gemma-4-26B-A4B-it",
     "rollout_sglang_jax_mem_fraction_static": 0.9,
     "rollout_sglang_jax_init_with_random_weights": True,
     "rollout_sglang_jax_disable_radix_cache": False,
@@ -340,7 +319,7 @@ sglang_jax_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
+    "rollout_vllm_model_version": "google/gemma-4-26B-A4B-it",
     "rollout_vllm_hbm_utilization": 0.5,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
@@ -385,8 +364,6 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
         train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
-        compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
-        rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=None,
         checkpointing_options=None,
@@ -396,8 +373,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 sft_utils.show_hbm_usage()
 
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen_actor,
-    reference=qwen_reference,
+    actor=gemma4_actor,
+    reference=gemma4_reference,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
