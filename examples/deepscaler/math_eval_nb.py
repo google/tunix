@@ -341,7 +341,7 @@ class Qwen25MathEvaluator:
           config=vllm_sampler.VllmConfig(
               mesh=self.rollout_mesh,
               hbm_utilization=0.5,
-              init_with_random_weights=True,
+              init_with_random_weights=False,
               mapping_config=mapping_config,
               engine_kwargs={
                   "model": self.model_version,
@@ -368,8 +368,8 @@ class Qwen25MathEvaluator:
       #     ),
       # )
       # sync weights from self.model to the sampler's internal model
-      print("Syncing model weights to VLLM sampler...")
-      self.sampler_vllm.update_params(nnx.state(self.model))
+      # print("Syncing model weights to VLLM sampler...")
+      # self.sampler_vllm.update_params(nnx.state(self.model))
       # # compare sampler_vllm with backup sampler, the language_model weights should be the same.
       # vllm_state = self.sampler_vllm.transformer_state
       # vllm_state_backup = self.sampler_vllm_backup.transformer_state

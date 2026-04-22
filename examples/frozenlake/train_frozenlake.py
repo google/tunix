@@ -210,9 +210,9 @@ if ENABLE_REMAT:
 
 
 devices = jax.devices()
-rollout_devices = np.array(devices[:2]).reshape(1, 2)
-reference_devices = np.array(devices[2:4]).reshape(2, 1)
-train_devices = np.array(devices[4:6]).reshape(2,1)
+rollout_devices = np.array(devices[0:1]).reshape(1, 1)
+reference_devices = np.array(devices[1:2]).reshape(1, 1)
+train_devices = np.array(devices[2:3]).reshape(1,1)
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 reference_mesh = Mesh(reference_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
@@ -308,7 +308,7 @@ base_rollout_dict = {
 }
 
 sglang_jax_rollout_dict = {
-    "rollout_sglang_jax_model_version": "google/gemma-4-26B-A4B-it",
+    "rollout_sglang_jax_model_version": "google/gemma-4-E2B-it",
     "rollout_sglang_jax_mem_fraction_static": 0.9,
     "rollout_sglang_jax_init_with_random_weights": True,
     "rollout_sglang_jax_disable_radix_cache": False,
@@ -319,8 +319,8 @@ sglang_jax_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    "rollout_vllm_model_version": "google/gemma-4-26B-A4B-it",
-    "rollout_vllm_hbm_utilization": 0.5,
+    "rollout_vllm_model_version": "google/gemma-4-E2B-it",
+    "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_init_with_random_weights": False,
@@ -391,12 +391,10 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
     max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
     epsilon=EPSILON,
-    system_prompt=SWE_SYSTEM_PROMPT,
+    system_prompt=SYSTEM_PROMPT,
     max_concurrency=MAX_CONCURRENCY,
     epsilon_high=EPSILON_HIGH,
     off_policy_steps=0,
-    episode_timeout=PER_TURN_TIMEOUT_SECS * MAX_TURNS,
-    advantage_estimator=ADVANTAGE_ESTIMATOR,
 )
 
 
@@ -406,7 +404,6 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     agent_class=FrozenLakeAgent,
     agent_kwargs={},
     env_class=FrozenLakeEnv,
-    env_kwargs={"max_steps": MAX_TURNS},
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
