@@ -340,7 +340,7 @@ class Qwen25MathEvaluator:
           config=vllm_sampler.VllmConfig(
               mesh=self.rollout_mesh,
               hbm_utilization=0.53,
-              init_with_random_weights=False,
+              init_with_random_weights=True,
               mapping_config=mapping_config,
               engine_kwargs={
                   "model": self.model_version,

@@ -859,6 +859,8 @@ def _apply_dtype_cast(
         val.dtype,
         tgt_dtype,
     )
+    if isinstance(val, jax.ShapeDtypeStruct):
+      print(f"{src_key=}")
     return val.astype(tgt_dtype)
   return val
 
@@ -906,6 +908,7 @@ def flatten_to_tuples(d):
     i = 0
     for k, v in d.items():
       # If it's a leaf node, add the (path, value) tuple
+      print(f"{k = }, {v.shape=}")
       items.append((k, v))
       key_idx_mapping[k] = i
       i+= 1

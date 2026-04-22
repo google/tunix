@@ -241,7 +241,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           (None, (cfg.num_experts, 2, cfg.expert_dim, cfg.embed_dim)),
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.experts\.down_proj(?:\.weight)?": (
-          r"layers.\1.moe.linear.value",
+          r"layers.\1.moe.linear",
           ((0, 2, 1), None),
       ),
   }

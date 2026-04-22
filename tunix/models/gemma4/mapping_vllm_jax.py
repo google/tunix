@@ -128,78 +128,22 @@ TO_HF_MAPPINGS.update({
         (None, None, None, 'model'),
     ),
     'layers.*.moe.linear': (
-        'vllm_model.language_model.model.layers.*.moe.experts.down_proj.weight',
+        'vllm_model.language_model.model.layers.*.moe.experts.w2_weight',
         (None, 'model', None),
     ),
+    'layers.*.moe_post_ffw_norm.scale': (
+        'vllm_model.language_model.model.layers.*.post_feedforward_layernorm_2.weight',
+        (None,),
+    ),
+    'layers.*.moe_pre_ffw_norm.scale': (
+        'vllm_model.language_model.model.layers.*.pre_feedforward_layernorm_2.weight',
+        (None,),
+    ),
+    'layers.*.dense_post_ffw_norm.scale': (
+        'vllm_model.language_model.model.layers.*.post_feedforward_layernorm_1.weight',
+        (None,),
+    ),
 })
-
-
-# def preprocess_gemma4_state(src_state):
-#     """Preprocess JAX state to fuse QKV and MLP for vLLM."""
-#     print("Preprocessing Gemma4 state for vLLM: fusing QKV and MLP weights")
-#     def _to_dict(x):
-#         if hasattr(x, 'items'):
-#             return {k: _to_dict(v) for k, v in x.items()}
-#         return x
-        
-#     state_dict = _to_dict(src_state)
-#     flat_state_tuples = flatten_dict(state_dict)
-    
-#     flat_state = {}
-#     for k, v in flat_state_tuples.items():
-#         str_key = '.'.join(str(x) for x in k)
-#         flat_state[str_key] = v
-        
-#     new_flat_state = dict(flat_state)
-    
-#     layer_indices = set()
-#     for key in flat_state.keys():
-#         match = re.match(r"layers\.(\d+)\.", key)
-#         if match:
-#             layer_indices.add(int(match.group(1)))
-            
-#     for i in layer_indices:
-#         # 1. Fuse QKV
-#         q_key = f"layers.{i}.attn.q_einsum.w"
-#         kv_key = f"layers.{i}.attn.kv_einsum.w"
-#         k_key = f"layers.{i}.attn.k_einsum.w"
-        
-#         q = flat_state.get(q_key)
-#         kv = flat_state.get(kv_key)
-#         k = flat_state.get(k_key)
-        
-#         if q is not None:
-#             if kv is not None:
-#                 k_tensor, v_tensor = kv[0], kv[1]
-#                 qkv = jnp.concatenate([q, k_tensor, v_tensor], axis=0)
-#                 qkv = qkv.reshape(-1, qkv.shape[-1])
-#                 print(f"Fusing QKV for layer {i}: q shape {q.shape}, k shape {k_tensor.shape}, v shape {v_tensor.shape}, fused shape {qkv.shape}")
-#                 new_flat_state[f"layers.{i}.attn.qkv_fused"] = qkv
-#                 del new_flat_state[q_key]
-#                 del new_flat_state[kv_key]
-#             elif k is not None:
-#                 qkv = jnp.concatenate([q, k, k], axis=0)
-#                 qkv = qkv.reshape(-1, qkv.shape[-1])
-#                 new_flat_state[f"layers.{i}.attn.qkv_fused"] = qkv
-#                 del new_flat_state[q_key]
-#                 del new_flat_state[k_key]
-                
-#         # 2. Fuse Gate/Up
-#         gate_key = f"layers.{i}.mlp.gate_proj.kernel"
-#         up_key = f"layers.{i}.mlp.up_proj.kernel"
-        
-#         gate = flat_state.get(gate_key)
-#         up = flat_state.get(up_key)
-        
-#         if gate is not None and up is not None:
-#             gate_up = jnp.concatenate([gate, up], axis=1)
-#             gate_up = gate_up.T
-#             new_flat_state[f"layers.{i}.mlp.gate_up_fused"] = gate_up
-#             del new_flat_state[gate_key]
-#             del new_flat_state[up_key]
-            
-#     return unflatten_dict(new_flat_state, sep='.')
-
 
 VLLM_JAX_MAPPING: Dict[str, Any] = {
     'to_hf_mappings': TO_HF_MAPPINGS,
