@@ -214,6 +214,7 @@ class Qwen25MathEvaluator:
       mesh_config = [[1, 4], ["fsdp", "tp"]]
     self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
     self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
+    # self.rollout_mesh_backup = jax.sharding.Mesh(np.array(jax.devices()[2:3]).reshape(1, 1), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
     self.sampler = None
@@ -339,25 +340,45 @@ class Qwen25MathEvaluator:
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
               mesh=self.rollout_mesh,
-              hbm_utilization=0.53,
+              hbm_utilization=0.5,
               init_with_random_weights=True,
               mapping_config=mapping_config,
               engine_kwargs={
                   "model": self.model_version,
-                  "max_model_len": (
-                      self.max_prompt_length + self.max_generation_steps + 100
-                  ),
+                  "max_model_len": 1024,
                   "max_num_seqs": 8,
-                  "max_num_batched_tokens": 8 * 1024,
+                  "max_num_batched_tokens": 8* 1024,
               },
           ),
       )
+      
+      # self.sampler_vllm_backup = vllm_sampler.VllmSampler(
+      #     tokenizer=self.tokenizer,
+      #     config=vllm_sampler.VllmConfig(
+      #         mesh=self.rollout_mesh_backup,
+      #         hbm_utilization=0.5,
+      #         init_with_random_weights=False,
+      #         mapping_config=mapping_config,
+      #         engine_kwargs={
+      #             "model": self.model_version,
+      #             "max_model_len": 1024,
+      #             "max_num_seqs": 8,
+      #             "max_num_batched_tokens": 8* 1024,
+      #         },
+      #     ),
+      # )
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to VLLM sampler...")
-      state_dict = nnx.state(self.model).to_pure_dict()
-      for k, v in state_dict.items():
-        print(f"Original State dict key: {k}, value shape: {jax.tree.map(lambda x: x.shape if isinstance(x, jnp.ndarray) else type(x), v)}, value values: {jax.tree.map(lambda x: x if not isinstance(x, jnp.ndarray) else 'array', v)}")
       self.sampler_vllm.update_params(nnx.state(self.model))
+      # # compare sampler_vllm with backup sampler, the language_model weights should be the same.
+      # vllm_state = self.sampler_vllm.transformer_state
+      # vllm_state_backup = self.sampler_vllm_backup.transformer_state
+      # for k, v in vllm_state.items():
+      #   if "language_model" in k:
+      #     if not jnp.array_equal(jax.device_get(vllm_state[k]), jax.device_get(vllm_state_backup[k])):
+      #       print(f"Parameter '{k}' successfully mapped and NOT match the sampler model state., shape: {vllm_state[k].shape} and sampler shape: {vllm_state_backup[k].shape}, vllm _value: {vllm_state[k]}, sampler model value: {vllm_state_backup[k]}")
+      #     else:
+      #       print(f"Parameter '{k}' successfully mapped and match the sampler model state.")
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
@@ -664,15 +685,15 @@ MODEL_MAPPING = {
     ),
     "google/gemma-4-31B-it": (
       gemma4_lib.ModelConfig.gemma4_31b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-31B-it/snapshots/439edf5652646a0d1bd8b46bfdc1d3645761a445",
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-31B-it/snapshots/439edf5652646a0d1bd8b46bfdc1d3645761a445",
     ),
     "google/gemma-4-E2B-it": (
       gemma4_lib.ModelConfig.gemma4_e2b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf",
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf",
     ),
     "google/gemma-4-E4B-it": (
       gemma4_lib.ModelConfig.gemma4_e4b(),
-      "/mnt/linchai_data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c",
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c",
     ),
     "google/gemma-4-26B-A4B-it": (
       gemma4_lib.ModelConfig.gemma4_26b_a4b(),

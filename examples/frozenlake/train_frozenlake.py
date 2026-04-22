@@ -70,8 +70,8 @@ parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
 
 # Rollout Config
-parser.add_argument("--max_prompt_length", type=int, default=4096)
-parser.add_argument("--max_response_length", type=int, default=8192)
+parser.add_argument("--max_prompt_length", type=int, default=1024)
+parser.add_argument("--max_response_length", type=int, default=256)
 parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
@@ -125,7 +125,7 @@ from examples.frozenlake.env import FrozenLakeEnv
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf"
 
 print(f"Looking for local model at: {MODEL_PATH}...")
 
@@ -192,7 +192,8 @@ VLLM_UTILIZATION = args.vllm_utilization
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
-VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+# VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+VLLM_MAX_BATCHED_TOKENS = 256
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 # %%
 # ==========================================
@@ -202,7 +203,7 @@ import jax
 import jax.numpy as jnp
 from tunix.models.automodel import call_model_config
 
-config = model_lib.ModelConfig.gemma4_26b_a4b()
+config = model_lib.ModelConfig.gemma4_e2b()
 
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
@@ -212,7 +213,8 @@ devices = jax.devices()
 split = int(len(devices) / 2)
 rollout_devices = np.array(devices[:split]).reshape(1, split)
 
-train_devices = np.array(devices[split:]).reshape(1, split)
+train_devices = np.array(devices[split:]).reshape(split, 1)
+print(f"train_devices: {train_devices}, rollout_devices: {rollout_devices}")
 
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
@@ -223,11 +225,11 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 # ==========================================
 
 gemma4_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=jnp.float32
+    MODEL_PATH, config, mesh=train_mesh, dtype=jnp.int4
 )
 
 gemma4_actor = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=jnp.float32
+    MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16
 )
 sft_utils.show_hbm_usage()
 
@@ -323,6 +325,7 @@ vllm_rollout_dict = {
     "rollout_vllm_hbm_utilization": 0.5,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
+    "rollout_vllm_init_with_random_weights": False,
     "rollout_vllm_async_scheduling": True,
     "tensor_parallel_size": rollout_mesh.shape["tp"],
     "data_parallel_size": rollout_mesh.shape["fsdp"],

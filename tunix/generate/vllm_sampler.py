@@ -157,7 +157,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
-    self.to_hf_preprocess_fn = getattr(config.mapping_config, 'to_hf_preprocess_fn', None)
+    self.to_hf_postprocess_fn = getattr(config.mapping_config, 'to_hf_postprocess_fn', None)
 
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
@@ -219,6 +219,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           ),
           tp_size=self.args.get("tensor_parallel_size", 1),
       )
+      if self.to_hf_postprocess_fn:
+        self.to_hf_postprocess_fn(self.transformer_state)
+      else:
+        # only hack for gemma4
+        if 'vllm_model.language_model.lm_head.weight' in self.transformer_state.keys():
+          self.transformer_state['vllm_model.language_model.lm_head.weight'] = self.transformer_state['vllm_model.language_model.model.embed_tokens.weight']
       # sampler_model_state = self.transformer_state
       # import jax.numpy as jnp
       # for k, v in vllm_state.items():

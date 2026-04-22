@@ -145,11 +145,19 @@ TO_HF_MAPPINGS.update({
     ),
 })
 
+
+def to_hf_postprocess_fn(state: Any):
+    print("assigning to lm_head weights")
+    if 'vllm_model.language_model.lm_head.weight' in state.keys():
+        state['vllm_model.language_model.lm_head.weight'] = state['vllm_model.language_model.model.embed_tokens.weight']
+
+
 VLLM_JAX_MAPPING: Dict[str, Any] = {
     'to_hf_mappings': TO_HF_MAPPINGS,
     'lora_to_hf_mappings': {},
     'to_hf_transpose_keys': {'embedding': (1, 0), 'mlp.down_proj.kernel': (1, 0)},
     'to_hf_hook_fns': None,
+    'to_hf_postprocess_fn': to_hf_postprocess_fn,
     # 'to_hf_preprocess_fn': preprocess_gemma4_state,
 }
 
