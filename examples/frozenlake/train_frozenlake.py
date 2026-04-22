@@ -210,13 +210,11 @@ if ENABLE_REMAT:
 
 
 devices = jax.devices()
-split = int(len(devices) / 2)
-rollout_devices = np.array(devices[:split]).reshape(1, split)
-
-train_devices = np.array(devices[split:]).reshape(split, 1)
-print(f"train_devices: {train_devices}, rollout_devices: {rollout_devices}")
-
+rollout_devices = np.array(devices[:2]).reshape(1, 2)
+reference_devices = np.array(devices[2:4]).reshape(2, 1)
+train_devices = np.array(devices[4:6]).reshape(2,1)
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
+reference_mesh = Mesh(reference_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 
 # %%
@@ -225,7 +223,7 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 # ==========================================
 
 gemma4_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=jnp.int4
+    MODEL_PATH, config, mesh=reference_mesh, dtype=jnp.float32
 )
 
 gemma4_actor = params_lib.create_model_from_safe_tensors(

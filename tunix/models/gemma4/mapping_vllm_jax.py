@@ -157,8 +157,6 @@ VLLM_JAX_MAPPING: Dict[str, Any] = {
     'lora_to_hf_mappings': {},
     'to_hf_transpose_keys': {'embedding': (1, 0), 'mlp.down_proj.kernel': (1, 0)},
     'to_hf_hook_fns': None,
-    'to_hf_postprocess_fn': to_hf_postprocess_fn,
-    # 'to_hf_preprocess_fn': preprocess_gemma4_state,
 }
 
 __all__ = [

@@ -16,8 +16,29 @@ if [ ! -f "$DOCKERFILE" ]; then
     exit 1
 fi
 
-export LOCAL_IMAGE_NAME=tunix_base_image
-echo "Building base image: $LOCAL_IMAGE_NAME"
+LOCAL_IMAGE_NAME=tunix_base_image
+TAG=$(date +%Y%m%d_%H%M%S)
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --local_image_name=*)
+      LOCAL_IMAGE_NAME="${1#*=}"
+      shift
+      ;;
+    --tag=*)
+      TAG="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+
+echo "Building base image: $LOCAL_IMAGE_NAME:$TAG with engine: $ENGINE"
 
 echo "Using Dockerfile: $DOCKERFILE"
 
@@ -31,29 +52,13 @@ build_ai_image() {
     echo "Building Tunix Image at commit hash ${COMMIT_HASH}..."
 
     DOCKER_COMMAND="docker"
-    if docker info >/dev/null 2>&1; then
-        DOCKER_COMMAND="docker"
-    else
-        # Avoid invoking sudo interactively which can prompt for a password.
-        # Check whether non-interactive sudo would work (no password).
-        if sudo -n docker info >/dev/null 2>&1; then
-            DOCKER_COMMAND="sudo docker"
-        else
-            cat <<'MSG'
-Docker does not appear usable from this account and the build would prompt for a password.
-
-Run the build with sufficient privileges (will prompt): sudo bash build_docker.sh
-On Linux, add your user to the docker group so sudo isn't required (you must re-login):
-  sudo usermod -aG docker "$USER" && newgrp docker
-
-MSG
-            exit 1
-        fi
+    if ! docker info >/dev/null 2>&1; then
+        DOCKER_COMMAND="sudo docker"
     fi
 
     $DOCKER_COMMAND build \
         --network=host \
-        -t ${LOCAL_IMAGE_NAME} \
+        -t "${LOCAL_IMAGE_NAME}:${TAG}" \
         -f ${DOCKERFILE} .
 }
 
@@ -63,5 +68,5 @@ echo ""
 echo "*************************
 "
 
-echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}.
-It now installs Tunix and the pinned vLLM and tpu-inference dependencies from requirements/requirements.txt. "
+echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}:${TAG}.
+It only has the dependencies installed. "

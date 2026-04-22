@@ -7,8 +7,11 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential git python3 python3-pip && \
+    apt-get install -y git python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
+
+# Install nano for easier file editing
+RUN apt-get update && apt-get install -y nano
 
 # Upgrade pip
 RUN python3 -m pip install --upgrade pip
@@ -22,12 +25,17 @@ RUN pip install --upgrade pip
 
 RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git
+# RUN pip uninstall -y pathwaysutils
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
-RUN pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+RUN pip install --upgrade "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
-RUN pip install --upgrade wandb
+
+RUN pip uninstall wandb
+RUN pip install wandb==0.24.2
+
+
 
 # Set the working directory
 WORKDIR /app
@@ -35,13 +43,30 @@ WORKDIR /app
 # Copy the project files to the image
 COPY . .
 
-ENV VLLM_TARGET_DEVICE=tpu
-
-RUN pip install -r /app/requirements/requirements.txt
-RUN pip install --force-reinstall -r /app/requirements/special_requirements.txt
-
+RUN pip install math-verify[antlr4_13_2]
 # Install the project in editable mode
-RUN pip install --force-reinstall .
+RUN pip install  --force-reinstall -e .
+
+ARG ENGINE
+# Set a directory to clone sglang-jax or vllm into
+WORKDIR /usr/src
+
+RUN rm -rf vllm && git clone https://github.com/wang2yn84/vllm.git && cd vllm && git checkout lance-ds && \
+        pip uninstall torch torch-xla -y && pip install -r requirements/tpu.txt && VLLM_TARGET_DEVICE="tpu" python -m pip install -e . && \
+        cd ..
+
+# install vllm wheels and tpu-inference
+RUN pip uninstall -y vllm
+WORKDIR /app/vllm_tpu_inference/vllm_wheels
+RUN pip install --upgrade transformers huggingface_hub
+RUN pip install --force-reinstall --no-deps transformers-5.5.0.dev0-py3-none-any.whl vllm-0.17.2-py3-none-any.whl
+
+WORKDIR /app/vllm_tpu_inference/tpu_inference
+RUN pip install -r requirements.txt && pip install -e .
+
+WORKDIR /app
+RUN pip install --force-reinstall protobuf==6.33.5
+
 
 # Set the default command to bash
 CMD ["bash"]
