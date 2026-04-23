@@ -479,6 +479,7 @@ class TrajectoryCollectEngine:
         perf_constants.ENVIRONMENT,
         tags=tags,
     ):
+      print(f"one step to collect the trajectory...")
       (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
           self.env.step, action
       )

@@ -177,7 +177,7 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     self.last_observation = new_obs_str
 
     super().update_from_env(new_obs_str, reward, done, info)
-    self.cur_step = Step(observation=new_obs_str)
+    self.cur_step = agent_types.Step(observation=new_obs_str)
 
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]
@@ -186,6 +186,7 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     self._messages.append({"role": "user", "content": str(observation)})
 
   def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
+    print(f"update_from_model with response: {response = }")
     DIRECTION_MAP = {"left": 1, "down": 2, "right": 3, "up": 4}
 
     thought = response

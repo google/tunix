@@ -160,7 +160,7 @@ class RolloutOrchestrator:
         "Starting generating trajectories(_runner) for pair %d",
         env.extra_kwargs["pair_index"],
     )
-    print("Starting generating trajectories for pair: ", env_extra_kwargs["pair_index"])
+    print("Starting generating trajectories for pair: ", env.extra_kwargs["pair_index"])
 
     try:
       # Parallel execution for the group
@@ -276,7 +276,7 @@ class RolloutOrchestrator:
               agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:
               agent, env = next(pairs_iterator)
-            print(f"create task...")
+            print(f"create task..., env extra_kwargs: {env.extra_kwargs=}")
             task = asyncio.create_task(
                 self._runner(
                     agent=agent,

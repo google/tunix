@@ -384,6 +384,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
+    logging.info(f"env extra_kwargs : {env.extra_kwargs=}")
 
     return agent, env
 
@@ -394,6 +395,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if env:
       env.task["policy_version"] = self.policy_version
 
+    print(f"in model_call, the chat_list is: {chat_lists=}")
     if self.chat_parser:
       chat_lists = self.chat_parser.parse(
           messages=chat_lists,
@@ -476,6 +478,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
+            logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
       else:
@@ -491,6 +494,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
+            logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
 

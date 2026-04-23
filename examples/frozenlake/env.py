@@ -177,10 +177,6 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
     self.size = entry["size"].item() if "size" in entry else 8
     self.p = entry["p"].item() if "p" in entry else 0.8
 
-    if not hasattr(self, "extra_kwargs"):
-      self.extra_kwargs = {}
-    self.extra_kwargs["group_id"] = group_id
-    self.extra_kwargs["pair_index"] = pair_index
   
     if desc is None:
       random_map, goal_position = generate_random_map(size=self.size, p=self.p, seed=self.seed)
@@ -213,6 +209,12 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
 
     self.reward = 0
     self._valid_actions = []
+
+    if not hasattr(self, "extra_kwargs"):
+      self.extra_kwargs = {}
+    self.extra_kwargs["group_id"] = group_id
+    self.extra_kwargs["pair_index"] = pair_index
+    print(f"env extra_kwargs: {self.extra_kwargs = }")
 
   def _get_player_position(self):
     return (self.s // self.ncol, self.s % self.ncol)
@@ -250,6 +252,7 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
     if not action:
       action = self.INVALID_ACTION
     action = int(action)
+    print(f"frozenlake env step with action: {action}")
     assert isinstance(action, int), "Action must be an integer"
     assert not self.success(), "Agent has already reached the goal or hole"
 
@@ -263,7 +266,7 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
 
     prev_player_position = int(self.s)
 
-    player_pos, reward, done, _, prob = GymFrozenLakeEnv.step(self, self.action_map[action])
+    player_pos, reward, done, _, prob = GymFrozenLakeEnv.step(self, int(self.action_map[action]))
 
     obs = self.render()
     return EnvStepResult(
