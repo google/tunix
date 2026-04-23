@@ -335,15 +335,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   @property
   def transformer_state(self):
-    members = [m for m in dir(self._model_runner) if not m.startswith('__')]
-    print("members key: ", members.keys() if isinstance(members, dict) else members)
-    print("members: ", members, "member types: ", {m: type(getattr(self._model_runner, m)) for m in members})
-    if hasattr(self._model_runner, "state"):
-      print("type of model runner state: ", type(self._model_runner.state))
-      # print(self._model_runner.state)
-      print("model runner state members: ", self._model_runner.state.keys())
-      for key in self._model_runner.state.keys():
-        print(f"Key: {key}, type: {type(self._model_runner.state[key])}, shape: {getattr(self._model_runner.state[key], 'shape', 'N/A')}")
       return self._model_runner.state
     else:
       raise AttributeError("vLLM model runner doesn't have state.")

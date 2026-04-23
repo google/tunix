@@ -296,7 +296,6 @@ def _make_preprocess_fn(cfg: model_lib.ModelConfig):
     out = dict(tensors)
 
     for key in list(out):
-      print(f"Processing key: {key} with shape {out[key].shape}")
       m = q_pat.fullmatch(key) or k_pat.fullmatch(key) or v_pat.fullmatch(key)
       if not m:
         continue
