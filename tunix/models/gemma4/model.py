@@ -36,7 +36,6 @@ from tunix.utils import compat
 from tunix.utils import env_utils
 from tunix.utils.sharding_utils import shard
 
-
 env_utils.setup_sharding_environment()
 
 
@@ -67,6 +66,8 @@ class ShardingConfig:
   act_btnh: Tuple[str | None, ...]
   vision_proj: Tuple[str | None, ...]
   vision_soft_emb_norm_weight: Tuple[str | None, ...]
+  kv_cache: Tuple[str | None, ...]
+  kv_cache_index: Tuple[str | None, ...]
   # MoE sharding
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
@@ -94,6 +95,8 @@ class ShardingConfig:
         act_btnh=('fsdp', None, 'tp', None),
         vision_proj=(fsdp, 'tp'),
         vision_soft_emb_norm_weight=('tp',),
+        kv_cache=('fsdp', None, 'tp', None),
+        kv_cache_index=('fsdp',),
         exp_weight_edf=(fsdp, None, None, 'tp'),
         exp_weight_efd=(fsdp, 'tp', None),
         per_layer_model_projection=(fsdp, None, 'tp'),
@@ -919,25 +922,34 @@ class Attention(nnx.Module):
       cache_len = min(max_seq_len, self.config.sliding_window_size)
 
     return {
-        'k': jnp.zeros(
-            (
-                batch_size,
-                cache_len,
-                self.num_kv_heads,
-                self.head_dim,
+        'k': shard(
+            jnp.zeros(
+                (
+                    batch_size,
+                    cache_len,
+                    self.num_kv_heads,
+                    self.head_dim,
+                ),
+                dtype,
             ),
-            dtype,
+            self.config.shd_config.kv_cache,
         ),
-        'v': jnp.zeros(
-            (
-                batch_size,
-                cache_len,
-                self.num_kv_heads,
-                self.head_dim,
+        'v': shard(
+            jnp.zeros(
+                (
+                    batch_size,
+                    cache_len,
+                    self.num_kv_heads,
+                    self.head_dim,
+                ),
+                dtype,
             ),
-            dtype,
+            self.config.shd_config.kv_cache,
         ),
-        'end_index': jnp.zeros((batch_size,), jnp.int32),
+        'end_index': shard(
+            jnp.zeros((batch_size,), jnp.int32),
+            self.config.shd_config.kv_cache_index,
+        ),
     }
 
 
@@ -1308,7 +1320,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
 
     return logits, (None if cache is None else new_cache)
 
-  def init_cache(self, batch_size, max_seq_len, dtype):
+  def init_cache(self, batch_size, max_seq_len, dtype) -> Cache:
     cache = {}
     for i, layer in enumerate(self.layers):
       if self.kv_cache_sharing_patterns[i] != i:
