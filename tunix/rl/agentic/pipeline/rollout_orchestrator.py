@@ -97,6 +97,7 @@ class RolloutOrchestrator:
   ) -> Trajectory:
     """Helper method to collect a single trajectory."""
     engine_kwargs = self.engine_kwargs.copy()
+    print(f"_collect_trajectory....engine_kwargs = {engine_kwargs}")
     if model_call_kwargs:
       engine_kwargs["model_call_kwargs"] = model_call_kwargs
     engine = self.engine_cls(agent, env, **engine_kwargs)
@@ -115,6 +116,7 @@ class RolloutOrchestrator:
   ):
     """Collects one trajectory and queues it."""
     pair_idx = env.extra_kwargs["pair_index"]
+    print(f"{pair_idx = }")
     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
     gid = group_key_fn(pair_idx, env, traj)
     start_step = start_step_fn() if start_step_fn else 0
@@ -154,14 +156,16 @@ class RolloutOrchestrator:
       collect_mode: An optional string to select the collection mode.
     """
     episode_count = 0
-    logging.debug(
+    logging.info(
         "Starting generating trajectories(_runner) for pair %d",
         env.extra_kwargs["pair_index"],
     )
+    print("Starting generating trajectories for pair: ", env_extra_kwargs["pair_index"])
 
     try:
       # Parallel execution for the group
       self._rollout_sync_lock.acquire_rollout()
+      print("Start to run and queue one episode")
       try:
         episode_count = await self._run_and_queue_one_episode(
             agent=agent,
@@ -272,6 +276,7 @@ class RolloutOrchestrator:
               agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:
               agent, env = next(pairs_iterator)
+            print(f"create task...")
             task = asyncio.create_task(
                 self._runner(
                     agent=agent,
@@ -282,6 +287,7 @@ class RolloutOrchestrator:
                     collect_mode=collect_mode,
                 )
             )
+            print("task created and appending to active_tasks...")
             active_tasks.add(task)
             self._tasks.append(task)
           except (StopIteration, StopAsyncIteration):
@@ -300,6 +306,7 @@ class RolloutOrchestrator:
 
         # Phase 2: Wait for any task to complete
         # This frees up a slot for a new task if the stream is not exhausted.
+        print("Waiting for active tasks to be done...")
         done, pending = await asyncio.wait(
             active_tasks, return_when=asyncio.FIRST_COMPLETED
         )
@@ -352,6 +359,7 @@ class RolloutOrchestrator:
       RuntimeError: If `run_producers_from_stream` has not been called to start
         the producers.
     """
+    print(f"yield batches...")
     if not self._group_queue_manager:
       raise RuntimeError("Producers have not been started.")
     try:

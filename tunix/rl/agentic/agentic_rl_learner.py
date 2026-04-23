@@ -372,12 +372,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       A tuple of agent and environment.
     """
 
+    print(f"{self.algo_config.system_prompt = }, {self.agent_kwargs=}")
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
     )  # if agent_kwargs contains "system_prompt", it will be honored.
 
     assert "group_id" not in self.env_kwargs
     assert "pair_index" not in self.env_kwargs
+    print (f"{single_example=}")
     env = self.env_class(
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
@@ -597,7 +599,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     async def _iterate_micro_batches():
       async for item in async_queue_iter:
+        print(f"item = {item}")
         for prompt in self._create_micro_batch_iterator(iter([item]), 1):
+          print(f"prompt from the item = {prompt}")
           yield prompt
 
     prompt_iterator = _iterate_micro_batches()

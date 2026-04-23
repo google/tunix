@@ -13,7 +13,7 @@
 # limitations under the License.
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
 
 from env import FrozenLakeEnv  # noqa: E402
 
@@ -135,7 +135,8 @@ Now it is your turn, please show your thinking process and put the final action 
 
 
 class FrozenLakeAgent(base_agent.ConversationAgentBase):
-  def __init__(self, use_multistep_prompt: bool | None = False):
+  def __init__(self, system_prompt: Optional[str] = None,
+               use_multistep_prompt: bool | None = False):
     self.multistep_prompt = use_multistep_prompt
     system_prompt = SYSTEM_PROMPT if not use_multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT
     super().__init__(system_prompt=system_prompt)
@@ -152,10 +153,6 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     """
     self._messages = [{"role": "system", "content": system_prompt or ""}]
 
-
-  @property
-  def system_prompt(self):
-    return SYSTEM_PROMPT if not self.multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT
 
   def update_from_env(
     self,
@@ -210,6 +207,7 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     # Add assistant's response to conversation history.
     self._messages.append({"role": "assistant", "content": response})
 
+    self._trajectory.steps.append(self.cur_step)
     # Record complete step with conversation context and parsed action.
     cur_step = self._trajectory.steps[-1]
     cur_step.thought = thought

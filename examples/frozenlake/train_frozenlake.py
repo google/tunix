@@ -41,6 +41,11 @@ logging.getLogger("absl").setLevel(logging.INFO)
 absl_logging.set_verbosity(absl_logging.INFO)
 absl_logging.set_stderrthreshold("info")
 
+import faulthandler
+
+# Enable the fault handler to dump tracebacks on crashes
+faulthandler.enable()
+
 # ==========================================
 # 0. Argument Parsing
 # ==========================================
@@ -167,7 +172,7 @@ KV_CACHE_SIZE = MAX_PROMPT_LENGTH + (
     MAX_RESPONSE_LENGTH
 )
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
-MAX_CONCURRENCY = 16
+MAX_CONCURRENCY = 1
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
 B1 = args.b1
@@ -250,11 +255,21 @@ print("Loading Dataset...")
 
 import pandas as pd
 dataset_path = "/mnt/disks/linchai-data/tunix/examples/frozenlake/data/frozenlake"
-train_dataset = pd.read_parquet(os.path.join(dataset_path, "train.parquet"))
-test_dataset = pd.read_parquet(os.path.join(dataset_path, "test.parquet"))
+train_dataset = Dataset.from_pandas(pd.read_parquet(os.path.join(dataset_path, "train.parquet")))
+test_dataset = Dataset.from_pandas(pd.read_parquet(os.path.join(dataset_path, "test.parquet")))
 
 train_dataset = grain.MapDataset.source(train_dataset)
 test_dataset = grain.MapDataset.source(test_dataset)
+
+def add_prompt(item):
+    item["prompt"] = ""
+    return item
+train_dataset = train_dataset.map(add_prompt)
+test_dataset = test_dataset.map(add_prompt)
+
+print("First 10 items in train_dataset:")
+for i in range(min(10, len(train_dataset))):
+    print(train_dataset[i])
 
 train_dataset, _ = data_lib.post_init_dataset(
     train_dataset,
@@ -264,7 +279,11 @@ train_dataset, _ = data_lib.post_init_dataset(
     max_prompt_length=MAX_PROMPT_LENGTH,
     fraction=TRAIN_FRACTION,
     num_epochs=NUM_EPOCHS,
+    prompt_key="prompt",
 )
+
+for item in train_dataset:
+    print(item)
 
 # %%
 # ==========================================
@@ -323,7 +342,7 @@ vllm_rollout_dict = {
     "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
-    "rollout_vllm_init_with_random_weights": False,
+    "rollout_vllm_init_with_random_weights": True,
     "rollout_vllm_async_scheduling": True,
     "tensor_parallel_size": rollout_mesh.shape["tp"],
     "data_parallel_size": rollout_mesh.shape["fsdp"],
@@ -385,13 +404,14 @@ rl_cluster = rl_cluster_lib.RLCluster(
 # ==========================================
 # 11. Learner & Agent Setup
 # ==========================================
+use_multistep_prompt = False
 grpo_config = agentic_grpo_learner.GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
     max_response_length=MAX_RESPONSE_LENGTH,
     beta=BETA,
     epsilon=EPSILON,
-    system_prompt=SYSTEM_PROMPT,
+    system_prompt=SYSTEM_PROMPT if not use_multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT,
     max_concurrency=MAX_CONCURRENCY,
     epsilon_high=EPSILON_HIGH,
     off_policy_steps=0,

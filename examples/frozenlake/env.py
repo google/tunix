@@ -167,21 +167,23 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
   INVALID_ACTION = 0
   PENALTY_FOR_INVALID = -1
 
-  def __init__(self, **kwargs):
+  def __init__(self, entry: dict, group_id: int | None = None, pair_index: int | None = None, max_steps: int = 1, **kwargs):
     global MAX_STEPS
-    MAX_STEPS = kwargs.pop("max_turns", 5)
+    MAX_STEPS = max_steps
 
     desc = kwargs.pop("desc", None)
     is_slippery = kwargs.pop("is_slippery", False)
-    size = kwargs.pop("size", 8)
-    p = kwargs.pop("p", 0.8)
-    seed = kwargs.pop("seed", 42)
-    self.seed = seed
-    self.size = size
-    self.p = p
+    self.seed = entry["seed"].item() if "seed" in entry else 42
+    self.size = entry["size"].item() if "size" in entry else 8
+    self.p = entry["p"].item() if "p" in entry else 0.8
 
+    if not hasattr(self, "extra_kwargs"):
+      self.extra_kwargs = {}
+    self.extra_kwargs["group_id"] = group_id
+    self.extra_kwargs["pair_index"] = pair_index
+  
     if desc is None:
-      random_map, goal_position = generate_random_map(size=size, p=p, seed=seed)
+      random_map, goal_position = generate_random_map(size=self.size, p=self.p, seed=self.seed)
     else:
       random_map = np.asarray(copy.deepcopy(desc), dtype="c")
       goal_position = get_goal_position(random_map)
@@ -194,13 +196,13 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
     self.ACTION_SPACE = gym.spaces.Discrete(4, start=1)
 
     self.map_kwargs = {
-      "size": size,
-      "p": p,
+      "size": self.size,
+      "p": self.p,
     }
     self.env_kwargs = {
       "is_slippery": is_slippery,
       "desc": copy.deepcopy(desc),
-      "seed": seed,
+      "seed": self.seed,
     }
     self.action_map = {
       1: 0,

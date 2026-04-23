@@ -184,6 +184,7 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
+    print("trajectory collect engine collect call....")
     await self._reset()
 
     # Initial Prompt Cost
@@ -193,6 +194,7 @@ class TrajectoryCollectEngine:
         and self.agent.trajectory.prompt_tokens
     ):
       current_token_count += len(self.agent.trajectory.prompt_tokens)
+      print(f"{current_token_count = }")
 
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
 
