@@ -62,7 +62,6 @@ parser.add_argument("--train_micro_batch_size", type=int, default=1)
 parser.add_argument("--num_batches", type=int, default=20)
 parser.add_argument("--num_test_batches", type=int, default=50)
 parser.add_argument("--train_fraction", type=float, default=1.0)
-parser.add_argument("--max_steps", type=int, default=10)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
@@ -73,6 +72,7 @@ parser.add_argument("--num_iterations", type=int, default=1)
 parser.add_argument("--beta", type=float, default=0.001)
 parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
+parser.add_argument("--max_turns", type=int, default=5)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=1024)
@@ -193,6 +193,8 @@ VLLM_MAX_NUM_SEQS =  NUM_GENERATIONS * BATCH_SIZE
 
 VLLM_UTILIZATION = args.vllm_utilization
 
+
+MAX_TURNS = args.max_turns
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -424,6 +426,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     agent_class=FrozenLakeAgent,
     agent_kwargs={},
     env_class=FrozenLakeEnv,
+    env_kwargs={"max_steps": MAX_TURNS},
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )

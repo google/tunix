@@ -315,6 +315,7 @@ class BaseTaskEnv(BaseEnv):
       A tuple of (observation, reward, done, info).
     """
     self.step_count += 1
+    print(f"{self.step_count=}")
     result = self._step_impl(action)
 
     # Enforce maximum episode length; if _step_impl has already finished

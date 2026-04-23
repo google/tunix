@@ -19,7 +19,8 @@
 # Some components have been modified or extended for custom use in this project.
 
 import copy
-from typing import Any
+from typing import Any, Dict
+from absl import logging
 
 import gymnasium as gym
 import numpy as np
@@ -97,7 +98,7 @@ def get_goal_position(random_map):
   return tuple(positions[0])  # returns (row, col)
 
 
-class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
+class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
   """
     Inherits from gymnasium.envs.toy_text.frozen_lake.FrozenLakeEnv
 
@@ -186,8 +187,8 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
 
     self.goal_postion = goal_position
 
-    GymFrozenLakeEnv.__init__(self, desc=random_map[:], is_slippery=is_slippery)
     BaseTaskEnv.__init__(self, max_steps=MAX_STEPS)
+    GymFrozenLakeEnv.__init__(self, desc=random_map[:], is_slippery=is_slippery)
 
     self.ACTION_SPACE = gym.spaces.Discrete(4, start=1)
 
@@ -223,7 +224,9 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
     GymFrozenLakeEnv.reset(self, seed=self.seed)
     self.reward = 0
     self._valid_actions = []
-    return self.render(mode="tiny_rgb_array")
+    init_observation = self.render(mode="tiny_rgb_array")
+    logging.info(f"reset initial observation: {init_observation}")
+    return init_observation
 
   def finished(self):
     player_pos = self._get_player_position()
@@ -235,6 +238,12 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
       """
     player_pos = self._get_player_position()
     return self.desc[player_pos] in b"G"
+
+
+  def step(self, action: Any) -> tuple[Any, float, bool, Dict[str, Any]]:
+    print(f"frozenlake env action: {action}")
+    return BaseTaskEnv.step(self, action)
+ 
 
   def _step_impl(self, action: Any) -> EnvStepResult:
     """
@@ -265,6 +274,7 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseTaskEnv):
       )
 
     prev_player_position = int(self.s)
+    print(f"{self.action_map[action]=}, {type(self.action_map[action])=}, {type(int(self.action_map[action]))=}")
 
     player_pos, reward, done, _, prob = GymFrozenLakeEnv.step(self, int(self.action_map[action]))
 

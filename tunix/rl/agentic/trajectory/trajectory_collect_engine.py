@@ -421,6 +421,7 @@ class TrajectoryCollectEngine:
     if self.tokenizer is not None and self.chat_parser is not None:
       # Get the current messages (usually System + User)
       init_messages = self.agent.chat_completions
+      logging.info(f"engine reset with {init_messages=}")
       prompt_tokens, _ = utils.tokenize_and_generate_masks(
           init_messages,
           tokenizer=self.tokenizer,
@@ -459,6 +460,7 @@ class TrajectoryCollectEngine:
         bool: True if the episode is done (either by environment or timeout),
           False otherwise.
     """
+    print(f"one step ... ")
     rollout_output = await asyncio.get_event_loop().run_in_executor(
         None,
         self.model_call,

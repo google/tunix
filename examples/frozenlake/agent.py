@@ -151,6 +151,7 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     Args:
       system_prompt: The system prompt to use.
     """
+    logging.info("frozenlake agent _init_messages..")
     self._messages = [{"role": "system", "content": system_prompt or ""}]
 
 
@@ -162,8 +163,8 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     info: dict[str, Any] | None = None,
     **kwargs,
   ) -> None:
-    print(f"frozenlake agent from env {observation = }, {reward = }, {done = }")
-    for k, v in info:
+    logging.info(f"frozenlake agent from env {observation = }, {reward = }, {done = }")
+    for k, v in info.items():
         print(f"frozenlake agent from env info: {k= } : {v = }")
     new_obs_str = str(observation)
     # Base message for the user
@@ -182,11 +183,11 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]
   ) -> None:
-
+    logging.info("_observation_to_messages")
     self._messages.append({"role": "user", "content": str(observation)})
 
   def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
-    print(f"update_from_model with response: {response = }")
+    logging.info(f"update_from_model with response: {response = }")
     DIRECTION_MAP = {"left": 1, "down": 2, "right": 3, "up": 4}
 
     thought = response
@@ -219,7 +220,5 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     return agent_types.Action(action=cur_step.action)
 
   def reset(self) -> None:
-    self._trajectory = agent_types.Trajectory()
-    self._init_messages(self.system_prompt)
-    self.step = 0
+    super().reset()
     self.last_observation = None
