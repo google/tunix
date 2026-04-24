@@ -608,18 +608,15 @@ def grpo_loss_fn(
       completion_tokens=completion_ids,
       pad_id=pad_id,
       eos_id=eos_id,
+      completion_mask=completion_mask,
       stop_gradient=False,
       return_logits=True,
+      segment_ids=getattr(train_example, "segment_ids", None),
+      segment_positions=getattr(train_example, "segment_positions", None),
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
-  if advantages.ndim != 1:
-    raise ValueError(
-        "Expected advantages to be a 1D array, but got shape"
-        f" {advantages.shape}"
-    )
-
 
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -647,9 +644,14 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
-  advantages = advantages[:, None]
-  pg_loss_1 = -advantages * is_ratio
-  pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
+
+  # Advantages must be broadcast against seq_length.
+  # When sequence packing is used, advantages are already 2D [B, seq_length].
+  # When unpacked, they are 1D [B].
+  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+
+  pg_loss_1 = -adv * is_ratio
+  pg_loss_2 = -adv * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
@@ -658,22 +660,20 @@ def grpo_loss_fn(
   )
 
   # dual-clip ppo loss
-  pg_loss_3 = -epsilon_c * advantages
+  pg_loss_3 = -epsilon_c * adv
 
   # pg_clipfrac_lower measures how often dual-clip ppo kicks in.
   # It kicks in when the standard clipped loss is larger than pg_loss_3
   # for instances with negative advantages.
   unreduced_pg_clipfrac_lower = (
-      (per_token_loss > pg_loss_3) & (advantages < 0.0)
+      (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
   pg_clipfrac_lower = common.aggregate_loss(
       unreduced_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
-  per_token_loss = jnp.where(
-      advantages < 0.0, pg_loss_clipped_dual, per_token_loss
-  )
+  per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )

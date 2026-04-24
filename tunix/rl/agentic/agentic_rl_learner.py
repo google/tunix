@@ -744,8 +744,31 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
     )
-    micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
+    if self._training_config.max_seq_token_per_tpu is not None:
+      mesh = self.rl_cluster.cluster_config.role_to_mesh[
+          rl_cluster_lib.Role.ACTOR
+      ]
+      # The packed batch size must be a multiple of the FSDP mesh axis size.
+      pack_size = mesh.shape.get("fsdp", 1)
+
+      logging.info(
+          "Using sequence packing with max_seq_token_per_tpu: %d, "
+          " pack_size: %d",
+          self._training_config.max_seq_token_per_tpu,
+          pack_size,
+      )
+
+      train_data_gen = rl_utils.pack_sequences(
+          train_data_gen,
+          self._training_config.max_seq_token_per_tpu,
+          num_packs=pack_size,
+      )
+    examples_since_last_sync = 0
+    examples_per_full_batch = (
+        full_batch_size
+        * self.algo_config.num_generations
+        * self.algo_config.num_iterations
+    )
     for train_micro_batch in train_data_gen:
       if (
           self._training_config.max_steps
@@ -815,8 +838,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
 
       # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      if self._training_config.max_seq_token_per_tpu is not None:
+        examples_since_last_sync += int(
+            jnp.sum(jnp.max(merged_train_micro_batch.segment_ids, axis=1))
+        )
+      else:
+        examples_since_last_sync += len(merged_train_micro_batch.prompt_ids)
+
+      if examples_since_last_sync >= examples_per_full_batch:
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
@@ -877,7 +906,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.perf_v2.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
-        micro_batches_since_last_sync = 0
+        examples_since_last_sync = 0
         self._global_step_start_time = time.time()
 
     _ = producer_future.result()

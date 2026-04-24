@@ -16,7 +16,7 @@
 
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, List, Optional
+from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from absl import logging
 from flax import nnx
@@ -27,9 +27,17 @@ from jax import tree_util
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+from tunix.rl import common
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
+
+_OPTIONAL_PER_TOKEN_KEYS = (
+    "ref_per_token_logps",
+    "old_per_token_logps",
+    "returns",
+    "old_values",
+)
 
 
 def is_positive_integer(value: int | None, name: str):
@@ -154,7 +162,7 @@ def get_batch_slice(tree: Any, batch_slice: slice) -> Any:
   )
 
 
-def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
+def merge_micro_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
   """Merges micro-batch dictionaries into a single batch.
 
   Concatenates values from a list of micro-batch dicts. Values are concatenated
@@ -170,11 +178,12 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
   merged = {}
-
-  for key in batches[0].keys():
+  first_batch, *_ = batches
+  for key in first_batch.keys():
     all_values = [item[key] for item in batches]
+    first_value, *_ = all_values
 
-    if isinstance(all_values[0], list):
+    if isinstance(first_value, list):
       merged[key] = list(chain.from_iterable(all_values))
     else:
       merged[key] = tree_util.tree_map(
@@ -265,6 +274,295 @@ def get_partition_spec(
     return sharding.spec
   else:
     return jax.sharding.PartitionSpec()
+
+
+def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
+  """Unpads a TrainExample into a list of dictionaries with numpy arrays."""
+  # TODO(noghabi): Skip padding and unpadding directly in the learner.
+  res = []
+  batch_size = example.prompt_ids.shape[0]
+
+  p_ids = np.asarray(example.prompt_ids)
+  p_mask = np.asarray(example.prompt_mask)
+  c_ids = np.asarray(example.completion_ids)
+  c_mask = np.asarray(example.completion_mask)
+  adv = np.asarray(example.advantages)
+  adv_is_per_token = adv.ndim == 2
+
+  has_ref = example.ref_per_token_logps is not None
+  if has_ref:
+    ref_logps = np.asarray(example.ref_per_token_logps)
+  has_old = example.old_per_token_logps is not None
+  if has_old:
+    old_logps = np.asarray(example.old_per_token_logps)
+
+  returns_val = getattr(example, "returns", None)
+  has_returns = returns_val is not None
+  if has_returns:
+    returns_np = np.asarray(returns_val)
+
+  old_values_val = getattr(example, "old_values", None)
+  has_old_values = old_values_val is not None
+  if has_old_values:
+    old_values_np = np.asarray(old_values_val)
+
+  policy_version_val = getattr(example, "policy_version", None)
+  has_policy_version = policy_version_val is not None
+  if has_policy_version:
+    policy_version_np = np.asarray(policy_version_val)
+
+  for i in range(batch_size):
+    p_len = int(np.sum(p_mask[i]))
+    c_len = int(np.sum(c_mask[i]))
+
+    item = {
+        "prompt_ids": p_ids[i, -p_len:] if p_len > 0 else p_ids[i, :0],
+        "prompt_mask": p_mask[i, -p_len:] if p_len > 0 else p_mask[i, :0],
+        "completion_ids": c_ids[i, :c_len],
+        "completion_mask": c_mask[i, :c_len],
+        "advantages": adv[i, :c_len] if adv_is_per_token else adv[i],
+        "adv_is_per_token": adv_is_per_token,
+        "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,
+        "old_per_token_logps": old_logps[i, :c_len] if has_old else None,
+        "returns": returns_np[i, :c_len] if has_returns else None,
+        "old_values": old_values_np[i, :c_len] if has_old_values else None,
+        "policy_version": policy_version_np if has_policy_version else None,
+    }
+    res.append(item)
+  return res
+
+
+def pack_sequences(
+    item_iterator: Iterator[Sequence[common.TrainExample]],
+    max_token_budget: int,
+    pad_id: int = 0,
+    num_packs: int = 1,
+) -> Iterator[list[common.TrainExample]]:
+  """Packs a stream of TrainExamples into 1D sequences up to a token budget and stacks them into 2D batches of shape [num_packs, max_token_budget].
+
+  Args:
+    item_iterator: An iterator that yields lists of TrainExamples (one
+      micro-batch).
+    max_token_budget: The maximum number of tokens allowed per packed sequence.
+    pad_id: The token ID to use for padding. Defaults to 0.
+    num_packs: The number of packs to yield together. Set this to the FSDP
+      dimension size to ensure the yielded batch size is shardable by JAX. Packs
+      will be padded with dummy data to ensure the total number of yields is a
+      multiple of this number. Defaults to 1.
+
+  Yields:
+    A list of size 1 containing a single TrainExample whose arrays are stacked
+    along the batch axis to shape [num_packs, MaxTokenBudget].
+  """
+
+  def _flush_pack(
+      pack_items: Sequence[Mapping[str, Any]],
+      example_cls: type[common.TrainExample],
+      first_item: Mapping[str, Any],
+  ) -> common.TrainExample:
+    """Flushes a pack of items into a single TrainExample.
+
+    Args:
+      pack_items: A list of dictionaries, each representing a single sequence to
+        be packed.
+      example_cls: The class of the TrainExample to be created.
+      first_item: The first item in the pack, used to determine which fields to
+        track.
+
+    Returns:
+      A single TrainExample with the packed sequences.
+    """
+    # Find optional keys to be populated.
+    tracked_per_token_keys = [
+        k for k in _OPTIONAL_PER_TOKEN_KEYS if first_item.get(k) is not None
+    ]
+    has_policy_version = first_item.get("policy_version") is not None
+
+    if not pack_items:
+      # Create a dummy pack filled with zeros/pads
+      p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+      p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+      c_ids_arr = jnp.full((1, max_token_budget), pad_id, dtype=jnp.int32)
+      c_mask_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+      adv_arr = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
+      seg_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+      pos_arr = jnp.zeros((1, max_token_budget), dtype=jnp.int32)
+
+      kwargs = dict(
+          prompt_ids=p_ids_arr,
+          prompt_mask=p_mask_arr,
+          completion_ids=c_ids_arr,
+          completion_mask=c_mask_arr,
+          advantages=adv_arr,
+          ref_per_token_logps=None,
+          old_per_token_logps=None,
+          segment_ids=seg_arr,
+          segment_positions=pos_arr,
+      )
+
+      for k in tracked_per_token_keys:
+        kwargs[k] = jnp.zeros((1, max_token_budget), dtype=jnp.float32)
+
+      if has_policy_version:
+        kwargs["policy_version"] = first_item["policy_version"]
+
+      return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
+
+    current_tokens = sum(
+        len(it["prompt_ids"]) + len(it["completion_ids"]) for it in pack_items
+    )
+    # TODO(noghabi): Pad to the next power of 2 instead of user defined
+    # max_token_budget if the seq is short. This will incur an additional
+    # compilation on trainer side, but also will result in faster compute.
+    pad_len = max_token_budget - current_tokens
+
+    packed_c_ids = []
+    packed_c_mask = []
+    packed_adv = []
+    packed_segment_ids = []
+    packed_positions = []
+
+    per_token_feature_buffers = {k: [] for k in tracked_per_token_keys}
+
+    for i, item in enumerate(pack_items, start=1):
+      p_ids = item["prompt_ids"]
+      c_ids = item["completion_ids"]
+      seq_len = len(p_ids) + len(c_ids)
+
+      packed_c_ids.extend([p_ids, c_ids])
+      packed_c_mask.extend([np.zeros_like(p_ids), item["completion_mask"]])
+
+      # Expand advantage to shape [c_len] to match completion length
+      if item["adv_is_per_token"]:
+        packed_adv.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            item["advantages"],
+        ])
+      else:
+        packed_adv.extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            np.full(len(c_ids), item["advantages"], dtype=np.float32),
+        ])
+
+      for k in tracked_per_token_keys:
+        per_token_feature_buffers[k].extend([
+            np.zeros_like(p_ids, dtype=np.float32),
+            item[k],
+        ])
+
+      packed_segment_ids.append(np.full(seq_len, i, dtype=np.int32))
+      packed_positions.append(np.arange(seq_len, dtype=np.int32))
+
+    def _pad(arr_list, val, length):
+      arr = np.concatenate(arr_list) if arr_list else np.array([])
+      return np.pad(arr, (0, length), constant_values=val)
+
+    # Empty prompt arrays
+    p_ids_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+    p_mask_arr = jnp.zeros((1, 0), dtype=jnp.int32)
+
+    # Pad all lists by pad_len
+    c_ids_arr = jnp.array(_pad(packed_c_ids, pad_id, pad_len))[None, :]
+    c_mask_arr = jnp.array(_pad(packed_c_mask, 0, pad_len))[None, :]
+    adv_arr = jnp.array(_pad(packed_adv, 0.0, pad_len))[None, :]
+    seg_arr = jnp.array(_pad(packed_segment_ids, 0, pad_len))[None, :]
+    pos_arr = jnp.array(_pad(packed_positions, 0, pad_len))[None, :]
+
+    per_token_features = {}
+    for k in tracked_per_token_keys:
+      per_token_features[k] = jnp.array(
+          _pad(per_token_feature_buffers[k], 0.0, pad_len)
+      )[None, :]
+
+    kwargs = dict(
+        prompt_ids=p_ids_arr,
+        prompt_mask=p_mask_arr,
+        completion_ids=c_ids_arr,
+        completion_mask=c_mask_arr,
+        advantages=adv_arr,
+        ref_per_token_logps=None,  # Will be overrriden if present in tracked_per_token_keys.
+        old_per_token_logps=None,  # Will be overrriden if present in tracked_per_token_keys.
+        segment_ids=seg_arr,
+        segment_positions=pos_arr,
+    )
+    for k in tracked_per_token_keys:
+      kwargs[k] = per_token_features[k]
+
+    if has_policy_version:
+      kwargs["policy_version"] = first_item["policy_version"]
+
+    return example_cls(**kwargs)  # pytype: disable=wrong-keyword-args
+
+  for item_list in item_iterator:
+    all_unpadded_items = []
+    example_cls = common.TrainExample
+    for example in item_list:
+      example_cls = type(example)
+      all_unpadded_items.extend(unpad_train_example(example))
+
+    if not all_unpadded_items:
+      continue
+
+    first_item, *_ = all_unpadded_items
+
+    # Sequential Packing per micro-batch
+    packs = []
+    current_pack_items = []
+    current_tokens = 0
+
+    for item in all_unpadded_items:
+      tokens = len(item["prompt_ids"]) + len(item["completion_ids"])
+
+      # If a single item is strictly larger than budget, we skip or truncate.
+      # Ideally, budget > max_prompt_length + max_response_length.
+      if tokens > max_token_budget:
+        logging.warning(
+            "Skipping single sequence with length %d exceeding budget %d",
+            tokens,
+            max_token_budget,
+        )
+        continue
+
+      if current_tokens + tokens > max_token_budget:
+        packs.append(current_pack_items)
+        current_pack_items = []
+        current_tokens = 0
+
+      current_pack_items.append(item)
+      current_tokens += tokens
+
+    # Flush the last pack.
+    if current_pack_items:
+      packs.append(current_pack_items)
+
+    if not packs:
+      continue
+
+    # Extend with empty packs to make the total number of packs a multiple of
+    # num_packs. Later packs will be filled with dummy data.
+    while len(packs) % num_packs != 0:
+      packs.append([])
+
+    for i in range(0, len(packs), num_packs):
+      chunk = packs[i : i + num_packs]
+      chunk_examples = []
+      for p in chunk:
+        chunk_examples.append(
+            _flush_pack(
+                p,
+                example_cls,
+                first_item,
+            )
+        )
+
+      yield [
+          jax.tree.map(
+              lambda first_x, *rest_xs: None
+              if first_x is None
+              else jnp.concatenate((first_x, *rest_xs), axis=0),
+              *chunk_examples,
+          )
+      ]
 
 
 VERIFY_UPDATE_PARAMS_KEY = "VERIFY_UPDATE_PARAMS_SRC_TO_TGT_MODULE_NAME"
