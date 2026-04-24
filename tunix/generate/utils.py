@@ -389,7 +389,6 @@ def build_flat_dict(
         for part in src.split('.'):
           if part == '*':
             src_parts.append(wildcards[wc_index])
-            print()
             wc_index += 1
           else:
             src_parts.append(part)
@@ -907,8 +906,6 @@ def flatten_to_tuples(d):
     key_idx_mapping = {}
     i = 0
     for k, v in d.items():
-      # If it's a leaf node, add the (path, value) tuple
-      print(f"{k = }, {v.shape=}")
       items.append((k, v))
       key_idx_mapping[k] = i
       i+= 1

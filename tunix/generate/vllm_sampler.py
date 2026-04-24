@@ -335,6 +335,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   @property
   def transformer_state(self):
+    if hasattr(self._model_runner, "state"):
       return self._model_runner.state
     else:
       raise AttributeError("vLLM model runner doesn't have state.")

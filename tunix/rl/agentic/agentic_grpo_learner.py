@@ -380,7 +380,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
-    logging.debug(
+    logging.info(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
         completion_ids.shape,

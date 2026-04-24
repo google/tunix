@@ -60,6 +60,7 @@ class AbstractRewardManager(abc.ABC):
     self.reward_fns = (
         [reward_fns] if not isinstance(reward_fns, Sequence) else reward_fns
     )
+    print(f"self.reward_fns: {self.reward_fns}")
 
     if not self.reward_fns:
       raise ValueError(

@@ -72,11 +72,11 @@ parser.add_argument("--num_iterations", type=int, default=1)
 parser.add_argument("--beta", type=float, default=0.001)
 parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
-parser.add_argument("--max_turns", type=int, default=5)
+parser.add_argument("--max_turns", type=int, default=2)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=1024)
-parser.add_argument("--max_response_length", type=int, default=256)
+parser.add_argument("--max_response_length", type=int, default=2048)
 parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
@@ -230,7 +230,7 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 # ==========================================
 
 gemma4_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=reference_mesh, dtype=jnp.float32
+    MODEL_PATH, config, mesh=reference_mesh, dtype=jnp.bfloat16
 )
 
 gemma4_actor = params_lib.create_model_from_safe_tensors(
@@ -269,7 +269,7 @@ def add_prompt(item):
 train_dataset = train_dataset.map(add_prompt)
 test_dataset = test_dataset.map(add_prompt)
 
-print("First 10 items in train_dataset:")
+print(f"train_dataset length: {len(train_dataset)}, First 10 items in train_dataset:")
 for i in range(min(10, len(train_dataset))):
     print(train_dataset[i])
 
