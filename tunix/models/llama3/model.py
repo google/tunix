@@ -79,7 +79,7 @@ class ShardingConfig:
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class ModelConfig:
   """Configuration for the Llama3 model."""
 

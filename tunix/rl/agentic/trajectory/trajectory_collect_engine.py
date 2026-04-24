@@ -421,7 +421,6 @@ class TrajectoryCollectEngine:
     if self.tokenizer is not None and self.chat_parser is not None:
       # Get the current messages (usually System + User)
       init_messages = self.agent.chat_completions
-      logging.info(f"engine reset with {init_messages=}")
       prompt_tokens, _ = utils.tokenize_and_generate_masks(
           init_messages,
           tokenizer=self.tokenizer,

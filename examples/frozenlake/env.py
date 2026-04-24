@@ -262,6 +262,9 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
       action = self.INVALID_ACTION
     action = int(action)
     print(f"frozenlake env step with action: {action}")
+    
+    # Mock to debug
+    action = 0
     assert isinstance(action, int), "Action must be an integer"
     assert not self.success(), "Agent has already reached the goal or hole"
 

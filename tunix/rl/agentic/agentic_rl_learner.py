@@ -26,6 +26,8 @@ import dataclasses
 import itertools
 import queue
 import threading
+    
+import tracemalloc
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
 
 from absl import logging
@@ -396,7 +398,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if env:
       env.task["policy_version"] = self.policy_version
 
-    print(f"in model_call, the chat_list is: {chat_lists=}")
     if self.chat_parser:
       chat_lists = self.chat_parser.parse(
           messages=chat_lists,
@@ -617,6 +618,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           num_generations=self.algo_config.num_generations,
           collect_mode="Token",
       ):
+
+        snapshot = tracemalloc.take_snapshot()
+        top_stats = snapshot.statistics('lineno')
+
+        print("[ Top 10 memory consumers ]")
+        for stat in top_stats[:10]:
+          print(stat)
         try:
           train_examples = self._batch_to_train_example(
               batch_results=batch,
@@ -663,6 +671,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
+    tracemalloc.start()
     full_batch_iterator = iter(train_dataset)
 
     if self.rl_cluster.global_steps > 0:
@@ -787,6 +796,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
+      jax.block_until_ready(merged_train_micro_batch)
 
       # --- Evaluation Logic ---
       current_eval_dataset = None

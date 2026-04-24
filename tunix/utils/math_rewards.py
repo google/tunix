@@ -34,6 +34,10 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
   Returns:
     float: The calculated reward value based on math evaluation
   """
+  # Mock to debug
+  # rewards = [0.2]*len(completions)
+  # rewards[0] = 0.4
+  # return rewards
   rewards = []
   # Extract information from task_info
   for i, completion in enumerate(completions):

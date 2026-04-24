@@ -187,18 +187,18 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     thought = response
     action_str = str(FrozenLakeEnv.INVALID_ACTION)
 
-    matches = re.findall(r"```(.*?)```", response, re.DOTALL)
+    # matches = re.findall(r"```(.*?)```", response, re.DOTALL)
 
-    if matches:
-      last_match_content = matches[-1].strip()
-      last_match_index = response.rfind(f"```{last_match_content}```")
-      if last_match_index != -1:
-        thought = response[:last_match_index].strip()
-        extracted_text = last_match_content.lower()
-        if extracted_text in DIRECTION_MAP:
-          action_str = str(DIRECTION_MAP[extracted_text])
-        elif extracted_text.isdigit() and int(extracted_text) in DIRECTION_MAP.values():
-          action_str = str(int(extracted_text))
+    # if matches:
+    #   last_match_content = matches[-1].strip()
+    #   last_match_index = response.rfind(f"```{last_match_content}```")
+    #   if last_match_index != -1:
+    #     thought = response[:last_match_index].strip()
+    #     extracted_text = last_match_content.lower()
+    #     if extracted_text in DIRECTION_MAP:
+    #       action_str = str(DIRECTION_MAP[extracted_text])
+    #     elif extracted_text.isdigit() and int(extracted_text) in DIRECTION_MAP.values():
+    #       action_str = str(int(extracted_text))
 
     # Add assistant's response to conversation history.
     self._messages.append({"role": "assistant", "content": response})
@@ -207,7 +207,9 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     # Record complete step with conversation context and parsed action.
     cur_step = self._trajectory.steps[-1]
     cur_step.thought = thought
-    cur_step.action = action_str
+    # Mock for debug
+    cur_step.action = 0
+    # cur_step.action = action_str
     cur_step.model_response = response
 
     self.step += 1
