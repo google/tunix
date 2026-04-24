@@ -421,6 +421,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
     )
+    jax.block_until_ready(result)
 
     return result
 

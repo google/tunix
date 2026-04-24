@@ -472,7 +472,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           rewards=rewards, num_generations=self.algo_config.num_generations
       )
 
-    logging.debug("Advantages computed: %s", advantages)
+    logging.info("Advantages computed: %s", advantages)
 
     if self.algo_config.degenerate_group_masking:
       if jnp.all(jnp.isclose(advantages, 0.0)):
@@ -599,6 +599,7 @@ def grpo_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
+#   jax.debug.print("Running here line 602")
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
@@ -613,6 +614,8 @@ def grpo_loss_fn(
       return_logits=True,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
+#   jax.debug.print("Running here line 617")
+  
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
   if advantages.ndim != 1:
@@ -629,11 +632,13 @@ def grpo_loss_fn(
         train_example.old_per_token_logps, jnp.float32
     )
 
+#   jax.debug.print("Running here line 635")
   seq_importance_ratio = per_token_logps - old_per_token_logps
   # Record KL divergence before clipping.
   ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
 
   seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
+#   jax.debug.print("Running here line 641")
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
@@ -648,6 +653,7 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
+#   jax.debug.print("Running here line 656")
   advantages = advantages[:, None]
   pg_loss_1 = -advantages * is_ratio
   pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
@@ -657,6 +663,7 @@ def grpo_loss_fn(
   clipped_fraction = ppo_helpers.masked_mean(
       jnp.greater(pg_loss_2, pg_loss_1), completion_mask
   )
+#   jax.debug.print("Running here line 666")
 
   # dual-clip ppo loss
   pg_loss_3 = -epsilon_c * advantages
@@ -670,6 +677,7 @@ def grpo_loss_fn(
   pg_clipfrac_lower = common.aggregate_loss(
       unreduced_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
   )
+#   jax.debug.print("Running here line 680")
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(
@@ -686,6 +694,7 @@ def grpo_loss_fn(
       "ppo_kl": ppo_kl,
       "pg_clipfrac_lower": pg_clipfrac_lower,
   }
+#   jax.debug.print("Running here line 697")
   # We do not alwayscompute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
   if train_example.ref_per_token_logps is not None:
@@ -706,11 +715,13 @@ def grpo_loss_fn(
     if beta is not None and beta != 0.0:
       loss = loss + beta * kl_loss
 
+#   jax.debug.print("Running here line 718")
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
   entropy_loss = common.aggregate_loss(
       token_entropy, completion_mask, loss_aggregation_mode
   )
   aux["entropy"] = entropy_loss
+#   jax.debug.print("Running here line 724")
 
   return loss, aux
 

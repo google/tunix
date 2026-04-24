@@ -33,6 +33,7 @@ logging.basicConfig(
     force=True,
 )
 
+jax.config.update("jax_debug_nans", True)
 # 3. Explicitly set levels for relevant loggers
 logging.getLogger().setLevel(logging.INFO)
 logging.getLogger("absl").setLevel(logging.INFO)
@@ -115,10 +116,10 @@ if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
 # ==========================================
 # 2. Imports from Custom Modules
 # ==========================================
-# from tunix.models.gemma4 import params_safetensors as params_lib
-# from tunix.models.gemma4 import model as model_lib
-from tunix.models.llama3 import params as params_lib
-from tunix.models.llama3 import model as model_lib
+from tunix.models.gemma4 import params_safetensors as params_lib
+from tunix.models.gemma4 import model as model_lib
+# from tunix.models.llama3 import params as params_lib
+# from tunix.models.llama3 import model as model_lib
 from tunix.sft import utils as sft_utils
 from tunix.sft import metrics_logger
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -137,9 +138,9 @@ from examples.frozenlake.env import FrozenLakeEnv
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf"
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf"
 
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
+# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
 print(f"Looking for local model at: {MODEL_PATH}...")
 
 # ====== Data ======
@@ -218,7 +219,7 @@ import jax
 import jax.numpy as jnp
 from tunix.models.automodel import call_model_config
 
-config = model_lib.ModelConfig.llama3p2_3b_instruct()
+config = model_lib.ModelConfig.gemma4_e2b()
 
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
@@ -237,11 +238,11 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 # 6. Model Initialization
 # ==========================================
 
-llama3_reference = params_lib.create_model_from_safe_tensors(
+gemma4_reference = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, mesh=reference_mesh, dtype=jnp.bfloat16
 )
 
-llama3_actor = params_lib.create_model_from_safe_tensors(
+gemma4_actor = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, mesh=train_mesh, dtype=jnp.bfloat16
 )
 sft_utils.show_hbm_usage()
@@ -350,7 +351,7 @@ sglang_jax_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    "rollout_vllm_model_version": "meta-llama/Llama-3.2-3B-Instruct",
+    "rollout_vllm_model_version": "google/gemma-4-E2B-it",
     "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
@@ -405,8 +406,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 sft_utils.show_hbm_usage()
 
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=llama3_actor,
-    reference=llama3_reference,
+    actor=gemma4_actor,
+    reference=gemma4_reference,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
