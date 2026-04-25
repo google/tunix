@@ -28,6 +28,7 @@ import numpy as np
 import optax
 import qwix
 from tunix.sft import checkpoint_manager
+from tunix.sft import checkpoint_options
 
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
@@ -110,11 +111,16 @@ class CheckpointManagerTest(parameterized.TestCase):
   def test_checkpoint_manager_options_none_sets_default(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=None)
-    self.assertIsNotNone(cp_manager._checkpoint_manager)
+    self.assertIsNotNone(cp_manager._checkpointer)
     self.assertEqual(
-        cp_manager._checkpoint_manager._options,  # pytype: disable=attribute-error
-        checkpoint_manager._DEFAULT_CHECKPOINTING_OPTIONS,
+        cp_manager._options,
+        checkpoint_options.DEFAULT_CHECKPOINTING_OPTIONS,
     )
+
+  def test_context_property(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    self.assertIsNotNone(cp_manager.context)
 
   def test_save(self):
     cp_path = f'{self.temp_path}/{self.id()}'
@@ -123,7 +129,7 @@ class CheckpointManagerTest(parameterized.TestCase):
 
     # Save the model state.
     self.assertTrue(cp_manager.save(1, model))
-    cp_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
+    cp_manager._checkpointer.wait()  # pytype: disable=attribute-error
     self.assertEqual(cp_manager.latest_step(), 1)
 
     cp_manager.close()
@@ -139,7 +145,7 @@ class CheckpointManagerTest(parameterized.TestCase):
 
     # Save the model params.
     self.assertTrue(cp_manager.save(1, model))
-    cp_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
+    cp_manager._checkpointer.wait()  # pytype: disable=attribute-error
 
     # Change the model state.
     changed_state = jax.tree.map(lambda x: x + 1, nnx.state(model))
@@ -162,7 +168,7 @@ class CheckpointManagerTest(parameterized.TestCase):
 
     # Save the model params.
     self.assertTrue(cp_manager.save(1, unsharded_model))
-    cp_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
+    cp_manager._checkpointer.wait()  # pytype: disable=attribute-error
 
     # Restore the model without shardings.
     self.assertEqual(cp_manager.maybe_restore(unsharded_model), (1, {}))
@@ -211,7 +217,7 @@ class CheckpointManagerTest(parameterized.TestCase):
 
     # Save the model params.
     self.assertTrue(cp_manager.save(1, model, save_only_lora_params=True))
-    cp_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
+    cp_manager._checkpointer.wait()  # pytype: disable=attribute-error
 
     # Change the model state.
     changed_state = jax.tree.map(lambda x: x + 1, nnx.state(model))
@@ -241,7 +247,7 @@ class CheckpointManagerTest(parameterized.TestCase):
     model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
     custom_metadata = {'foo': 1, 'bar': 2}
     ckpt_manager.save(1, model, custom_metadata=custom_metadata)
-    ckpt_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
+    ckpt_manager._checkpointer.wait()  # pytype: disable=attribute-error
     restored_step, restored_metadata = ckpt_manager.maybe_restore(model)
     self.assertEqual(restored_step, 1)
     self.assertEqual(restored_metadata, custom_metadata)
@@ -257,7 +263,7 @@ class CheckpointManagerTest(parameterized.TestCase):
     )
     custom_metadata = {'foo': 1, 'bar': 2}
     ckpt_manager.save(1, model, optimizer, custom_metadata=custom_metadata)
-    ckpt_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
+    ckpt_manager._checkpointer.wait()  # pytype: disable=attribute-error
 
     new_optimizer = nnx.Optimizer(
         model,
@@ -281,6 +287,67 @@ class CheckpointManagerTest(parameterized.TestCase):
         new_optimizer.opt_state.hyperparams['learning_rate'].value, 1e-3
     )
 
+  def test_save_and_restore_with_forced_single_device_sharding(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    ckpt_manager = checkpoint_manager.CheckpointManager(cp_path)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    optimizer = nnx.Optimizer(
+        model,
+        optax.inject_hyperparams(optax.adamw)(learning_rate=1e-3),
+        wrt=nnx.Param,
+    )
+    custom_metadata = {'foo': 1, 'bar': 2}
+    ckpt_manager.save(1, model, optimizer, custom_metadata=custom_metadata)
+    ckpt_manager._checkpointer.wait()  # pytype: disable=attribute-error
+
+    new_optimizer = nnx.Optimizer(
+        model,
+        optax.inject_hyperparams(optax.adamw)(learning_rate=1e-5),
+        wrt=nnx.Param,
+    )
+
+    new_optimizer.opt_state.hyperparams['learning_rate'].value = jax.device_put(
+        new_optimizer.opt_state.hyperparams['learning_rate'].value,
+        jax.devices()[0],
+    )
+
+    self.assertIsInstance(
+        new_optimizer.opt_state.hyperparams['learning_rate'].value.sharding,
+        jax.sharding.SingleDeviceSharding,
+    )
+
+    restored_step, _ = ckpt_manager.maybe_restore(
+        model, new_optimizer
+    )
+    self.assertEqual(restored_step, 1)
+
+    errors = []
+    def assert_named_sharding(path, x):
+      if hasattr(x, 'sharding'):
+        try:
+          self.assertIsInstance(
+              x.sharding,
+              jax.sharding.NamedSharding,
+              f'Variable at {path} is not NamedSharding',
+          )
+        except AssertionError as e:
+          errors.append(str(e))
+          return
+
+        path_str = str(path)
+        if 'hyperparams' in path_str:
+          try:
+            self.assertEqual(x.sharding.spec, jax.sharding.PartitionSpec())
+          except AssertionError as e:
+            errors.append(str(e))
+
+    jax.tree.map_with_path(
+        assert_named_sharding,
+        nnx.state(new_optimizer, nnx.optimizer.OptState),
+    )
+    if errors:
+      self.fail('Found sharding mismatches:\n' + '\n'.join(errors))
+
   def test_restore_without_optimizer(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     ckpt_manager = checkpoint_manager.CheckpointManager(cp_path)
@@ -291,7 +358,7 @@ class CheckpointManagerTest(parameterized.TestCase):
         wrt=nnx.Param,
     )
     ckpt_manager.save(1, model, optimizer)
-    ckpt_manager._checkpoint_manager.wait_until_finished()  # pytype: disable=attribute-error
+    ckpt_manager._checkpointer.wait()  # pytype: disable=attribute-error
     ckpt_manager.maybe_restore(model)
 
   @parameterized.parameters(['test_data/checkpoints'])
