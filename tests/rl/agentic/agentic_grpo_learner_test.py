@@ -37,7 +37,7 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 from tunix.generate import tokenizer_adapter
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
@@ -48,6 +48,7 @@ from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
+from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.tests import test_common
 from tunix.utils import trajectory_logger
@@ -814,8 +815,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
               train_micro_batch_size=mini_batch_size,
               rollout_micro_batch_size=mini_batch_size,
               compute_logps_micro_batch_size=mini_batch_size,
-              checkpointing_options=ocp.CheckpointManagerOptions(
-                  save_interval_steps=1,
+              checkpointing_options=checkpoint_options.create_checkpointing_options(
+                  save_decision_policy=(
+                      ocp.training.save_decision_policies.FixedIntervalPolicy(1)
+                  ),
               ),
               checkpoint_root_directory=ckpt_dir,
           ),
@@ -1003,8 +1006,10 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
       mesh = pxla.thread_resources.env.physical_mesh
       if ckpt_dir:
-        checkpointing_options = ocp.CheckpointManagerOptions(
-            save_interval_steps=1,
+        checkpointing_options = checkpoint_options.create_checkpointing_options(
+            save_decision_policy=(
+                ocp.training.save_decision_policies.FixedIntervalPolicy(1)
+            ),
         )
       else:
         checkpointing_options = None
