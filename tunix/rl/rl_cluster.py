@@ -45,6 +45,7 @@ from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -1040,6 +1041,55 @@ class RLCluster:
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
       return per_token_logps
+
+  def get_actor_per_token_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int | None = None,
+      completion_mask: jax.Array | None = None,
+  ) -> jax.Array:
+    """Gets per-token logps from the actor model on the trainer side."""
+    batch_size = prompt_tokens.shape[0]
+    if batch_size == 0:
+      raise ValueError("Cannot get actor log probabilities from an empty batch.")
+    micro_batch_size = micro_batch_size or batch_size
+
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      dest_prompt_tokens = sharding_utils.shard_input(
+          prompt_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion_tokens = sharding_utils.shard_input(
+          completion_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+      graphdef, state = nnx.split(self.actor_trainer.model)
+      outs = []
+      for batch_slice in rl_utils.chunk_slices_by_size(
+          stop=batch_size, step=micro_batch_size
+      ):
+        outs.append(
+            common.compute_per_token_logps(
+                graphdef,
+                state,
+                prompt_tokens=dest_prompt_tokens[batch_slice],
+                completion_tokens=dest_completion_tokens[batch_slice],
+                pad_id=pad_id,
+                eos_id=eos_id,
+                completion_mask=None
+                if completion_mask is None
+                else completion_mask[batch_slice],
+                stop_gradient=True,
+                return_logits=False,
+            )
+        )
+      actor_per_token_logps = jnp.concatenate(outs, axis=0)
+      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+      return actor_per_token_logps
 
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""

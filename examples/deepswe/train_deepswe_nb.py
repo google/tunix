@@ -169,6 +169,15 @@ parser.add_argument(
         "Default is False to align with rLLM DeepSWE."
     ),
 )
+parser.add_argument(
+    "--use_rollout_logps",
+    type=bool,
+    default=False,
+    help=(
+        "Whether to use rollout-cached logprobs as old policy logps. "
+        "Default is False to recompute old logps on the actor side. "
+    ),
+)
 
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
@@ -400,6 +409,7 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 DEGENERATE_GROUP_MASKING = args.degenerate_group_masking
+USE_ROLLOUT_LOGPS = args.use_rollout_logps
 
 
 # %%
@@ -624,7 +634,7 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
-    "return_logprobs": True,
+    "return_logprobs": USE_ROLLOUT_LOGPS,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -734,6 +744,7 @@ config_kwargs = {
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "degenerate_group_masking": DEGENERATE_GROUP_MASKING,
+    "use_rollout_logps": USE_ROLLOUT_LOGPS,
 }
 
 print("[STEP 11] Building GRPOConfig..."); sys.stdout.flush()
