@@ -25,13 +25,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 import qwix
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.models.gemma3 import model as model_lib
 from tunix.models.gemma3 import params as params_lib
 from tunix.processors import image_processor as image_processor_lib
+from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
 
@@ -313,9 +314,12 @@ def train(
       log_dir=logging_dir, flush_every_n_steps=20
   )
   checkpointing_options = None
-  if full_ckpt_dir is not  None:
-    checkpointing_options = ocp.CheckpointManagerOptions(
-        save_interval_steps=_SAVE_INTERVAL_STEPS.value, max_to_keep=1
+  if full_ckpt_dir is not None:
+    checkpointing_options = checkpoint_options.create_checkpointing_options(
+        save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+            _SAVE_INTERVAL_STEPS.value
+        ),
+        preservation_policy=ocp.training.preservation_policies.LatestN(1),
     )
 
   training_config = peft_trainer.TrainingConfig(

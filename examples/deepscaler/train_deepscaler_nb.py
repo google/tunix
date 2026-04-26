@@ -15,8 +15,7 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 import optax
-import optax
-from orbax import checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 import qwix
 
 # ====== Logging Configuration ======
@@ -59,6 +58,7 @@ except:
 with cm:
   from tunix.models.qwen2 import params as params_lib
   from tunix.models.qwen2 import model as model_lib
+  from tunix.sft import checkpoint_options
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
@@ -446,8 +446,13 @@ TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 
 # %%
 # Ckpt saving
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+checkpointing_options = checkpoint_options.create_checkpointing_options(
+    save_decision_policy=ocp.training.save_decision_policies.FixedIntervalPolicy(
+        SAVE_INTERVAL_STEPS
+    ),
+    preservation_policy=ocp.training.preservation_policies.LatestN(
+        MAX_TO_KEEP
+    ),
 )
 
 # Metrics logger

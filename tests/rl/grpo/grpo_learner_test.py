@@ -30,13 +30,14 @@ from jax.interpreters import pxla
 import jax.numpy as jnp
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 from tunix.perf import trace as trace_lib
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
+from tunix.sft import checkpoint_options
 from tunix.sft import profiler
 from tunix.tests import test_common as tc
 from typing_extensions import override
@@ -718,9 +719,13 @@ class GRPOLearnerTest(parameterized.TestCase):
             eval_every_n_steps=10,
             max_steps=10,
             checkpoint_root_directory=temp_path,
-            checkpointing_options=ocp.CheckpointManagerOptions(
-                save_interval_steps=1,
-                max_to_keep=10,
+            checkpointing_options=checkpoint_options.create_checkpointing_options(
+                save_decision_policy=(
+                    ocp.training.save_decision_policies.FixedIntervalPolicy(1)
+                ),
+                preservation_policy=ocp.training.preservation_policies.LatestN(
+                    10
+                ),
             ),
         ),
         rollout_config=base_rollout.RolloutConfig(
@@ -1050,8 +1055,10 @@ class GRPOLearnerTest(parameterized.TestCase):
               train_micro_batch_size=mini_batch_size,
               rollout_micro_batch_size=mini_batch_size,
               compute_logps_micro_batch_size=mini_batch_size,
-              checkpointing_options=ocp.CheckpointManagerOptions(
-                  save_interval_steps=4,
+              checkpointing_options=checkpoint_options.create_checkpointing_options(
+                  save_decision_policy=(
+                      ocp.training.save_decision_policies.FixedIntervalPolicy(4)
+                  ),
               ),
               checkpoint_root_directory=ckpt_dir,
           ),
