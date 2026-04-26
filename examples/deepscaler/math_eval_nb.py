@@ -44,7 +44,7 @@ from typing import Any, Dict, Optional
 import jax
 from jax import numpy as jnp
 from flax import nnx
-import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp
 from tqdm.auto import tqdm
 import re
 
@@ -238,28 +238,14 @@ class Qwen25MathEvaluator:
           abs_state,
           nnx.get_named_sharding(abs_state, self.mesh),
       )
-      item_handlers = {
-          "model_params": ocp.PyTreeCheckpointHandler(),
-          "optimizer_state": ocp.PyTreeCheckpointHandler(),
-      }
-      checkpointer = ocp.CheckpointManager(
-          self.model_path,
-          item_handlers=item_handlers,
-      )
-      model_cp_args = ocp.args.PyTreeRestore(
-          item=abs_state,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(
-              target=abs_state
-          ),
-      )
-      ckpt = checkpointer.restore(
-          160,
-          args=ocp.args.Composite(
-              model_params=model_cp_args,
-          ),
+      step_path = os.path.join(self.model_path, "160")
+      ckpt_model_params = ocp.load_pytree(
+          step_path,
+          abstract_pytree=abs_state,
+          checkpointable_name="model_params",
       )
       graphdef, _ = nnx.split(abs_model)
-      new_state = nnx.State(ckpt.model_params)
+      new_state = nnx.State(ckpt_model_params)
       self.model = nnx.merge(graphdef, new_state)
 
   def load_model(self):
