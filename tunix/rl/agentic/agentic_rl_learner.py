@@ -63,6 +63,8 @@ MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   policy_version: np.ndarray | None = None
+  rollout_per_token_logps: jax.Array | None = None
+  trainer_old_per_token_logps: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

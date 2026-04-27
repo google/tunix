@@ -634,7 +634,7 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
-    "return_logprobs": USE_ROLLOUT_LOGPS,
+    "return_logprobs": True,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 

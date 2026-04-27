@@ -57,6 +57,97 @@ RewardFn = agentic_rl_learner.RewardFn
 MetricFn = agentic_rl_learner.MetricFn
 
 TrainExample = agentic_rl_learner.TrainExample
+_DEBUG_LOGPS_PREVIEW_TOKENS = 8
+
+
+def _masked_stats_np(values: np.ndarray, mask: np.ndarray) -> tuple[float, float, float]:
+  """Returns mean, min, max over masked entries."""
+  active = mask.astype(bool)
+  if not np.any(active):
+    return 0.0, 0.0, 0.0
+  active_values = values[active]
+  return (
+      float(active_values.mean()),
+      float(active_values.min()),
+      float(active_values.max()),
+  )
+
+
+def _print_debug_logps_snapshot(
+    *,
+    group_id: int | str | None,
+    expected_step: int | None,
+    completion_mask: jax.Array,
+    rollout_per_token_logps: jax.Array | None,
+    trainer_old_per_token_logps: jax.Array | None,
+    use_rollout_logps: bool,
+) -> None:
+  """Prints rollout/trainer-side old-logps snapshots for debugging."""
+  mask_np = np.asarray(completion_mask)
+  header = (
+      "[debug-logps] pretrain"
+      f" step={expected_step}"
+      f" group_id={group_id}"
+      f" old_logps_source={'rollout' if use_rollout_logps else 'trainer'}"
+  )
+  print(header, flush=True)
+  print(
+      f"[debug-logps] pretrain completion_mask[0,:{_DEBUG_LOGPS_PREVIEW_TOKENS}]="
+      f"{mask_np[0, :_DEBUG_LOGPS_PREVIEW_TOKENS].tolist()}",
+      flush=True,
+  )
+
+  if rollout_per_token_logps is not None:
+    rollout_np = np.asarray(rollout_per_token_logps)
+    mean_v, min_v, max_v = _masked_stats_np(rollout_np, mask_np)
+    print(
+        f"[debug-logps] pretrain rollout_old_logps[0,:{_DEBUG_LOGPS_PREVIEW_TOKENS}]="
+        f"{rollout_np[0, :_DEBUG_LOGPS_PREVIEW_TOKENS].tolist()}",
+        flush=True,
+    )
+    print(
+        "[debug-logps] pretrain rollout_old_logps_stats "
+        f"mean={mean_v:.6f} min={min_v:.6f} max={max_v:.6f}",
+        flush=True,
+    )
+  else:
+    print("[debug-logps] pretrain rollout_old_logps=None", flush=True)
+
+  if trainer_old_per_token_logps is not None:
+    trainer_np = np.asarray(trainer_old_per_token_logps)
+    mean_v, min_v, max_v = _masked_stats_np(trainer_np, mask_np)
+    print(
+        f"[debug-logps] pretrain trainer_old_logps[0,:{_DEBUG_LOGPS_PREVIEW_TOKENS}]="
+        f"{trainer_np[0, :_DEBUG_LOGPS_PREVIEW_TOKENS].tolist()}",
+        flush=True,
+    )
+    print(
+        "[debug-logps] pretrain trainer_old_logps_stats "
+        f"mean={mean_v:.6f} min={min_v:.6f} max={max_v:.6f}",
+        flush=True,
+    )
+  else:
+    print("[debug-logps] pretrain trainer_old_logps=None", flush=True)
+
+  if (
+      rollout_per_token_logps is not None
+      and trainer_old_per_token_logps is not None
+  ):
+    rollout_np = np.asarray(rollout_per_token_logps)
+    trainer_np = np.asarray(trainer_old_per_token_logps)
+    logp_diff = trainer_np - rollout_np
+    ratio = np.exp(np.clip(logp_diff, -20.0, 20.0))
+    mean_v, min_v, max_v = _masked_stats_np(ratio, mask_np)
+    print(
+        f"[debug-logps] pretrain trainer_vs_rollout_ratio[0,:{_DEBUG_LOGPS_PREVIEW_TOKENS}]="
+        f"{ratio[0, :_DEBUG_LOGPS_PREVIEW_TOKENS].tolist()}",
+        flush=True,
+    )
+    print(
+        "[debug-logps] pretrain trainer_vs_rollout_ratio_stats "
+        f"mean={mean_v:.6f} min={min_v:.6f} max={max_v:.6f}",
+        flush=True,
+    )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -356,7 +447,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               :max_response_length
           ]
       )
-      if self.algo_config.use_rollout_logps and old_logprobs is not None:
+      if old_logprobs is not None:
         padded_old_logprobs.append(
             agentic_utils.right_pad(
                 old_logprobs,
@@ -376,19 +467,25 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_ids.shape,
     )
 
-    if self.algo_config.use_rollout_logps and padded_old_logprobs:
-      old_per_token_logps = jnp.asarray(padded_old_logprobs)
+    rollout_per_token_logps = (
+        jnp.asarray(padded_old_logprobs) if padded_old_logprobs else None
+    )
+
+    trainer_old_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=pad_value,
+        eos_id=eos_value,
+        micro_batch_size=None,
+        completion_mask=completion_mask,
+    )
+
+    if self.algo_config.use_rollout_logps and rollout_per_token_logps is not None:
+      old_per_token_logps = rollout_per_token_logps
     elif self.algo_config.use_rollout_logps:
       old_per_token_logps = None
     else:
-      old_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
-          micro_batch_size=None,
-          completion_mask=completion_mask,
-      )
+      old_per_token_logps = trainer_old_per_token_logps
 
     if self.algo_config.num_iterations > 1 and old_per_token_logps is None:
       raise RuntimeError(
@@ -408,6 +505,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     }
     if group_id is not None:
       perf_tags[perf_constants.GROUP_ID] = group_id
+
+    _print_debug_logps_snapshot(
+        group_id=group_id,
+        expected_step=expected_step,
+        completion_mask=completion_mask,
+        rollout_per_token_logps=rollout_per_token_logps,
+        trainer_old_per_token_logps=trainer_old_per_token_logps,
+        use_rollout_logps=self.algo_config.use_rollout_logps,
+    )
 
     if self.algo_config.beta != 0.0:
       with self.rl_cluster.perf_v2.span(
@@ -539,6 +645,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         advantages=advantages,
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
+        rollout_per_token_logps=rollout_per_token_logps,
+        trainer_old_per_token_logps=trainer_old_per_token_logps,
     )
     return [combined_batch]
 
@@ -645,6 +753,151 @@ def grpo_loss_fn(
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
+  mask_f = completion_mask.astype(jnp.float32)
+  denom = jnp.clip(mask_f.sum(), min=1.0)
+  rollout_debug_logps = (
+      None
+      if train_example.rollout_per_token_logps is None
+      else jnp.astype(train_example.rollout_per_token_logps, jnp.float32)
+  )
+  trainer_debug_logps = (
+      None
+      if train_example.trainer_old_per_token_logps is None
+      else jnp.astype(train_example.trainer_old_per_token_logps, jnp.float32)
+  )
+  rollout_importance_ratio = (
+      None
+      if rollout_debug_logps is None
+      else jnp.exp(jnp.clip(per_token_logps - rollout_debug_logps, -20.0, 20.0))
+  )
+  trainer_importance_ratio = (
+      None
+      if trainer_debug_logps is None
+      else jnp.exp(jnp.clip(per_token_logps - trainer_debug_logps, -20.0, 20.0))
+  )
+  rollout_ppo_kl = (
+      None
+      if rollout_debug_logps is None
+      else ppo_helpers.masked_mean(
+          -(per_token_logps - rollout_debug_logps), completion_mask
+      )
+  )
+  trainer_ppo_kl = (
+      None
+      if trainer_debug_logps is None
+      else ppo_helpers.masked_mean(
+          -(per_token_logps - trainer_debug_logps), completion_mask
+      )
+  )
+  jax.debug.print(
+      "[debug-logps] train selected_old_source={src} "
+      "completion_mask[0,:{n}]={mask}",
+      src="rollout" if algo_config.use_rollout_logps else "trainer",
+      n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+      mask=completion_mask[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+      ordered=True,
+  )
+  if rollout_debug_logps is not None:
+    jax.debug.print(
+        "[debug-logps] train rollout_old_logps[0,:{n}]={vals}",
+        n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+        vals=rollout_debug_logps[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+        ordered=True,
+    )
+  else:
+    jax.debug.print(
+        "[debug-logps] train rollout_old_logps=None",
+        ordered=True,
+    )
+  if trainer_debug_logps is not None:
+    jax.debug.print(
+        "[debug-logps] train trainer_old_logps[0,:{n}]={vals}",
+        n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+        vals=trainer_debug_logps[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+        ordered=True,
+    )
+  else:
+    jax.debug.print(
+        "[debug-logps] train trainer_old_logps=None",
+        ordered=True,
+    )
+  jax.debug.print(
+      "[debug-logps] train selected_old_logps[0,:{n}]={old}",
+      n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+      old=old_per_token_logps[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+      ordered=True,
+  )
+  jax.debug.print(
+      "[debug-logps] train current_logps[0,:{n}]={cur}",
+      n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+      cur=per_token_logps[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+      ordered=True,
+  )
+  jax.debug.print(
+      "[debug-logps] train importance_ratio[0,:{n}]={ratio}",
+      n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+      ratio=is_ratio[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+      ordered=True,
+  )
+  if rollout_importance_ratio is not None:
+    jax.debug.print(
+        "[debug-logps] train rollout_importance_ratio[0,:{n}]={ratio}",
+        n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+        ratio=rollout_importance_ratio[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+        ordered=True,
+    )
+    jax.debug.print(
+        "[debug-logps] train rollout_importance_ratio_stats "
+        "mean={mean} min={minv} max={maxv} ppo_kl={ppo_kl}",
+        mean=(rollout_importance_ratio * mask_f).sum() / denom,
+        minv=jnp.where(
+            completion_mask > 0, rollout_importance_ratio, jnp.inf
+        ).min(),
+        maxv=jnp.where(
+            completion_mask > 0, rollout_importance_ratio, -jnp.inf
+        ).max(),
+        ppo_kl=rollout_ppo_kl,
+        ordered=True,
+    )
+  else:
+    jax.debug.print(
+        "[debug-logps] train rollout_importance_ratio=None",
+        ordered=True,
+    )
+  if trainer_importance_ratio is not None:
+    jax.debug.print(
+        "[debug-logps] train trainer_importance_ratio[0,:{n}]={ratio}",
+        n=_DEBUG_LOGPS_PREVIEW_TOKENS,
+        ratio=trainer_importance_ratio[0, :_DEBUG_LOGPS_PREVIEW_TOKENS],
+        ordered=True,
+    )
+    jax.debug.print(
+        "[debug-logps] train trainer_importance_ratio_stats "
+        "mean={mean} min={minv} max={maxv} ppo_kl={ppo_kl}",
+        mean=(trainer_importance_ratio * mask_f).sum() / denom,
+        minv=jnp.where(
+            completion_mask > 0, trainer_importance_ratio, jnp.inf
+        ).min(),
+        maxv=jnp.where(
+            completion_mask > 0, trainer_importance_ratio, -jnp.inf
+        ).max(),
+        ppo_kl=trainer_ppo_kl,
+        ordered=True,
+    )
+  else:
+    jax.debug.print(
+        "[debug-logps] train trainer_importance_ratio=None",
+        ordered=True,
+    )
+  jax.debug.print(
+      "[debug-logps] train selected_importance_ratio_stats "
+      "mean={mean} min={minv} max={maxv} ppo_kl={ppo_kl}",
+      mean=(is_ratio * mask_f).sum() / denom,
+      minv=jnp.where(completion_mask > 0, is_ratio, jnp.inf).min(),
+      maxv=jnp.where(completion_mask > 0, is_ratio, -jnp.inf).max(),
+      ppo_kl=ppo_kl,
+      ordered=True,
+  )
   advantages = advantages[:, None]
   pg_loss_1 = -advantages * is_ratio
   pg_loss_2 = -advantages * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
