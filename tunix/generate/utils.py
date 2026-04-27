@@ -423,8 +423,8 @@ def build_flat_dict(
           break
         
     # There are no mappings for rng related params.
-    if not mapped:
-      logging.warning('!!! No mapping for flat state: %s', path)
+    # if not mapped:
+    #   logging.warning('!!! No mapping for flat state: %s', path)
 
   # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():

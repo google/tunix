@@ -65,6 +65,7 @@ WORKDIR /app/vllm_tpu_inference/tpu_inference
 RUN pip install -r requirements.txt && pip install -e .
 
 WORKDIR /app
+RUN pip install gymnasium
 RUN pip install --force-reinstall protobuf==6.33.5
 
 

@@ -465,12 +465,11 @@ def load_and_create_model(
   Returns:
     An NNX model instance with weights loaded from the safetensors files.
   """
-  # if mode == 'auto':
-  #   if env_utils.is_internal_env() or env_utils.is_pathways_initialized():
-  #     mode = 'original'
-  #   else:
-  #     mode = 'optimized'
-  mode = 'original'
+  if mode == 'auto':
+    if env_utils.is_internal_env() or env_utils.is_pathways_initialized():
+      mode = 'original'
+    else:
+      mode = 'optimized'
 
   # TODO(tunix-dev): Fix optimized mode when pathways is initialized.
   if mode == 'optimized':

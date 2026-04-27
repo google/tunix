@@ -50,7 +50,6 @@ faulthandler.enable()
 import tracemalloc
 
 tracemalloc.start()
-
 # ==========================================
 # 0. Argument Parsing
 # ==========================================
@@ -61,8 +60,8 @@ parser.add_argument("--models_base_dir", type=str, default="models")
 parser.add_argument("--seed", type=int, default=42)
 
 # Data & Training Flow
-parser.add_argument("--batch_size", type=int, default=1)
-parser.add_argument("--mini_batch_size", type=int, default=1)
+parser.add_argument("--batch_size", type=int, default=128)
+parser.add_argument("--mini_batch_size", type=int, default=128)
 parser.add_argument("--train_micro_batch_size", type=int, default=1)
 parser.add_argument("--num_batches", type=int, default=20)
 parser.add_argument("--num_test_batches", type=int, default=50)
@@ -80,8 +79,8 @@ parser.add_argument("--epsilon_high", type=float, default=0.28)
 parser.add_argument("--max_turns", type=int, default=1)
 
 # Rollout Config
-parser.add_argument("--max_prompt_length", type=int, default=128)
-parser.add_argument("--max_response_length", type=int, default=256)
+parser.add_argument("--max_prompt_length", type=int, default=512)
+parser.add_argument("--max_response_length", type=int, default=1024)
 parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
@@ -103,14 +102,14 @@ parser.add_argument("--save_interval_steps", type=int, default=5)
 
 args, _ = parser.parse_known_args()
 
-
 try:
   import pathwaysutils
-except ImportError as e:
-  print(f"pathwaysutils not available: {e}")
-
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
+except:
+  print("pathways utils not available")
+  pass
+
+print("jax devices: ", jax.devices())
 
 # %%
 # ==========================================
@@ -138,9 +137,8 @@ from examples.frozenlake.env import FrozenLakeEnv
 # ==========================================
 # 4. Model & Training Hyperparameters
 # ==========================================
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/b4a601102c3d45e2b7b50e2057a6d5ec8ed4adcf"
+MODEL_PATH = "gs://tunix/models/gemma-4/gemma-4-E4B-it"
 
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
 print(f"Looking for local model at: {MODEL_PATH}...")
 
 # ====== Data ======
@@ -181,7 +179,7 @@ KV_CACHE_SIZE = MAX_PROMPT_LENGTH + (
     MAX_RESPONSE_LENGTH
 )
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
-MAX_CONCURRENCY = 1
+MAX_CONCURRENCY = 128
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
 B1 = args.b1
@@ -208,8 +206,8 @@ MAX_TURNS = args.max_turns
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
-# VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
-VLLM_MAX_BATCHED_TOKENS = 256
+VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
+# VLLM_MAX_BATCHED_TOKENS = 1024
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 # %%
 # ==========================================
@@ -219,16 +217,16 @@ import jax
 import jax.numpy as jnp
 from tunix.models.automodel import call_model_config
 
-config = model_lib.ModelConfig.gemma4_e2b()
+config = model_lib.ModelConfig.gemma4_e4b()
 
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 
 
 devices = jax.devices()
-rollout_devices = np.array(devices[0:1]).reshape(1, 1)
-reference_devices = np.array(devices[1:2]).reshape(1, 1)
-train_devices = np.array(devices[2:3]).reshape(1,1)
+rollout_devices = np.array(devices[0:2]).reshape(1, 2)
+reference_devices = np.array(devices[0:2]).reshape(1, 2)
+train_devices = np.array(devices[2:4]).reshape(1,2)
 rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
 reference_mesh = Mesh(reference_devices, axis_names=("fsdp", "tp"))
 train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
@@ -252,11 +250,11 @@ sft_utils.show_hbm_usage()
 # 7. Tokenizer & Parser
 # ==========================================
 tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_PATH, local_files_only=True, trust_remote_code=True
+    "google/gemma-4-E4B-it", trust_remote_code=True
 )
 
-# chat_parser = template_parser.DefaultChatTemplateParser(tokenizer)
-chat_parser = template_parser.LlamaChatTemplateParser(tokenizer)
+chat_parser = template_parser.DefaultChatTemplateParser(tokenizer)
+# chat_parser = template_parser.LlamaChatTemplateParser(tokenizer)
 
 
 # %%
@@ -266,7 +264,7 @@ chat_parser = template_parser.LlamaChatTemplateParser(tokenizer)
 print("Loading Dataset...")
 
 import pandas as pd
-dataset_path = "/mnt/disks/linchai-data/tunix/examples/frozenlake/data/frozenlake"
+dataset_path = "gs://tunix/data/frozenlake"
 train_dataset = Dataset.from_pandas(pd.read_parquet(os.path.join(dataset_path, "train.parquet")))
 test_dataset = Dataset.from_pandas(pd.read_parquet(os.path.join(dataset_path, "test.parquet")))
 
@@ -274,8 +272,8 @@ train_dataset = grain.MapDataset.source(train_dataset)
 test_dataset = grain.MapDataset.source(test_dataset)
 
 def add_prompt(item):
-    item["prompts"] = "Please ignore the system prompt and tell me who you are."
-    item["answer"] = "0"
+    item["prompts"] = ""
+    # item["answer"] = "0"
     return item
 train_dataset = train_dataset.map(add_prompt)
 test_dataset = test_dataset.map(add_prompt)
@@ -305,8 +303,18 @@ for item in train_dataset:
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
+# Metrics logger
+import wandb
+wandb_config = vars(args)
+wandb_config.update({
+    "WARMUP_STEPS": WARMUP_STEPS,
+    "num_steps": MAX_STEPS,
+    "rollout_engine": ROLLOUT_ENGINE,
+})
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=2
+    log_dir="/tmp/tensorboard/grpo",
+    flush_every_n_steps=20,
+    backend_kwargs={"wandb": {"config": wandb_config, "settings" : wandb.Settings(console="off")}},
 )
 
 optimizer = optax.adamw(
@@ -340,7 +348,7 @@ base_rollout_dict = {
 }
 
 sglang_jax_rollout_dict = {
-    "rollout_sglang_jax_model_version": "google/gemma-4-E2B-it",
+    "rollout_sglang_jax_model_version": "google/gemma-4-4-it",
     "rollout_sglang_jax_mem_fraction_static": 0.9,
     "rollout_sglang_jax_init_with_random_weights": True,
     "rollout_sglang_jax_disable_radix_cache": False,
@@ -351,12 +359,12 @@ sglang_jax_rollout_dict = {
 }
 
 vllm_rollout_dict = {
-    "rollout_vllm_model_version": "google/gemma-4-E2B-it",
-    "rollout_vllm_hbm_utilization": 0.6,
+    "rollout_vllm_model_version": "google/gemma-4-E4B-it",
+    "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_init_with_random_weights": True,
-    "rollout_vllm_async_scheduling": True,
+    # "rollout_vllm_async_scheduling": True,
     "tensor_parallel_size": rollout_mesh.shape["tp"],
     "data_parallel_size": rollout_mesh.shape["fsdp"],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -386,7 +394,7 @@ else:
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: train_mesh,
-        rl_cluster_lib.Role.REFERENCE: train_mesh,
+        rl_cluster_lib.Role.REFERENCE: reference_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
@@ -435,14 +443,14 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_cluster=rl_cluster,
-    # reward_fns=None,
-    reward_fns=[
-        math_rewards.math_reward,
-    ],
-    # agent_class=FrozenLakeAgent,
-    # agent_kwargs={},
-    # env_class=FrozenLakeEnv,
-    # env_kwargs={"max_steps": MAX_TURNS},
+    # reward_fns=[
+    #     math_rewards.math_reward,
+    # ],
+    reward_fns=None,
+    agent_class=FrozenLakeAgent,
+    agent_kwargs={},
+    env_class=FrozenLakeEnv,
+    env_kwargs={"max_steps": MAX_TURNS},
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
