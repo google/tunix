@@ -725,8 +725,8 @@ def _align_shape(
 
 
 def _apply_dtype_cast(
-    val: jnp.ndarray, tgt_dtype: jnp.dtype, src_key: str
-) -> jnp.ndarray:
+    val: jax.Array | np.ndarray, tgt_dtype: jnp.dtype, src_key: str
+) -> jax.Array | np.ndarray:
   if val.dtype != tgt_dtype:
     logging.log_first_n(
         logging.WARNING,
@@ -912,11 +912,11 @@ def _shapes_are_repeatable(
 
 
 def _unstack_scanned_param(
-    src_val: jax.Array | np.ndarray | Any,
-    tgt_val: jax.Array | np.ndarray | Any,
+    src_val: jax.Array | np.ndarray,
+    tgt_val: jax.Array | np.ndarray,
     key_path: str,
     scan_axis: Optional[int] = None,
-) -> Tuple[jax.Array | np.ndarray | Any]:
+) -> Tuple[jax.Array | np.ndarray, ...]:
   """Unstacks a scanned parameter by moving the scan axis to 0.
 
   This helper unstacks a scanned array at the specified scan_axis. When scan_axis
@@ -988,106 +988,379 @@ def _unstack_scanned_param(
   return (src_val,)
 
 
-def _repeat_to_model_shape(
-    src_val: jax.Array | np.ndarray | Any,
-    tgt_val: jax.Array | np.ndarray | Any,
+_MOE_MLP_WEIGHTS = frozenset({'wi', 'wi_0', 'wi_1'})
+
+
+def _partition_size(
+    partition: Optional[str | Tuple[str, ...]],
+    mesh: jax.sharding.Mesh,
+) -> int:
+  """Total mesh-axis size used to shard a single tensor axis."""
+  if partition is None:
+    return 1
+  names = (partition,) if isinstance(partition, str) else tuple(partition)
+  size = 1
+  for n in names:
+    size *= mesh.shape[n]
+  return size
+
+
+def _spec_at_axis(
+    sharding: Optional[jax.sharding.Sharding],
+    axis: int,
+) -> Optional[str | Tuple[str, ...]]:
+  """Returns the PartitionSpec entry at the given axis, or None if absent."""
+  if not isinstance(sharding, jax.sharding.NamedSharding):
+    return None
+  spec = sharding.spec
+  return spec[axis] if axis < len(spec) else None
+
+
+def _get_n_shards(arr: jax.Array | np.ndarray, axis: int) -> int:
+  """Returns the number of shards for a given axis of an array."""
+  sharding = getattr(arr, 'sharding', None)
+  if isinstance(sharding, jax.sharding.NamedSharding):
+    return _partition_size(_spec_at_axis(sharding, axis), sharding.mesh)
+  return 1
+
+
+@functools.partial(jax.jit, static_argnames=('pad_specs',))
+def _jit_zero_pad_axes(arr, pad_specs):
+  """Shard-aware tail-pad on multiple axes within a single JIT.
+
+  `pad_specs` is a tuple of `(axis, n_shards, per_shard_extra)`; entries
+  with `per_shard_extra == 0` are no-ops. Composing every padded axis
+  inside one trace lets XLA fuse them with the surrounding reshape ops
+  rather than launching each as a separate eager primitive.
+  """
+  out = arr
+  for axis, n_shards, per_shard_extra in pad_specs:
+    if per_shard_extra <= 0:
+      continue
+    src_dim = out.shape[axis]
+    src_chunk_size = src_dim // n_shards
+    split_shape = list(out.shape)
+    split_shape.insert(axis + 1, src_chunk_size)
+    split_shape[axis] = n_shards
+    arr_split = out.reshape(split_shape)
+    pad_width = [(0, 0)] * arr_split.ndim
+    pad_width[axis + 1] = (0, per_shard_extra)
+    arr_padded = jnp.pad(arr_split, pad_width)
+    final_shape = list(out.shape)
+    final_shape[axis] = src_dim + per_shard_extra * n_shards
+    out = arr_padded.reshape(final_shape)
+  return out
+
+
+@functools.partial(jax.jit, static_argnames=('repeats',))
+def _jit_repeat_axes(arr, repeats):
+  """Apply `jnp.repeat` on multiple axes within a single JIT.
+
+  `repeats` is a tuple of `(axis, count)`. One trace covers every
+  repeated axis so XLA can fuse them rather than dispatching per axis.
+  """
+  out = arr
+  for axis, count in repeats:
+    out = jnp.repeat(out, count, axis=axis)
+  return out
+
+
+def _align_per_axis(
+    arr: jax.Array | np.ndarray,
+    tgt_shape: Tuple[int, ...],
+    tgt_sharding: Optional[jax.sharding.Sharding],
     key_path: str,
-) -> jax.Array | np.ndarray | Any:
-  """Repeats src_val to match tgt_val's shape if shapes are compatible multiples.
+) -> jax.Array | np.ndarray:
+  """Aligns `arr` to `tgt_shape` via either pure-repeat or pure-zero_pad.
 
-  This is used to broadcast KV heads (or other dimensions) from a model with
-  fewer heads to one with more heads, e.g., when transferring GQA weights.
+  Each tensor needs exactly one transform mode in practice:
+    * MoE linear weights (`wi`, `wi_0`, `wi_1`, `wo`) → `zero_pad` on
+      every mismatched axis (TPU-lane / GMM_v2 alignment).
+    * Anything else (attention QKV/O projections, biases, …) → `repeat`
+      on every mismatched axis (e.g. KV-head expansion).
+  KV-head expansion and MoE-dim padding never co-occur on the same
+  tensor, so we classify by leaf key once and dispatch the whole
+  transform to a single JIT compiled helper. That collapses what used
+  to be N eager primitive launches into one fused XLA program — the hot
+  path here is bulk alignment of scanned MoE weights, where eager
+  dispatch was costing tens of seconds per tensor.
+  """
+  if not hasattr(arr, 'shape'):
+    return arr
+  if arr.shape == tgt_shape:
+    return arr
+  if len(arr.shape) != len(tgt_shape):
+    raise ShapeMismatchError(
+        f"Rank mismatch for {key_path}: src={arr.shape} vs tgt={tgt_shape}"
+    )
 
-  Args:
-      src_val: The source array to repeat.
-      tgt_val: The target array whose shape we want to match.
-      key_path: Path string for debug logging.
+  mismatches = []
+  for axis, (s, t) in enumerate(zip(arr.shape, tgt_shape)):
+    if s == t:
+      continue
+    if t < s:
+      raise ShapeMismatchError(
+          f"Cannot shrink axis {axis} for {key_path}: src={s} -> tgt={t}"
+      )
+    mismatches.append((axis, s, t))
+  if not mismatches:
+    return arr
 
-  Returns:
-      A repeated version of src_val matching tgt_val's shape, or src_val
-      unchanged if shapes already match or repeating is not possible.
+  last_key = key_path.split('.')[-1]
+  if last_key in _MOE_MLP_WEIGHTS:
+    if isinstance(tgt_sharding, jax.sharding.NamedSharding):
+      mesh = tgt_sharding.mesh
+      pad_specs = []
+      for axis, s, t in mismatches:
+        n_shards = _partition_size(_spec_at_axis(tgt_sharding, axis), mesh)
+        if t % n_shards != 0:
+          raise ValueError(
+              f"Target dimension {t} on axis {axis} for {key_path} is not "
+              f"divisible by n_shards={n_shards}; the target shape itself "
+              f"is misconfigured for the requested sharding."
+          )
+        if (t - s) % n_shards != 0 or s % n_shards != 0:
+          raise ValueError(
+              f"Cannot interleave pad axis {axis} for {key_path}: src_dim "
+              f"({s}) or extra ({t - s}) is not cleanly divisible by "
+              f"n_shards ({n_shards}). Ensure the source tensor is evenly "
+              f"partitionable."
+          )
+        pad_specs.append((axis, n_shards, (t - s) // n_shards))
+    else:
+      pad_specs = [(axis, 1, t - s) for axis, s, t in mismatches]
+    return _jit_zero_pad_axes(arr, tuple(pad_specs))
+
+  repeats = []
+  for axis, s, t in mismatches:
+    if t % s != 0:
+      raise ShapeMismatchError(
+          f"Cannot align axis {axis} for {key_path}: src={s} -> tgt={t} "
+          f"is not an integer multiple and the key is not a recognized "
+          f"MoE pattern."
+      )
+    repeats.append((axis, t // s))
+  return _jit_repeat_axes(arr, tuple(repeats))
+
+
+def _interleave_moe_weights(
+    wi_0: jax.Array | np.ndarray,
+    wi_1: jax.Array | np.ndarray,
+    tgt_shape: Tuple[int, ...],
+    n_shards: int,
+    axis: Optional[int] = None,
+) -> jax.Array | np.ndarray:
+  """Interleaves wi_0 and wi_1 per-shard into a single tensor."""
+  if axis is None:
+    axis = len(tgt_shape) - 1
+    
+  target_half_dim = tgt_shape[axis] // 2
+
+  def _pad_and_chunk(arr):
+    current_total_size = arr.shape[axis]
+    chunk_size = current_total_size // n_shards
+    target_chunk_size = target_half_dim // n_shards
+
+    # Safely reshape to expose per-shard chunk without assuming the last axis
+    new_shape = list(arr.shape)
+    new_shape[axis] = n_shards
+    new_shape.insert(axis + 1, chunk_size)
+    arr_reshaped = arr.reshape(new_shape)
+
+    pad_amount = target_chunk_size - chunk_size
+    if pad_amount > 0:
+      pad_widths = [(0, 0)] * arr_reshaped.ndim
+      pad_widths[axis + 1] = (0, pad_amount)
+      arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
+    return arr_reshaped
+
+  p_wi_0 = _pad_and_chunk(wi_0)
+  p_wi_1 = _pad_and_chunk(wi_1)
+
+  # Interleave along the chunked dimension
+  combined = jnp.concatenate([p_wi_0, p_wi_1], axis=axis + 1)
+  return combined.reshape(tgt_shape)
+
+
+def _align_to_model_shape(
+    src_val: jax.Array | np.ndarray,
+    tgt_val: jax.Array | np.ndarray,
+    key_path: str,
+) -> jax.Array | np.ndarray:
+  """Aligns src_val to tgt_val's shape via per-axis repeat / zero-pad.
+
+  Thin wrapper around `_align_per_axis` that pulls the target's sharding off
+  the target leaf. The per-axis helper is what actually decides repeat vs
+  zero-pad per axis and chooses between per-shard and global padding.
   """
   if not (hasattr(src_val, 'shape') and hasattr(tgt_val, 'shape')):
     return src_val
-
-  src_shape = src_val.shape
-  tgt_shape = tgt_val.shape
-
-  if src_shape == tgt_shape:
+  if src_val.shape == tgt_val.shape:
     return src_val
 
-  if len(src_shape) != len(tgt_shape):
-    return src_val
-
-  for src_dim, tgt_dim in zip(src_shape, tgt_shape):
-    if src_dim > tgt_dim or tgt_dim % src_dim != 0:
-      return src_val
-
-  logging.info(
-      "Repeating '%s' from %s to %s.",
-      key_path, src_shape, tgt_shape,
-  )
-  result = src_val
-  for axis, (src_dim, tgt_dim) in enumerate(zip(src_shape, tgt_shape)):
-    if tgt_dim != src_dim:
-      result = jnp.repeat(result, tgt_dim // src_dim, axis=axis)
-  return result
+  tgt_sharding = getattr(tgt_val, 'sharding', None)
+  return _align_per_axis(src_val, tgt_val.shape, tgt_sharding, key_path)
 
 
-@functools.partial(jax.jit, static_argnums=(2, 3))
-def _jit_fuse_and_unstack_moe(
-    wi_0: jax.Array,
-    wi_1: jax.Array,
+def _bulk_align_and_unstack(
+    arr: jax.Array | np.ndarray,
     scan_axis: int,
-    num_layers: int,
-) -> tuple[jax.Array, ...]:
-  """Fuses wi_0/wi_1 along last axis, then unstacks along scan_axis.
+    per_layer_tgt_val: jax.Array | np.ndarray,
+    key_path: str,
+) -> Tuple[jax.Array | np.ndarray, ...]:
+  """Applies per-axis alignment on a scanned tensor, then unstacks.
 
-  By combining concatenation and unstacking under jax.jit, XLA can fuse both
-  ops and avoid materializing the full concatenated intermediate tensor on
-  device. scan_axis and num_layers are static so XLA knows the output tuple
-  size at compile time and can unroll the unstack at trace time.
+  Operates on the FULL scanned tensor (one bulk repeat / zero-pad per axis,
+  performed under JIT so XLA can fuse the pad with surrounding ops), then
+  emits `num_layers` per-layer slices. Replaces the prior pattern of unstack
+  → align-each-layer, which created N intermediate allocations and N small
+  ops.
+
+  The per-layer target's logical axes map to the scanned tensor's axes by
+  inserting the scan axis: `scan_padded_axis = a if a < scan_axis else a + 1`.
 
   Args:
-    wi_0: First MoE gate weight, shape [num_layers, experts, features].
-    wi_1: Second MoE gate weight, shape [num_layers, experts, features].
-    scan_axis: The axis along which layers are stacked (typically 0).
-    num_layers: Number of layers (must match wi_0.shape[scan_axis]).
+    arr: The full scanned source tensor (shape includes `num_layers` at
+      `scan_axis`).
+    scan_axis: Axis at which `num_layers` lives in `arr`.
+    per_layer_tgt_val: A target leaf — its `.shape`, `.sharding`, and dtype
+      drive the alignment policy.
+    key_path: Dot-separated source path for diagnostics.
 
   Returns:
-    A tuple of num_layers fused per-layer arrays, each with shape
-    [experts, 2 * features].
+    A tuple of `num_layers` per-layer arrays at the per-layer target shape.
+  """
+  per_layer_shape = per_layer_tgt_val.shape
+  scanned_tgt_shape = (
+      per_layer_shape[:scan_axis]
+      + (arr.shape[scan_axis],)
+      + per_layer_shape[scan_axis:]
+  )
+  scanned_tgt_sharding = _scanned_sharding_from_per_layer(
+      getattr(per_layer_tgt_val, 'sharding', None), scan_axis
+  )
+
+  if arr.shape == scanned_tgt_shape:
+    return tuple(jnp.unstack(arr, axis=scan_axis))
+
+  aligned = _align_per_axis(
+      arr, scanned_tgt_shape, scanned_tgt_sharding, key_path
+  )
+  return tuple(jnp.unstack(aligned, axis=scan_axis))
+
+
+def _scanned_sharding_from_per_layer(
+    per_layer_sharding: Optional[jax.sharding.Sharding],
+    scan_axis: int,
+) -> Optional[jax.sharding.NamedSharding]:
+  """Builds a scanned `NamedSharding` from a per-layer one by inserting
+  `PartitionSpec(None)` at `scan_axis`. Returns None if input isn't a
+  NamedSharding."""
+  if not isinstance(per_layer_sharding, jax.sharding.NamedSharding):
+    return None
+  spec = list(per_layer_sharding.spec)
+  spec.insert(scan_axis, None)
+  return jax.sharding.NamedSharding(
+      per_layer_sharding.mesh,
+      jax.sharding.PartitionSpec(*spec),
+      memory_kind=per_layer_sharding.memory_kind,
+  )
+
+
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7))
+def _jit_fuse_and_unstack_moe(
+    wi_0: jax.Array | np.ndarray,
+    wi_1: jax.Array | np.ndarray,
+    scan_axis: int,
+    num_layers: int,
+    n_shards: int,
+    tgt_shape: Tuple[int, ...],
+    scan_padded_axis: int,
+    tgt_padded_axis: int,
+) -> Tuple[jax.Array | np.ndarray, ...]:
+  """Fuses wi_0/wi_1 along the padded axis, then unstacks along scan_axis.
+
+  By combining concat and unstack under jax.jit, XLA fuses both ops and
+  avoids materializing the full concatenated intermediate on device.
+
+  Args:
+    wi_0: First MoE gate weight; per-layer layout matches `tgt_shape`
+      (with the padded dim halved), with `num_layers` inserted at `scan_axis`.
+    wi_1: Second MoE gate weight, same layout as `wi_0`.
+    scan_axis: Axis at which `num_layers` is stacked in `wi_0` / `wi_1`.
+    num_layers: Number of layers (== `wi_0.shape[scan_axis]`).
+    n_shards: Mesh shards along the per-layer fused/padded axis.
+    tgt_shape: Per-layer fused target shape (fused mlp dim on `tgt_padded_axis`).
+    scan_padded_axis: Position of the padded axis in the scanned layout.
+    tgt_padded_axis: Position of the padded axis in the per-layer layout.
+
+  Returns:
+    Tuple of `num_layers` per-layer arrays, each with shape `tgt_shape`.
   """
   del num_layers  # Only used to make this a static arg for JIT cache keying.
-  fused = jnp.concatenate([wi_0, wi_1], axis=-1)
+  fused_shape = list(wi_0.shape)
+  fused_shape[scan_padded_axis] = tgt_shape[tgt_padded_axis]
+
+  fused = _interleave_moe_weights(
+      wi_0, wi_1, tuple(fused_shape), n_shards, axis=scan_padded_axis
+  )
   return jnp.unstack(fused, axis=scan_axis)
 
 
-def _fuse_moe_weights(src_flat: Dict[Tuple[str, ...], Any], tgt_flat: Dict[Tuple[str, ...], Any]) -> Dict[Tuple[str, ...], Any]:
-  """Fuses wi_0 and wi_1 into wi if the target model expects fused MoE weights.
-  
+def _fuse_moe_weights(
+    src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
+    tgt_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
+) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
+  """Fuses unscanned wi_0/wi_1 into wi for unscanned-fused targets.
+
+  Only catches the case where source and target share the same prefix (e.g.
+  src `('layers', 'wi_0')` + `('layers', 'wi_1')` → tgt `('layers', 'wi')`,
+  or src `('layers_0', 'wi_0')` + `('layers_0', 'wi_1')` →
+  tgt `('layers_0', 'wi')`). The scanned-source / unrolled-target case is
+  handled in `intersect_trees` via `_jit_fuse_and_unstack_moe`.
+
   Args:
-    src_flat: Flat dict mapping key tuples to source JAX arrays.
-    tgt_flat: Flat dict mapping key tuples to target JAX arrays, used to detect if fused MoE weights are expected.
+    src_flat: Flat dict of source key tuples to JAX arrays.
+    tgt_flat: Flat dict of target key tuples to target leaves.
 
   Returns:
-    A new flat dict with wi_0 and wi_1 fused into wi where appropriate.
+    A new flat dict with wi_0/wi_1 fused into wi at matching prefixes. Any
+    remaining shape mismatch on non-fused axes is left for the per-target
+    `_align_to_model_shape` call to handle (it composes repeat + zero-pad).
   """
   new_src_flat = dict(src_flat)
   for tgt_key in tgt_flat.keys():
-    if tgt_key and tgt_key[-1] == 'wi':
-      wi_0_key = tgt_key[:-1] + ('wi_0',)
-      wi_1_key = tgt_key[:-1] + ('wi_1',)
-      if wi_0_key in new_src_flat and wi_1_key in new_src_flat:
-        logging.info("Fusing MoE weights for %s", tgt_key)
-        wi_0 = new_src_flat.pop(wi_0_key)
-        wi_1 = new_src_flat.pop(wi_1_key)
-        new_src_flat[tgt_key] = jnp.concatenate([wi_0, wi_1], axis=-1)
-        del wi_0, wi_1  # Release references; .pop() already removed from dict.
+    if not tgt_key or tgt_key[-1] != 'wi':
+      continue
+    wi_0_key = tgt_key[:-1] + ('wi_0',)
+    wi_1_key = tgt_key[:-1] + ('wi_1',)
+    if wi_0_key not in new_src_flat or wi_1_key not in new_src_flat:
+      continue
+    wi_0 = new_src_flat.pop(wi_0_key)
+    wi_1 = new_src_flat.pop(wi_1_key)
+    tgt_val = tgt_flat[tgt_key]
+    # Pick the fused axis as the last axis where src and tgt differ. For the
+    # canonical wi_0/wi_1 -> wi case this is the last axis (the mlp dim).
+    mismatched_axes = [
+        i for i, (s, t) in enumerate(zip(wi_0.shape, tgt_val.shape)) if s != t
+    ]
+    axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
+    n_shards = _get_n_shards(tgt_val, axis)
+    logging.info(
+        'Fusing MoE %s: wi_0=%s, wi_1=%s -> %s on axis %d',
+        '.'.join(str(k) for k in tgt_key),
+        wi_0.shape, wi_1.shape, tgt_val.shape, axis,
+    )
+    new_src_flat[tgt_key] = _interleave_moe_weights(
+        wi_0, wi_1, tgt_val.shape, n_shards, axis=axis
+    )
+    del wi_0, wi_1  # Free memory immediately after fusion.
   return new_src_flat
 
 
-def _collect_src_buffer_ids(src_flat: Mapping[Any, Any]) -> set:
+def _collect_src_buffer_ids(
+    src_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+) -> Optional[set[int]]:
   """Collects physical device buffer pointers for arrays in src_flat.
 
   Used to detect when a target jax.Array shares its underlying buffer with a
@@ -1095,7 +1368,7 @@ def _collect_src_buffer_ids(src_flat: Mapping[Any, Any]) -> set:
   jax.Array wrappers can back the same physical shard (e.g. when source slices
   come from a scanned tensor that also backs another spec entry).
   """
-  ids = set()
+  ids: set[int] = set()
   for v in src_flat.values():
     arr = v.value if hasattr(v, 'value') else v
     if not hasattr(arr, 'addressable_shards'):
@@ -1103,32 +1376,46 @@ def _collect_src_buffer_ids(src_flat: Mapping[Any, Any]) -> set:
     for shard in arr.addressable_shards:
       try:
         ids.add(shard.data.unsafe_buffer_pointer())
+      except jax.errors.JaxRuntimeError as e:
+        if "PjRt-compatible backend only" in str(e):
+          # Backend doesn't support unsafe pointers (e.g., disaggregated Pathways setup).
+          # Fast-fail and return None to signal that aliasing checks should be skipped.
+          return None
+        raise e  # Do not swallow unrelated JAX runtime errors
       except Exception:  # pylint: disable=broad-except
+        # Fallback for non-JAX runtime errors from the original implementation
         pass
   return ids
 
 
 def _delete_target_buffers(
-    spec_flat: Mapping[Any, Any],
-    src_flat: Mapping[Any, Any],
+    spec_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+    src_flat: Mapping[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
 ) -> None:
   """Deletes target arrays in spec_flat that don't alias any source shard."""
+  # This will be a set() of IDs, or None if we are on Pathways
   src_buffer_ids = _collect_src_buffer_ids(src_flat)
   for tgt_val in spec_flat.values():
     tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+    # Skip if the array cannot be deleted or is already deleted
     if not hasattr(tgt_arr, 'delete') or getattr(
         tgt_arr, 'is_deleted', lambda: False
     )():
       continue
-    if hasattr(tgt_arr, 'addressable_shards') and any(
-        shard.data.unsafe_buffer_pointer() in src_buffer_ids
-        for shard in tgt_arr.addressable_shards
-    ):
-      continue
+    # Check for aliasing only if the backend supports buffer pointer tracking
+    if src_buffer_ids is not None and hasattr(tgt_arr, 'addressable_shards'):
+      aliases_source = any(
+          shard.data.unsafe_buffer_pointer() in src_buffer_ids
+          for shard in tgt_arr.addressable_shards
+      )
+      if aliases_source:
+        continue
     tgt_arr.delete()
 
 
-def _snapshot_dst_sharding(arr: Any) -> Any:
+def _snapshot_dst_sharding(
+    arr: jax.Array | np.ndarray,
+) -> jax.sharding.Sharding:
   """Snapshots a destination sharding leaf for reshard_fn's target tree.
 
   Captured *before* any potential `.delete()` on `arr` so the caller never
@@ -1148,16 +1435,16 @@ def _snapshot_dst_sharding(arr: Any) -> Any:
       s, (jax.sharding.NamedSharding, jax.sharding.SingleDeviceSharding)
   ):
     return s
-  return jax.sharding.NamedSharding(s.mesh, s.spec, memory_kind=s.memory_kind)
+  return jax.sharding.NamedSharding(s.mesh, s.spec, memory_kind=s.memory_kind)  # type: ignore[attr-defined]
 
 
 def _reshard_in_chunks(
-    src_flat: Dict[Tuple[str, ...], Any],
-    spec_flat: Dict[Tuple[str, ...], Any],
+    src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
+    spec_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
     reshard_fn: Callable[..., Mapping[str, Any]],
     chunk_size: int,
     delete_spec_buffers: bool = False,
-) -> Dict[Tuple[str, ...], Any]:
+) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
   """Reshards a flat weight dict in sequential chunks to reduce peak HBM pressure.
 
   Instead of issuing one large jax.device_put for the entire model, this helper
@@ -1181,7 +1468,7 @@ def _reshard_in_chunks(
     A flat dict with the same keys as src_flat, containing resharded arrays.
   """
   keys = list(src_flat.keys())
-  resharded: Dict[Tuple[str, ...], Any] = {}
+  resharded: Dict[Tuple[str, ...], jax.Array | np.ndarray] = {}
   for start in range(0, len(keys), chunk_size):
     chunk_keys = keys[start : start + chunk_size]
     chunk_src_flat = {}
@@ -1317,11 +1604,12 @@ def transfer_state_directly(
     layer_pattern = re.compile(r'^layers_(\d+)$')
 
     for key_tuple, tgt_val in tgt_flat.items():
+      path_str = '.'.join(str(k) for k in key_tuple)
       # Try Direct Match
       if key_tuple in src_flat:
         src_val = src_flat[key_tuple]
-        src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(key_tuple))
-        src_val = _repeat_to_model_shape(src_val, tgt_val, str(key_tuple))
+        src_val = _apply_dtype_cast(src_val, tgt_val.dtype, path_str)
+        src_val = _align_to_model_shape(src_val, tgt_val, path_str)
         filtered_src_flat[key_tuple] = src_val
         filtered_tgt_flat[key_tuple] = tgt_val
         continue
@@ -1360,18 +1648,38 @@ def transfer_state_directly(
             break
 
         if found_candidate:
-          if found_candidate not in unstacked_cache:
+          # Cache key includes per-layer target shape so distinct unrolled
+          # targets with different padded shapes don't collide on the same
+          # scanned source.
+          cache_key = (found_candidate, tgt_val.shape, 'aligned')
+          if cache_key not in unstacked_cache:
             src_val = src_flat[found_candidate]
+            candidate_path = '.'.join(str(k) for k in found_candidate)
             # Cast the bulk tensor once before unstacking.
-            src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(found_candidate))
-            unstacked_cache[found_candidate] = _unstack_scanned_param(
-                src_val, tgt_val, str(found_candidate), scan_axis=scan_axis
+            src_val = _apply_dtype_cast(src_val, tgt_val.dtype, candidate_path)
+            scanned_per_layer_shape = (
+                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1:]
             )
+            if scanned_per_layer_shape == tgt_val.shape:
+              # Pure unstack — no alignment needed.
+              unstacked_cache[cache_key] = _unstack_scanned_param(
+                  src_val, tgt_val, candidate_path, scan_axis=scan_axis
+              )
+            else:
+              # Bulk align (repeat / zero-pad per axis) on the full scanned
+              # tensor, then unstack. Replaces N per-layer alignments with
+              # one bulk op + free unstack.
+              logging.info(
+                  'Bulk-aligning scanned %s: %s -> per-layer %s',
+                  candidate_path, src_val.shape, tgt_val.shape,
+              )
+              unstacked_cache[cache_key] = _bulk_align_and_unstack(
+                  src_val, scan_axis, tgt_val, candidate_path
+              )
 
           # Extract the layer_idx-th element from the unstacked cache.
-          sliced_val = unstacked_cache[found_candidate][layer_idx]
-          # Apply KV-head repeat per-slice after unstacking (avoids _MockTarget hack).
-          sliced_val = _repeat_to_model_shape(sliced_val, tgt_val, str(key_tuple))
+          sliced_val = unstacked_cache[cache_key][layer_idx]
+          sliced_val = _align_to_model_shape(sliced_val, tgt_val, path_str)
           filtered_src_flat[key_tuple] = sliced_val
           filtered_tgt_flat[key_tuple] = tgt_val
           continue
@@ -1389,28 +1697,37 @@ def transfer_state_directly(
           wi_1_key = scanned_prefix + ('wi_1',)
 
           if wi_0_key in src_flat and wi_1_key in src_flat:
-            # Use a synthetic cache key for the pre-fused scanned tensor so it
-            # is computed only once across all layer indices.
             fused_scanned_key = scanned_prefix + ('wi_fused',)
             if fused_scanned_key not in unstacked_cache:
-              logging.info(
-                  'Fusing scanned MoE weights for %s', scanned_prefix
-              )
+              scanned_prefix_path = '.'.join(str(k) for k in scanned_prefix)
+              logging.info('Fusing scanned MoE weights for %s', scanned_prefix_path)
               wi_0_full = _apply_dtype_cast(
-                  src_flat[wi_0_key], tgt_val.dtype, str(wi_0_key)
+                  src_flat[wi_0_key], tgt_val.dtype, '.'.join(str(k) for k in wi_0_key)
               )
               wi_1_full = _apply_dtype_cast(
-                  src_flat[wi_1_key], tgt_val.dtype, str(wi_1_key)
+                  src_flat[wi_1_key], tgt_val.dtype, '.'.join(str(k) for k in wi_1_key)
               )
               num_layers = src_flat[wi_0_key].shape[scan_axis]
-              # Single JIT-compiled fusion+unstack: XLA fuses concat and
-              # unstack into one program, avoiding a materialized intermediate.
+              
+              # Remove scan_axis to compare against the per-layer tgt_val shape
+              wi_0_single_shape = wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1:]
+              mismatched_axes = [
+                  i for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape)) if s != t
+              ]
+              tgt_axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
+              n_shards = _get_n_shards(tgt_val, tgt_axis)
+              
+              # Offset the axis by 1 if it falls after the scan axis in the bulk tensor
+              scan_padded_axis = tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
+
               unstacked_cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
-                  wi_0_full, wi_1_full, scan_axis, num_layers
+                  wi_0_full, wi_1_full, scan_axis, num_layers, n_shards, tgt_val.shape, scan_padded_axis, tgt_axis
               )
-              del wi_0_full, wi_1_full  # Release references promptly.
+              del wi_0_full, wi_1_full
 
             sliced_val = unstacked_cache[fused_scanned_key][layer_idx]
+            sliced_val = _align_to_model_shape(sliced_val, tgt_val, path_str)
+
             filtered_src_flat[key_tuple] = sliced_val
             filtered_tgt_flat[key_tuple] = tgt_val
             continue

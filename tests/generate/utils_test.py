@@ -1541,13 +1541,25 @@ class UtilsTest(parameterized.TestCase):
     )
 
   def test_transfer_state_directly_fuses_moe_weights_scanned_to_unrolled(self):
-    """Scanned wi_0/wi_1 are unstacked and fused into per-layer wi (unrolled dst)."""
-    # 2 layers, 2 experts, 2 features each -> fused shape [2, 4] per layer
+    """Scanned wi_0/wi_1 are unstacked and fused into per-layer wi (unrolled dst).
+
+    Uses the function default `scan_axis=1`, matching MaxText's canonical
+    scanned MoE layout `(experts, num_layers, features)`. `experts != num_layers`
+    so a regression that prepends `wi_0.shape[0]` (experts) instead of
+    `num_layers` will fail the final reshape inside `_interleave_moe_weights`.
+    """
+    # Layout: [experts=3, num_layers=2, features=2] (scan_axis=1).
     wi_0_val = jnp.array(
-        [[[1., 2.], [5., 6.]], [[10., 20.], [50., 60.]]], dtype=jnp.float32
-    )  # [num_layers=2, experts=2, features=2]
+        [[[1., 2.], [10., 20.]],
+         [[3., 4.], [30., 40.]],
+         [[5., 6.], [50., 60.]]],
+        dtype=jnp.float32,
+    )
     wi_1_val = jnp.array(
-        [[[3., 4.], [7., 8.]], [[30., 40.], [70., 80.]]], dtype=jnp.float32
+        [[[100., 200.], [1000., 2000.]],
+         [[300., 400.], [3000., 4000.]],
+         [[500., 600.], [5000., 6000.]]],
+        dtype=jnp.float32,
     )
 
     src_state = nnx.Dict(
@@ -1557,22 +1569,20 @@ class UtilsTest(parameterized.TestCase):
         )
     )
     dst_state = nnx.Dict(**{
-        'layers_0': nnx.Dict(wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32))),
-        'layers_1': nnx.Dict(wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32))),
+        'layers_0': nnx.Dict(wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))),
+        'layers_1': nnx.Dict(wi=nnx.Param(jnp.zeros((3, 4), dtype=jnp.float32))),
     })
 
     mock_reshard = lambda source, target: source
-    utils.transfer_state_directly(
-        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
-    )
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
 
     np.testing.assert_array_equal(
         dst_state['layers_0']['wi'][...],
-        jnp.concatenate([wi_0_val[0], wi_1_val[0]], axis=-1),
+        jnp.concatenate([wi_0_val[:, 0, :], wi_1_val[:, 0, :]], axis=-1),
     )
     np.testing.assert_array_equal(
         dst_state['layers_1']['wi'][...],
-        jnp.concatenate([wi_0_val[1], wi_1_val[1]], axis=-1),
+        jnp.concatenate([wi_0_val[:, 1, :], wi_1_val[:, 1, :]], axis=-1),
     )
 
   def test_transfer_state_directly_delete_dst_buffers_no_chunking(self):
@@ -1703,6 +1713,347 @@ class UtilsTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         dst_state['layers_1']['weight'][...], scanned[1]
     )
+
+
+  def test_transfer_state_directly_fuses_moe_weights_with_padding(self):
+    """Tests that wi_0 and wi_1 are fused, padded and interleaved into wi."""
+    # Source: wi_0, wi_1 each (2 experts, 2 features)
+    wi_0_val = jnp.array([[1.0, 2.0], [5.0, 6.0]], dtype=jnp.float32)
+    wi_1_val = jnp.array([[3.0, 4.0], [7.0, 8.0]], dtype=jnp.float32)
+
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(wi_0_val),
+            wi_1=nnx.Param(wi_1_val),
+        )
+    )
+
+    # Target: wi (2 experts, 8 features total -> 4 features each half)
+    # To test interleaved sharding, we need n_shards > 1.
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Need at least 2 devices for sharded padding test.")
+
+    mesh = Mesh(np.array(devices[:2]), axis_names=("model",))
+    # Sharding on last axis with 2 shards
+    sharding = NamedSharding(mesh, PartitionSpec(None, "model"))
+
+    dst_wi = jax.device_put(jnp.zeros((2, 8), dtype=jnp.float32), sharding)
+    dst_state = nnx.Dict(layers=nnx.Dict(wi=nnx.Param(dst_wi)))
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    # Expected:
+    # Half 0 (wi_0) padded from 2 to 4 features. Per-shard padding: 1 -> 2.
+    # wi_0 local shards: [1.0], [2.0] -> padded: [1.0, 0.0], [2.0, 0.0] -> global: [1.0, 0.0, 2.0, 0.0]
+    # Half 1 (wi_1) padded from 2 to 4 features. Per-shard padding: 1 -> 2.
+    # wi_1 local shards: [3.0], [4.0] -> padded: [3.0, 0.0], [4.0, 0.0] -> global: [3.0, 0.0, 4.0, 0.0]
+    # Interleaved: [half0_shard0, half1_shard0, half0_shard1, half1_shard1]
+    # [1.0, 0.0, 3.0, 0.0, 2.0, 0.0, 4.0, 0.0] for first expert.
+
+    expected_wi = jnp.array(
+        [
+            [1.0, 0.0, 3.0, 0.0, 2.0, 0.0, 4.0, 0.0],
+            [5.0, 0.0, 7.0, 0.0, 6.0, 0.0, 8.0, 0.0],
+        ],
+        dtype=jnp.float32,
+    )
+
+    np.testing.assert_array_equal(dst_state["layers"]["wi"][...], expected_wi)
+
+  def test_transfer_state_directly_fuses_moe_weights_with_padding_scanned(self):
+    """Scanned wi_0/wi_1 are fused, padded per-shard, and unstacked per-layer.
+
+    Mirrors `test_transfer_state_directly_fuses_moe_weights_with_padding` but
+    with a scanned source under the function default `scan_axis=1` and
+    `experts != num_layers` so a regression that prepends `wi_0.shape[0]`
+    (experts) instead of `num_layers` will fail the final reshape inside
+    `_interleave_moe_weights`.
+    """
+    # Source: scanned [experts=3, num_layers=2, features=2] with scan_axis=1.
+    wi_0_val = jnp.array(
+        [[[1., 2.], [10., 20.]],
+         [[3., 4.], [30., 40.]],
+         [[5., 6.], [50., 60.]]],
+        dtype=jnp.float32,
+    )
+    wi_1_val = jnp.array(
+        [[[100., 200.], [1000., 2000.]],
+         [[300., 400.], [3000., 4000.]],
+         [[500., 600.], [5000., 6000.]]],
+        dtype=jnp.float32,
+    )
+
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(wi_0_val),
+            wi_1=nnx.Param(wi_1_val),
+        )
+    )
+
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Need at least 2 devices for sharded padding test.")
+
+    mesh = Mesh(np.array(devices[:2]), axis_names=("model",))
+    sharding = NamedSharding(mesh, PartitionSpec(None, "model"))
+
+    # Per-layer fused target: (3 experts, 8 features). Two layers, unrolled dst.
+    dst_state = nnx.Dict(**{
+        'layers_0': nnx.Dict(
+            wi=nnx.Param(
+                jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharding)
+            )
+        ),
+        'layers_1': nnx.Dict(
+            wi=nnx.Param(
+                jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharding)
+            )
+        ),
+    })
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    # Per-shard pad-then-interleave on the last axis. For each (expert, layer)
+    # the wi_0 features [a, b] pad to [a, 0, b, 0] (2 shards, 1 elt each pads
+    # to 2), wi_1 features [c, d] pad to [c, 0, d, 0]; interleaved per shard
+    # gives [a, 0, c, 0, b, 0, d, 0].
+    expected_layers_0 = jnp.array(
+        [
+            [1., 0., 100., 0., 2., 0., 200., 0.],
+            [3., 0., 300., 0., 4., 0., 400., 0.],
+            [5., 0., 500., 0., 6., 0., 600., 0.],
+        ],
+        dtype=jnp.float32,
+    )
+    expected_layers_1 = jnp.array(
+        [
+            [10., 0., 1000., 0., 20., 0., 2000., 0.],
+            [30., 0., 3000., 0., 40., 0., 4000., 0.],
+            [50., 0., 5000., 0., 60., 0., 6000., 0.],
+        ],
+        dtype=jnp.float32,
+    )
+
+    np.testing.assert_array_equal(
+        dst_state["layers_0"]["wi"][...], expected_layers_0
+    )
+    np.testing.assert_array_equal(
+        dst_state["layers_1"]["wi"][...], expected_layers_1
+    )
+
+  def test_transfer_state_directly_moe_wi_padding_replicated_source(self):
+    """Replicated source -> TP-sharded target produces interleaved global pad.
+
+    The MoE-key path in `_align_per_axis` reshapes the source to expose
+    the target's shard structure, tail-pads each chunk under JIT
+    (`_jit_zero_pad_axes`), then flattens. The interleaved layout means
+    each device receives `[data_chunk, local_pad]` rather than one device
+    getting all data and another all padding.
+    """
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Need at least 2 devices for sharded padding test.")
+
+    mesh = Mesh(np.array(devices[:2]), axis_names=("model",))
+    replicated = NamedSharding(mesh, PartitionSpec())
+    sharded = NamedSharding(mesh, PartitionSpec(None, "model"))
+
+    wi_0_val = jnp.array(
+        [[1., 2., 3., 4.],
+         [5., 6., 7., 8.],
+         [9., 10., 11., 12.]],
+        dtype=jnp.float32,
+    )
+    src_wi_0 = jax.device_put(wi_0_val, replicated)
+
+    src_state = nnx.Dict(layers=nnx.Dict(wi_0=nnx.Param(src_wi_0)))
+    dst_state = nnx.Dict(layers=nnx.Dict(
+        wi_0=nnx.Param(
+            jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
+        )
+    ))
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard
+    )
+    result = dst_state["layers"]["wi_0"][...]
+
+    self.assertEqual(result.shape, (3, 8))
+    # Each row's 4 source values split into 2 chunks of 2; each chunk gets 2
+    # tail zeros, then chunks flatten into the global axis. So
+    # [1, 2, 3, 4] -> [[1, 2], [3, 4]] -> [[1, 2, 0, 0], [3, 4, 0, 0]]
+    # -> [1, 2, 0, 0, 3, 4, 0, 0]. Device 0 sees [1, 2, 0, 0]; device 1
+    # sees [3, 4, 0, 0] — no data shifts across the shard boundary.
+    expected = jnp.array(
+        [[1., 2., 0., 0., 3., 4., 0., 0.],
+         [5., 6., 0., 0., 7., 8., 0., 0.],
+         [9., 10., 0., 0., 11., 12., 0., 0.]],
+        dtype=jnp.float32,
+    )
+    np.testing.assert_array_equal(result, expected)
+
+  def test_transfer_state_directly_moe_wi_padding_unscanned_separate_replicated_src(
+      self,
+  ):
+    """End-to-end: unscanned replicated wi_0/wi_1 -> unscanned padded sharded wi_0/wi_1.
+
+    The bug this whole refactor targets: a replicated trainer source that
+    needs MoE-dim padding for a TP-sharded inference target. Pre-fix this
+    silently produced under-padded arrays after `nnx.update`. The new
+    interleaved global pad keeps each device's slice aligned with its
+    portion of the source data.
+    """
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Need at least 2 devices for sharded padding test.")
+    mesh = Mesh(np.array(devices[:2]), axis_names=("model",))
+    replicated = NamedSharding(mesh, PartitionSpec())
+    sharded = NamedSharding(mesh, PartitionSpec(None, "model"))
+
+    wi_0_val = jnp.array(
+        [[1., 2., 3., 4.],
+         [5., 6., 7., 8.],
+         [9., 10., 11., 12.]],
+        dtype=jnp.float32,
+    )
+    src_state = nnx.Dict(layers=nnx.Dict(
+        wi_0=nnx.Param(jax.device_put(wi_0_val, replicated)),
+    ))
+    dst_state = nnx.Dict(layers=nnx.Dict(
+        wi_0=nnx.Param(
+            jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
+        ),
+    ))
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    # Interleaved: each row's 4 values split into 2 chunks of 2, each chunk
+    # gets 2 trailing zeros, then chunks flatten — so device 0 owns
+    # `[a, b, 0, 0]` and device 1 owns `[c, d, 0, 0]` for each row.
+    expected = jnp.array(
+        [[1., 2., 0., 0., 3., 4., 0., 0.],
+         [5., 6., 0., 0., 7., 8., 0., 0.],
+         [9., 10., 0., 0., 11., 12., 0., 0.]],
+        dtype=jnp.float32,
+    )
+    self.assertEqual(dst_state["layers"]["wi_0"][...].shape, (3, 8))
+    np.testing.assert_array_equal(dst_state["layers"]["wi_0"][...], expected)
+
+  def test_transfer_state_directly_moe_wi_padding_scanned_separate_replicated_src(
+      self,
+  ):
+    """Scanned replicated wi_0/wi_1 -> unrolled padded sharded non-fused wi_0/wi_1.
+
+    Exercises the bulk-align-and-unstack path on a scanned source that's
+    replicated relative to the target's TP sharding. Verifies per-layer
+    shapes are correctly padded after `nnx.update`.
+    """
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Need at least 2 devices for sharded padding test.")
+    mesh = Mesh(np.array(devices[:2]), axis_names=("model",))
+    replicated = NamedSharding(mesh, PartitionSpec())
+    sharded = NamedSharding(mesh, PartitionSpec(None, "model"))
+
+    # Scanned replicated source: (experts=3, num_layers=2, features=4) at scan_axis=1.
+    wi_0_unsharded = jnp.array(
+        [[[1., 2., 3., 4.], [10., 20., 30., 40.]],
+         [[5., 6., 7., 8.], [50., 60., 70., 80.]],
+         [[9., 10., 11., 12.], [90., 100., 110., 120.]]],
+        dtype=jnp.float32,
+    )
+    src_state = nnx.Dict(layers=nnx.Dict(
+        wi_0=nnx.Param(jax.device_put(wi_0_unsharded, replicated)),
+    ))
+
+    def _zeros():
+      return jax.device_put(jnp.zeros((3, 8), dtype=jnp.float32), sharded)
+
+    dst_state = nnx.Dict(**{
+        "layers_0": nnx.Dict(wi_0=nnx.Param(_zeros())),
+        "layers_1": nnx.Dict(wi_0=nnx.Param(_zeros())),
+    })
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    # Replicated source -> sharded target: per-axis pad goes through the
+    # global interleaved path. For each unrolled layer slice the 4 source
+    # features split into 2 chunks of 2; each chunk gets 2 trailing zeros,
+    # so the per-row layout becomes [a, b, 0, 0, c, d, 0, 0] — aligned with
+    # the target's 2-shard split on the last axis.
+    expected_layer_0 = jnp.array(
+        [[1., 2., 0., 0., 3., 4., 0., 0.],
+         [5., 6., 0., 0., 7., 8., 0., 0.],
+         [9., 10., 0., 0., 11., 12., 0., 0.]],
+        dtype=jnp.float32,
+    )
+    expected_layer_1 = jnp.array(
+        [[10., 20., 0., 0., 30., 40., 0., 0.],
+         [50., 60., 0., 0., 70., 80., 0., 0.],
+         [90., 100., 0., 0., 110., 120., 0., 0.]],
+        dtype=jnp.float32,
+    )
+    self.assertEqual(dst_state["layers_0"]["wi_0"][...].shape, (3, 8))
+    self.assertEqual(dst_state["layers_1"]["wi_0"][...].shape, (3, 8))
+    np.testing.assert_array_equal(
+        dst_state["layers_0"]["wi_0"][...], expected_layer_0
+    )
+    np.testing.assert_array_equal(
+        dst_state["layers_1"]["wi_0"][...], expected_layer_1
+    )
+
+  def test_align_per_axis_attention_pure_repeat(self):
+    """Attention key path → pure `repeat` on every mismatched axis.
+
+    KV-head expansion and head_dim padding never co-occur on a single
+    tensor in production, so `_align_per_axis` no longer composes both:
+    attention keys take the repeat-only path. This pins that contract.
+    """
+    src = jnp.array(
+        [[1., 2., 3., 4.], [5., 6., 7., 8.]], dtype=jnp.float32
+    )  # shape (2, 4) — kv_heads=2, head_dim=4
+    tgt_shape = (8, 4)  # 4x KV-head expansion only.
+    result = utils._align_per_axis(
+        src, tgt_shape, tgt_sharding=None, key_path="layers.0.attn.q_proj"
+    )
+    self.assertEqual(result.shape, tgt_shape)
+    expected = jnp.repeat(src, 4, axis=0)
+    np.testing.assert_array_equal(np.asarray(result), expected)
+
+  def test_align_per_axis_non_repeatable_non_moe_raises(self):
+    """Non-MoE key with a non-integer-multiple mismatch raises.
+
+    The simplified single-mode aligner no longer falls back to zero-pad
+    for attention head_dim mismatches; if a non-MoE tensor has an axis
+    that isn't an integer multiple, it's a configuration error.
+    """
+    src = jnp.zeros((2, 3), dtype=jnp.float32)
+    with self.assertRaises(utils.ShapeMismatchError):
+      utils._align_per_axis(
+          src, (8, 4), tgt_sharding=None, key_path="layers.0.attn.q_proj"
+      )
+
+  def test_align_per_axis_moe_two_axes_zero_pad(self):
+    """MoE `wi` style: multiple mismatched axes, all classified as zero_pad.
+
+    Pre-refactor `_align_to_model_shape` only padded the *last* mismatched
+    axis on MoE keys (and warned). The new per-axis aligner handles every
+    mismatched axis. This test exercises a synthetic case to pin that down.
+    """
+    src = jnp.array(
+        [[[1., 2.], [3., 4.]]],  # (1, 2, 2)
+        dtype=jnp.float32,
+    )
+    result = utils._align_per_axis(
+        src, tgt_shape=(2, 2, 4), tgt_sharding=None, key_path="layers.0.wi"
+    )
+    self.assertEqual(result.shape, (2, 2, 4))
+    expected = jnp.pad(src, ((0, 1), (0, 0), (0, 2)))
+    np.testing.assert_array_equal(np.asarray(result), expected)
 
 
 class ResolveParallelismSizesTest(parameterized.TestCase):
