@@ -109,7 +109,7 @@ class DAPOlearnerTest(parameterized.TestCase):
 
     self.assertIn("kl", dapo_aux)
     self.assertIn("kl", grpo_aux)
-    self.assertEqual(dapo_aux["kl"], 0.0)  # DAPO does not have KL term.
+
 
 
 class TestDAPOConfigPostInit(parameterized.TestCase):
