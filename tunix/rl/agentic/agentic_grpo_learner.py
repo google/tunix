@@ -88,9 +88,9 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       advantages.
   """
 
-  algo_variant: str = "agentic_grpo"
-  advantage_estimator: str = "agentic_grpo"
-  policy_loss_fn: str = "agentic_grpo"
+  algo_variant: str = "grpo"
+  advantage_estimator: str = "grpo"
+  policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "sequence-mean-token-mean"
   loss_algo: (
       str

@@ -334,7 +334,6 @@ def ppo_value_loss_fn(
 # ==============================================================================
 
 @function_registry.register_policy_loss_fn("grpo")
-@function_registry.register_policy_loss_fn("agentic_grpo")
 def grpo_loss_fn(
     model,
     train_example,
@@ -499,7 +498,6 @@ def grpo_loss_fn(
 
 
 @function_registry.register_advantage_estimator("grpo")
-@function_registry.register_advantage_estimator("agentic_grpo")
 def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
   """Compute group relative advantages.
 
@@ -521,7 +519,7 @@ def compute_advantages(rewards: jax.Array, num_generations: int) -> jax.Array:
   return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
 
 
-@function_registry.register_advantage_estimator("agentic_rloo")
+@function_registry.register_advantage_estimator("rloo")
 def compute_rloo_advantages(
     rewards: jax.Array, num_generations: int
 ) -> jax.Array:
