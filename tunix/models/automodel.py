@@ -45,6 +45,7 @@ class ModelSource(enum.Enum):
   GCS = 'gcs'  # Load model from GCS.
   HUGGINGFACE = 'huggingface'  # Load model from HuggingFace.
   INTERNAL = 'internal'  # Load model from Internal.
+  MAXTEXT = 'maxtext'  # Load model from Maxtext.
 
 
 def get_model_module(model_name: str, module_type: ModelModule) -> Any:
@@ -303,7 +304,7 @@ def download_model(
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
     return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
-  elif model_source == ModelSource.GCS:
+  elif model_source in (ModelSource.GCS, ModelSource.MAXTEXT):
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
     raise ValueError('INTERNAL model source is not supported in OSS.')
@@ -423,6 +424,7 @@ class AutoModel:
         ModelSource.INTERNAL,
         ModelSource.GCS,
         ModelSource.KAGGLE,
+        ModelSource.MAXTEXT,
     ):
       if model_path is None:
         raise ValueError(
@@ -437,7 +439,24 @@ class AutoModel:
     )
 
     # Case 1: Special handling cases for Gemma models
-    if naming_info.model_family == 'gemma3':
+    if model_source == ModelSource.MAXTEXT:
+      import maxtext.configs.pyconfig as pyconfig
+      from maxtext.utils import model_creation_utils as maxtext_model_creation_utils
+
+      # We provide load_parameters_path instead of model_path since that's what maxtext expects.
+      # Also add skip_jax_distributed_system=True as we handle that outside or it's not needed.
+      argv = [
+          'base.yml',
+          f'model_name={naming_info.model_name}',
+          f'load_parameters_path={resolved_model_path}',
+          'skip_jax_distributed_system=True'
+      ]
+      maxtext_config = pyconfig.initialize(argv)
+      model = maxtext_model_creation_utils.from_pretrained(
+          maxtext_config, mesh=mesh, wrap_with_tunix_adapter=True
+      )
+      model_params = maxtext_config
+    elif naming_info.model_family == 'gemma3':
       if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         model, model_params = create_gemma3_model_from_checkpoint(
             ckpt_path=resolved_model_path,
