@@ -441,26 +441,35 @@ class AutoModel:
     # Case 1: Special handling cases for Gemma models
     if model_source == ModelSource.MAXTEXT:
       import maxtext.configs.pyconfig as pyconfig
+      from maxtext.configs.types import MaxTextConfig
       from maxtext.utils import model_creation_utils as maxtext_model_creation_utils
 
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
-      # Also add skip_jax_distributed_system=True as we handle that outside or it's not needed.
       argv = [
           '',
           'base.yml',
           f'model_name={naming_info.model_name}',
           f'load_parameters_path={resolved_model_path}',
-          'skip_jax_distributed_system=True'
       ]
 
+      # We handle jax distribution outside or it's not needed by default.
+      if 'skip_jax_distributed_system' not in kwargs:
+          kwargs['skip_jax_distributed_system'] = True
+
+      valid_keys = set()
+      if hasattr(MaxTextConfig, "model_fields"):
+          valid_keys = set(MaxTextConfig.model_fields.keys())
+      elif hasattr(MaxTextConfig, "__annotations__"):
+          valid_keys = set(MaxTextConfig.__annotations__.keys())
+
       for k, v in kwargs.items():
-          if v is not None:
+          if v is not None and k in valid_keys:
               val_str = str(v).lower() if isinstance(v, bool) else str(v)
               argv.append(f"{k}={val_str}")
 
       maxtext_config = pyconfig.initialize(argv)
       model = maxtext_model_creation_utils.from_pretrained(
-          maxtext_config, mesh=mesh, wrap_with_tunix_adapter=True
+          maxtext_config, mesh=mesh
       )
       model_params = maxtext_config
     elif naming_info.model_family == 'gemma3':

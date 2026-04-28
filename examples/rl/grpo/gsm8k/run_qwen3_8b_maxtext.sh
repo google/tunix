@@ -23,8 +23,6 @@
 
 set -euo pipefail
 
-export SKIP_JAX_PRECOMPILE=true
-
 model_name="${model_name:-Qwen3-8B}"
 model_id="${model_id:-/tmp/maxtext_qwen3_8b}"
 tokenizer_path="${tokenizer_path:-$model_id}"
