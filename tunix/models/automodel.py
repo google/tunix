@@ -424,7 +424,6 @@ class AutoModel:
         ModelSource.INTERNAL,
         ModelSource.GCS,
         ModelSource.KAGGLE,
-        ModelSource.MAXTEXT,
     ):
       if model_path is None:
         raise ValueError(
@@ -449,12 +448,17 @@ class AutoModel:
           '',
           'base.yml',
           f'model_name={naming_info.model_name}',
-          f'load_parameters_path={resolved_model_path}',
       ]
+
+      if model_path is not None:
+          argv.append(f'load_parameters_path={resolved_model_path}')
 
       # We handle jax distribution outside or it's not needed by default.
       if 'skip_jax_distributed_system' not in kwargs:
           kwargs['skip_jax_distributed_system'] = True
+
+      if 'hf_access_token' not in kwargs and 'HF_TOKEN' in os.environ:
+          kwargs['hf_access_token'] = os.environ['HF_TOKEN']
 
       valid_keys = set()
       if hasattr(MaxTextConfig, "model_fields"):
@@ -471,7 +475,7 @@ class AutoModel:
       model = maxtext_model_creation_utils.from_pretrained(
           maxtext_config, mesh=mesh
       )
-      model_params = maxtext_config
+      return model, resolved_model_path
     elif naming_info.model_family == 'gemma3':
       if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         model, model_params = create_gemma3_model_from_checkpoint(

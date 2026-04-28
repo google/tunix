@@ -40,6 +40,21 @@ model_config: &base_model_config
 
   ################################## NNX ##################################
   # Integer seed to create `nnx.Rngs` to mangage the random state.
+  # Optional keyword arguments passed to the underlying model architecture.
+  # When using `model_source: "maxtext"`, you can safely pass MaxText-specific
+  # configuration overrides under `kwargs`. Tunix will automatically forward valid
+  # configuration fields (e.g., `base_emb_dim`, `sparse_matmul`, etc.) to the
+  # MaxText initializer without conflicts.
+  #
+  # Note on Hugging Face token: Maxtext can download models automatically from
+  # Hugging Face if no `model_path` is given. By default, it uses the `HF_TOKEN`
+  # environment variable. You can also explicitly specify it here:
+  # kwargs:
+  #   hf_access_token: "your_token"
+  #   base_emb_dim: 4096
+  #   sparse_matmul: true
+  #   remat_policy: "minimal"
+
   rng_seed: 0
 
   # Display model

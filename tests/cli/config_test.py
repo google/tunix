@@ -149,6 +149,10 @@ class ConfigTest(parameterized.TestCase):
           testcase_name="gcs_ckpt_source",
           overrides=["model_name=gemma3-1b-pt", "model_source=gcs"],
       ),
+      dict(
+          testcase_name="maxtext_source",
+          overrides=["model_name=qwen2.5-0.5b", "model_source=maxtext"],
+      ),
   )
   def test_valid_configs(self, overrides):
     prefix = "model_config."

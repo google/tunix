@@ -121,6 +121,7 @@ def _get_non_gemma_models_test_parameters():
 class AutoModelTest(parameterized.TestCase):
 
 
+
   @mock.patch("tunix.models.automodel.download_model", return_value="gs://my-bucket/my-model")
   def test_from_pretrained_maxtext(self, mock_download):
     import sys
@@ -153,28 +154,30 @@ class AutoModelTest(parameterized.TestCase):
         m_maxtext_utils_model_creation_utils.from_pretrained = mock.MagicMock()
 
         class MockMaxTextConfig:
-            model_fields = {"skip_jax_distributed_system": True}
+            model_fields = {"skip_jax_distributed_system": True, "hf_access_token": "mock"}
 
         m_maxtext_configs_types.MaxTextConfig = MockMaxTextConfig
 
         mock_mesh = mock.MagicMock()
-
-        automodel.AutoModel.from_pretrained(
-            "qwen2.5-0.5b",
-            mesh=mock_mesh,
-            model_source=automodel.ModelSource.MAXTEXT,
-            model_path="gs://my-bucket/my-model",
-            use_flash_attention=True,
-            tunix_fake_arg_that_should_be_dropped=False,
-            skip_jax_distributed_system=False,
-        )
+        import os
+        with mock.patch.dict(os.environ, {"HF_TOKEN": "mock_token"}):
+            automodel.AutoModel.from_pretrained(
+                "qwen2.5-0.5b",
+                mesh=mock_mesh,
+                model_source=automodel.ModelSource.MAXTEXT,
+                use_flash_attention=True,
+                tunix_fake_arg_that_should_be_dropped=False,
+                skip_jax_distributed_system=False,
+            )
 
         m_maxtext_configs_pyconfig.initialize.assert_called_once()
 
         called_argv = m_maxtext_configs_pyconfig.initialize.call_args[0][0]
 
         self.assertIn("model_name=qwen2.5-0.5b", called_argv)
-        self.assertIn("load_parameters_path=gs://my-bucket/my-model", called_argv)
+        has_load_params = any("load_parameters_path" in arg for arg in called_argv)
+        self.assertFalse(has_load_params)
+        self.assertIn("hf_access_token=mock_token", called_argv)
 
         self.assertIn("skip_jax_distributed_system=false", called_argv)
 
