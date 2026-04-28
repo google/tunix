@@ -75,6 +75,10 @@ python -m tunix.cli.grpo_main \
   model_config.rng_seed=42 \
   model_config.model_display=false \
   model_config.remat_config=3 \
+  `# -- Maxtext specific configs mapping ---------------------------------` \
+  model_config.kwargs.base_emb_dim=4096 \
+  model_config.kwargs.sparse_matmul=true \
+  model_config.kwargs.remat_policy="minimal" \
   actor_model_config.mesh.shape="$train_mesh" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   reference_model_config.mesh=null \
