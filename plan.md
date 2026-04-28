@@ -1,5 +1,0 @@
-1. **Understand PPO vs GRPO for Agentic RL:** The user wants PPO to be used in agentic mode. Currently, the codebase has `agentic_grpo_learner.py` which computes advantages for group-wise generation. For PPO, advantages are usually computed using GAE (Generalized Advantage Estimation) or similar, based on value function estimates. However, the exact implementation details of `ppo_learner.py` should be inspected.
-2. **Review `tunix/rl/ppo/ppo_learner.py`:** Understand how PPO computes advantages and updates policies in the standard mode. We need to implement `agentic_ppo_learner.py` to match the API of `agentic_rl_learner.py` and `ppo_learner.py`.
-3. **Implement `tunix/cli/ppo_main.py`:** Create the CLI entry point for PPO. It should support both `ppo` and `agentic_ppo` modes.
-4. **Add Examples:** Create `examples/rl/ppo/gsm8k/configs/gemma2_2b.yaml` and `examples/rl/ppo/gsm8k/run_gemma2_2b.sh`.
-5. **Update README and Notebook:** Add PPO to `examples/rl/README.md` and create `examples/ppo_gemma.ipynb`.
