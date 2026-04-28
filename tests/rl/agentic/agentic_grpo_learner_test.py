@@ -43,6 +43,7 @@ from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic import agentic_grpo_learner
+from tunix.rl import algo_core as grpo_core
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
@@ -1899,7 +1900,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   def test_compute_rloo_advantages(self):
     rewards = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-    advantages = agentic_grpo_learner.compute_rloo_advantages(
+    advantages = grpo_core.compute_rloo_advantages(
         rewards, num_generations=3
     )
     expected_value = jnp.array([-1.5, 0.0, 1.5, -1.5, 0.0, 1.5])
@@ -1907,7 +1908,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   def test_compute_rloo_advantages_low_generations(self):
     rewards = jnp.array([1.0, 2.0])
-    advantages = agentic_grpo_learner.compute_rloo_advantages(
+    advantages = grpo_core.compute_rloo_advantages(
         rewards, num_generations=1
     )
     np.testing.assert_allclose(advantages, jnp.zeros_like(rewards))
