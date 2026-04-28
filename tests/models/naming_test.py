@@ -599,6 +599,15 @@ class TestNaming(parameterized.TestCase):
     ):
       naming.get_model_name_from_model_id('google/')
 
+  def test_get_model_name_from_model_id_other(self):
+    self.assertEqual(
+        naming.get_model_name_from_model_id('foobar'),
+        'foobar',
+    )
+
+  def test_standardize_model_version_empty(self):
+    self.assertEqual(naming._standardize_model_version(''), '')
+
   @tenacity.retry(
       stop=tenacity.stop_after_attempt(3),
       wait=tenacity.wait_exponential(multiplier=1, min=2, max=10),

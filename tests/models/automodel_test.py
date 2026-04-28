@@ -1,4 +1,5 @@
 import dataclasses
+import importlib
 from unittest import mock
 
 from absl.testing import absltest
@@ -151,6 +152,36 @@ class AutoModelTest(parameterized.TestCase):
     ):
       automodel.get_model_module("invalid-model", automodel.ModelModule.PARAMS)
 
+  @mock.patch.object(importlib, "import_module", autospec=True)
+  def test_get_model_module_import_error(self, mock_import_module):
+    mock_import_module.side_effect = ImportError("mock import error")
+    with self.assertRaisesRegex(
+        ImportError, "Could not import module for model config category"
+    ):
+      automodel.get_model_module("gemma-2b", automodel.ModelModule.PARAMS)
+
+  @mock.patch.object(automodel, "get_model_module", autospec=True)
+  def test_call_model_config_missing_attr(self, mock_get_model_module):
+    mock_module = mock.Mock()
+    mock_module.ModelConfig = object()
+    mock_get_model_module.return_value = mock_module
+    with self.assertRaisesRegex(
+        AttributeError, "Function 'gemma_2b' not found on the target object"
+    ):
+      automodel.call_model_config("gemma-2b")
+
+  @mock.patch.object(automodel, "get_model_module", autospec=True)
+  def test_call_model_config_not_callable(self, mock_get_model_module):
+    class MockConfig:
+      gemma_2b = "not a callable"
+    mock_module = mock.Mock()
+    mock_module.ModelConfig = MockConfig()
+    mock_get_model_module.return_value = mock_module
+    with self.assertRaisesRegex(
+        TypeError, "Attribute 'gemma_2b' on the target object is not callable"
+    ):
+      automodel.call_model_config("gemma-2b")
+
   @parameterized.named_parameters(*_get_all_models_test_parameters())
   @mock.patch.object(automodel, "get_model_module", autospec=True)
   def test_create_model_dynamically(
@@ -224,6 +255,18 @@ class AutoModelTest(parameterized.TestCase):
         version=expected_version,
     )
 
+  def test_download_model_unsupported(self):
+    with self.assertRaisesRegex(
+        ValueError, "Unsupported model source"
+    ):
+      automodel.download_model("model_id", "path", "unsupported")
+
+  def test_download_model_gcs(self):
+    self.assertEqual(
+        automodel.download_model("my_path", None, automodel.ModelSource.GCS),
+        "my_path"
+    )
+
   @parameterized.named_parameters(
       dict(testcase_name="kaggle", model_source=automodel.ModelSource.KAGGLE),
       dict(testcase_name="gcs", model_source=automodel.ModelSource.GCS),
@@ -244,6 +287,87 @@ class AutoModelTest(parameterized.TestCase):
           model_path=None,
       )
 
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  def test_from_pretrained_gemma3_internal(self, mock_download_model):
+    mock_download_model.return_value = "fake_path"
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    with mock.patch.object(automodel, "create_gemma3_model_from_checkpoint", autospec=True) as mock_create:
+      mock_create.return_value = (mock.Mock(), mock.Mock())
+      automodel.AutoModel.from_pretrained(
+          model_id="google/gemma-3-1b-it",
+          mesh=mesh,
+          model_source=automodel.ModelSource.INTERNAL,
+          model_path="fake_path",
+      )
+      self.assertTrue(mock_create.called)
+
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  def test_from_pretrained_gemma3_unsupported(self, mock_download_model):
+    mock_download_model.return_value = "fake_path"
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    with self.assertRaisesRegex(
+        NotImplementedError, "Gemma 3 models are only supported from GCS or INTERNAL"
+    ):
+      automodel.AutoModel.from_pretrained(
+          model_id="google/gemma-3-1b-it",
+          mesh=mesh,
+          model_source=automodel.ModelSource.HUGGINGFACE,
+      )
+
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  def test_from_pretrained_gemma_kaggle(self, mock_download_model):
+    mock_download_model.return_value = "fake_path"
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    with mock.patch.object(automodel, "create_gemma_model_with_nnx_conversion", autospec=True) as mock_create:
+      mock_create.return_value = (mock.Mock(), mock.Mock())
+      automodel.AutoModel.from_pretrained(
+          model_id="google/gemma-2b",
+          mesh=mesh,
+          model_source=automodel.ModelSource.KAGGLE,
+          model_path="fake_path",
+      )
+      self.assertTrue(mock_create.called)
+
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  def test_from_pretrained_gemma_internal(self, mock_download_model):
+    mock_download_model.return_value = "fake_path"
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    with mock.patch.object(automodel, "create_gemma_model_from_params", autospec=True) as mock_create:
+      mock_create.return_value = (mock.Mock(), mock.Mock())
+      automodel.AutoModel.from_pretrained(
+          model_id="google/gemma-2b",
+          mesh=mesh,
+          model_source=automodel.ModelSource.INTERNAL,
+          model_path="fake_path",
+      )
+      self.assertTrue(mock_create.called)
+
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  def test_from_pretrained_gemma_unsupported(self, mock_download_model):
+    mock_download_model.return_value = "fake_path"
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    with self.assertRaisesRegex(
+        NotImplementedError, "Gemma models are only supported from KAGGLE or INTERNAL"
+    ):
+      automodel.AutoModel.from_pretrained(
+          model_id="google/gemma-2b",
+          mesh=mesh,
+          model_source=automodel.ModelSource.HUGGINGFACE,
+      )
+
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  def test_from_pretrained_qwen_unsupported_source(self, mock_download_model):
+    mock_download_model.return_value = "fake_path"
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    with self.assertRaisesRegex(
+        NotImplementedError, "Only Gemma models are supported from KAGGLE or GCS"
+    ):
+      automodel.AutoModel.from_pretrained(
+          model_id="qwen/Qwen2.5-0.5B",
+          mesh=mesh,
+          model_source=automodel.ModelSource.KAGGLE,
+          model_path="fake_path",
+      )
 
   @mock.patch.object(naming, "ModelNaming", autospec=True)
   @mock.patch.object(automodel, "call_model_config", autospec=True)
