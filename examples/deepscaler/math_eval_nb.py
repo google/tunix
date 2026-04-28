@@ -368,8 +368,8 @@ class Qwen25MathEvaluator:
       #     ),
       # )
       # sync weights from self.model to the sampler's internal model
-      # print("Syncing model weights to VLLM sampler...")
-      # self.sampler_vllm.update_params(nnx.state(self.model))
+      print("Syncing model weights to VLLM sampler...")
+      self.sampler_vllm.update_params(nnx.state(self.model))
       # # compare sampler_vllm with backup sampler, the language_model weights should be the same.
       # vllm_state = self.sampler_vllm.transformer_state
       # vllm_state_backup = self.sampler_vllm_backup.transformer_state

@@ -27,9 +27,7 @@ class BackendMappingMixin:
   @classmethod
   def mapping_for(cls, backend: str | None = None) -> Dict[str, Any]:
     backend = backend or cls.DEFAULT_BACKEND
-    print(f'Loading mapping for backend: {backend} from {cls.__name__}')
     registry = cls._backend_registry()
-    print(f'Available backends in registry: {list(registry.keys())}')
     if backend not in registry:
       raise RuntimeError(
           f'{backend} mappings not available for {cls.__name__}.'
@@ -38,11 +36,19 @@ class BackendMappingMixin:
 
   @classmethod
   def to_hf_mappings(cls, backend: str | None = None):
-    print(f'Loading to_hf_mappings for backend: {backend} from {cls.__name__}')
     mapping = cls.mapping_for(backend).get('to_hf_mappings')
     if mapping is None:
       raise RuntimeError(
           f'{backend} to_hf_mappings missing for {cls.__name__}.'
+      )
+    return mapping
+
+  @classmethod
+  def hf_key_mappings(cls, backend: str | None = None):
+    mapping = cls.mapping_for(backend).get('hf_key_mappings')
+    if mapping is None:
+      raise RuntimeError(
+          f'{backend} hf_key_mappings missing for {cls.__name__}.'
       )
     return mapping
 
@@ -76,6 +82,7 @@ class MappingConfig:
   """
 
   to_hf_mappings: Optional[Dict[str, Any]] = None
+  hf_key_mappings: Optional[Dict[str, Any]] = None
   lora_to_hf_mappings: Optional[Dict[str, Any]] = None
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
@@ -97,7 +104,6 @@ class MappingConfig:
       return mapping_obj
 
     if mapping_obj is None:
-      print(f'No mapping_obj provided, loading MappingConfig from model for backend: {backend}')
       return cls.from_model(model, backend)
 
     keys = (

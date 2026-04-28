@@ -145,18 +145,25 @@ TO_HF_MAPPINGS.update({
     ),
 })
 
-
-def to_hf_postprocess_fn(state: Any):
-    print("assigning to lm_head weights")
-    if 'vllm_model.language_model.lm_head.weight' in state.keys():
-        state['vllm_model.language_model.lm_head.weight'] = state['vllm_model.language_model.model.embed_tokens.weight']
-
+HF_KEY_MAPPINGS: Dict[str, MappingEntry] = {
+    'vllm_model.language_model.lm_head.weight': (
+        'vllm_model.language_model.model.embed_tokens.weight',
+        (None, None),
+    ),
+}
 
 VLLM_JAX_MAPPING: Dict[str, Any] = {
     'to_hf_mappings': TO_HF_MAPPINGS,
     'lora_to_hf_mappings': {},
-    'to_hf_transpose_keys': {'embedding': (1, 0), 'mlp.down_proj.kernel': (1, 0)},
+    'to_hf_transpose_keys': {
+        'embedding': (1, 0),
+        'mlp.down_proj.kernel': (1, 0),
+        'per_layer_input_gate.w': (1, 0),
+        'per_layer_projection.w': (1, 0),
+        'moe.router_logits': (1, 0),
+    },
     'to_hf_hook_fns': None,
+    'hf_key_mappings': HF_KEY_MAPPINGS,
 }
 
 __all__ = [

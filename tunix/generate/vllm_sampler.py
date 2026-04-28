@@ -66,6 +66,7 @@ class VllmConfig:
   data_parallel_size: int = -1
   tensor_parallel_size: int = -1
   expert_parallel_size: int = 1
+  reshard_chunk_size: Optional[int] = None
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -155,9 +156,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.llm = LLM(**self.args)
 
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
+    self.hf_key_mappings = dict(config.mapping_config.hf_key_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
-    self.to_hf_postprocess_fn = getattr(config.mapping_config, 'to_hf_postprocess_fn', None)
 
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
@@ -190,20 +191,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
-    
-    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
-    gc.collect()
-    jax.clear_caches()
+
+    # Synchronization point before weight sync
     jax.effects_barrier()
 
     if self.to_hf_key_mappings:
       # Mapped Weight Sync (e.g. Vanilla -> vLLM)
-      # import copy
-      # vllm_state = copy.deepcopy(self.transformer_state)
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,
           key_mappings=self.to_hf_key_mappings,
+          hf_key_mappings=self.hf_key_mappings,
           key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,
           reshard_fn=reshard.reshard_pytree,
@@ -219,19 +217,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           ),
           tp_size=self.args.get("tensor_parallel_size", 1),
       )
-      if self.to_hf_postprocess_fn:
-        self.to_hf_postprocess_fn(self.transformer_state)
-      else:
-        # only hack for gemma4
-        if 'vllm_model.language_model.lm_head.weight' in self.transformer_state.keys():
-          self.transformer_state['vllm_model.language_model.lm_head.weight'] = self.transformer_state['vllm_model.language_model.model.embed_tokens.weight']
-      # sampler_model_state = self.transformer_state
-      # import jax.numpy as jnp
-      # for k, v in vllm_state.items():
-      #   if not jnp.array_equal(vllm_state[k], sampler_model_state[k]):
-      #     print(f"Parameter '{k}' successfully mapped and NOT match the sampler model state., shape: {vllm_state[k].shape} and sampler shape: {sampler_model_state[k].shape}, vllm _value: {vllm_state[k]}, sampler model value: {sampler_model_state[k]}")
-      #   else:
-      #     print(f"Parameter '{k}' successfully mapped and match the sampler model state.")
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
@@ -253,8 +238,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
           delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
+          reshard_chunk_size=self.config.reshard_chunk_size,
       )
-    
+
     if self.llm is not None:
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:

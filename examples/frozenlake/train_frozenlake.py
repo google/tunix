@@ -95,18 +95,17 @@ import argparse
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
 arg_parser.add_argument("--batch_size", type=int, default=4)
 arg_parser.add_argument("--mini_batch_size", type=int, default=4)
-arg_parser.add_argument("--train_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=312)
+arg_parser.add_argument("--num_batches", type=int, default=20)
 arg_parser.add_argument("--num_generations", type=int, default=2)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_prompt_length", type=int, default=256)
-arg_parser.add_argument("--max_response_length", type=int, default=512)
+arg_parser.add_argument("--max_prompt_length", type=int, default=512)
+arg_parser.add_argument("--max_response_length", type=int, default=1024)
 arg_parser.add_argument("--temperature", type=float, default=0.8)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
@@ -133,9 +132,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-MESH = [(2, 4), ("fsdp", "tp")]
 ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(1, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -152,7 +151,7 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 768
+VLLM_MAX_NUM_SEQS = 16
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -172,9 +171,10 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
+ENABLE_FLASH_ATTENTION = False
+ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
-TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
 NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
@@ -192,7 +192,7 @@ MAX_CONCURRENCY = args.max_concurrency
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 
-MODEL_DTYPE = jnp.float32
+MODEL_DTYPE = jnp.bfloat16
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -210,8 +210,8 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 1
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 500
-MAX_TO_KEEP = 4
+SAVE_INTERVAL_STEPS = 5
+MAX_TO_KEEP = 500
 DO_MEM_PROFILING = False
 
 # ====== Inference ======
@@ -225,7 +225,7 @@ GENERATION_CONFIGS = {
 }
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "sglang_jax"
+    "ROLLOUT_ENGINE", "vllm"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
 # mesh = jax.make_mesh(
@@ -235,36 +235,43 @@ mesh = None
 
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
+reference_devices = math.prod(REFERENCE_MESH[0])
 
-if trainer_devices + rollout_devices > jax.device_count():
+if trainer_devices + rollout_devices + reference_devices > jax.device_count():
   raise ValueError(
       "Trainer devices must be less than or equal to the number of devices"
       " available."
   )
 
 
-if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
-  rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
-  )
+rollout_device_list = jax._src.mesh_utils.create_device_mesh(
+    ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+)
 
-  rollout_mesh = jax.sharding.Mesh(
-      rollout_device_list,
-      axis_names=ROLLOUT_MESH[1],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-  )
-  print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
-  trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
-      TRAINER_MESH[0], jax.devices()[-trainer_devices:]
-  )
-  trainer_mesh = jax.sharding.Mesh(
-      trainer_devices_list,
-      axis_names=TRAINER_MESH[1],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
-  )
-else:
-  rollout_mesh = mesh
-  trainer_mesh = mesh
+rollout_mesh = jax.sharding.Mesh(
+    rollout_device_list,
+    axis_names=ROLLOUT_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+)
+print(f"{rollout_device_list=} {rollout_mesh.devices=}")
+reference_device_list = jax._src.mesh_utils.create_device_mesh(
+    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
+)
+reference_mesh = jax.sharding.Mesh(
+    reference_device_list,
+    axis_names=REFERENCE_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
+)
+print(f"{reference_device_list=} {reference_mesh.devices=}")
+trainer_device_list = jax._src.mesh_utils.create_device_mesh(
+    TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+)
+trainer_mesh = jax.sharding.Mesh(
+    trainer_device_list,
+    axis_names=REFERENCE_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
+)
+print(f"{trainer_device_list=} {trainer_mesh.devices=}")
 
 # %%
 try:
@@ -295,8 +302,8 @@ print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
 
 MODEL_VERSION = "google/gemma-4-E4B-it"
-# MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-E4B-it")
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-E4B-it")
+# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -377,10 +384,14 @@ show_hbm_usage("Done with loading datasets")
 config = model_lib.ModelConfig.gemma4_e4b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
+if ENABLE_FLASH_ATTENTION:
+  config.use_flash_attention = True
+if ENABLE_MIX_PRECISION:
+  config.param_dtype = jnp.bfloat16
 
 print("MODEL_PATH: ", MODEL_PATH)
 gemma4_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=jnp.int8
+    MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
 )
 
 
@@ -476,6 +487,7 @@ if MAX_GRAD_NORM is not None:
 # Training config
 print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
+print("Reference mesh: ", reference_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -536,7 +548,7 @@ else:
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
+        rl_cluster_lib.Role.REFERENCE: reference_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
@@ -551,7 +563,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+        train_micro_batch_size=1,
         # metrics logging
         # metrics_logging_options=metrics_logging_options,
         # checkpoint saving

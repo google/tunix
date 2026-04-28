@@ -30,6 +30,8 @@ from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
+QKV_PROJ_PATTERN = r'vllm_model.language_model.model.layers\.\d+\.self_attn\.qkv_proj\.weight'
+GATE_UP_PROJ_PATTERN = r'vllm_model.language_model.model.layers\.\d+\.mlp\.gate_up_proj.weight'
 
 def compute_attention_masks(
     time_step: int, seq_len: int, input_mask: jax.Array
@@ -325,16 +327,15 @@ def get_logprobs_from_vllm_output(
       )
   return extracted
 
+
 def is_fused_path(path):
-  if re.compile(r"vllm_model.language_model.model.layers\.\d+\.self_attn\.qkv_proj\.weight").match(path):
+  if re.compile(QKV_PROJ_PATTERN).match(path) or re.compile(GATE_UP_PROJ_PATTERN).match(path):
     return True
-  if re.compile(r"vllm_model.language_model.model.layers\.\d+\.mlp\.gate_up_proj.weight").match(path):
-    return True
+
 
 def build_flat_dict(
     flat_state: Iterator[tuple[tuple[str, ...], nnx.State]],
     mappings: Dict[str, tuple[str, tuple[int, ...]]],
-    fused_tgt_map: Dict[str, tuple[str, tuple[int, ...]]],
 ):
   """Build a new flat dictionary from the flat state using the provided mappings.
 
@@ -350,12 +351,11 @@ def build_flat_dict(
   """
   new_flat_dict = {}
   compiled_mappings = []
-  fused_compiled_mappings = {}
+  fused_tgt_map: Dict[str, Any] = {}
 
   # PRE-COMPILE MAPPINGS
   # Convert target string patterns into Python Regex objects for fast matching.
   for src, (tgt, sharding) in mappings.items():
-    # print(f"Compiling mapping from source '{src}' to target pattern '{tgt}' with sharding {sharding}")
     # Scenario A: The mapping already contains regex special characters (manual
     # filtering). The assumption is that `src` does not contain regex
     # characters like `()`; only `tgt` can contain them.
@@ -371,12 +371,12 @@ def build_flat_dict(
     compiled_mappings.append((src, re.compile(pattern), sharding))
 
   # ITERATE THROUGH ACTUAL PARAMETERS
+  unmapped_target_keys = []
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
     path = keys if isinstance(keys, str) else '.'.join(str(key) for key in keys)
     mapped = False
     for src, regex, sharding in compiled_mappings:
-      # print(f"Trying to match path '{path}' against pattern '{regex.pattern}' for source '{src}' with sharding {sharding}")
       matched = regex.match(path)
       if matched:
         # Extract wildcards if any
@@ -393,7 +393,6 @@ def build_flat_dict(
           else:
             src_parts.append(part)
         actual_src = '.'.join(src_parts)
-        # print(f"{actual_src=}")
 
         # HANDLE SCANNED VS REGULAR PARAMS
         # Scanned parameters have 'layer' in their sharding spec. This means we
@@ -409,26 +408,20 @@ def build_flat_dict(
         else:
           # Regular (non-scanned) parameter
           new_flat_dict[actual_src] = v, path, sharding
-          
           if is_fused_path(path):
-            if path in fused_tgt_map:
-              fused_tgt_map[path].append(actual_src)
-              # print(f"Adding to existing fused mapping for target '{path}': source '{actual_src}' with original source pattern '{src}'")
-            else:
-              fused_tgt_map[path] = [actual_src]
-            # print(f"Mapping fused parameter '{path}' to source '{actual_src}' with original source pattern '{src}' and sharding {sharding}")
+            fused_tgt_map.setdefault(path, []).append(actual_src)
 
         mapped = True
+        # Fused path needs to loop over all keys that map to the same target.
         if not is_fused_path(path):
           break
-        
     # There are no mappings for rng related params.
-    # if not mapped:
-    #   logging.warning('!!! No mapping for flat state: %s', path)
+    if not mapped:
+      unmapped_target_keys.append(path)
+    logging.warning('!!! No mapping for flat state: %s', unmapped_target_keys)
 
   # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():
-    # print(f"Build flat dict key: {key} with {len(layers)} layers and sharding {sharding} for path {paths}")
     if isinstance(layers, list):
       layers.sort(key=lambda x: x[0])
       paths.sort(key=lambda x: x[0])
@@ -460,31 +453,22 @@ def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
   return None
 
 
-def fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tp_size):
-  # print(f"tp_size: {tp_size}")
-  if tgt_path in fuse_sources:
-    fuse_sources[tgt_path].append((src_key, src_val))
-  else:
-    fuse_sources[tgt_path] = [(src_key, src_val)]
-  if re.compile(r"vllm_model.language_model.model.layers\.\d+\.self_attn\.qkv_proj\.weight").match(tgt_path) and len(fuse_sources[tgt_path]) == 2:
-    if 'kv_einsum' in fuse_sources[tgt_path][0][0]:
-      q = fuse_sources[tgt_path][1][1]
-      k = fuse_sources[tgt_path][0][1][0]
-      v = fuse_sources[tgt_path][0][1][1]
-    elif 'kv_einsum' in fuse_sources[tgt_path][1][0]:
-      q = fuse_sources[tgt_path][0][1]
-      k = fuse_sources[tgt_path][1][1][0]
-      v = fuse_sources[tgt_path][1][1][1]
-    elif 'q_einsum' in fuse_sources[tgt_path][0][0]:
-      q = fuse_sources[tgt_path][0][1]
-      k = fuse_sources[tgt_path][1][1]
-      v = k
-    elif 'q_einsum' in fuse_sources[tgt_path][1][0]:
-      q = fuse_sources[tgt_path][1][1]
-      k = fuse_sources[tgt_path][0][1]
-      v = k
-    else:
-      raise MappingError(f"Neither of the source keys for target '{tgt_path}' contains 'q_einsum' or 'kv_einsum'. Source keys: {[k for k, v in fuse_sources[tgt_path]]}")
+def fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tgt_param,tp_size):
+  """Fuses source parameters for the same target path, performing necessary transpositions and reshaping. This only works for VLLM torchax models."""
+  fuse_sources.setdefault(tgt_path, {})[src_key] = (src_val, tgt_param)
+  if re.compile(QKV_PROJ_PATTERN).match(tgt_path) and len(fuse_sources[tgt_path].items()) == 2:
+    k, v, q = None, None, None
+    for sk, (sv, _) in fuse_sources[tgt_path].items():
+      if 'kv_einsum' in sk:
+        k = sv[0]
+        v = sv[1]
+      elif 'q_einsum' in sk:
+        q = sv
+      elif 'k_einsum' in sk:
+        k = v = sv
+      else:
+        raise MappingError(f"Unexpected source key '{sk}' for target '{tgt_path}'. Expected 'kv_einsum', 'q_einsum', or 'k_einsum'.")
+    assert k is not None and v is not None and q is not None, f"Failed to find Q, K, V for target '{tgt_path}'."
     tp = min(tp_size, k.shape[0])
     kv_per_tp = k.shape[0] // tp
     q_per_tp = q.shape[0] // tp
@@ -498,39 +482,34 @@ def fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tp_siz
     qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=2)
     qkv = qkv_by_tp.reshape(d_model, -1)
     qkv = qkv.transpose(1, 0)
-    match = re.search(r"layers\.(\d+)\.attn\.(q|k|kv)_einsum\.w", fuse_sources[tgt_path][0][0])
-    assert match, f"Source key '{fuse_sources[tgt_path][0][0]}' does not match expected pattern for QKV fusion."
+    match = re.search(r"layers\.(\d+)\.attn\.(q|k|kv)_einsum\.w", list(fuse_sources[tgt_path].keys())[0])
+    assert match, f"Source key '{list(fuse_sources[tgt_path].keys())[0]}' does not match expected pattern for QKV fusion."
     layer_idx = match.group(1)
     fused_src_key = f"layers.{layer_idx}.attn.qkv_fused"
-    fuse_sources[tgt_path] = (fused_src_key, qkv)
-  elif re.compile(r"vllm_model.language_model.model.layers\.\d+\.mlp\.gate_up_proj.weight").match(tgt_path) and len(fuse_sources[tgt_path]) == 2:
-    if 'gate_proj' in fuse_sources[tgt_path][0][0]:
-      gate = fuse_sources[tgt_path][0][1]
-      up = fuse_sources[tgt_path][1][1]
-    else:
-      gate = fuse_sources[tgt_path][1][1]
-      up = fuse_sources[tgt_path][0][1]
+    fuse_sources[tgt_path] = {fused_src_key:(qkv, tgt_param)}
+  elif re.compile(GATE_UP_PROJ_PATTERN).match(tgt_path) and len(fuse_sources[tgt_path].items()) == 2:
+    gate, up = None, None
+    for sk, (sv, _) in fuse_sources[tgt_path].items():
+      if 'gate_proj' in sk:
+        gate = sv
+      elif 'up_proj' in sk:
+        up = sv
+      else:
+        raise MappingError(f"Unexpected source key '{sk}' for target '{tgt_path}'. Expected 'gate_proj' or 'up_proj'.")
+    assert gate is not None and up is not None, f"Failed to find gate and up for target '{tgt_path}'."
     gate, up = gate.T, up.T
     hidden_dim = gate.shape[0]
     chunk_size = hidden_dim // tp_size
-    # padded_chunk_size = ((chunk_size + 127)//128)*128
-    # pad_amount = padded_chunk_size - chunk_size
     gate_chunks = gate.reshape(tp_size, chunk_size, gate.shape[1])
     up_chunks = up.reshape(tp_size, chunk_size, up.shape[1])
-    # if pad_amount > 0:
-    #   gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, pad_amount), (0, 0)))
-    #   up_chunks = jnp.pad(up_chunks, ((0, 0), (0, pad_amount), (0, 0)))
     gate_up = jnp.stack([gate_chunks, up_chunks], axis=1)
-    # if pad_amount > 0:
-    #   gate_up = gate_up.reshape(2 * padded_chunk_size * tp_size, gate.shape[1])
-    # else:
     gate_up = gate_up.reshape(2 * hidden_dim, gate.shape[1])
-    match = re.search(r"layers\.(\d+)\.mlp\.gate_proj\.kernel", fuse_sources[tgt_path][0][0])
-    assert match, f"Source key '{fuse_sources[tgt_path][0][0]}' does not match expected pattern for QKV fusion."
+    match = re.search(r"layers\.(\d+)\.mlp\.gate_proj\.kernel", list(fuse_sources[tgt_path].keys())[0])
+    assert match, f"Source key '{list(fuse_sources[tgt_path].keys())[0]}' does not match expected pattern for QKV fusion."
     layer_idx = match.group(1)
     fused_src_key = f"layers.{layer_idx}.mlp.gate_up_fused"
-    fuse_sources[tgt_path] = (fused_src_key, gate_up)
-    
+    fuse_sources[tgt_path] = {fused_src_key: (gate_up, tgt_param)}
+
   return fuse_sources
 
 
@@ -552,11 +531,10 @@ def _unroll_scanned_layers(
   """
 
   unscanned_flat = {}
+  tgt_path_to_src_values_fused = {}
 
-  fuse_sources = {}
   for src_keys, src_val in src_state.flat_state():
     src_key = '.'.join(str(k) for k in src_keys)
-    # print(f"_unroll_scanned_layers source key '{src_key}', value: {src_val}")
 
     # Skip RNG parameters silently
     if 'rng' in src_key:
@@ -567,12 +545,11 @@ def _unroll_scanned_layers(
     if src_key not in src_to_tgt_map:
       logging.error('No mapping for source key: %s', src_key)
       continue
+
     tgt_param, tgt_path, sharding_spec = src_to_tgt_map[src_key]
-    # print(f'Processing source key "{src_key}" with target path "{tgt_path}" with sharding spec "{sharding_spec}"')
 
     # Check if this is a scanned layer that needs unrolling
     layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
-    # print(f'Layer axis for key "{src_key}": {layer_axis}')
 
     if layer_axis is not None:
       # Unroll the scanned layer dimension
@@ -585,18 +562,16 @@ def _unroll_scanned_layers(
         unscanned_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
     else:
       # No unrolling needed
-      # print(f'Processing source key "{src_key}" with value shape {src_val.value.shape if hasattr(src_val, "value") else type(src_val)}')
       if tgt_path in fused_tgt_map:
         assert src_key in fused_tgt_map[tgt_path], f"Source key '{src_key}' should be part of the fused mapping for target '{tgt_path}' but it's not. Fused mapping keys: {fused_tgt_map[tgt_path]}"
-        # print(f"{src_key=}, {tgt_path=}, {tgt_param.sharding=}, {src_val.value.sharding=}")
-        fuse_sources = fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tp_size)
-        # print(f"fuse_sources for target '{tgt_path}': {[k for k, v in fuse_sources.items()]}")
-        if isinstance(fuse_sources[tgt_path], tuple):
-          unscanned_flat[(fuse_sources[tgt_path][0], tgt_path)] = (fuse_sources[tgt_path][1], tgt_param)
-          # print(f"Fused parameter for target '{tgt_path}' from sources '{fuse_sources[tgt_path][0]}' with shape {fuse_sources[tgt_path][1].shape} and sharding {tgt_param.sharding}")
+        fuse_sources = fuse_src_to_same_tgt_params(src_val, src_key, tgt_path_to_src_values_fused, tgt_path, tgt_param, tp_size)
+        # if (fuse_sources[tgt_path], dict):
+        #   unscanned_flat[(list(fuse_sources[tgt_path].keys())[0], tgt_path)] = (list(fuse_sources[tgt_path].values())[0], tgt_param)
+        #   print(f"Fused parameter for target '{tgt_path}' from sources: {list(fuse_sources[tgt_path].keys())}")
       else:
         unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
-
+  for tgt_path, src_tgt in fuse_sources.items():
+    unscanned_flat[(list(src_tgt.keys())[0], tgt_path)] = (list(src_tgt.values())[0][0], list(src_tgt.values())[0][1])
   return unscanned_flat
 
 
@@ -612,6 +587,7 @@ def _apply_transpose(
 
   last_key = src_key.split('.')[-1]
   last_three_keys = '.'.join(src_key.split('.')[-3:])
+  last_two_keys = '.'.join(src_key.split('.')[-2:])
   # print(f"Checking if transpose is needed for {src_key} with last key {last_key} and last three keys {last_three_keys}")
   all_key = src_key
   target_key = ''
@@ -621,6 +597,8 @@ def _apply_transpose(
     target_key = all_key
   elif last_three_keys in transpose_keys and 'lora' not in last_three_keys:
     target_key = last_three_keys
+  elif last_two_keys in transpose_keys and 'lora' not in last_two_keys:
+    target_key = last_two_keys
   if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
     return jnp.transpose(val, transpose_keys[target_key])
@@ -702,11 +680,9 @@ def _align_shape(
         val = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
         new_tgt_shape = tgt_shape
 
-    elif src_key == 'embedder.per_layer_input_embedding': 
-      # print(f"Reshaping per_layer_input_embedding on {src_key}: {val.shape} -> {tgt_shape}, val type: {type(val)}")
+    elif src_key == 'embedder.per_layer_input_embedding':
       return jnp.reshape(val, (val.shape[0], -1))
     elif src_key == 'embedder.per_layer_model_projection.w':
-      # print(f"Reshaping per_layer_model_projection on {src_key}: {val.shape} -> {tgt_shape}, val type: {type(val)}")
       val = jnp.reshape(val, (val.shape[0], -1))
       return val.T
     elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
@@ -740,10 +716,8 @@ def _align_shape(
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
     elif re.compile(r'layers\..*\.attn_vec_einsum\.w').match(src_key):
       # reshape from (num_head, head_dim, model_dim) to (model_dim, num_head * head_dim) for vec_einsum.
-      # print(f"Reshaping attention vec_einsum on {src_key}: {val.shape} -> {tgt_shape}")
       return val.reshape((val.shape[0] * val.shape[1], val.shape[2])).T
     elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
-      # print(f"Reshaping moe.gating_einsum on {src_key}: {val.shape} -> {tgt_shape}")
       tp_size = kwargs["tp_size"]
       num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
       gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
@@ -758,7 +732,6 @@ def _align_shape(
       val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
       val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
       val_chunks = val_chunks.transpose(0, 2, 1)
-      # print(f"Reshaping moe.gating_einsum on {src_key}: {val_chunks.shape} -> {tgt_shape}")
       return val_chunks
     else:
       raise ShapeMismatchError(
@@ -783,8 +756,7 @@ def _align_shape(
     val_2d = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
     val_2d = jnp.repeat(val_2d, repeat_factor, axis=0)
     return jnp.reshape(val_2d, tgt_shape)
-  elif re.compile(r'layers\..*\.per_layer_input_gate\.w').match(src_key) or re.compile(r'layers\..*\.per_layer_projection\.w').match(src_key) or re.compile(r'layers\..*\.moe\.router_logits').match(src_key):
-    return val.T
+
   attention_patterns = [
       r'.*(q|k|v|o)_proj.*',
       r'.*(q|k|v|o)_bias.*',
@@ -858,8 +830,6 @@ def _apply_dtype_cast(
         val.dtype,
         tgt_dtype,
     )
-    if isinstance(val, jax.ShapeDtypeStruct):
-      print(f"{src_key=}")
     return val.astype(tgt_dtype)
   return val
 
@@ -901,27 +871,29 @@ def _sync_tied_lm_head_if_needed(
 
   lm_head_param.value = embed_param.value
 
+
 def flatten_to_tuples(d):
-    items = []
-    key_idx_mapping = {}
-    i = 0
-    for k, v in d.items():
-      items.append((k, v))
-      key_idx_mapping[k] = i
-      i+= 1
-    return items, key_idx_mapping
-  
+  items = []
+  key_idx_mapping = {}
+  i = 0
+  for k, v in d.items():
+    items.append((k, v))
+    key_idx_mapping[k] = i
+    i += 1
+  return items, key_idx_mapping
+
 
 def unflatten_from_tuples(flat_list, dst_state):
   for path, value in flat_list:
-    # print(f"Processing path: {path} with value = {value }")
     dst_state[path] = value
   return dst_state
+
 
 def transfer_state_with_mappings(
     src_state,
     dst_state,
     key_mappings,
+    hf_key_mappings=None,
     key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
@@ -950,14 +922,10 @@ def transfer_state_with_mappings(
   """
   # Get flat target state
   if isinstance(dst_state, dict):
-    # If it's already a dict, perhaps you don't need to flatten it,
-    # or you need to use a different flattening utility.
     tgt_flat_list, tgt_key_idx_mapping = flatten_to_tuples(dst_state)
   else:
     tgt_flat_list = dst_state.flat_state()
     tgt_key_idx_mapping = None
-  # for k, v in tgt_flat_list:
-  #   print(f"Target flat key: {k}, value shape: {v.shape}, value: {v}")
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
@@ -973,13 +941,7 @@ def transfer_state_with_mappings(
     }
 
   # Build source-to-target mapping
-  # {src_key: (tgt_param, tgt_path, sharding_spec)}
-  # {fused_tgt_key: (src_key, src_val, sharding_spec)}
-  fused_tgt_map = {}
-  src_to_tgt_map, fused_tgt_map = build_flat_dict(tgt_flat_list, key_mappings, fused_tgt_map)
-  # for tgt, src_list in fused_tgt_map.items():
-  #   if len(src_list) > 1:
-  #     print(f"Fused target key '{tgt}' is mapped from multiple source keys: {src_list}. This requires special handling.")
+  src_to_tgt_map, fused_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map, fused_tgt_map, kwargs['tp_size'])
@@ -991,19 +953,23 @@ def transfer_state_with_mappings(
       tgt_param,
   ) in unscanned_src_to_tgt_flat.items():
     # Apply transpose if configured
-    # print(f'Processing unscanned_src_to_tgt_flat: {flat_src_key} -> {flat_tgt_key} with initial shape {val.shape}')
     val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
-    # if flat_src_key == "embedder.input_embedding":
-    #   print(f"src val {val}, tgt_param {tgt_param} ")
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
-    # print(f'Aligning shape for {flat_src_key} -> {flat_tgt_key}: {val.shape} -> {tgt_param.shape}')
-    tgt_shape = tgt_param.value.shape if hasattr(tgt_param, 'value') else tgt_param.shape
-    tgt_dtype = tgt_param.value.dtype if hasattr(tgt_param, 'value') else tgt_param.dtype
+    tgt_shape = (
+        tgt_param.value.shape
+        if hasattr(tgt_param, 'value')
+        else tgt_param.shape
+    )
+    tgt_dtype = (
+        tgt_param.value.dtype
+        if hasattr(tgt_param, 'value')
+        else tgt_param.dtype
+    )
     val = _align_shape(
         val, tgt_shape, flat_src_key, rollout_engine, **kwargs
     )
@@ -1031,8 +997,6 @@ def transfer_state_with_mappings(
         key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
         for key, tgt_params in tgt_flat_list
     }
-    # for k, v in tgt_flat_dict.items():
-    #   print(f"tgt_flat_dict key: {k}, value {v}")
     resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for tgt_key, tgt_param in tgt_flat_list:
@@ -1043,7 +1007,13 @@ def transfer_state_with_mappings(
         tgt_param.value = resharded_values_flat_dict[tgt_key]
       else:
         tgt_flat_list[tgt_key_idx_mapping[tgt_key]] = (tgt_key, resharded_values_flat_dict[tgt_key])
-        # print(f"After resharding, assigned {tgt_key} with shape {tgt_param.shape} and value {tgt_param}")  
+
+  # handle cases like vllm_model.language_model.lm_head.weight -> vllm_model.language_model.model.embed_tokens.weight
+  if hf_key_mappings:
+    for tgt_key1, tgt_key2 in hf_key_mappings.items():
+      for path, value in tgt_flat_list:
+        if path == tgt_key1:
+          tgt_flat_list[tgt_key2] = value
 
   if isinstance(dst_state, dict):
     return unflatten_from_tuples(tgt_flat_list, dst_state)
@@ -1184,24 +1154,181 @@ def _repeat_to_model_shape(
   for axis, (src_dim, tgt_dim) in enumerate(zip(src_shape, tgt_shape)):
     if tgt_dim != src_dim:
       result = jnp.repeat(result, tgt_dim // src_dim, axis=axis)
-
   return result
 
 
-def _delete_pytree_buffers(pytree: Any) -> None:
-  """Deletes buffers of jax.Arrays in a pytree to save memory."""
-  logging.info('Deleting pytree buffers.')
+@functools.partial(jax.jit, static_argnums=(2, 3))
+def _jit_fuse_and_unstack_moe(
+    wi_0: jax.Array,
+    wi_1: jax.Array,
+    scan_axis: int,
+    num_layers: int,
+) -> tuple[jax.Array, ...]:
+  """Fuses wi_0/wi_1 along last axis, then unstacks along scan_axis.
 
-  def _delete_buffers(x):
-    if isinstance(x, nnx.Variable) and isinstance(x.value, jax.Array):
-      if not x.value.is_deleted():
-        x.value.delete()
-    elif isinstance(x, jax.Array):
-      if not x.is_deleted():
-        x.delete()
-    return x
+  By combining concatenation and unstacking under jax.jit, XLA can fuse both
+  ops and avoid materializing the full concatenated intermediate tensor on
+  device. scan_axis and num_layers are static so XLA knows the output tuple
+  size at compile time and can unroll the unstack at trace time.
 
-  jax.tree_util.tree_map(_delete_buffers, pytree)
+  Args:
+    wi_0: First MoE gate weight, shape [num_layers, experts, features].
+    wi_1: Second MoE gate weight, shape [num_layers, experts, features].
+    scan_axis: The axis along which layers are stacked (typically 0).
+    num_layers: Number of layers (must match wi_0.shape[scan_axis]).
+
+  Returns:
+    A tuple of num_layers fused per-layer arrays, each with shape
+    [experts, 2 * features].
+  """
+  del num_layers  # Only used to make this a static arg for JIT cache keying.
+  fused = jnp.concatenate([wi_0, wi_1], axis=-1)
+  return jnp.unstack(fused, axis=scan_axis)
+
+
+def _fuse_moe_weights(src_flat: Dict[Tuple[str, ...], Any], tgt_flat: Dict[Tuple[str, ...], Any]) -> Dict[Tuple[str, ...], Any]:
+  """Fuses wi_0 and wi_1 into wi if the target model expects fused MoE weights.
+  
+  Args:
+    src_flat: Flat dict mapping key tuples to source JAX arrays.
+    tgt_flat: Flat dict mapping key tuples to target JAX arrays, used to detect if fused MoE weights are expected.
+
+  Returns:
+    A new flat dict with wi_0 and wi_1 fused into wi where appropriate.
+  """
+  new_src_flat = dict(src_flat)
+  for tgt_key in tgt_flat.keys():
+    if tgt_key and tgt_key[-1] == 'wi':
+      wi_0_key = tgt_key[:-1] + ('wi_0',)
+      wi_1_key = tgt_key[:-1] + ('wi_1',)
+      if wi_0_key in new_src_flat and wi_1_key in new_src_flat:
+        logging.info("Fusing MoE weights for %s", tgt_key)
+        wi_0 = new_src_flat.pop(wi_0_key)
+        wi_1 = new_src_flat.pop(wi_1_key)
+        new_src_flat[tgt_key] = jnp.concatenate([wi_0, wi_1], axis=-1)
+        del wi_0, wi_1  # Release references; .pop() already removed from dict.
+  return new_src_flat
+
+
+def _collect_src_buffer_ids(src_flat: Mapping[Any, Any]) -> set:
+  """Collects physical device buffer pointers for arrays in src_flat.
+
+  Used to detect when a target jax.Array shares its underlying buffer with a
+  source array — Python identity (`is`) is insufficient because two distinct
+  jax.Array wrappers can back the same physical shard (e.g. when source slices
+  come from a scanned tensor that also backs another spec entry).
+  """
+  ids = set()
+  for v in src_flat.values():
+    arr = v.value if hasattr(v, 'value') else v
+    if not hasattr(arr, 'addressable_shards'):
+      continue
+    for shard in arr.addressable_shards:
+      try:
+        ids.add(shard.data.unsafe_buffer_pointer())
+      except Exception:  # pylint: disable=broad-except
+        pass
+  return ids
+
+
+def _delete_target_buffers(
+    spec_flat: Mapping[Any, Any],
+    src_flat: Mapping[Any, Any],
+) -> None:
+  """Deletes target arrays in spec_flat that don't alias any source shard."""
+  src_buffer_ids = _collect_src_buffer_ids(src_flat)
+  for tgt_val in spec_flat.values():
+    tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+    if not hasattr(tgt_arr, 'delete') or getattr(
+        tgt_arr, 'is_deleted', lambda: False
+    )():
+      continue
+    if hasattr(tgt_arr, 'addressable_shards') and any(
+        shard.data.unsafe_buffer_pointer() in src_buffer_ids
+        for shard in tgt_arr.addressable_shards
+    ):
+      continue
+    tgt_arr.delete()
+
+
+def _snapshot_dst_sharding(arr: Any) -> Any:
+  """Snapshots a destination sharding leaf for reshard_fn's target tree.
+
+  Captured *before* any potential `.delete()` on `arr` so the caller never
+  needs to dereference a deleted jax.Array later. `reshard_pytree`'s
+  `_get_dst_sharding` accepts `NamedSharding` / `SingleDeviceSharding` leaves
+  directly, so for those we return the existing sharding object (no rebuild).
+  """
+  s = arr.sharding
+  if isinstance(
+      s, (jax.sharding.NamedSharding, jax.sharding.SingleDeviceSharding)
+  ):
+    return s
+  return jax.sharding.NamedSharding(s.mesh, s.spec, memory_kind=s.memory_kind)
+
+
+def _reshard_in_chunks(
+    src_flat: Dict[Tuple[str, ...], Any],
+    spec_flat: Dict[Tuple[str, ...], Any],
+    reshard_fn: Callable[..., Mapping[str, Any]],
+    chunk_size: int,
+    delete_spec_buffers: bool = False,
+) -> Dict[Tuple[str, ...], Any]:
+  """Reshards a flat weight dict in sequential chunks to reduce peak HBM pressure.
+
+  Instead of issuing one large jax.device_put for the entire model, this helper
+  splits the flat key-value dict into groups of `chunk_size` keys and reshards
+  each group independently. Between groups it calls jax.block_until_ready() so
+  that the XLA allocator can reclaim the source buffers before committing the
+  next chunk, keeping the peak contiguous allocation requirement proportional to
+  chunk_size rather than the full model size.
+
+  Args:
+    src_flat: Flat dict mapping key tuples to source JAX arrays.
+    spec_flat: Flat dict mapping the same key tuples to target-sharded arrays
+      (used by reshard_fn to determine destination shardings).
+    reshard_fn: Callable with the same signature as reshard_pytree, i.e.
+      reshard_fn(source=<nested dict>, target=<nested dict>).
+    chunk_size: Maximum number of flat keys to process per reshard call.
+    delete_spec_buffers: Whether to delete buffers in the destination spec
+      immediately before they are overwritten by resharded chunks.
+
+  Returns:
+    A flat dict with the same keys as src_flat, containing resharded arrays.
+  """
+  keys = list(src_flat.keys())
+  resharded: Dict[Tuple[str, ...], Any] = {}
+  for start in range(0, len(keys), chunk_size):
+    chunk_keys = keys[start : start + chunk_size]
+    chunk_src_flat = {}
+    chunk_spec_flat = {}
+    chunk_dst_shardings_flat = {}
+    for k in chunk_keys:
+      src_val = src_flat.pop(k)
+      tgt_val = spec_flat[k]
+      chunk_src_flat[k] = src_val
+      chunk_spec_flat[k] = tgt_val
+      tgt_arr = tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+      chunk_dst_shardings_flat[k] = _snapshot_dst_sharding(tgt_arr)
+
+    if delete_spec_buffers:
+      _delete_target_buffers(chunk_spec_flat, chunk_src_flat)
+
+    chunk_src = traverse_util.unflatten_dict(chunk_src_flat)
+    chunk_dst_shardings = traverse_util.unflatten_dict(chunk_dst_shardings_flat)
+    chunk_resharded = reshard_fn(source=chunk_src, target=chunk_dst_shardings)
+    jax.block_until_ready(chunk_resharded)
+    resharded.update(traverse_util.flatten_dict(chunk_resharded))
+
+    del (
+        chunk_src,
+        chunk_dst_shardings,
+        chunk_resharded,
+        chunk_src_flat,
+        chunk_spec_flat,
+        chunk_dst_shardings_flat,
+    )
+  return resharded
 
 
 def transfer_state_directly(
@@ -1210,6 +1337,7 @@ def transfer_state_directly(
     reshard_fn: Callable[..., Mapping[str, Any]],
     scan_axis: int = 1,
     delete_dst_buffers: bool = False,
+    reshard_chunk_size: Optional[int] = None,
 ) -> None:
   """Transfers state directly by matching structure, stripping wrappers.
 
@@ -1225,13 +1353,19 @@ def transfer_state_directly(
     dst_state: The destination state to transfer to.
     reshard_fn: A function to shard the values.
     scan_axis: The axis along which to unroll scanned layers, if needed.
-    delete_dst_buffers: Whether to delete buffers in the destination state after transfer to save memory.
+    delete_dst_buffers: Whether to delete buffers in the destination state
+      before resharding to save HBM. Buffers that physically alias a source
+      shard are preserved automatically (see `_delete_target_buffers`).
+    reshard_chunk_size: When set, the final reshard is split into sequential
+      groups of this many flat keys instead of one monolithic call. This
+      reduces peak contiguous HBM pressure, which prevents XLA allocator
+      fragmentation on large models. The unit is *number of flat keys per
+      chunk* — per-layer key counts vary by architecture (MQA vs GQA, biases
+      on/off, dense vs MoE, fused vs split MoE gates), so as a rule of thumb
+      start with roughly `10 * num_layers` for a dense transformer and tune
+      downward if you still see fragmentation. When None (default) the
+      original single-call reshard behavior is preserved.
   """
-
-  if delete_dst_buffers:
-    _delete_pytree_buffers(dst_state)
-    gc.collect()
-
   def safe_has_key(obj: Mapping[str, Any], key: str) -> bool:
     if isinstance(obj, dict):
       return key in obj
@@ -1288,6 +1422,8 @@ def transfer_state_directly(
     src_flat = traverse_util.flatten_dict(src)
     tgt_flat = traverse_util.flatten_dict(tgt_spec)
 
+    src_flat = _fuse_moe_weights(src_flat, tgt_flat)
+
     filtered_src_flat = {}
     filtered_tgt_flat = {}
 
@@ -1295,9 +1431,6 @@ def transfer_state_directly(
     unstacked_cache = {}
 
     layer_pattern = re.compile(r'^layers_(\d+)$')
-
-    # Cache to store unstacked scanned arrays to avoid repeated work
-    unstacked_cache = {}
 
     for key_tuple, tgt_val in tgt_flat.items():
       # Try Direct Match
@@ -1343,38 +1476,60 @@ def transfer_state_directly(
             break
 
         if found_candidate:
-          # Apply the dtype cast and the repeating *before* unstacking
           if found_candidate not in unstacked_cache:
             src_val = src_flat[found_candidate]
-            
-            # Cast the bulk tensor once
+            # Cast the bulk tensor once before unstacking.
             src_val = _apply_dtype_cast(src_val, tgt_val.dtype, str(found_candidate))
-            
-            # Predict the stacked target shape and repeat the bulk tensor once
-            src_shape = getattr(src_val, 'shape', None)
-            tgt_shape = getattr(tgt_val, 'shape', None)
-            
-            if src_shape and tgt_shape and len(src_shape) == len(tgt_shape) + 1:
-              # Construct the 3D target shape (e.g., [layers, global_heads, dim])
-              stacked_tgt_shape = tgt_shape[:scan_axis] + (src_shape[scan_axis],) + tgt_shape[scan_axis:]
-              
-              # Mock a target array purely to pass the shape to our repeat helper
-              class _MockTarget:
-                shape = stacked_tgt_shape
-                
-              src_val = _repeat_to_model_shape(src_val, _MockTarget(), str(found_candidate))
-            
-            # Unstack the already casted and repeated tensor using the provided scan_axis
             unstacked_cache[found_candidate] = _unstack_scanned_param(
                 src_val, tgt_val, str(found_candidate), scan_axis=scan_axis
             )
-          
-          # Extract the layer_idx-th element from the unstacked cache
-          sliced_val = unstacked_cache[found_candidate][layer_idx]
 
+          # Extract the layer_idx-th element from the unstacked cache.
+          sliced_val = unstacked_cache[found_candidate][layer_idx]
+          # Apply KV-head repeat per-slice after unstacking (avoids _MockTarget hack).
+          sliced_val = _repeat_to_model_shape(sliced_val, tgt_val, str(key_tuple))
           filtered_src_flat[key_tuple] = sliced_val
           filtered_tgt_flat[key_tuple] = tgt_val
           continue
+
+        # MoE fusion case: target has 'layers_X/.../wi' but source has scanned
+        # 'layers/.../wi_0' and 'layers/.../wi_1'. Fuse the full stacked
+        # tensors first, then unstack once via a JIT-compiled helper — avoids
+        # N per-layer jnp.concatenate dispatches and 2N intermediate device
+        # allocations that cause compilation pressure and memory fragmentation.
+        if key_tuple and key_tuple[-1] == 'wi':
+          scanned_prefix = (
+              key_tuple[:match_index] + ('layers',) + key_tuple[match_index + 1:-1]
+          )
+          wi_0_key = scanned_prefix + ('wi_0',)
+          wi_1_key = scanned_prefix + ('wi_1',)
+
+          if wi_0_key in src_flat and wi_1_key in src_flat:
+            # Use a synthetic cache key for the pre-fused scanned tensor so it
+            # is computed only once across all layer indices.
+            fused_scanned_key = scanned_prefix + ('wi_fused',)
+            if fused_scanned_key not in unstacked_cache:
+              logging.info(
+                  'Fusing scanned MoE weights for %s', scanned_prefix
+              )
+              wi_0_full = _apply_dtype_cast(
+                  src_flat[wi_0_key], tgt_val.dtype, str(wi_0_key)
+              )
+              wi_1_full = _apply_dtype_cast(
+                  src_flat[wi_1_key], tgt_val.dtype, str(wi_1_key)
+              )
+              num_layers = src_flat[wi_0_key].shape[scan_axis]
+              # Single JIT-compiled fusion+unstack: XLA fuses concat and
+              # unstack into one program, avoiding a materialized intermediate.
+              unstacked_cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
+                  wi_0_full, wi_1_full, scan_axis, num_layers
+              )
+              del wi_0_full, wi_1_full  # Release references promptly.
+
+            sliced_val = unstacked_cache[fused_scanned_key][layer_idx]
+            filtered_src_flat[key_tuple] = sliced_val
+            filtered_tgt_flat[key_tuple] = tgt_val
+            continue
 
     # Unflatten back to nested structure
     return (
@@ -1390,14 +1545,46 @@ def transfer_state_directly(
   final_source, final_spec = intersect_trees(full_source_dict, full_target_spec)
 
   # Reshard and Update
-  resharded_weights = reshard_fn(
-      source=final_source,
-      target=final_spec,
-  )
-  nnx.update(dst_state, resharded_weights)
+  if reshard_chunk_size is not None:
+    # Chunked path: split the flat weight dict into groups of reshard_chunk_size
+    # entries and reshard each group independently. This keeps peak contiguous
+    # HBM allocation proportional to chunk_size, avoiding XLA fragmentation
+    # errors on large models without needing to clear the compilation cache.
+    src_flat = traverse_util.flatten_dict(final_source)
+    spec_flat = traverse_util.flatten_dict(final_spec)
+    del final_source, final_spec
+    resharded_flat = _reshard_in_chunks(
+        src_flat,
+        spec_flat,
+        reshard_fn,
+        reshard_chunk_size,
+        delete_dst_buffers,
+    )
+    resharded_weights = traverse_util.unflatten_dict(resharded_flat)
+  else:
+    src_flat = traverse_util.flatten_dict(final_source)
+    spec_flat = traverse_util.flatten_dict(final_spec)
 
-  # Explicitly free memory
-  gc.collect()
+    # Snapshot dst shardings before any deletion so reshard_fn never has to
+    # touch a deleted jax.Array. reshard_pytree's _get_dst_sharding accepts
+    # NamedSharding leaves directly, so this is a drop-in substitute for
+    # passing the array objects.
+    dst_shardings_flat = {
+        k: _snapshot_dst_sharding(
+            tgt_val.value if hasattr(tgt_val, 'value') else tgt_val
+        )
+        for k, tgt_val in spec_flat.items()
+    }
+
+    if delete_dst_buffers:
+      _delete_target_buffers(spec_flat, src_flat)
+
+    del final_spec
+    resharded_weights = reshard_fn(
+        source=final_source,
+        target=traverse_util.unflatten_dict(dst_shardings_flat),
+    )
+  nnx.update(dst_state, resharded_weights)
 
 
 def resolve_parallelism_sizes(
