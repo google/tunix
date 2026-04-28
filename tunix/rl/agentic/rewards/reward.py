@@ -20,6 +20,8 @@ as input and return a `reward_types.RewardOutput` containing a scalar reward and
 metadata.
 """
 
+import ast
+import operator
 from typing import Any, Callable, Dict
 
 from tunix.rl.agentic.rewards import reward_types
@@ -171,8 +173,8 @@ def calculate_reward(
 ) -> reward_types.RewardOutput:
   """Calculates the reward for a math expression based on answer correctness.
 
-  WARNING: Uses eval(), which is NOT SAFE for untrusted input. This is only for
-  feature testing.
+  Uses a safe AST-based math evaluator instead of eval() to prevent
+  arbitrary code execution from untrusted input.
 
   Args:
     task: The task context containing the 'question' field.
@@ -189,7 +191,7 @@ def calculate_reward(
   try:
     answer_str = action.replace("The answer is ", "").strip().rstrip(".")
     answer = float(answer_str)
-    correct_value = eval(expression)
+    correct_value = _safe_eval_math(expression)
     tolerance = 1e-6
     if abs(correct_value - answer) < tolerance:
       score = 1.0
@@ -199,3 +201,71 @@ def calculate_reward(
   except Exception:
     score = 0.0
   return reward_types.RewardOutput(score, {"calculate_correct": score})
+
+
+# Allowed binary operators for safe math evaluation.
+_SAFE_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+
+# Allowed unary operators for safe math evaluation.
+_SAFE_UNARYOPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+
+def _safe_eval_math(expression: str) -> float:
+  """Safely evaluate a mathematical expression using AST parsing.
+
+  Only supports numeric literals and basic arithmetic operators
+  (+, -, *, /, //, %, **). Raises ValueError for any non-arithmetic
+  content, preventing code injection.
+
+  Args:
+    expression: A string containing a mathematical expression.
+
+  Returns:
+    The numeric result of the expression.
+
+  Raises:
+    ValueError: If the expression contains unsupported operations.
+  """
+  tree = ast.parse(expression, mode="eval")
+  return float(_eval_node(tree.body))
+
+
+def _eval_node(node: ast.AST) -> float:
+  """Recursively evaluate an AST node for safe math expressions.
+
+  Args:
+    node: An AST node to evaluate.
+
+  Returns:
+    The numeric result of evaluating the node.
+
+  Raises:
+    ValueError: If the node type is not a supported numeric operation.
+  """
+  if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+    return float(node.value)
+  if isinstance(node, ast.BinOp):
+    op_fn = _SAFE_BINOPS.get(type(node.op))
+    if op_fn is None:
+      raise ValueError(f"Unsupported binary operator: {type(node.op).__name__}")
+    return op_fn(_eval_node(node.left), _eval_node(node.right))
+  if isinstance(node, ast.UnaryOp):
+    op_fn = _SAFE_UNARYOPS.get(type(node.op))
+    if op_fn is None:
+      raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
+    return op_fn(_eval_node(node.operand))
+  raise ValueError(
+      f"Unsupported expression node: {type(node).__name__}."
+      " Only numeric literals and arithmetic operators are allowed."
+  )
