@@ -55,11 +55,6 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 
 
-_PATHWAYS_BNS = flags.DEFINE_string(
-    "pathways_bns", None, "BNS address of the Pathways server."
-)
-
-
 class PPOPipeline(config.HyperParameters):
   """Runs standard PPO or agentic PPO depending on ``training_mode``.
 
