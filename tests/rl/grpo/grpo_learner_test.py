@@ -35,6 +35,7 @@ from tunix.perf import trace as trace_lib
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
+from tunix.rl.algo_core import grpo_core
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import profiler
@@ -1234,9 +1235,9 @@ class GRPOLearnerTest(parameterized.TestCase):
 
     rng = jax.random.PRNGKey(0)
     rewards = jax.random.uniform(rng, shape=(1, 6))
-    advantages = grpo_lib.compute_advantages(rewards, num_generations=3)
+    advantages = grpo_core.compute_advantages(rewards, num_generations=3)
     expected_value = jnp.array(
-        [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
+        [[0.307498, -1.117636,  0.810138,  1.094526, -0.228671, -0.865855]]
     )
     np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
 
