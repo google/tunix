@@ -32,7 +32,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 jobs:
   build_tunix_package:
     name: Build tunix package

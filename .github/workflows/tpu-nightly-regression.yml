@@ -35,6 +35,9 @@ env:
 
 jobs:
   run_prod:
+    outputs:
+      vllm_commit: ${{ steps.extract_commits.outputs.vllm_commit }}
+      tpu_inference_commit: ${{ steps.extract_commits.outputs.tpu_inference_commit }}
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
@@ -220,3 +223,87 @@ jobs:
         fi
         echo "🎉 All RL scripts completed successfully."
 
+    - name: Extract dependency commits
+      id: extract_commits
+      run: |
+        cat << 'EOF' > get_commits.py
+        import sys
+
+        try:
+            from importlib.metadata import requires, version
+        except ImportError:
+            import pkg_resources
+
+        def get_commit(package_name):
+            try:
+                import importlib.metadata
+                dist = importlib.metadata.distribution(package_name)
+                # the dist.read_text('direct_url.json') usually contains the exact git commit for git dependencies
+                import json
+                direct_url = dist.read_text('direct_url.json')
+                if direct_url:
+                    data = json.loads(direct_url)
+                    if 'vcs_info' in data and 'commit_id' in data['vcs_info']:
+                        return data['vcs_info']['commit_id']
+            except Exception as e:
+                pass
+            return None
+
+        vllm_commit = get_commit("vllm")
+        tpu_inference_commit = get_commit("tpu-inference")
+
+        with open(r"${{ github.output }}", "a") as f:
+            if vllm_commit:
+                f.write(f"vllm_commit={vllm_commit}\n")
+            if tpu_inference_commit:
+                f.write(f"tpu_inference_commit={tpu_inference_commit}\n")
+        EOF
+        sed -i "s|\${{ github.output }}|$GITHUB_OUTPUT|g" get_commits.py
+        python3 get_commits.py
+
+  update_lkg_pr:
+    needs: run_prod
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Update requirement files
+        run: |
+          VLLM_COMMIT="${{ needs.run_prod.outputs.vllm_commit }}"
+          TPU_INFERENCE_COMMIT="${{ needs.run_prod.outputs.tpu_inference_commit }}"
+
+          if [ -n "$VLLM_COMMIT" ]; then
+            sed -i "s|vllm-project/vllm\.git@[a-f0-9]\+|vllm-project/vllm.git@${VLLM_COMMIT}|g" requirements/requirements.txt
+          fi
+
+          if [ -n "$TPU_INFERENCE_COMMIT" ]; then
+            sed -i "s|vllm-project/tpu-inference\.git@[a-f0-9]\+|vllm-project/tpu-inference.git@${TPU_INFERENCE_COMMIT}|g" requirements/special_requirements.txt
+          fi
+
+      - name: Create Pull Request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --exit-code; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          BRANCH_NAME="update-lkg-commits-$(date +%s)"
+          git checkout -b "$BRANCH_NAME"
+          git add requirements/requirements.txt requirements/special_requirements.txt
+          git commit -m "chore: update vLLM and tpu-inference LKG commits"
+          git push origin "$BRANCH_NAME"
+
+          gh pr create \
+            --title "Update vLLM and tpu-inference LKG commits" \
+            --body "This PR updates the vLLM and tpu-inference pinned commits to the latest versions that passed the Tunix Nightly Regression tests." \
+            --base main \
+            --head "$BRANCH_NAME"
