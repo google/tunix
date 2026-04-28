@@ -446,11 +446,18 @@ class AutoModel:
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       # Also add skip_jax_distributed_system=True as we handle that outside or it's not needed.
       argv = [
+          '',
           'base.yml',
           f'model_name={naming_info.model_name}',
           f'load_parameters_path={resolved_model_path}',
           'skip_jax_distributed_system=True'
       ]
+
+      for k, v in kwargs.items():
+          if v is not None:
+              val_str = str(v).lower() if isinstance(v, bool) else str(v)
+              argv.append(f"{k}={val_str}")
+
       maxtext_config = pyconfig.initialize(argv)
       model = maxtext_model_creation_utils.from_pretrained(
           maxtext_config, mesh=mesh, wrap_with_tunix_adapter=True

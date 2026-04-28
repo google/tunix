@@ -42,6 +42,7 @@ _SUPPORTED_MODEL_SOURCES = (
     "huggingface",
     "gcs",
     "internal",
+    "maxtext",
     "",
 )
 
@@ -364,13 +365,13 @@ class HyperParameters:
     model_name = model_config["model_name"]
     model_source = model_config["model_source"]
     supported_sources = collections.defaultdict(
-        lambda: ["huggingface", "internal"]
+        lambda: ["huggingface", "internal", "maxtext"]
     )
     # TODO(b/467448875): Add support for other sources, such as kaggle for other
     # models.
-    supported_sources["gemma"] = ["kaggle", "internal"]
-    supported_sources["gemma2"] = ["kaggle", "internal"]
-    supported_sources["gemma3"] = ["gcs", "internal"]
+    supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
+    supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
+    supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
 
     if model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
       expected_sources = supported_sources["gemma3"]
