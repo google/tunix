@@ -483,7 +483,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
-            logging.info("env extra kwargs: {env.extra_kwargs=}")
+            # logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
       else:
@@ -499,7 +499,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
-            logging.info("env extra kwargs: {env.extra_kwargs=}")
+            # logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
 

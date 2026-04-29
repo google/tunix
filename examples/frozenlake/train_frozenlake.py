@@ -456,7 +456,7 @@ wandb_config.update({
     "rollout_engine": ROLLOUT_ENGINE,
 })
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="gs:://linchai-bucket-dev/tensorboard/grpo",
+    log_dir="gs://linchai-bucket-dev/tensorboard/grpo",
     flush_every_n_steps=20,
     backend_kwargs={"wandb": {"config": wandb_config, "settings": wandb.Settings(console="off")}},
 )

@@ -154,7 +154,7 @@ class RolloutOrchestrator:
       collect_mode: An optional string to select the collection mode.
     """
     episode_count = 0
-    logging.info(
+    logging.debug(
         "Starting generating trajectories(_runner) for pair %d",
         env.extra_kwargs["pair_index"],
     )
