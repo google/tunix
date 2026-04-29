@@ -423,9 +423,15 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  gemma4_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+  graph, state = nnx.split(gemma4_ref)
+  actor_shardings = jax.tree_util.tree_map(
+      lambda x: jax.sharding.NamedSharding(
+          trainer_mesh,
+          x,
+        ),
+      nnx.get_partition_spec(state),
   )
+  gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, actor_shardings))
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -517,7 +523,7 @@ vllm_rollout_dict = {
     },
 }
 
-elif ROLLOUT_ENGINE == "vllm":
+if ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(
       **base_rollout_dict, **vllm_rollout_dict
   )
