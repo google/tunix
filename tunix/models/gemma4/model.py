@@ -77,8 +77,10 @@ class ShardingConfig:
   per_layer_input_embedding: Tuple[str | None, ...]
 
   @staticmethod
-  def get_default_sharding(is_sampling: bool = False):
+  def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
+    sp = 'sp' if (not is_sampling and enable_sp) else None
+    fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
         emb_vd=('tp', fsdp),
@@ -89,9 +91,9 @@ class ShardingConfig:
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
+        act_btd=('fsdp', sp, None if is_sampling else 'tp'),
+        act_btf=('fsdp', sp, 'tp'),
+        act_btnh=('fsdp', sp, 'tp', None),
         vision_proj=(fsdp, 'tp'),
         vision_soft_emb_norm_weight=('tp',),
         exp_weight_edf=(fsdp, None, None, 'tp'),

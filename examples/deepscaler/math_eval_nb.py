@@ -212,8 +212,8 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
-    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
+    # self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
+    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(2, 2), axis_names=["fsdp", "tp"])
     # self.rollout_mesh_backup = jax.sharding.Mesh(np.array(jax.devices()[2:3]).reshape(1, 1), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
@@ -280,11 +280,12 @@ class Qwen25MathEvaluator:
 
     print("Setting up model config...")
 
-    if has_safetensors(self.model_path):
-      self.model_from_safe_tensors()
-    else:
-      self.model_from_orbax_ckpt()
-    print("Model loaded successfully!")
+    # if has_safetensors(self.model_path):
+    #   self.model_from_safe_tensors()
+    # else:
+    #   self.model_from_orbax_ckpt()
+    # print("Model loaded successfully!")
+    print("Skipping model loading for testing purposes...")
     print("Creating sampler...")
     cache_config = sampler_lib.CacheConfig(
         cache_size=self.max_prompt_length + self.max_generation_steps + 100,
@@ -324,15 +325,10 @@ class Qwen25MathEvaluator:
       )
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to SGLang JAX sampler...")
-      self.sampler_sglang.update_params(nnx.state(self.model))
+      # self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
       from tunix.generate import vllm_sampler   # pylint: disable=g-import-not-at-top
 
-      mapping_config = mappings.MappingConfig.build(
-          mapping_obj=None,
-          model=self.model,
-          backend="vllm_jax",
-      )
       
       from tunix.sft import utils as sft_utils
       sft_utils.show_hbm_usage(title="Before creating VLLM sampler")
@@ -341,13 +337,16 @@ class Qwen25MathEvaluator:
           config=vllm_sampler.VllmConfig(
               mesh=self.rollout_mesh,
               hbm_utilization=0.5,
+              enable_dp_attention=True,
               init_with_random_weights=False,
-              mapping_config=mapping_config,
+              # mapping_config=mapping_config,
+              tensor_parallel_size=2,
+              data_parallel_size=2,
               engine_kwargs={
                   "model": self.model_version,
                   "max_model_len": 1024,
-                  "max_num_seqs": 8,
-                  "max_num_batched_tokens": 8* 1024,
+                  "max_num_seqs": 32,
+                  "max_num_batched_tokens": 32* 1024,
               },
           ),
       )
@@ -368,8 +367,8 @@ class Qwen25MathEvaluator:
       #     ),
       # )
       # sync weights from self.model to the sampler's internal model
-      print("Syncing model weights to VLLM sampler...")
-      self.sampler_vllm.update_params(nnx.state(self.model))
+      # print("Syncing model weights to VLLM sampler...")
+      # self.sampler_vllm.update_params(nnx.state(self.model))
       # # compare sampler_vllm with backup sampler, the language_model weights should be the same.
       # vllm_state = self.sampler_vllm.transformer_state
       # vllm_state_backup = self.sampler_vllm_backup.transformer_state

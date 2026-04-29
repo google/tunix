@@ -93,23 +93,23 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=4)
-arg_parser.add_argument("--mini_batch_size", type=int, default=4)
+arg_parser.add_argument("--batch_size", type=int, default=8)
+arg_parser.add_argument("--mini_batch_size", type=int, default=8)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
 arg_parser.add_argument("--num_batches", type=int, default=20)
-arg_parser.add_argument("--num_generations", type=int, default=2)
+arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_prompt_length", type=int, default=512)
-arg_parser.add_argument("--max_response_length", type=int, default=1024)
-arg_parser.add_argument("--temperature", type=float, default=0.8)
+arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
+arg_parser.add_argument("--max_response_length", type=int, default=4096)
+arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=8)
+arg_parser.add_argument("--max_concurrency", type=int, default=64)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -132,9 +132,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(2, 2), ("fsdp", "tp")]
-REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
+# REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -151,7 +151,7 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 16
+VLLM_MAX_NUM_SEQS = 64
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -171,7 +171,7 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
-ENABLE_FLASH_ATTENTION = False
+ENABLE_FLASH_ATTENTION = True
 ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
@@ -207,7 +207,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 1
+MAX_GRAD_NORM = 0.5
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -226,16 +226,13 @@ GENERATION_CONFIGS = {
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
     "ROLLOUT_ENGINE", "vllm"
-)  # one of "vanilla", "vllm" or "sglang_jax"
+)  # one of "vanilla", "vllm" 
 
-# mesh = jax.make_mesh(
-#     *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
-# )
-mesh = None
 
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
-reference_devices = math.prod(REFERENCE_MESH[0])
+# reference_devices = math.prod(REFERENCE_MESH[0])
+reference_devices = 0
 
 if trainer_devices + rollout_devices + reference_devices > jax.device_count():
   raise ValueError(
@@ -254,21 +251,21 @@ rollout_mesh = jax.sharding.Mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
-reference_device_list = jax._src.mesh_utils.create_device_mesh(
-    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
-)
-reference_mesh = jax.sharding.Mesh(
-    reference_device_list,
-    axis_names=REFERENCE_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
-)
-print(f"{reference_device_list=} {reference_mesh.devices=}")
+# reference_device_list = jax._src.mesh_utils.create_device_mesh(
+#     REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
+# )
+# reference_mesh = jax.sharding.Mesh(
+#     reference_device_list,
+#     axis_names=REFERENCE_MESH[1],
+#     axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
+# )
+# print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
     TRAINER_MESH[0], jax.devices()[-trainer_devices:]
 )
 trainer_mesh = jax.sharding.Mesh(
     trainer_device_list,
-    axis_names=REFERENCE_MESH[1],
+    axis_names=TRAINER_MESH[1],
     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
 )
 print(f"{trainer_device_list=} {trainer_mesh.devices=}")
@@ -301,8 +298,9 @@ else:
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
 
-MODEL_VERSION = "google/gemma-4-E4B-it"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-E4B-it")
+MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
+# MODEL_VERSION = "google/gemma-4-E4B-it"
 # MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
 
 # %%
@@ -381,7 +379,8 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.gemma4_e4b()
+config = model_lib.ModelConfig.gemma4_26b_a4b()
+# config = model_lib.ModelConfig.gemma4_e4b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -391,7 +390,7 @@ if ENABLE_MIX_PRECISION:
 
 print("MODEL_PATH: ", MODEL_PATH)
 gemma4_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
+    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 
 
@@ -452,7 +451,7 @@ wandb_config.update({
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="/tmp/tensorboard/grpo",
     flush_every_n_steps=20,
-    backend_kwargs={"wandb": {"config": wandb_config}},
+    backend_kwargs={"wandb": {"config": wandb_config, "settings": wandb.Settings(console="off")}},
 )
 
 # %%
@@ -487,7 +486,7 @@ if MAX_GRAD_NORM is not None:
 # Training config
 print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
-print("Reference mesh: ", reference_mesh)
+# print("Reference mesh: ", reference_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -499,28 +498,14 @@ base_rollout_dict = {
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
-sglang_jax_rollout_dict = {
-    # sglang-jax specific configs
-    "rollout_sglang_jax_model_version": (
-        MODEL_VERSION
-    ),
-    "rollout_sglang_jax_mem_fraction_static": 0.8,
-    "rollout_sglang_jax_init_with_random_weights": True,
-    "rollout_sglang_jax_disable_radix_cache": True,
-    "rollout_sglang_jax_enable_deterministic_sampling": False,
-    "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
-    "rollout_sglang_jax_page_size": 128,
-    "rollout_sglang_jax_use_sort_for_toppk_minp": False,
-}
-
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.4,
+    "rollout_vllm_hbm_utilization": 0.7,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
+    "rollout_vllm_enable_dp_attention": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -528,14 +513,10 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": True,
+        "enable_prefix_caching": False,
     },
 }
 
-if ROLLOUT_ENGINE == "sglang_jax":
-  rollout_engine_config = base_rollout.RolloutConfig(
-      **base_rollout_dict, **sglang_jax_rollout_dict
-  )
 elif ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(
       **base_rollout_dict, **vllm_rollout_dict
@@ -548,7 +529,7 @@ else:
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: reference_mesh,
+        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
