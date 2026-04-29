@@ -224,7 +224,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -277,7 +277,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -321,7 +321,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -371,7 +371,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -417,7 +417,7 @@ verl_compatible: false
       pipeline.run_grpo_trainer()
       mock_run.assert_called_once_with(mode="grpo")
 
-  def test_agentic_grpo_dispatches_to_agentic(self):
+  def test_agentic_dispatches_to_agentic(self):
     extra = """
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
@@ -436,7 +436,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -530,7 +530,7 @@ agent_kwargs: {{}}
 env_class_path: null
 env_kwargs: {{}}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0
@@ -603,7 +603,7 @@ agent_kwargs: {{}}
 env_class_path: null
 env_kwargs: {{}}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.001
@@ -623,26 +623,26 @@ vllm_config:
     p = _make_pipeline(
         self._base_extra("max_turns: 20\n  per_turn_timeout_secs: 300")
     )
-    algo = p._create_agentic_grpo_config()
+    algo = p._create_agentic_config()
     self.assertEqual(algo.episode_timeout, 300 * 20)
 
   def test_max_response_length_from_rollout(self):
     p = _make_pipeline(self._base_extra("max_turns: 1"))
-    algo = p._create_agentic_grpo_config()
+    algo = p._create_agentic_config()
     # rollout_config.total_generation_steps = 512
     self.assertEqual(algo.max_response_length, 512)
 
   def test_num_generations_passed_through(self):
     p = _make_pipeline(self._base_extra("max_turns: 1"))
-    algo = p._create_agentic_grpo_config()
+    algo = p._create_agentic_config()
     self.assertEqual(algo.num_generations, 2)
 
   def test_cli_empty_system_prompt_stays_empty_string(self):
     p = _make_pipeline_with_cli_args(
         self._base_extra("max_turns: 1", system_prompt='"base"'),
-        ['agentic_grpo_config.system_prompt=""'],
+        ['agentic_config.system_prompt=""'],
     )
-    self.assertEqual(p.config["agentic_grpo_config"]["system_prompt"], "")
+    self.assertEqual(p.config["agentic_config"]["system_prompt"], "")
 
 
 class SplitMeshConfigTest(absltest.TestCase):
@@ -665,7 +665,7 @@ agent_kwargs: {}
 env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
-agentic_grpo_config:
+agentic_config:
   num_generations: 2
   num_iterations: 1
   beta: 0.0

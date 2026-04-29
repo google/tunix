@@ -99,7 +99,7 @@ options = metrics_logger.MetricsLoggerOptions(
 logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
 ```
 
-With the above, agentic_grpo_learner will by default start an async trajectory
+With the above, agentic_learner will by default start an async trajectory
 logger which logs the trajectories including prompts, responses, etc. to the
 specified `log_dir`.
 

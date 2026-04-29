@@ -69,7 +69,7 @@ class GrpoPipeline(config.HyperParameters):
   ``training_mode: "agentic_grpo"`` — multi-turn agentic GRPO using
   GRPOLearner.  Additional config sections are recognised:
 
-  * ``agentic_grpo_config``: GRPOConfig fields (num_generations, beta, …)
+  * ``agentic_config``: GRPOConfig fields (num_generations, beta, …)
     plus ``max_turns``, ``context_ratio``, ``per_turn_timeout_secs``.
   * role-specific ``*_model_config.mesh``: any role with an explicit mesh gets
     its own device slice; omitted meshes share the actor mesh by default.
@@ -280,7 +280,7 @@ class GrpoPipeline(config.HyperParameters):
     max_response = rollout_cfg.get("total_generation_steps", 0)
 
     if mode == "agentic_grpo":
-      agentic_cfg = self.config.get("agentic_grpo_config", {})
+      agentic_cfg = self.config.get("agentic_config", {})
       max_turns = agentic_cfg.get("max_turns", 1)
       context_ratio = agentic_cfg.get("context_ratio", 1)
       if max_turns > 1:
@@ -637,11 +637,11 @@ class GrpoPipeline(config.HyperParameters):
   # Agentic GRPO helpers
   # ------------------------------------------------------------------
 
-  def _create_agentic_grpo_config(self):
-    """Build GRPOConfig (agentic) from the agentic_grpo_config YAML section."""
-    from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig  # pylint: disable=g-import-not-at-top
+  def _create_agentic_config(self):
+    """Build GRPOConfig (agentic) from the agentic_config YAML section."""
+    from tunix.rl.agentic.agentic_learner import GRPOConfig  # pylint: disable=g-import-not-at-top
 
-    cfg = dict(self.config.get("agentic_grpo_config", {}))
+    cfg = dict(self.config.get("agentic_config", {}))
 
     # episode_timeout = per_turn_timeout_secs * max_turns when not explicit
     if "episode_timeout" not in cfg:
@@ -758,8 +758,8 @@ class GrpoPipeline(config.HyperParameters):
     if mode != "agentic_grpo":
       raise ValueError(f"Unsupported training_mode {mode!r}")
 
-    from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner  # pylint: disable=g-import-not-at-top
-    algo_config = self._create_agentic_grpo_config()
+    from tunix.rl.agentic.agentic_learner import GRPOLearner  # pylint: disable=g-import-not-at-top
+    algo_config = self._create_agentic_config()
 
     reward_fns = (
         self.obtain_reward_fn() if self.config.get("reward_functions") else None

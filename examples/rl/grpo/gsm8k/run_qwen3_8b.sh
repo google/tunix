@@ -130,15 +130,15 @@ python -m tunix.cli.grpo_main \
   tokenizer_config.add_eos=false \
   \
   `# -- GRPO algorithm ---------------------------------------------------` \
-  agentic_grpo_config.num_generations="$num_generations" \
-  agentic_grpo_config.num_iterations=1 \
-  agentic_grpo_config.beta=0.08 \
-  agentic_grpo_config.epsilon=0.2 \
-  agentic_grpo_config.system_prompt="You are given a grade school math problem. Think step by step and respond using <reasoning>...</reasoning> followed by <answer>...</answer> with only the final numeric answer inside <answer>." \
-  agentic_grpo_config.max_concurrency=128 \
-  agentic_grpo_config.max_response_length=768 \
-  agentic_grpo_config.max_turns=1 \
-  agentic_grpo_config.context_ratio=1 \
+  agentic_config.num_generations="$num_generations" \
+  agentic_config.num_iterations=1 \
+  agentic_config.beta=0.08 \
+  agentic_config.epsilon=0.2 \
+  agentic_config.system_prompt="You are given a grade school math problem. Think step by step and respond using <reasoning>...</reasoning> followed by <answer>...</answer> with only the final numeric answer inside <answer>." \
+  agentic_config.max_concurrency=128 \
+  agentic_config.max_response_length=768 \
+  agentic_config.max_turns=1 \
+  agentic_config.context_ratio=1 \
   \
   `# -- Optimizer --------------------------------------------------------` \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \

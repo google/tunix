@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for agentic_grpo_learner."""
+"""Tests for agentic_learner."""
 
 import asyncio
 import functools
@@ -42,7 +42,7 @@ from tunix.generate import tokenizer_adapter
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.agentic import agentic_grpo_learner
+from tunix.rl.agentic import agentic_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
@@ -55,7 +55,7 @@ from typing_extensions import override
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
 Mesh = sharding.Mesh
-TrainingInputT = agentic_grpo_learner.TrainingInputT
+TrainingInputT = agentic_learner.TrainingInputT
 
 
 def reward_fn_1(prompts, completions, **kwargs):
@@ -194,7 +194,7 @@ class MockChatParser:
     return "Assistant: "
 
 
-class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
+class _LearnerWithException(agentic_learner.GRPOLearner):
 
   def _batch_to_train_example(self, batch_results, mode):
     raise ValueError("test exception in producer")
@@ -218,7 +218,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
 
   def test_iterator(self):
-    class _MockTrainer(agentic_grpo_learner.GRPOLearner):
+    class _MockTrainer(agentic_learner.GRPOLearner):
 
       def __init__(self, algo_config):
         self.algo_config = algo_config
@@ -276,7 +276,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             yield group, [example]
             i += 1
 
-    algo_config = agentic_grpo_learner.GRPOConfig(
+    algo_config = agentic_learner.GRPOConfig(
         num_generations=2,
         num_iterations=2,
     )
@@ -305,11 +305,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, "num_generations must be greater than 1"
     ):
-      agentic_grpo_learner.GRPOConfig(num_generations=1)
+      agentic_learner.GRPOConfig(num_generations=1)
     with self.assertRaisesRegex(
         ValueError, "loss_algo should be either grpo or gspo-token"
     ):
-      agentic_grpo_learner.GRPOConfig(loss_algo="invalid")
+      agentic_learner.GRPOConfig(loss_algo="invalid")
 
   def test_num_iterations_greater_than_1(self):
     vocab = test_common.MockVocab()
@@ -354,13 +354,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         num_generations=2,
         num_iterations=2,  # > 1
         loss_algo="grpo",
         max_response_length=10,
     )
-    grpo_learner = agentic_grpo_learner.GRPOLearner(
+    grpo_learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
@@ -411,7 +411,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         (batch_size, seq_len), -0.1, dtype=jnp.float32
     )
 
-    train_example = agentic_grpo_learner.TrainExample(
+    train_example = agentic_learner.TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_ids > -1,
         completion_ids=completion_ids,
@@ -436,7 +436,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             None,
         )
 
-    algo_config = agentic_grpo_learner.GRPOConfig(
+    algo_config = agentic_learner.GRPOConfig(
         beta=0.1,
         epsilon=0.2,
         loss_algo=loss_algo,
@@ -508,7 +508,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       # Unmasked example
       final_completion_mask = completion_mask
 
-    train_example = agentic_grpo_learner.TrainExample(
+    train_example = agentic_learner.TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_ids > -1,
         completion_ids=completion_ids,
@@ -518,7 +518,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         old_per_token_logps=None,
     )
 
-    config = agentic_grpo_learner.GRPOConfig(
+    config = agentic_learner.GRPOConfig(
         beta=0.1,
         epsilon=0.2,
         num_generations=2,
@@ -624,7 +624,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         tokenizer=tokenizer,
         cluster_config=cluster_config,
     )
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         beta=0.1,
         epsilon=0.2,
         num_generations=2,
@@ -632,7 +632,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=10,
     )
 
-    learner = agentic_grpo_learner.GRPOLearner(
+    learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=None,
         algo_config=grpo_config,
@@ -724,7 +724,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         tokenizer=tokenizer,
         cluster_config=cluster_config,
     )
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         beta=0.1,
         epsilon=0.2,
         num_generations=2,
@@ -733,7 +733,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         max_response_length=10,
     )
 
-    learner = agentic_grpo_learner.GRPOLearner(
+    learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=None,
         algo_config=grpo_config,
@@ -836,12 +836,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           cluster_config=cluster_config,
       )
 
-      grpo_config = agentic_grpo_learner.GRPOConfig(
+      grpo_config = agentic_learner.GRPOConfig(
           num_generations=2,
           num_iterations=1,
           max_response_length=10,
       )
-      grpo_learner = agentic_grpo_learner.GRPOLearner(
+      grpo_learner = agentic_learner.GRPOLearner(
           rl_cluster=rl_cluster,
           reward_fns=reward_fn_1,
           algo_config=grpo_config,
@@ -938,12 +938,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           cluster_config=cluster_config,
       )
 
-      grpo_config = agentic_grpo_learner.GRPOConfig(
+      grpo_config = agentic_learner.GRPOConfig(
           num_generations=2,
           num_iterations=1,
           max_response_length=10,
       )
-      grpo_learner = agentic_grpo_learner.GRPOLearner(
+      grpo_learner = agentic_learner.GRPOLearner(
           rl_cluster=rl_cluster,
           reward_fns=reward_fn,
           algo_config=grpo_config,
@@ -1045,12 +1045,12 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           cluster_config=cluster_config,
       )
 
-      grpo_config = agentic_grpo_learner.GRPOConfig(
+      grpo_config = agentic_learner.GRPOConfig(
           num_generations=2,
           num_iterations=1,
           max_response_length=10,
       )
-      grpo_learner = agentic_grpo_learner.GRPOLearner(
+      grpo_learner = agentic_learner.GRPOLearner(
           rl_cluster=rl_cluster,
           reward_fns=reward_fn,
           algo_config=grpo_config,
@@ -1144,14 +1144,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         beta=beta,
         force_compute_kl=force_compute_kl,
         max_response_length=10,
         num_generations=2,
         num_iterations=1,
     )
-    learner = agentic_grpo_learner.GRPOLearner(
+    learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
@@ -1233,7 +1233,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         tokenizer=tokenizer,
         cluster_config=cluster_config,
     )
-    grpo_config = agentic_grpo_learner.GRPOConfig(max_response_length=10)
+    grpo_config = agentic_learner.GRPOConfig(max_response_length=10)
     learner = _LearnerWithException(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
@@ -1310,13 +1310,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     rl_cluster.with_external_metrics_logger(print)
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         num_generations=2,
         num_iterations=1,
         loss_algo=loss_algo,
         max_response_length=10,
     )
-    grpo_learner = agentic_grpo_learner.GRPOLearner(
+    grpo_learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fns,
         algo_config=grpo_config,
@@ -1466,14 +1466,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         num_generations=2,
         num_iterations=1,
         loss_algo="grpo",
         off_policy_steps=offpolicy_steps,
         max_response_length=10,
     )
-    grpo_learner = agentic_grpo_learner.GRPOLearner(
+    grpo_learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
@@ -1534,8 +1534,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(max_response_length=512)
-    grpo_learner = agentic_grpo_learner.GRPOLearner(
+    grpo_config = agentic_learner.GRPOConfig(max_response_length=512)
+    grpo_learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
@@ -1600,13 +1600,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         cluster_config=cluster_config,
     )
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         num_generations=2,
         num_iterations=1,
         loss_algo="grpo",
         max_response_length=10,
     )
-    grpo_learner = agentic_grpo_learner.GRPOLearner(
+    grpo_learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
@@ -1695,13 +1695,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         tokenizer=tokenizer,
         cluster_config=cluster_config,
     )
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         num_generations=2,
         num_iterations=1,
         max_response_length=10,
     )
 
-    grpo_learner = agentic_grpo_learner.GRPOLearner(
+    grpo_learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
@@ -1819,14 +1819,14 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     rl_cluster.with_external_metrics_logger(print)
 
-    grpo_config = agentic_grpo_learner.GRPOConfig(
+    grpo_config = agentic_learner.GRPOConfig(
         num_generations=2,
         num_iterations=1,
         loss_algo="grpo",
         max_response_length=128,
         max_concurrency=1,  # so the output is deterministic.
     )
-    grpo_learner = agentic_grpo_learner.GRPOLearner(
+    grpo_learner = agentic_learner.GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=reward_fn_1,
         algo_config=grpo_config,
@@ -1901,7 +1901,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   def test_compute_rloo_advantages(self):
     rewards = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-    advantages = agentic_grpo_learner.compute_rloo_advantages(
+    advantages = agentic_learner.compute_rloo_advantages(
         rewards, num_generations=3
     )
     expected_value = jnp.array([-1.5, 0.0, 1.5, -1.5, 0.0, 1.5])
@@ -1909,7 +1909,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
 
   def test_compute_rloo_advantages_low_generations(self):
     rewards = jnp.array([1.0, 2.0])
-    advantages = agentic_grpo_learner.compute_rloo_advantages(
+    advantages = agentic_learner.compute_rloo_advantages(
         rewards, num_generations=1
     )
     np.testing.assert_allclose(advantages, jnp.zeros_like(rewards))

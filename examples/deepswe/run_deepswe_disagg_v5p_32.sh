@@ -149,21 +149,21 @@ python -m tunix.cli.grpo_main \
   kubernetes_config.node_selector_val="deepswe-cpu-pool" \
   \
   `# ── Agentic / multi-turn ─────────────────────────────────────────────` \
-  agentic_grpo_config.max_turns=20 \
-  agentic_grpo_config.per_turn_timeout_secs=300 \
-  agentic_grpo_config.context_ratio=2 \
-  agentic_grpo_config.max_concurrency=100 \
+  agentic_config.max_turns=20 \
+  agentic_config.per_turn_timeout_secs=300 \
+  agentic_config.context_ratio=2 \
+  agentic_config.max_concurrency=100 \
   \
   `# ── GRPO algorithm ───────────────────────────────────────────────────` \
-  agentic_grpo_config.num_generations="$num_generations" \
-  agentic_grpo_config.max_response_length="$max_response_length" \
-  agentic_grpo_config.num_iterations=1 \
-  agentic_grpo_config.beta=0.001 \
-  agentic_grpo_config.epsilon=0.2 \
-  agentic_grpo_config.epsilon_high=0.28 \
-  agentic_grpo_config.off_policy_steps=0 \
-  agentic_grpo_config.loss_agg_mode="seq-mean-token-mean" \
-  agentic_grpo_config.kl_loss_mode="low_var_kl" \
+  agentic_config.num_generations="$num_generations" \
+  agentic_config.max_response_length="$max_response_length" \
+  agentic_config.num_iterations=1 \
+  agentic_config.beta=0.001 \
+  agentic_config.epsilon=0.2 \
+  agentic_config.epsilon_high=0.28 \
+  agentic_config.off_policy_steps=0 \
+  agentic_config.loss_agg_mode="seq-mean-token-mean" \
+  agentic_config.kl_loss_mode="low_var_kl" \
   \
   `# ── Optimizer ────────────────────────────────────────────────────────` \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
