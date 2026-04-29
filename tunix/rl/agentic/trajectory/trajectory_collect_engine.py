@@ -187,7 +187,7 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
-    print("trajectory collect engine collect call....")
+    # print("trajectory collect engine collect call....")
     await self._reset()
 
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
@@ -477,7 +477,7 @@ class TrajectoryCollectEngine:
         perf_constants.ENVIRONMENT,
         tags=tags,
     ):
-      print(f"one step to collect the trajectory...")
+      # print(f"one step to collect the trajectory...")
       (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
           self.env.step, action
       )

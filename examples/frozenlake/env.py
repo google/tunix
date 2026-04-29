@@ -215,7 +215,7 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
       self.extra_kwargs = {}
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
-    print(f"env extra_kwargs: {self.extra_kwargs = }")
+    # print(f"env extra_kwargs: {self.extra_kwargs = }")
 
   def _get_player_position(self):
     return (self.s // self.ncol, self.s % self.ncol)
@@ -241,7 +241,7 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
 
 
   def step(self, action: Any) -> tuple[Any, float, bool, Dict[str, Any]]:
-    print(f"frozenlake env action: {action}")
+    # print(f"frozenlake env action: {action}")
     return BaseTaskEnv.step(self, action)
  
 
@@ -261,7 +261,7 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
     if not action:
       action = self.INVALID_ACTION
     action = int(action)
-    print(f"frozenlake env step with action: {action}")
+    # print(f"frozenlake env step with action: {action}")
     
     # Mock to debug
     action = 0
@@ -277,7 +277,7 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
       )
 
     prev_player_position = int(self.s)
-    print(f"{self.action_map[action]=}, {type(self.action_map[action])=}, {type(int(self.action_map[action]))=}")
+    # print(f"{self.action_map[action]=}, {type(self.action_map[action])=}, {type(int(self.action_map[action]))=}")
 
     player_pos, reward, done, _, prob = GymFrozenLakeEnv.step(self, int(self.action_map[action]))
 
