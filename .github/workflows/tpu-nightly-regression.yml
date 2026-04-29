@@ -35,9 +35,6 @@ env:
 
 jobs:
   run_prod:
-    outputs:
-      vllm_commit: ${{ steps.extract_commits.outputs.vllm_commit }}
-      tpu_inference_commit: ${{ steps.extract_commits.outputs.tpu_inference_commit }}
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
@@ -223,34 +220,64 @@ jobs:
         fi
         echo "🎉 All RL scripts completed successfully."
 
+  run_latest:
+    outputs:
+      vllm_commit: ${{ steps.extract_commits.outputs.vllm_commit }}
+      tpu_inference_commit: ${{ steps.extract_commits.outputs.tpu_inference_commit }}
+    runs-on: [linux-x86-ct5lp-224-8tpu]
+    environment: testing
+    container:
+      image: vllm/vllm-tpu:nightly
+      options: --privileged
+      env:
+        CLOUD_TPU_ACCELERATOR: v5e-8
+        JAX_PLATFORMS: tpu,cpu
+    steps:
+
+    # Cache Hugging Face hub
+    - name: Cache HF hub
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+        restore-keys: |
+          hf-${{ runner.os }}-
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
     - name: Extract dependency commits
       id: extract_commits
       run: |
         cat << 'EOF' > get_commits.py
-        import sys
+        import urllib.request
+        import json
 
-        try:
-            from importlib.metadata import requires, version
-        except ImportError:
-            import pkg_resources
-
-        def get_commit(package_name):
+        def get_head_commit(repo):
+            url = f"https://api.github.com/repos/{repo}/commits/main"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             try:
-                import importlib.metadata
-                dist = importlib.metadata.distribution(package_name)
-                # the dist.read_text('direct_url.json') usually contains the exact git commit for git dependencies
-                import json
-                direct_url = dist.read_text('direct_url.json')
-                if direct_url:
-                    data = json.loads(direct_url)
-                    if 'vcs_info' in data and 'commit_id' in data['vcs_info']:
-                        return data['vcs_info']['commit_id']
+                with urllib.request.urlopen(req) as response:
+                    data = json.loads(response.read().decode())
+                    return data['sha']
             except Exception as e:
-                pass
-            return None
+                print(f"Error fetching {repo}: {e}")
+                return None
 
-        vllm_commit = get_commit("vllm")
-        tpu_inference_commit = get_commit("tpu-inference")
+        def get_vllm_lkg_commit():
+            url = "https://raw.githubusercontent.com/vllm-project/tpu-inference/main/.buildkite/vllm_lkg.version"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            try:
+                with urllib.request.urlopen(req) as response:
+                    return response.read().decode().strip()
+            except Exception as e:
+                print(f"Error fetching vllm lkg: {e}")
+                return None
+
+        vllm_commit = get_vllm_lkg_commit()
+        tpu_inference_commit = get_head_commit("vllm-project/tpu-inference")
 
         with open(r"${{ github.output }}", "a") as f:
             if vllm_commit:
@@ -261,8 +288,181 @@ jobs:
         sed -i "s|\${{ github.output }}|$GITHUB_OUTPUT|g" get_commits.py
         python3 get_commits.py
 
+    - name: Install tunix dependencies
+      run: |
+        # Update requirement files with specific commits
+        VLLM_COMMIT="${{ steps.extract_commits.outputs.vllm_commit }}"
+        TPU_INFERENCE_COMMIT="${{ steps.extract_commits.outputs.tpu_inference_commit }}"
+
+        if [ -n "$VLLM_COMMIT" ]; then
+          sed -i "s|vllm-project/vllm\.git@[a-f0-9]\+|vllm-project/vllm.git@${VLLM_COMMIT}|g" requirements/requirements.txt
+        fi
+
+        if [ -n "$TPU_INFERENCE_COMMIT" ]; then
+          sed -i "s|vllm-project/tpu-inference\.git@[a-f0-9]\+|vllm-project/tpu-inference.git@${TPU_INFERENCE_COMMIT}|g" requirements/special_requirements.txt
+        fi
+
+        pip install -e .[prod,test]
+
+    - name: Verify TPU availability
+      run: |
+        python -c "
+        import jax
+        print(f'JAX version: {jax.__version__}')
+        print(f'JAX devices: {jax.devices()}')
+
+        # Check if we have TPU devices specifically
+        devices = jax.devices()
+        has_tpu = len(devices) > 0 and all(device.platform == 'tpu' for device in devices)
+        print(f'TPU available: {has_tpu}')
+
+        if not has_tpu:
+            print('ERROR: No TPU devices found! Expected TPU devices but got:', [device.platform for device in devices])
+            exit(1)
+        else:
+            print(f'SUCCESS: Found {len(devices)} TPU device(s)')
+        "
+
+    - name: Run regression scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      id: regression_tests
+      run: |
+        # Download GSM8K dataset
+        mkdir -p /tmp/grpo_test/rl/grpo/data
+
+        FAILED=0
+        echo "📦 Executing: examples/deepscaler/math_eval_nb.py..."
+        python examples/deepscaler/math_eval_nb.py || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way || FAILED=1
+
+        # SGLang Tests
+        unset JAX_PLATFORMS
+        pip list | egrep 'jax|flax|libtpu'
+        cd ..
+        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
+        pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24
+        pip list | egrep 'jax|flax|libtpu'
+        cd tunix
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in colocated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 2 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 3 way disaggregated mode ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way || FAILED=1
+
+        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax with LoRA ..."
+        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine sglang_jax --enable-lora --lora-target-modules all || FAILED=1
+
+
+        if [ "$FAILED" -ne 0 ]; then
+          echo "One or more scripts failed!"
+          exit 1
+        fi
+
+    - name: Run SFT shell scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        SCRIPT_DIR="./tunix/examples/sft/mtnt"
+        MAX_STEPS=5
+        EVAL_EVERY_N_STEPS=1
+
+        # Check if directory exists
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist"
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR"
+        for script in "$SCRIPT_DIR"/*.sh; do
+          if [ -f "$script" ]; then
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            if bash "$script" \
+                --training_config.max_steps "$MAX_STEPS" \
+                --training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              echo "✅ Successfully completed: $script"
+            else
+              exit_code=$?
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              exit "$exit_code"
+            fi
+          fi
+        done
+        echo "🎉 All SFT scripts completed successfully."
+
+    - name: Run RL shell scripts
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        SCRIPT_DIR="./tunix/examples/rl/grpo/gsm8k"
+        EXCLUDE_DIR="verl_compatible"
+        MAX_STEPS=5
+        EVAL_EVERY_N_STEPS=1
+
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist" >&2
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
+        final_exit_code=0
+
+        while IFS= read -r script; do
+          if [ -f "$script" ]; then
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            if ! bash "$script" \
+                --rl_training_config.max_steps "$MAX_STEPS" \
+                --rl_training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              exit_code=$?
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              final_exit_code=$exit_code
+              # Stop processing further scripts after the first failure
+              break
+            else
+              echo "✅ Successfully completed: $script"
+            fi
+          fi
+        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/")
+
+        if [ "$final_exit_code" -ne 0 ]; then
+          echo "🚫 One or more RL scripts failed. Exiting with code $final_exit_code." >&2
+          exit "$final_exit_code"
+        fi
+        echo "🎉 All RL scripts completed successfully."
+
   update_lkg_pr:
-    needs: run_prod
+    needs: run_latest
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -273,8 +473,8 @@ jobs:
 
       - name: Update requirement files
         run: |
-          VLLM_COMMIT="${{ needs.run_prod.outputs.vllm_commit }}"
-          TPU_INFERENCE_COMMIT="${{ needs.run_prod.outputs.tpu_inference_commit }}"
+          VLLM_COMMIT="${{ needs.run_latest.outputs.vllm_commit }}"
+          TPU_INFERENCE_COMMIT="${{ needs.run_latest.outputs.tpu_inference_commit }}"
 
           if [ -n "$VLLM_COMMIT" ]; then
             sed -i "s|vllm-project/vllm\.git@[a-f0-9]\+|vllm-project/vllm.git@${VLLM_COMMIT}|g" requirements/requirements.txt
