@@ -301,6 +301,7 @@ CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
 
 MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
+# MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
 # MODEL_VERSION = "google/gemma-4-E4B-it"
 # MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
 
@@ -389,6 +390,8 @@ if ENABLE_FLASH_ATTENTION:
 if ENABLE_MIX_PRECISION:
   config.param_dtype = jnp.bfloat16
 
+from huggingface_hub import snapshot_download
+MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION)
 print("MODEL_PATH: ", MODEL_PATH)
 gemma4_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
@@ -424,11 +427,11 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  gemma4_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-  )
-#   graph, state = nnx.split(gemma4_ref)
-#   gemma4_actor = nnx.merge(graph, jax.tree.map(jnp.copy, state),)
+#   gemma4_actor = params_lib.create_model_from_safe_tensors(
+#       MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+#   )
+  graph, state = nnx.split(gemma4_ref)
+  gemma4_actor = nnx.merge(graph, jax.tree.map(jnp.copy, state),)
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -445,6 +448,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 )
 
 # Metrics logger
+import wandb
 wandb_config = vars(args)
 wandb_config.update({
     "WARMUP_STEPS": WARMUP_STEPS,
