@@ -215,6 +215,9 @@ class ConversationAgentBase(LLMBaseAgent):
       step.reward = reward
       step.done = done
       step.info = info or {}
+      print(f"update step with {reward=}, {done=}")
+    else:
+      print("No step is seen....")
 
     # Let subclass / default handler convert observation into messages.
     if observation is not None:

@@ -456,7 +456,7 @@ wandb_config.update({
     "rollout_engine": ROLLOUT_ENGINE,
 })
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo",
+    log_dir="gs:://linchai-bucket-dev/tensorboard/grpo",
     flush_every_n_steps=20,
     backend_kwargs={"wandb": {"config": wandb_config, "settings": wandb.Settings(console="off")}},
 )
@@ -553,7 +553,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
         train_micro_batch_size=1,
         # metrics logging
-        # metrics_logging_options=metrics_logging_options,
+        metrics_logging_options=metrics_logging_options,
         # checkpoint saving
         # checkpoint_root_directory=CKPT_DIR,
         # checkpointing_options=checkpointing_options,
