@@ -70,6 +70,7 @@ with cm:
   from tunix.sft import utils as sft_utils
   from tunix.utils import math_rewards
   from tunix.utils import compat
+  from tunix.rl import reshard
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
@@ -423,15 +424,11 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  graph, state = nnx.split(gemma4_ref)
-  actor_shardings = jax.tree_util.tree_map(
-      lambda x: jax.sharding.NamedSharding(
-          trainer_mesh,
-          x,
-        ),
-      nnx.get_partition_spec(state),
+  gemma4_actor = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
-  gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, actor_shardings))
+#   graph, state = nnx.split(gemma4_ref)
+#   gemma4_actor = nnx.merge(graph, jax.tree.map(jnp.copy, state),)
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
