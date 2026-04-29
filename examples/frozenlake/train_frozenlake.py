@@ -133,7 +133,7 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(4, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
 TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
 # REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
 

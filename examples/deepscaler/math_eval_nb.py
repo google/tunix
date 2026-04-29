@@ -341,7 +341,7 @@ class Qwen25MathEvaluator:
               init_with_random_weights=False,
               # mapping_config=mapping_config,
               tensor_parallel_size=2,
-              data_parallel_size=2,
+              # data_parallel_size=1,
               engine_kwargs={
                   "model": self.model_version,
                   "max_model_len": 1024,

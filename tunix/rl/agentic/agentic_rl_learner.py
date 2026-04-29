@@ -622,12 +622,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           collect_mode="Token",
       ):
 
-        snapshot = tracemalloc.take_snapshot()
-        top_stats = snapshot.statistics('lineno')
+        # snapshot = tracemalloc.take_snapshot()
+        # top_stats = snapshot.statistics('lineno')
 
-        print("[ Top 10 memory consumers ]")
-        for stat in top_stats[:10]:
-          print(stat)
+        # print("[ Top 10 memory consumers ]")
+        # for stat in top_stats[:10]:
+        #   print(stat)
         try:
           train_examples = self._batch_to_train_example(
               batch_results=batch,
@@ -674,7 +674,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
-    tracemalloc.start()
+    # tracemalloc.start()
     full_batch_iterator = iter(train_dataset)
 
     if self.rl_cluster.global_steps > 0:

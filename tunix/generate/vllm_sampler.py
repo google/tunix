@@ -296,6 +296,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def _create_driver(self) -> VLLMInProcessDriver:
     engine_args = self._build_engine_args()
+    print(f"engine_args: {engine_args}")
     return VLLMInProcessDriver.from_engine_args(
         engine_args,
     )
