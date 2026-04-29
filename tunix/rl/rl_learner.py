@@ -710,14 +710,31 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         mode=rl_cluster_lib.Mode.TRAIN,
     )
 
+    def queue_iterator():
+      while True:
+        item = train_data_queue.get(block=True)
+        if item is None:
+          break
+        yield item
+
+    train_data_gen = queue_iterator()
+    if self._training_config.max_seq_token_per_tpu is not None:
+      logging.info(
+          "Using sequence packing with max_seq_token_per_tpu: %d",
+          self._training_config.max_seq_token_per_tpu,
+      )
+      train_data_gen = rl_utils.pack_sequences(
+          train_data_gen, self._training_config.max_seq_token_per_tpu
+      )
+
     curr_eval_ds = None
     with jax.profiler.StepTraceAnnotation("trainer", step_num=initial_steps):
       while True:
         with sft_utils.time_measure(suppress_logging=True) as timer:
-          curr_train_ds = train_data_queue.get(block=True)
-
-        if curr_train_ds is None:
-          break
+          try:
+            curr_train_ds = next(train_data_gen)
+          except StopIteration:
+            break
 
         if self.can_enable_async_rollout:
           self.rl_cluster.buffer_metrics(

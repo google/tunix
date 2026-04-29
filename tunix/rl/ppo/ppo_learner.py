@@ -40,8 +40,8 @@ registry = function_registry.default_registry
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
-  returns: jax.Array
-  old_values: jax.Array
+  returns: jax.Array | None = None
+  old_values: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -541,11 +541,18 @@ def ppo_value_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
-  logits_to_keep = completion_ids.shape[1]
-
   # ====== Loss ======
   values = train_example.old_values
   returns = train_example.returns
+
+  segment_ids = getattr(train_example, "segment_ids", None)
+  if segment_ids is not None:
+    # For packed sequences, prompt_ids is empty and completion_ids holds the full sequence.
+    # We predict values for token t using the model's output at t-1.
+    logits_to_keep = completion_ids.shape[1] - 1
+  else:
+    logits_to_keep = completion_ids.shape[1]
+
   # Get new values.
   vpreds = common.compute_score(
       model,
@@ -554,8 +561,14 @@ def ppo_value_loss_fn(
       pad_id,
       eos_id,
       stop_gradient=False,
+      segment_ids=segment_ids,
+      segment_positions=getattr(train_example, "segment_positions", None),
   )
   vpreds = vpreds[:, -logits_to_keep - 1 : -1]
+
+  if segment_ids is not None:
+    # Pad the first token's value with 0.0, since it has no preceding token to predict it.
+    vpreds = jnp.pad(vpreds, ((0, 0), (1, 0)), constant_values=0.0)
   vpred_clipped = jnp.clip(
       vpreds, values - clip_range_value, values + clip_range_value
   )
@@ -607,6 +620,8 @@ def ppo_policy_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_logits=True,
+      segment_ids=getattr(train_example, "segment_ids", None),
+      segment_positions=getattr(train_example, "segment_positions", None),
   )
 
   advantages = train_example.advantages

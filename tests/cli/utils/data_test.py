@@ -16,6 +16,9 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
+
 from absl.testing import absltest
 from tunix.cli.utils import data as data_lib
 
@@ -25,6 +28,14 @@ class _FakeTokenizer:
   def encode(self, text: str):
     # Simple tokenization: one token per whitespace-separated chunk
     return text.split()
+
+
+class _FakeChatTemplateTokenizer(_FakeTokenizer):
+
+  def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+    del tokenize
+    del add_generation_prompt
+    return " | ".join(message["content"] for message in messages)
 
 
 class _BaseDataset:
@@ -93,6 +104,87 @@ class _BatchedDataset:
 
 class PostInitDatasetTest(absltest.TestCase):
 
+  def test_get_dataset_from_module_passes_kwargs_and_templates_prompt(self):
+    module_source = """
+class FakeDataset:
+  def __init__(self, records):
+    self._records = list(records)
+
+  def __len__(self):
+    return len(self._records)
+
+  def __getitem__(self, idx):
+    return self._records[idx]
+
+  def map(self, fn):
+    return FakeDataset([fn(record) for record in self._records])
+
+
+def create_dataset(train_data_path, eval_data_path):
+  return FakeDataset([
+      {
+          "prompt": [
+              {"role": "user", "content": train_data_path},
+              {"role": "assistant", "content": eval_data_path},
+          ],
+          "meta": "kept",
+      }
+  ])
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+      f.write(module_source)
+      module_path = f.name
+
+    self.addCleanup(lambda: os.unlink(module_path))
+
+    dataset = data_lib.get_dataset_from_module(
+        module_path,
+        tokenizer=_FakeChatTemplateTokenizer(),
+        apply_chat_template_to_dataset=True,
+        train_data_path="train.json",
+        eval_data_path="eval.parquet",
+    )
+
+    self.assertEqual(
+        dataset[0],
+        {"prompts": "train.json | eval.parquet", "meta": "kept"},
+    )
+
+  def test_get_dataset_from_module_keeps_existing_prompts(self):
+    module_source = """
+class FakeDataset:
+  def __init__(self, records):
+    self._records = list(records)
+
+  def __len__(self):
+    return len(self._records)
+
+  def __getitem__(self, idx):
+    return self._records[idx]
+
+  def map(self, fn):
+    return FakeDataset([fn(record) for record in self._records])
+
+
+def create_dataset():
+  return FakeDataset([
+      {"prompts": "already formatted", "value": 1}
+  ])
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+      f.write(module_source)
+      module_path = f.name
+
+    self.addCleanup(lambda: os.unlink(module_path))
+
+    dataset = data_lib.get_dataset_from_module(
+        module_path,
+        tokenizer=_FakeChatTemplateTokenizer(),
+        apply_chat_template_to_dataset=False,
+    )
+
+    self.assertEqual(dataset[0], {"prompts": "already formatted", "value": 1})
+
   def test_filters_by_prompt_length(self):
     tokenizer = _FakeTokenizer()
     dataset = _BaseDataset([
@@ -156,6 +248,32 @@ class PostInitDatasetTest(absltest.TestCase):
     self.assertLen(second_batches, 2)  # remaining 4 items / batch_size 2
     self.assertEqual(first_batches[0][0]["prompts"], "p0")
     self.assertEqual(second_batches[-1][-1]["prompts"], "p7")
+
+  def test_normalizes_prompt_key_to_prompts(self):
+    tokenizer = _FakeTokenizer()
+    dataset = _BaseDataset([
+        {"question": "short prompt", "answer": 1},
+        {"question": "another prompt", "answer": 2},
+    ])
+
+    first, second = data_lib.post_init_dataset(
+        dataset,
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
+        batch_size=2,
+        num_batches=None,
+        max_prompt_length=None,
+        prompt_key="question",
+    )
+
+    self.assertIsNone(second)
+    batches = list(first)
+    self.assertEqual(
+        batches[0],
+        [
+            {"question": "short prompt", "answer": 1, "prompts": "short prompt"},
+            {"question": "another prompt", "answer": 2, "prompts": "another prompt"},
+        ],
+    )
 
   def test_num_epochs_repeats_dataset(self):
     tokenizer = _FakeTokenizer()

@@ -4,7 +4,7 @@ import ast
 import functools
 import importlib
 import os
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Protocol, Union
 
 from tunix.generate import tokenizer_adapter
 
@@ -12,7 +12,20 @@ Tokenizer = tokenizer_adapter.Tokenizer
 TokenizerAdapter = tokenizer_adapter.TokenizerAdapter
 
 
-def apply_chat_template(x, tokenizer: TokenizerAdapter) -> dict[str, Any]:
+class ChatTemplateTokenizer(Protocol):
+
+  def apply_chat_template(
+      self,
+      messages: list[dict[str, str]],
+      tokenize: bool = False,
+      add_generation_prompt: bool = True,
+  ) -> str | list[int]:
+    ...
+
+
+def apply_chat_template(
+    x, tokenizer: ChatTemplateTokenizer
+) -> dict[str, Any]:
   return {
       "prompts": tokenizer.apply_chat_template(
           x["prompt"], tokenize=False, add_generation_prompt=True
@@ -65,7 +78,12 @@ def parse_call_string(arg_string: str) -> tuple[list[Any], dict[str, Any]]:
   return parsed_args, parsed_kwargs
 
 
-def get_dataset_from_module(specifier: str, tokenizer: TokenizerAdapter):
+def get_dataset_from_module(
+    specifier: str,
+    tokenizer: ChatTemplateTokenizer | None = None,
+    apply_chat_template_to_dataset: bool = False,
+    **dataset_kwargs,
+):
   """Get dataset from module.
 
   Examples of specifier:
@@ -78,7 +96,12 @@ def get_dataset_from_module(specifier: str, tokenizer: TokenizerAdapter):
 
   Args:
     specifier: The specifier of the module.
-    tokenizer: The tokenizer to apply to the dataset.
+    tokenizer: The tokenizer to apply to the dataset when the module returns
+      raw chat messages under ``prompt``. It must expose
+      ``apply_chat_template``.
+    apply_chat_template_to_dataset: Whether to apply chat templating when the
+      module dataset exposes a raw ``prompt`` field.
+    **dataset_kwargs: Keyword arguments forwarded to ``create_dataset``.
 
   Returns:
     The dataset.
@@ -126,7 +149,16 @@ def get_dataset_from_module(specifier: str, tokenizer: TokenizerAdapter):
 
   else:
     func = module.create_dataset
-  dataset = func(*args, **kwargs)
+  dataset = func(*args, **{**dataset_kwargs, **kwargs})
+  if not apply_chat_template_to_dataset:
+    return dataset
+
+  if tokenizer is None:
+    raise ValueError(
+        "tokenizer must be provided when apply_chat_template_to_dataset is"
+        " True."
+    )
+
   return dataset.map(
       functools.partial(apply_chat_template, tokenizer=tokenizer)
   )
@@ -161,6 +193,15 @@ def post_init_dataset(
   Returns:
     The processed dataset.
   """
+  if prompt_key != "prompts":
+    source_prompt_key = prompt_key
+
+    def normalize_prompt_key(x):
+      return {**x, "prompts": x[source_prompt_key]}
+
+    dataset = dataset.map(normalize_prompt_key)
+    prompt_key = "prompts"
+
   if max_prompt_length is not None and max_prompt_length > 0:
 
     def prompt_length_filter(x):

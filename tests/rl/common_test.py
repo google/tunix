@@ -117,13 +117,150 @@ class CommonTest(parameterized.TestCase):
         atol=1e-03,
     )
 
-  def test_compute_per_token_logps(self):
+  def test_process_ids_raises_value_error(self):
+    prompt_tokens = jnp.array([[1, 2], [3, 4]])
+    completion_tokens = jnp.array([[5, 6], [7, 8]])
+    segment_ids = jnp.array([[1, 1, 2, 2], [1, 1, 2, 2]])
+    with self.assertRaisesRegex(
+        ValueError,
+        "segment_positions must be explicitly provided for packed sequences.",
+    ):
+      common.process_ids(
+          prompt_tokens,
+          completion_tokens,
+          pad_id=0,
+          eos_id=-1,
+          segment_ids=segment_ids,
+          segment_positions=None,
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="normal",
+          prompt_tokens=np.array([[1, 2, 3, 4], [0, 0, 1, 2], [0, 1, 2, 3]]),
+          completion_tokens=np.array(
+              [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
+          ),
+          segment_ids=None,
+          segment_positions=None,
+          expected_logps=np.array([
+              [-5.876301, -8.700251, -5.046069, -5.788748],
+              [-6.071025, -7.5328417, -5.9712567, -4.653783],
+              [-6.039485, -8.264197, -6.2771187, -4.767109],
+          ]),
+      ),
+      dict(
+          testcase_name="seq-packed-single-item",
+          prompt_tokens=np.zeros((3, 0), dtype=np.int32),
+          completion_tokens=np.array([
+              [1, 2, 3, 4, 10, 11, -1, 12],
+              [0, 0, 1, 2, 10, 11, 12, 13],
+              [0, 1, 2, 3, 10, 11, 12, -1],
+          ]),
+          segment_ids=np.ones((3, 8), dtype=np.int32),
+          segment_positions=np.tile(np.arange(8), (3, 1)),
+          expected_logps=np.array([
+              [
+                  0.0,
+                  -7.3199797,
+                  -6.8320303,
+                  -5.6091313,
+                  -5.876301,
+                  -8.700251,
+                  -5.0460696,
+                  -5.788748,
+              ],
+              [
+                  0.0,
+                  -6.4536085,
+                  -5.5156517,
+                  -7.103587,
+                  -6.0710244,
+                  -7.5328417,
+                  -5.971257,
+                  -4.653783,
+              ],
+              [
+                  0.0,
+                  -5.789238,
+                  -7.7057056,
+                  -6.7916627,
+                  -6.0394855,
+                  -8.264197,
+                  -6.2771187,
+                  -4.7671094,
+              ],
+          ]),
+      ),
+      dict(
+          testcase_name="seq-packed-multi-item",
+          prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+          completion_tokens=np.array([
+              [1, 2, 3, 4, 10, 11, -1, 12, 0, 0, 1, 2, 10, 11, 12, 13],
+              [0, 1, 2, 3, 10, 11, 12, -1, 0, 0, 0, 0, 0, 0, 0, 0],
+          ]),
+          segment_ids=np.array([
+              [1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2],
+              [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+          ]),
+          segment_positions=np.array([
+              [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7],
+              [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7],
+          ]),
+          # NOTE: Expected logprobs diverge from single-item values because
+          # floating-point reductions in XLA compound differently when changing
+          # batch size from 3 to 2 and sequence length from 8 to 16.
+          expected_logps=np.array([
+              [
+                  0.0,
+                  -7.255163,
+                  -6.413455,
+                  -5.682157,
+                  -5.83097,
+                  -8.132578,
+                  -4.8891325,
+                  -5.7902822,
+                  -6.452383,
+                  -6.524351,
+                  -5.778284,
+                  -7.255163,
+                  -6.245493,
+                  -8.132578,
+                  -6.025977,
+                  -4.6675467,
+              ],
+              [
+                  0.0,
+                  -4.070095,
+                  -7.792082,
+                  -6.3780885,
+                  -6.312748,
+                  -6.536421,
+                  -6.0986547,
+                  -5.62961,
+                  -5.558264,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+              ],
+          ]),
+      ),
+  )
+  def test_compute_per_token_logps(
+      self,
+      prompt_tokens,
+      completion_tokens,
+      segment_ids,
+      segment_positions,
+      expected_logps,
+  ):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
-    prompt_tokens = jnp.array([[1, 2, 3, 4], [0, 0, 1, 2], [0, 1, 2, 3]])
-    completion_tokens = jnp.array(
-        [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
-    )
     graphdef, state = nnx.split(model)
+
     per_token_logps = common.compute_per_token_logps(
         graphdef,
         state,
@@ -132,17 +269,14 @@ class CommonTest(parameterized.TestCase):
         pad_id=0,
         eos_id=-1,
         return_logits=False,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
     )
+
     np.testing.assert_allclose(
-        per_token_logps,
-        np.array([
-            [-5.876301, -8.700251, -5.046069, -5.788748],
-            [-6.071025, -7.5328417, -5.9712567, -4.653783],
-            [-6.039485, -8.264197, -6.2771187, -4.767109],
-        ]),
-        atol=1e-1,
-        rtol=1e-2,
+        per_token_logps, expected_logps, atol=1e-1, rtol=1e-2
     )
+
     _, logits = common.compute_per_token_logps(
         graphdef,
         state,
@@ -151,8 +285,12 @@ class CommonTest(parameterized.TestCase):
         pad_id=0,
         eos_id=-1,
         return_logits=True,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
     )
-    np.testing.assert_equal(logits.shape, (3, 4, 256))
+    np.testing.assert_equal(
+        logits.shape, (expected_logps.shape[0], expected_logps.shape[1], 256)
+    )
 
   def test_np_make_completion_mask(self):
     completion_ids = np.array(

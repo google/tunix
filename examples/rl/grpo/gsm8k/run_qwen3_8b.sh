@@ -17,7 +17,7 @@
 # tunix/cli/base_agentic_config.yaml plus explicit CLI overrides.
 #
 # Usage:
-#   bash /examples/rl/grpo/gsm8k/run_qwen3_8b.sh
+#   checkpoint_dir="" bash /examples/rl/grpo/gsm8k/run_qwen3_8b.sh
 #
 # Run from the tunix repo root.
 
@@ -44,6 +44,12 @@ num_generations="${num_generations:-4}"
 
 train_mesh="${train_mesh:-(8,1)}"
 rollout_mesh="${rollout_mesh:-(1,8)}"
+
+checkpoint_dir="${checkpoint_dir:-gs://tunix/rl/checkpoints/gsm8k/qwen3/01}"
+checkpoint_suffix="${checkpoint_suffix:-$(printf '%04d' "$((RANDOM % 10000))")}"
+if [[ -n "$checkpoint_dir" && "$checkpoint_dir" != "null" ]]; then
+  checkpoint_dir="${checkpoint_dir}_${checkpoint_suffix}"
+fi
 
 max_steps=$(awk "BEGIN {
   value = $num_batches * $num_train_epochs * $train_fraction;
@@ -81,6 +87,7 @@ python -m tunix.cli.grpo_main \
   `# -- Data -------------------------------------------------------------` \
   data_source="huggingface" \
   dataset_name="openai/gsm8k:main" \
+  prompt_key="question" \
   \
   `# -- Training loop ----------------------------------------------------` \
   training_mode="agentic_grpo" \
@@ -155,7 +162,7 @@ python -m tunix.cli.grpo_main \
   rl_training_config.train_micro_batch_size="$train_micro_batch_size" \
   rl_training_config.rollout_micro_batch_size="$rollout_micro_batch_size" \
   rl_training_config.compute_logps_micro_batch_size="$compute_logps_micro_batch_size" \
-  rl_training_config.checkpoint_root_directory="/tmp/tunix/checkpoints/gsm8k_qwen3_8b" \
+  rl_training_config.checkpoint_root_directory="$checkpoint_dir" \
   rl_training_config.checkpointing_options.save_interval_steps=250 \
   rl_training_config.checkpointing_options.max_to_keep=4 \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/gsm8k_qwen3_8b" \

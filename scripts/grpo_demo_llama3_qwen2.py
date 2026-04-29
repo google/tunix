@@ -629,6 +629,7 @@ dataset = create_dataset(
     tokenizer=model_tokenizer,
     tfds_download=True,
     split="train",
+    apply_chat_template_to_dataset=True,
 )
 
 train_dataset, val_dataset = data_lib.post_init_dataset(
@@ -647,6 +648,7 @@ test_dataset = create_dataset(
     tokenizer=model_tokenizer,
     tfds_download=True,
     split="test",
+    apply_chat_template_to_dataset=True,
 )
 
 test_dataset, _ = data_lib.post_init_dataset(

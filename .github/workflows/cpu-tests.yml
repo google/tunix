@@ -66,3 +66,7 @@ jobs:
       - name: Run perf tests
         run: |
           python -m pytest tests/perf/ -v --tb=short
+
+      - name: Run model registry tests
+        run: |
+          python -m pytest tests/models/registry_test.py -v --tb=short

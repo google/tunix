@@ -14,13 +14,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import threading
 from typing import Any
 
+from absl import logging
 import numpy as np
+from tunix.perf.experimental import constants
 from tunix.perf.experimental import timeline
-
 
 JaxDevice = Any
 
@@ -47,6 +48,30 @@ def is_host_timeline(tl_id: str) -> bool:
     True if the timeline ID starts with 'host-', False otherwise.
   """
   return tl_id.startswith("host-")
+
+
+def generate_queued_timeline_id(tl_id: str) -> str:
+  """Generates a string ID for a queued timeline based on a base timeline ID.
+
+  Args:
+    tl_id: The base timeline ID.
+
+  Returns:
+    The queued timeline ID.
+  """
+  return f"{tl_id}_queue"
+
+
+def is_queued_timeline(tl_id: str) -> bool:
+  """Checks if the timeline ID corresponds to a queued timeline.
+
+  Args:
+    tl_id: The timeline ID to check.
+
+  Returns:
+    True if the timeline ID ends with '_queue', False otherwise.
+  """
+  return tl_id.endswith("_queue")
 
 
 def generate_device_timeline_id(device_id: str | JaxDevice) -> str:
@@ -98,18 +123,101 @@ def generate_device_timeline_ids(
 
 
 def is_timeline_only_of_allowed_type(
-    tl: timeline.Timeline, allowed_span_names: Sequence[str]
+    tl: timeline.Timeline,
+    allowed_span_names: Sequence[str],
+    include_cur_step: bool = False,
 ) -> bool:
   """Checks if all spans in a timeline are of allowed types.
 
   Args:
     tl: The timeline to check.
     allowed_span_names: A sequence of allowed span names.
+    include_cur_step: Whether to include the uncommitted cur_step spans.
 
   Returns:
     True if the timeline has spans and all spans have a name in
     `allowed_span_names`, False otherwise.
   """
-  if not tl.spans:
-    return False
-  return all(span.name in allowed_span_names for span in tl.spans.values())
+  has_spans = False
+  steps = tl.all_steps if include_cur_step else tl.committed_steps
+  for step in steps:
+    for span in step.values():
+      has_spans = True
+      if span.name not in allowed_span_names:
+        return False
+  return has_spans
+
+
+def sequentialize_overlapping_spans(
+    spans_dict: Mapping[int, timeline.Span],
+) -> tuple[Mapping[int, timeline.Span], Mapping[int, timeline.Span]]:
+  """Sequentializes overlapping spans into non-overlapping active and queue spans.
+
+  If spans overlap, they are assumed to be executed sequentially. The first span
+  is active immediately, and subsequent overlapping spans are queued.
+    - For spans that the active duration is entirely contained within another
+    span,
+    the contained span is dropped from the active spans and only added to the
+    queue spans.
+    - If multiple spans overlap with a long-running span, their "queue" spans
+    will also be sequentialized (i.e., no two queue spans will overlap).
+
+  Args:
+    spans_dict: A dictionary of active spans.
+
+  Returns:
+    A tuple of two dictionaries: (active_spans, queue_spans).
+  """
+  active_spans: dict[int, timeline.Span] = {}
+  queue_spans: dict[int, timeline.Span] = {}
+
+  if not spans_dict:
+    return active_spans, queue_spans
+
+  sorted_spans = sorted(spans_dict.values(), key=lambda s: (s.begin, s.id))
+
+  current_end = float("-inf")
+  last_queue_end = float("-inf")
+
+  for s in sorted_spans:
+    if s.begin < current_end:
+      active_begin = current_end
+      active_end = max(active_begin, s.end)
+
+      queue_begin = max(s.begin, last_queue_end)
+      if queue_begin < active_begin:
+        queue_span = timeline.Span(
+            name=constants.QUEUE,
+            begin=queue_begin,
+            id=s.id,
+            parent_id=s.parent_id,
+            tags={constants.NAME: s.name},
+        )
+        queue_span.end = active_begin
+        queue_spans[s.id] = queue_span
+        last_queue_end = active_begin
+    else:
+      active_begin = s.begin
+      active_end = s.end
+
+    if active_begin < active_end:
+      active_span = timeline.Span(
+          name=s.name,
+          begin=active_begin,
+          id=s.id,
+          parent_id=s.parent_id,
+          tags=dict(s.tags) if s.tags else None,
+      )
+      active_span.end = active_end
+      active_spans[s.id] = active_span
+
+      current_end = active_end
+    else:
+      logging.warning(
+          "Span %r has zero or negative duration due to complete overlap with"
+          " another span and will be dropped from active spans. Span: %r",
+          s.name,
+          s,
+      )
+
+  return active_spans, queue_spans

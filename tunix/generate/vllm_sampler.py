@@ -191,7 +191,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
-
+    
     # Synchronization point before weight sync
     jax.effects_barrier()
 

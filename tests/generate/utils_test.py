@@ -1428,6 +1428,198 @@ class UtilsTest(parameterized.TestCase):
     self.assertTrue(jnp.allclose(result.params[src_key], expected))
 
 
+  def test_transfer_state_directly_fuses_moe_weights(self):
+    """Tests that wi_0 and wi_1 are fused into wi when target expects it."""
+    wi_0_val = jnp.array([[1.0, 2.0], [5.0, 6.0]], dtype=jnp.float32)
+    wi_1_val = jnp.array([[3.0, 4.0], [7.0, 8.0]], dtype=jnp.float32)
+    
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(wi_0_val),
+            wi_1=nnx.Param(wi_1_val),
+        )
+    )
+    
+    dst_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32))
+        )
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(src_state, dst_state, reshard_fn=mock_reshard)
+
+    expected_wi = jnp.concatenate([wi_0_val, wi_1_val], axis=-1)
+    np.testing.assert_array_equal(
+        dst_state['layers']['wi'][...],
+        expected_wi,
+    )
+
+  def test_transfer_state_directly_fuses_moe_weights_scanned_to_unrolled(self):
+    """Scanned wi_0/wi_1 are unstacked and fused into per-layer wi (unrolled dst)."""
+    # 2 layers, 2 experts, 2 features each -> fused shape [2, 4] per layer
+    wi_0_val = jnp.array(
+        [[[1., 2.], [5., 6.]], [[10., 20.], [50., 60.]]], dtype=jnp.float32
+    )  # [num_layers=2, experts=2, features=2]
+    wi_1_val = jnp.array(
+        [[[3., 4.], [7., 8.]], [[30., 40.], [70., 80.]]], dtype=jnp.float32
+    )
+
+    src_state = nnx.Dict(
+        layers=nnx.Dict(
+            wi_0=nnx.Param(wi_0_val),
+            wi_1=nnx.Param(wi_1_val),
+        )
+    )
+    dst_state = nnx.Dict(**{
+        'layers_0': nnx.Dict(wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32))),
+        'layers_1': nnx.Dict(wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32))),
+    })
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=mock_reshard, scan_axis=0
+    )
+
+    np.testing.assert_array_equal(
+        dst_state['layers_0']['wi'][...],
+        jnp.concatenate([wi_0_val[0], wi_1_val[0]], axis=-1),
+    )
+    np.testing.assert_array_equal(
+        dst_state['layers_1']['wi'][...],
+        jnp.concatenate([wi_0_val[1], wi_1_val[1]], axis=-1),
+    )
+
+  def test_transfer_state_directly_delete_dst_buffers_no_chunking(self):
+    """delete_dst_buffers=True must never pass deleted arrays to reshard_fn."""
+    src_val = jnp.array([1.0, 2.0, 3.0])
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(src_val)))
+    )
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(
+            layer0=nnx.Dict(weight=nnx.Param(jnp.zeros(3, dtype=jnp.float32)))
+        )
+    )
+
+    inspected_targets = []
+
+    def reshard_fn(source, target):
+      inspected_targets.extend(jax.tree_util.tree_leaves(target))
+      return source
+
+    utils.transfer_state_directly(
+        src_state, dst_state, reshard_fn=reshard_fn, delete_dst_buffers=True
+    )
+
+    self.assertNotEmpty(inspected_targets)
+    for leaf in inspected_targets:
+      # Pre-fix this would have been a (possibly deleted) jax.Array.
+      self.assertIsInstance(
+          leaf, (NamedSharding, sharding.SingleDeviceSharding)
+      )
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['weight'][...], src_val
+    )
+
+  def test_transfer_state_directly_delete_dst_buffers_chunked(self):
+    """delete_dst_buffers=True works through the chunked path too."""
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(**{
+            f'layer{i}': nnx.Dict(weight=nnx.Param(jnp.array([float(i + 1)])))
+            for i in range(4)
+        })
+    )
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(**{
+            f'layer{i}': nnx.Dict(weight=nnx.Param(jnp.array([0.0])))
+            for i in range(4)
+        })
+    )
+
+    inspected_targets = []
+
+    def reshard_fn(source, target):
+      inspected_targets.extend(jax.tree_util.tree_leaves(target))
+      return source
+
+    utils.transfer_state_directly(
+        src_state,
+        dst_state,
+        reshard_fn=reshard_fn,
+        delete_dst_buffers=True,
+        reshard_chunk_size=2,
+    )
+
+    self.assertNotEmpty(inspected_targets)
+    for leaf in inspected_targets:
+      self.assertIsInstance(
+          leaf, (NamedSharding, sharding.SingleDeviceSharding)
+      )
+    for i in range(4):
+      np.testing.assert_array_equal(
+          dst_state['decoder'][f'layer{i}']['weight'][...],
+          jnp.array([float(i + 1)]),
+      )
+
+  def test_transfer_state_directly_delete_dst_buffers_skips_aliased_buffers(
+      self,
+  ):
+    """When src and dst Variables share a backing jax.Array, skip deletion."""
+    shared = jnp.array([1.0, 2.0, 3.0])
+    src_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(shared)))
+    )
+    # Same backing jax.Array object on both sides — typical of collocated
+    # trainer/sampler setups where the rollout state aliases trainer weights.
+    dst_state = nnx.Dict(
+        decoder=nnx.Dict(layer0=nnx.Dict(weight=nnx.Param(shared)))
+    )
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state,
+        dst_state,
+        reshard_fn=mock_reshard,
+        delete_dst_buffers=True,
+    )
+
+    # If deletion misfired the next access raises "Array has been deleted".
+    np.testing.assert_array_equal(np.asarray(shared), [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(
+        dst_state['decoder']['layer0']['weight'][...], [1.0, 2.0, 3.0]
+    )
+
+  def test_transfer_state_directly_delete_dst_buffers_scanned_layers(self):
+    """Unstacked-slice targets remain valid after delete_dst_buffers=True."""
+    scanned = jnp.arange(8, dtype=jnp.float32).reshape(2, 4)
+    src_state = nnx.Dict(layers=nnx.Dict(weight=nnx.Param(scanned)))
+    dst_state = nnx.Dict(**{
+        'layers_0': nnx.Dict(
+            weight=nnx.Param(jnp.zeros(4, dtype=jnp.float32))
+        ),
+        'layers_1': nnx.Dict(
+            weight=nnx.Param(jnp.zeros(4, dtype=jnp.float32))
+        ),
+    })
+
+    mock_reshard = lambda source, target: source
+    utils.transfer_state_directly(
+        src_state,
+        dst_state,
+        reshard_fn=mock_reshard,
+        scan_axis=0,
+        delete_dst_buffers=True,
+    )
+
+    np.testing.assert_array_equal(
+        dst_state['layers_0']['weight'][...], scanned[0]
+    )
+    np.testing.assert_array_equal(
+        dst_state['layers_1']['weight'][...], scanned[1]
+    )
+
+
 class ResolveParallelismSizesTest(parameterized.TestCase):
 
   def _make_mesh(self, total_devices):

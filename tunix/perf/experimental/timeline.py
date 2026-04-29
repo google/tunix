@@ -140,44 +140,102 @@ def _async_wait(
 
 
 class Timeline:
-  """A sequence of spans or events.
+  """A thread-safe data structure for recording spans of execution time.
+
+  A timeline represents a chronological sequence of spans or events. It supports
+  nested spans by keeping track of the active span stack, allowing parent-child
+  relationships to model hierarchical execution.
+
+  The timeline is organized into a series of steps, defined by when `commit_step`
+  is called. It is expected that spans do not cross commit boundaries (i.e.,
+  all spans started in a step must finish before the step is committed).
 
   Attributes:
     id: A unique identifier for the timeline.
     born: The time when the timeline was created.
-    spans: A dictionary mapping span IDs to Span objects.
+    _spans_stack: Stack of active (uncompleted) synchronous span IDs.
+    _cur_step: Dict of active and completed spans accumulated in this step.
+    _last_span_id: ID of the last created span.
+    _committed_steps: Archive of committed step dictionaries. Each dictionary
+      represents a step and contains the spans that were active during that
+      step. Once a step is committed, the spans in cur_step are moved to the
+      committed steps and cannot be modified. This allows for lock-free read
+      access to the committed spans and copy-on-write for updates.
+    _lock: A reentrant lock to protect timeline state.
   """
 
   def __init__(self, id: str, born: float):
+    """Initializes the Timeline instance.
+
+    Args:
+      id: A unique string identifier for the timeline.
+      born: The creation time of the timeline, used as the base for relative
+        time calculations.
+    """
     self.id = id
     self.born = born
-    self.spans: dict[int, Span] = {}
-    self._active_spans: list[int] = []  # stack of active span IDs
-    self._lock = threading.Lock()
+    self._spans_stack: list[int] = []
+    self._cur_step: dict[int, Span] = {}
     self._last_span_id = -1
+    self._committed_steps: list[dict[int, Span]] = []
+    self._lock = threading.RLock()
+
+  @property
+  def committed_steps(self) -> list[dict[int, Span]]:
+    """The immutable chunks of committed steps lock-free."""
+    return self._committed_steps
+
+  @property
+  def cur_step(self) -> dict[int, Span]:
+    """A copy of the active current step spans."""
+    with self._lock:
+      return dict(self._cur_step)
+
+  @property
+  def all_steps(self) -> list[dict[int, Span]]:
+    """A list of all step dictionaries (history and current)."""
+    with self._lock:
+      return self._committed_steps + [dict(self._cur_step)]
 
   def start_span(
       self, name: str, begin: float, tags: Mapping[str, Any] | None = None
   ) -> Span:
-    """Starts a new span and pushes it to active spans."""
+    """Starts a new span and pushes it to active spans.
+
+    Args:
+      name: The name of the span.
+      begin: The start time of the span.
+      tags: An optional dictionary of tags to associate with the span.
+
+    Returns:
+      The newly created Span object.
+    """
     with self._lock:
-      parent_id = self._active_spans[-1] if self._active_spans else None
+      parent_id = self._spans_stack[-1] if self._spans_stack else None
       self._last_span_id += 1
       span_id = self._last_span_id
       _span = Span(
           name=name, begin=begin, id=span_id, parent_id=parent_id, tags=tags
       )
-      self.spans[span_id] = _span
-      self._active_spans.append(span_id)
+      self._cur_step[span_id] = _span
+      self._spans_stack.append(span_id)
     return _span
 
   def stop_span(self, end: float) -> None:
-    """Ends the current span on the stack."""
+    """Ends the current span on the stack.
+
+    Args:
+      end: The end time to record for the span.
+
+    Raises:
+      ValueError: If there are no active spans to end, or if the end time is
+        before the span's begin time.
+    """
     with self._lock:
-      if not self._active_spans:
+      if not self._spans_stack:
         raise ValueError(f"{self.id}: no more spans to end.")
-      span_id = self._active_spans.pop()
-      _span = self.spans[span_id]
+      span_id = self._spans_stack.pop()
+      _span = self._cur_step[span_id]
       if _span.begin > end:
         raise ValueError(
             f"{self.id}: span '{_span.name}' ended at {end:.6f} before it began"
@@ -185,28 +243,55 @@ class Timeline:
         )
       _span.end = end
 
-  def snapshot(self) -> Timeline:
-    """Returns a snapshot of the timeline with only completed spans."""
+  def commit_step(self) -> None:
+    """Commits current step spans to history, purging any uncompleted/dangling spans."""
     with self._lock:
-      tl = self.__class__(self.id, self.born)
-      tl.spans = dict(self.spans)
-      # Remove any active (uncompleted) spans from the snapshot.
-      for span_id in self._active_spans:
-        tl.spans.pop(span_id, None)
-      return tl
+      to_remove = []
+      for sid, span in self._cur_step.items():
+        if span.end == float("inf") or sid in self._spans_stack:
+          logging.warning(
+              "Purging uncompleted span %r crossing step boundary in"
+              " timeline %s",
+              span.name,
+              self.id,
+          )
+          to_remove.append(sid)
+
+      for sid in to_remove:
+        self._cur_step.pop(sid, None)
+      self._spans_stack.clear()
+
+      # Archive current step dict and reset via copy-on-write
+      self._committed_steps = list(self._committed_steps) + [self._cur_step]
+
+      self._cur_step = {}
 
   def __repr__(self) -> str:
-    out = f"Timeline({self.id}, {self.born:.6f})\n"
+    parts = [f"Timeline({self.id}, {self.born:.6f})\n"]
     with self._lock:
-      for s in sorted(self.spans.values(), key=lambda span: span.id):
-        out += f"{s._format_relative(self.born)}\n"
-    return out
+      if self._cur_step:
+        parts.append(f"Current Step -{len(self._committed_steps)}:\n")
+        for s in sorted(self._cur_step.values(), key=lambda span: span.id):
+          parts.append(f"  {s._format_relative(self.born)}\n")
+      for i, step in enumerate(reversed(self._committed_steps)):
+        if step:
+          parts.append(f"Committed Step -{i}:\n")
+          for s in sorted(step.values(), key=lambda span: span.id):
+            parts.append(f"  {s._format_relative(self.born)}\n")
+    return "".join(parts)
 
 
 class AsyncTimeline(Timeline):
   """A timeline with asynchronously closing spans."""
 
   def __init__(self, id: str, born: float):
+    """Initializes the AsyncTimeline instance.
+
+    Args:
+      id: A unique string identifier for the timeline.
+      born: The creation time of the timeline, used as the base for relative
+        time calculations.
+    """
     super().__init__(id, born)
     self._threads: list[threading.Thread] = []
 
@@ -234,7 +319,7 @@ class AsyncTimeline(Timeline):
       # Async spans cannot be parents of other spans (sync or async), so we
       # don't push the new span_id to self._active_spans. They are always
       # "leaves".
-      parent_id = self._active_spans[-1] if self._active_spans else None
+      parent_id = self._spans_stack[-1] if self._spans_stack else None
       self._last_span_id += 1
       span_id = self._last_span_id
 
@@ -257,7 +342,7 @@ class AsyncTimeline(Timeline):
             tags=tags,
         )
         _span.end = end
-        self.spans[span_id] = _span
+        self._cur_step[span_id] = _span
 
     def on_failure(e: Exception) -> None:
       # TODO(noghabi):Capture the span even if it fails, but add a tag that it
@@ -285,8 +370,14 @@ class AsyncTimeline(Timeline):
 
 
 class BatchAsyncTimelines:
+  """A helper class to record spans across multiple AsyncTimeline instances."""
 
   def __init__(self, timelines: list[AsyncTimeline]):
+    """Initializes the BatchAsyncTimelines instance.
+
+    Args:
+      timelines: A list of AsyncTimeline objects to manage.
+    """
     self._timelines = timelines
 
   def span(

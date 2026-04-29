@@ -15,7 +15,6 @@
 """Base class for Agentic RL Learners."""
 
 from __future__ import annotations
-
 import abc
 import time
 import asyncio
@@ -26,9 +25,7 @@ import dataclasses
 import itertools
 import queue
 import threading
-    
-import tracemalloc
-from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
+from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
 
 from absl import logging
 import flax
@@ -92,6 +89,8 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   num_generations: int = 1
   num_iterations: int = 1
   episode_timeout: float = 1800.0
+  filter_statuses: Optional[Set] = None
+  overlong_filter: bool = False
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -267,7 +266,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "True for AgenticRLLearner if using vLLM engine. Please set this "
             "before initializing RLCluster."
         )
-
   def _compute_rewards(
       self,
       prompts: List[str],
@@ -392,7 +390,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     return agent, env
 
   def _model_call(
-      self, chat_lists: List[Dict[str, str]], env: Any = None
+      self, chat_lists: List[Dict[str, str]], env: Any = None, 
   ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
     if env:
@@ -415,6 +413,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
+
+
     result = self.rl_cluster.generate(
         prompts=chat_lists,
         apply_chat_template=False if self.chat_parser else True,
@@ -432,6 +432,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         timeout=self.algo_config.episode_timeout,
+        overlong_filter=self.algo_config.overlong_filter,
+        filter_statuses=self.algo_config.filter_statuses,
         perf_v2=self.rl_cluster.perf_v2,
     )
     return rollout_orchestrator.RolloutOrchestrator(
@@ -766,6 +768,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
     )
+    if self._training_config.max_seq_token_per_tpu is not None:
+      logging.info(
+          "Using sequence packing with max_seq_token_per_tpu: %d",
+          self._training_config.max_seq_token_per_tpu,
+      )
+      train_data_gen = rl_utils.pack_sequences(
+          train_data_gen, self._training_config.max_seq_token_per_tpu
+      )
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
     print(f"micro_batches_per_full_batch = ")

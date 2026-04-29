@@ -156,6 +156,7 @@ def create_dataset(
     tokenizer=None,
     tfds_download: bool = True,
     split: str = "train",
+    apply_chat_template_to_dataset: bool = False,
 ):
   """Creates a dataset based on the given name.
 
@@ -172,6 +173,11 @@ def create_dataset(
     tfds_download: the download flag when using TFDS datasets. If false, the
       data_dir used will be set to `None` and chosen by default by tfds.
     split: The dataset split to use (e.g., "train", "test").
+    apply_chat_template_to_dataset: Whether to apply chat template to dataset.
+      If true, the dataset is expected to have a "question" field and an
+      "answer" field, and the output will have a "prompts" field with the
+      applied template. If false, the dataset is returned as is without
+      applying the template.
 
   Returns:
     A batched grain.MapDataset or grain.experimental.ParquetIterDataset.
@@ -200,6 +206,7 @@ def create_dataset(
     )
 
   # Apply template
-  ds = apply_template(ds, tokenizer, tokenize=False)
+  if apply_chat_template_to_dataset:
+    ds = apply_template(ds, tokenizer, tokenize=False)
 
   return ds

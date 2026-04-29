@@ -185,7 +185,9 @@ def create_gemma_model_with_nnx_conversion(
           ' model name.', model_name
       )
       naming_info = naming.ModelNaming(model_name=model_name)
-      version_dashed = naming_info.model_version.replace('_', '-')
+      version_dashed = None
+      if naming_info.model_version is not None:
+        version_dashed = naming_info.model_version.replace('_', '-')
 
       if naming_info.model_family == 'gemma2':
         dir_name = f'gemma2-{version_dashed}'

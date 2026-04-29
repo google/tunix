@@ -17,7 +17,7 @@
 # explicit CLI overrides.
 #
 # Usage:
-#   bash examples/deepswe/run_deepswe_disagg_v5p_32.sh
+#   checkpoint_dir="" bash examples/deepswe/run_deepswe_disagg_v5p_32.sh
 #
 # Run from the tunix repo root.
 
@@ -40,10 +40,17 @@ mini_batch_size="${mini_batch_size:-1}"
 train_micro_batch_size="${train_micro_batch_size:-1}"
 rollout_micro_batch_size="${rollout_micro_batch_size:-1}"
 
-
 num_generations="${num_generations:-2}"
+max_response_length="${max_response_length:-8192}"
 
+trainer_mesh="${trainer_mesh:-(8,2)}"
+rollout_mesh="${rollout_mesh:-(2,8)}"
 
+checkpoint_dir="${checkpoint_dir:-gs://tunix/rl/checkpoints/01}"
+checkpoint_suffix="${checkpoint_suffix:-$(printf '%04d' "$((RANDOM % 10000))")}"
+if [[ -n "$checkpoint_dir" && "$checkpoint_dir" != "null" ]]; then
+  checkpoint_dir="${checkpoint_dir}_${checkpoint_suffix}"
+fi
 
 
 max_steps=$(awk "BEGIN {
@@ -72,11 +79,11 @@ python -m tunix.cli.grpo_main \
   model_config.rng_seed=42 \
   model_config.model_display=false \
   model_config.remat_config=3 \
-  actor_model_config.mesh.shape="(8,2)" \
+  actor_model_config.mesh.shape="$trainer_mesh" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   reference_model_config.mesh=null \
   reference_model_config.same_mesh_as="actor" \
-  rollout_model_config.mesh.shape="(2,8)" \
+  rollout_model_config.mesh.shape="$rollout_mesh" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
   \
   `# ── Data ─────────────────────────────────────────────────────────────` \
@@ -102,8 +109,8 @@ python -m tunix.cli.grpo_main \
   \
   `# ── Rollout config ───────────────────────────────────────────────────` \
   rollout_config.max_prompt_length=4096 \
-  rollout_config.total_generation_steps=8192 \
-  rollout_config.max_tokens_to_generate=8192 \
+  rollout_config.total_generation_steps="$max_response_length" \
+  rollout_config.max_tokens_to_generate="$max_response_length" \
   rollout_config.temperature=1.0 \
   rollout_config.top_p=null \
   rollout_config.top_k=null \
@@ -149,7 +156,7 @@ python -m tunix.cli.grpo_main \
   \
   `# ── GRPO algorithm ───────────────────────────────────────────────────` \
   agentic_grpo_config.num_generations="$num_generations" \
-  agentic_grpo_config.max_response_length=8192 \
+  agentic_grpo_config.max_response_length="$max_response_length" \
   agentic_grpo_config.num_iterations=1 \
   agentic_grpo_config.beta=0.001 \
   agentic_grpo_config.epsilon=0.2 \
@@ -179,7 +186,7 @@ python -m tunix.cli.grpo_main \
   rl_training_config.train_micro_batch_size=1 \
   rl_training_config.rollout_micro_batch_size=1 \
   rl_training_config.compute_logps_micro_batch_size=1 \
-  rl_training_config.checkpoint_root_directory="/tmp/tunix/checkpoints/deepswe" \
+  rl_training_config.checkpoint_root_directory="$checkpoint_dir" \
   rl_training_config.checkpointing_options.save_interval_steps=100 \
   rl_training_config.checkpointing_options.max_to_keep=4 \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/deepswe" \

@@ -152,6 +152,28 @@ class ExportTest(parameterized.TestCase):
     )
     self.assertIs(exporter._writer, mock_writer_cls.return_value)
 
+  def test_safe_write_exception(self):
+    with export.PerfMetricsExport(enable_trace_writer=False) as exporter:
+      with mock.patch.object(exporter, "_writer", autospec=True) as mock_writer:
+        mock_writer.write_timelines.side_effect = ValueError("test error")
+        with self.assertLogs(level="ERROR") as logs:
+          exporter._safe_write({})
+        self.assertTrue(
+            any("Background trace export failed." in log for log in logs.output)
+        )
+
+  def test_export_metrics_after_shutdown(self):
+    with export.PerfMetricsExport(enable_trace_writer=True) as exporter:
+      exporter.shutdown(wait=False)
+      with self.assertLogs(level="WARNING") as logs:
+        exporter.export_metrics({})
+      self.assertTrue(
+          any(
+              "PerfMetricsExport background worker has been shut down." in log
+              for log in logs.output
+          )
+      )
+
   @mock.patch.object(
       export.trace_writer_lib,
       "PerfettoTraceWriter",

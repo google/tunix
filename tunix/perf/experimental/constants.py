@@ -22,7 +22,7 @@ MICRO_BATCH = "micro_batch_step"
 ROLE = "role"
 GROUP_ID = "group_id"
 PAIR_INDEX = "pair_index"
-
+NAME = "NAME"
 # Common Span / Event names.
 
 DATA_LOADING = "data_loading"
@@ -34,3 +34,4 @@ OLD_ACTOR_INFERENCE = "old_actor_inference"
 ADVANTAGE_COMPUTATION = "advantage_computation"
 PEFT_TRAIN = "peft_train"
 ENVIRONMENT = "environment"
+QUEUE = "queue"

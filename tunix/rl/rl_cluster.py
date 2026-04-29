@@ -510,7 +510,12 @@ class RLCluster:
 
         if export_fn_v2:
           self._perf_v2 = perf_tracer_v2.PerfTracer(
-              devices, export_fn=export_fn_v2
+              devices,
+              export_fn=export_fn_v2,
+              concurrent_device_spans=[
+                  perf_constants.ROLLOUT,
+                  perf_constants.ENVIRONMENT,
+              ],
           )
 
     # 2. Initialize inference worker.

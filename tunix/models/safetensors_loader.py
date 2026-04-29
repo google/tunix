@@ -267,21 +267,23 @@ def load_and_create_model_orig(
     def make_update_tensor_fn(current_file_tensors):
       def update_tensor(path, param, shard=None):
         current_path_key = path_to_key(path)
-        if current_path_key in current_file_tensors:
-          loaded_arr = current_file_tensors[current_path_key]
-          if loaded_arr.shape != param.shape:
-            raise ValueError(
-                f'Shape mismatch for {current_path_key}: got'
-                f' {loaded_arr.shape}, expected {param.shape}'
-            )
-          if shard is not None:
-            return jax.device_put(loaded_arr, shard)
-          else:
-            return jax.device_put(loaded_arr, jax.devices()[0])
-        else:
-          logging.warning(
-              f'Key {current_path_key} not found in loaded tensors for current file.'
-          )
+
+        # nnx.Param adds a .value suffix to the key
+        possible_keys = [current_path_key, f'{current_path_key}.value']
+
+        for k in possible_keys:
+          if k in current_file_tensors:
+            loaded_arr = current_file_tensors[k]
+            if loaded_arr.shape != param.shape:
+              raise ValueError(
+                  f'Shape mismatch for {k}: got'
+                  f' {loaded_arr.shape}, expected {param.shape}'
+              )
+            if shard is not None:
+              return jax.device_put(loaded_arr, shard)
+            else:
+              return jax.device_put(loaded_arr, jax.devices()[0])
+
         return param
 
       return update_tensor

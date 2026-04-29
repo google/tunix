@@ -29,6 +29,8 @@ from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-imp
 class Trainer(peft_trainer.PeftTrainer):
   """Handles additional RL metrics logging and display."""
 
+  supports_sequence_packing = True
+
   def __init__(
       self,
       model: nnx.Module,

@@ -89,7 +89,8 @@ jobs:
     - name: Run tunix model tests
       run: |
         python -m pytest tests/models/ -v --tb=short -m "not cpu_only and not gpu_only" \
-          --ignore=tests/models/naming_test.py
+          --ignore=tests/models/naming_test.py \
+          --ignore=tests/models/registry_test.py
 
     - name: Run tunix generation tests (PASSED only)
       run: |

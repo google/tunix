@@ -70,10 +70,10 @@ class ModelNaming:
   # and then remove str support.
   model_id: HFModelId | ConfigId | str | None = None
   model_name: str | None = None
-  model_family: str = dataclasses.field(init=False)
-  model_version: str = dataclasses.field(init=False)
-  model_config_category: str = dataclasses.field(init=False)
-  model_config_id: str = dataclasses.field(init=False)
+  model_family: str | None = None
+  model_version: str | None = None
+  model_config_category: str | None = None
+  model_config_id: str | None = None
 
   def __post_init__(self):
     if self.model_id:
@@ -94,13 +94,35 @@ class ModelNaming:
     object.__setattr__(self, 'model_name', model_name)
 
     family, version = get_model_family_and_version(model_name)
+    if self.model_family is not None and self.model_family != family:
+      raise ValueError(
+          f'model_family mismatch: {self.model_family} != {family}'
+      )
     object.__setattr__(self, 'model_family', family)
+
+    if self.model_version is not None and self.model_version != version:
+      raise ValueError(
+          f'model_version mismatch: {self.model_version} != {version}'
+      )
     object.__setattr__(self, 'model_version', version)
 
-    object.__setattr__(
-        self, 'model_config_category', get_model_config_category(model_name)
-    )
-    object.__setattr__(self, 'model_config_id', get_model_config_id(model_name))
+    category = get_model_config_category(model_name)
+    if (
+        self.model_config_category is not None
+        and self.model_config_category != category
+    ):
+      raise ValueError(
+          f'model_config_category mismatch: {self.model_config_category} !='
+          f' {category}'
+      )
+    object.__setattr__(self, 'model_config_category', category)
+
+    config_id = get_model_config_id(model_name)
+    if self.model_config_id is not None and self.model_config_id != config_id:
+      raise ValueError(
+          f'model_config_id mismatch: {self.model_config_id} != {config_id}'
+      )
+    object.__setattr__(self, 'model_config_id', config_id)
 
 
 @dataclasses.dataclass(frozen=True)

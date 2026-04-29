@@ -96,6 +96,8 @@ tokenizer_config:
 data_source: ""
 data_directory: ""
 data_module: ""
+# For agentic grpo cli, we apply template in chat parser, not in dataset.
+apply_chat_template_to_dataset: false
 data_config: {}
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16

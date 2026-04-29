@@ -170,6 +170,7 @@ class HuggingFaceDatasetTest(absltest.TestCase):
           data_source="huggingface",
           dataset="openai/gsm8k",
           split="test",
+          apply_chat_template_to_dataset=True,
       )
 
     mock_loader.assert_called_once_with(

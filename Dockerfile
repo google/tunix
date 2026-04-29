@@ -7,7 +7,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y git python3 python3-pip && \
+    apt-get install -y build-essential git python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
 # Install nano for easier file editing

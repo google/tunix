@@ -140,7 +140,6 @@ class ModelConfig:
   dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
-  tie_word_embeddings: bool = True
 
   # MoE config
   enable_moe: bool = False

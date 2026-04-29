@@ -96,6 +96,8 @@ tokenizer_config:
 data_source: "tfds"
 data_directory: ""
 data_module: ""
+# For non agentic grpo cli, we apply chat template to dataset by default.
+apply_chat_template_to_dataset: true
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 max_target_length: 256

@@ -61,7 +61,15 @@ class CheckpointManager:
                 use_zarr3=False,
             ),
         }
-        logging.info('Using persistence APIs for checkpointing with Pathways.')
+        if os.getenv('ENABLE_PATHWAYS_PERSISTENCE', ''):
+          logging.info(
+              'Using persistence API for checkpointing with Pathways.'
+          )
+        else:
+          logging.warning(
+              'Checkpointing without the persistence API, be aware of potential'
+              ' OOM.'
+          )
       else:
         item_handlers = {
             'model_params': ocp.PyTreeCheckpointHandler(),

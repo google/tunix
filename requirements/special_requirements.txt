@@ -1,5 +1,5 @@
---extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
---find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
---pre
+# --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+# --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
+# --pre
 
-tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@581c4d49959c30638a3bdcecb981fe83ab85830e
+tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@8dd3107ac1d50b823c2a4edd036dd181775b1c94

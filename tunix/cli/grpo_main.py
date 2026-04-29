@@ -30,10 +30,11 @@ Usage::
     python -m tunix.cli.grpo_main examples/deepswe/configs/qwen3_32b.yaml
 """
 
+import collections
 import dataclasses
 import importlib
 import os
-import collections
+from types import ModuleType
 from typing import Any
 
 from absl import app
@@ -106,15 +107,18 @@ class GrpoPipeline(config.HyperParameters):
       "rollout": rl_cluster_lib.Role.ROLLOUT,
   }
 
-
   def _resolve_split_role(self, role_name: str) -> rl_cluster_lib.Role:
     normalized = role_name.strip().lower()
     if normalized not in self._SPLIT_ROLE_ALIASES:
       valid_roles = sorted(self._SPLIT_ROLE_ALIASES)
-      raise ValueError(f"Unknown role name {role_name!r}. Expected one of {valid_roles}.")
+      raise ValueError(
+          f"Unknown role name {role_name!r}. Expected one of {valid_roles}."
+      )
     return self._SPLIT_ROLE_ALIASES[normalized]
 
-  def _get_same_mesh_as_map(self) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
+  def _get_same_mesh_as_map(
+      self,
+  ) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
     same_mesh_as = {}
     for role, model_key in self._ROLE_TO_MODEL_KEY.items():
       model_cfg = self.config.get(model_key, {}) or {}
@@ -138,14 +142,20 @@ class GrpoPipeline(config.HyperParameters):
     model_key = self._ROLE_TO_MODEL_KEY[role]
     return model_key in self.config
 
-  def _resolve_mesh_owners(self) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
+  def _resolve_mesh_owners(
+      self,
+  ) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
     same_mesh_as = self._get_same_mesh_as_map()
     base_owners = {}
     for role, model_key in self._ROLE_TO_MODEL_KEY.items():
       if not self._is_role_active(role) and role not in same_mesh_as:
         continue
       has_mesh = bool(self.config.get(model_key, {}).get("mesh"))
-      base_owners[role] = role if role == rl_cluster_lib.Role.ACTOR or has_mesh else rl_cluster_lib.Role.ACTOR
+      base_owners[role] = (
+          role
+          if role == rl_cluster_lib.Role.ACTOR or has_mesh
+          else rl_cluster_lib.Role.ACTOR
+      )
 
     def resolve_owner(
         role: rl_cluster_lib.Role,
@@ -158,7 +168,9 @@ class GrpoPipeline(config.HyperParameters):
       seen.add(role)
       target_role = same_mesh_as[role]
       if target_role not in base_owners:
-        raise ValueError(f"Role {target_role.value!r} is not active in this config.")
+        raise ValueError(
+            f"Role {target_role.value!r} is not active in this config."
+        )
       return resolve_owner(target_role, seen)
 
     role_to_owner = {}
@@ -204,7 +216,9 @@ class GrpoPipeline(config.HyperParameters):
         )
       assigned_devices = devices[device_offset:next_offset]
       owner_to_device_slice[owner] = assigned_devices
-      owner_to_mesh[owner] = self.create_mesh(model_key, devices=assigned_devices)
+      owner_to_mesh[owner] = self.create_mesh(
+          model_key, devices=assigned_devices
+      )
       device_offset = next_offset
 
     if device_offset < len(devices):
@@ -237,7 +251,8 @@ class GrpoPipeline(config.HyperParameters):
   # ------------------------------------------------------------------
 
   def create_rollout_config(
-      self, role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None
+      self,
+      role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
   ) -> base_rollout.RolloutConfig:
     """Build RolloutConfig from YAML.
 
@@ -252,7 +267,9 @@ class GrpoPipeline(config.HyperParameters):
     mode = self.config.get("training_mode", "grpo")
     engine = self.config.get("rollout_engine", "vanilla")
 
-    valid_fields = {f.name for f in dataclasses.fields(base_rollout.RolloutConfig)}
+    valid_fields = {
+        f.name for f in dataclasses.fields(base_rollout.RolloutConfig)
+    }
 
     # Base pass-through (same as original create_rollout_config)
     filtered = {k: v for k, v in rollout_cfg.items() if k in valid_fields}
@@ -330,7 +347,9 @@ class GrpoPipeline(config.HyperParameters):
     if engine == "vllm":
       vllm = self.config.get("vllm_config", {})
       if role_to_mesh is None:
-        raise ValueError("role_to_mesh must be provided for vllm rollout config.")
+        raise ValueError(
+            "role_to_mesh must be provided for vllm rollout config."
+        )
       rollout_shape = role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.shape
       max_num_seqs = self.config["rollout_config"].get(
           "rollout_vllm_max_num_seqs",
@@ -477,8 +496,8 @@ class GrpoPipeline(config.HyperParameters):
       )
 
     cluster_config = self.create_cluster_config(
-      role_to_mesh=role_to_mesh,
-      rollout_config=rollout_config,
+        role_to_mesh=role_to_mesh,
+        rollout_config=rollout_config,
     )
     perf_config = self.create_perf_config(cluster_config)
     return rl_cluster_lib.RLCluster(
@@ -569,17 +588,42 @@ class GrpoPipeline(config.HyperParameters):
     return self.data_module
 
   def _get_dataset(self, tokenizer):
+    apply_chat_template_to_dataset = self.config.get(
+        "apply_chat_template_to_dataset"
+    )
+    if apply_chat_template_to_dataset is None:
+      raise ValueError(
+          "apply_chat_template_to_dataset must be set."
+      )
+
+  def _get_data_module(self,):
+    if self.data_module is None:
+      self.data_module = importlib.import_module(self.config["data_module"])
+    return self.data_module
+
+  def _get_dataset(self, tokenizer):
+    apply_chat_template_to_dataset = self.config.get(
+        "apply_chat_template_to_dataset"
+    )
+    if apply_chat_template_to_dataset is None:
+      raise ValueError(
+          "apply_chat_template_to_dataset must be set."
+      )
+
     if self.config.get("data_module", None):
       data_module = self.config.get("data_module", None)
       dataset = data_lib.get_dataset_from_module(
           data_module,
           tokenizer,
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
+          **(self.config.get("data_config") or {}),
       )
     elif self.config["data_source"] == "local":
       dataset = example_data.create_dataset(
           data_source=self.config["data_source"],
           dataset=self.config["data_directory"],
           tokenizer=tokenizer,
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     elif self.config["data_source"] == "tfds":
       dataset = example_data.create_dataset(
@@ -587,6 +631,7 @@ class GrpoPipeline(config.HyperParameters):
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
           split=self.config.get("train_split", self.config.get("split", "train")),
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     elif self.config["data_source"] == "huggingface":
       dataset = example_data.create_dataset(
@@ -594,6 +639,7 @@ class GrpoPipeline(config.HyperParameters):
           dataset=self.config["dataset_name"],
           tokenizer=tokenizer,
           split=self.config.get("train_split", self.config.get("split", "train")),
+          apply_chat_template_to_dataset=apply_chat_template_to_dataset,
       )
     else:
       raise ValueError(f"Unsupported data_source {self.config['data_source']}")
@@ -651,10 +697,10 @@ class GrpoPipeline(config.HyperParameters):
     The module must expose ``create_dataset(**data_config) -> grain.MapDataset``
     and optionally a ``batch_fn`` used as ``custom_batch_fn``.
     """
-    dataset = self._get_dataset(tokenizer)
     data_module = (
-      self._get_data_module() if self.config.get("data_module", None) else None
+        self._get_data_module() if self.config.get("data_module", None) else None
     )
+    dataset = self._get_dataset(tokenizer)
     batch_fn = getattr(data_module, "batch_fn", None) if data_module else None
     return dataset, batch_fn
 
@@ -672,6 +718,7 @@ class GrpoPipeline(config.HyperParameters):
     try:
       from kubernetes import client as k8s_client_lib  # pylint: disable=g-import-not-at-top
       from kubernetes import config as k8s_config_lib  # pylint: disable=g-import-not-at-top
+
       k8s_config_lib.load_kube_config()
       k8s_client_lib.CoreV1Api()
     except Exception as e:  # pylint: disable=broad-except
@@ -690,6 +737,7 @@ class GrpoPipeline(config.HyperParameters):
     chat_parser = self._create_chat_parser(tokenizer)
 
     raw_dataset, custom_batch_fn = self._load_raw_dataset(tokenizer)
+
     self.compute_params(raw_dataset)
 
     dataset, _ = data_lib.post_init_dataset(
@@ -697,7 +745,9 @@ class GrpoPipeline(config.HyperParameters):
         tokenizer,
         batch_size=self.config.get("batch_size", 1),
         num_batches=self.config.get("num_batches"),
-        max_prompt_length=self.config["rollout_config"].get("max_prompt_length"),
+        max_prompt_length=self.config["rollout_config"].get(
+            "max_prompt_length"
+        ),
         fraction=self.config.get("train_fraction", 1.0),
         num_epochs=self.config.get("num_train_epochs", 1),
         prompt_key=self.config.get("prompt_key", "prompts"),
@@ -737,8 +787,12 @@ class GrpoPipeline(config.HyperParameters):
 
     agent_class_path = self.config.get("agent_class_path")
     if agent_class_path:
-      learner_kwargs["agent_class"] = self._load_class_from_path(agent_class_path)
-      learner_kwargs["agent_kwargs"] = dict(self.config.get("agent_kwargs") or {})
+      learner_kwargs["agent_class"] = self._load_class_from_path(
+          agent_class_path
+      )
+      learner_kwargs["agent_kwargs"] = dict(
+          self.config.get("agent_kwargs") or {}
+      )
 
     env_class_path = self.config.get("env_class_path")
     if env_class_path:
@@ -755,15 +809,7 @@ class GrpoPipeline(config.HyperParameters):
   def run_grpo_trainer(self):
     """Dispatch to standard or agentic GRPO based on training_mode."""
     mode = self.config.get("training_mode", "grpo")
-    if mode == "agentic_grpo":
-      self._run_agentic_grpo()
-    elif mode == "grpo":
-      self._run_standard_grpo()
-    else:
-      raise ValueError(
-          f"Unknown training_mode: {mode!r}. "
-          "Expected 'grpo' or 'agentic_grpo'."
-      )
+    self._run(mode=mode)
 
 
 def _setup_jax_pathways(pathways_bns: str):
