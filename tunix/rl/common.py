@@ -158,9 +158,13 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   Returns:
     Selected log probabilities.
   """
-  logps = jax.nn.log_softmax(logits, axis=-1)
-  per_token_logps = jnp.take_along_axis(logps, input_ids[..., None], axis=-1)
-  return per_token_logps[..., 0]
+  target_logits = (
+      jnp.take_along_axis(logits, input_ids[..., None], axis=-1)
+      .squeeze(-1)
+      .astype(jnp.float32)
+  )
+  normalizer = jax.nn.logsumexp(logits.astype(jnp.float32), axis=-1)
+  return target_logits - normalizer
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
