@@ -44,8 +44,6 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 _GLOBAL_VLLM_CONFIG = None
 
-_GLOBAL_VLLM_CONFIG = None
-
 
 @dataclasses.dataclass
 class VllmConfig:
@@ -267,15 +265,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
       _patched_get_current_vllm_config.__is_patched__ = True
       vllm.config.vllm.get_current_vllm_config = _patched_get_current_vllm_config
-
-      import vllm.config
-      vllm.config.get_current_vllm_config = _patched_get_current_vllm_config
-      
-      try:
-        import tpu_inference.offload.utils
-        tpu_inference.offload.utils.get_current_vllm_config = _patched_get_current_vllm_config
-      except ImportError:
-        pass
 
     global _GLOBAL_VLLM_CONFIG
     if self.llm is not None:
