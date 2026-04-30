@@ -63,6 +63,11 @@ jobs:
       run: |
         pip install -e .[prod,test]
 
+        # override vLLM and tpu-inference
+        export VLLM_TARGET_DEVICE=tpu
+        pip install -r requirements/requirements.txt
+        pip install -r requirements/special_requirements.txt
+
     - name: Verify TPU availability
       run: |
         python -c "
@@ -126,7 +131,7 @@ jobs:
         pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24
         pip list | egrep 'jax|flax|libtpu'
         cd tunix
-        
+
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in colocated mode ..."
         python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax || FAILED=1
 
@@ -139,7 +144,7 @@ jobs:
         # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax with LoRA ..."
         # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine sglang_jax --enable-lora --lora-target-modules all || FAILED=1
 
-    
+
         if [ "$FAILED" -ne 0 ]; then
           echo "One or more scripts failed!"
           exit 1
