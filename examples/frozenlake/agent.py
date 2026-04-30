@@ -173,8 +173,8 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
       new_obs_str += "\nYour last response is invalid. Your position didn't change at all. You may need to recheck your thinking process, action outputted, and the format of response. Remember, you should only output the NEXT ACTION at each interation in the ``` ```. For example, if you want to move up, you should output ```Up```."
     self.last_observation = new_obs_str
 
-    self.cur_step = agent_types.Step(observation=new_obs_str)
     super().update_from_env(new_obs_str, reward, done, info)
+    self.cur_step = agent_types.Step(observation=new_obs_str)
 
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]

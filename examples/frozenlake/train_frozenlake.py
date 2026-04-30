@@ -172,7 +172,7 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
-ENABLE_FLASH_ATTENTION = True
+ENABLE_FLASH_ATTENTION = False
 ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
