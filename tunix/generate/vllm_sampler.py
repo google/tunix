@@ -41,6 +41,8 @@ from vllm.sampling_params import SamplingParams
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
+_GLOBAL_VLLM_CONFIG = None
+
 
 @dataclasses.dataclass
 class VllmConfig:
@@ -238,10 +240,36 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
     
+    import vllm.config.vllm
+
+    if not hasattr(vllm.config.vllm.get_current_vllm_config, "__is_patched__"):
+      _original_get_config = vllm.config.vllm.get_current_vllm_config
+
+      def _patched_get_current_vllm_config():
+        try:
+          return _original_get_config()
+        except AssertionError:
+          global _GLOBAL_VLLM_CONFIG
+          if _GLOBAL_VLLM_CONFIG is not None:
+            return _GLOBAL_VLLM_CONFIG
+          raise
+
+      _patched_get_current_vllm_config.__is_patched__ = True
+      vllm.config.vllm.get_current_vllm_config = _patched_get_current_vllm_config
+
+    global _GLOBAL_VLLM_CONFIG
     if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
+      _GLOBAL_VLLM_CONFIG = self.llm.llm_engine.vllm_config
+      try:
+        self.llm.collective_rpc("reinitialize_kv_cache")
+      finally:
+        _GLOBAL_VLLM_CONFIG = None
     elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+      _GLOBAL_VLLM_CONFIG = self._driver.llm_engine.vllm_config
+      try:
+        self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+      finally:
+        _GLOBAL_VLLM_CONFIG = None
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
