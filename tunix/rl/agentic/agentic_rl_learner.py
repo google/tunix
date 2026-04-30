@@ -15,9 +15,9 @@
 """Base class for Agentic RL Learners."""
 
 from __future__ import annotations
-import abc
-import time
 import asyncio
+import abc
+from concurrent import futures as concurrent_futures
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import copy
@@ -25,6 +25,7 @@ import dataclasses
 import itertools
 import queue
 import threading
+import time
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
 
 from absl import logging
@@ -58,9 +59,44 @@ RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
 
+# Marks the end of one logical global batch while keeping the stage pipeline
+# alive. Downstream stages must flush any buffered work for the current batch
+# when they see this sentinel, but they should continue waiting for more items
+# from the same queue afterward. This is what prevents sequence packing and
+# train micro-batching from crossing a global-step boundary.
+_GLOBAL_BATCH_BARRIER = object()
+
+# Marks the terminal end of a stage queue. Unlike _GLOBAL_BATCH_BARRIER, this
+# means no more items will ever arrive on the queue, so downstream stages
+# should flush any remaining buffered work and then exit instead of waiting for
+# another batch.
+_QUEUE_CLOSED = object()
+
+
+def _mesh_device_keys(mesh) -> frozenset[Any]:
+  return frozenset(
+      getattr(device, "id", device)
+      for device in mesh.devices.flatten().tolist()
+  )
+
+
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   policy_version: np.ndarray | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class TrainStageItem:
+  train_examples: List[TrainExample] | None
+  end_of_global_batch: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class StageBoundaryConfig:
+  """Describes how a stage should buffer at its input and output edges."""
+
+  buffer_inputs_until_barrier: bool = False
+  buffer_outputs_until_barrier: bool = False
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -196,17 +232,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.rollout.model(),
         )
     )
-
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
-    self.can_enable_async_rollout = (
-        self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
-        != self.rl_cluster.cluster_config.role_to_mesh[
-            rl_cluster_lib.Role.ROLLOUT
-        ]
-    )
-
     self._rollout_micro_batch_size = (
         self._training_config.rollout_micro_batch_size
     )
@@ -220,6 +245,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.policy_version = self.rl_cluster.global_steps
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
     self._full_batch_size = 0
+    self._train_micro_batch_size = 1
 
     loop_queue = queue.Queue()
 
@@ -386,7 +412,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     return agent, env
 
   def _model_call(
-      self, chat_lists: List[Dict[str, str]], env: Any = None, 
+      self, chat_lists: List[Dict[str, str]], env: Any = None,
   ) -> base_rollout.RolloutOutput:
     """Calls model generation."""
     if env:
@@ -589,15 +615,90 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """Returns the number of generations per prompt."""
     return self.algo_config.num_generations
 
-  async def _producer(
+  def _get_role_mesh(
+      self,
+      role: rl_cluster_lib.Role,
+      fallback_role: rl_cluster_lib.Role | None = None,
+  ):
+    """Returns the mesh for a role, optionally falling back to another role."""
+    mesh = self.rl_cluster.cluster_config.role_to_mesh.get(role)
+    if mesh is not None:
+      return mesh
+    if fallback_role is None:
+      raise KeyError(f"No mesh configured for role: {role}")
+    return self.rl_cluster.cluster_config.role_to_mesh[fallback_role]
+
+  def _roles_share_devices(
+      self,
+      upstream_role: rl_cluster_lib.Role,
+      downstream_role: rl_cluster_lib.Role,
+      *,
+      upstream_fallback_role: rl_cluster_lib.Role | None = None,
+      downstream_fallback_role: rl_cluster_lib.Role | None = None,
+  ) -> bool:
+    """Returns whether two stage roles resolve to the same device set."""
+    upstream_mesh = self._get_role_mesh(upstream_role, upstream_fallback_role)
+    downstream_mesh = self._get_role_mesh(
+        downstream_role,
+        downstream_fallback_role,
+    )
+    return _mesh_device_keys(upstream_mesh) == _mesh_device_keys(downstream_mesh)
+
+  def _should_buffer_stage_boundary(
+      self,
+      upstream_role: rl_cluster_lib.Role,
+      downstream_role: rl_cluster_lib.Role,
+      *,
+      upstream_fallback_role: rl_cluster_lib.Role | None = None,
+      downstream_fallback_role: rl_cluster_lib.Role | None = None,
+  ) -> bool:
+    """Returns whether two adjacent stages must serialize on one boundary."""
+    if not self.rl_cluster.cluster_config.offload_to_cpu:
+      return False
+    return self._roles_share_devices(
+        upstream_role,
+        downstream_role,
+        upstream_fallback_role=upstream_fallback_role,
+        downstream_fallback_role=downstream_fallback_role,
+    )
+
+  def _create_stage_boundary_config(
+      self,
+      *,
+      upstream_role: rl_cluster_lib.Role,
+      stage_role: rl_cluster_lib.Role,
+      downstream_role: rl_cluster_lib.Role,
+      upstream_fallback_role: rl_cluster_lib.Role | None = None,
+      stage_fallback_role: rl_cluster_lib.Role | None = None,
+      downstream_fallback_role: rl_cluster_lib.Role | None = None,
+  ) -> StageBoundaryConfig:
+    """Builds a reusable boundary config for a pipeline stage."""
+    return StageBoundaryConfig(
+        buffer_inputs_until_barrier=self._should_buffer_stage_boundary(
+            upstream_role,
+            stage_role,
+            upstream_fallback_role=upstream_fallback_role,
+            downstream_fallback_role=stage_fallback_role,
+        ),
+        buffer_outputs_until_barrier=self._should_buffer_stage_boundary(
+            stage_role,
+            downstream_role,
+            upstream_fallback_role=stage_fallback_role,
+            downstream_fallback_role=downstream_fallback_role,
+        ),
+    )
+
+  async def _rollout_stage_producer(
       self,
       orchestrator,
       prompt_queue: queue.Queue[TrainingInputT | None],
-      train_data_queue,
+      rollout_queue: queue_lib.AbstractDataQueue,
   ):
-    """Produces training examples from prompts in the dataset_iterator."""
+    """Produces rollout groups and emits a barrier per global batch."""
     loop = asyncio.get_running_loop()
     async_queue_iter = self._AsyncQueueIterator(prompt_queue, loop)
+    full_batch_size = max(getattr(self, "_full_batch_size", 0), 1)
+    prompts_in_current_batch = 0
 
     async def _iterate_micro_batches():
       async for item in async_queue_iter:
@@ -612,38 +713,450 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           num_generations=self.algo_config.num_generations,
           collect_mode="Token",
       ):
-        try:
-          train_examples = self._batch_to_train_example(
-              batch_results=batch,
-              mode=rl_cluster_lib.Mode.TRAIN,
-          )
-          iterations = self.algo_config.num_iterations
-          for _ in range(iterations):
-            for train_example in train_examples:
-              train_data_queue.put(train_example)
-        except Exception as e:
-          if not isinstance(e, RuntimeError):
-            logging.exception(
-                "Exception in _producer while processing batch: %s", e
-            )
-          raise
+        rollout_queue.put(batch)
+        prompts_in_current_batch += 1
+        if prompts_in_current_batch == full_batch_size:
+          rollout_queue.put(_GLOBAL_BATCH_BARRIER)
+          prompts_in_current_batch = 0
     finally:
-      # Signal production is complete for this batch, even if errors occurred.
-      train_data_queue.put(None)
-      # Ensure that any background threads waiting on the prompt queue are
-      # unblocked.
+      if prompts_in_current_batch:
+        rollout_queue.put(_GLOBAL_BATCH_BARRIER)
+      rollout_queue.put(_QUEUE_CLOSED)
       prompt_queue.put(None)
 
+  def _global_rollout_batch_to_train_examples(
+      self,
+      rollout_batches: List[list[Any]],
+      mode: rl_cluster_lib.Mode,
+  ) -> List[TrainExample]:
+    """Converts one rollout global batch into raw train examples."""
+    train_examples = []
+    for batch in rollout_batches:
+      train_examples.extend(
+          self._batch_to_train_example(
+              batch_results=batch,
+              mode=mode,
+          )
+      )
+    return train_examples
+
+  def _emit_train_examples(
+      self,
+      train_data_queue: queue_lib.AbstractDataQueue,
+      train_examples: List[TrainExample],
+  ) -> None:
+    """Emits train examples for all configured training iterations."""
+    for _ in range(self.algo_config.num_iterations):
+      for train_example in train_examples:
+        train_data_queue.put(train_example)
+
+  def _reference_stage_producer(
+      self,
+      rollout_queue: queue_lib.AbstractDataQueue,
+      train_data_queue: queue_lib.AbstractDataQueue,
+      boundary_config: StageBoundaryConfig,
+  ) -> None:
+    """Consumes rollout batches and emits raw train examples per global batch."""
+    rollout_batches = []
+    pending_train_examples = []
+    try:
+      while True:
+        item = rollout_queue.get(block=True)
+        if item is _QUEUE_CLOSED:
+          break
+        if item is _GLOBAL_BATCH_BARRIER:
+          if rollout_batches:
+            train_examples = self._global_rollout_batch_to_train_examples(
+                rollout_batches,
+                rl_cluster_lib.Mode.TRAIN,
+            )
+            if boundary_config.buffer_outputs_until_barrier:
+              pending_train_examples.extend(train_examples)
+            else:
+              self._emit_train_examples(train_data_queue, train_examples)
+            rollout_batches = []
+          if pending_train_examples:
+            self._emit_train_examples(
+                train_data_queue,
+                pending_train_examples,
+            )
+            pending_train_examples = []
+          train_data_queue.put(_GLOBAL_BATCH_BARRIER)
+          continue
+        if boundary_config.buffer_inputs_until_barrier:
+          rollout_batches.append(item)
+          continue
+        train_examples = self._global_rollout_batch_to_train_examples(
+            [item],
+            rl_cluster_lib.Mode.TRAIN,
+        )
+        if boundary_config.buffer_outputs_until_barrier:
+          pending_train_examples.extend(train_examples)
+        else:
+          self._emit_train_examples(train_data_queue, train_examples)
+    finally:
+      if rollout_batches:
+        train_examples = self._global_rollout_batch_to_train_examples(
+            rollout_batches,
+            rl_cluster_lib.Mode.TRAIN,
+        )
+        if boundary_config.buffer_outputs_until_barrier:
+          pending_train_examples.extend(train_examples)
+        else:
+          self._emit_train_examples(train_data_queue, train_examples)
+      if pending_train_examples:
+        self._emit_train_examples(train_data_queue, pending_train_examples)
+        train_data_queue.put(_GLOBAL_BATCH_BARRIER)
+      train_data_queue.put(_QUEUE_CLOSED)
+
+  def _request_stage_pipeline_stop(
+      self,
+      *,
+      prompt_queue: queue.Queue[TrainingInputT | None] | None,
+      rollout_queue: queue_lib.AbstractDataQueue | None,
+      train_data_queue: queue_lib.AbstractDataQueue | None,
+      rollout_future: concurrent_futures.Future | None = None,
+  ) -> None:
+    """Best-effort cooperative stop for the staged pipeline."""
+    if prompt_queue is not None:
+      prompt_queue.put(None)
+    if rollout_queue is not None:
+      rollout_queue.put(_QUEUE_CLOSED)
+    if train_data_queue is not None:
+      train_data_queue.put(_QUEUE_CLOSED)
+    if rollout_future is not None and not rollout_future.done():
+      rollout_future.cancel()
+
+  def _attach_stage_failure_callbacks(
+      self,
+      *,
+      rollout_future: concurrent_futures.Future,
+      reference_future: concurrent_futures.Future,
+      rollout_queue: queue_lib.AbstractDataQueue,
+      train_data_queue: queue_lib.AbstractDataQueue,
+  ) -> None:
+    """Wakes blocked stages when an upstream worker fails or is cancelled."""
+
+    def _wake_rollout_consumer_on_failure(
+        future: concurrent_futures.Future,
+    ) -> None:
+      if not future.cancelled():
+        try:
+          future.result()
+          return
+        except BaseException:
+          pass
+      rollout_queue.put(_QUEUE_CLOSED)
+
+    def _wake_train_consumer_on_failure(
+        future: concurrent_futures.Future,
+    ) -> None:
+      if not future.cancelled():
+        try:
+          future.result()
+          return
+        except BaseException:
+          pass
+      train_data_queue.put(_QUEUE_CLOSED)
+
+    rollout_future.add_done_callback(_wake_rollout_consumer_on_failure)
+    reference_future.add_done_callback(_wake_train_consumer_on_failure)
+
   def _data_consumer_batch_generator(
-      self, queue: queue_lib.AbstractDataQueue, batch_size: int
-  ):
-    """Yields micro-batches from a queue until a None is received."""
-    item_iterator = iter(lambda: queue.get(block=True), None)
+      self,
+      queue: queue_lib.AbstractDataQueue,
+      batch_size: int,
+  ) -> Iterator[TrainStageItem]:
+    """Yields train batches and marks the global-batch boundary explicitly."""
+
+    class _GlobalBatchQueueIterator:
+
+      def __init__(
+          self,
+          data_queue: queue_lib.AbstractDataQueue,
+      ):
+        self._data_queue = data_queue
+        self.hit_barrier = False
+        self.hit_queue_closed = False
+
+      def __iter__(self):
+        return self
+
+      def __next__(self):
+        item = self._data_queue.get(block=True)
+        if item is _GLOBAL_BATCH_BARRIER:
+          self.hit_barrier = True
+          raise StopIteration
+        if item is _QUEUE_CLOSED:
+          self.hit_queue_closed = True
+          raise StopIteration
+        return [item]
+
     while True:
-      batch = list(itertools.islice(item_iterator, batch_size))
-      if not batch:
-        return  # The iterator is exhausted.
-      yield batch
+      global_batch_iter = _GlobalBatchQueueIterator(
+          queue,
+      )
+      if self._training_config.max_seq_token_per_tpu is not None:
+        logging.info(
+            "Using sequence packing with max_seq_token_per_tpu: %d",
+            self._training_config.max_seq_token_per_tpu,
+        )
+        batch_iterator = rl_utils.pack_sequences(
+            global_batch_iter,
+            self._training_config.max_seq_token_per_tpu,
+        )
+      else:
+        batch_iterator = self._iter_train_micro_batches_from_stream(
+            global_batch_iter,
+            batch_size,
+        )
+
+      last_batch = None
+      for batch in batch_iterator:
+        if last_batch is not None:
+          yield TrainStageItem(last_batch, end_of_global_batch=False)
+        last_batch = batch
+
+      if last_batch is not None:
+        yield TrainStageItem(last_batch, end_of_global_batch=True)
+      elif global_batch_iter.hit_barrier:
+        yield TrainStageItem(None, end_of_global_batch=True)
+
+      if global_batch_iter.hit_queue_closed:
+        return
+
+  def _iter_train_micro_batches_from_stream(
+      self,
+      train_example_iterator: Iterable[List[TrainExample]],
+      batch_size: int,
+  ) -> Iterator[List[TrainExample]]:
+    """Re-batches a stream of raw train examples into train micro-batches."""
+    pending_train_examples = []
+    for train_examples in train_example_iterator:
+      pending_train_examples.extend(train_examples)
+      while len(pending_train_examples) >= batch_size:
+        yield pending_train_examples[:batch_size]
+        pending_train_examples = pending_train_examples[batch_size:]
+    if pending_train_examples:
+      yield pending_train_examples
+
+  def _iter_train_micro_batches(
+      self,
+      train_examples: List[TrainExample],
+      batch_size: int,
+  ) -> Iterator[List[TrainExample]]:
+    """Splits a full training batch into trainer micro-batches."""
+    for start in range(0, len(train_examples), batch_size):
+      yield train_examples[start : start + batch_size]
+
+  def _finalize_global_step(
+      self,
+      full_dataset_iterator: Iterator[TrainingInputT],
+      prompt_queue: queue.Queue[TrainingInputT | None],
+  ) -> None:
+    """Completes sync and advances input state after one training batch."""
+    global_step_time = time.time() - self._global_step_start_time
+    logging.info(
+        f"Global step {self.rl_cluster.global_steps} completed in"
+        f" {global_step_time:.2f} seconds."
+    )
+    self.rl_cluster.buffer_metrics_async(
+        {"perf/global_step_time": (global_step_time, np.mean)},
+        mode=rl_cluster_lib.Mode.TRAIN,
+        step=self.rl_cluster.global_steps,
+    )
+    if self.should_sync_weights:
+      logging.info("Requesting sync lock to sync weights...")
+      self._rollout_sync_lock.acquire_weight_sync()
+      try:
+        logging.info("Sync lock acquired. Syncing weights.")
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.WEIGHT_SYNC,
+            self.rl_cluster.perf_v2.all_devices,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+            },
+        ):
+          self.rl_cluster.sync_weights()
+        self.policy_version += 1
+        logging.info(
+            "Weights synced. Policy version incremented to %d.",
+            self.policy_version,
+        )
+        try:
+          with self.rl_cluster.perf_v2.span(
+              perf_constants.DATA_LOADING,
+              tags={
+                  perf_constants.STEP: self.rl_cluster.global_steps,
+              },
+          ):
+            batch = next(full_dataset_iterator)
+          self._put_prompts_to_queue(prompt_queue, batch)
+        except StopIteration:
+          prompt_queue.put(None)
+      finally:
+        self._rollout_sync_lock.release_weight_sync()
+        logging.info("Sync lock released.")
+    else:
+      self.rl_cluster.global_steps += 1
+      try:
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.DATA_LOADING,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+            },
+        ):
+          batch = next(full_dataset_iterator)
+        self._put_prompts_to_queue(prompt_queue, batch)
+      except StopIteration:
+        prompt_queue.put(None)
+
+    self.rl_cluster.buffer_metrics(
+        self.rl_cluster.perf_v2.export(),
+        mode=rl_cluster_lib.Mode.TRAIN,
+    )
+    self._global_step_start_time = time.time()
+
+  def _setup_train_stage_pipeline(
+      self,
+      *,
+      orchestrator,
+      prompt_queue: queue.Queue[TrainingInputT | None],
+      rollout_queue: queue_lib.AbstractDataQueue,
+      train_data_queue: queue_lib.AbstractDataQueue,
+      reference_executor: ThreadPoolExecutor,
+  ) -> tuple[concurrent_futures.Future, concurrent_futures.Future]:
+    """Starts the rollout and reference stages for the train pipeline.
+
+    This helper only performs stage startup:
+    - submits the reference-stage worker to the single-thread executor
+    - schedules the rollout-stage coroutine on the background event loop
+    - installs failure callbacks so downstream blocked consumers wake up
+
+    It deliberately does not own shutdown. `train()` is the lifecycle owner for
+    the staged pipeline, so any startup failure or later runtime failure is
+    unwound there via `_request_stage_pipeline_stop(...)` and executor cleanup.
+
+    Returns:
+      The `(rollout_future, reference_future)` pair for the started upstream
+      stages. `train()` awaits these futures after the train-stage consumer
+      drains the pipeline.
+    """
+    reference_stage_boundary_config = self._create_stage_boundary_config(
+        upstream_role=rl_cluster_lib.Role.ROLLOUT,
+        stage_role=rl_cluster_lib.Role.REFERENCE,
+        downstream_role=rl_cluster_lib.Role.ACTOR,
+        stage_fallback_role=rl_cluster_lib.Role.ACTOR,
+    )
+    reference_future = reference_executor.submit(
+        self._reference_stage_producer,
+        rollout_queue,
+        train_data_queue,
+        reference_stage_boundary_config,
+    )
+    rollout_future = asyncio.run_coroutine_threadsafe(
+        self._rollout_stage_producer(
+            orchestrator,
+            prompt_queue,
+            rollout_queue,
+        ),
+        self.loop,
+    )
+    self._attach_stage_failure_callbacks(
+        rollout_future=rollout_future,
+        reference_future=reference_future,
+        rollout_queue=rollout_queue,
+        train_data_queue=train_data_queue,
+    )
+    return rollout_future, reference_future
+
+  def _run_train_stage_pipeline(
+      self,
+      *,
+      prompt_queue: queue.Queue[TrainingInputT | None],
+      train_data_queue: queue_lib.AbstractDataQueue,
+      full_dataset_iterator: Iterator[TrainingInputT],
+      all_eval_prompts: List[TrainingInputT],
+      train_micro_batch_size: int,
+      training_config,
+      skip_jit: bool,
+  ) -> None:
+    """Consumes train-stage items until the staged pipeline reaches completion."""
+    train_data_gen = self._data_consumer_batch_generator(
+        train_data_queue,
+        train_micro_batch_size,
+    )
+    for train_stage_item in train_data_gen:
+      if (
+          self._training_config.max_steps
+          and self.rl_cluster.global_steps >= self._training_config.max_steps
+      ):
+        logging.info(
+            "Reached max_steps: %d >= %d",
+            self.rl_cluster.global_steps,
+            self._training_config.max_steps,
+        )
+        prompt_queue.put(None)
+        break
+
+      train_micro_batch = train_stage_item.train_examples
+      if train_micro_batch is not None:
+        self._iter_steps += 1
+
+        # TODO(tsbao): Re-enable this once off-policy filtering is needed.
+        # Filter out examples that are too old (off-policy).
+        # filtered_train_micro_batch = self._filter_outdated_offpolicy_examples(
+        #     train_micro_batch
+        # )
+        # if not filtered_train_micro_batch:
+        #   continue
+        # train_micro_batch = filtered_train_micro_batch
+
+        merged_train_micro_batch = jax.tree.map(
+            lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+        )
+
+        current_eval_dataset = None
+        if (
+            all_eval_prompts
+            and self.rl_cluster.actor_trainer.train_steps
+            % training_config.eval_every_n_steps
+            == 0
+        ):
+          self._eval_iter_steps = 0
+          eval_orchestrator = self._build_orchestrator()
+
+          async def _eval_runner_async(current_eval_orchestrator):
+            eval_examples = []
+            async for batch in self._orchestrator_producer(
+                current_eval_orchestrator,
+                all_eval_prompts,
+                num_generations=self._num_generations(),
+            ):
+              eval_example = self._batch_to_train_example(
+                  batch,
+                  rl_cluster_lib.Mode.EVAL,
+              )
+              eval_examples.extend(eval_example)
+            return eval_examples
+
+          eval_future = asyncio.run_coroutine_threadsafe(
+              _eval_runner_async(eval_orchestrator), self.loop
+          )
+          eval_examples = eval_future.result()
+          self._eval_iter_steps += 1
+          current_eval_dataset = eval_examples
+
+        self.rl_cluster.update_actor(
+            [merged_train_micro_batch], current_eval_dataset, skip_jit
+        )
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              [merged_train_micro_batch], current_eval_dataset, skip_jit
+          )
+
+      if train_stage_item.end_of_global_batch:
+        self._finalize_global_step(full_dataset_iterator, prompt_queue)
 
   def train(
       self,
@@ -684,6 +1197,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_micro_batch_size = (
         self._training_config.train_micro_batch_size or mini_batch_size
     )
+    self._train_micro_batch_size = train_micro_batch_size
     # Rollout and compute_logps micro batch sizes have to be 1 since we only
     # process inidividual prompts.
     self._rollout_micro_batch_size = 1
@@ -718,9 +1232,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     training_config = self.rl_cluster.cluster_config.training_config
 
+    rollout_queue = queue_lib.SimpleDataQueue(maxsize=0)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    reference_executor = None
+    rollout_future = None
+    reference_future = None
 
-    # 1. Start producer thread to generate rollouts and training examples.
+    # 1. Start the rollout and reference stages explicitly.
     orchestrator = self._build_orchestrator()
 
     prompt_queue = queue.Queue()
@@ -735,161 +1253,38 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         prompt_queue.put(None)
         break
 
-    producer_future = asyncio.run_coroutine_threadsafe(
-        self._producer(orchestrator, prompt_queue, train_data_queue),
-        self.loop,
-    )
-
-    # 2. Consume training examples and train.
-    train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue, train_micro_batch_size
-    )
-    if self._training_config.max_seq_token_per_tpu is not None:
-      logging.info(
-          "Using sequence packing with max_seq_token_per_tpu: %d",
-          self._training_config.max_seq_token_per_tpu,
+    try:
+      reference_executor = ThreadPoolExecutor(max_workers=1)
+      rollout_future, reference_future = self._setup_train_stage_pipeline(
+          orchestrator=orchestrator,
+          prompt_queue=prompt_queue,
+          rollout_queue=rollout_queue,
+          train_data_queue=train_data_queue,
+          reference_executor=reference_executor,
       )
-      train_data_gen = rl_utils.pack_sequences(
-          train_data_gen, self._training_config.max_seq_token_per_tpu
+      self._run_train_stage_pipeline(
+          prompt_queue=prompt_queue,
+          train_data_queue=train_data_queue,
+          full_dataset_iterator=full_dataset_iterator,
+          all_eval_prompts=all_eval_prompts,
+          train_micro_batch_size=train_micro_batch_size,
+          training_config=training_config,
+          skip_jit=skip_jit,
       )
-    micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
-    for train_micro_batch in train_data_gen:
-      if (
-          self._training_config.max_steps
-          and self.rl_cluster.global_steps >= self._training_config.max_steps
-      ):
-        logging.info(
-            "Reached max_steps: %d >= %d",
-            self.rl_cluster.global_steps,
-            self._training_config.max_steps,
-        )
-        prompt_queue.put(None)
-        break
-      self._iter_steps += 1
-
-      # TODO(tsbao): Re-enable this once off-policy filtering is needed.
-      # Filter out examples that are too old (off-policy).
-      # filtered_train_micro_batch = self._filter_outdated_offpolicy_examples(
-      #     train_micro_batch
-      # )
-      # if not filtered_train_micro_batch:
-      #   continue
-      # train_micro_batch = filtered_train_micro_batch
-
-      merged_train_micro_batch = jax.tree.map(
-          lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+      rollout_future.result()
+      reference_future.result()
+    except BaseException:
+      self._request_stage_pipeline_stop(
+          prompt_queue=prompt_queue,
+          rollout_queue=rollout_queue,
+          train_data_queue=train_data_queue,
+          rollout_future=rollout_future,
       )
-
-      # --- Evaluation Logic ---
-      current_eval_dataset = None
-      if (
-          all_eval_prompts
-          and self.rl_cluster.actor_trainer.train_steps
-          % training_config.eval_every_n_steps
-          == 0
-      ):
-        self._eval_iter_steps = 0
-        eval_orchestrator = self._build_orchestrator()
-
-        async def _eval_runner_async(current_eval_orchestrator):
-          eval_examples = []
-          async for batch in self._orchestrator_producer(
-              current_eval_orchestrator,
-              all_eval_prompts,
-              num_generations=self._num_generations(),
-          ):
-            eval_example = self._batch_to_train_example(
-                batch,
-                rl_cluster_lib.Mode.EVAL,
-            )
-            eval_examples.extend(eval_example)
-          return eval_examples
-
-        eval_future = asyncio.run_coroutine_threadsafe(
-            _eval_runner_async(eval_orchestrator), self.loop
-        )
-        eval_examples = eval_future.result()
-        self._eval_iter_steps += 1
-        current_eval_dataset = eval_examples
-
-      # --- Training Step ---
-      self.rl_cluster.update_actor(
-          [merged_train_micro_batch], current_eval_dataset, skip_jit
-      )
-      if hasattr(self.rl_cluster, "critic_trainer"):
-        self.rl_cluster.update_critic(
-            [merged_train_micro_batch], current_eval_dataset, skip_jit
-        )
-
-      # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
-        global_step_time = time.time() - self._global_step_start_time
-        logging.info(
-            f"Global step {self.rl_cluster.global_steps} completed in"
-            f" {global_step_time:.2f} seconds."
-        )
-        self.rl_cluster.buffer_metrics_async(
-            {"perf/global_step_time": (global_step_time, np.mean)},
-            mode=rl_cluster_lib.Mode.TRAIN,
-            step=self.rl_cluster.global_steps,
-        )
-        if self.should_sync_weights:
-          logging.info("Requesting sync lock to sync weights...")
-          self._rollout_sync_lock.acquire_weight_sync()
-          try:
-            logging.info("Sync lock acquired. Syncing weights.")
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.WEIGHT_SYNC,
-                self.rl_cluster.perf_v2.all_devices,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                },
-            ):
-              self.rl_cluster.sync_weights()
-            self.policy_version += 1
-            logging.info(
-                "Weights synced. Policy version incremented to %d.",
-                self.policy_version,
-            )
-            try:
-              with self.rl_cluster.perf_v2.span(
-                  perf_constants.DATA_LOADING,
-                  tags={
-                      perf_constants.STEP: self.rl_cluster.global_steps,
-                  },
-              ):
-                batch = next(full_dataset_iterator)
-              self._put_prompts_to_queue(prompt_queue, batch)
-            except StopIteration:
-              prompt_queue.put(None)
-          finally:
-            self._rollout_sync_lock.release_weight_sync()
-            logging.info("Sync lock released.")
-        else:
-          self.rl_cluster.global_steps += 1
-          try:
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.DATA_LOADING,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                },
-            ):
-              batch = next(full_dataset_iterator)
-            self._put_prompts_to_queue(prompt_queue, batch)
-          except StopIteration:
-            prompt_queue.put(None)
-
-        self.rl_cluster.buffer_metrics(
-            self.rl_cluster.perf_v2.export(),
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
-        micro_batches_since_last_sync = 0
-        self._global_step_start_time = time.time()
-
-    _ = producer_future.result()
-    self.rl_cluster.close()
+      raise
+    finally:
+      if reference_executor is not None:
+        reference_executor.shutdown(wait=False, cancel_futures=True)
+      self.rl_cluster.close()
 
   def _put_prompts_to_queue(
       self,

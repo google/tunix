@@ -120,6 +120,53 @@ generating trajectories with stale parameters.
   <img src="images/batch_vs_async_rollout.png" alt="Batch vs Async Rollout" width="50%">
 </p>
 
+### Mesh Placement and Colocation
+
+Agentic GRPO supports three distinct placement patterns for the actor,
+reference, and rollout roles:
+
+1.  **Shared mesh**: multiple roles reuse the exact same mesh object. This is
+        the most tightly colocated setup and may enable model or backbone sharing
+        in parts of the stack.
+
+    Backend status: exact shared-mesh support is currently supported for the
+    vanilla rollout backend. Exact shared-mesh execution is not supported yet
+    for `vllm` and `sglang_jax`.
+
+2.  **Colocated device set**: a role uses `colocate_with` to reuse another
+        role's device slice while still keeping its own mesh shape. For example,
+        the actor can use `(4, 1)` while rollout uses `(1, 4)` on the same four
+        devices. This is still colocated, but it is different from exact mesh
+        sharing.
+
+3.  **Disaggregated placement**: each role owns a separate device slice.
+
+For CLI-driven GRPO and agentic GRPO runs, `colocate_with` is configured on the
+role-specific model config, for example:
+
+```yaml
+actor_model_config:
+    mesh:
+        shape: "(4,1)"
+        axis_names: "('fsdp','tp')"
+
+rollout_model_config:
+    colocate_with: "actor"
+    mesh:
+        shape: "(1,4)"
+        axis_names: "('fsdp','tp')"
+```
+
+This tells Tunix to allocate only one four-device owner slice and build two
+different meshes on top of it. Exact mesh equality is only required when a
+runtime path wants to reuse the same model instance; it is not required for
+colocation itself.
+
+For accelerated rollout backends, treat same-device-set colocation and exact
+shared-mesh reuse as different features. Today, `vllm` and `sglang_jax`
+support colocated device-set placement through `colocate_with`, but exact
+shared-mesh execution is not supported yet.
+
 ### Trajectory Batching and Grouping
 
 Tunix supports batching of agentic trajectories through the `GroupQueueManager`.

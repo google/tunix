@@ -15,12 +15,14 @@
 """Tests for agentic_grpo_learner."""
 
 import asyncio
+from concurrent import futures as concurrent_futures
 import functools
 import os
 import queue
 import random
 import shutil
 import tempfile
+import threading
 import types
 from typing import Any, AsyncIterable, Iterable
 from unittest import mock
@@ -43,6 +45,7 @@ from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic import agentic_grpo_learner
+from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
@@ -224,10 +227,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         self.algo_config = algo_config
         self.rl_cluster = mock.Mock()
         self.metric_fns = []
+        self._full_batch_size = 2
+        self._training_config = types.SimpleNamespace(
+            max_seq_token_per_tpu=None,
+        )
 
       def _create_micro_batch_iterator(self, iterator, batch_size):
-        # The dataset batch size is 2, and we want to test micro-batching
-        # of size 1, as consumed by _orchestrator_producer.
+        del batch_size
         for batch in iterator:
           for i in range(len(batch["prompts"])):
             yield jax.tree.map(lambda x, index=i: x[index : index + 1], batch)
@@ -254,27 +260,15 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           num_generations: int = 1,
           collect_mode: str = "Token",
       ):
+        del orchestrator, num_generations, collect_mode
         i = 0
-        if hasattr(prompt_iterator, "__aiter__"):
-          async for example in prompt_iterator:
-            group = [
-                types.SimpleNamespace(
-                    pair_index=i * self.algo_config.num_generations + j
-                )
-                for j in range(self.algo_config.num_generations)
-            ]
-            yield group, [example]
-            i += 1
-        else:
-          for example in prompt_iterator:
-            group = [
-                types.SimpleNamespace(
-                    pair_index=i * self.algo_config.num_generations + j
-                )
-                for j in range(self.algo_config.num_generations)
-            ]
-            yield group, [example]
-            i += 1
+        async for example in prompt_iterator:
+          group = [
+              types.SimpleNamespace(pair_index=i * 2 + j)
+              for j in range(2)
+          ]
+          yield group, [example]
+          i += 1
 
     algo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=2,
@@ -282,6 +276,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     trainer = _MockTrainer(algo_config)
 
+    rollout_queue = queue_lib.SimpleDataQueue(maxsize=0)
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
     dataset = _dummy_dataset(MySource(data=[i for i in range(2)]), batch_size=2)
     prompt_queue = queue.Queue()
@@ -289,17 +284,238 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       prompt_queue.put(item)
     prompt_queue.put(None)
 
-    asyncio.run(trainer._producer(mock.Mock(), prompt_queue, train_data_queue))
+    ref_thread = threading.Thread(
+        target=trainer._reference_stage_producer,
+        args=(
+            rollout_queue,
+            train_data_queue,
+            agentic_rl_learner.StageBoundaryConfig(
+                buffer_inputs_until_barrier=True,
+                buffer_outputs_until_barrier=True,
+            ),
+        ),
+        daemon=True,
+    )
+    ref_thread.start()
+
+    asyncio.run(
+        trainer._rollout_stage_producer(
+            mock.Mock(),
+            prompt_queue,
+            rollout_queue,
+        )
+    )
+    ref_thread.join(timeout=1.0)
 
     results = []
+    barrier_count = 0
     while True:
       item = train_data_queue.get(block=True)
-      if item is None:
+      if item is agentic_rl_learner._QUEUE_CLOSED:
         break
+      if item is agentic_rl_learner._GLOBAL_BATCH_BARRIER:
+        barrier_count += 1
+        continue
       results.append(item)
 
     prompt_ids = [r.prompt_ids[0] for r in results]
     self.assertEqual(prompt_ids, [0, 0, 0, 0, 1, 1, 1, 1])
+    self.assertEqual(barrier_count, 1)
+
+  def test_reference_stage_streams_when_devices_are_disjoint(self):
+    class _MockTrainer(agentic_grpo_learner.GRPOLearner):
+
+      def __init__(self, algo_config):
+        self.algo_config = algo_config
+
+      @override
+      def _batch_to_train_example(self, batch_results, mode):
+        del mode
+        return [types.SimpleNamespace(prompt_ids=np.array([batch_results[0]]))]
+
+    trainer = _MockTrainer(
+        agentic_grpo_learner.GRPOConfig(num_generations=2, num_iterations=1)
+    )
+    rollout_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+
+    ref_thread = threading.Thread(
+        target=trainer._reference_stage_producer,
+        args=(
+            rollout_queue,
+            train_data_queue,
+            agentic_rl_learner.StageBoundaryConfig(),
+        ),
+        daemon=True,
+    )
+    ref_thread.start()
+
+    rollout_queue.put(7)
+
+    first_item = train_data_queue.get(timeout=1.0)
+    self.assertEqual(first_item.prompt_ids[0], 7)
+
+    rollout_queue.put(agentic_rl_learner._GLOBAL_BATCH_BARRIER)
+    self.assertIs(
+        train_data_queue.get(timeout=1.0),
+        agentic_rl_learner._GLOBAL_BATCH_BARRIER,
+    )
+
+    rollout_queue.put(agentic_rl_learner._QUEUE_CLOSED)
+    self.assertIs(
+        train_data_queue.get(timeout=1.0),
+        agentic_rl_learner._QUEUE_CLOSED,
+    )
+    ref_thread.join(timeout=1.0)
+
+  def test_reference_stage_waits_for_barrier_when_devices_are_colocated(self):
+    class _MockTrainer(agentic_grpo_learner.GRPOLearner):
+
+      def __init__(self, algo_config):
+        self.algo_config = algo_config
+
+      @override
+      def _batch_to_train_example(self, batch_results, mode):
+        del mode
+        return [types.SimpleNamespace(prompt_ids=np.array([batch_results[0]]))]
+
+    trainer = _MockTrainer(
+        agentic_grpo_learner.GRPOConfig(num_generations=2, num_iterations=1)
+    )
+    rollout_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+
+    ref_thread = threading.Thread(
+        target=trainer._reference_stage_producer,
+        args=(
+            rollout_queue,
+            train_data_queue,
+            agentic_rl_learner.StageBoundaryConfig(
+                buffer_inputs_until_barrier=True,
+                buffer_outputs_until_barrier=False,
+            ),
+        ),
+        daemon=True,
+    )
+    ref_thread.start()
+
+    rollout_queue.put(7)
+
+    with self.assertRaises(queue.Empty):
+      train_data_queue.get(block=True, timeout=0.1)
+
+    rollout_queue.put(agentic_rl_learner._GLOBAL_BATCH_BARRIER)
+    self.assertEqual(train_data_queue.get(timeout=1.0).prompt_ids[0], 7)
+    self.assertIs(
+        train_data_queue.get(timeout=1.0),
+        agentic_rl_learner._GLOBAL_BATCH_BARRIER,
+    )
+
+    rollout_queue.put(agentic_rl_learner._QUEUE_CLOSED)
+    self.assertIs(
+        train_data_queue.get(timeout=1.0),
+        agentic_rl_learner._QUEUE_CLOSED,
+    )
+    ref_thread.join(timeout=1.0)
+
+  def test_should_buffer_stage_boundary_only_when_offloading(self):
+    class _MockTrainer(agentic_grpo_learner.GRPOLearner):
+
+      def __init__(self, offload_to_cpu):
+        shared_mesh = types.SimpleNamespace(
+            devices=np.array([[types.SimpleNamespace(id=1)]], dtype=object)
+        )
+        self.rl_cluster = types.SimpleNamespace(
+            cluster_config=types.SimpleNamespace(
+                offload_to_cpu=offload_to_cpu,
+                role_to_mesh={
+                    rl_cluster_lib.Role.ROLLOUT: shared_mesh,
+                    rl_cluster_lib.Role.REFERENCE: shared_mesh,
+                },
+            )
+        )
+
+    trainer_without_offload = _MockTrainer(offload_to_cpu=False)
+    self.assertFalse(
+        trainer_without_offload._should_buffer_stage_boundary(
+            rl_cluster_lib.Role.ROLLOUT,
+            rl_cluster_lib.Role.REFERENCE,
+        )
+    )
+
+    trainer_with_offload = _MockTrainer(offload_to_cpu=True)
+    self.assertTrue(
+        trainer_with_offload._should_buffer_stage_boundary(
+            rl_cluster_lib.Role.ROLLOUT,
+            rl_cluster_lib.Role.REFERENCE,
+        )
+    )
+
+  def test_data_consumer_batch_generator(self):
+    trainer = mock.Mock(spec=agentic_rl_learner.AgenticRLLearner)
+    trainer._training_config = types.SimpleNamespace(max_seq_token_per_tpu=None)
+    trainer._iter_train_micro_batches_from_stream = (
+        agentic_rl_learner.AgenticRLLearner._iter_train_micro_batches_from_stream
+        .__get__(trainer, agentic_rl_learner.AgenticRLLearner)
+    )
+
+    train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    for prompt_id in [0, 0, 1, 1]:
+      train_data_queue.put(
+          types.SimpleNamespace(prompt_ids=np.array([prompt_id]))
+      )
+    train_data_queue.put(agentic_rl_learner._GLOBAL_BATCH_BARRIER)
+    train_data_queue.put(agentic_rl_learner._QUEUE_CLOSED)
+
+    train_data_gen = agentic_rl_learner.AgenticRLLearner._data_consumer_batch_generator(
+        trainer,
+        train_data_queue,
+        2,
+    )
+
+    batches = list(train_data_gen)
+    self.assertLen(batches, 2)
+    self.assertFalse(batches[0].end_of_global_batch)
+    self.assertTrue(batches[1].end_of_global_batch)
+    self.assertEqual(
+        [item.prompt_ids[0] for item in batches[0].train_examples],
+        [0, 0],
+    )
+    self.assertEqual(
+        [item.prompt_ids[0] for item in batches[1].train_examples],
+        [1, 1],
+    )
+
+  def test_attach_stage_failure_callbacks_wake_blocked_queues(self):
+    trainer = mock.Mock(spec=agentic_rl_learner.AgenticRLLearner)
+    trainer._attach_stage_failure_callbacks = (
+        agentic_rl_learner.AgenticRLLearner._attach_stage_failure_callbacks
+        .__get__(trainer, agentic_rl_learner.AgenticRLLearner)
+    )
+
+    rollout_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    rollout_future = concurrent_futures.Future()
+    reference_future = concurrent_futures.Future()
+
+    trainer._attach_stage_failure_callbacks(
+        rollout_future=rollout_future,
+        reference_future=reference_future,
+        rollout_queue=rollout_queue,
+        train_data_queue=train_data_queue,
+    )
+
+    rollout_future.set_exception(RuntimeError("rollout failed"))
+    reference_future.set_exception(RuntimeError("reference failed"))
+
+    self.assertIs(
+        rollout_queue.get(timeout=1.0),
+        agentic_rl_learner._QUEUE_CLOSED,
+    )
+    self.assertIs(
+        train_data_queue.get(timeout=1.0),
+        agentic_rl_learner._QUEUE_CLOSED,
+    )
 
   def test_grpo_config_validation(self):
     with self.assertRaisesRegex(
@@ -638,7 +854,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         algo_config=grpo_config,
         chat_parser=MockChatParser(),
     )
-    
+
     with mock.patch.object(learner, "_compute_rewards", side_effect=mock_compute_rewards):
       with mock.patch.object(
           learner.rl_cluster,
@@ -647,7 +863,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           autospec=True,
       ):
         learner._process_results(trajectories)
-    
+
     self.assertEqual(extracted_completions, ["msg 0", "msg 1"])
 
   @parameterized.named_parameters(

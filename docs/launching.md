@@ -254,7 +254,7 @@ This section provides a detailed explanation of the configuration parameters ava
 
 #### Model Configuration (`model_config`)
 
-These parameters define the base model, where to download it from, and how to shard it across TPUs/GPUs. Note that `actor_model_config`, `reference_model_config`, and `rollout_model_config` typically inherit from this base configuration. 
+These parameters define the base model, where to download it from, and how to shard it across TPUs/GPUs. Note that `actor_model_config`, `reference_model_config`, and `rollout_model_config` typically inherit from this base configuration.
 
 * **`model_name`**: The unique full name identifier of the model. This
     corresponds to the full name and should match exactly with the model name
@@ -287,6 +287,16 @@ These parameters define the base model, where to download it from, and how to sh
 * **`mesh`**: Defines the hardware mesh layout for distributed training.
   * `shape`: Tuple string defining mesh dimensions (e.g., `"(2,2)"` for a 2x2 grid).
   * `axis_names`: Names for mesh axes, often used for parallelism strategies (e.g., `"('fsdp','tp')"` for Fully Sharded Data Parallelism and Tensor Parallelism).
+* **`colocate_with`**: Optional role-local placement override for
+  `actor_model_config`, `reference_model_config`, `rollout_model_config`, and
+  other RL roles.
+  * If unset, a role owns its own device slice when it has an explicit
+    `mesh`, or shares the actor mesh by default when it does not.
+  * If set to a role name such as `"actor"`, the role reuses that role's
+    device slice but may still define its own `mesh.shape` and
+    `mesh.axis_names`.
+  * This is different from exact mesh sharing: two roles can be colocated on
+    the same devices while using different mesh layouts.
 
 
 #### Tokenizer Configuration (`tokenizer_config`)
@@ -338,7 +348,7 @@ General settings for the training loop, logging, and checkpointing.
 
 * **`eval_every_n_steps`**: Frequency of running evaluation steps.
 
-* **`gradient_accumulation_steps`**: Number of steps to accumulate gradients 
+* **`gradient_accumulation_steps`**: Number of steps to accumulate gradients
 before performing a parameter update (simulates larger batch sizes).
 
 * **`checkpointing_options`**:
