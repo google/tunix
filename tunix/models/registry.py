@@ -178,6 +178,39 @@ MODEL_CATALOG = (
         model_config_id='gemma3_27b_it',
         model_config_category='gemma3',
     ),
+    # Gemma 4 models.
+    naming.ModelNaming(
+        model_id='google/gemma-4-e2b',
+        model_name='gemma-4-e2b',
+        model_family='gemma4',
+        model_version='e2b',
+        model_config_id='gemma4_e2b',
+        model_config_category='gemma4',
+    ),
+    naming.ModelNaming(
+        model_id='google/gemma-4-e4b',
+        model_name='gemma-4-e4b',
+        model_family='gemma4',
+        model_version='e4b',
+        model_config_id='gemma4_e4b',
+        model_config_category='gemma4',
+    ),
+    naming.ModelNaming(
+        model_id='google/gemma-4-31b',
+        model_name='gemma-4-31b',
+        model_family='gemma4',
+        model_version='31b',
+        model_config_id='gemma4_31b',
+        model_config_category='gemma4',
+    ),
+    naming.ModelNaming(
+        model_id='google/gemma-4-26b-a4b',
+        model_name='gemma-4-26b-a4b',
+        model_family='gemma4',
+        model_version='26b_a4b',
+        model_config_id='gemma4_26b_a4b',
+        model_config_category='gemma4',
+    ),
     # Llama models.
     naming.ModelNaming(
         model_id='meta-llama/Meta-Llama-3-70B',

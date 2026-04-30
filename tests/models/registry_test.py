@@ -17,6 +17,7 @@ from absl.testing import absltest
 from tunix.models import registry
 from tunix.models.gemma import model as gemma_model
 from tunix.models.gemma3 import model as gemma3_model
+from tunix.models.gemma4 import model as gemma4_model
 from tunix.models.llama3 import model as llama3_model
 from tunix.models.qwen2 import model as qwen2_model
 from tunix.models.qwen3 import model as qwen3_model
@@ -24,6 +25,7 @@ from tunix.models.qwen3 import model as qwen3_model
 _ALL_MODEL_MODULES = [
     gemma_model,
     gemma3_model,
+    gemma4_model,
     llama3_model,
     qwen2_model,
     qwen3_model,
