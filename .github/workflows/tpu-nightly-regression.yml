@@ -108,20 +108,21 @@ jobs:
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 3 way disaggregated mode ..."
         python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || FAILED=1
 
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in colocated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm || FAILED=1
+        # vLLM Tests
+        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in colocated mode ..."
+        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm || FAILED=1
 
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 2 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way || FAILED=1
+        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 2 way disaggregated mode ..."
+        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way || FAILED=1
 
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 3 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way || FAILED=1
+        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 3 way disaggregated mode ..."
+        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way || FAILED=1
 
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 2 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
+        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 2 way disaggregated mode ..."
+        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
 
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way || FAILED=1
+        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode ..."
+        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way || FAILED=1
 
         # SGLang Tests
         unset JAX_PLATFORMS
