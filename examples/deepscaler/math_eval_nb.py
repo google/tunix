@@ -6,6 +6,7 @@ import pandas as pd
 import os
 import fsspec
 import numpy as np
+import numpy as np
 
 import transformers
 from tunix.generate import mappings
@@ -240,7 +241,7 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(1, 2, 2), axis_names=["fsdp", "tp", "ep"])
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(4, 1), axis_names=["fsdp", "tp"])
     self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(1, 4), axis_names=["fsdp", "tp"])
     # self.rollout_mesh_backup = jax.sharding.Mesh(np.array(jax.devices()[2:3]).reshape(1, 1), axis_names=["fsdp", "tp"])
     self.tokenizer = None
@@ -371,11 +372,11 @@ class Qwen25MathEvaluator:
           config=vllm_sampler.VllmConfig(
               mesh=self.rollout_mesh,
               hbm_utilization=0.75,
-              enable_dp_attention=True,
+              # enable_dp_attention=True,
               init_with_random_weights=False,
               mapping_config=mapping_config,
-              delete_dst_buffers=True,
-              reshard_chunk_size=128,
+              # tensor_parallel_size=2,
+              # data_parallel_size=1,
               engine_kwargs={
                   "model": self.model_version,
                   "max_model_len": 1024,
@@ -714,13 +715,13 @@ MODEL_MAPPING = {
     
 }
 
-mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
+mesh_config = [[1, 4], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
 # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 model_version = "google/gemma-4-26B-A4B-it"
-# model_version = "google/gemma-4-31B-it"
+# model_version = "google/gemma-4-E4B-it"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 

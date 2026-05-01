@@ -105,6 +105,7 @@ TO_HF_MAPPINGS = {
         (None, None, 'model'),
     ),
     'layers.*.moe.linear': (
+    'layers.*.moe.linear': (
         'model.layers.*.experts.kernel_down_proj_EFD',
         ('model', None, None),
     ),
