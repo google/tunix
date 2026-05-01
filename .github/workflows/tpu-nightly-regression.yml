@@ -155,7 +155,7 @@ jobs:
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
-        SCRIPT_DIR="./tunix/examples/sft/mtnt"
+        SCRIPT_DIR="./examples/sft/mtnt"
         MAX_STEPS=5
         EVAL_EVERY_N_STEPS=1
 
@@ -188,7 +188,7 @@ jobs:
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
-        SCRIPT_DIR="./tunix/examples/rl/grpo/gsm8k"
+        SCRIPT_DIR="./examples/rl/grpo/gsm8k"
         EXCLUDE_DIR="verl_compatible"
         MAX_STEPS=5
         EVAL_EVERY_N_STEPS=1
