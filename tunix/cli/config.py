@@ -691,51 +691,6 @@ class HyperParameters:
       )
     return tuple(axis_shapes), tuple(axis_names)
 
-  def create_mesh(self, model_key: str, devices: Sequence[Any] | None = None):
-    """Validate and extract mesh configuration from a dictionary.
-
-    Expects raw_keys to contain a 'mesh' key, which is a dictionary with 'shape'
-    and 'axis_names' keys.
-
-    Args:
-      model_key: A model key that contain raw mesh configuration. For example,
-        in rl, there are actor_model, critic_model and reference_model, each of
-        them could have different mesh configuration.
-      devices: Optional explicit device subset to use for the mesh. When
-        provided, the mesh shape must exactly match the number of assigned
-        devices.
-
-    Returns:
-      A tuple containing (axis_shapes, axis_names), both as tuples.
-
-    Raises:
-      ValueError: If the mesh configuration is missing, malformed, or invalid.
-    """
-
-    axis_shapes, axis_names = self._parse_mesh_config(model_key)
-    num_devices = len(devices) if devices is not None else jax.device_count()
-    if np.prod(axis_shapes) > num_devices:
-      raise ValueError(
-          f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
-          f"but found {num_devices}."
-      )
-    if devices is not None:
-      if np.prod(axis_shapes) != num_devices:
-        raise ValueError(
-            f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
-            f"but was assigned {num_devices}."
-        )
-      return jax.sharding.Mesh(
-          np.array(list(devices)).reshape(axis_shapes),
-          axis_names,
-          axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
-      )
-    return jax.make_mesh(
-        axis_shapes,
-        axis_names,
-        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
-    )
-
   def obtain_training_config_dict(self, key):
     """Obtain training config dictionary from specified key in self.config.
 

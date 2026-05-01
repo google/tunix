@@ -753,6 +753,107 @@ vllm_config:
         role_to_mesh[rl_cluster_lib.Role.ACTOR],
     )
 
+  def test_split_mesh_delegates_device_allocation_to_mesh_utils(self):
+    extra = """
+training_mode: "agentic_grpo"
+data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
+data_config:
+  train_data_path: "gs://fake/train.json"
+  eval_data_path: "gs://fake/eval.parquet"
+prompt_key: "prompts"
+reward_functions: []
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+  context_ratio: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    pipeline = _make_pipeline(extra)
+    actor_model_config = pipeline.config["actor_model_config"]
+    if isinstance(actor_model_config, omegaconf.dictconfig.DictConfig):
+      actor_model_config["mesh"] = {
+          "shape": "(1,2)",
+          "axis_names": "('fsdp','tp')",
+      }
+    pipeline.config["reference_model_config"] = {"same_mesh_as": "actor"}
+    rollout_model_config = pipeline.config["rollout_model_config"]
+    if isinstance(rollout_model_config, omegaconf.dictconfig.DictConfig):
+      rollout_model_config["mesh"] = {
+          "shape": "(1,2)",
+          "axis_names": "('fsdp','tp')",
+      }
+
+    fake_devices = ["a0", "a1", "r0", "r1"]
+    allocated_devices = {
+        "actor_model_config": ["a0", "a1"],
+        "rollout_model_config": ["r0", "r1"],
+    }
+    created_mesh_devices = {}
+
+    def fake_create_mesh(axis_shapes, axis_names, devices=None):
+      model_key = (
+          "actor_model_config"
+          if axis_shapes == (1, 2) and axis_names == ("fsdp", "tp")
+          and "actor_model_config" not in created_mesh_devices
+          else "rollout_model_config"
+      )
+      created_mesh_devices[model_key] = list(devices)
+      return (model_key, tuple(devices))
+
+    with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
+      with mock.patch.object(
+          grpo_main.mesh_lib,
+          "allocate_named_mesh_device_slices",
+          return_value=allocated_devices,
+      ) as allocate_mock:
+        with mock.patch.object(
+            grpo_main.mesh_lib,
+            "create_mesh",
+            side_effect=fake_create_mesh,
+        ):
+          role_to_mesh = pipeline.create_role_to_mesh()
+
+    allocate_mock.assert_called_once_with(
+        [
+            ("actor_model_config", 2),
+            ("rollout_model_config", 2),
+        ],
+        devices=fake_devices,
+    )
+    self.assertEqual(created_mesh_devices["actor_model_config"], ["a0", "a1"])
+    self.assertEqual(created_mesh_devices["rollout_model_config"], ["r0", "r1"])
+    self.assertEqual(
+        role_to_mesh[rl_cluster_lib.Role.ACTOR],
+        ("actor_model_config", ("a0", "a1")),
+    )
+    self.assertIs(
+        role_to_mesh[rl_cluster_lib.Role.REFERENCE],
+        role_to_mesh[rl_cluster_lib.Role.ACTOR],
+    )
+    self.assertEqual(
+        role_to_mesh[rl_cluster_lib.Role.ROLLOUT],
+        ("rollout_model_config", ("r0", "r1")),
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
