@@ -167,7 +167,7 @@ def preprocess_src_state(src_state: Any) -> Any:
           new_flat_state.append((v_keys, v_val))
       else:
         new_flat_state.append((keys, param))
-    src_state = type(src_state).from_flat_path(new_flat_state)
+    src_state = src_state.from_flat_path(new_flat_state)
   return src_state
 
 
