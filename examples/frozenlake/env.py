@@ -168,7 +168,7 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
   INVALID_ACTION = 0
   PENALTY_FOR_INVALID = -1
 
-  def __init__(self, entry: dict, group_id: int | None = None, pair_index: int | None = None, max_steps: int = 1, **kwargs):
+  def __init__(self, entry: dict, group_id: int | None = None, pair_index: int | None = None, max_steps: int = 5, **kwargs):
     global MAX_STEPS
     MAX_STEPS = max_steps
 
@@ -326,6 +326,11 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
       result = "\n".join("".join(lookup(cell) for cell in row) for row in room_state)
       # result += f"Player Position is at ({position_P[0]}, {position_P[1]}), Goal Position is at ({self.goal_postion[0]}, {self.goal_postion[1]})"
       return result
+
+  def reset(self):
+    super().reset()
+    GymFrozenLakeEnv.reset(self, seed=self.seed)
+    return self.render(mode="tiny_rgb_array"), {}
 
   @classmethod
   def from_dict(cls, env_info: dict) -> "FrozenLakeEnv":

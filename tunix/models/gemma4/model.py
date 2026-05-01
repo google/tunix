@@ -817,9 +817,17 @@ class Attention(nnx.Module):
     return self.num_kv_heads != self.config.num_heads and self.num_kv_heads > 1
 
   def __call__(self, x, segment_pos, cache, attn_mask, kv_shared_cache=None):
-    return self.block(
-        x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
-    )
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
+      )
+    else:
+      return self.block(
+          x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
+      )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
     return {
@@ -894,8 +902,19 @@ class FeedForward(nnx.Module):
         param_dtype=config.param_dtype,
     )
 
-  def __call__(self, x):
+  
+  def block(self, x):
     return self.down_proj(nnx.gelu(self.gate_proj(x)) * self.up_proj(x))
+
+  def __call__(self, x):
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      return nnx.remat(self.block.__func__)(self, x)
+    else:
+      return self.block(x)
+
 
 
 class DecoderLayer(nnx.Module):
@@ -1004,7 +1023,7 @@ class DecoderLayer(nnx.Module):
       )
 
 
-  def __call__(
+  def block(
       self,
       x,
       segment_pos,
@@ -1042,6 +1061,27 @@ class DecoderLayer(nnx.Module):
 
     ffw = ffw * self.skip_scale.value
     return cache, ffw
+
+  def __call__(
+      self,
+      x,
+      segment_pos,
+      cache,
+      attn_mask,
+      per_layer_input=None,
+      kv_shared_cache=None,
+  ):
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask, per_layer_input, kv_shared_cache
+      )
+    else:
+      return self.block(
+          x, segment_pos, cache, attn_mask, per_layer_input, kv_shared_cache
+      )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
     return self.attn.init_cache(batch_size, max_seq_len, dtype)

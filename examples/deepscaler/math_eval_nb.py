@@ -212,8 +212,8 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    # self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
-    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(2, 2), axis_names=["fsdp", "tp"])
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(2, 1), axis_names=["fsdp", "tp"])
+    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
     # self.rollout_mesh_backup = jax.sharding.Mesh(np.array(jax.devices()[2:3]).reshape(1, 1), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
@@ -280,11 +280,11 @@ class Qwen25MathEvaluator:
 
     print("Setting up model config...")
 
-    # if has_safetensors(self.model_path):
-    #   self.model_from_safe_tensors()
-    # else:
-    #   self.model_from_orbax_ckpt()
-    # print("Model loaded successfully!")
+    if has_safetensors(self.model_path):
+      self.model_from_safe_tensors()
+    else:
+      self.model_from_orbax_ckpt()
+    print("Model loaded successfully!")
     print("Skipping model loading for testing purposes...")
     print("Creating sampler...")
     cache_config = sampler_lib.CacheConfig(
@@ -325,7 +325,7 @@ class Qwen25MathEvaluator:
       )
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to SGLang JAX sampler...")
-      # self.sampler_sglang.update_params(nnx.state(self.model))
+      self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
       from tunix.generate import vllm_sampler   # pylint: disable=g-import-not-at-top
 

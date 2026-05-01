@@ -165,6 +165,7 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     new_obs_str = str(observation)
     # Base message for the user
     new_obs_str = "Current Observation: \n" + new_obs_str
+    print(f"last 500 chars of new_obs_str: {new_obs_str[-500:]}")
     if not done:
       new_obs_str += "\n" + "You have not achieved the goal, P has not reached G yet. Please give the next action."
 

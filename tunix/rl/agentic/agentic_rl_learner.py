@@ -431,6 +431,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         model_call=self._model_call,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        max_response_length=self.algo_config.max_response_length,
         timeout=self.algo_config.episode_timeout,
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,

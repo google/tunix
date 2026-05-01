@@ -563,15 +563,26 @@ def _unroll_scanned_layers(
     else:
       # No unrolling needed
       if tgt_path in fused_tgt_map:
-        assert src_key in fused_tgt_map[tgt_path], f"Source key '{src_key}' should be part of the fused mapping for target '{tgt_path}' but it's not. Fused mapping keys: {fused_tgt_map[tgt_path]}"
-        fuse_sources = fuse_src_to_same_tgt_params(src_val, src_key, tgt_path_to_src_values_fused, tgt_path, tgt_param, tp_size)
-        # if (fuse_sources[tgt_path], dict):
-        #   unscanned_flat[(list(fuse_sources[tgt_path].keys())[0], tgt_path)] = (list(fuse_sources[tgt_path].values())[0], tgt_param)
-        #   print(f"Fused parameter for target '{tgt_path}' from sources: {list(fuse_sources[tgt_path].keys())}")
+        assert src_key in fused_tgt_map[tgt_path], (
+            f"Source key '{src_key}' should be part of the fused mapping for"
+            f" target '{tgt_path}' but it's not. Fused mapping keys:"
+            f' {fused_tgt_map[tgt_path]}'
+        )
+        tgt_path_to_src_values_fused = fuse_src_to_same_tgt_params(
+            src_val,
+            src_key,
+            tgt_path_to_src_values_fused,
+            tgt_path,
+            tgt_param,
+            tp_size,
+        )
       else:
         unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
-  for tgt_path, src_tgt in fuse_sources.items():
-    unscanned_flat[(list(src_tgt.keys())[0], tgt_path)] = (list(src_tgt.values())[0][0], list(src_tgt.values())[0][1])
+  for tgt_path, src_tgt in tgt_path_to_src_values_fused.items():
+    unscanned_flat[(list(src_tgt.keys())[0], tgt_path)] = (
+        list(src_tgt.values())[0][0],
+        list(src_tgt.values())[0][1],
+    )
   return unscanned_flat
 
 
@@ -588,7 +599,6 @@ def _apply_transpose(
   last_key = src_key.split('.')[-1]
   last_three_keys = '.'.join(src_key.split('.')[-3:])
   last_two_keys = '.'.join(src_key.split('.')[-2:])
-  # print(f"Checking if transpose is needed for {src_key} with last key {last_key} and last three keys {last_three_keys}")
   all_key = src_key
   target_key = ''
   if last_key in transpose_keys and 'lora' not in last_key:
@@ -893,7 +903,7 @@ def transfer_state_with_mappings(
     src_state,
     dst_state,
     key_mappings,
-    hf_key_mappings=None,
+    key_reference_mappings=None,
     key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
@@ -944,7 +954,9 @@ def transfer_state_with_mappings(
   src_to_tgt_map, fused_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
   # Unroll scanned layers and flatten source state
-  unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map, fused_tgt_map, kwargs['tp_size'])
+  unscanned_src_to_tgt_flat = _unroll_scanned_layers(
+      src_state, src_to_tgt_map, fused_tgt_map, kwargs.get('tp_size', None),
+  )
   transferred_target_keys = set()
 
   # Transfer values with transformations
@@ -1006,11 +1018,15 @@ def transfer_state_with_mappings(
       if hasattr(tgt_param, 'value'):
         tgt_param.value = resharded_values_flat_dict[tgt_key]
       else:
-        tgt_flat_list[tgt_key_idx_mapping[tgt_key]] = (tgt_key, resharded_values_flat_dict[tgt_key])
+        tgt_flat_list[tgt_key_idx_mapping[tgt_key]] = (
+            tgt_key,
+            resharded_values_flat_dict[tgt_key],
+        )
 
-  # handle cases like vllm_model.language_model.lm_head.weight -> vllm_model.language_model.model.embed_tokens.weight
-  if hf_key_mappings:
-    for tgt_key1, tgt_key2 in hf_key_mappings.items():
+  # handle cases like vllm_model.language_model.lm_head.weight just referencing
+  # the value of vllm_model.language_model.model.embed_tokens.weight.
+  if key_reference_mappings:
+    for tgt_key1, tgt_key2 in key_reference_mappings.items():
       for path, value in tgt_flat_list:
         if path == tgt_key1:
           tgt_flat_list[tgt_key2] = value
