@@ -366,6 +366,7 @@ def build_flat_dict(
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
     path = '.'.join(str(key) for key in keys)
+    print(f"target path: {path}, shape: {v.value.shape}")
     mapped = False
     for src, regex, sharding in compiled_mappings:
       matched = regex.match(path)
@@ -456,6 +457,8 @@ def _unroll_scanned_layers(
 
   unscanned_flat = {}
 
+  for src_key, (_, tgt_path, _) in src_to_tgt_map.items():
+    print(f"Source key: {src_key}, Target path: {tgt_path}")
   for src_keys, src_val in src_state.flat_state():
     src_key = '.'.join(str(k) for k in src_keys)
 
@@ -617,6 +620,22 @@ def _align_shape(
           padded_dim = (val.shape[-1] + 127) // 128 * 128
           repeated_dim = tgt_shape[-1] // padded_dim
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
+    elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
+      tp_size = kwargs["tp_size"]
+      num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
+      gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
+      chunk_size = expert_dim // tp_size
+      padded_expert_chunk_dim = ((chunk_size + 127)//128)*128
+      pad_amount = padded_expert_chunk_dim - chunk_size
+      gate_chunks = gate_chunks.reshape(num_experts, tp_size, -1, embed_dim)
+      up_chunks = up_chunks.reshape(num_experts, tp_size, -1, embed_dim)
+      if pad_amount > 0:
+        gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+        up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+      val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
+      val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
+      val_chunks = val_chunks.transpose(0, 2, 1)
+      return val_chunks
     else:
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
@@ -819,6 +838,7 @@ def transfer_state_with_mappings(
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
+      print(f'Applying hook function for {flat_src_key}')
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)

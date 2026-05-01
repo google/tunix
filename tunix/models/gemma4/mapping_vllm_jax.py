@@ -43,91 +43,7 @@ class WildcardDict(dict):
     raise KeyError(key)
 
 
-class DynamicMappingsDict(dict):
-  """Custom dictionary that generates exact regex patterns based on source keys."""
-
-  def items(self) -> list[tuple[str, Any]]:
-    frame = sys._getframe(1)
-    src_state = frame.f_locals.get('src_state')
-    if src_state is not None:
-      src_keys = {
-          '.'.join(str(k) for k in keys) for keys, _ in src_state.flat_state()
-      }
-      res = []
-      for k, v in super().items():
-        tgt, sharding = v
-        if '*' in k:
-          # Extract matching layer indices from src_keys
-          pattern = '^' + re.escape(k).replace('\\*', r'(\d+)') + '$'
-          layers = []
-          for sk in src_keys:
-            m = re.match(pattern, sk)
-            if m:
-              layers.append(m.group(1))
-          if layers:
-            layers_pat = '(' + '|'.join(layers) + ')'
-            new_tgt = tgt.replace('.', r'\.').replace('*', layers_pat)
-            res.append((k, (new_tgt, sharding)))
-          else:
-            res.append((k, v))
-        else:
-          res.append((k, v))
-      return res
-    return list(super().items())
-
-
-def _kv_hook(val: jnp.ndarray) -> jnp.ndarray:
-  # val has shape (2, num_kv_heads, embed_dim, head_dim)
-  k_val = jnp.transpose(val[0], (1, 0, 2))
-  v_val = jnp.transpose(val[1], (1, 0, 2))
-
-  frame = sys._getframe(1)
-  dst_state = frame.f_locals['dst_state']
-  flat_src_key = frame.f_locals['flat_src_key']
-
-  match = re.match(r'layers\.(\d+)\.attn\.kv_einsum\.w', flat_src_key)
-  if match:
-    layer_idx = int(match.group(1))
-    for k, v in dst_state.flat_state():
-      if (
-          len(k) >= 6
-          and k[-6:-4] == ('layers', str(layer_idx))
-          and 'v_proj' in k
-      ):
-        v.value = v_val
-        break
-
-  return k_val
-
-
-def _moe_gate_up_hook(val: jnp.ndarray) -> jnp.ndarray:
-  gate_val = val[:, 0, :, :]
-  up_val = val[:, 1, :, :]
-
-  frame = sys._getframe(1)
-  dst_state = frame.f_locals['dst_state']
-  flat_src_key = frame.f_locals['flat_src_key']
-
-  match = re.match(r'layers\.(\d+)\.moe\.gating_einsum', flat_src_key)
-  if match:
-    layer_idx = int(match.group(1))
-    for k, v in dst_state.flat_state():
-      if (
-          len(k) >= 6
-          and k[-6:-4] == ('layers', str(layer_idx))
-          and 'kernel_up_proj_EDF' in k
-      ):
-        v.value = up_val
-        break
-
-  return gate_val
-
-
-def _moe_down_hook(val: jnp.ndarray) -> jnp.ndarray:
-  return jnp.transpose(val, (0, 2, 1))
-
-
-TO_HF_MAPPINGS = DynamicMappingsDict({
+TO_HF_MAPPINGS = {
     'embedder.input_embedding': ('model.embed_tokens.weight', ('model', None)),
     'layers.*.pre_attention_norm.scale': (
         'model.layers.*.input_layernorm.weight',
@@ -145,8 +61,8 @@ TO_HF_MAPPINGS = DynamicMappingsDict({
         'model.layers.*.self_attn.k_proj.weight',
         (None, 'model', None),
     ),
-    'layers.*.attn.kv_einsum.w': (
-        'model.layers.*.self_attn.k_proj.weight',
+    'layers.*.attn.v_einsum.w': (
+        'model.layers.*.self_attn.v_proj.weight',
         (None, 'model', None),
     ),
     'layers.*.attn._key_norm.scale': (
@@ -203,9 +119,10 @@ TO_HF_MAPPINGS = DynamicMappingsDict({
         (None,),
     ),
     'layers.*.moe.gating_einsum': (
-        'model.layers.*.experts.kernel_gating_EDF',
+        'model.layers.*.experts.kernel_gating_upproj_EDF',
         (None, None, 'model'),
     ),
+    'layers.*.moe.linear': (
     'layers.*.moe.linear': (
         'model.layers.*.experts.kernel_down_proj_EFD',
         ('model', None, None),
@@ -222,22 +139,42 @@ TO_HF_MAPPINGS = DynamicMappingsDict({
 
 LORA_TO_HF_MAPPINGS: Dict[str, MappingEntry] = {}
 
-TO_HF_HOOK_FNS = WildcardDict({
-    'layers.*.attn.kv_einsum.w': _kv_hook,
-    'layers.*.moe.gating_einsum': _moe_gate_up_hook,
-    'layers.*.moe.linear': _moe_down_hook,
-})
-
 TO_HF_TRANSPOSE_KEYS = WildcardDict({
     'layers.*.attn.q_einsum.w': (1, 0, 2),
     'layers.*.attn.k_einsum.w': (1, 0, 2),
+    'layers.*.attn.v_einsum.w': (1, 0, 2),
 })
+
+def preprocess_src_state(src_state: Any) -> Any:
+  if hasattr(src_state, 'flat_state'):
+    flat_state = list(src_state.flat_state())
+    new_flat_state = []
+    for keys, param in flat_state:
+      src_key = '.'.join(str(k) for k in keys)
+      if 'attn.kv_einsum.w' in src_key:
+        val = param.value if hasattr(param, 'value') else param
+        k_val = val[0]
+        v_val = val[1]
+        k_keys = keys[:-2] + ('k_einsum', 'w')
+        v_keys = keys[:-2] + ('v_einsum', 'w')
+        if hasattr(param, 'value'):
+          from flax import nnx
+          new_flat_state.append((k_keys, nnx.Param(k_val)))
+          new_flat_state.append((v_keys, nnx.Param(v_val)))
+        else:
+          new_flat_state.append((k_keys, k_val))
+          new_flat_state.append((v_keys, v_val))
+      else:
+        new_flat_state.append((keys, param))
+    src_state = type(src_state).from_flat_path(new_flat_state)
+  return src_state
+
 
 VLLM_JAX_MAPPING: Dict[str, Any] = {
     'to_hf_mappings': TO_HF_MAPPINGS,
     'lora_to_hf_mappings': LORA_TO_HF_MAPPINGS,
     'to_hf_transpose_keys': TO_HF_TRANSPOSE_KEYS,
-    'to_hf_hook_fns': TO_HF_HOOK_FNS,
+    'preprocess_src_state': preprocess_src_state,
 }
 
 __all__ = [
