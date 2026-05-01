@@ -52,6 +52,7 @@ from tunix.perf import metrics as perf_metrics
 from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
+from tunix.utils import mesh as mesh_lib
 
 
 _PATHWAYS_BNS = flags.DEFINE_string(
@@ -189,7 +190,25 @@ class GrpoPipeline(config.HyperParameters):
       role_to_owner[role] = resolve_owner(role, set())
     return role_to_owner
 
-  def _create_role_to_mesh(self):
+  def create_role_to_mesh(self):
+    """Builds the role-to-mesh mapping for GRPO execution.
+
+    Any role with an explicit ``*.mesh`` config gets a dedicated device slice.
+    Roles without a mesh share the actor mesh by default, or can point at
+    another role via ``same_mesh_as``.
+
+    All mesh owners participating in the same allocation pass must agree on
+    one ``mesh.allocation_policy`` value. That policy is then passed to the
+    mesh allocator so users can choose between compact packing and
+    performance-oriented cubical packing from config.
+
+    Returns:
+      A mapping from logical GRPO role to the concrete JAX mesh it should use.
+
+    Raises:
+      ValueError: If mesh ownership resolution is invalid or if mesh owners
+        request conflicting allocation policies.
+    """
     devices = list(jax.devices())
     role_to_owner = self._resolve_mesh_owners()
     owner_order = []
@@ -200,50 +219,36 @@ class GrpoPipeline(config.HyperParameters):
       if owner not in owner_order:
         owner_order.append(owner)
 
-    owner_to_mesh = {}
-    owner_to_device_slice = {}
-    device_offset = 0
+    mesh_requirements = []
+    allocation_policy = None
     for owner in owner_order:
       model_key = self._ROLE_TO_MODEL_KEY[owner]
-      axis_shapes, _ = self._parse_mesh_config(model_key)
-      required_devices = int(np.prod(axis_shapes))
-      next_offset = device_offset + required_devices
-      if next_offset > len(devices):
+      axis_shapes, _ = self.parse_mesh_config(model_key)
+      owner_policy = self._parse_mesh_allocation_policy(model_key)
+      if allocation_policy is None:
+        allocation_policy = owner_policy
+      elif owner_policy != allocation_policy:
         raise ValueError(
-            f"Mesh allocation requires {next_offset} devices after allocating"
-            f" {model_key}, but only {len(devices)} are available."
+            "All owned meshes must use the same mesh.allocation_policy, got "
+            f"{allocation_policy!r} and {owner_policy!r}."
         )
-      assigned_devices = devices[device_offset:next_offset]
-      owner_to_device_slice[owner] = assigned_devices
-      owner_to_mesh[owner] = self.create_mesh(
-          model_key, devices=assigned_devices
-      )
-      device_offset = next_offset
+      mesh_requirements.append((model_key, int(np.prod(axis_shapes))))
 
-    if device_offset < len(devices):
-      logging.warning(
-          "Mesh allocation used %d of %d devices; %d devices remain unused.",
-          device_offset,
-          len(devices),
-          len(devices) - device_offset,
-      )
-    logging.info(
-        "Mesh device allocation: %s",
-        {
-            self._ROLE_TO_MODEL_KEY[owner]: len(owner_to_device_slice[owner])
-            for owner in owner_order
-        },
+    allocated_devices = mesh_lib.allocate_named_mesh_device_slices(
+        mesh_requirements,
+        devices=devices,
+        allocation_policy=allocation_policy or mesh_lib.normalize_allocation_policy(None),
     )
+
+    owner_to_mesh = {}
+    for owner in owner_order:
+      model_key = self._ROLE_TO_MODEL_KEY[owner]
+      axis_shapes, axis_names = self.parse_mesh_config(model_key)
+      assigned_devices = allocated_devices[model_key]
+      owner_to_mesh[owner] = mesh_lib.create_mesh(
+          axis_shapes, axis_names, devices=assigned_devices
+      )
     return {role: owner_to_mesh[owner] for role, owner in role_to_owner.items()}
-
-  def create_role_to_mesh(self):
-    """Build role→mesh mapping.
-
-    Any role with an explicit ``*.mesh`` config gets a dedicated device slice.
-    Roles without a mesh share the actor mesh by default, or can point at
-    another role via ``same_mesh_as``.
-    """
-    return self._create_role_to_mesh()
 
   # ------------------------------------------------------------------
   # Rollout config

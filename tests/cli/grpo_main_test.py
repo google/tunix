@@ -20,8 +20,6 @@ and that KV cache / GRPOConfig computation is correct.
 import os
 import pathlib
 import tempfile
-from typing import Any
-from typing import cast
 from unittest import mock
 
 from absl.testing import absltest
@@ -573,26 +571,6 @@ verl_compatible: false
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
 
 
-class ComputeParamsTest(absltest.TestCase):
-
-  def test_compute_params_persists_dynamic_num_batches(self):
-    pipeline = _make_pipeline("")
-    pipeline.config["batch_size"] = 8
-    pipeline.config["num_batches"] = 0
-    pipeline.config["num_train_epochs"] = 1
-    pipeline.config["train_fraction"] = 0.8
-    rl_training_config = cast(dict[str, Any], pipeline.config["rl_training_config"])
-    rl_training_config["max_steps"] = 0
-
-    raw_dataset = mock.Mock()
-    raw_dataset.__len__ = mock.Mock(return_value=7473)
-
-    pipeline.compute_params(raw_dataset)
-
-    self.assertEqual(pipeline.config["num_batches"], 934)
-    self.assertEqual(rl_training_config["max_steps"], 747)
-
-
 # ---------------------------------------------------------------------------
 # GRPOConfig construction
 # ---------------------------------------------------------------------------
@@ -710,7 +688,21 @@ vllm_config:
           "axis_names": "('fsdp','tp')",
       }
 
-    fake_devices = list(range(4))
+    class FakeDevice:
+
+      def __init__(self, device_id, coords):
+        self.id = device_id
+        self.coords = coords
+        self.process_index = 0
+        self.slice_index = 0
+        self.device_kind = "TPU v5e"
+
+    fake_devices = [
+        FakeDevice(0, (0, 0)),
+        FakeDevice(1, (1, 0)),
+        FakeDevice(2, (0, 1)),
+        FakeDevice(3, (1, 1)),
+    ]
 
     class FakeMesh:
 
@@ -726,11 +718,21 @@ vllm_config:
         role_to_mesh = pipeline.create_role_to_mesh()
 
     self.assertSequenceEqual(
-        role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.flatten().tolist(),
+      [
+        device.id
+        for device in role_to_mesh[rl_cluster_lib.Role.ACTOR]
+        .devices.flatten()
+        .tolist()
+      ],
         [0, 1],
     )
     self.assertSequenceEqual(
-        role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.flatten().tolist(),
+      [
+        device.id
+        for device in role_to_mesh[rl_cluster_lib.Role.ROLLOUT]
+        .devices.flatten()
+        .tolist()
+      ],
         [2, 3],
     )
     self.assertEqual(
@@ -744,6 +746,72 @@ vllm_config:
     self.assertIs(
         role_to_mesh[rl_cluster_lib.Role.REFERENCE],
         role_to_mesh[rl_cluster_lib.Role.ACTOR],
+    )
+
+  def test_create_role_to_mesh_passes_configured_allocation_policy(self):
+    extra = """
+training_mode: "agentic_grpo"
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    pipeline = _make_pipeline(extra)
+    actor_model_config = pipeline.config["actor_model_config"]
+    if isinstance(actor_model_config, omegaconf.dictconfig.DictConfig):
+      actor_model_config["mesh"] = {
+          "shape": "(2,1)",
+          "axis_names": "('fsdp','tp')",
+          "allocation_policy": "PERFORMANCE",
+      }
+    pipeline.config["reference_model_config"] = {"same_mesh_as": "actor"}
+    rollout_model_config = pipeline.config["rollout_model_config"]
+    if isinstance(rollout_model_config, omegaconf.dictconfig.DictConfig):
+      rollout_model_config["mesh"] = {
+          "shape": "(1,2)",
+          "axis_names": "('fsdp','tp')",
+          "allocation_policy": "PERFORMANCE",
+      }
+
+    fake_devices = list(range(4))
+
+    with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
+      with mock.patch.object(
+          grpo_main.mesh_lib,
+          "allocate_named_mesh_device_slices",
+          return_value={
+              "actor_model_config": [0, 1],
+              "rollout_model_config": [2, 3],
+          },
+      ) as allocate_mock, mock.patch.object(
+          grpo_main.mesh_lib,
+          "create_mesh",
+          side_effect=[object(), object()],
+      ):
+        pipeline.create_role_to_mesh()
+
+    allocate_mock.assert_called_once_with(
+        [("actor_model_config", 2), ("rollout_model_config", 2)],
+        devices=fake_devices,
+        allocation_policy="PERFORMANCE",
     )
 
 

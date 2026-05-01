@@ -25,6 +25,7 @@ from tunix.cli.utils import model as model_lib
 from tunix.examples.data import translation_dataset as data_lib
 from tunix.sft import peft_trainer
 from tunix.sft import utils
+from tunix.utils import mesh as mesh_lib
 
 _PATHWAYS_BNS = flags.DEFINE_string(
     "pathways_bns", None, "BNS address of the Pathways server."
@@ -36,7 +37,8 @@ class PeftPipeline(config.HyperParameters):
 
   def run_peft_trainer(self):
     """Run the PEFT trainer."""
-    mesh: jax.sharding.Mesh = self.create_mesh('model_config')
+    axis_shapes, axis_names = self.parse_mesh_config('model_config')
+    mesh: jax.sharding.Mesh = mesh_lib.create_mesh(axis_shapes, axis_names)
     model: nnx.Module | None = None
     tokenizer: Any | None = None
     my_gen_model_input_fn: (

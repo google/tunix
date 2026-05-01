@@ -36,6 +36,7 @@ import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
+from tunix.utils import mesh as mesh_lib
 
 # Define a prefix for environment variables that can override YAML keys
 _TUNIX_PREFIX = "T_"
@@ -633,8 +634,21 @@ class HyperParameters:
           f"Check if the arguments match the signature of optax.{opt_type}: {e}"
       ) from e
 
-  def _parse_mesh_config(self, model_key: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
-    """Validate and parse mesh configuration for a model key."""
+  def parse_mesh_config(self, model_key: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """Validates and parses the mesh shape and axis names for one model.
+
+    Args:
+      model_key: Config section name such as ``model_config`` or
+        ``actor_model_config``.
+
+    Returns:
+      A tuple ``(axis_shapes, axis_names)`` ready to pass to
+      ``tunix.utils.mesh.create_mesh``.
+
+    Raises:
+      ValueError: If the mesh config is missing, malformed, or internally
+        inconsistent.
+    """
     mesh_config = self.config[model_key].get("mesh")
     if not mesh_config:
 
@@ -693,49 +707,41 @@ class HyperParameters:
       )
     return tuple(axis_shapes), tuple(axis_names)
 
-  def create_mesh(self, model_key: str, devices: Sequence[Any] | None = None):
-    """Validate and extract mesh configuration from a dictionary.
+  def _parse_mesh_allocation_policy(self, model_key: str) -> str:
+    """Validates and returns the mesh allocation policy for one model.
 
-    Expects raw_keys to contain a 'mesh' key, which is a dictionary with 'shape'
-    and 'axis_names' keys.
+    Mesh allocation policy controls how Tunix chooses device subsets when a
+    mesh must be carved out of a larger device pool.
+
+    Supported values are:
+
+    * ``COMPACT``: prefer the smallest remaining region that can satisfy the
+      request.
+    * ``PERFORMANCE``: prefer the most cubical supported extracted shape.
+
+    When ``mesh.allocation_policy`` is omitted, this defaults to ``COMPACT``.
 
     Args:
-      model_key: A model key that contain raw mesh configuration. For example,
-        in rl, there are actor_model, critic_model and reference_model, each of
-        them could have different mesh configuration.
-      devices: Optional explicit device subset to use for the mesh. When
-        provided, the mesh shape must exactly match the number of assigned
-        devices.
+      model_key: Config section name such as ``model_config`` or
+        ``actor_model_config``.
 
     Returns:
-      A tuple containing (axis_shapes, axis_names), both as tuples.
+      The normalized allocation policy string.
 
     Raises:
-      ValueError: If the mesh configuration is missing, malformed, or invalid.
+      ValueError: If the mesh config is missing or the policy value is not
+        supported.
     """
-
-    axis_shapes, axis_names = self._parse_mesh_config(model_key)
-    num_devices = len(devices) if devices is not None else jax.device_count()
-    if np.prod(axis_shapes) > num_devices:
+    mesh_config = self.config[model_key].get("mesh")
+    if not mesh_config:
+      raise ValueError("Missing 'mesh' configuration in raw_keys.")
+    if not isinstance(mesh_config, collections.abc.Mapping):
       raise ValueError(
-          f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
-          f"but found {num_devices}."
+          "The 'mesh' configuration must be a dictionary-like object, got"
+          f" {type(mesh_config)}."
       )
-    if devices is not None:
-      if np.prod(axis_shapes) != num_devices:
-        raise ValueError(
-            f"Mesh shape {axis_shapes} requires {np.prod(axis_shapes)} devices, "
-            f"but was assigned {num_devices}."
-        )
-      return jax.sharding.Mesh(
-          np.array(list(devices)).reshape(axis_shapes),
-          axis_names,
-          axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
-      )
-    return jax.make_mesh(
-        axis_shapes,
-        axis_names,
-        axis_types=(jax.sharding.AxisType.Auto,) * len(axis_names),
+    return mesh_lib.normalize_allocation_policy(
+        mesh_config.get("allocation_policy")
     )
 
   def obtain_training_config_dict(self, key):

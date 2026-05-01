@@ -254,7 +254,7 @@ This section provides a detailed explanation of the configuration parameters ava
 
 #### Model Configuration (`model_config`)
 
-These parameters define the base model, where to download it from, and how to shard it across TPUs/GPUs. Note that `actor_model_config`, `reference_model_config`, and `rollout_model_config` typically inherit from this base configuration. 
+These parameters define the base model, where to download it from, and how to shard it across TPUs/GPUs. Note that `actor_model_config`, `reference_model_config`, and `rollout_model_config` typically inherit from this base configuration.
 
 * **`model_name`**: The unique full name identifier of the model. This
     corresponds to the full name and should match exactly with the model name
@@ -287,6 +287,11 @@ These parameters define the base model, where to download it from, and how to sh
 * **`mesh`**: Defines the hardware mesh layout for distributed training.
   * `shape`: Tuple string defining mesh dimensions (e.g., `"(2,2)"` for a 2x2 grid).
   * `axis_names`: Names for mesh axes, often used for parallelism strategies (e.g., `"('fsdp','tp')"` for Fully Sharded Data Parallelism and Tensor Parallelism).
+  * `allocation_policy`: Optional policy controlling how Tunix carves this mesh from a larger device pool.
+    * `COMPACT`: Prefer the smallest fitting remaining coord region.
+    * `PERFORMANCE`: Prefer more cubical supported extracted shapes.
+    * If omitted, Tunix defaults to `COMPACT`.
+    * When multiple owned meshes are allocated together, they must all use the same `allocation_policy` or leave to defaults.
 
 
 #### Tokenizer Configuration (`tokenizer_config`)
@@ -338,7 +343,7 @@ General settings for the training loop, logging, and checkpointing.
 
 * **`eval_every_n_steps`**: Frequency of running evaluation steps.
 
-* **`gradient_accumulation_steps`**: Number of steps to accumulate gradients 
+* **`gradient_accumulation_steps`**: Number of steps to accumulate gradients
 before performing a parameter update (simulates larger batch sizes).
 
 * **`checkpointing_options`**:
