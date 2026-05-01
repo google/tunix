@@ -436,6 +436,91 @@ class UtilsTest(parameterized.TestCase):
         "Regular parameter with transpose mismatch",
     )
 
+  def test_transfer_state_with_mappings_gemma4(self):
+    """Test transfer_state_with_mappings for Gemma4."""
+    from tunix.models.gemma4.mapping_vllm_jax import VLLM_JAX_MAPPING
+
+    # Mock source state (Tunix style)
+    src_params = {
+        "layers.0.attn.kv_einsum.w": MockParam(
+            jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
+        ),
+        "layers.0.moe.gating_einsum": MockParam(
+            jnp.arange(4 * 2 * 8 * 16, dtype=jnp.float32).reshape(4, 2, 8, 16)
+        ),
+        "layers.0.moe.linear": MockParam(
+            jnp.arange(4 * 16 * 8, dtype=jnp.float32).reshape(4, 16, 8)
+        ),
+    }
+    src_state = MockState(src_params)
+
+    # Mock destination state (vLLM style)
+    dst_params = {
+        "model.layers.0.self_attn.k_proj.weight": MockParam(
+            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        ),
+        "model.layers.0.self_attn.v_proj.weight": MockParam(
+            jnp.zeros((16, 2, 8), dtype=jnp.float32)
+        ),
+        "model.layers.0.experts.kernel_gating_upproj_EDF": MockParam(
+            jnp.zeros((4, 2, 8, 16), dtype=jnp.float32)
+        ),
+        "model.layers.0.experts.kernel_down_proj_EFD": MockParam(
+            jnp.zeros((4, 8, 16), dtype=jnp.float32)
+        ),
+    }
+    dst_state = MockState(dst_params)
+
+    # Apply preprocessing if it exists in mapping
+    if 'preprocess_src_state' in VLLM_JAX_MAPPING:
+      src_state = VLLM_JAX_MAPPING['preprocess_src_state'](src_state)
+
+    key_mappings = VLLM_JAX_MAPPING['to_hf_mappings']
+    transpose_keys = VLLM_JAX_MAPPING['to_hf_transpose_keys']
+
+    new_tgt_state = utils.transfer_state_with_mappings(
+        src_state,
+        dst_state,
+        key_mappings=key_mappings,
+        transpose_keys=transpose_keys,
+    )
+
+    # Assertions
+    src_val = jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
+    k_val_src = src_val[0]
+    v_val_src = src_val[1]
+    
+    expected_k = jnp.transpose(k_val_src, (1, 0, 2))
+    expected_v = jnp.transpose(v_val_src, (1, 0, 2))
+    
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params["model.layers.0.self_attn.k_proj.weight"],
+            expected_k,
+        )
+    )
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params["model.layers.0.self_attn.v_proj.weight"],
+            expected_v,
+        )
+    )
+
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params["model.layers.0.experts.kernel_gating_upproj_EDF"],
+            src_params["layers.0.moe.gating_einsum"].value,
+        )
+    )
+
+    expected_linear = jnp.transpose(src_params["layers.0.moe.linear"].value, (0, 2, 1))
+    self.assertTrue(
+        jnp.array_equal(
+            new_tgt_state.params["model.layers.0.experts.kernel_down_proj_EFD"],
+            expected_linear,
+        )
+    )
+
   def test_verify_state_closeness(self):
     """Test verify_state_closeness function with various scenarios."""
 

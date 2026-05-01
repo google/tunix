@@ -143,6 +143,7 @@ TO_HF_TRANSPOSE_KEYS = WildcardDict({
     'layers.*.attn.q_einsum.w': (1, 0, 2),
     'layers.*.attn.k_einsum.w': (1, 0, 2),
     'layers.*.attn.v_einsum.w': (1, 0, 2),
+    'layers.*.moe.linear': (0, 2, 1),
 })
 
 def preprocess_src_state(src_state: Any) -> Any:
