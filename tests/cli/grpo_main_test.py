@@ -644,7 +644,6 @@ vllm_config:
     )
     self.assertEqual(p.config["agentic_grpo_config"]["system_prompt"], "")
 
-
 class SplitMeshConfigTest(absltest.TestCase):
 
   def test_split_mesh_uses_explicit_role_meshes(self):
@@ -688,7 +687,6 @@ vllm_config:
           "shape": "(2,1)",
           "axis_names": "('fsdp','tp')",
       }
-    pipeline.config["reference_model_config"] = {"same_mesh_as": "actor"}
     rollout_model_config = pipeline.config["rollout_model_config"]
     if isinstance(rollout_model_config, omegaconf.dictconfig.DictConfig):
       rollout_model_config["mesh"] = {
@@ -731,6 +729,128 @@ vllm_config:
         role_to_mesh[rl_cluster_lib.Role.REFERENCE],
         role_to_mesh[rl_cluster_lib.Role.ACTOR],
     )
+
+  def test_colocate_with_reuses_device_slice_with_different_mesh(self):
+    extra = """
+training_mode: "agentic_grpo"
+data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
+data_config:
+  train_data_path: "gs://fake/train.json"
+  eval_data_path: "gs://fake/eval.parquet"
+prompt_key: "prompts"
+reward_functions: []
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+  context_ratio: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    pipeline = _make_pipeline(extra)
+    actor_model_config = pipeline.config["actor_model_config"]
+    if isinstance(actor_model_config, omegaconf.dictconfig.DictConfig):
+      actor_model_config["mesh"] = {
+          "shape": "(2,1)",
+          "axis_names": "('fsdp','tp')",
+      }
+    rollout_model_config = pipeline.config["rollout_model_config"]
+    if isinstance(rollout_model_config, omegaconf.dictconfig.DictConfig):
+      rollout_model_config["colocate_with"] = "actor"
+      rollout_model_config["mesh"] = {
+          "shape": "(1,2)",
+          "axis_names": "('fsdp','tp')",
+      }
+
+    fake_devices = list(range(4))
+
+    class FakeMesh:
+
+      def __init__(self, devices, axis_names, axis_types=None):
+        self.devices = devices
+        self.axis_names = axis_names
+        self.axis_types = axis_types
+
+    with mock.patch.object(grpo_main.jax, "devices", return_value=fake_devices):
+      with mock.patch.object(
+          grpo_main.jax.sharding, "Mesh", side_effect=FakeMesh
+      ):
+        role_to_mesh = pipeline.create_role_to_mesh()
+
+    self.assertSequenceEqual(
+        role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.flatten().tolist(),
+        [0, 1],
+    )
+    self.assertSequenceEqual(
+        role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.flatten().tolist(),
+        [0, 1],
+    )
+    self.assertEqual(
+        role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.shape,
+        (2, 1),
+    )
+    self.assertEqual(
+        role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.shape,
+        (1, 2),
+    )
+
+  def test_empty_string_colocate_with_is_treated_as_unset(self):
+    extra = """
+training_mode: "agentic_grpo"
+data_module: "tunix.cli.recipes.deepscaler_data"
+apply_chat_template_to_dataset: false
+data_config:
+  train_data_path: "gs://fake/train.json"
+  eval_data_path: "gs://fake/eval.parquet"
+prompt_key: "prompts"
+reward_functions: []
+verl_compatible: false
+chat_parser_config:
+  type: "default"
+agent_class_path: null
+agent_kwargs: {}
+env_class_path: null
+env_kwargs: {}
+kubernetes_config: null
+agentic_grpo_config:
+  num_generations: 2
+  num_iterations: 1
+  beta: 0.0
+  epsilon: 0.2
+  epsilon_high: 0.28
+  system_prompt: ""
+  max_concurrency: 1
+  off_policy_steps: 0
+  max_turns: 1
+  context_ratio: 1
+sglang_jax_config:
+  mem_fraction_static: 0.8
+vllm_config:
+  hbm_utilization: 0.4
+"""
+    pipeline = _make_pipeline(extra)
+    rollout_model_config = pipeline.config["rollout_model_config"]
+    if isinstance(rollout_model_config, omegaconf.dictconfig.DictConfig):
+      rollout_model_config["colocate_with"] = ""
+
+    self.assertEmpty(pipeline._get_colocate_with_map())
 
 
 if __name__ == "__main__":

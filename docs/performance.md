@@ -156,8 +156,13 @@ and training. To further maximize the hardware utility, you can consider enablin
 non-active models to CPU RAM when a
 different component is occupying the TPU.
 
-Enabling collocated mode is straightforward; you simply provide the same mesh to
-every component when configuring the `role_to_mesh` mapping for your `rl_cluster`.
+Enabling collocated mode is straightforward; the strongest form is to provide
+the same mesh to every component when configuring the `role_to_mesh` mapping
+for your `rl_cluster`.
+
+Backend status: exact shared-mesh execution is currently supported for the
+vanilla rollout backend. Exact shared-mesh execution is not supported yet for
+`vllm` and `sglang-jax`.
 
 ```python
 import numpy as np
@@ -178,6 +183,35 @@ ClusterConfig(
   ...
 )
 ```
+
+For CLI-driven GRPO and agentic GRPO runs, there is now a second colocated
+mode: **same device set, different mesh shape**. This is configured with
+`colocate_with`.
+
+```yaml
+actor_model_config:
+    mesh:
+        shape: "(4,1)"
+        axis_names: "('fsdp','tp')"
+
+rollout_model_config:
+    colocate_with: "actor"
+    mesh:
+        shape: "(1,4)"
+        axis_names: "('fsdp','tp')"
+```
+
+In this configuration, actor and rollout are still colocated because they run
+on the same device slice, but they do not share the exact same mesh object.
+That distinction matters:
+
+* Same device set means the roles are colocated.
+* Same mesh may additionally allow model or backbone sharing in some runtime
+    paths.
+
+For `vllm` and `sglang-jax`, this same-device-set colocation mode is the
+currently supported colocated placement. Exact shared-mesh reuse is not
+supported yet for those backends.
 
 ### Disaggregated Execution
 

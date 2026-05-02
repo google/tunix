@@ -81,8 +81,6 @@ python -m tunix.cli.grpo_main \
   model_config.remat_config=3 \
   actor_model_config.mesh.shape="$trainer_mesh" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  reference_model_config.mesh=null \
-  reference_model_config.same_mesh_as="actor" \
   rollout_model_config.mesh.shape="$rollout_mesh" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
   \

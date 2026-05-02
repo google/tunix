@@ -45,7 +45,11 @@ num_generations="${num_generations:-4}"
 train_mesh="${train_mesh:-(8,1)}"
 rollout_mesh="${rollout_mesh:-(1,8)}"
 
-checkpoint_dir="${checkpoint_dir:-gs://tunix/rl/checkpoints/gsm8k/qwen3/01}"
+# Set rollout_colocate to the mesh name (e.g. "actor") to colocate the rollout
+# model on the same mesh as the actor model
+rollout_colocate="${rollout_colocate:-null}"
+
+checkpoint_dir="${checkpoint_dir-gs://tunix/rl/checkpoints/gsm8k/qwen3/01}"
 checkpoint_suffix="${checkpoint_suffix:-$(printf '%04d' "$((RANDOM % 10000))")}"
 if [[ -n "$checkpoint_dir" && "$checkpoint_dir" != "null" ]]; then
   checkpoint_dir="${checkpoint_dir}_${checkpoint_suffix}"
@@ -79,8 +83,7 @@ python -m tunix.cli.grpo_main \
   model_config.remat_config=3 \
   actor_model_config.mesh.shape="$train_mesh" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  reference_model_config.mesh=null \
-  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.colocate_with="$rollout_colocate" \
   rollout_model_config.mesh.shape="$rollout_mesh" \
   rollout_model_config.mesh.axis_names="('fsdp','tp')" \
   \

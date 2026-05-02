@@ -47,6 +47,13 @@ RewardFn = Callable[..., List[float]]
 
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 
+
+def _mesh_device_keys(mesh) -> frozenset[Any]:
+  return frozenset(
+      getattr(device, "id", device)
+      for device in mesh.devices.flatten().tolist()
+  )
+
 TConfig = TypeVar("TConfig", bound=algo_config_lib.AlgorithmConfig)
 
 
@@ -118,16 +125,18 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.rollout.model(),
         )
     )
-
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
-    self.can_enable_async_rollout = (
-        self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
-        != self.rl_cluster.cluster_config.role_to_mesh[
-            rl_cluster_lib.Role.ROLLOUT
-        ]
+    actor_mesh = self.rl_cluster.cluster_config.role_to_mesh[
+        rl_cluster_lib.Role.ACTOR
+    ]
+    rollout_mesh = self.rl_cluster.cluster_config.role_to_mesh[
+        rl_cluster_lib.Role.ROLLOUT
+    ]
+    self._share_actor_rollout_devices = (
+        _mesh_device_keys(actor_mesh) == _mesh_device_keys(rollout_mesh)
     )
+
+    # Overlap is only safe when actor and rollout use different device sets.
+    self.can_enable_async_rollout = not self._share_actor_rollout_devices
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
 

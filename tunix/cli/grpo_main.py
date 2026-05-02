@@ -73,8 +73,8 @@ class GrpoPipeline(config.HyperParameters):
     plus ``max_turns``, ``context_ratio``, ``per_turn_timeout_secs``.
   * role-specific ``*_model_config.mesh``: any role with an explicit mesh gets
     its own device slice; omitted meshes share the actor mesh by default.
-  * role-specific ``same_mesh_as``: optional mesh sharing like
-    ``reference_model_config.same_mesh_as: actor``.
+  * role-specific ``colocate_with``: share another role's device set while
+    still allowing a different mesh shape on that same device set.
   * ``sglang_jax_config`` / ``vllm_config``: engine-specific rollout params.
   * ``chat_parser_config.type``: ``"default"`` or ``"qwen"``.
   * ``agent_class_path`` / ``env_class_path``: dotted Python paths to load
@@ -116,21 +116,19 @@ class GrpoPipeline(config.HyperParameters):
       )
     return self._SPLIT_ROLE_ALIASES[normalized]
 
-  def _get_same_mesh_as_map(
+  def _get_colocate_with_map(
       self,
   ) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
-    same_mesh_as = {}
+    colocate_with = {}
     for role, model_key in self._ROLE_TO_MODEL_KEY.items():
       model_cfg = self.config.get(model_key, {}) or {}
-      target_name = model_cfg.get("same_mesh_as")
-      if target_name is None:
+      target_name = model_cfg.get("colocate_with")
+      if target_name is None or not str(target_name).strip():
         continue
-      target_role = self._resolve_split_role(str(target_name))
       if role == rl_cluster_lib.Role.ACTOR:
-        raise ValueError("Actor must own its mesh.")
-      same_mesh_as[role] = target_role
-
-    return same_mesh_as
+        raise ValueError("Actor must own its device set.")
+      colocate_with[role] = self._resolve_split_role(str(target_name))
+    return colocate_with
 
   def _is_role_active(self, role: rl_cluster_lib.Role) -> bool:
     if role in (
@@ -145,10 +143,10 @@ class GrpoPipeline(config.HyperParameters):
   def _resolve_mesh_owners(
       self,
   ) -> dict[rl_cluster_lib.Role, rl_cluster_lib.Role]:
-    same_mesh_as = self._get_same_mesh_as_map()
+    colocate_with = self._get_colocate_with_map()
     base_owners = {}
     for role, model_key in self._ROLE_TO_MODEL_KEY.items():
-      if not self._is_role_active(role) and role not in same_mesh_as:
+      if not self._is_role_active(role):
         continue
       has_mesh = bool(self.config.get(model_key, {}).get("mesh"))
       base_owners[role] = (
@@ -162,11 +160,11 @@ class GrpoPipeline(config.HyperParameters):
         seen: set[rl_cluster_lib.Role],
     ) -> rl_cluster_lib.Role:
       if role in seen:
-        raise ValueError("same_mesh_as contains a cycle.")
-      if role not in same_mesh_as:
+        raise ValueError("colocate_with contains a cycle.")
+      if role not in colocate_with:
         return base_owners[role]
       seen.add(role)
-      target_role = same_mesh_as[role]
+      target_role = colocate_with[role]
       if target_role not in base_owners:
         raise ValueError(
             f"Role {target_role.value!r} is not active in this config."
@@ -174,24 +172,18 @@ class GrpoPipeline(config.HyperParameters):
       return resolve_owner(target_role, seen)
 
     role_to_owner = {}
-    for role, model_key in self._ROLE_TO_MODEL_KEY.items():
-      if role not in base_owners:
-        continue
-      has_mesh = bool(self.config.get(model_key, {}).get("mesh"))
-      if role in same_mesh_as:
-        if has_mesh:
-          raise ValueError(
-              f"{model_key}.mesh is specified, so it must own a separate mesh "
-              "and cannot also use same_mesh_as."
-          )
-      else:
-        role_to_owner[role] = resolve_owner(role, set())
-        continue
+    for role in base_owners:
       role_to_owner[role] = resolve_owner(role, set())
     return role_to_owner
 
-  def _create_role_to_mesh(self):
+  def create_role_to_mesh(self):
+    """Build role→mesh mapping.
+
+    Any role with an explicit ``*.mesh`` config gets a dedicated device slice.
+    Roles without a mesh share the actor mesh by default.
+    """
     devices = list(jax.devices())
+    colocate_with = self._get_colocate_with_map()
     role_to_owner = self._resolve_mesh_owners()
     owner_order = []
     for role in self._ROLE_TO_MODEL_KEY:
@@ -229,22 +221,32 @@ class GrpoPipeline(config.HyperParameters):
           len(devices) - device_offset,
       )
     logging.info(
-        "Mesh device allocation: %s",
-        {
-            self._ROLE_TO_MODEL_KEY[owner]: len(owner_to_device_slice[owner])
-            for owner in owner_order
-        },
+      "Mesh device allocation: %s | colocate_with=%s | role_to_owner=%s",
+      {
+        self._ROLE_TO_MODEL_KEY[owner]: len(owner_to_device_slice[owner])
+        for owner in owner_order
+      },
+      {
+        role.value: owner.value
+        for role, owner in colocate_with.items()
+      },
+      {
+        role.value: owner.value
+        for role, owner in role_to_owner.items()
+      },
     )
-    return {role: owner_to_mesh[owner] for role, owner in role_to_owner.items()}
+    role_to_mesh = {}
+    for role, owner in role_to_owner.items():
+      model_key = self._ROLE_TO_MODEL_KEY[role]
+      has_mesh = bool(self.config.get(model_key, {}).get("mesh"))
+      if role == owner or not has_mesh:
+        role_to_mesh[role] = owner_to_mesh[owner]
+      else:
+        role_to_mesh[role] = self.create_mesh(
+            model_key, devices=owner_to_device_slice[owner]
+        )
+    return role_to_mesh
 
-  def create_role_to_mesh(self):
-    """Build role→mesh mapping.
-
-    Any role with an explicit ``*.mesh`` config gets a dedicated device slice.
-    Roles without a mesh share the actor mesh by default, or can point at
-    another role via ``same_mesh_as``.
-    """
-    return self._create_role_to_mesh()
 
   # ------------------------------------------------------------------
   # Rollout config

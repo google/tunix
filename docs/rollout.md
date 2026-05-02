@@ -91,6 +91,11 @@ Setting `cluster_config.rollout_engine="vllm"` enables the vllm rollout/sampler.
 Tunix uses `tunix.rl.rollout.base_rollout.RolloutConfig` for rollout settings.
 The fields below are the vLLM-relevant ones.
 
+Exact shared-mesh execution is currently supported only for the vanilla rollout
+backend. For `vllm`, exact shared-mesh execution is not supported yet. The
+supported colocated configuration today is same-device-set placement with an
+independently shaped rollout mesh.
+
 #### vLLM-specific fields
 
 In addition to the common sampling parameters mentioned above, the following
@@ -276,6 +281,11 @@ Rollout engine selection happens in `tunix/rl/rl_cluster.py`.
 Tunix uses `tunix.rl.rollout.base_rollout.RolloutConfig` for rollout settings.
 In addition to the common sampling parameters, the following fields are specific
 to SGLang-Jax:
+
+Exact shared-mesh execution is currently supported only for the vanilla rollout
+backend. For `sglang_jax`, exact shared-mesh execution is not supported yet.
+The supported colocated configuration today is same-device-set placement with
+an independently shaped rollout mesh.
 
 -   `rollout_sglang_jax_model_version`
 
