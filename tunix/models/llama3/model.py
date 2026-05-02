@@ -567,7 +567,7 @@ class DecoderLayer(nnx.Module):
       return self.block(x, segment_pos, cache, attn_mask)
 
 
-class Llama3(BackendMappingMixin, nnx.Module, pytree=False):
+class Llama3(BackendMappingMixin, nnx.Module):
   """Llama3 model."""
 
   BACKEND_PACKAGE_PATH = __name__
