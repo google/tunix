@@ -58,16 +58,12 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
 
 def kaggle_pipeline(model_id: str, model_download_path: str):
   """Download model from Kaggle."""
-  if 'KAGGLE_USERNAME' not in os.environ or 'KAGGLE_KEY' not in os.environ:
-    kagglehub.login()
   os.environ['KAGGLEHUB_CACHE'] = model_download_path
   return kagglehub.model_download(model_id)
 
 
 def hf_pipeline(model_id: str, model_download_path: str):
   """Download model from HuggingFace."""
-  if 'HF_TOKEN' not in os.environ:
-    hf.login()
   all_files = hf.list_repo_files(model_id)
   filtered_files = [f for f in all_files if not f.startswith('original/')]
   for filename in filtered_files:
