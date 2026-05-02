@@ -104,3 +104,6 @@ pyink-ipynb-indentation = 2
 [tool.isort]
 profile = "google"       # or "black", etc.
 known_third_party = ["tunix"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
