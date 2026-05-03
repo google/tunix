@@ -128,19 +128,19 @@ python -m tunix.cli.grpo_main \
   tokenizer_config.add_eos=false \
   \
   `# ── GRPO algorithm ───────────────────────────────────────────────────` \
-  agentic_grpo_config.num_generations=8 \
-  agentic_grpo_config.num_iterations=1 \
-  agentic_grpo_config.beta=0.0 \
-  agentic_grpo_config.epsilon=0.2 \
-  agentic_grpo_config.epsilon_high=0.28 \
-  agentic_grpo_config.system_prompt="" \
-  agentic_grpo_config.max_concurrency=1024 \
-  agentic_grpo_config.max_response_length="$max_response_length" \
-  agentic_grpo_config.off_policy_steps=0 \
-  agentic_grpo_config.loss_agg_mode="token-mean" \
-  agentic_grpo_config.kl_loss_mode="low_var_kl" \
-  agentic_grpo_config.max_turns=1 \
-  agentic_grpo_config.context_ratio=1 \
+  agentic_config.num_generations=8 \
+  agentic_config.num_iterations=1 \
+  agentic_config.beta=0.0 \
+  agentic_config.epsilon=0.2 \
+  agentic_config.epsilon_high=0.28 \
+  agentic_config.system_prompt="" \
+  agentic_config.max_concurrency=1024 \
+  agentic_config.max_response_length="$max_response_length" \
+  agentic_config.off_policy_steps=0 \
+  agentic_config.loss_agg_mode="token-mean" \
+  agentic_config.kl_loss_mode="low_var_kl" \
+  agentic_config.max_turns=1 \
+  agentic_config.context_ratio=1 \
   \
   `# ── Optimizer ────────────────────────────────────────────────────────` \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \

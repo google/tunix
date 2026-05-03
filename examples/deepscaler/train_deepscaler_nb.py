@@ -60,7 +60,7 @@ with cm:
   from tunix.models.qwen2 import params as params_lib
   from tunix.models.qwen2 import model as model_lib
   from tunix.sft import metrics_logger
-  from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
+  from tunix.rl.agentic.agentic_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
   from tunix.rl.agentic.environments import task_environment
   from tunix.rl.agentic.trajectory import trajectory_collect_engine

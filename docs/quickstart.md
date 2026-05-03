@@ -323,7 +323,7 @@ out_data = sampler(
 During reinforcement learning (RL) training, it is often useful to analyze the
 generated trajectories (prompts, responses, rewards, etc.). Tunix provides an
 `AsyncTrajectoryLogger` to log this data asynchronously to CSV files without
-blocking the training loop. It's enabled in agentic_grpo_learner by default, if
+blocking the training loop. It's enabled in agentic_learner by default, if
 you provide a log directory in your cluster configuration training config.
 
 ```python

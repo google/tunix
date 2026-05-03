@@ -248,7 +248,7 @@ env_class_path: null
 env_kwargs: {}
 kubernetes_config: null
 
-agentic_grpo_config: {}
+agentic_config: {}
 
  ############################# Reward Fns #############################
 

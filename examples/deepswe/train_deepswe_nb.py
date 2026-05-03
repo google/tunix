@@ -171,7 +171,7 @@ from tunix.sft import utils as sft_utils
 from tunix.sft import metrics_logger
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
-from tunix.rl.agentic import agentic_grpo_learner
+from tunix.rl.agentic import agentic_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
 from examples.deepswe.swe_agent import (
@@ -564,7 +564,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
 # ==========================================
 # 11. Learner & Agent Setup
 # ==========================================
-grpo_config = agentic_grpo_learner.GRPOConfig(
+grpo_config = agentic_learner.GRPOConfig(
     num_generations=NUM_GENERATIONS,
     num_iterations=NUM_ITERATIONS,
     max_response_length=MAX_RESPONSE_LENGTH,
@@ -579,7 +579,7 @@ grpo_config = agentic_grpo_learner.GRPOConfig(
 )
 
 
-agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
+agentic_learner = agentic_learner.GRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=None,
     agent_class=SWEAgent,
@@ -652,7 +652,7 @@ train_dataset, _ = data_lib.post_init_dataset(
 
 
 print("Starting training...")
-agentic_grpo_learner.train(train_dataset=train_dataset)
+agentic_learner.train(train_dataset=train_dataset)
 
 
 # %%
