@@ -454,7 +454,6 @@ else:
 #     nnx.get_partition_spec(state),
 #   )
 #   gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
->>>>>>> 09545408 (snapshot)
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
