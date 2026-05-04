@@ -43,9 +43,9 @@ class TokenConfig:
 class BaseChatTemplateParser(ABC):
   """Abstract base class for chat template parsers."""
 
-  def __init__(self, tokenizer, disable_thinking: bool = False):
+  def __init__(self, tokenizer, enable_thinking: bool = True):
     self.tokenizer = tokenizer
-    self.disable_thinking = disable_thinking
+    self.enable_thinking = enable_thinking
     self.tokens = self._init_tokens()
     self.generation_prompt = self._init_generation_prompt()
 
@@ -160,8 +160,8 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
 
   def _get_assistant_token(self) -> str:
     token = "<|im_start|>assistant\n"
-    if self.disable_thinking:
-      token += "<think>\\n\\n</think>\\n\\n"
+    if not self.enable_thinking:
+      token += "<think>\n\n</think>\n\n"
     return token
 
   def _init_generation_prompt(self) -> str:

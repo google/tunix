@@ -83,13 +83,13 @@ class QwenChatTemplateParserTest(absltest.TestCase):
 
   def test_parse_with_disable_thinking(self):
     p = parser.QwenChatTemplateParser(
-        self.mock_tokenizer, disable_thinking=True
+        self.mock_tokenizer, enable_thinking=False
     )
     messages = [{'role': 'assistant', 'content': 'Thinking...'}]
     result = p.parse(messages, add_generation_prompt=True)
     expected = (
-        '<|im_start|>assistant\n<think>\\n\\n</think>\\n\\nThinking...<|im_end|>\n'
-        '<|im_start|>assistant\n<think>\\n\\n</think>\\n\\n'
+        '<|im_start|>assistant\n<think>\n\n</think>\n\nThinking...<|im_end|>\n'
+        '<|im_start|>assistant\n<think>\n\n</think>\n\n'
     )
     self.assertEqual(result, expected)
 
