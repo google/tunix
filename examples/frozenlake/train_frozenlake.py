@@ -90,6 +90,11 @@ except:
   pass
 
 print("jax devices: ", jax.devices())
+try:
+  stats = jax.devices()[0].client.memory_stats()
+  print(f"--- Startup HBM Reserved Memory: {stats['bytes_reserved'] / 1e9:.2f} GB ---")
+except Exception as e:
+  print(f"Failed to query startup HBM stats: {e}")
 
 # %%
 import argparse
