@@ -7,7 +7,6 @@ import logging
 import math
 import os
 import sys
-from typing import List
 
 from absl import logging as absl_logging
 from flax import nnx
@@ -75,8 +74,12 @@ with cm:
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
-  from tunix.examples.frozenlake.agent import FrozenLakeAgent
-  from tunix.examples.frozenlake.env import FrozenLakeEnv
+  from examples.frozenlake.agent import (
+      SYSTEM_PROMPT,
+      MULTI_SHOT_SYSTEM_PROMPT,
+      FrozenLakeAgent,
+  )
+  from examples.frozenlake.env import FrozenLakeEnv
 
 try:
   import pathwaysutils
@@ -86,23 +89,18 @@ except:
   pass
 
 print("jax devices: ", jax.devices())
-try:
-  stats = jax.devices()[0].client.memory_stats()
-  print(f"--- Startup HBM Reserved Memory: {stats['bytes_reserved'] / 1e9:.2f} GB ---")
-except Exception as e:
-  print(f"Failed to query startup HBM stats: {e}")
 
 # %%
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=32)
-arg_parser.add_argument("--mini_batch_size", type=int, default=32)
+arg_parser.add_argument("--batch_size", type=int, default=8)
+arg_parser.add_argument("--mini_batch_size", type=int, default=8)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=300)
+arg_parser.add_argument("--num_batches", type=int, default=20)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
@@ -112,11 +110,11 @@ arg_parser.add_argument("--max_response_length", type=int, default=4096)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=256)
+arg_parser.add_argument("--max_concurrency", type=int, default=64)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
-    "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
+    "--loss_agg_mode", type=str, default="token-mean"
 )
 arg_parser.add_argument(
     "--kl_loss_mode", type=str, default="low_var_kl"
@@ -135,9 +133,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(2, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
 TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
-REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
+# REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -154,11 +152,11 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 256
+VLLM_MAX_NUM_SEQS = 16
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
+VLLM_MAX_BATCHED_TOKENS = 16 * 1024
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -210,7 +208,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.3
+MAX_GRAD_NORM = 0.5
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -234,7 +232,8 @@ ROLLOUT_ENGINE = os.getenv(
 
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
-reference_devices = math.prod(REFERENCE_MESH[0])
+# reference_devices = math.prod(REFERENCE_MESH[0])
+reference_devices = 0
 
 if trainer_devices + rollout_devices + reference_devices > jax.device_count():
   raise ValueError(
@@ -253,15 +252,15 @@ rollout_mesh = jax.sharding.Mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
-reference_device_list = jax._src.mesh_utils.create_device_mesh(
-    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
-)
-reference_mesh = jax.sharding.Mesh(
-    reference_device_list,
-    axis_names=REFERENCE_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
-)
-print(f"{reference_device_list=} {reference_mesh.devices=}")
+# reference_device_list = jax._src.mesh_utils.create_device_mesh(
+#     REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
+# )
+# reference_mesh = jax.sharding.Mesh(
+#     reference_device_list,
+#     axis_names=REFERENCE_MESH[1],
+#     axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
+# )
+# print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
     TRAINER_MESH[0], jax.devices()[-trainer_devices:]
 )
@@ -298,13 +297,14 @@ else:
   CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-import datetime
-now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
 
-MODEL_VERSION = "google/gemma-4-26B-A4B-it"
-# MODEL_VERSION = "google/gemma-4-31B-it"
+# MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+MODEL_VERSION = "google/gemma-4-31B-it"
 # MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
+# MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
+# MODEL_VERSION = "google/gemma-4-E4B-it"
+# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -381,7 +381,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.gemma4_26b_a4b()
+config = model_lib.ModelConfig.gemma4_31b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -389,15 +389,15 @@ if ENABLE_FLASH_ATTENTION:
   config.flash_attention_block_size = 256
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
-else:
-  config.dtype = jnp.float32
 
 from huggingface_hub import snapshot_download
+import os
+os.environ["HF_TOKEN"] = ""
 
 MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
 print("MODEL_PATH: ", MODEL_PATH)
 gemma4_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
+    MODEL_PATH, config, trainer_mesh
 )
 
 # %%
@@ -433,9 +433,9 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  # gemma4_actor = params_lib.create_model_from_safe_tensors(
-  #     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-  # )
+#   gemma4_actor = params_lib.create_model_from_safe_tensors(
+#       MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+#   )
   graph, state = nnx.split(gemma4_ref)
   trainer_shardings = jax.tree_util.tree_map(
     lambda x: jax.sharding.NamedSharding(
@@ -448,6 +448,11 @@ else:
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
+
+# %%
+ModelAgent = model_agent.ModelAgent
+TaskEnvironment = task_environment.TaskEnvironment
+TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 
 # %%
 # Ckpt saving
@@ -470,9 +475,23 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
 )
 
 # %%
+# # Logs
+# if NOTEBOOK_ENV == "g3":
+#   %load_ext GOOGLE_INTERNAL_PACKAGE_PATH.learning.brain.tensorboard.notebook.extension
+# else:
+#   %load_ext tensorboard
+# %tensorboard --logdir /tmp/content/tmp/tensorboard/grpo --port=0
+
+# %%
 # Optimizer, learning rate scheduler, gradient clipping
 optimizer = optax.adamw(
-    learning_rate=LEARNING_RATE,
+    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=LEARNING_RATE,
+        warmup_steps=WARMUP_STEPS,
+        decay_steps=MAX_STEPS,
+        end_value=0.0,
+    ),
     b1=B1,
     b2=B2,
     weight_decay=WEIGHT_DECAY,
@@ -485,9 +504,9 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-print("Rollout mesh: ", rollout_mesh)
+print("# Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
-print("Reference mesh: ", reference_mesh)
+# print("Reference mesh: ", reference_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -502,7 +521,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.6,
+    "rollout_vllm_hbm_utilization": 0.7,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -516,6 +535,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
+        "dtype": "bfloat16",
     },
 }
 
@@ -531,7 +551,7 @@ else:
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: reference_mesh,
+        rl_cluster_lib.Role.REFERENCE: rollout_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
@@ -545,8 +565,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -563,7 +583,6 @@ grpo_config = GRPOConfig(
     off_policy_steps=OFF_POLICY_STEPS,
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
-    force_compute_kl=True,
 )
 
 # Perf Metrics logging
@@ -585,39 +604,6 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 show_hbm_usage("after RLCluster creation")
-
-
-def length_penalty_reward_fn(
-    prompts: List[str], 
-    completions: List[str], 
-    trajectory_rewards: List[float], 
-    **kwargs
-) -> List[float]:
-  """Computes a group-relative length penalty inspired by Kimi 1.5.
-  
-  Promotes shorter successful paths and penalizes longer ones, 
-  while strictly penalizing long, unsuccessful paths.
-  """
-  lengths = np.array([len(c) for c in completions])
-  
-  min_len = np.min(lengths)
-  max_len = np.max(lengths)
-  
-  rewards = np.zeros_like(lengths, dtype=np.float32)
-  if max_len == min_len:
-    return list(rewards)
-  
-  lambdas = 0.5 - (lengths - min_len) / (max_len - min_len)
-  
-  for i in range(len(completions)):
-    is_correct = trajectory_rewards[i] > 0.1
-    if is_correct:
-      rewards[i] = lambdas[i]
-    else:
-      rewards[i] = min(0.0, lambdas[i])
-  
-  weight = 0.1
-  return list(rewards * weight)
 
 
 # %%
@@ -650,7 +636,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
-    # reward_fns=[length_penalty_reward_fn],
+    reward_fns=None,
     agent_class=FrozenLakeAgent,
     agent_kwargs={},
     env_class=FrozenLakeEnv,
@@ -661,33 +647,4 @@ grpo_trainer = GRPOLearner(
 show_hbm_usage("after GRPOLearner creation")
 
 # %%
-try:
-  print("Defragmenting JAX/XLA memory before training...")
-  backend = None
-  try:
-    import jax.extend.backend as jax_backend
-    backend = jax_backend.get_backend()
-  except:
-    try:
-      backend = jax.devices()[0].client
-    except:
-      try:
-        from jax._src.lib import xla_bridge
-        backend = xla_bridge.get_backend()
-      except:
-        pass
-  if backend is not None and hasattr(backend, 'defragment'):
-    backend.defragment()
-    print("Defragmentation successful!")
-  else:
-    print("Defragmentation skipped: backend has no defragment attribute or could not be resolved.")
-except Exception as e:
-  print(f"Defragmentation failed: {e}")
-
-import gc
-import jax
-gc.collect()
-# Clear JAX compilation and execution caches
-jax.clear_caches()
-
 grpo_trainer.train(train_dataset)

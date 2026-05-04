@@ -29,6 +29,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+from tunix.sft import utils as sft_utils
 
 
 def compute_attention_masks(
@@ -405,6 +406,8 @@ def build_flat_dict(
         mapped = True
         break
     # There are no mappings for rng related params.
+    # if not mapped:
+    #   logging.warning('!!! No mapping for flat state: %s', path)
     if not mapped:
       unmapped_paths.append(path)
 
