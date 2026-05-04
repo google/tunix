@@ -507,7 +507,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.7,
+    "rollout_vllm_hbm_utilization": 0.5,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -541,7 +541,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
-    offload_to_cpu=False,
+    offload_to_cpu=True,
     training_config=rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
