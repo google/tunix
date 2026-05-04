@@ -666,9 +666,32 @@ show_hbm_usage("after GRPOLearner creation")
 # %%
 try:
   print("Defragmenting JAX/XLA memory before training...")
-  jax.lib.xla_bridge.get_backend().defragment()
-  print("Defragmentation successful!")
+  backend = None
+  try:
+    import jax.extend.backend as jax_backend
+    backend = jax_backend.get_backend()
+  except:
+    try:
+      backend = jax.devices()[0].client
+    except:
+      try:
+        from jax._src.lib import xla_bridge
+        backend = xla_bridge.get_backend()
+      except:
+        pass
+  if backend is not None and hasattr(backend, 'defragment'):
+    backend.defragment()
+    print("Defragmentation successful!")
+  else:
+    print("Defragmentation skipped: backend has no defragment attribute or could not be resolved.")
 except Exception as e:
   print(f"Defragmentation failed: {e}")
+
+import gc
+import jax
+# 1. Force Python garbage collection to release unreferenced device buffers
+gc.collect()
+# 2. Clear JAX compilation and execution caches
+jax.clear_caches()
 
 grpo_trainer.train(train_dataset)
