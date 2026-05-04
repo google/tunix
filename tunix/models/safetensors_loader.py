@@ -230,7 +230,13 @@ def load_and_create_model_orig(
 
           shard = None
           if flat_sharding_dict:
-            shard = flat_sharding_dict.get(jax_key_mapped) or flat_sharding_dict.get(f'{jax_key_mapped}.value')
+            lookup_key = jax_key_mapped
+            if lookup_key.startswith('tmp.layers.'):
+              if '.attn.q' in lookup_key:
+                lookup_key = lookup_key.replace('tmp.', '').replace('.attn.q', '.attn.q_einsum.w')
+              elif '.attn.k' in lookup_key or '.attn.v' in lookup_key:
+                lookup_key = lookup_key.replace('tmp.', '').replace('.attn.k', '.attn.kv_einsum.w').replace('.attn.v', '.attn.kv_einsum.w')
+            shard = flat_sharding_dict.get(lookup_key) or flat_sharding_dict.get(f'{lookup_key}.value')
 
           if shard is not None:
             current_arr = jax.device_put(v, shard)
@@ -289,8 +295,12 @@ def load_and_create_model_orig(
                   f' {loaded_arr.shape}, expected {param.shape}'
               )
             if shard is not None:
+              if hasattr(loaded_arr, 'sharding') and loaded_arr.sharding == shard:
+                return loaded_arr
               return jax.device_put(loaded_arr, shard)
             else:
+              if hasattr(loaded_arr, 'sharding') and loaded_arr.sharding == jax.devices()[0]:
+                return loaded_arr
               return jax.device_put(loaded_arr, jax.devices()[0])
 
         return param
