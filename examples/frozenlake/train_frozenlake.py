@@ -100,7 +100,7 @@ arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=20)
+arg_parser.add_argument("--num_batches", type=int, default=150)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
@@ -296,7 +296,7 @@ else:
   CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "frozenlake/01")
 
 # MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 MODEL_VERSION = "google/gemma-4-31B-it"
@@ -504,7 +504,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.6,
+    "rollout_vllm_hbm_utilization": 0.7,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -548,8 +548,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
     ),
     rollout_config=rollout_engine_config,
 )

@@ -165,7 +165,6 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
     new_obs_str = str(observation)
     # Base message for the user
     new_obs_str = "Current Observation: \n" + new_obs_str
-    print(f"last 500 chars of new_obs_str: {new_obs_str[-500:]}")
     if not done:
       new_obs_str += "\n" + "You have not achieved the goal, P has not reached G yet. Please give the next action."
 
@@ -195,11 +194,13 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
       last_match_index = response.rfind(f"```{last_match_content}```")
       if last_match_index != -1:
         thought = response[:last_match_index].strip()
-        extracted_text = last_match_content.lower()
-        if extracted_text in DIRECTION_MAP:
-          action_str = str(DIRECTION_MAP[extracted_text])
-        elif extracted_text.isdigit() and int(extracted_text) in DIRECTION_MAP.values():
-          action_str = str(int(extracted_text))
+
+      extracted_text = last_match_content.lower()
+
+      if extracted_text in DIRECTION_MAP:
+        action_str = str(DIRECTION_MAP[extracted_text])
+      elif extracted_text.isdigit() and int(extracted_text) in DIRECTION_MAP.values():
+        action_str = str(int(extracted_text))
 
     # Add assistant's response to conversation history.
     self._messages.append({"role": "assistant", "content": response})
