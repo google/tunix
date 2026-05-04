@@ -853,6 +853,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             [merged_train_micro_batch], current_eval_dataset, skip_jit
         )
 
+      import gc
+      gc.collect()
+
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
       if micro_batches_since_last_sync == micro_batches_per_full_batch:
