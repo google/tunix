@@ -632,11 +632,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
-<<<<<<< HEAD
-    reward_fns=None,
-=======
     # reward_fns=[length_penalty_reward_fn],
->>>>>>> f2b8a2fb (snapshot)
     agent_class=FrozenLakeAgent,
     agent_kwargs={},
     env_class=FrozenLakeEnv,
