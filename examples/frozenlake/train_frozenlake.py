@@ -297,7 +297,7 @@ else:
   CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "frozenlake/01")
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "frozenlake/02")
 
 # MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 MODEL_VERSION = "google/gemma-4-31B-it"
