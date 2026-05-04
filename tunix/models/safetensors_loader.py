@@ -87,7 +87,7 @@ def load_safetensors_with_offsets(filepath):
     header_size_bytes = f.read(8)
     header_size = struct.unpack('<Q', header_size_bytes)[0]
     header_bytes = f.read(header_size)
-    header = json.loads(header_bytes.decode('utf-8'))
+    header = json.loads(header_bytes)
 
   data_block_start_offset_bytes = 8 + header_size
 
@@ -241,6 +241,11 @@ def load_and_create_model_orig(
       for future in concurrent.futures.as_completed(futures):
         if future.exception():
           raise future.exception()
+
+      # Synchronize JAX to ensure all asynchronous Host-to-Device copies are
+      # complete before exiting the safetensors context manager (which
+      # triggers munmap).
+      jax.block_until_ready(list(file_loaded_tensors.values()))
 
     # Apply preprocessing if provided (e.g., for MoE expert stacking)
     if preprocess_fn is not None:
