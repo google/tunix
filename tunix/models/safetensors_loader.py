@@ -180,8 +180,17 @@ def load_and_create_model_orig(
   graph_def, abs_state = nnx.split(model)
   state_dict = abs_state.to_pure_dict()
 
+  flat_sharding_dict = {}
   if mesh is not None:
     sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
+    def flatten(d, parent_key=''):
+      for k, v in d.items():
+        new_key = f"{parent_key}.{k}" if parent_key else str(k)
+        if isinstance(v, dict):
+          flatten(v, new_key)
+        else:
+          flat_sharding_dict[new_key] = v
+    flatten(sharding_dict)
   else:
     sharding_dict = None
 
@@ -215,9 +224,18 @@ def load_and_create_model_orig(
             if reshape:
               v = v.reshape(reshape)
 
-          current_arr = v
-          if dtype and current_arr.dtype != to_np_dtype(dtype):
-            current_arr = current_arr.astype(to_np_dtype(dtype))
+          target_dtype = to_np_dtype(dtype) if dtype else v.dtype
+          if v.dtype != target_dtype:
+            v = v.astype(target_dtype)
+
+          shard = None
+          if flat_sharding_dict:
+            shard = flat_sharding_dict.get(jax_key_mapped) or flat_sharding_dict.get(f'{jax_key_mapped}.value')
+
+          if shard is not None:
+            current_arr = jax.device_put(v, shard)
+          else:
+            current_arr = jax.device_put(v, jax.devices()[0])
 
           if jax_key_mapped in file_loaded_tensors:
             raise ValueError(
