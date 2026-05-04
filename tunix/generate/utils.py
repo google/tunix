@@ -821,6 +821,10 @@ def transfer_state_with_mappings(
         for key, tgt_params in tgt_flat_list
     }
 
+  for key, tgt_param in tgt_flat_list:
+    if hasattr(tgt_param, 'value') and hasattr(tgt_param.value, 'delete'):
+      tgt_param.value.delete()
+
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
