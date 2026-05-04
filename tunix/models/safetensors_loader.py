@@ -239,6 +239,9 @@ def load_and_create_model_orig(
             shard = flat_sharding_dict.get(lookup_key) or flat_sharding_dict.get(f'{lookup_key}.value')
 
           if shard is not None:
+            if hasattr(shard, 'spec') and v.ndim < len(shard.spec):
+              new_spec = jax.sharding.PartitionSpec(*shard.spec[-v.ndim:])
+              shard = jax.sharding.NamedSharding(shard.mesh, new_spec)
             current_arr = jax.device_put(v, shard)
           else:
             current_arr = jax.device_put(v, jax.devices()[0])
