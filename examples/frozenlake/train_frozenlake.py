@@ -504,7 +504,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.6,
+    "rollout_vllm_hbm_utilization": 0.7,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
