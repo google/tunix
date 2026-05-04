@@ -29,7 +29,6 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-from tunix.sft import utils as sft_utils
 
 
 def compute_attention_masks(
@@ -822,16 +821,6 @@ def transfer_state_with_mappings(
         )
         for key, tgt_params in tgt_flat_list
     }
-  # sft_utils.show_hbm_usage('Before transfer_state_with_mappings')
-  # for key, tgt_param in tgt_flat_list:
-  #   if hasattr(tgt_param, 'value') and hasattr(tgt_param.value, 'delete'):
-  #     tgt_param.value.delete()
-  
-  # sft_utils.show_hbm_usage('After removing the old tgt_param values')
-
-  for key, tgt_param in tgt_flat_list:
-    if hasattr(tgt_param, 'value') and hasattr(tgt_param.value, 'delete'):
-      tgt_param.value.delete()
 
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
