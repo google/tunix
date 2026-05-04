@@ -70,3 +70,7 @@ jobs:
       - name: Run model registry tests
         run: |
           python -m pytest tests/models/registry_test.py -v --tb=short
+
+      - name: Run CPU-only flash attention cache regression test
+        run: |
+          python -m pytest tests/models/flash_attention_cache_test.py -v --tb=short

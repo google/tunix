@@ -689,6 +689,11 @@ class Attention(nnx.Module):
       key_proj = jax.lax.dynamic_update_slice(
           cache['k'], key_proj, slice_indices
       )
+      cache_value_proj = value_proj
+      cache_key_proj = key_proj
+    else:
+      cache_value_proj = value_proj
+      cache_key_proj = key_proj
 
     b, t, qh, d = query_proj.shape
     _, _, kh, _ = key_proj.shape
@@ -801,8 +806,8 @@ class Attention(nnx.Module):
 
     if cache is not None:
       new_cache = {
-          'v': value_proj,
-          'k': key_proj,
+          'v': cache_value_proj,
+          'k': cache_key_proj,
           'end_index': cache['end_index'] + seq_len,
       }
     else:
