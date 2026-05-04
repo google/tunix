@@ -180,17 +180,8 @@ def load_and_create_model_orig(
   graph_def, abs_state = nnx.split(model)
   state_dict = abs_state.to_pure_dict()
 
-  flat_sharding_dict = {}
   if mesh is not None:
     sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
-    def flatten(d, parent_key=''):
-      for k, v in d.items():
-        new_key = f"{parent_key}.{k}" if parent_key else str(k)
-        if isinstance(v, dict):
-          flatten(v, new_key)
-        else:
-          flat_sharding_dict[new_key] = v
-    flatten(sharding_dict)
   else:
     sharding_dict = None
 
@@ -224,27 +215,9 @@ def load_and_create_model_orig(
             if reshape:
               v = v.reshape(reshape)
 
-          target_dtype = to_np_dtype(dtype) if dtype else v.dtype
-          if v.dtype != target_dtype:
-            v = v.astype(target_dtype)
-
-          shard = None
-          if flat_sharding_dict:
-            lookup_key = jax_key_mapped
-            if lookup_key.startswith('tmp.layers.'):
-              if '.attn.q' in lookup_key:
-                lookup_key = lookup_key.replace('tmp.', '').replace('.attn.q', '.attn.q_einsum.w')
-              elif '.attn.k' in lookup_key or '.attn.v' in lookup_key:
-                lookup_key = lookup_key.replace('tmp.', '').replace('.attn.k', '.attn.kv_einsum.w').replace('.attn.v', '.attn.kv_einsum.w')
-            shard = flat_sharding_dict.get(lookup_key) or flat_sharding_dict.get(f'{lookup_key}.value')
-
-          if shard is not None:
-            if hasattr(shard, 'spec') and v.ndim < len(shard.spec):
-              new_spec = jax.sharding.PartitionSpec(*shard.spec[-v.ndim:])
-              shard = jax.sharding.NamedSharding(shard.mesh, new_spec)
-            current_arr = jax.device_put(v, shard)
-          else:
-            current_arr = jax.device_put(v, jax.devices()[0])
+          current_arr = jnp.array(v)
+          if dtype and current_arr.dtype != dtype:
+            current_arr = current_arr.astype(dtype)
 
           if jax_key_mapped in file_loaded_tensors:
             raise ValueError(
@@ -258,7 +231,7 @@ def load_and_create_model_orig(
           ) from e
 
       with concurrent.futures.ThreadPoolExecutor(
-          max_workers=4
+          max_workers=os.cpu_count()
       ) as executor:
         futures = [
             executor.submit(process_key, key, f, sf, file_loaded_tensors)
@@ -298,12 +271,8 @@ def load_and_create_model_orig(
                   f' {loaded_arr.shape}, expected {param.shape}'
               )
             if shard is not None:
-              if hasattr(loaded_arr, 'sharding') and loaded_arr.sharding == shard:
-                return loaded_arr
               return jax.device_put(loaded_arr, shard)
             else:
-              if hasattr(loaded_arr, 'sharding') and loaded_arr.sharding == jax.devices()[0]:
-                return loaded_arr
               return jax.device_put(loaded_arr, jax.devices()[0])
 
         return param
