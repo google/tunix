@@ -433,18 +433,18 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  gemma4_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+  # gemma4_actor = params_lib.create_model_from_safe_tensors(
+  #     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+  # )
+  graph, state = nnx.split(gemma4_ref)
+  trainer_shardings = jax.tree_util.tree_map(
+    lambda x: jax.sharding.NamedSharding(
+        trainer_mesh,
+        x,
+    ),
+    nnx.get_partition_spec(state),
   )
-#   graph, state = nnx.split(gemma4_ref)
-#   trainer_shardings = jax.tree_util.tree_map(
-#     lambda x: jax.sharding.NamedSharding(
-#         trainer_mesh,
-#         x,
-#     ),
-#     nnx.get_partition_spec(state),
-#   )
-#   gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+  gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -507,7 +507,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.5,
+    "rollout_vllm_hbm_utilization": 0.7,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -541,7 +541,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
-    offload_to_cpu=True,
+    offload_to_cpu=False,
     training_config=rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
