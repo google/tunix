@@ -380,6 +380,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 dtype=old_logprobs.dtype,
             )[:max_response_length]
         )
+      else:
+        padded_old_logprobs.append(
+            np.zeros(max_response_length, dtype=np.float32)
+        )
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
     prompt_mask = prompt_ids != pad_value

@@ -4,9 +4,11 @@
 
 # %%
 import argparse
+import faulthandler
 import json
 import logging
 import os
+import signal
 import sys
 from absl import logging as absl_logging
 import datasets as datasets_lib
@@ -25,30 +27,12 @@ import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
 from tunix.utils import compat
+from tunix.rl.agentic.agents import agent_types
 import vllm  # pytype: disable=import-error
 
+faulthandler.register(signal.SIGINT, all_threads=True)
+
 Dataset = datasets_lib.Dataset
-# ====== Logging Configuration ======
-# 1. Force absl to use python logging
-absl_logging.use_python_logging()
-
-# 2. Configure the root logger
-logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,
-)
-
-# 3. Explicitly set levels for relevant loggers
-logging.getLogger().setLevel(logging.INFO)
-logging.getLogger("absl").setLevel(logging.INFO)
-
-# 4. Set absl verbosity to INFO so they actually print
-absl_logging.set_verbosity(absl_logging.INFO)
-absl_logging.set_stderrthreshold("info")
-
 # ==========================================
 # 0. Argument Parsing
 # ==========================================
@@ -63,15 +47,23 @@ parser.add_argument("--model_version", type=str, default="Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 
 # Data & Training Flow
-parser.add_argument("--batch_size", type=int, default=1)
-parser.add_argument("--mini_batch_size", type=int, default=1)
-parser.add_argument("--num_batches", type=int, default=20)
-parser.add_argument("--num_test_batches", type=int, default=50)
+parser.add_argument("--batch_size", type=int, default=8)
+parser.add_argument("--mini_batch_size", type=int, default=8)
 parser.add_argument("--train_fraction", type=float, default=1.0)
-parser.add_argument("--max_steps", type=int, default=10)
+parser.add_argument("--max_steps", type=int, default=50)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
+parser.add_argument(
+    "--remat_policy",
+    type=str,
+    default="decoder",
+    choices=["block", "decoder"],
+    help=(
+        "Remat policy when enable_remat is True: 'block' remats the attention"
+        " block, 'decoder' remats the full decoder layer."
+    ),
+)
 
 # LoRA
 # LoRA Config
@@ -80,17 +72,12 @@ parser.add_argument("--alpha", type=float, default=64.0)
 parser.add_argument("--train_with_lora", type=bool, default=False)
 
 # GRPO Config
-parser.add_argument("--num_generations", type=int, default=2)
+parser.add_argument("--num_generations", type=int, default=8)
 parser.add_argument("--num_iterations", type=int, default=1)
-parser.add_argument("--beta", type=float, default=0.001)
+parser.add_argument("--beta", type=float, default=0.0)
 parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
-parser.add_argument(
-    "--advantage_estimator",
-    type=str,
-    default="agentic_grpo",
-    choices=["agentic_grpo", "agentic_rloo"],
-)
+parser.add_argument("--off_policy_steps", type=int, default=0)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=4096)
@@ -105,9 +92,15 @@ parser.add_argument("--vllm_utilization", type=float, default=0.4)
 parser.add_argument("--learning_rate", type=float, default=1e-6)
 parser.add_argument("--b1", type=float, default=0.9)
 parser.add_argument("--b2", type=float, default=0.99)
-parser.add_argument("--weight_decay", type=float, default=0.1)
-parser.add_argument("--max_grad_norm", type=float, default=0.1)
-parser.add_argument("--warmup_ratio", type=float, default=0.1)
+parser.add_argument("--weight_decay", type=float, default=0.01)
+parser.add_argument("--max_grad_norm", type=float, default=1)
+parser.add_argument(
+    "--optimizer_offload",
+    type=bool,
+    default=False,
+    help="Whether to offload optimizer states to CPU (pinned host memory).",
+)  # not supported yet
+
 
 # Checkpointing
 parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
@@ -120,24 +113,141 @@ parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
 parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 
 # DeepSWE Agentic Specifics
-parser.add_argument("--max_turns", type=int, default=20)
+parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
-parser.add_argument("--max_concurrency", type=int, default=1)
+parser.add_argument("--max_concurrency", type=int, default=200)
+
+parser.add_argument(
+    "--overlong_filter",
+    type=bool,
+    default=True,
+    help="Whether to filter out trajectories that exceed length limits",
+)
+
+# Mesh / Topology Config Override
+parser.add_argument(
+    "--rollout_mesh_fsdp",
+    type=int,
+    default=None,
+    help="Optional override for rollout mesh FSDP dimension.",
+)
+parser.add_argument(
+    "--rollout_mesh_tp",
+    type=int,
+    default=None,
+    help="Optional override for rollout mesh TP dimension.",
+)
+parser.add_argument(
+    "--train_mesh_fsdp",
+    type=int,
+    default=None,
+    help="Optional override for train mesh FSDP dimension.",
+)
+parser.add_argument(
+    "--train_mesh_tp",
+    type=int,
+    default=None,
+    help="Optional override for train mesh TP dimension.",
+)
+parser.add_argument(
+    "--train_mesh_sp",
+    type=int,
+    default=None,
+    help="Optional override for train mesh SP dimension.",
+)
+
+parser.add_argument(
+    "--rollout_split_fraction",
+    type=float,
+    default=0.5,
+    help=(
+        "Fraction of total devices to allocate to the rollout mesh. Default is"
+        " 0.5 (1:1 ratio)."
+    ),
+)
+
+
+VALID_STATUS_NAMES = [status.name for status in agent_types.TrajectoryStatus]
+
+parser.add_argument(
+    "--filter_statuses",
+    type=str,
+    nargs="+",
+    default=None,  # Set default to None
+    choices=VALID_STATUS_NAMES,
+    help=(
+        "List of trajectory statuses to filter out. Valid statuses:"
+        f" {VALID_STATUS_NAMES}. Defaults to None."
+    ),
+)
+
+parser.add_argument(
+    "--loss_agg_mode", type=str, default="sequence-mean-token-scale"
+)
+parser.add_argument("--advantage_estimator", type=str, default="rloo")
 
 
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
-parser.add_argument("--model_dtype", type=str, default="bfloat16",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
-    help="Data type for the model (e.g., bfloat16, float32)")
+
+parser.add_argument(
+    "--dtype",
+    type=str,
+    default="bfloat16",
+    choices=["bfloat16", "float16", "float32"],  # Restrict to valid inputs
+    help="Data type for the model activations(e.g., bfloat16, float32)",
+)
+parser.add_argument(
+    "--param_dtype",
+    type=str,
+    default="float32",
+    choices=["bfloat16", "float16", "float32"],  # Restrict to valid inputs
+    help="Data type for the model weights (e.g., bfloat16, float32)",
+)
+
+
+parser.add_argument("--use_flash_attention", type=bool, default=True)
+parser.add_argument("--flash_attention_block_size", type=int, default=1024)
+parser.add_argument("--metric_logger_dir", type=str, default=None)
+parser.add_argument(
+    "--logging_level",
+    type=str,
+    default="INFO",
+    choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    help="Logging level for the script and relevant libraries.",
+)
 
 args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
 
+# ====== Logging Configuration ======
+# 1. Force absl to use python logging
+absl_logging.use_python_logging()
+
+# 2. Configure the root logger
+log_level = getattr(logging, args.logging_level.upper())
+logging.basicConfig(
+    stream=sys.stdout,
+    level=log_level,
+    format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+
+# 3. Explicitly set levels for relevant loggers
+logging.getLogger().setLevel(log_level)
+logging.getLogger("absl").setLevel(log_level)
+
+# 4. Set absl verbosity so they actually print
+absl_logging.set_verbosity(getattr(absl_logging, args.logging_level.upper()))
+absl_logging.set_stderrthreshold(args.logging_level.lower())
+
 # %%
 # ==========================================
 # 1. Path Setup
 # ==========================================
+
 # Use the current working directory as ROOT folder
 workdir = os.getcwd()
 tunix_root = os.path.join(workdir, "tunix")
@@ -161,6 +271,7 @@ except ImportError as e:
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
 
+
 # %%
 # ==========================================
 # 2. Imports from Custom Modules
@@ -173,6 +284,8 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.parser.chat_template_parser import parser as template_parser
+from tunix import PerfMetricsConfig
+from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
 from examples.deepswe.swe_agent import (
     SWE_SYSTEM_PROMPT,
@@ -269,6 +382,7 @@ NUM_ITERATIONS = args.num_iterations
 BETA = args.beta
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
+OFF_POLICY_STEPS = args.off_policy_steps
 
 # ====== Training ======
 DTYPE_MAP = {
@@ -277,12 +391,15 @@ DTYPE_MAP = {
     "float32": jnp.float32,
     "int32": jnp.int32,
 }
-MODEL_DTYPE = DTYPE_MAP[args.model_dtype]
+DTYPE = DTYPE_MAP[args.dtype]
+PARAM_DTYPE = DTYPE_MAP[args.param_dtype]
+USE_FLASH_ATTENTION = args.use_flash_attention
+FLASH_ATTENTION_BLOCK_SIZE = args.flash_attention_block_size
 ENABLE_REMAT = args.enable_remat
+REMAT_POLICY = args.remat_policy
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
-NUM_BATCHES = args.num_batches
-NUM_TEST_BATCHES = args.num_test_batches
+
 
 COMPUTE_LOGPS_MICRO_BATCH_SIZE = args.compute_logps_micro_batch_size
 TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
@@ -306,9 +423,10 @@ LEARNING_RATE = args.learning_rate
 B1 = args.b1
 B2 = args.b2
 WEIGHT_DECAY = args.weight_decay
-WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
+# WARMUP_STEPS = int(args.warmup_ratio * MAX_STEPS)
 MAX_GRAD_NORM = args.max_grad_norm
-ADVANTAGE_ESTIMATOR = args.advantage_estimator
+OPTIMIZER_OFFLOAD = args.optimizer_offload
+
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = args.save_interval_steps
 MAX_TO_KEEP = args.max_to_keep
@@ -318,17 +436,27 @@ DO_MEM_PROFILING = args.do_mem_profiling
 ROLLOUT_ENGINE = args.rollout_engine
 CKPT_DIR = args.ckpt_dir
 
+# Max number of sequences to be processed in parallel by vllm.
+VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
 
 VLLM_UTILIZATION = args.vllm_utilization
 
-
-# 2. Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS  # 1 * 2 = 2
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
 VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
+
+OVERLONG_FILTER = args.overlong_filter
+FILTER_STATUSES = (
+    {agent_types.TrajectoryStatus[name] for name in args.filter_statuses}
+    if args.filter_statuses is not None
+    else None
+)
+LOSS_AGG_MODE = args.loss_agg_mode
+ADVANTAGE_ESTIMATOR = args.advantage_estimator
+
+
 # %%
 # ==========================================
 # 5. JAX Device & Mesh Setup
@@ -340,24 +468,94 @@ from tunix.models.automodel import call_model_config
 config = call_model_config(MODEL_VERSION)
 
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  _REMAT_POLICY_MAP = {
+      "block": model_lib.RematConfig.BLOCK,
+      "decoder": model_lib.RematConfig.DECODER,
+  }
+  config.remat_config = _REMAT_POLICY_MAP[REMAT_POLICY]
 
+if DTYPE is not None:
+  config.dtype = DTYPE
+
+if USE_FLASH_ATTENTION:
+  config.use_flash_attention = USE_FLASH_ATTENTION
+  config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
 
 devices = jax.devices()
-split = int(len(devices) / 2)
+total_devices = len(devices)
 
-# Favor TP for now.
-# TODO(sizhi): Experiment with DP vs TP for rollout.
-rollout_tp = np.gcd(split, config.num_kv_heads)
-rollout_fsdp = split // rollout_tp
-rollout_devices = np.array(devices[:split]).reshape(rollout_fsdp, rollout_tp)
+# 1. Resolve Rollout Mesh Dimensions
+# Each explicitly-provided dim becomes an axis in the mesh; unspecified dims are
+# dropped (not defaulted to 1), so passing only --rollout_mesh_fsdp yields a 1D mesh.
+# If nothing is provided, fall back to the split-fraction heuristic (2D: fsdp+tp).
+rollout_fsdp = args.rollout_mesh_fsdp
+rollout_tp = args.rollout_mesh_tp
+if rollout_fsdp is not None or rollout_tp is not None:
+  rollout_dims = []
+  if rollout_fsdp is not None:
+    rollout_dims.append(("fsdp", rollout_fsdp))
+  if rollout_tp is not None:
+    rollout_dims.append(("tp", rollout_tp))
+else:
+  num_rollout_devices = int(total_devices * args.rollout_split_fraction)
+  rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
+  rollout_fsdp = num_rollout_devices // rollout_tp
+  rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 
-train_fsdp = np.gcd(split, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
-train_tp = split // train_fsdp
-train_devices = np.array(devices[split:]).reshape(train_fsdp, train_tp)
+# 2. Resolve Train Mesh Dimensions
+# Same rule: each provided dim becomes an axis; unspecified dims are dropped.
+# Supports fsdp-only, fsdp+sp, fsdp+tp, fsdp+sp+tp, etc. If nothing is provided,
+# fall back to leftover devices (2D: fsdp+tp).
+train_fsdp = args.train_mesh_fsdp
+train_sp = args.train_mesh_sp
+train_tp = args.train_mesh_tp
+if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
+  train_dims = []
+  train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
+  if train_sp is not None:
+    train_dims.append(("sp", train_sp))
+  train_dims.append(("tp", train_tp if train_tp is not None else 1))
+else:
+  num_train_devices = total_devices - num_rollout_devices
+  train_fsdp = int(
+      np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
+  )
+  train_tp = num_train_devices // train_fsdp
+  train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+num_train_devices = int(np.prod([d for _, d in train_dims]))
 
-rollout_mesh = Mesh(rollout_devices, axis_names=("fsdp", "tp"))
-train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
+# 3. Sanity Check
+if num_rollout_devices + num_train_devices > total_devices:
+  raise ValueError(
+      f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
+      f"train devices, but cluster only has {total_devices} available."
+  )
+
+# 4. Route to Meshes
+rollout_axis_names = tuple(name for name, _ in rollout_dims)
+rollout_shape = tuple(d for _, d in rollout_dims)
+train_axis_names = tuple(name for name, _ in train_dims)
+train_shape = tuple(d for _, d in train_dims)
+
+rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
+train_devices = np.array(
+    devices[num_rollout_devices : num_rollout_devices + num_train_devices]
+).reshape(train_shape)
+
+rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
+train_mesh = Mesh(train_devices, axis_names=train_axis_names)
+
+
+print(
+    f"*** Rollout Mesh *** | dims: {rollout_dims} | Shape: {rollout_mesh.shape}"
+)
+print(f"*** Train Mesh *** | dims: {train_dims} | Shape: {train_mesh.shape}")
+
+if train_sp is not None:
+  config.shd_config = model_lib.ShardingConfig.get_default_sharding(
+      enable_sp=True
+  )
 
 # %%
 # ==========================================
@@ -365,7 +563,7 @@ train_mesh = Mesh(train_devices, axis_names=("fsdp", "tp"))
 # ==========================================
 
 qwen_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=MODEL_DTYPE
+    MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
 )
 
 
@@ -434,6 +632,7 @@ def transform(entry):
       entry[k] = json.dumps(v)
   return entry
 
+
 dataset = dataset.map(
     transform,
     keep_in_memory=True,
@@ -446,22 +645,20 @@ dataset = dataset.map(
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
 )
+
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=2
+    log_dir=args.metrics_logger_dir, flush_every_n_steps=2
 )
 
-optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
+optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
+    learning_rate=LEARNING_RATE, b1=B1, b2=B2, weight_decay=WEIGHT_DECAY
 )
+
+if MAX_GRAD_NORM is not None:
+  optimizer = optax.chain(
+      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      optimizer,
+  )
 
 
 # %%
@@ -493,12 +690,12 @@ sglang_jax_rollout_dict = {
 
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
-    "rollout_vllm_hbm_utilization": 0.4,
+    "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
-    "tensor_parallel_size": rollout_mesh.shape["tp"],
-    "data_parallel_size": rollout_mesh.shape["fsdp"],
+    "tensor_parallel_size": rollout_mesh.shape.get("tp", 1),
+    "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
@@ -547,6 +744,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=None,
         checkpointing_options=None,
+        # optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -564,19 +762,25 @@ rl_cluster = rl_cluster_lib.RLCluster(
 # ==========================================
 # 11. Learner & Agent Setup
 # ==========================================
-grpo_config = agentic_grpo_learner.GRPOConfig(
-    num_generations=NUM_GENERATIONS,
-    num_iterations=NUM_ITERATIONS,
-    max_response_length=MAX_RESPONSE_LENGTH,
-    beta=BETA,
-    epsilon=EPSILON,
-    system_prompt=SWE_SYSTEM_PROMPT,
-    max_concurrency=MAX_CONCURRENCY,
-    epsilon_high=EPSILON_HIGH,
-    off_policy_steps=0,
-    episode_timeout=PER_TURN_TIMEOUT_SECS * MAX_TURNS,
-    advantage_estimator=ADVANTAGE_ESTIMATOR,
-)
+
+config_kwargs = {
+    "num_generations": NUM_GENERATIONS,
+    "num_iterations": NUM_ITERATIONS,
+    "max_response_length": MAX_RESPONSE_LENGTH,
+    "beta": BETA,
+    "epsilon": EPSILON,
+    "system_prompt": SWE_SYSTEM_PROMPT,
+    "max_concurrency": MAX_CONCURRENCY,
+    "epsilon_high": EPSILON_HIGH,
+    "off_policy_steps": OFF_POLICY_STEPS,
+    "episode_timeout": PER_TURN_TIMEOUT_SECS * MAX_TURNS,
+    "overlong_filter": OVERLONG_FILTER,
+    "filter_statuses": FILTER_STATUSES,
+    "loss_agg_mode": LOSS_AGG_MODE,
+    "advantage_estimator": ADVANTAGE_ESTIMATOR,
+}
+
+grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
 
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
@@ -598,7 +802,6 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 
 dataset = dataset.shuffle(seed=SEED)
 grain_dataset = grain.MapDataset.source(dataset)
-
 
 def mixed_type_batch_fn(elements):
   """elements: A list of dicts."""
@@ -637,12 +840,42 @@ def mixed_type_batch_fn(elements):
 
   return batched_data
 
+try:
+  import datetime
+  import wandb # pytype: disable=import-error
+
+  settings = wandb.Settings(console="off")
+  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+  wandb_config = {
+      **vars(args),
+      # Derived values not present in args
+      "kv_cache_size": KV_CACHE_SIZE,
+      "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
+      "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+      # Stringify set so wandb can serialize it
+      "filter_statuses": (
+          [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
+      ),
+      # Mesh topology
+      "num_devices": len(devices),
+      "rollout_mesh_fsdp": rollout_fsdp,
+      "rollout_mesh_tp": rollout_tp,
+      "train_mesh_fsdp": train_fsdp,
+      "train_mesh_sp": train_sp,
+      "train_mesh_tp": train_tp,
+  }
+  wandb.init(
+      project="tunix", name=run_name, config=wandb_config, settings=settings
+  )
+except Exception as e:
+  print(f"W&B initialization failed with error: {e}")
+
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,
     tokenizer,
     batch_size=BATCH_SIZE,
-    num_batches=NUM_BATCHES,
+    num_batches=None,
     max_prompt_length=MAX_PROMPT_LENGTH,
     fraction=TRAIN_FRACTION,
     num_epochs=NUM_EPOCHS,

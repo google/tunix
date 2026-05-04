@@ -560,7 +560,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
           100.04,
           100.2,  # _one_step: 100.2 - 100.02 = 0.18 > 0.1
           100.21,
-          100.22,  # _append_final_reward
+          100.22,
+          100.23,  # _append_final_reward
       ]
 
       engine = trajectory_collect_engine.TrajectoryCollectEngine(

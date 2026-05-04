@@ -19,8 +19,8 @@ asynchronous collection of rollouts by managing the interaction loop between
 an LLM-based agent and an environment. It supports single and concurrent
 multi-pair trajectory collection.
 """
-
 import asyncio
+import json
 import time
 from typing import Any, AsyncGenerator, Callable, Concatenate, Dict, List, Optional, ParamSpec, Set, Tuple
 
@@ -58,9 +58,7 @@ class TrajectoryCollectEngine:
       agent: ConversationAgentBase,
       env: BaseTaskEnv,
       *,
-      model_call: Callable[
-          Concatenate[Dict[str, str], P], base_rollout.RolloutOutput
-      ],
+      model_call: Callable[..., base_rollout.RolloutOutput],
       model_call_kwargs: Optional[Dict[str, Any]] = None,
       gamma: float = 1.0,
       max_response_length: Optional[int] = None,
@@ -92,7 +90,7 @@ class TrajectoryCollectEngine:
         timeout (float): Maximum episode duration in seconds before timeout
           termination
         tokenizer: Optional tokenizer for converting messages to token IDs. This
-          is required if we want to track down `max_context_tokens`.
+          is required if we want to track down token counts.
         chat_parser: Optional chat parser for formatting messages
         filter_statuses (Set[TrajectoryStatus]): A set of statuses that are
           masked out for overlong filtering.
@@ -105,6 +103,9 @@ class TrajectoryCollectEngine:
     self.model_call = model_call
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
+    self.perf_v2 = (
+        perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
+    )
     self.max_steps = getattr(self.env, "max_steps", 1)
     self.gamma = gamma
     self.max_response_length = max_response_length
@@ -119,7 +120,9 @@ class TrajectoryCollectEngine:
         agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
         agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
         agent_types.TrajectoryStatus.TIMEOUT,
+        agent_types.TrajectoryStatus.ENV_TIMEOUT,
     }
+
     self.overlong_filter = overlong_filter
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
     self.env_time = {
@@ -151,9 +154,20 @@ class TrajectoryCollectEngine:
       )
 
   async def _run_with_timing(
-      self, func: Callable[..., Any], *args
+      self, func: Callable[..., Any], *args, timeout: Optional[float] = None
   ) -> Tuple[Any, float, float]:
-    """Runs a sync function in an executor and returns (result, wall_time, cpu_time)."""
+    """Runs a sync function in an executor and returns (result, wall_time, cpu_time).
+
+    Args:
+      func: Synchronous callable to run in the executor.
+      *args: Positional arguments forwarded to func.
+      timeout: Optional deadline in seconds. If provided and the executor future
+        does not finish in time, asyncio.TimeoutError is re-raised to the
+        caller.
+
+    Raises:
+      asyncio.TimeoutError: When timeout is not None and is exceeded.
+    """
 
     def _clocked_wrapper():
       t_start = time.thread_time()
@@ -164,8 +178,11 @@ class TrajectoryCollectEngine:
     loop = asyncio.get_running_loop()
     wall_start = time.perf_counter()
 
-    # Run the wrapper in the default executor
-    result, cpu_delta = await loop.run_in_executor(None, _clocked_wrapper)
+    fut = loop.run_in_executor(None, _clocked_wrapper)
+    if timeout is not None:
+      result, cpu_delta = await asyncio.wait_for(fut, timeout=timeout)
+    else:
+      result, cpu_delta = await fut
 
     wall_delta = time.perf_counter() - wall_start
     return result, wall_delta, cpu_delta
@@ -209,11 +226,19 @@ class TrajectoryCollectEngine:
         self.overlong_filter
         and self.agent.trajectory.status in self.filter_statuses
     )
-    if not masked_out:
-      await self._append_final_reward()
-    self.compute_mc_reward()
-    self.compute_trajectory_reward()
-    await self._close()
+    try:
+      if not masked_out:
+        await self._append_final_reward()
+      else:
+        logging.debug(
+            "%s mask out trajectory due to status %s",
+            self._debug_prefix,
+            self.agent.trajectory.status.name,
+        )
+      self.compute_mc_reward()
+      self.compute_trajectory_reward()
+    finally:
+      await self._close()
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
@@ -382,7 +407,13 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
+    logging.debug("%s env.reset starting", self._debug_prefix)
     (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
+    logging.debug(
+        "%s env.reset done in %.1fs",
+        self._debug_prefix,
+        wall_time,
+    )
 
     self.env_time["reset_latency"] += wall_time
     self.env_time["reset_cpu_time"] += cpu_time
@@ -409,6 +440,17 @@ class TrajectoryCollectEngine:
     self._start_ts = time.perf_counter()
     self._response_token_count = 0
 
+  @property
+  def _debug_prefix(self) -> str:
+    """Returns a consistent log prefix with step_idx, pair_index, and group_id."""
+    extra = getattr(self.env, "extra_kwargs", {}) or {}
+    step_idx = len(self.agent.trajectory.steps)
+    pair_index = extra.get("pair_index")
+    group_id = extra.get("group_id")
+    return (
+        f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
+    )
+
   def _get_perf_tags(self) -> Dict[str, Any]:
     """Extracts performance tracing tags from the environment."""
     tags = {}
@@ -434,7 +476,7 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.status = (
           agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
       )
-
+      logging.debug("%s MAX_CONTEXT_LIMIT_REACHED", self._debug_prefix)
       return True
     return False
 
@@ -451,38 +493,100 @@ class TrajectoryCollectEngine:
     """
     if self._check_and_set_context_limit_reached():
       return True
+    max_generation_steps = (
+        self.max_response_length - self._response_token_count
+        if self.max_response_length is not None
+        else None
+    )
+    logging.debug("%s model_call starting", self._debug_prefix)
+
+    def _safe_model_call():
+      try:
+        return self.model_call(
+            self.agent.chat_completions,
+            self.env,
+            max_generation_steps=max_generation_steps,
+            **self.model_call_kwargs,
+        )
+      except Exception as e:
+        logging.exception("Caught exception inside model_call: %s", e)
+        raise
 
     rollout_output = await asyncio.get_event_loop().run_in_executor(
         None,
-        self.model_call,
-        self.agent.chat_completions,
-        self.env,
-        **self.model_call_kwargs,
+        _safe_model_call,
     )
+    logging.debug("%s model_call done", self._debug_prefix)
+
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])
     if self._check_and_set_context_limit_reached():
       return True
 
     action = self.agent.update_from_model(rollout_output.text[0]).action
-
+    logging.debug(
+        "%s Agent Action:\n%s",
+        self._debug_prefix,
+        json.dumps(action, default=str, indent=2),
+    )
     if action is None:
       logging.warning(
           "Agent returned None action, using empty action list as fallback"
       )
       action = []
+
+    step_idx = len(self.agent.trajectory.steps)
+    remaining_time = self.timeout - (time.perf_counter() - self._start_ts)
+
     tags = self._get_perf_tags()
-    with self.perf_v2.span(
-        perf_constants.ENVIRONMENT,
-        tags=tags,
-    ):
-      (obs, rew, done, info), wall_time, cpu_time = await self._run_with_timing(
-          self.env.step, action
-      )
+    try:
+      with self.perf_v2.span(
+          perf_constants.ENVIRONMENT,
+          tags=tags,
+      ):
+        (obs, rew, done, info), wall_time, cpu_time = (
+            await self._run_with_timing(
+                self.env.step, action, timeout=remaining_time
+            )
+        )
+    except asyncio.TimeoutError:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
+      if step_idx == 0:
+        logging.error(
+            "%s env.step hung at step 0 (first action) and was killed after"
+            " %.1f s remaining timeout. This trajectory produced no usable"
+            " data. Consider investigating the environment.",
+            self._debug_prefix,
+            remaining_time,
+        )
+      else:
+        logging.error(
+            "%s env.step hung at step %d and was killed after %.1f s"
+            " remaining timeout.",
+            self._debug_prefix,
+            step_idx,
+            remaining_time,
+        )
+      cur_step = self.agent.get_current_step()
+      if cur_step is not None:
+        cur_step.done = True
+      return True
 
     self.env_time["step_latency"] += wall_time
     self.env_time["step_cpu_time"] += cpu_time
 
+    logging.debug(
+        "%s Env Observation (Rew: %s, Done: %s):\n%s",
+        self._debug_prefix,
+        rew,
+        done,
+        json.dumps(obs, default=str, indent=2),
+    )
+    logging.debug(
+        "%s Env Info:\n%s",
+        self._debug_prefix,
+        json.dumps(info, default=str, indent=2),
+    )
     self.agent.update_from_env(obs, rew, done, info)
 
     cur_step = self.agent.get_current_step()
@@ -532,9 +636,14 @@ class TrajectoryCollectEngine:
     additional reward signals based on overall episode performance.
     """
     last_step = self.agent.get_current_step()
-    if last_step is None or self.final_reward_fn is None:
+    if (
+        last_step is None
+        or self.final_reward_fn is None
+        or not callable(self.final_reward_fn)
+    ):
       # Skip reward computation in trajectory collection if no reward function
       # is provided or no step is taken.
+      logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
     final_reward, wall_time, cpu_time = await self._run_with_timing(
         self.final_reward_fn
@@ -543,6 +652,9 @@ class TrajectoryCollectEngine:
     self.reward_time["reward_latency"] += wall_time
     self.reward_time["reward_cpu_time"] += cpu_time
     last_step.reward += final_reward
+    logging.debug(
+        "%s Final reward computed: %s", self._debug_prefix, final_reward
+    )
 
   def compute_trajectory_reward(self):
     """Computes and stores the total reward for the trajectory.
@@ -581,4 +693,23 @@ class TrajectoryCollectEngine:
     Ensures proper cleanup of environment resources such as network
     connections, file handles, or external processes.
     """
-    await asyncio.get_event_loop().run_in_executor(None, self.env.close)
+    logging.debug("%s Closing environment.", self._debug_prefix)
+    for k, v in self.env_time.items():
+      logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
+    for k, v in self.reward_time.items():
+      logging.debug("%s k=%s v=%s", self._debug_prefix, k, v)
+
+    try:
+      await asyncio.wait_for(
+          asyncio.get_event_loop().run_in_executor(
+              None, self.env.close
+          ),
+          timeout=150.0,
+      )
+    except asyncio.TimeoutError:
+      logging.error(
+          "%s env.close() timed out after 150s — executor thread may be"
+          " leaked. This will starve the thread pool over time.",
+          self._debug_prefix,
+      )
+    logging.debug("%s Environment closed.", self._debug_prefix)
