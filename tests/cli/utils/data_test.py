@@ -205,6 +205,40 @@ def create_dataset():
     self.assertLen(batches, 1)
     self.assertEqual(batches[0], [{"prompts": "short", "answer": 1}])
 
+  def test_raises_when_prompt_length_filter_removes_all_examples(self):
+    tokenizer = _FakeTokenizer()
+    dataset = _BaseDataset([
+        {"prompts": "this is too long", "answer": 1},
+        {"prompts": "also too long", "answer": 2},
+    ])
+
+    with self.assertRaisesRegex(
+        ValueError, "empty after post_init_dataset filtering"
+    ):
+      data_lib.post_init_dataset(
+          dataset,
+          tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
+          batch_size=2,
+          num_batches=None,
+          max_prompt_length=2,
+      )
+
+  def test_raises_when_fraction_makes_training_split_empty(self):
+    tokenizer = _FakeTokenizer()
+    dataset = _BaseDataset([
+        {"prompts": "short", "answer": 1},
+    ])
+
+    with self.assertRaisesRegex(ValueError, "empty after post_init_dataset split"):
+      data_lib.post_init_dataset(
+          dataset,
+          tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
+          batch_size=1,
+          num_batches=None,
+          max_prompt_length=None,
+          fraction=0.5,
+      )
+
   def test_limits_num_batches(self):
     tokenizer = _FakeTokenizer()
     dataset = _BaseDataset(

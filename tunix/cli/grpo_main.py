@@ -29,8 +29,7 @@ Usage::
     # Agentic GRPO — DeepSWE
     python -m tunix.cli.grpo_main examples/deepswe/configs/qwen3_32b.yaml
 """
-
-import collections
+from collections.abc import MutableMapping
 import dataclasses
 import importlib
 import os
@@ -259,13 +258,13 @@ class GrpoPipeline(config.HyperParameters):
     Standard mode: pass rollout_config fields through with kv_cache_size =
     max_prompt_length + total_generation_steps + 256.
 
-    Agentic mode: same base. Same kv_cache_size calculation. 
+    Agentic mode: same base. Same kv_cache_size calculation.
 
     Engine-specific extras (sglang_jax_config, vllm_config) are also applied.
     """
-    rollout_cfg = self.config["rollout_config"]
-    mode = self.config.get("training_mode", "grpo")
-    engine = self.config.get("rollout_engine", "vanilla")
+    rollout_cfg = self._config_mapping("rollout_config")
+    mode = self._config_string("training_mode", "grpo")
+    engine = self._config_string("rollout_engine", "vanilla")
 
     valid_fields = {
         f.name for f in dataclasses.fields(base_rollout.RolloutConfig)
@@ -280,7 +279,7 @@ class GrpoPipeline(config.HyperParameters):
     max_response = rollout_cfg.get("total_generation_steps", 0)
 
     if mode == "agentic_grpo":
-      agentic_cfg = self.config.get("agentic_grpo_config", {})
+      agentic_cfg = self._config_mapping("agentic_grpo_config")
       kv_cache_size = max_prompt + max_response + 256
       filtered["kv_cache_size"] = kv_cache_size
       logging.info("kv_cache_size: %d", kv_cache_size)
@@ -308,10 +307,10 @@ class GrpoPipeline(config.HyperParameters):
       role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
   ) -> dict:
     """Return engine-specific RolloutConfig fields for agentic mode."""
-    model_id = self.config.get("actor_model_config", {}).get("model_id", "")
+    model_id = self._config_mapping("actor_model_config").get("model_id", "")
 
     if engine == "sglang_jax":
-      sg = self.config.get("sglang_jax_config", {})
+      sg = self._config_mapping("sglang_jax_config")
       return dict(
           rollout_sglang_jax_model_version=sg.get("model_version", model_id),
           rollout_sglang_jax_mem_fraction_static=sg.get(
@@ -340,17 +339,18 @@ class GrpoPipeline(config.HyperParameters):
       )
 
     if engine == "vllm":
-      vllm = self.config.get("vllm_config", {})
+      vllm = self._config_mapping("vllm_config")
       if role_to_mesh is None:
         raise ValueError(
             "role_to_mesh must be provided for vllm rollout config."
         )
       rollout_shape = role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.shape
-      max_num_seqs = self.config["rollout_config"].get(
+      rollout_cfg = self._config_mapping("rollout_config")
+      max_num_seqs = rollout_cfg.get(
           "rollout_vllm_max_num_seqs",
           vllm.get("max_num_seqs", 768),
       )
-      max_batched_tokens = self.config["rollout_config"].get(
+      max_batched_tokens = rollout_cfg.get(
           "rollout_vllm_max_num_batched_tokens",
           vllm.get(
               "max_num_batched_tokens",
@@ -396,8 +396,8 @@ class GrpoPipeline(config.HyperParameters):
       rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
     return rl_cluster_lib.ClusterConfig(
         role_to_mesh=role_to_mesh,
-        rollout_engine=self.config["rollout_engine"],
-        offload_to_cpu=self.config["offload_to_cpu"],
+        rollout_engine=self._config_string("rollout_engine"),
+        offload_to_cpu=self._config_bool("offload_to_cpu"),
         training_config=self.create_rl_training_config(),
         rollout_config=rollout_config,
     )
@@ -406,7 +406,7 @@ class GrpoPipeline(config.HyperParameters):
     base_key = "rl_training_config"
     constructed_rl_training_config = self.obtain_training_config_dict(base_key)
 
-    base_config = self.config[base_key]
+    base_config = self._config_mapping(base_key)
     if base_config.get("actor_optimizer_config"):
       constructed_rl_training_config["actor_optimizer"] = self.create_optimizer(
           base_key, "actor_optimizer_config"
@@ -465,23 +465,26 @@ class GrpoPipeline(config.HyperParameters):
   def create_rl_cluster(self, tokenizer):
     role_to_mesh = self.create_role_to_mesh()
     rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
+    reference_model_config = self._mutable_config_mapping("reference_model_config")
+    actor_model_config = self._mutable_config_mapping("actor_model_config")
+    tokenizer_config = self._config_mapping("tokenizer_config")
     # Should not use LoRA for reference model.
-    if self.config["reference_model_config"].get("lora_config"):
+    if reference_model_config.get("lora_config"):
       logging.warning(
           "LoRA config is not supported for the reference model. Disabling"
           " LoRA."
       )
-      del self.config["reference_model_config"]["lora_config"]
+      del reference_model_config["lora_config"]
     reference_model, tokenizer_path = model_lib.create_model(
-        self.config["reference_model_config"],
-        self.config["tokenizer_config"],
+      dict(reference_model_config),
+        tokenizer_config,
         role_to_mesh[rl_cluster_lib.Role.REFERENCE],
     )
-    if self.config["actor_model_config"].get("lora_config", None):
+    if actor_model_config.get("lora_config", None):
       actor_model = model_lib.apply_lora_to_model(
           reference_model,
           role_to_mesh[rl_cluster_lib.Role.ACTOR],
-          self.config["actor_model_config"]["lora_config"],
+          actor_model_config["lora_config"],
       )
     else:
       graph_def, params = nnx.split(reference_model)
@@ -504,9 +507,7 @@ class GrpoPipeline(config.HyperParameters):
     )
 
   def compute_params(self, dataset):
-    rl_training_config: dict[str, Any] = self.config.get(
-        "rl_training_config", {}
-    )
+    rl_training_config = self._mutable_config_mapping("rl_training_config")
 
     # Return early if max_steps is already specified.
     max_steps = None
@@ -529,6 +530,7 @@ class GrpoPipeline(config.HyperParameters):
           num_batches,
           batch_size,
       )
+    self.config["num_batches"] = num_batches
     num_train_epochs = self.config.get("num_train_epochs")
     if not num_train_epochs:
       num_train_epochs = 1
@@ -553,9 +555,12 @@ class GrpoPipeline(config.HyperParameters):
       )
 
     rl_training_config["max_steps"] = max_steps
-    actor_opt: dict[str, Any] = rl_training_config.get(
-        "actor_optimizer_config", {}
-    )
+    actor_opt: MutableMapping[str, Any] | None = None
+    actor_opt_value = rl_training_config.get("actor_optimizer_config")
+    if isinstance(actor_opt_value, MutableMapping):
+      actor_opt = actor_opt_value
+    elif actor_opt_value is not None:
+      raise ValueError("rl_training_config.actor_optimizer_config must be a dict.")
     if actor_opt and not actor_opt.get("decay_steps"):
       actor_opt["decay_steps"] = max_steps
     if actor_opt and not actor_opt.get("warmup_steps"):
@@ -593,7 +598,7 @@ class GrpoPipeline(config.HyperParameters):
       )
 
     if self.config.get("data_module", None):
-      data_module = self.config.get("data_module", None)
+      data_module = self._config_string("data_module")
       dataset = data_lib.get_dataset_from_module(
           data_module,
           tokenizer,
@@ -636,7 +641,7 @@ class GrpoPipeline(config.HyperParameters):
     """Build GRPOConfig (agentic) from the agentic_grpo_config YAML section."""
     from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig  # pylint: disable=g-import-not-at-top
 
-    cfg = dict(self.config.get("agentic_grpo_config", {}))
+    cfg = dict(self._config_mapping("agentic_grpo_config"))
 
     # episode_timeout = per_turn_timeout_secs * max_turns when not explicit
     if "episode_timeout" not in cfg:
@@ -647,7 +652,7 @@ class GrpoPipeline(config.HyperParameters):
 
     # max_response_length mirrors rollout_config.total_generation_steps
     if "max_response_length" not in cfg:
-      cfg["max_response_length"] = self.config["rollout_config"].get(
+      cfg["max_response_length"] = self._config_mapping("rollout_config").get(
           "total_generation_steps", 8192
       )
 
@@ -660,7 +665,7 @@ class GrpoPipeline(config.HyperParameters):
     """Instantiate a chat parser based on chat_parser_config.type."""
     from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib  # pylint: disable=g-import-not-at-top
 
-    parser_type = (self.config.get("chat_parser_config") or {}).get(
+    parser_type = self._config_mapping("chat_parser_config").get(
         "type", "default"
     )
     if parser_type == "qwen":
@@ -686,7 +691,7 @@ class GrpoPipeline(config.HyperParameters):
     return dataset, batch_fn
 
   def _setup_kubernetes(self) -> None:
-    k8s_cfg = self.config.get("kubernetes_config") or {}
+    k8s_cfg = self._config_mapping("kubernetes_config")
     if not k8s_cfg:
       return
     os.environ["KUBECONFIG"] = k8s_cfg.get("kubeconfig", "~/.kube/config")
@@ -697,8 +702,8 @@ class GrpoPipeline(config.HyperParameters):
         "node_selector_val", "deepswe-cpu-pool"
     )
     try:
-      from kubernetes import client as k8s_client_lib  # pylint: disable=g-import-not-at-top
-      from kubernetes import config as k8s_config_lib  # pylint: disable=g-import-not-at-top
+      from kubernetes import client as k8s_client_lib  # type: ignore[import-untyped]  # pylint: disable=g-import-not-at-top
+      from kubernetes import config as k8s_config_lib  # type: ignore[import-untyped]  # pylint: disable=g-import-not-at-top
 
       k8s_config_lib.load_kube_config()
       k8s_client_lib.CoreV1Api()
@@ -726,7 +731,7 @@ class GrpoPipeline(config.HyperParameters):
         tokenizer,
         batch_size=self.config.get("batch_size", 1),
         num_batches=self.config.get("num_batches"),
-        max_prompt_length=self.config["rollout_config"].get(
+      max_prompt_length=self._config_mapping("rollout_config").get(
             "max_prompt_length"
         ),
         fraction=self.config.get("train_fraction", 1.0),
@@ -743,7 +748,9 @@ class GrpoPipeline(config.HyperParameters):
       grpo_trainer = grpo_learner.GrpoLearner(
           rl_cluster=rl_cluster,
           reward_fns=self.obtain_reward_fn(),
-          algo_config=grpo_learner.GrpoConfig(**self.config["grpo_config"]),
+          algo_config=grpo_learner.GrpoConfig(
+            **self._config_mapping("grpo_config")
+          ),
       )
       grpo_trainer.train(dataset)
       return
@@ -766,7 +773,7 @@ class GrpoPipeline(config.HyperParameters):
         chat_parser=chat_parser,
     )
 
-    agent_class_path = self.config.get("agent_class_path")
+    agent_class_path = self._config_string("agent_class_path")
     if agent_class_path:
       learner_kwargs["agent_class"] = self._load_class_from_path(
           agent_class_path
@@ -775,7 +782,7 @@ class GrpoPipeline(config.HyperParameters):
           self.config.get("agent_kwargs") or {}
       )
 
-    env_class_path = self.config.get("env_class_path")
+    env_class_path = self._config_string("env_class_path")
     if env_class_path:
       learner_kwargs["env_class"] = self._load_class_from_path(env_class_path)
       learner_kwargs["env_kwargs"] = dict(self.config.get("env_kwargs") or {})
@@ -801,7 +808,7 @@ def _setup_jax_pathways(pathways_bns: str):
 
 
 def _setup_pathways_on_cloud():
-  import pathwaysutils  # pylint: disable=g-import-not-at-top
+  import pathwaysutils  # type: ignore[import-not-found,import-untyped]  # pytype: disable=import-error  # pyright: ignore[reportMissingImports]  # pylint: disable=g-import-not-at-top
 
   pathwaysutils.initialize()
 

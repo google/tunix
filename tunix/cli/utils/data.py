@@ -193,6 +193,8 @@ def post_init_dataset(
   Returns:
     The processed dataset.
   """
+  original_size = len(dataset)
+
   if prompt_key != "prompts":
     source_prompt_key = prompt_key
 
@@ -210,6 +212,15 @@ def post_init_dataset(
 
     dataset = dataset.filter(prompt_length_filter)
 
+  filtered_size = len(dataset)
+  if filtered_size == 0:
+    raise ValueError(
+        "Training dataset is empty after post_init_dataset filtering. "
+        f"original_size={original_size}, max_prompt_length={max_prompt_length}, "
+        f"prompt_key={prompt_key!r}. Consider increasing max_prompt_length "
+        "or adjusting the prompt template/filter settings."
+    )
+
   if num_batches is not None:
     target_size = min(num_batches * batch_size, len(dataset))
     dataset = dataset[:target_size]
@@ -221,6 +232,13 @@ def post_init_dataset(
   else:
     first_segment_dataset = dataset
     second_segment_dataset = None
+
+  if len(first_segment_dataset) == 0:
+    raise ValueError(
+        "Training dataset is empty after post_init_dataset split. "
+        f"filtered_size={filtered_size}, fraction={fraction}, "
+        f"num_batches={num_batches}, batch_size={batch_size}."
+    )
 
   first_segment_dataset = (
       first_segment_dataset.repeat(num_epochs)

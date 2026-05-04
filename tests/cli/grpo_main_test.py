@@ -20,6 +20,8 @@ and that KV cache / GRPOConfig computation is correct.
 import os
 import pathlib
 import tempfile
+from typing import Any
+from typing import cast
 from unittest import mock
 
 from absl.testing import absltest
@@ -575,6 +577,26 @@ verl_compatible: false
     p = _make_pipeline(extra)
     cfg = p.create_rollout_config()
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
+
+
+class ComputeParamsTest(absltest.TestCase):
+
+  def test_compute_params_persists_dynamic_num_batches(self):
+    pipeline = _make_pipeline("")
+    pipeline.config["batch_size"] = 8
+    pipeline.config["num_batches"] = 0
+    pipeline.config["num_train_epochs"] = 1
+    pipeline.config["train_fraction"] = 0.8
+    rl_training_config = cast(dict[str, Any], pipeline.config["rl_training_config"])
+    rl_training_config["max_steps"] = 0
+
+    raw_dataset = mock.Mock()
+    raw_dataset.__len__ = mock.Mock(return_value=7473)
+
+    pipeline.compute_params(raw_dataset)
+
+    self.assertEqual(pipeline.config["num_batches"], 934)
+    self.assertEqual(rl_training_config["max_steps"], 747)
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,8 @@
 import ast
 import collections
 from collections.abc import Callable
+from collections.abc import Mapping
+from collections.abc import MutableMapping
 import copy
 import importlib
 import inspect
@@ -241,6 +243,60 @@ class HyperParameters:
     self._validate_model_source(raw_keys)
     self.check_supported_workflow()
     self._validate_perf_metrics(entry_point=argv[0])
+
+  def _config_mapping(self, key: str) -> dict[str, Any]:
+    """Returns a config section as a plain dictionary.
+
+    This narrows nested config sections that may otherwise be inferred as broad
+    unions of scalars and mappings by static type checkers.
+    """
+    value = self.config.get(key)
+    if value is None:
+      return {}
+    if not isinstance(value, Mapping):
+      raise TypeError(
+          f"Expected config section {key!r} to be a mapping, got"
+          f" {type(value).__name__}."
+      )
+    return dict(value)
+
+  def _mutable_config_mapping(self, key: str) -> MutableMapping[str, Any]:
+    """Returns a mutable config section for in-place updates."""
+    value = self.config.get(key)
+    if value is None:
+      section: dict[str, Any] = {}
+      self.config[key] = section
+      return section
+    if not isinstance(value, MutableMapping):
+      raise TypeError(
+          f"Expected config section {key!r} to be a mutable mapping, got"
+          f" {type(value).__name__}."
+      )
+    return value
+
+  def _config_string(self, key: str, default: str = "") -> str:
+    """Returns a string config value with validation."""
+    value = self.config.get(key, default)
+    if value is None:
+      return default
+    if not isinstance(value, str):
+      raise TypeError(
+          f"Expected config value {key!r} to be a string, got"
+          f" {type(value).__name__}."
+      )
+    return value
+
+  def _config_bool(self, key: str, default: bool = False) -> bool:
+    """Returns a boolean config value with validation."""
+    value = self.config.get(key, default)
+    if value is None:
+      return default
+    if not isinstance(value, bool):
+      raise TypeError(
+          f"Expected config value {key!r} to be a bool, got"
+          f" {type(value).__name__}."
+      )
+    return value
 
   def _validate_perf_metrics(self, entry_point: str):
     """Validates that perf metrics are only enabled for GRPO.
