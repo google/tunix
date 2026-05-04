@@ -29,6 +29,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+from tunix.sft import utils as sft_utils
 
 
 def compute_attention_masks(
@@ -403,8 +404,8 @@ def build_flat_dict(
         mapped = True
         break
     # There are no mappings for rng related params.
-    if not mapped:
-      logging.warning('!!! No mapping for flat state: %s', path)
+    # if not mapped:
+    #   logging.warning('!!! No mapping for flat state: %s', path)
 
   # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():
@@ -617,6 +618,22 @@ def _align_shape(
           padded_dim = (val.shape[-1] + 127) // 128 * 128
           repeated_dim = tgt_shape[-1] // padded_dim
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
+    elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
+      tp_size = kwargs["tp_size"]
+      num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
+      gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
+      chunk_size = expert_dim // tp_size
+      padded_expert_chunk_dim = ((chunk_size + 127)//128)*128
+      pad_amount = padded_expert_chunk_dim - chunk_size
+      gate_chunks = gate_chunks.reshape(num_experts, tp_size, -1, embed_dim)
+      up_chunks = up_chunks.reshape(num_experts, tp_size, -1, embed_dim)
+      if pad_amount > 0:
+        gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+        up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+      val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
+      val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
+      val_chunks = val_chunks.transpose(0, 2, 1)
+      return val_chunks
     else:
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
@@ -741,9 +758,10 @@ def _sync_tied_lm_head_if_needed(
   embed_param = None
   lm_head_param = None
   for flat_key, tgt_param in tgt_flat_list:
-    if flat_key[-1:] == ('embedding',):
+    path = '.'.join(str(k) for k in flat_key)
+    if path.endswith(('embedding', 'embed_tokens.weight')):
       embed_param = tgt_param
-    elif flat_key[-1:] == ('lm_head',):
+    elif path.endswith(('lm_head', 'lm_head.weight')):
       lm_head_param = tgt_param
 
   if embed_param is None or lm_head_param is None:
@@ -801,6 +819,12 @@ def transfer_state_with_mappings(
         )
         for key, tgt_params in tgt_flat_list
     }
+  # sft_utils.show_hbm_usage('Before transfer_state_with_mappings')
+  # for key, tgt_param in tgt_flat_list:
+  #   if hasattr(tgt_param, 'value') and hasattr(tgt_param.value, 'delete'):
+  #     tgt_param.value.delete()
+  
+  # sft_utils.show_hbm_usage('After removing the old tgt_param values')
 
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)

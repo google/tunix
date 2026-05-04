@@ -37,9 +37,12 @@ from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sampling_params import SamplingParams
+from tunix.sft import utils as sft_utils
 
 # Colocate vllm engine and worker in the main process
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+_GLOBAL_VLLM_CONFIG = None
 
 
 @dataclasses.dataclass
@@ -154,8 +157,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       atexit.register(self.stop)
     else:
       self.llm = LLM(**self.args)
-
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
+
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
 
@@ -195,7 +198,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     jax.effects_barrier()
 
     if self.to_hf_key_mappings:
+      preprocess_fn = self.config.mapping_config.preprocess_src_state
+      if preprocess_fn:
+        updated_weights = preprocess_fn(updated_weights)
+
       # Mapped Weight Sync (e.g. Vanilla -> vLLM)
+      # # Save original weights for comparison (only for layer 0 to save memory)
+      # import copy
+      # orig_weights = {}
+      # for keys, param in self.transformer_state.flat_state():
+      #   key = '.'.join(str(k) for k in keys)
+      #   if 'layers.0.' in key:
+      #     orig_weights[key] = copy.deepcopy(param.value)
+
+      # for k, p in orig_weights.items():
+      #   print(f"Original weight {k}: shape={p.shape}")
+      sft_utils.show_hbm_usage(title="Before weight sync....")
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,
@@ -213,7 +231,27 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               if not self._model_runner
               else self._model_runner.model_config.get_head_size()
           ),
+          tp_size=self.args.get("tensor_parallel_size", 1),
       )
+      
+      # # Compare weights
+      # print("Comparing weights before and after update (Layer 0 only):")
+      # updated_keys = set()
+      # for keys, param in self.transformer_state.flat_state():
+      #   key = '.'.join(str(k) for k in keys)
+      #   if 'layers.0.' in key:
+      #     updated_keys.add(key)
+      #     if key in orig_weights:
+      #       if not jax.numpy.allclose(orig_weights[key], param.value, atol=1e-2):
+      #         print(f"Weight changed for {key}")
+      #       else:
+      #         print(f"Weight unchanged for {key}")
+      #     else:
+      #       print(f"New weight {key} (not in original state)")
+            
+      # for key in orig_weights:
+      #   if key not in updated_keys:
+      #     print(f"Weight {key} was removed in update")
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
@@ -238,10 +276,45 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
     
+    import vllm.config.vllm
+
+    if not hasattr(vllm.config.vllm.get_current_vllm_config, "__is_patched__"):
+      _original_get_config = vllm.config.vllm.get_current_vllm_config
+
+      def _patched_get_current_vllm_config():
+        try:
+          return _original_get_config()
+        except AssertionError:
+          global _GLOBAL_VLLM_CONFIG
+          if _GLOBAL_VLLM_CONFIG is not None:
+            return _GLOBAL_VLLM_CONFIG
+          raise
+
+      _patched_get_current_vllm_config.__is_patched__ = True
+      vllm.config.vllm.get_current_vllm_config = _patched_get_current_vllm_config
+
+      import vllm.config
+      vllm.config.get_current_vllm_config = _patched_get_current_vllm_config
+      
+      try:
+        import tpu_inference.offload.utils
+        tpu_inference.offload.utils.get_current_vllm_config = _patched_get_current_vllm_config
+      except ImportError:
+        pass
+
+    global _GLOBAL_VLLM_CONFIG
     if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
+      _GLOBAL_VLLM_CONFIG = self.llm.llm_engine.vllm_config
+      try:
+        self.llm.collective_rpc("reinitialize_kv_cache")
+      finally:
+        _GLOBAL_VLLM_CONFIG = None
     elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+      _GLOBAL_VLLM_CONFIG = self._driver.llm_engine.vllm_config
+      try:
+        self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+      finally:
+        _GLOBAL_VLLM_CONFIG = None
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading

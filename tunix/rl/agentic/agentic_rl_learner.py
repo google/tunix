@@ -297,6 +297,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
 
+    # print("compute rewards")
     rewards_info = self.reward_manager(
         prompts=prompts,
         completions=completions,
@@ -372,16 +373,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       A tuple of agent and environment.
     """
 
+    # print(f"{self.algo_config.system_prompt = }, {self.agent_kwargs=}")
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
     )  # if agent_kwargs contains "system_prompt", it will be honored.
 
     assert "group_id" not in self.env_kwargs
     assert "pair_index" not in self.env_kwargs
+    # print (f"{single_example=}")
     env = self.env_class(
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
+    logging.info(f"env extra_kwargs : {env.extra_kwargs=}")
 
     return agent, env
 
@@ -417,6 +421,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
     )
+    jax.block_until_ready(result)
 
     return result
 
@@ -426,6 +431,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         model_call=self._model_call,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
+        max_response_length=self.algo_config.max_response_length,
         timeout=self.algo_config.episode_timeout,
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
@@ -478,6 +484,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
+            # logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
       else:
@@ -493,6 +500,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
+            # logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
 
@@ -601,7 +609,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     async def _iterate_micro_batches():
       async for item in async_queue_iter:
+        # print(f"item = {item}")
         for prompt in self._create_micro_batch_iterator(iter([item]), 1):
+          # print(f"prompt from the item = {prompt}")
           yield prompt
 
     prompt_iterator = _iterate_micro_batches()
@@ -612,27 +622,40 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           num_generations=self.algo_config.num_generations,
           collect_mode="Token",
       ):
+
+        # snapshot = tracemalloc.take_snapshot()
+        # top_stats = snapshot.statistics('lineno')
+
+        # print("[ Top 10 memory consumers ]")
+        # for stat in top_stats[:10]:
+        #   print(stat)
         try:
           train_examples = self._batch_to_train_example(
               batch_results=batch,
               mode=rl_cluster_lib.Mode.TRAIN,
           )
+          # print("get train_examples")
           iterations = self.algo_config.num_iterations
           for _ in range(iterations):
             for train_example in train_examples:
               train_data_queue.put(train_example)
+              # print(f"train_data_queue put train_examples")
         except Exception as e:
           if not isinstance(e, RuntimeError):
+            # print("Exception in _producer while processing")
             logging.exception(
                 "Exception in _producer while processing batch: %s", e
             )
+          # print("Hererererere?")
           raise
     finally:
       # Signal production is complete for this batch, even if errors occurred.
+      # print("Single production is complete for this batch")
       train_data_queue.put(None)
       # Ensure that any background threads waiting on the prompt queue are
       # unblocked.
       prompt_queue.put(None)
+    # print("Hererererere before returning?")
 
   def _data_consumer_batch_generator(
       self, queue: queue_lib.AbstractDataQueue, batch_size: int
@@ -652,6 +675,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
+    # tracemalloc.start()
     full_batch_iterator = iter(train_dataset)
 
     if self.rl_cluster.global_steps > 0:
@@ -740,6 +764,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self.loop,
     )
 
+    # print("after producing train examples")
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
@@ -754,11 +779,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
+    # print(f"micro_batches_per_full_batch = ")
     for train_micro_batch in train_data_gen:
       if (
           self._training_config.max_steps
           and self.rl_cluster.global_steps >= self._training_config.max_steps
       ):
+        # print("Done!!!")
         logging.info(
             "Reached max_steps: %d >= %d",
             self.rl_cluster.global_steps,
@@ -767,6 +794,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         prompt_queue.put(None)
         break
       self._iter_steps += 1
+      print(f"{self._iter_steps=}")
 
       # TODO(tsbao): Re-enable this once off-policy filtering is needed.
       # Filter out examples that are too old (off-policy).
@@ -780,6 +808,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
+      jax.block_until_ready(merged_train_micro_batch)
 
       # --- Evaluation Logic ---
       current_eval_dataset = None
@@ -814,9 +843,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         current_eval_dataset = eval_examples
 
       # --- Training Step ---
+      sft_utils.show_hbm_usage(title="Before updata actor.......")
       self.rl_cluster.update_actor(
           [merged_train_micro_batch], current_eval_dataset, skip_jit
       )
+      # print("Done updating actor...")
       if hasattr(self.rl_cluster, "critic_trainer"):
         self.rl_cluster.update_critic(
             [merged_train_micro_batch], current_eval_dataset, skip_jit
@@ -825,6 +856,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
       if micro_batches_since_last_sync == micro_batches_per_full_batch:
+        # print("Time to sync weights....")
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
@@ -869,6 +901,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             logging.info("Sync lock released.")
         else:
           self.rl_cluster.global_steps += 1
+          # print(f"global steps: {self.rl_cluster.global_steps}")
           try:
             with self.rl_cluster.perf_v2.span(
                 perf_constants.DATA_LOADING,
@@ -907,6 +940,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       batch: The batch of prompts (TrainingInputT).
     """
     current_batch_size = len(next(iter(batch.values())))
+    # print("_put_prompts_to_queue...")
     if (
         self._training_config.max_steps
         and self.rl_cluster.global_steps >= self._training_config.max_steps

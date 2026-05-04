@@ -16,10 +16,14 @@ class BackendMappingMixin:
 
   @classmethod
   def _backend_registry(cls) -> Dict[str, Any]:
+    import sys
     # Use the explicit path if provided, otherwise fallback to the module path
     module = cls.BACKEND_PACKAGE_PATH or cls.__module__
 
     package_name = module.rsplit('.', 1)[0] if '.' in module else module
+    for k in list(sys.modules.keys()):
+      if k.startswith(package_name):
+        del sys.modules[k]
     package = importlib.import_module(package_name)
 
     return getattr(package, 'BACKEND_MAPPINGS', {})
@@ -61,6 +65,10 @@ class BackendMappingMixin:
   def to_hf_hook_fns(cls, backend: str | None = None):
     return cls.mapping_for(backend).get('to_hf_hook_fns')
 
+  @classmethod
+  def preprocess_src_state(cls, backend: str | None = None):
+    return cls.mapping_for(backend).get('preprocess_src_state')
+
 
 @dataclass
 class MappingConfig:
@@ -77,6 +85,7 @@ class MappingConfig:
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
   lora_to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
+  preprocess_src_state: Optional[Callable[[Any], Any]] = None
 
   @classmethod
   def build(
@@ -102,6 +111,7 @@ class MappingConfig:
         'to_hf_hook_fns',
         'to_hf_transpose_keys',
         'lora_to_hf_transpose_keys',
+        'preprocess_src_state',
     )
 
     values: Dict[str, Any] = {}
@@ -129,6 +139,7 @@ class MappingConfig:
         to_hf_hook_fns=resolved.get('to_hf_hook_fns'),
         to_hf_transpose_keys=resolved.get('to_hf_transpose_keys'),
         lora_to_hf_transpose_keys=resolved.get('lora_to_hf_transpose_keys'),
+        preprocess_src_state=resolved.get('preprocess_src_state'),
     )
 
   @classmethod
@@ -157,6 +168,7 @@ class MappingConfig:
         to_hf_hook_fns=maybe_call('to_hf_hook_fns'),
         to_hf_transpose_keys=maybe_call('to_hf_transpose_keys'),
         lora_to_hf_transpose_keys=maybe_call('lora_to_hf_transpose_keys'),
+        preprocess_src_state=maybe_call('preprocess_src_state'),
     )
 
     for key, value in overrides.items():
@@ -164,3 +176,4 @@ class MappingConfig:
         setattr(config, key, value)
 
     return config
+

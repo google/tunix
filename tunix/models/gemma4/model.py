@@ -77,8 +77,10 @@ class ShardingConfig:
   per_layer_input_embedding: Tuple[str | None, ...]
 
   @staticmethod
-  def get_default_sharding(is_sampling: bool = False):
+  def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
+    sp = 'sp' if (not is_sampling and enable_sp) else None
+    fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
         emb_vd=('tp', fsdp),
@@ -89,9 +91,9 @@ class ShardingConfig:
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
-        act_btd=('fsdp', None, None if is_sampling else 'tp'),
-        act_btf=('fsdp', None, 'tp'),
-        act_btnh=('fsdp', None, 'tp', None),
+        act_btd=('fsdp', sp, None if is_sampling else 'tp'),
+        act_btf=('fsdp', sp, 'tp'),
+        act_btnh=('fsdp', sp, 'tp', None),
         vision_proj=(fsdp, 'tp'),
         vision_soft_emb_norm_weight=('tp',),
         exp_weight_edf=(fsdp, None, None, 'tp'),
@@ -815,9 +817,17 @@ class Attention(nnx.Module):
     return self.num_kv_heads != self.config.num_heads and self.num_kv_heads > 1
 
   def __call__(self, x, segment_pos, cache, attn_mask, kv_shared_cache=None):
-    return self.block(
-        x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
-    )
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
+      )
+    else:
+      return self.block(
+          x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
+      )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
     return {
@@ -892,8 +902,19 @@ class FeedForward(nnx.Module):
         param_dtype=config.param_dtype,
     )
 
-  def __call__(self, x):
+  
+  def block(self, x):
     return self.down_proj(nnx.gelu(self.gate_proj(x)) * self.up_proj(x))
+
+  def __call__(self, x):
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
+      return nnx.remat(self.block.__func__)(self, x)
+    else:
+      return self.block(x)
+
 
 
 class DecoderLayer(nnx.Module):
@@ -909,6 +930,7 @@ class DecoderLayer(nnx.Module):
   ):
 
     self.config = config
+    self.skip_scale = nnx.Param(jnp.ones((1,), dtype=config.param_dtype))
     self.pre_attention_norm = RMSNorm(
         config.embed_dim,
         rngs=rngs,
@@ -1000,9 +1022,8 @@ class DecoderLayer(nnx.Module):
           param_dtype=config.param_dtype,
       )
 
-    self.skip_scale = nnx.Param(jnp.ones((1,), dtype=config.param_dtype))
 
-  def __call__(
+  def block(
       self,
       x,
       segment_pos,
@@ -1041,12 +1062,35 @@ class DecoderLayer(nnx.Module):
     ffw = ffw * self.skip_scale.value
     return cache, ffw
 
+  def __call__(
+      self,
+      x,
+      segment_pos,
+      cache,
+      attn_mask,
+      per_layer_input=None,
+      kv_shared_cache=None,
+  ):
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask, per_layer_input, kv_shared_cache
+      )
+    else:
+      return self.block(
+          x, segment_pos, cache, attn_mask, per_layer_input, kv_shared_cache
+      )
+
   def init_cache(self, batch_size, max_seq_len, dtype):
     return self.attn.init_cache(batch_size, max_seq_len, dtype)
 
 
 class Gemma4(BackendMappingMixin, nnx.Module):
   """Gemma4 model."""
+  
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
