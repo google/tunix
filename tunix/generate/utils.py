@@ -367,6 +367,7 @@ def build_flat_dict(
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
     path = '.'.join(str(key) for key in keys)
+    print(f"target path: {path}, shape: {v.value.shape}")
     mapped = False
     for src, regex, sharding in compiled_mappings:
       matched = regex.match(path)
@@ -457,6 +458,8 @@ def _unroll_scanned_layers(
 
   unscanned_flat = {}
 
+  for src_key, (_, tgt_path, _) in src_to_tgt_map.items():
+    print(f"Source key: {src_key}, Target path: {tgt_path}")
   for src_keys, src_val in src_state.flat_state():
     src_key = '.'.join(str(k) for k in src_keys)
 
@@ -843,6 +846,7 @@ def transfer_state_with_mappings(
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
+      print(f'Applying hook function for {flat_src_key}')
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)

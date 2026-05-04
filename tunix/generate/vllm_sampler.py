@@ -44,6 +44,8 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 _GLOBAL_VLLM_CONFIG = None
 
+_GLOBAL_VLLM_CONFIG = None
+
 
 @dataclasses.dataclass
 class VllmConfig:
