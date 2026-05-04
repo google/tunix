@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import sys
+from typing import List
 
 from absl import logging as absl_logging
 from flax import nnx
@@ -589,6 +590,39 @@ rl_cluster = rl_cluster_lib.RLCluster(
 show_hbm_usage("after RLCluster creation")
 
 
+def length_penalty_reward_fn(
+    prompts: List[str], 
+    completions: List[str], 
+    trajectory_rewards: List[float], 
+    **kwargs
+) -> List[float]:
+  """Computes a group-relative length penalty inspired by Kimi 1.5.
+  
+  Promotes shorter successful paths and penalizes longer ones, 
+  while strictly penalizing long, unsuccessful paths.
+  """
+  lengths = np.array([len(c) for c in completions])
+  
+  min_len = np.min(lengths)
+  max_len = np.max(lengths)
+  
+  rewards = np.zeros_like(lengths, dtype=np.float32)
+  if max_len == min_len:
+    return list(rewards)
+  
+  lambdas = 0.5 - (lengths - min_len) / (max_len - min_len)
+  
+  for i in range(len(completions)):
+    is_correct = trajectory_rewards[i] > 0.1
+    if is_correct:
+      rewards[i] = lambdas[i]
+    else:
+      rewards[i] = min(0.0, lambdas[i])
+  
+  weight = 0.1
+  return list(rewards * weight)
+
+
 # %%
 def metric_fn(prompts, completions, rewards, advantages, **kwargs):
   del prompts, completions, advantages, kwargs
@@ -619,7 +653,7 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
-    reward_fns=None,
+    reward_fns=[length_penalty_reward_fn],
     agent_class=FrozenLakeAgent,
     agent_kwargs={},
     env_class=FrozenLakeEnv,
@@ -630,4 +664,11 @@ grpo_trainer = GRPOLearner(
 show_hbm_usage("after GRPOLearner creation")
 
 # %%
+try:
+  print("Defragmenting JAX/XLA memory before training...")
+  jax.lib.xla_bridge.get_backend().defragment()
+  print("Defragmentation successful!")
+except Exception as e:
+  print(f"Defragmentation failed: {e}")
+
 grpo_trainer.train(train_dataset)
