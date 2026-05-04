@@ -133,13 +133,15 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-<<<<<<< HEAD
 ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
 TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+<<<<<<< HEAD
 =======
 ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
 TRAINER_MESH = [(8, 1), ("fsdp", "tp")]
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 # REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -157,12 +159,12 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-<<<<<<< HEAD
 VLLM_MAX_NUM_SEQS = 16
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 VLLM_MAX_BATCHED_TOKENS = 16 * 1024
+<<<<<<< HEAD
 =======
 VLLM_MAX_NUM_SEQS = 64
 
@@ -170,6 +172,8 @@ VLLM_MAX_NUM_SEQS = 64
 # Divide by 8 for on policy, 1 step off divide by 4
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -185,11 +189,13 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
-<<<<<<< HEAD
 ENABLE_FLASH_ATTENTION = True
+<<<<<<< HEAD
 =======
 ENABLE_FLASH_ATTENTION = False
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
@@ -316,14 +322,16 @@ else:
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
 
-<<<<<<< HEAD
 # MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 MODEL_VERSION = "google/gemma-4-31B-it"
 # MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
+<<<<<<< HEAD
 =======
 MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 # MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
 # MODEL_VERSION = "google/gemma-4-E4B-it"
 # MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
@@ -375,12 +383,14 @@ def create_datasets(
 
 # %%
 
-<<<<<<< HEAD
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
+<<<<<<< HEAD
 =======
 tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 
 chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 
@@ -408,24 +418,23 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-<<<<<<< HEAD
 config = model_lib.ModelConfig.gemma4_31b()
+<<<<<<< HEAD
 =======
 config = model_lib.ModelConfig.gemma4_26b_a4b()
 # config = model_lib.ModelConfig.gemma4_e4b()
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
-<<<<<<< HEAD
   config.flash_attention_block_size = 256
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
 from huggingface_hub import snapshot_download
-import os
-os.environ["HF_TOKEN"] = ""
 
 MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
 print("MODEL_PATH: ", MODEL_PATH)
@@ -436,6 +445,7 @@ gemma4_ref = params_lib.create_model_from_safe_tensors(
 # %%
 show_hbm_usage("after loading gemma4_ref")
 
+<<<<<<< HEAD
 =======
 if ENABLE_MIX_PRECISION:
   config.param_dtype = jnp.bfloat16
@@ -448,6 +458,8 @@ gemma4_ref = params_lib.create_model_from_safe_tensors(
 )
 
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 
 # %%
 def get_lora_model(base_model, model_mesh):
@@ -482,7 +494,6 @@ else:
 #       MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 #   )
   graph, state = nnx.split(gemma4_ref)
-<<<<<<< HEAD
   trainer_shardings = jax.tree_util.tree_map(
     lambda x: jax.sharding.NamedSharding(
         trainer_mesh,
@@ -491,9 +502,12 @@ else:
     nnx.get_partition_spec(state),
   )
   gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+<<<<<<< HEAD
 =======
   gemma4_actor = nnx.merge(graph, jax.tree.map(jnp.copy, state),)
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -553,11 +567,13 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-<<<<<<< HEAD
 print("# Rollout mesh: ", rollout_mesh)
+<<<<<<< HEAD
 =======
 print("Rollout mesh: ", rollout_mesh)
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
 print("Trainer mesh: ", trainer_mesh)
 # print("Reference mesh: ", reference_mesh)
 
@@ -577,14 +593,16 @@ vllm_rollout_dict = {
     "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
-<<<<<<< HEAD
     "rollout_vllm_enable_dp_attention": True,
     "rollout_vllm_async_scheduling": True,
     "rollout_vllm_init_with_random_weights": True,
+<<<<<<< HEAD
 =======
     "rollout_vllm_async_scheduling": True,
     "rollout_vllm_enable_dp_attention": True,
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -593,10 +611,12 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
-<<<<<<< HEAD
         "dtype": "bfloat16",
+<<<<<<< HEAD
 =======
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
     },
 }
 
@@ -612,11 +632,13 @@ else:
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
-<<<<<<< HEAD
         rl_cluster_lib.Role.REFERENCE: rollout_mesh,
+<<<<<<< HEAD
 =======
         rl_cluster_lib.Role.REFERENCE: trainer_mesh,
 >>>>>>> f9f4054a (snapshot)
+=======
+>>>>>>> 4c8d08ce (snaptshot)
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
