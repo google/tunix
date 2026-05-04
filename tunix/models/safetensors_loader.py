@@ -258,7 +258,7 @@ def load_and_create_model_orig(
           ) from e
 
       with concurrent.futures.ThreadPoolExecutor(
-          max_workers=os.cpu_count()
+          max_workers=4
       ) as executor:
         futures = [
             executor.submit(process_key, key, f, sf, file_loaded_tensors)
