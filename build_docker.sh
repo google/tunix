@@ -16,8 +16,29 @@ if [ ! -f "$DOCKERFILE" ]; then
     exit 1
 fi
 
-export LOCAL_IMAGE_NAME=tunix_base_image
-echo "Building base image: $LOCAL_IMAGE_NAME"
+LOCAL_IMAGE_NAME=tunix_base_image
+TAG=$(date +%Y%m%d_%H%M%S)
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --local_image_name=*)
+      LOCAL_IMAGE_NAME="${1#*=}"
+      shift
+      ;;
+    --tag=*)
+      TAG="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+
+echo "Building base image: $LOCAL_IMAGE_NAME:$TAG with engine: $ENGINE"
 
 echo "Using Dockerfile: $DOCKERFILE"
 
@@ -53,7 +74,7 @@ MSG
 
     $DOCKER_COMMAND build \
         --network=host \
-        -t ${LOCAL_IMAGE_NAME} \
+        -t "${LOCAL_IMAGE_NAME}:${TAG}" \
         -f ${DOCKERFILE} .
 }
 
@@ -63,5 +84,5 @@ echo ""
 echo "*************************
 "
 
-echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}.
-It now installs Tunix and the pinned vLLM and tpu-inference dependencies from requirements/requirements.txt. "
+echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}:${TAG}.
+It only has the dependencies installed. "

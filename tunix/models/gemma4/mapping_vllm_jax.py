@@ -123,7 +123,6 @@ TO_HF_MAPPINGS = {
         (None, None, 'model'),
     ),
     'layers.*.moe.linear': (
-    'layers.*.moe.linear': (
         'model.layers.*.experts.kernel_down_proj_EFD',
         ('model', None, None),
     ),
@@ -135,7 +134,7 @@ TO_HF_MAPPINGS = {
         'model.layers.*.post_feedforward_layernorm_2.weight',
         (None,),
     ),
-})
+}
 
 LORA_TO_HF_MAPPINGS: Dict[str, MappingEntry] = {}
 

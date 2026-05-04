@@ -10,6 +10,11 @@
 .idea
 .vscode
 .envrc
+tmpmkxo4xsc
+tmppcz0pudd
+wandb/
+workspace/
+huggingface/
 
 # virtualenv/venv directories
 /venv/

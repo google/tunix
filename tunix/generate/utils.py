@@ -29,6 +29,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
+from tunix.sft import utils as sft_utils
 
 
 def compute_attention_masks(
@@ -404,8 +405,8 @@ def build_flat_dict(
         mapped = True
         break
     # There are no mappings for rng related params.
-    if not mapped:
-      logging.warning('!!! No mapping for flat state: %s', path)
+    # if not mapped:
+    #   logging.warning('!!! No mapping for flat state: %s', path)
 
   # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():
@@ -760,9 +761,10 @@ def _sync_tied_lm_head_if_needed(
   embed_param = None
   lm_head_param = None
   for flat_key, tgt_param in tgt_flat_list:
-    if flat_key[-1:] == ('embedding',):
+    path = '.'.join(str(k) for k in flat_key)
+    if path.endswith(('embedding', 'embed_tokens.weight')):
       embed_param = tgt_param
-    elif flat_key[-1:] == ('lm_head',):
+    elif path.endswith(('lm_head', 'lm_head.weight')):
       lm_head_param = tgt_param
 
   if embed_param is None or lm_head_param is None:
@@ -820,6 +822,12 @@ def transfer_state_with_mappings(
         )
         for key, tgt_params in tgt_flat_list
     }
+  # sft_utils.show_hbm_usage('Before transfer_state_with_mappings')
+  # for key, tgt_param in tgt_flat_list:
+  #   if hasattr(tgt_param, 'value') and hasattr(tgt_param.value, 'delete'):
+  #     tgt_param.value.delete()
+  
+  # sft_utils.show_hbm_usage('After removing the old tgt_param values')
 
   for key, tgt_param in tgt_flat_list:
     if hasattr(tgt_param, 'value') and hasattr(tgt_param.value, 'delete'):
