@@ -94,8 +94,8 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=8)
-arg_parser.add_argument("--mini_batch_size", type=int, default=8)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -114,7 +114,7 @@ arg_parser.add_argument("--max_concurrency", type=int, default=64)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
-    "--loss_agg_mode", type=str, default="token-mean"
+    "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
 )
 arg_parser.add_argument(
     "--kl_loss_mode", type=str, default="low_var_kl"
@@ -135,7 +135,7 @@ TRAIN_WITH_LORA = False
 # ====== Sharding ======
 ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
 TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
-# REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -232,8 +232,7 @@ ROLLOUT_ENGINE = os.getenv(
 
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
-# reference_devices = math.prod(REFERENCE_MESH[0])
-reference_devices = 0
+reference_devices = math.prod(REFERENCE_MESH[0])
 
 if trainer_devices + rollout_devices + reference_devices > jax.device_count():
   raise ValueError(
@@ -252,15 +251,15 @@ rollout_mesh = jax.sharding.Mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
-# reference_device_list = jax._src.mesh_utils.create_device_mesh(
-#     REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
-# )
-# reference_mesh = jax.sharding.Mesh(
-#     reference_device_list,
-#     axis_names=REFERENCE_MESH[1],
-#     axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
-# )
-# print(f"{reference_device_list=} {reference_mesh.devices=}")
+reference_device_list = jax._src.mesh_utils.create_device_mesh(
+    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
+)
+reference_mesh = jax.sharding.Mesh(
+    reference_device_list,
+    axis_names=REFERENCE_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
+)
+print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
     TRAINER_MESH[0], jax.devices()[-trainer_devices:]
 )
@@ -395,7 +394,7 @@ from huggingface_hub import snapshot_download
 MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
 print("MODEL_PATH: ", MODEL_PATH)
 gemma4_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh
+    MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
 )
 
 # %%
@@ -431,18 +430,18 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-#   gemma4_actor = params_lib.create_model_from_safe_tensors(
-#       MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-#   )
-  graph, state = nnx.split(gemma4_ref)
-  trainer_shardings = jax.tree_util.tree_map(
-    lambda x: jax.sharding.NamedSharding(
-        trainer_mesh,
-        x,
-    ),
-    nnx.get_partition_spec(state),
+  gemma4_actor = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
-  gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+#   graph, state = nnx.split(gemma4_ref)
+#   trainer_shardings = jax.tree_util.tree_map(
+#     lambda x: jax.sharding.NamedSharding(
+#         trainer_mesh,
+#         x,
+#     ),
+#     nnx.get_partition_spec(state),
+#   )
+#   gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -473,23 +472,9 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
 )
 
 # %%
-# # Logs
-# if NOTEBOOK_ENV == "g3":
-#   %load_ext GOOGLE_INTERNAL_PACKAGE_PATH.learning.brain.tensorboard.notebook.extension
-# else:
-#   %load_ext tensorboard
-# %tensorboard --logdir /tmp/content/tmp/tensorboard/grpo --port=0
-
-# %%
 # Optimizer, learning rate scheduler, gradient clipping
 optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
+    learning_rate=LEARNING_RATE,
     b1=B1,
     b2=B2,
     weight_decay=WEIGHT_DECAY,
@@ -504,7 +489,7 @@ if MAX_GRAD_NORM is not None:
 # Training config
 print("# Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
-# print("Reference mesh: ", reference_mesh)
+print("Reference mesh: ", reference_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -549,7 +534,7 @@ else:
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: rollout_mesh,
+        rl_cluster_lib.Role.REFERENCE: reference_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
