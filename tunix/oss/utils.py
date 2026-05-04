@@ -39,13 +39,36 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
     raise ValueError(f'Invalid GCS path: {file_dir}')
 
   _, prefix = file_dir[5:].split('/', 1)
+  
+  import tempfile  # pylint: disable=g-import-not-at-top
+  import shutil
+  import subprocess
+
+  if target_dir is None:
+    target_dir = tempfile.gettempdir()
+  local_dir = os.path.join(target_dir, prefix)
+
+  # Try gcloud storage first (fastest)
+  if shutil.which('gcloud'):
+    try:
+      logging.info(f'Using gcloud storage to download {file_dir}...')
+      subprocess.run(['gcloud', 'storage', 'cp', '-r', file_dir, local_dir], check=True)
+      return local_dir
+    except subprocess.CalledProcessError as e:
+      logging.warning(f'gcloud storage failed: {e}, falling back...')
+
+  # Try gsutil next
+  if shutil.which('gsutil'):
+    try:
+      logging.info(f'Using gsutil to download {file_dir}...')
+      subprocess.run(['gsutil', '-m', 'cp', '-r', file_dir, local_dir], check=True)
+      return local_dir
+    except subprocess.CalledProcessError as e:
+      logging.warning(f'gsutil failed: {e}, falling back...')
+
+  # Fallback to fsspec
   try:
-    import tempfile  # pylint: disable=g-import-not-at-top
-
-    if target_dir is None:
-      target_dir = tempfile.gettempdir()
-    local_dir = os.path.join(target_dir, prefix)
-
+    logging.info(f'Using fsspec to download {file_dir}...')
     fsspec_fs = fsspec.filesystem('gs')
     fsspec_fs.get(file_dir, local_dir, recursive=True)
 
