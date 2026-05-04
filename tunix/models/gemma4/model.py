@@ -1137,7 +1137,6 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         param_dtype=config.param_dtype,
     )
 
-  @nnx.jit
   def __call__(
       self,
       tokens,
