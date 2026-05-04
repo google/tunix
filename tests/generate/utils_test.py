@@ -41,14 +41,45 @@ class MockState:
   def from_flat_path(self, flat_path):
     new_params = {}
     for keys, param in flat_path:
-      new_params[".".join(keys)] = param.value
+      new_params[".".join(keys)] = param if hasattr(param, "value") else MockParam(param)
     return MockState(new_params)
 
 
+from jax.tree_util import register_pytree_node_class
+
+@register_pytree_node_class
 class MockParam:
 
   def __init__(self, value):
     self.value = value
+
+  @property
+  def shape(self):
+    return self.value.shape
+
+  @property
+  def dtype(self):
+    return self.value.dtype
+
+  @property
+  def ndim(self):
+    return self.value.ndim
+
+  def __getitem__(self, item):
+    return self.value[item]
+
+  def __array__(self, dtype=None):
+    return np.asarray(self.value, dtype=dtype)
+
+  def __jax_array__(self):
+    return self.value
+
+  def tree_flatten(self):
+    return (self.value,), None
+
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    return cls(children[0])
 
 
 class Logprob:
