@@ -100,8 +100,8 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=16)
-arg_parser.add_argument("--mini_batch_size", type=int, default=16)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -139,9 +139,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 4), ("fsdp", "tp")]
-REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 4), ("fsdp", "tp")]
+REFERENCE_MESH = [(4, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -158,7 +158,7 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = 512
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
