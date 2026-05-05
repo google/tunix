@@ -53,6 +53,7 @@ python3 -m tunix.cli.grpo_main \
   batch_size=$batch_size \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
+  train_fraction=$train_fraction \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
