@@ -97,7 +97,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
       ])
   )
   def test_load_and_create_model(
-      self, path_type='abs', mode='optimized'
+      self, path_type='abs', mode='auto'
   ):
     try:
       st_dir_abs = self.create_tempdir().full_path
