@@ -110,6 +110,7 @@ class SequenceRewardManager(AbstractRewardManager):
   ) -> Dict[str, Any]:
     """Computes the rewards for completions using the provided reward function, and return the sequence-level rewards information for advantage computationand logging."""
     return self._compute_rewards(prompts, completions, **kwargs)
+
   def _compute_rewards(
       self,
       prompts: List[str],
@@ -248,32 +249,23 @@ class AgenticSequenceRewardManager(SequenceRewardManager):  # pytype: disable=ba
       completions: List[str],
       **kwargs,
   ) -> Dict[str, Any]:
-    trajectory_rewards = kwargs.pop("trajectory_rewards", None)
 
-    rewards = None
     log_metrics = {}
+
+    # Extract trajectory rewards from kwargs and log them. Even trajectory rewards will be all zero if not provided.
+    trajectory_rewards = kwargs.pop("trajectory_rewards")
+    trajectory_rewards_array = np.asarray(trajectory_rewards)
+    # Log trajectory rewards separately
+    log_metrics.update(
+        _calculate_scalar_reward_log_metrics(
+            trajectory_rewards_array, prefix="trajectory_rewards", axis=0
+        )
+    )
+    final_rewards = trajectory_rewards_array
 
     if self.reward_fns:
       rewards_info = self._compute_rewards(prompts, completions, **kwargs)
-      rewards = rewards_info["rewards"]
+      final_rewards += rewards_info["rewards"]
       log_metrics.update(rewards_info["log_metrics"])
 
-    if trajectory_rewards is not None:
-      trajectory_rewards_array = np.asarray(trajectory_rewards)
-      if rewards is None:
-        rewards = trajectory_rewards_array
-      else:
-        rewards += trajectory_rewards_array
-
-      # Log trajectory rewards separately
-      log_metrics.update(
-          _calculate_scalar_reward_log_metrics(trajectory_rewards_array, axis=0)
-      )
-
-    if rewards is None:
-      raise ValueError(
-          "No reward functions provided and no trajectory rewards found in"
-          " kwargs."
-      )
-
-    return {"rewards": rewards, "log_metrics": log_metrics}
+    return {"rewards": final_rewards, "log_metrics": log_metrics}
