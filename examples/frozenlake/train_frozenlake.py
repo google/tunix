@@ -94,8 +94,8 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=64)
-arg_parser.add_argument("--mini_batch_size", type=int, default=64)
+arg_parser.add_argument("--batch_size", type=int, default=16)
+arg_parser.add_argument("--mini_batch_size", type=int, default=16)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -134,7 +134,11 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+<<<<<<< HEAD
 TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+=======
+TRAINER_MESH = [(4, 4), ("fsdp", "tp")]
+>>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -157,6 +161,14 @@ VLLM_MAX_NUM_SEQS = 16
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 VLLM_MAX_BATCHED_TOKENS = 16 * 1024
+<<<<<<< HEAD
+=======
+VLLM_MAX_NUM_SEQS = 64
+
+# Max number of tokens to be processed in parallel by vllm.
+# Divide by 8 for on policy, 1 step off divide by 4
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
+>>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -300,9 +312,14 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
+<<<<<<< HEAD
 # MODEL_VERSION = "google/gemma-4-31B-it"
 MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
+=======
+# MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+MODEL_VERSION = "google/gemma-4-31B-it"
+>>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 # MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
 # MODEL_VERSION = "google/gemma-4-E4B-it"
 # MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
@@ -382,7 +399,11 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
+<<<<<<< HEAD
 config = model_lib.ModelConfig.gemma4_26b_a4b()
+=======
+config = model_lib.ModelConfig.gemma4_31b()
+>>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -402,6 +423,7 @@ gemma4_ref = params_lib.create_model_from_safe_tensors(
 # %%
 show_hbm_usage("after loading gemma4_ref")
 
+<<<<<<< HEAD
 if ENABLE_MIX_PRECISION:
   config.param_dtype = jnp.bfloat16
 
@@ -412,6 +434,8 @@ gemma4_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 
+=======
+>>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 
 # %%
 def get_lora_model(base_model, model_mesh):
@@ -522,6 +546,11 @@ vllm_rollout_dict = {
     "rollout_vllm_enable_dp_attention": True,
     "rollout_vllm_async_scheduling": True,
     "rollout_vllm_init_with_random_weights": True,
+<<<<<<< HEAD
+=======
+    "rollout_vllm_async_scheduling": True,
+    "rollout_vllm_enable_dp_attention": True,
+>>>>>>> 4ec30393 (31B running on 64 and 128 cores)
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -545,7 +574,11 @@ else:
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
+<<<<<<< HEAD
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
+=======
+        rl_cluster_lib.Role.TRAINER: trainer_mesh,
+>>>>>>> 4ec30393 (31B running on 64 and 128 cores)
         rl_cluster_lib.Role.REFERENCE: reference_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
