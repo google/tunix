@@ -68,6 +68,9 @@ test = [
   "gcsfs",
   "chex",
 ]
+cli = [
+  "tensorflow",
+]
 
 [project.urls]
 Source = "https://github.com/google/tunix"

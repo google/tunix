@@ -23,6 +23,12 @@ on:
       HF_TOKEN:
         required: true
         description: 'HuggingFace token for model downloads'
+      KAGGLE_USERNAME:
+        required: true
+        description: 'Kaggle username for model downloads'
+      KAGGLE_KEY:
+        required: true
+        description: 'Kaggle API key for model downloads'
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
@@ -61,7 +67,7 @@ jobs:
 
     - name: Install tunix dependencies
       run: |
-        pip install -e .[prod,test]
+        pip install -e .[prod,test,cli]
 
         # override vLLM and tpu-inference
         export VLLM_TARGET_DEVICE=tpu
@@ -154,6 +160,8 @@ jobs:
     - name: Run SFT shell scripts
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
         SCRIPT_DIR="./examples/sft/mtnt"
         MAX_STEPS=5
@@ -187,6 +195,8 @@ jobs:
     - name: Run RL shell scripts
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
         SCRIPT_DIR="./examples/rl/grpo/gsm8k"
         EXCLUDE_DIR="verl_compatible"
