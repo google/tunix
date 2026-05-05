@@ -25,24 +25,6 @@ Sharding = Tuple[str | None, ...]
 MappingEntry = Tuple[str, Sharding]
 
 
-class WildcardDict(dict):
-  """Custom dictionary that supports wildcard/regex key matching."""
-
-  def __contains__(self, key: Any) -> bool:
-    for k in self.keys():
-      pattern = '^' + re.escape(k).replace('\\*', '.*') + '$'
-      if re.match(pattern, key):
-        return True
-    return False
-
-  def __getitem__(self, key: Any) -> Any:
-    for k, v in self.items():
-      pattern = '^' + re.escape(k).replace('\\*', '.*') + '$'
-      if re.match(pattern, key):
-        return v
-    raise KeyError(key)
-
-
 TO_HF_MAPPINGS = {
     'embedder.input_embedding': ('model.embed_tokens.weight', ('model', None)),
     'layers.*.pre_attention_norm.scale': (
@@ -138,12 +120,11 @@ TO_HF_MAPPINGS = {
 
 LORA_TO_HF_MAPPINGS: Dict[str, MappingEntry] = {}
 
-TO_HF_TRANSPOSE_KEYS = WildcardDict({
+TO_HF_TRANSPOSE_KEYS = {
     'layers.*.attn.q_einsum.w': (1, 0, 2),
     'layers.*.attn.k_einsum.w': (1, 0, 2),
     'layers.*.attn.v_einsum.w': (1, 0, 2),
-    'layers.*.moe.linear': (0, 2, 1),
-})
+}
 
 def preprocess_src_state(src_state: Any) -> Any:
   if hasattr(src_state, 'flat_state'):

@@ -429,6 +429,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             eos_id=eos_value,
             micro_batch_size=None,
         )
+        
+        if ref_per_token_logps is not None:
+          ref_np = np.array(ref_per_token_logps)
+          chunk_size = 500
+          for i in range(ref_np.shape[0]):
+            seq = ref_np[i]
+            logging.info(
+                "Generation %d ref_per_token_logps total len: %d", i, len(seq)
+            )
+            for j in range(0, len(seq), chunk_size):
+              logging.info(
+                  "  [%d:%d]: %s",
+                  j,
+                  min(j + chunk_size, len(seq)),
+                  seq[j : j + chunk_size].tolist(),
+              )
         interval_v2.async_end([ref_per_token_logps])
     else:
       ref_per_token_logps = None

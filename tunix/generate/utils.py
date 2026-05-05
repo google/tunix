@@ -507,6 +507,13 @@ def _apply_transpose(
     target_key = last_key
   elif all_key in transpose_keys and 'lora' not in all_key:
     target_key = all_key
+  else:
+    for k, v in transpose_keys.items():
+      if '*' in k:
+        pattern = '^' + re.escape(k).replace('\\*', '.*') + '$'
+        if re.match(pattern, all_key):
+          target_key = k
+          break
   if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
     return jnp.transpose(val, transpose_keys[target_key])
@@ -519,7 +526,6 @@ def _apply_transpose(
       if re.compile(rf'{r_key}').match(all_key):
         logging.debug('Applying LoRA transpose on %s', src_key)
         return jnp.transpose(val[None, :, :], transpose_keys[r_key])
-
   return val
 
 
