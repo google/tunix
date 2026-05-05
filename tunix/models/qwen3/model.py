@@ -276,6 +276,23 @@ class ModelConfig:
     )
 
   @classmethod
+  def qwen3_30b_a3b_mock(cls):
+    """Tiny MoE config shaped like qwen3_30b_a3b for fast local tests."""
+    return cls(
+        num_layers=4,
+        vocab_size=128,
+        embed_dim=64,
+        hidden_dim=128,
+        num_heads=4,
+        head_dim=16,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=1_000_000,
+        num_experts=8,
+        num_experts_per_tok=2,
+    )
+
+  @classmethod
   def qwen3_32b(cls):  # qwen3-32B
     return cls(
         num_layers=64,

@@ -902,6 +902,289 @@ class UtilsTest(parameterized.TestCase):
         dst_state['untouched_variable'][...], jnp.array(-1)
     )
 
+  def test_transfer_planning_helpers_preserve_match_rule_order(self):
+    rules = utils._default_structural_match_rules()
+
+    self.assertEqual(
+        [rule.name for rule in rules],
+        ['direct_match', 'scanned_layers', 'scanned_fused_moe'],
+    )
+    self.assertTrue(
+        utils._match_rule_applies(
+            rules[1], ('decoder', 'layers_7', 'mlp', 'weight')
+        )
+    )
+    self.assertFalse(
+        utils._match_rule_applies(rules[2], ('decoder', 'layers_7', 'mlp'))
+    )
+
+  def test_transfer_planning_helpers_extract_and_rewrite_layer_keys(self):
+    target_key = ('decoder', 'layers_7', 'mlp', 'weight')
+
+    self.assertEqual(utils._extract_layer_index(target_key), 7)
+    self.assertEqual(
+        utils._replace_layers_n_with_layers(target_key),
+        ('decoder', 'layers', 'mlp', 'weight'),
+    )
+    self.assertEqual(
+        utils._remove_layers_n_component(target_key),
+        ('decoder', 'mlp', 'weight'),
+    )
+
+  def test_transfer_planning_helpers_derive_fused_moe_source_keys(self):
+    target_key = ('decoder', 'layers_3', 'mlp', 'wi')
+
+    wi_0_key, wi_1_key = utils._derive_moe_source_keys(target_key)
+
+    self.assertEqual(wi_0_key, ('decoder', 'layers_3', 'mlp', 'wi_0'))
+    self.assertEqual(wi_1_key, ('decoder', 'layers_3', 'mlp', 'wi_1'))
+
+  def test_transfer_planning_helpers_reject_non_wi_moe_derivation(self):
+    with self.assertRaises(utils.MappingError):
+      utils._derive_moe_source_keys(('decoder', 'layers_3', 'mlp', 'wo'))
+
+  def test_build_transfer_plan_direct_match(self):
+    src_flat = {('decoder', 'layer0', 'weight'): jnp.array([1.0, 2.0])}
+    tgt_flat = {
+        ('decoder', 'layer0', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+
+    self.assertLen(plan, 1)
+    self.assertEqual(plan[0].rule_name, 'direct_match')
+    self.assertEqual(plan[0].source_keys, (('decoder', 'layer0', 'weight'),))
+    self.assertEqual(plan[0].target_key, ('decoder', 'layer0', 'weight'))
+
+  def test_build_transfer_plan_scanned_layer_match(self):
+    src_flat = {
+        ('decoder', 'layers', 'mlp', 'weight'): jnp.array([[1.0], [2.0]])
+    }
+    tgt_flat = {
+        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((1,), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+
+    self.assertLen(plan, 1)
+    self.assertEqual(plan[0].rule_name, 'scanned_layers')
+    self.assertEqual(
+        plan[0].source_keys,
+        (('decoder', 'layers', 'mlp', 'weight'),),
+    )
+    self.assertEqual(plan[0].target_key, ('decoder', 'layers_1', 'mlp', 'weight'))
+
+  def test_build_transfer_plan_implicit_layers_match(self):
+    src_flat = {('layers', 'mlp', 'weight'): jnp.array([1.0, 2.0])}
+    tgt_flat = {
+        ('layers', 'layers_1', 'mlp', 'weight'): jnp.zeros((), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+
+    self.assertLen(plan, 1)
+    self.assertEqual(plan[0].rule_name, 'scanned_layers')
+    self.assertEqual(plan[0].source_keys, (('layers', 'mlp', 'weight'),))
+
+  def test_build_transfer_plan_scanned_fused_moe_match(self):
+    src_flat = {
+        ('decoder', 'layers', 'mlp', 'wi_0'): jnp.ones((2, 3, 2), dtype=jnp.float32),
+        ('decoder', 'layers', 'mlp', 'wi_1'): jnp.ones((2, 3, 2), dtype=jnp.float32),
+    }
+    tgt_flat = {
+        ('decoder', 'layers_2', 'mlp', 'wi'): jnp.zeros((2, 4), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+
+    self.assertLen(plan, 1)
+    self.assertEqual(plan[0].rule_name, 'scanned_fused_moe')
+    self.assertEqual(
+        plan[0].source_keys,
+        (
+            ('decoder', 'layers', 'mlp', 'wi_0'),
+            ('decoder', 'layers', 'mlp', 'wi_1'),
+        ),
+    )
+
+  def test_build_transfer_plan_explicit_rule_wins_first(self):
+    src_flat = {
+        ('decoder', 'layers', 'mlp', 'weight'): jnp.array([[1.0], [2.0]]),
+        ('decoder', 'custom_layer', 'weight'): jnp.array([9.0], dtype=jnp.float32),
+    }
+    tgt_flat = {
+        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((1,), dtype=jnp.float32)
+    }
+    weight_rules = (
+        utils.WeightRule(
+            name='explicit_override',
+            source=('decoder', 'custom_layer', 'weight'),
+            target=('decoder', 'layers_1', 'mlp', 'weight'),
+            transforms=(
+                utils.Transform('align_shape'),
+                utils.Transform('cast_to_target'),
+            ),
+        ),
+    )
+
+    plan = utils.build_transfer_plan(
+        src_flat,
+        tgt_flat,
+        weight_rules=weight_rules,
+        match_rules=utils._default_structural_match_rules(),
+    )
+
+    self.assertLen(plan, 1)
+    self.assertEqual(plan[0].rule_name, 'explicit_override')
+    self.assertEqual(
+        plan[0].source_keys,
+        (('decoder', 'custom_layer', 'weight'),),
+    )
+
+  def test_materialize_structural_plan_direct_match(self):
+    src_flat = {('decoder', 'layer0', 'weight'): jnp.array([1.0, 2.0])}
+    tgt_flat = {
+        ('decoder', 'layer0', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+    filtered_src_flat, filtered_tgt_flat = utils._materialize_structural_plan(
+        plan, src_flat, tgt_flat, scan_axis=0
+    )
+
+    np.testing.assert_array_equal(
+        filtered_src_flat[('decoder', 'layer0', 'weight')],
+        jnp.array([1.0, 2.0]),
+    )
+    self.assertEqual(filtered_tgt_flat, tgt_flat)
+
+  def test_execute_transfer_plan_direct_match(self):
+    src_flat = {('decoder', 'layer0', 'weight'): jnp.array([1.0, 2.0])}
+    tgt_flat = {
+        ('decoder', 'layer0', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+    filtered_src_flat, filtered_tgt_flat = utils.execute_transfer_plan(
+        plan, src_flat, tgt_flat, scan_axis=0
+    )
+
+    np.testing.assert_array_equal(
+        filtered_src_flat[('decoder', 'layer0', 'weight')],
+        jnp.array([1.0, 2.0]),
+    )
+    self.assertEqual(filtered_tgt_flat, tgt_flat)
+
+  def test_materialize_structural_plan_scanned_layer_match(self):
+    src_flat = {
+        ('decoder', 'layers', 'mlp', 'weight'): jnp.array(
+            [[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32
+        )
+    }
+    tgt_flat = {
+        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+    filtered_src_flat, filtered_tgt_flat = utils._materialize_structural_plan(
+        plan, src_flat, tgt_flat, scan_axis=0
+    )
+
+    np.testing.assert_array_equal(
+        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'weight')],
+        jnp.array([20.0, 21.0], dtype=jnp.float32),
+    )
+    self.assertEqual(
+        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'weight')].shape,
+        (2,),
+    )
+
+  def test_execute_transfer_plan_scanned_layer_match(self):
+    src_flat = {
+        ('decoder', 'layers', 'mlp', 'weight'): jnp.array(
+            [[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32
+        )
+    }
+    tgt_flat = {
+        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+    filtered_src_flat, filtered_tgt_flat = utils.execute_transfer_plan(
+        plan, src_flat, tgt_flat, scan_axis=0
+    )
+
+    np.testing.assert_array_equal(
+        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'weight')],
+        jnp.array([20.0, 21.0], dtype=jnp.float32),
+    )
+    self.assertEqual(
+        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'weight')].shape,
+        (2,),
+    )
+
+  def test_materialize_structural_plan_scanned_fused_moe_match(self):
+    wi_0 = jnp.array(
+        [[[1.0, 2.0], [10.0, 20.0]], [[3.0, 4.0], [30.0, 40.0]]],
+        dtype=jnp.float32,
+    )
+    wi_1 = jnp.array(
+        [[[100.0, 200.0], [1000.0, 2000.0]], [[300.0, 400.0], [3000.0, 4000.0]]],
+        dtype=jnp.float32,
+    )
+    src_flat = {
+        ('decoder', 'layers', 'mlp', 'wi_0'): wi_0,
+        ('decoder', 'layers', 'mlp', 'wi_1'): wi_1,
+    }
+    tgt_flat = {
+        ('decoder', 'layers_1', 'mlp', 'wi'): jnp.zeros((2, 4), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+    filtered_src_flat, filtered_tgt_flat = utils._materialize_structural_plan(
+        plan, src_flat, tgt_flat, scan_axis=1
+    )
+
+    np.testing.assert_array_equal(
+        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'wi')],
+        jnp.concatenate([wi_0[:, 1, :], wi_1[:, 1, :]], axis=-1),
+    )
+    self.assertEqual(
+        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'wi')].shape,
+        (2, 4),
+    )
+
+  def test_execute_transfer_plan_scanned_fused_moe_match(self):
+    wi_0 = jnp.array(
+        [[[1.0, 2.0], [10.0, 20.0]], [[3.0, 4.0], [30.0, 40.0]]],
+        dtype=jnp.float32,
+    )
+    wi_1 = jnp.array(
+        [[[100.0, 200.0], [1000.0, 2000.0]], [[300.0, 400.0], [3000.0, 4000.0]]],
+        dtype=jnp.float32,
+    )
+    src_flat = {
+        ('decoder', 'layers', 'mlp', 'wi_0'): wi_0,
+        ('decoder', 'layers', 'mlp', 'wi_1'): wi_1,
+    }
+    tgt_flat = {
+        ('decoder', 'layers_1', 'mlp', 'wi'): jnp.zeros((2, 4), dtype=jnp.float32)
+    }
+
+    plan = utils.build_transfer_plan(src_flat, tgt_flat)
+    filtered_src_flat, filtered_tgt_flat = utils.execute_transfer_plan(
+        plan, src_flat, tgt_flat, scan_axis=1
+    )
+
+    np.testing.assert_array_equal(
+        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'wi')],
+        jnp.concatenate([wi_0[:, 1, :], wi_1[:, 1, :]], axis=-1),
+    )
+    self.assertEqual(
+        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'wi')].shape,
+        (2, 4),
+    )
+
   def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
     """Test repeating num_heads dimension (non-last axis) for attention weights."""
     # Source k_proj: (model_dim=16, num_heads=2, head_dim=128)

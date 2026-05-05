@@ -278,6 +278,22 @@ class Qwen3ModelConfigTest(absltest.TestCase):
         "Model must have a separate lm_head when use_tied_embedding is False"
     )
 
+  def test_qwen3_30b_a3b_mock_config_is_small_and_instantiable(self):
+    config = qwen3_model.ModelConfig.qwen3_30b_a3b_mock()
+
+    self.assertEqual(config.num_layers, 4)
+    self.assertEqual(config.embed_dim, 64)
+    self.assertEqual(config.hidden_dim, 128)
+    self.assertEqual(config.num_heads, 4)
+    self.assertEqual(config.head_dim, 16)
+    self.assertEqual(config.num_kv_heads, 2)
+    self.assertEqual(config.num_experts, 8)
+    self.assertEqual(config.num_experts_per_tok, 2)
+
+    model = qwen3_model.Qwen3(config, rngs=nnx.Rngs(params=0))
+
+    self.assertLen(model.layers, 4)
+
 
 if __name__ == "__main__":
   # Check if running in Jupyter/IPython environment

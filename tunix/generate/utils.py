@@ -16,6 +16,7 @@
 """Utility functions for sampler."""
 
 from collections import abc
+from dataclasses import dataclass, field
 import functools
 import gc
 from absl import logging
@@ -430,6 +431,182 @@ class MappingError(ValueError):
   pass
 
 
+@dataclass(frozen=True)
+class Transform:
+  """Declarative description of a tensor transform in the transfer plan."""
+
+  kind: str
+  args: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExecPolicy:
+  """Execution-time controls shared by all planned transfer steps."""
+
+  reshard: bool = True
+  reshard_chunk_size: Optional[int] = None
+  delete_dst_buffers: bool = False
+  run_gc_between_chunks: bool = True
+  sync_tied_lm_head: bool = True
+
+
+@dataclass(frozen=True)
+class WeightRule:
+  """Explicit source-to-target mapping knowledge for the planner."""
+
+  name: str
+  source: str | Tuple[str, ...]
+  target: str | Tuple[str, ...]
+  transforms: Tuple[Transform, ...] = ()
+  optional: bool = False
+
+
+@dataclass(frozen=True)
+class MatchRule:
+  """Structural fallback rule used when explicit mappings are absent."""
+
+  name: str
+  target_pattern: str
+  strategies: Tuple[str, ...]
+  transforms: Tuple[Transform, ...] = ()
+  optional: bool = False
+
+
+@dataclass(frozen=True)
+class MappingSpec:
+  """Complete declarative input to the shared transfer planner."""
+
+  model_type: str
+  exec_policy: ExecPolicy = field(default_factory=ExecPolicy)
+  weight_rules: Tuple[WeightRule, ...] = ()
+  match_rules: Tuple[MatchRule, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlannedTransfer:
+  """Planner output for one target leaf transfer."""
+
+  rule_name: str
+  source_keys: Tuple[Tuple[str, ...], ...]
+  target_key: Tuple[str, ...]
+  transforms: Tuple[Transform, ...]
+
+
+_LAYER_COMPONENT_RE = re.compile(r'^layers_(\d+)$')
+
+
+def _flat_key_to_path(flat_key: Tuple[str, ...]) -> str:
+  """Converts a flat key tuple into a deterministic dot path."""
+  return '.'.join(str(part) for part in flat_key)
+
+
+def _match_rule_applies(rule: MatchRule, target_key: Tuple[str, ...]) -> bool:
+  """Returns whether a structural rule applies to a target key."""
+  return re.match(rule.target_pattern, _flat_key_to_path(target_key)) is not None
+
+
+def _extract_layer_index(target_key: Tuple[str, ...]) -> Optional[int]:
+  """Extracts the numeric suffix from a `layers_N` path component."""
+  for part in target_key:
+    matched = _LAYER_COMPONENT_RE.match(str(part))
+    if matched:
+      return int(matched.group(1))
+  return None
+
+
+def _replace_layers_n_with_layers(
+    target_key: Tuple[str, ...],
+) -> Tuple[str, ...]:
+  """Rewrites any `layers_N` path component to `layers`."""
+  return tuple(
+      'layers' if _LAYER_COMPONENT_RE.match(str(part)) else str(part)
+      for part in target_key
+  )
+
+
+def _remove_layers_n_component(
+    target_key: Tuple[str, ...],
+) -> Tuple[str, ...]:
+  """Removes the first `layers_N` component for implicit-layer matching."""
+  removed = False
+  rewritten = []
+  for part in target_key:
+    if not removed and _LAYER_COMPONENT_RE.match(str(part)):
+      removed = True
+      continue
+    rewritten.append(str(part))
+  return tuple(rewritten)
+
+
+def _derive_moe_source_keys(
+    target_key: Tuple[str, ...],
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+  """Derives the `wi_0` and `wi_1` source keys for a fused `wi` target."""
+  if not target_key or target_key[-1] != 'wi':
+    raise MappingError(
+        f'Cannot derive MoE source keys for non-wi target: {target_key}'
+    )
+  prefix = target_key[:-1]
+  return prefix + ('wi_0',), prefix + ('wi_1',)
+
+
+def _normalize_rule_key(
+    rule_key: str | Tuple[str, ...],
+) -> Tuple[str, ...]:
+  """Normalizes rule keys to flat tuple form for planner matching."""
+  def _normalize_part(part: Any) -> Any:
+    if isinstance(part, str) and part.isdigit():
+      return int(part)
+    return str(part) if not isinstance(part, int) else part
+
+  if isinstance(rule_key, tuple):
+    return tuple(_normalize_part(part) for part in rule_key)
+  return tuple(_normalize_part(part) for part in rule_key.split('.'))
+
+
+def _default_structural_match_rules() -> Tuple[MatchRule, ...]:
+  """Returns the phase-one structural rule set mirroring current semantics."""
+  return (
+      MatchRule(
+          name='direct_match',
+          target_pattern=r'.*',
+          strategies=('direct',),
+          transforms=(
+              Transform('cast_to_target'),
+              Transform('repeat_to_target'),
+          ),
+      ),
+      MatchRule(
+          name='scanned_layers',
+          target_pattern=r'.*layers_\d+.*',
+          strategies=('scanned_layer', 'implicit_layers'),
+          transforms=(
+              Transform('cast_to_target'),
+              Transform('unstack_scanned'),
+              Transform('repeat_to_target'),
+          ),
+      ),
+      MatchRule(
+          name='scanned_fused_moe',
+          target_pattern=r'.*layers_\d+.*\.wi$',
+          strategies=('fused_moe',),
+          transforms=(
+              Transform('cast_to_target'),
+              Transform('fuse_moe', {'axis': -1}),
+              Transform('unstack_scanned'),
+          ),
+      ),
+  )
+
+
+def make_structural_mapping_spec() -> MappingSpec:
+  """Builds the default structural mapping spec for direct transfer."""
+  return MappingSpec(
+      model_type='structural',
+      match_rules=_default_structural_match_rules(),
+  )
+
+
 def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
   """Returns index of the 'layer' axis in sharding_spec, or None if not found."""
   if isinstance(sharding_spec, (list, tuple)):
@@ -521,6 +698,30 @@ def _apply_transpose(
         return jnp.transpose(val[None, :, :], transpose_keys[r_key])
 
   return val
+
+
+def _resolve_transpose_axes(
+    src_key: str,
+    transpose_keys: Optional[Dict[str, Tuple[int, ...]]],
+    rollout_engine: Optional[str],
+) -> Optional[Tuple[int, ...]]:
+  """Returns the transpose axes configured for a source key, if any."""
+  if not transpose_keys:
+    return None
+
+  last_key = src_key.split('.')[-1]
+  all_key = src_key
+  if last_key in transpose_keys and 'lora' not in last_key:
+    return transpose_keys[last_key]
+  if all_key in transpose_keys and 'lora' not in all_key:
+    return transpose_keys[all_key]
+
+  if rollout_engine == 'sglang_jax' and 'lora' in all_key:
+    for r_key in transpose_keys:
+      if re.compile(rf'{r_key}').match(all_key):
+        return transpose_keys[r_key]
+
+  return None
 
 
 def _align_shape(
@@ -807,37 +1008,43 @@ def transfer_state_with_mappings(
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  mapping_spec, resolved_src_flat, resolved_tgt_flat = _build_explicit_mapping_spec(
+      unscanned_src_to_tgt_flat,
+      key_mapping_hook_fns=key_mapping_hook_fns,
+      transpose_keys=transpose_keys,
+      rollout_engine=rollout_engine,
+  )
+  transfer_plan = build_transfer_plan(
+      resolved_src_flat,
+      resolved_tgt_flat,
+      weight_rules=mapping_spec.weight_rules,
+      match_rules=mapping_spec.match_rules,
+  )
+  filtered_src_flat, _ = execute_transfer_plan(
+      transfer_plan,
+      resolved_src_flat,
+      resolved_tgt_flat,
+      scan_axis=0,
+      transform_context={
+          'rollout_engine': rollout_engine,
+          **kwargs,
+      },
+  )
+  tgt_param_by_path = {
+      _flat_key_to_path(key): (key, tgt_param) for key, tgt_param in tgt_flat_list
+  }
   transferred_target_keys = set()
 
-  # Transfer values with transformations
-  for (flat_src_key, flat_tgt_key), (
-      val,
-      tgt_param,
-  ) in unscanned_src_to_tgt_flat.items():
-    # Apply transpose if configured
-    val = _apply_transpose(val, flat_src_key, transpose_keys, rollout_engine)
-
-    # Apply optional hook function
-    if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
-      val = key_mapping_hook_fns[flat_src_key](val)
-
-    # Align shapes (padding/repeating as needed)
-    val = _align_shape(
-        val, tgt_param.value.shape, flat_src_key, rollout_engine, **kwargs
-    )
-
-    # Cast to target dtype
-    val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
-
-    # Assign transformed value
+  for target_key, val in filtered_src_flat.items():
+    actual_target_key, tgt_param = tgt_param_by_path[_flat_key_to_path(target_key)]
     tgt_param.value = val
-    transferred_target_keys.add(flat_tgt_key)
+    transferred_target_keys.add(_flat_key_to_path(actual_target_key))
 
   # Target rollout engine might have different implementation and have materialized lm_head
   _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
 
   # Clean up memory
-  del unscanned_src_to_tgt_flat
+  del unscanned_src_to_tgt_flat, resolved_src_flat, resolved_tgt_flat, filtered_src_flat
   gc.collect()
 
   # Batch reshard and assign if resharding is configured
@@ -1458,6 +1665,336 @@ def _reshard_in_chunks(
   return resharded
 
 
+def _find_layer_component_index(target_key: Tuple[str, ...]) -> Optional[int]:
+  """Returns the index of the first `layers_N` path component."""
+  for i, part in enumerate(target_key):
+    if _LAYER_COMPONENT_RE.match(str(part)):
+      return i
+  return None
+
+
+def _resolve_structural_target_key(
+    target_key: Tuple[str, ...],
+    src_flat: Mapping[Tuple[str, ...], Any],
+    match_rules: Tuple[MatchRule, ...],
+) -> Optional[PlannedTransfer]:
+  """Resolves one target leaf to a structural transfer step."""
+  layer_component_index = _find_layer_component_index(target_key)
+
+  for rule in match_rules:
+    if not _match_rule_applies(rule, target_key):
+      continue
+
+    for strategy in rule.strategies:
+      if strategy == 'direct' and target_key in src_flat:
+        return PlannedTransfer(
+            rule_name=rule.name,
+            source_keys=(target_key,),
+            target_key=target_key,
+            transforms=rule.transforms,
+        )
+
+      if strategy == 'scanned_layer' and layer_component_index is not None:
+        candidate = _replace_layers_n_with_layers(target_key)
+        if candidate in src_flat:
+          return PlannedTransfer(
+              rule_name=rule.name,
+              source_keys=(candidate,),
+              target_key=target_key,
+              transforms=rule.transforms,
+          )
+
+      if strategy == 'implicit_layers' and layer_component_index is not None:
+        candidate = _remove_layers_n_component(target_key)
+        if candidate in src_flat:
+          return PlannedTransfer(
+              rule_name=rule.name,
+              source_keys=(candidate,),
+              target_key=target_key,
+              transforms=rule.transforms,
+          )
+
+      if (
+          strategy == 'fused_moe'
+          and layer_component_index is not None
+          and target_key
+          and target_key[-1] == 'wi'
+      ):
+        scanned_prefix = (
+            target_key[:layer_component_index]
+            + ('layers',)
+            + target_key[layer_component_index + 1 : -1]
+        )
+        wi_0_key = scanned_prefix + ('wi_0',)
+        wi_1_key = scanned_prefix + ('wi_1',)
+        if wi_0_key in src_flat and wi_1_key in src_flat:
+          return PlannedTransfer(
+              rule_name=rule.name,
+              source_keys=(wi_0_key, wi_1_key),
+              target_key=target_key,
+              transforms=rule.transforms,
+          )
+
+  return None
+
+
+def _resolve_explicit_target_key(
+    target_key: Tuple[str, ...],
+    src_flat: Mapping[Tuple[str, ...], Any],
+    weight_rules: Tuple[WeightRule, ...],
+) -> Optional[PlannedTransfer]:
+  """Resolves one target leaf using explicit WeightRules."""
+  for rule in weight_rules:
+    normalized_target = _normalize_rule_key(rule.target)
+    if normalized_target != target_key:
+      continue
+    normalized_source = _normalize_rule_key(rule.source)
+    if normalized_source not in src_flat:
+      continue
+    return PlannedTransfer(
+        rule_name=rule.name,
+        source_keys=(normalized_source,),
+        target_key=target_key,
+        transforms=rule.transforms,
+    )
+  return None
+
+
+def build_transfer_plan(
+    src_flat: Mapping[Tuple[str, ...], Any],
+    tgt_flat: Mapping[Tuple[str, ...], Any],
+    weight_rules: Optional[Tuple[WeightRule, ...]] = None,
+    match_rules: Optional[Tuple[MatchRule, ...]] = None,
+) -> Tuple[PlannedTransfer, ...]:
+  """Builds a target-driven transfer plan with explicit precedence."""
+  if weight_rules is None:
+    weight_rules = ()
+  if match_rules is None:
+    match_rules = _default_structural_match_rules()
+
+  plan = []
+  for tgt_key in tgt_flat:
+    step = _resolve_explicit_target_key(tgt_key, src_flat, weight_rules)
+    if step is None:
+      step = _resolve_structural_target_key(tgt_key, src_flat, match_rules)
+    if step is not None:
+      plan.append(step)
+  return tuple(plan)
+
+
+def _build_explicit_mapping_spec(
+    unscanned_src_to_tgt_flat: Mapping[Tuple[str, str], Tuple[Any, Any]],
+    key_mapping_hook_fns: Optional[Mapping[str, Callable[[Any], Any]]] = None,
+    transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None,
+    rollout_engine: Optional[str] = None,
+) -> Tuple[
+    MappingSpec,
+    Dict[Tuple[str, ...], Any],
+    Dict[Tuple[str, ...], Any],
+]:
+  """Builds a MappingSpec with WeightRules from resolved key mappings."""
+  weight_rules = []
+  resolved_src_flat = {}
+  resolved_tgt_flat = {}
+
+  for (flat_src_key, flat_tgt_key), (val, tgt_param) in unscanned_src_to_tgt_flat.items():
+    target_key = _normalize_rule_key(flat_tgt_key)
+    source_key = ('__mapped__', flat_src_key, flat_tgt_key)
+    transforms = []
+
+    transpose_axes = _resolve_transpose_axes(
+        flat_src_key, transpose_keys, rollout_engine
+    )
+    if transpose_axes is not None:
+      transforms.append(Transform('transpose', {'axes': transpose_axes}))
+
+    if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
+      transforms.append(Transform('hook', {'fn': key_mapping_hook_fns[flat_src_key]}))
+
+    transforms.append(
+      Transform('align_shape', {'source_path': flat_src_key})
+    )
+    transforms.append(Transform('cast_to_target'))
+
+    resolved_src_flat[source_key] = val
+    resolved_tgt_flat[target_key] = (
+        tgt_param.value if hasattr(tgt_param, 'value') else tgt_param
+    )
+    weight_rules.append(
+        WeightRule(
+            name='explicit_mapping',
+            source=source_key,
+            target=target_key,
+            transforms=tuple(transforms),
+        )
+    )
+
+  return (
+      MappingSpec(
+          model_type='explicit',
+          weight_rules=tuple(weight_rules),
+      ),
+      resolved_src_flat,
+      resolved_tgt_flat,
+  )
+
+
+def _materialize_transfer_step(
+    step: PlannedTransfer,
+    src_flat: Mapping[Tuple[str, ...], Any],
+    tgt_val: Any,
+    scan_axis: int,
+    value_cache: Dict[Any, Any],
+    transform_context: Optional[Mapping[str, Any]] = None,
+) -> Any:
+  """Materializes one planned transfer step into a target-aligned value."""
+  if transform_context is None:
+    transform_context = {}
+  key_tuple = step.target_key
+  path_str = _flat_key_to_path(key_tuple)
+  transform_kinds = tuple(transform.kind for transform in step.transforms)
+
+  if 'fuse_moe' in transform_kinds:
+    layer_idx = _extract_layer_index(key_tuple)
+    assert layer_idx is not None
+    cache_key = (step.source_keys, tgt_val.shape, scan_axis, 'fused')
+    if cache_key not in value_cache:
+      wi_0_key, wi_1_key = step.source_keys
+      wi_0_full = src_flat[wi_0_key]
+      wi_1_full = src_flat[wi_1_key]
+      if 'cast_to_target' in transform_kinds:
+        wi_0_full = _apply_dtype_cast(
+            wi_0_full, tgt_val.dtype, _flat_key_to_path(wi_0_key)
+        )
+        wi_1_full = _apply_dtype_cast(
+            wi_1_full, tgt_val.dtype, _flat_key_to_path(wi_1_key)
+        )
+      num_layers = src_flat[wi_0_key].shape[scan_axis]
+      wi_0_single_shape = (
+          wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1 :]
+      )
+      mismatched_axes = [
+          i
+          for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape))
+          if s != t
+      ]
+      tgt_axis = (
+          mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
+      )
+      n_shards = _get_n_shards(tgt_val, tgt_axis)
+      scan_padded_axis = tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
+      value_cache[cache_key] = _jit_fuse_and_unstack_moe(
+          wi_0_full,
+          wi_1_full,
+          scan_axis,
+          num_layers,
+          n_shards,
+          tgt_val.shape,
+          scan_padded_axis,
+          tgt_axis,
+      )
+      del wi_0_full, wi_1_full
+
+    sliced_val = value_cache[cache_key][layer_idx]
+    return _align_to_model_shape(sliced_val, tgt_val, path_str)
+
+  if len(step.source_keys) != 1:
+    raise MappingError(
+        f'Unsupported multi-source transfer without fuse_moe: {step.source_keys}'
+    )
+
+  source_key = step.source_keys[0]
+  src_val = src_flat[source_key]
+  source_path = _flat_key_to_path(source_key)
+
+  for transform in step.transforms:
+    if transform.kind == 'copy':
+      continue
+    if transform.kind == 'cast_to_target':
+      src_val = _apply_dtype_cast(src_val, tgt_val.dtype, source_path)
+      continue
+    if transform.kind == 'transpose':
+      src_val = jnp.transpose(src_val, transform.args['axes'])
+      continue
+    if transform.kind == 'hook':
+      src_val = transform.args['fn'](src_val)
+      continue
+    if transform.kind == 'unstack_scanned':
+      layer_idx = _extract_layer_index(key_tuple)
+      assert layer_idx is not None
+      cache_key = (source_key, tgt_val.shape, scan_axis, 'aligned')
+      if cache_key not in value_cache:
+        scanned_per_layer_shape = (
+            src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1 :]
+        )
+        if scanned_per_layer_shape == tgt_val.shape:
+          value_cache[cache_key] = _unstack_scanned_param(
+              src_val, tgt_val, source_path, scan_axis=scan_axis
+          )
+        else:
+          logging.info(
+              'Bulk-aligning scanned %s: %s -> per-layer %s',
+              source_path,
+              src_val.shape,
+              tgt_val.shape,
+          )
+          value_cache[cache_key] = _bulk_align_and_unstack(
+              src_val, scan_axis, tgt_val, source_path
+          )
+      src_val = value_cache[cache_key][layer_idx]
+      continue
+    if transform.kind == 'align_shape':
+      align_context = dict(transform_context)
+      rollout_engine = align_context.pop('rollout_engine', None)
+      align_source_path = transform.args.get('source_path', source_path)
+      src_val = _align_shape(
+          src_val,
+          tgt_val.shape,
+        align_source_path,
+          rollout_engine,
+          **align_context,
+      )
+      continue
+    if transform.kind == 'repeat_to_target':
+      src_val = _align_to_model_shape(src_val, tgt_val, path_str)
+      continue
+    raise MappingError(f'Unsupported transfer transform: {transform.kind}')
+
+  return src_val
+
+
+def execute_transfer_plan(
+    plan: Tuple[PlannedTransfer, ...],
+    src_flat: Mapping[Tuple[str, ...], Any],
+    tgt_flat: Mapping[Tuple[str, ...], Any],
+    scan_axis: int,
+    transform_context: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Dict[Tuple[str, ...], Any], Dict[Tuple[str, ...], Any]]:
+  """Executes a planned transfer into filtered flat source/target trees."""
+  filtered_src_flat = {}
+  filtered_tgt_flat = {}
+  value_cache = {}
+
+  for step in plan:
+    tgt_val = tgt_flat[step.target_key]
+    filtered_src_flat[step.target_key] = _materialize_transfer_step(
+        step, src_flat, tgt_val, scan_axis, value_cache, transform_context
+    )
+    filtered_tgt_flat[step.target_key] = tgt_val
+
+  return filtered_src_flat, filtered_tgt_flat
+
+
+def _materialize_structural_plan(
+    plan: Tuple[PlannedTransfer, ...],
+    src_flat: Mapping[Tuple[str, ...], Any],
+    tgt_flat: Mapping[Tuple[str, ...], Any],
+    scan_axis: int,
+) -> Tuple[Dict[Tuple[str, ...], Any], Dict[Tuple[str, ...], Any]]:
+  """Compatibility wrapper around the shared transfer executor."""
+  return execute_transfer_plan(plan, src_flat, tgt_flat, scan_axis)
+
+
 def transfer_state_directly(
     src_state: Mapping[str, Any],
     dst_state: Mapping[str, Any],
@@ -1536,159 +2073,25 @@ def transfer_state_directly(
       src: Mapping[str, Any],
       tgt_spec: Mapping[str, Any],
   ) -> Tuple[Mapping[str, Any], Mapping[str, Any]]:
-    """Optimized intersection (Handle KVCache/RNG mismatches and Scanned Layers).
-
-    Uses flat dictionary traversal for efficiency.
-    """
+    """Builds and materializes the structural transfer plan."""
     # Fast path for non-dict inputs (leaves)
     if not isinstance(src, abc.Mapping) or not isinstance(tgt_spec, abc.Mapping):
       return src, tgt_spec
 
-    # Flatten both structures to (path_tuple) -> value
-    # usage of sep='/' is optional, but tuples are faster for manipulation
     src_flat = traverse_util.flatten_dict(src)
     tgt_flat = traverse_util.flatten_dict(tgt_spec)
-
     src_flat = _fuse_moe_weights(src_flat, tgt_flat)
+    mapping_spec = make_structural_mapping_spec()
+    transfer_plan = build_transfer_plan(
+      src_flat,
+      tgt_flat,
+      weight_rules=mapping_spec.weight_rules,
+      match_rules=mapping_spec.match_rules,
+    )
+    filtered_src_flat, filtered_tgt_flat = execute_transfer_plan(
+        transfer_plan, src_flat, tgt_flat, scan_axis
+    )
 
-    filtered_src_flat = {}
-    filtered_tgt_flat = {}
-
-    # Cache to store unstacked scanned arrays to avoid repeated work
-    unstacked_cache = {}
-
-    layer_pattern = re.compile(r'^layers_(\d+)$')
-
-    for key_tuple, tgt_val in tgt_flat.items():
-      path_str = '.'.join(str(k) for k in key_tuple)
-      # Try Direct Match
-      if key_tuple in src_flat:
-        src_val = src_flat[key_tuple]
-        src_val = _apply_dtype_cast(src_val, tgt_val.dtype, path_str)
-        src_val = _align_to_model_shape(src_val, tgt_val, path_str)
-        filtered_src_flat[key_tuple] = src_val
-        filtered_tgt_flat[key_tuple] = tgt_val
-        continue
-
-      # Try Scanned Layer Mapping
-      # We look for 'layers_X' in the path and try to map it to 'layers' (MaxText)
-      # or remove it (GPT-OSS / implicit stack).
-
-      # Locate which part of the path is 'layers_X'
-      layer_idx = -1
-      match_index = -1
-
-      for i, part in enumerate(key_tuple):
-        # Optimization: Only check strings that look like layers
-        if isinstance(part, str) and part.startswith('layers_'):
-          m = layer_pattern.match(part)
-          if m:
-            layer_idx = int(m.group(1))
-            match_index = i
-            break
-
-      if match_index != -1:
-        # Check different candidate path formats for scanned layers
-        # Candidate A: Replace 'layers_X' with 'layers' (Standard MaxText)
-        candidate_a = list(key_tuple)
-        candidate_a[match_index] = 'layers'
-
-        # Candidate B: Remove 'layers_X' (Implicit Container / GPT-OSS)
-        candidate_b = list(key_tuple)
-        candidate_b.pop(match_index)
-
-        found_candidate = None
-        for cand in [tuple(candidate_a), tuple(candidate_b)]:
-          if cand in src_flat:
-            found_candidate = cand
-            break
-
-        if found_candidate:
-          # Cache key includes per-layer target shape so distinct unrolled
-          # targets with different padded shapes don't collide on the same
-          # scanned source.
-          cache_key = (found_candidate, tgt_val.shape, 'aligned')
-          if cache_key not in unstacked_cache:
-            src_val = src_flat[found_candidate]
-            candidate_path = '.'.join(str(k) for k in found_candidate)
-            # Cast the bulk tensor once before unstacking.
-            src_val = _apply_dtype_cast(src_val, tgt_val.dtype, candidate_path)
-            scanned_per_layer_shape = (
-                src_val.shape[:scan_axis] + src_val.shape[scan_axis + 1:]
-            )
-            if scanned_per_layer_shape == tgt_val.shape:
-              # Pure unstack — no alignment needed.
-              unstacked_cache[cache_key] = _unstack_scanned_param(
-                  src_val, tgt_val, candidate_path, scan_axis=scan_axis
-              )
-            else:
-              # Bulk align (repeat / zero-pad per axis) on the full scanned
-              # tensor, then unstack. Replaces N per-layer alignments with
-              # one bulk op + free unstack.
-              logging.info(
-                  'Bulk-aligning scanned %s: %s -> per-layer %s',
-                  candidate_path, src_val.shape, tgt_val.shape,
-              )
-              unstacked_cache[cache_key] = _bulk_align_and_unstack(
-                  src_val, scan_axis, tgt_val, candidate_path
-              )
-
-          # Extract the layer_idx-th element from the unstacked cache.
-          sliced_val = unstacked_cache[cache_key][layer_idx]
-          sliced_val = _align_to_model_shape(sliced_val, tgt_val, path_str)
-          filtered_src_flat[key_tuple] = sliced_val
-          filtered_tgt_flat[key_tuple] = tgt_val
-          continue
-
-        # MoE fusion case: target has 'layers_X/.../wi' but source has scanned
-        # 'layers/.../wi_0' and 'layers/.../wi_1'. Fuse the full stacked
-        # tensors first, then unstack once via a JIT-compiled helper — avoids
-        # N per-layer jnp.concatenate dispatches and 2N intermediate device
-        # allocations that cause compilation pressure and memory fragmentation.
-        if key_tuple and key_tuple[-1] == 'wi':
-          scanned_prefix = (
-              key_tuple[:match_index] + ('layers',) + key_tuple[match_index + 1:-1]
-          )
-          wi_0_key = scanned_prefix + ('wi_0',)
-          wi_1_key = scanned_prefix + ('wi_1',)
-
-          if wi_0_key in src_flat and wi_1_key in src_flat:
-            fused_scanned_key = scanned_prefix + ('wi_fused',)
-            if fused_scanned_key not in unstacked_cache:
-              scanned_prefix_path = '.'.join(str(k) for k in scanned_prefix)
-              logging.info('Fusing scanned MoE weights for %s', scanned_prefix_path)
-              wi_0_full = _apply_dtype_cast(
-                  src_flat[wi_0_key], tgt_val.dtype, '.'.join(str(k) for k in wi_0_key)
-              )
-              wi_1_full = _apply_dtype_cast(
-                  src_flat[wi_1_key], tgt_val.dtype, '.'.join(str(k) for k in wi_1_key)
-              )
-              num_layers = src_flat[wi_0_key].shape[scan_axis]
-              
-              # Remove scan_axis to compare against the per-layer tgt_val shape
-              wi_0_single_shape = wi_0_full.shape[:scan_axis] + wi_0_full.shape[scan_axis + 1:]
-              mismatched_axes = [
-                  i for i, (s, t) in enumerate(zip(wi_0_single_shape, tgt_val.shape)) if s != t
-              ]
-              tgt_axis = mismatched_axes[-1] if mismatched_axes else len(tgt_val.shape) - 1
-              n_shards = _get_n_shards(tgt_val, tgt_axis)
-              
-              # Offset the axis by 1 if it falls after the scan axis in the bulk tensor
-              scan_padded_axis = tgt_axis if tgt_axis < scan_axis else tgt_axis + 1
-
-              unstacked_cache[fused_scanned_key] = _jit_fuse_and_unstack_moe(
-                  wi_0_full, wi_1_full, scan_axis, num_layers, n_shards, tgt_val.shape, scan_padded_axis, tgt_axis
-              )
-              del wi_0_full, wi_1_full
-
-            sliced_val = unstacked_cache[fused_scanned_key][layer_idx]
-            sliced_val = _align_to_model_shape(sliced_val, tgt_val, path_str)
-
-            filtered_src_flat[key_tuple] = sliced_val
-            filtered_tgt_flat[key_tuple] = tgt_val
-            continue
-
-    # Unflatten back to nested structure
     return (
         traverse_util.unflatten_dict(filtered_src_flat),
         traverse_util.unflatten_dict(filtered_tgt_flat),
