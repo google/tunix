@@ -715,13 +715,13 @@ MODEL_MAPPING = {
     
 }
 
-mesh_config = [[1, 4], ["fsdp", "tp"]]  # 2-way tensor parallelism
+mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
 # %%
 # MATH-500
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
 # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 model_version = "google/gemma-4-26B-A4B-it"
-# model_version = "google/gemma-4-E4B-it"
+# model_version = "google/gemma-4-31B-it"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -741,7 +741,7 @@ evaluator.load_model()
 print("\nStarting evaluation...")
 results = evaluator.evaluate(
     batch_size=8,
-    num_batches=10,
+    num_batches=5,
     temperature=0.6,
     top_k=50,
     top_p=0.95,

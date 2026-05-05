@@ -611,6 +611,7 @@ grpo_config = GRPOConfig(
     off_policy_steps=OFF_POLICY_STEPS,
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
+    force_compute_kl=True,
 )
 
 # Perf Metrics logging
