@@ -48,7 +48,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
       r"(?:model\.language_model\.)?embed_tokens_per_layer\.weight": (
-          "embedder.per_layer_input_embedding.value",
+          "embedder.per_layer_input_embedding",
           (None, (cfg.num_embed, cfg.num_layers, cfg.per_layer_input_dim)),
       ),
       r"(?:model\.language_model\.)?per_layer_model_projection\.weight": (
@@ -198,7 +198,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.layer_scalar": (
-          r"layers.\1.skip_scale.value",
+          r"layers.\1.skip_scale",
           None,
       ),
       r"(?:model\.language_model\.)?norm\.weight": ("final_norm.scale", None),
@@ -225,7 +225,7 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
       ),
       # MoE Router and Experts
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.router\.proj\.weight": (
-          r"layers.\1.moe.router_logits.value",
+          r"layers.\1.moe.router_logits",
           ((1, 0), None),
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.router\.per_expert_scale": (
@@ -233,15 +233,15 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.router\.scale": (
-          r"layers.\1.moe.router_scale.value",
+          r"layers.\1.moe.router_scale",
           None,
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.experts\.gate_up_proj(?:\.weight)?": (
-          r"layers.\1.moe.gating_einsum.value",
+          r"layers.\1.moe.gating_einsum",
           (None, (cfg.num_experts, 2, cfg.expert_dim, cfg.embed_dim)),
       ),
       r"(?:model\.language_model\.)?layers\.([0-9]+)\.experts\.down_proj(?:\.weight)?": (
-          r"layers.\1.moe.linear.value",
+          r"layers.\1.moe.linear",
           ((0, 2, 1), None),
       ),
   }

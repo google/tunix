@@ -30,6 +30,8 @@ from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
+QKV_PROJ_PATTERN = r'vllm_model.language_model.model.layers\.\d+\.self_attn\.qkv_proj\.weight'
+GATE_UP_PROJ_PATTERN = r'vllm_model.language_model.model.layers\.\d+\.mlp\.gate_up_proj.weight'
 
 def compute_attention_masks(
     time_step: int, seq_len: int, input_mask: jax.Array
@@ -326,6 +328,11 @@ def get_logprobs_from_vllm_output(
   return extracted
 
 
+def is_fused_path(path):
+  if re.compile(QKV_PROJ_PATTERN).match(path) or re.compile(GATE_UP_PROJ_PATTERN).match(path):
+    return True
+
+
 def build_flat_dict(
     flat_state: Iterator[tuple[tuple[str, ...], nnx.State]],
     mappings: Dict[str, tuple[str, tuple[int, ...]]],
@@ -344,6 +351,7 @@ def build_flat_dict(
   """
   new_flat_dict = {}
   compiled_mappings = []
+  fused_tgt_map: Dict[str, Any] = {}
 
   # PRE-COMPILE MAPPINGS
   # Convert target string patterns into Python Regex objects for fast matching.
@@ -363,9 +371,10 @@ def build_flat_dict(
     compiled_mappings.append((src, re.compile(pattern), sharding))
 
   # ITERATE THROUGH ACTUAL PARAMETERS
+  unmapped_target_keys = []
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
-    path = '.'.join(str(key) for key in keys)
+    path = keys if isinstance(keys, str) else '.'.join(str(key) for key in keys)
     mapped = False
     for src, regex, sharding in compiled_mappings:
       matched = regex.match(path)
@@ -399,12 +408,17 @@ def build_flat_dict(
         else:
           # Regular (non-scanned) parameter
           new_flat_dict[actual_src] = v, path, sharding
+          if is_fused_path(path):
+            fused_tgt_map.setdefault(path, []).append(actual_src)
 
         mapped = True
-        break
+        # Fused path needs to loop over all keys that map to the same target.
+        if not is_fused_path(path):
+          break
     # There are no mappings for rng related params.
     if not mapped:
-      logging.warning('!!! No mapping for flat state: %s', path)
+      unmapped_target_keys.append(path)
+    logging.warning('!!! No mapping for flat state: %s', unmapped_target_keys)
 
   # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():
@@ -415,7 +429,7 @@ def build_flat_dict(
       paths = [p for _, p in paths]
       new_flat_dict[key] = (values, paths, sharding)
 
-  return new_flat_dict
+  return new_flat_dict, fused_tgt_map
 
 
 class ShapeMismatchError(ValueError):
@@ -439,9 +453,71 @@ def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
   return None
 
 
+def fuse_src_to_same_tgt_params(src_val, src_key, fuse_sources, tgt_path, tgt_param,tp_size):
+  """Fuses source parameters for the same target path, performing necessary transpositions and reshaping. This only works for VLLM torchax models."""
+  fuse_sources.setdefault(tgt_path, {})[src_key] = (src_val, tgt_param)
+  if re.compile(QKV_PROJ_PATTERN).match(tgt_path) and len(fuse_sources[tgt_path].items()) == 2:
+    k, v, q = None, None, None
+    for sk, (sv, _) in fuse_sources[tgt_path].items():
+      if 'kv_einsum' in sk:
+        k = sv[0]
+        v = sv[1]
+      elif 'q_einsum' in sk:
+        q = sv
+      elif 'k_einsum' in sk:
+        k = v = sv
+      else:
+        raise MappingError(f"Unexpected source key '{sk}' for target '{tgt_path}'. Expected 'kv_einsum', 'q_einsum', or 'k_einsum'.")
+    assert k is not None and v is not None and q is not None, f"Failed to find Q, K, V for target '{tgt_path}'."
+    tp = min(tp_size, k.shape[0])
+    kv_per_tp = k.shape[0] // tp
+    q_per_tp = q.shape[0] // tp
+    # (num_heads, d_model, head_dim) -> (d_model, num_heads, head_dim)
+    q, k, v = q.transpose(1, 0, 2), k.transpose(1, 0, 2), v.transpose(1, 0, 2)
+    head_dim = q.shape[2]
+    d_model = q.shape[0]
+    q_by_tp = q.reshape(d_model, tp, q_per_tp, head_dim)
+    k_by_tp = k.reshape(d_model, tp, kv_per_tp, head_dim)
+    v_by_tp = v.reshape(d_model, tp, kv_per_tp, head_dim)
+    qkv_by_tp = jnp.concatenate([q_by_tp, k_by_tp, v_by_tp], axis=2)
+    qkv = qkv_by_tp.reshape(d_model, -1)
+    qkv = qkv.transpose(1, 0)
+    match = re.search(r"layers\.(\d+)\.attn\.(q|k|kv)_einsum\.w", list(fuse_sources[tgt_path].keys())[0])
+    assert match, f"Source key '{list(fuse_sources[tgt_path].keys())[0]}' does not match expected pattern for QKV fusion."
+    layer_idx = match.group(1)
+    fused_src_key = f"layers.{layer_idx}.attn.qkv_fused"
+    fuse_sources[tgt_path] = {fused_src_key:(qkv, tgt_param)}
+  elif re.compile(GATE_UP_PROJ_PATTERN).match(tgt_path) and len(fuse_sources[tgt_path].items()) == 2:
+    gate, up = None, None
+    for sk, (sv, _) in fuse_sources[tgt_path].items():
+      if 'gate_proj' in sk:
+        gate = sv
+      elif 'up_proj' in sk:
+        up = sv
+      else:
+        raise MappingError(f"Unexpected source key '{sk}' for target '{tgt_path}'. Expected 'gate_proj' or 'up_proj'.")
+    assert gate is not None and up is not None, f"Failed to find gate and up for target '{tgt_path}'."
+    gate, up = gate.T, up.T
+    hidden_dim = gate.shape[0]
+    chunk_size = hidden_dim // tp_size
+    gate_chunks = gate.reshape(tp_size, chunk_size, gate.shape[1])
+    up_chunks = up.reshape(tp_size, chunk_size, up.shape[1])
+    gate_up = jnp.stack([gate_chunks, up_chunks], axis=1)
+    gate_up = gate_up.reshape(2 * hidden_dim, gate.shape[1])
+    match = re.search(r"layers\.(\d+)\.mlp\.gate_proj\.kernel", list(fuse_sources[tgt_path].keys())[0])
+    assert match, f"Source key '{list(fuse_sources[tgt_path].keys())[0]}' does not match expected pattern for QKV fusion."
+    layer_idx = match.group(1)
+    fused_src_key = f"layers.{layer_idx}.mlp.gate_up_fused"
+    fuse_sources[tgt_path] = {fused_src_key: (gate_up, tgt_param)}
+
+  return fuse_sources
+
+
 def _unroll_scanned_layers(
     src_state: Any,
     src_to_tgt_map: Dict,
+    fused_tgt_map: Dict,
+    tp_size: int,
 ) -> Dict[Tuple[str, str], Tuple[Any, Any]]:
   """Unroll scanned layers from source state and map to target keys.
 
@@ -455,6 +531,7 @@ def _unroll_scanned_layers(
   """
 
   unscanned_flat = {}
+  tgt_path_to_src_values_fused = {}
 
   for src_keys, src_val in src_state.flat_state():
     src_key = '.'.join(str(k) for k in src_keys)
@@ -485,8 +562,27 @@ def _unroll_scanned_layers(
         unscanned_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
     else:
       # No unrolling needed
-      unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
-
+      if tgt_path in fused_tgt_map:
+        assert src_key in fused_tgt_map[tgt_path], (
+            f"Source key '{src_key}' should be part of the fused mapping for"
+            f" target '{tgt_path}' but it's not. Fused mapping keys:"
+            f' {fused_tgt_map[tgt_path]}'
+        )
+        tgt_path_to_src_values_fused = fuse_src_to_same_tgt_params(
+            src_val,
+            src_key,
+            tgt_path_to_src_values_fused,
+            tgt_path,
+            tgt_param,
+            tp_size,
+        )
+      else:
+        unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
+  for tgt_path, src_tgt in tgt_path_to_src_values_fused.items():
+    unscanned_flat[(list(src_tgt.keys())[0], tgt_path)] = (
+        list(src_tgt.values())[0][0],
+        list(src_tgt.values())[0][1],
+    )
   return unscanned_flat
 
 
@@ -501,12 +597,18 @@ def _apply_transpose(
     return val
 
   last_key = src_key.split('.')[-1]
+  last_three_keys = '.'.join(src_key.split('.')[-3:])
+  last_two_keys = '.'.join(src_key.split('.')[-2:])
   all_key = src_key
   target_key = ''
   if last_key in transpose_keys and 'lora' not in last_key:
     target_key = last_key
   elif all_key in transpose_keys and 'lora' not in all_key:
     target_key = all_key
+  elif last_three_keys in transpose_keys and 'lora' not in last_three_keys:
+    target_key = last_three_keys
+  elif last_two_keys in transpose_keys and 'lora' not in last_two_keys:
+    target_key = last_two_keys
   if target_key != '':
     logging.debug('Applying transpose on %s', src_key)
     return jnp.transpose(val, transpose_keys[target_key])
@@ -588,6 +690,11 @@ def _align_shape(
         val = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
         new_tgt_shape = tgt_shape
 
+    elif src_key == 'embedder.per_layer_input_embedding':
+      return jnp.reshape(val, (val.shape[0], -1))
+    elif src_key == 'embedder.per_layer_model_projection.w':
+      val = jnp.reshape(val, (val.shape[0], -1))
+      return val.T
     elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
       if math.prod(tgt_shape) == math.prod(val.shape):
         logging.debug(
@@ -617,6 +724,25 @@ def _align_shape(
           padded_dim = (val.shape[-1] + 127) // 128 * 128
           repeated_dim = tgt_shape[-1] // padded_dim
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
+    elif re.compile(r'layers\..*\.attn_vec_einsum\.w').match(src_key):
+      # reshape from (num_head, head_dim, model_dim) to (model_dim, num_head * head_dim) for vec_einsum.
+      return val.reshape((val.shape[0] * val.shape[1], val.shape[2])).T
+    elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
+      tp_size = kwargs["tp_size"]
+      num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
+      gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
+      chunk_size = expert_dim // tp_size
+      padded_expert_chunk_dim = ((chunk_size + 127)//128)*128
+      pad_amount = padded_expert_chunk_dim - chunk_size
+      gate_chunks = gate_chunks.reshape(num_experts, tp_size, -1, embed_dim)
+      up_chunks = up_chunks.reshape(num_experts, tp_size, -1, embed_dim)
+      if pad_amount > 0:
+        gate_chunks = jnp.pad(gate_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+        up_chunks = jnp.pad(up_chunks, ((0, 0), (0, 0), (0, pad_amount), (0, 0)))
+      val_chunks = jnp.stack([gate_chunks, up_chunks], axis=2)
+      val_chunks = val_chunks.reshape(num_experts, -1, embed_dim)
+      val_chunks = val_chunks.transpose(0, 2, 1)
+      return val_chunks
     else:
       raise ShapeMismatchError(
           f'Rank mismatch for {src_key}: {val.shape} vs {tgt_shape}'
@@ -756,10 +882,28 @@ def _sync_tied_lm_head_if_needed(
   lm_head_param.value = embed_param.value
 
 
+def flatten_to_tuples(d):
+  items = []
+  key_idx_mapping = {}
+  i = 0
+  for k, v in d.items():
+    items.append((k, v))
+    key_idx_mapping[k] = i
+    i += 1
+  return items, key_idx_mapping
+
+
+def unflatten_from_tuples(flat_list, dst_state):
+  for path, value in flat_list:
+    dst_state[path] = value
+  return dst_state
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
     key_mappings,
+    key_reference_mappings=None,
     key_mapping_hook_fns=None,
     transpose_keys=None,
     reshard_fn=None,
@@ -787,7 +931,11 @@ def transfer_state_with_mappings(
     The target state with the transferred values.
   """
   # Get flat target state
-  tgt_flat_list = dst_state.flat_state()
+  if isinstance(dst_state, dict):
+    tgt_flat_list, tgt_key_idx_mapping = flatten_to_tuples(dst_state)
+  else:
+    tgt_flat_list = dst_state.flat_state()
+    tgt_key_idx_mapping = None
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
@@ -803,10 +951,12 @@ def transfer_state_with_mappings(
     }
 
   # Build source-to-target mapping
-  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
+  src_to_tgt_map, fused_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
 
   # Unroll scanned layers and flatten source state
-  unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
+  unscanned_src_to_tgt_flat = _unroll_scanned_layers(
+      src_state, src_to_tgt_map, fused_tgt_map, kwargs.get('tp_size', None),
+  )
   transferred_target_keys = set()
 
   # Transfer values with transformations
@@ -822,15 +972,28 @@ def transfer_state_with_mappings(
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
+    tgt_shape = (
+        tgt_param.value.shape
+        if hasattr(tgt_param, 'value')
+        else tgt_param.shape
+    )
+    tgt_dtype = (
+        tgt_param.value.dtype
+        if hasattr(tgt_param, 'value')
+        else tgt_param.dtype
+    )
     val = _align_shape(
-        val, tgt_param.value.shape, flat_src_key, rollout_engine, **kwargs
+        val, tgt_shape, flat_src_key, rollout_engine, **kwargs
     )
 
     # Cast to target dtype
-    val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
+    val = _apply_dtype_cast(val, tgt_dtype, flat_src_key)
 
     # Assign transformed value
-    tgt_param.value = val
+    if hasattr(tgt_param, 'value'):
+      tgt_param.value = val
+    else:
+      tgt_flat_list[tgt_key_idx_mapping[flat_tgt_key]]  = (flat_tgt_key, val)
     transferred_target_keys.add(flat_tgt_key)
 
   # Target rollout engine might have different implementation and have materialized lm_head
@@ -855,8 +1018,21 @@ def transfer_state_with_mappings(
       if hasattr(tgt_param, 'value'):
         tgt_param.value = resharded_values_flat_dict[tgt_key]
       else:
-        tgt_param = resharded_values_flat_dict[tgt_key]
+        tgt_flat_list[tgt_key_idx_mapping[tgt_key]] = (
+            tgt_key,
+            resharded_values_flat_dict[tgt_key],
+        )
 
+  # handle cases like vllm_model.language_model.lm_head.weight just referencing
+  # the value of vllm_model.language_model.model.embed_tokens.weight.
+  if key_reference_mappings:
+    for tgt_key1, tgt_key2 in key_reference_mappings.items():
+      for path, value in tgt_flat_list:
+        if path == tgt_key1:
+          tgt_flat_list[tgt_key2] = value
+
+  if isinstance(dst_state, dict):
+    return unflatten_from_tuples(tgt_flat_list, dst_state)
   return dst_state.from_flat_path(tgt_flat_list)
 
 
