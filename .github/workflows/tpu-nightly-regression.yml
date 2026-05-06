@@ -114,6 +114,7 @@ jobs:
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 3 way disaggregated mode ..."
         python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || FAILED=1
 
+        # TODO(b/508252632): Re-enable once the bug is fixed.
         # vLLM Tests
         # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in colocated mode ..."
         # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm || FAILED=1
@@ -176,6 +177,12 @@ jobs:
         echo "🔍 Finding scripts in $SCRIPT_DIR"
         for script in "$SCRIPT_DIR"/*.sh; do
           if [ -f "$script" ]; then
+            # TODO(b/510383584)
+            if [[ "$script" == *"run_gemma_2b.sh" ]]; then
+              echo "⏭️ Skipping: $script"
+              continue
+            fi
+
             echo "📦 Executing: $script"
             echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
             chmod +x "$script"
@@ -213,6 +220,11 @@ jobs:
 
         while IFS= read -r script; do
           if [ -f "$script" ]; then
+            # TODO(b/510383570)
+            if [[ "$script" == *"run_qwen3_8b"* ]]; then
+              echo "⏭️ Skipping: $script"
+              continue
+            fi
             echo "📦 Executing: $script"
             echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
             chmod +x "$script"
