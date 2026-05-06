@@ -116,7 +116,7 @@ arg_parser.add_argument("--max_response_length", type=int, default=4096)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=64)
+arg_parser.add_argument("--max_concurrency", type=int, default=512)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -306,12 +306,7 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
-# MODEL_VERSION = "google/gemma-4-26B-A4B-it"
-MODEL_VERSION = "google/gemma-4-31B-it"
-# MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
-# MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
-# MODEL_VERSION = "google/gemma-4-E4B-it"
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
+MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -388,7 +383,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.gemma4_31b()
+config = model_lib.ModelConfig.gemma4_26b_a4b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -495,7 +490,7 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-print("# Rollout mesh: ", rollout_mesh)
+print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
 print("Reference mesh: ", reference_mesh)
 
@@ -526,7 +521,6 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
-        "dtype": "bfloat16",
     },
 }
 
@@ -697,9 +691,8 @@ except Exception as e:
 
 import gc
 import jax
-# 1. Force Python garbage collection to release unreferenced device buffers
 gc.collect()
-# 2. Clear JAX compilation and execution caches
+# Clear JAX compilation and execution caches
 jax.clear_caches()
 
 grpo_trainer.train(train_dataset)

@@ -13,6 +13,34 @@ from tunix.generate import mappings
 Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
 
+from absl import logging as absl_logging
+
+import logging
+import sys
+
+# ====== Logging Configuration ======
+# 1. Force absl to use python logging
+absl_logging.use_python_logging()
+
+# 2. Configure the root logger
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+
+# 3. Explicitly set levels for relevant loggers
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger("absl").setLevel(logging.INFO)
+
+# 4. Set absl verbosity
+absl_logging.set_verbosity(absl_logging.INFO)
+absl_logging.set_stderrthreshold("info")
+
+print("Logging configured at INFO level.")
+
 try:
   from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
   from etils import ecolab
@@ -212,8 +240,8 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(4, 1), axis_names=["fsdp", "tp"])
-    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(1, 4), axis_names=["fsdp", "tp"])
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
+    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
     # self.rollout_mesh_backup = jax.sharding.Mesh(np.array(jax.devices()[2:3]).reshape(1, 1), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
@@ -710,15 +738,15 @@ evaluator = Qwen25MathEvaluator(
 evaluator.load_model()
 
 print("\nStarting evaluation...")
-results = evaluator.evaluate(
-    batch_size=8,
-    num_batches=5,
-    temperature=0.6,
-    top_k=50,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
+# results = evaluator.evaluate(
+#     batch_size=8,
+#     num_batches=5,
+#     temperature=0.6,
+#     top_k=50,
+#     top_p=0.95,
+#     num_passes=1,
+#     debug_first_n=5,
+# )
 
 # Print results
 print("\n" + "=" * 60)

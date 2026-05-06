@@ -190,7 +190,7 @@ def get_per_token_logps(
 
 # TODO(abheesht): This is computed 4 times - twice in `compute_per_token_logps`
 # and twice in `compute_score`. We can factor this out and compute it just once.
-@partial(jax.jit, static_argnames=("pad_id", "eos_id"))
+# @partial(jax.jit, static_argnames=("pad_id", "eos_id"))
 def process_ids(
     prompt_tokens: jax.Array,
     completion_tokens: jax.Array,
@@ -217,6 +217,7 @@ def process_ids(
     segment_positions: optional 1D local position indices used for packing.
   """
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
+  print(f"{prompt_completion_ids = }")
 
   if segment_ids is not None:
     # Positions are either provided or must be computed correctly (assumed
@@ -229,6 +230,7 @@ def process_ids(
     return prompt_completion_ids, segment_positions, attn_mask
 
   prompt_mask = prompt_tokens != pad_id
+  print(f"{prompt_mask = }")
 
   if completion_mask is None:
     completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
@@ -236,22 +238,23 @@ def process_ids(
   prompt_completion_mask = jnp.concatenate(
       [prompt_mask, completion_mask], axis=-1
   )
+  print(f"{prompt_completion_mask = }")
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
 
   return prompt_completion_ids, positions, attn_mask
 
 
-@partial(
-    jax.jit,
-    static_argnames=(
-        "pad_id",
-        "eos_id",
-        "stop_gradient",
-        "return_logits",
-        "temperature",
-    ),
-)
+# @partial(
+#     jax.jit,
+#     static_argnames=(
+#         "pad_id",
+#         "eos_id",
+#         "stop_gradient",
+#         "return_logits",
+#         "temperature",
+#     ),
+# )
 def compute_per_token_logps(
     graphdef,
     state,
@@ -310,6 +313,7 @@ def compute_per_token_logps(
       segment_positions,
   )
 
+  print(f"{input_tokens = }")
   model_kwargs = {
       "positions": calculated_positions,
       "cache": None,
@@ -321,6 +325,7 @@ def compute_per_token_logps(
     model_kwargs["images"] = images
 
   logits, _ = model(input_tokens, **model_kwargs)
+  print(f"{logits = }")
 
   if segment_ids is not None:
     # Packed Mode: Evaluate the full sequence (mixed prompts + completions).

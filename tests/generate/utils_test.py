@@ -47,7 +47,7 @@ class MockState:
 
 from jax.tree_util import register_pytree_node_class
 
-@register_pytree_node_class
+# @register_pytree_node_class
 class MockParam:
 
   def __init__(self, value):
@@ -73,13 +73,6 @@ class MockParam:
 
   def __jax_array__(self):
     return self.value
-
-  def tree_flatten(self):
-    return (self.value,), None
-
-  @classmethod
-  def tree_unflatten(cls, aux_data, children):
-    return cls(children[0])
 
 
 class Logprob:
@@ -328,7 +321,7 @@ class UtilsTest(parameterized.TestCase):
     # Verify shape
     self.assertEqual(result.params[src_key].shape, (4, 128))
     # Verify values are repeated correctly
-    self.assertTrue(jnp.allclose(result.params[src_key], 1.0))
+    self.assertTrue(jnp.allclose(result.params[src_key].value, 1.0))
 
   def test_transfer_state_with_scanned_layers(self):
     """Comprehensive test for scanned layers covering multiple scenarios."""
@@ -1117,7 +1110,7 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layer.0.weight"], expected_layer_0
+            new_tgt_state.params["decoder.layer.0.weight"].vaule, expected_layer_0
         ),
         "Interleaved layer 0 mismatch",
     )
@@ -1517,7 +1510,7 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertEqual(result.params[src_key].shape, (1024,))
     expected = jnp.tile(src_k_bias, 8)
-    self.assertTrue(jnp.allclose(result.params[src_key], expected))
+    self.assertTrue(jnp.allclose(result.params[src_key].value, expected))
 
 
   def test_transfer_state_directly_fuses_moe_weights(self):

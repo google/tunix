@@ -100,13 +100,13 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=16)
-arg_parser.add_argument("--mini_batch_size", type=int, default=16)
+arg_parser.add_argument("--batch_size", type=int, default=32)
+arg_parser.add_argument("--mini_batch_size", type=int, default=32)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=150)
+arg_parser.add_argument("--num_batches", type=int, default=300)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
@@ -116,7 +116,7 @@ arg_parser.add_argument("--max_response_length", type=int, default=4096)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=64)
+arg_parser.add_argument("--max_concurrency", type=int, default=256)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -139,9 +139,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 4), ("fsdp", "tp")]
-REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -158,7 +158,7 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = 256
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -214,7 +214,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.5
+MAX_GRAD_NORM = 0.3
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -306,12 +306,9 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
-# MODEL_VERSION = "google/gemma-4-26B-A4B-it"
-MODEL_VERSION = "google/gemma-4-31B-it"
+MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+# MODEL_VERSION = "google/gemma-4-31B-it"
 # MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
-# MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
-# MODEL_VERSION = "google/gemma-4-E4B-it"
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -388,7 +385,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.gemma4_31b()
+config = model_lib.ModelConfig.gemma4_26b_a4b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -455,11 +452,6 @@ else:
 show_hbm_usage("after loading gemma4_actor")
 
 # %%
-ModelAgent = model_agent.ModelAgent
-TaskEnvironment = task_environment.TaskEnvironment
-TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
-
-# %%
 # Ckpt saving
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
@@ -495,7 +487,7 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-print("# Rollout mesh: ", rollout_mesh)
+print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
 print("Reference mesh: ", reference_mesh)
 
@@ -526,7 +518,6 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
-        "dtype": "bfloat16",
     },
 }
 
@@ -697,9 +688,8 @@ except Exception as e:
 
 import gc
 import jax
-# 1. Force Python garbage collection to release unreferenced device buffers
 gc.collect()
-# 2. Clear JAX compilation and execution caches
+# Clear JAX compilation and execution caches
 jax.clear_caches()
 
 grpo_trainer.train(train_dataset)
