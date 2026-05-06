@@ -373,7 +373,14 @@ class HyperParameters:
     supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
 
-    if model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
+    if model_name.startswith("gemma4") or model_name.startswith("gemma-4"):
+      expected_sources = supported_sources["gemma4"]
+      if model_source not in expected_sources:
+        raise ValueError(
+            f"Model '{model_name}' must use source(s) {expected_sources}, but"
+            f" got '{model_source}'."
+        )
+    elif model_name.startswith("gemma3") or model_name.startswith("gemma-3"):
       expected_sources = supported_sources["gemma3"]
       if model_source not in expected_sources:
         raise ValueError(
@@ -568,12 +575,22 @@ class HyperParameters:
     injected_opt_func = optax.inject_hyperparams(opt_func)
     # Call the optimizer function with the extracted kwargs
     try:
-      return injected_opt_func(**opt_kwargs)
+      opt = injected_opt_func(**opt_kwargs)
     except TypeError as e:
       raise TypeError(
           f"Error calling {opt_type} with arguments {opt_kwargs}. "
           f"Check if the arguments match the signature of optax.{opt_type}: {e}"
       ) from e
+    # Honor optimizer_config.max_grad_norm by chaining a global-norm clip
+    # in front of the optimizer. The base YAML declares this field
+    # (base_config.yaml:156) and the programmatic demos use it (e.g.
+    # scripts/grpo_demo_llama3_qwen2.py), but the CLI path was silently
+    # dropping it: max_grad_norm isn't a kwarg on optax.adamw, so
+    # _extract_kwargs filters it out before reaching the optimizer.
+    max_grad_norm = optimizer_config.get("max_grad_norm", None)
+    if max_grad_norm is not None:
+      opt = optax.chain(optax.clip_by_global_norm(float(max_grad_norm)), opt)
+    return opt
 
   def _parse_mesh_config(self, model_key: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
     """Validate and parse mesh configuration for a model key."""
@@ -736,7 +753,13 @@ class HyperParameters:
       elif "optimizer_config" in key:
         continue
       else:
-        constructed_training_config[key] = value
+        # OmegaConf can stringify YAML `null` to the literal "None" once it
+        # passes through container coercion; coerce back so dataclass fields
+        # typed as `str | None` don't get the string and hand it to orbax.
+        if isinstance(value, str) and value == "None":
+          constructed_training_config[key] = None
+        else:
+          constructed_training_config[key] = value
 
     return constructed_training_config
 

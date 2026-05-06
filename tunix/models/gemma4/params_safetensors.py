@@ -361,7 +361,11 @@ def create_model_from_safe_tensors(
     config: model_lib.ModelConfig,
     mesh: jax.sharding.Mesh | None = None,
     dtype: jnp.dtype | None = None,
+    mode: str = "auto",  # accepted-and-ignored, kept for signature parity
+                         # with gemma{,1p1,2,3} loaders so automodel can
+                         # call all gemma loaders with the same kwargs.
 ):
+  del mode
   return safetensors_loader.load_and_create_model(
       file_dir=file_dir,
       model_class=model_lib.Gemma4,

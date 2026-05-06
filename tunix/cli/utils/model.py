@@ -118,6 +118,17 @@ def create_model(
         f'Available sources: {[s.value for s in automodel.ModelSource]}'
     ) from exc
 
+  # Optional dtype overrides from YAML (e.g. `param_dtype: float32` and
+  # `dtype: bfloat16` for mixed-precision training). Strings are looked
+  # up on jax.numpy and forwarded to from_pretrained, where the existing
+  # dataclass-field auto-override in automodel.py applies them to the
+  # ModelConfig.
+  dtype_kwargs = {
+      k: getattr(jax.numpy, model_config[k])
+      for k in ('dtype', 'param_dtype')
+      if model_config.get(k) is not None
+  }
+
   model, model_path = automodel.AutoModel.from_pretrained(
       model_id=model_config['model_id'],
       mesh=mesh,
@@ -131,6 +142,7 @@ def create_model(
           'flash_attention_block_size', 1024
       ),
       remat_config=model_config.get('remat_config', 1),
+      **dtype_kwargs,
   )
 
   # Handle Tokenizer Path overrides

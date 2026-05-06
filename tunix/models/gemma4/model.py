@@ -174,6 +174,13 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma4_e2b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_e2b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma4_e4b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -201,6 +208,13 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma4_e4b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_e4b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma4_31b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -226,6 +240,13 @@ class ModelConfig:
             AttentionType.GLOBAL,
         ),
     )
+
+  @classmethod
+  def gemma4_31b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_31b(sharding_config=sharding_config)
 
   @classmethod
   def gemma4_26b_a4b(
@@ -259,6 +280,13 @@ class ModelConfig:
             AttentionType.GLOBAL,
         ),
     )
+
+  @classmethod
+  def gemma4_26b_a4b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_26b_a4b(sharding_config=sharding_config)
 
 
 class Embedder(nnx.Module):

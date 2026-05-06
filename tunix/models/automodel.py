@@ -343,7 +343,7 @@ def create_model_from_safe_tensors(
       AttributeError: If create_model_from_safe_tensors is not in the module.
   """
   naming_info = naming.ModelNaming(model_name=model_name)
-  if naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2', 'gemma3'):
+  if naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2', 'gemma3', 'gemma4'):
     params_module = get_model_module(model_name, ModelModule.PARAMS_SAFETENSORS)
   else:
     params_module = get_model_module(model_name, ModelModule.PARAMS)
@@ -545,12 +545,18 @@ class AutoModel:
           logging.info('Applying model config overrides: %s', overrides)
           model_params = dataclasses.replace(model_params, **overrides)
 
+      # Storage dtype for loaded weights = model's configured param_dtype
+      # (so YAML's `param_dtype: float32` actually results in fp32 master
+      # weights even when the on-disk safetensors are bf16).
+      storage_dtype = getattr(model_params, 'param_dtype', None)
+
       with mesh:
         model = create_model_from_safe_tensors(
             naming_info.model_name,
             resolved_model_path,
             model_params,
             mesh,
+            dtype=storage_dtype,
         )
 
     return model, resolved_model_path
