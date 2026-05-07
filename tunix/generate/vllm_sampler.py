@@ -218,6 +218,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # for k, p in orig_weights.items():
       #   print(f"Original weight {k}: shape={p.shape}")
       sft_utils.show_hbm_usage(title="Before weight sync....")
+      jax.clear_caches()
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,

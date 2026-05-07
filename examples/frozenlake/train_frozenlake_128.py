@@ -86,6 +86,14 @@ try:
 except Exception:
   pass
 
+sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
+os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+try:
+  from absl import flags
+  flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
+except Exception:
+  pass
+
 try:
   import pathwaysutils
 

@@ -133,9 +133,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 4), ("fsdp", "tp")]
-REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(2, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -525,7 +525,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.7,
+    "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,

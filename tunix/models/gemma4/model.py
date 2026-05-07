@@ -70,6 +70,7 @@ class ShardingConfig:
   # MoE sharding
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
+  router_weight_de: Tuple[str | None, ...]
   # PLE sharding
   per_layer_model_projection: Tuple[str | None, ...]
   per_layer_input_gate: Tuple[str | None, ...]
@@ -77,10 +78,8 @@ class ShardingConfig:
   per_layer_input_embedding: Tuple[str | None, ...]
 
   @staticmethod
-  def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
+  def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
-    sp = 'sp' if (not is_sampling and enable_sp) else None
-    fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
         emb_vd=('tp', fsdp),
@@ -91,9 +90,9 @@ class ShardingConfig:
         ffw_weight_df=(fsdp, 'tp'),
         ffw_weight_fd=('tp', fsdp),
         rms_norm_weight=('tp',),
-        act_btd=('fsdp', sp, None if is_sampling else 'tp'),
-        act_btf=('fsdp', sp, 'tp'),
-        act_btnh=('fsdp', sp, 'tp', None),
+        act_btd=('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=('fsdp', None, 'tp'),
+        act_btnh=('fsdp', None, 'tp', None),
         vision_proj=(fsdp, 'tp'),
         vision_soft_emb_norm_weight=('tp',),
         exp_weight_edf=(fsdp, None, None, 'tp'),
@@ -846,6 +845,7 @@ class Attention(nnx.Module):
       )
 
 
+
   def init_cache(self, batch_size, max_seq_len, dtype):
     return {
         'k': jnp.zeros(
@@ -919,7 +919,6 @@ class FeedForward(nnx.Module):
         param_dtype=config.param_dtype,
     )
 
-  
   def block(self, x):
     return self.down_proj(nnx.gelu(self.gate_proj(x)) * self.up_proj(x))
 
@@ -1110,13 +1109,14 @@ class DecoderLayer(nnx.Module):
           x, segment_pos, cache, attn_mask, per_layer_input, kv_shared_cache
       )
 
+
   def init_cache(self, batch_size, max_seq_len, dtype):
     return self.attn.init_cache(batch_size, max_seq_len, dtype)
 
 
 class Gemma4(BackendMappingMixin, nnx.Module):
   """Gemma4 model."""
-  
+
   BACKEND_PACKAGE_PATH = __name__
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
