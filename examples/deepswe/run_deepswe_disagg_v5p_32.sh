@@ -42,9 +42,14 @@ rollout_micro_batch_size="${rollout_micro_batch_size:-1}"
 
 num_generations="${num_generations:-2}"
 max_response_length="${max_response_length:-8192}"
-
+#TODO(b/510820709) - find the optimal mesh configuration.
+total_tpus="${total_tpus:-32}"
 trainer_mesh="${trainer_mesh:-(8,2)}"
 rollout_mesh="${rollout_mesh:-(2,8)}"
+
+
+source "$(dirname "$0")/../tpu_utils.sh"
+validate_mesh_allocation "$total_tpus" "$trainer_mesh" "$rollout_mesh" "null" || exit 1
 
 checkpoint_dir="${checkpoint_dir:-gs://tunix/rl/checkpoints/01}"
 checkpoint_suffix="${checkpoint_suffix:-$(printf '%04d' "$((RANDOM % 10000))")}"

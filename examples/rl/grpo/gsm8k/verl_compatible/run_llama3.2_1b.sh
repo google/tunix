@@ -51,8 +51,10 @@ python3 -m tunix.cli.grpo_main \
   actor_model_config.mesh.shape="(4,1)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   actor_model_config.lora_config={} \
-  rollout_model_config.mesh.shape="(4,1)" \
-  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
+  reference_model_config.mesh=null \
+  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh=null \
+  rollout_model_config.same_mesh_as="actor" \
   tokenizer_config.tokenizer_path="meta-llama/Llama-3.2-1B-Instruct" \
   tokenizer_config.tokenizer_type="huggingface" \
   tokenizer_config.add_bos=false \

@@ -54,8 +54,10 @@ python3 -m tunix.cli.grpo_main \
   actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj" \
   actor_model_config.mesh.shape="(2,4)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  rollout_model_config.mesh.shape="(2,4)" \
-  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
+  reference_model_config.mesh=null \
+  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh=null \
+  rollout_model_config.same_mesh_as="actor" \
   tokenizer_config.tokenizer_path=Qwen/${model_name} \
   tokenizer_config.tokenizer_type=huggingface \
   tokenizer_config.add_bos=false \

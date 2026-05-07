@@ -55,8 +55,10 @@ python3 -m tunix.cli.grpo_main \
   actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \
   actor_model_config.mesh.shape="(2,4)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  rollout_model_config.mesh.shape="(2,4)" \
-  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
+  reference_model_config.mesh=null \
+  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh=null \
+  rollout_model_config.same_mesh_as="actor" \
   tokenizer_config.tokenizer_path="/tmp/models/gemma-7b/models/google/gemma/flax/7b-it/2/tokenizer.model" \
   tokenizer_config.tokenizer_type="sentencepiece" \
   tokenizer_config.add_bos=false \

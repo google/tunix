@@ -32,8 +32,14 @@ warmup_ratio="${warmup_ratio:-0.1}"
 batch_size="${batch_size:-128}"
 mini_batch_size="${mini_batch_size:-128}"
 max_response_length="${max_response_length:-8192}"
+#TODO(b/510820709) - find the optimal mesh configuration
+total_tpus="${total_tpus:-8}"
+
 trainer_mesh="${trainer_mesh:-(4,1)}"
 rollout_mesh="${rollout_mesh:-(4,1)}"
+
+source "$(dirname "$0")/../tpu_utils.sh"
+validate_mesh_allocation "$total_tpus" "$trainer_mesh" "$rollout_mesh" "null" || exit 1
 
 checkpoint_dir="${checkpoint_dir:-gs://tunix/rl/checkpoints/01}"
 checkpoint_suffix="${checkpoint_suffix:-$(printf '%04d' "$((RANDOM % 10000))")}"
