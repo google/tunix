@@ -78,14 +78,6 @@ with cm:
   from tunix.examples.frozenlake.agent import FrozenLakeAgent
   from tunix.examples.frozenlake.env import FrozenLakeEnv
 
-sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
-os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
-try:
-  from absl import flags
-  flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
-except Exception:
-  pass
-
 try:
   import pathwaysutils
 
@@ -104,23 +96,23 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=64)
-arg_parser.add_argument("--mini_batch_size", type=int, default=64)
+arg_parser.add_argument("--batch_size", type=int, default=16)
+arg_parser.add_argument("--mini_batch_size", type=int, default=16)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
 arg_parser.add_argument("--num_batches", type=int, default=150)
-arg_parser.add_argument("--num_generations", type=int, default=8)
+arg_parser.add_argument("--num_generations", type=int, default=1)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
-arg_parser.add_argument("--max_response_length", type=int, default=4096)
+arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
+arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=512)
+arg_parser.add_argument("--max_concurrency", type=int, default=64)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -143,9 +135,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(2, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
-REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(1, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -162,7 +154,7 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 512
+VLLM_MAX_NUM_SEQS = 64
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -252,7 +244,7 @@ if trainer_devices + rollout_devices + reference_devices > jax.device_count():
 
 
 rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-    ROLLOUT_MESH[0], jax.devices()[:rollout_devices], allow_split_physical_axes=True
+    ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
 )
 
 rollout_mesh = jax.sharding.Mesh(
@@ -262,7 +254,7 @@ rollout_mesh = jax.sharding.Mesh(
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
 reference_device_list = jax._src.mesh_utils.create_device_mesh(
-    REFERENCE_MESH[0], jax.devices()[-reference_devices-trainer_devices:-trainer_devices], allow_split_physical_axes=True
+    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
 )
 reference_mesh = jax.sharding.Mesh(
     reference_device_list,
@@ -271,7 +263,7 @@ reference_mesh = jax.sharding.Mesh(
 )
 print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
-    TRAINER_MESH[0], jax.devices()[-trainer_devices:], allow_split_physical_axes=True
+    TRAINER_MESH[0], jax.devices()[-trainer_devices:]
 )
 trainer_mesh = jax.sharding.Mesh(
     trainer_device_list,
@@ -310,7 +302,8 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
-MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+MODEL_VERSION = "google/gemma-4-E4B-it"
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -387,7 +380,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.gemma4_26b_a4b()
+config = model_lib.ModelConfig.gemma4_31b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -398,7 +391,7 @@ if ENABLE_MIX_PRECISION:
 
 from huggingface_hub import snapshot_download
 
-MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
+# MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
 print("MODEL_PATH: ", MODEL_PATH)
 gemma4_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
@@ -437,18 +430,18 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  # gemma4_actor = params_lib.create_model_from_safe_tensors(
-  #     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-  # )
-  graph, state = nnx.split(gemma4_ref)
-  trainer_shardings = jax.tree_util.tree_map(
-    lambda x: jax.sharding.NamedSharding(
-        trainer_mesh,
-        x,
-    ),
-    nnx.get_partition_spec(state),
+  gemma4_actor = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
-  gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+  # graph, state = nnx.split(gemma4_ref)
+  # trainer_shardings = jax.tree_util.tree_map(
+  #   lambda x: jax.sharding.NamedSharding(
+  #       trainer_mesh,
+  #       x,
+  #   ),
+  #   nnx.get_partition_spec(state),
+  # )
+  # gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -494,7 +487,7 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-print("Rollout mesh: ", rollout_mesh)
+print("# Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
 print("Reference mesh: ", reference_mesh)
 
@@ -511,7 +504,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.68,
+    "rollout_vllm_hbm_utilization": 0.7,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -525,6 +518,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
+        "dtype": "bfloat16",
     },
 }
 
@@ -572,7 +566,6 @@ grpo_config = GRPOConfig(
     off_policy_steps=OFF_POLICY_STEPS,
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
-    force_compute_kl=True,
 )
 
 # Perf Metrics logging
@@ -695,8 +688,9 @@ except Exception as e:
 
 import gc
 import jax
+# 1. Force Python garbage collection to release unreferenced device buffers
 gc.collect()
-# Clear JAX compilation and execution caches
+# 2. Clear JAX compilation and execution caches
 jax.clear_caches()
 
 grpo_trainer.train(train_dataset)

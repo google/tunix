@@ -70,7 +70,6 @@ class ShardingConfig:
   # MoE sharding
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
-  router_weight_de: Tuple[str | None, ...]
   # PLE sharding
   per_layer_model_projection: Tuple[str | None, ...]
   per_layer_input_gate: Tuple[str | None, ...]

@@ -75,12 +75,8 @@ with cm:
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
-  from examples.frozenlake.agent import (
-      SYSTEM_PROMPT,
-      MULTI_SHOT_SYSTEM_PROMPT,
-      FrozenLakeAgent,
-  )
-  from examples.frozenlake.env import FrozenLakeEnv
+  from tunix.examples.frozenlake.agent import FrozenLakeAgent
+  from tunix.examples.frozenlake.env import FrozenLakeEnv
 
 try:
   import pathwaysutils
