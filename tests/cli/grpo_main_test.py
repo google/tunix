@@ -557,8 +557,7 @@ vllm_config:
   def test_multi_turn_kv_cache(self):
     p = self._make_agentic_pipeline(max_turns=20, context_ratio=2)
     cfg = p.create_rollout_config()
-    # max_prompt=256, max_response=512, 20 turns * ratio 2
-    self.assertEqual(cfg.kv_cache_size, 256 + 512 * 2 * 20)
+    self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
 
   def test_standard_grpo_kv_cache(self):
     extra = """

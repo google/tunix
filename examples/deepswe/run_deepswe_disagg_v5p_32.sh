@@ -151,7 +151,6 @@ python -m tunix.cli.grpo_main \
   `# ── Agentic / multi-turn ─────────────────────────────────────────────` \
   agentic_grpo_config.max_turns=20 \
   agentic_grpo_config.per_turn_timeout_secs=300 \
-  agentic_grpo_config.context_ratio=2 \
   agentic_grpo_config.max_concurrency=100 \
   \
   `# ── GRPO algorithm ───────────────────────────────────────────────────` \

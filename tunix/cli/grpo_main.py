@@ -70,7 +70,7 @@ class GrpoPipeline(config.HyperParameters):
   GRPOLearner.  Additional config sections are recognised:
 
   * ``agentic_grpo_config``: GRPOConfig fields (num_generations, beta, …)
-    plus ``max_turns``, ``context_ratio``, ``per_turn_timeout_secs``.
+    plus ``max_turns``, ``per_turn_timeout_secs``.
   * role-specific ``*_model_config.mesh``: any role with an explicit mesh gets
     its own device slice; omitted meshes share the actor mesh by default.
   * role-specific ``same_mesh_as``: optional mesh sharing like
@@ -259,8 +259,8 @@ class GrpoPipeline(config.HyperParameters):
     Standard mode: pass rollout_config fields through with kv_cache_size =
     max_prompt_length + total_generation_steps + 256.
 
-    Agentic mode: same base, but multi-turn KV cache =
-    max_prompt + total_generation_steps * context_ratio * max_turns.
+    Agentic mode: same base. Same kv_cache_size calculation. 
+
     Engine-specific extras (sglang_jax_config, vllm_config) are also applied.
     """
     rollout_cfg = self.config["rollout_config"]
@@ -281,12 +281,7 @@ class GrpoPipeline(config.HyperParameters):
 
     if mode == "agentic_grpo":
       agentic_cfg = self.config.get("agentic_grpo_config", {})
-      max_turns = agentic_cfg.get("max_turns", 1)
-      context_ratio = agentic_cfg.get("context_ratio", 1)
-      if max_turns > 1:
-        kv_cache_size = max_prompt + max_response * context_ratio * max_turns
-      else:
-        kv_cache_size = max_prompt + max_response + 256
+      kv_cache_size = max_prompt + max_response + 256
       filtered["kv_cache_size"] = kv_cache_size
       logging.info("kv_cache_size: %d", kv_cache_size)
 
@@ -659,7 +654,6 @@ class GrpoPipeline(config.HyperParameters):
     # Strip helper keys that are not GRPOConfig fields
     valid = {f.name for f in dataclasses.fields(GRPOConfig)}
     cfg.pop("max_turns", None)
-    cfg.pop("context_ratio", None)
     return GRPOConfig(**{k: v for k, v in cfg.items() if k in valid})
 
   def _create_chat_parser(self, tokenizer: Any) -> Any:
@@ -744,7 +738,7 @@ class GrpoPipeline(config.HyperParameters):
     rl_cluster = self.create_rl_cluster(tokenizer)
 
     if mode == "grpo":
-      from tunix.rl.grpo import grpo_learner
+      from tunix.rl.grpo import grpo_learner  # pylint: disable=g-import-not-at-top
 
       grpo_trainer = grpo_learner.GrpoLearner(
           rl_cluster=rl_cluster,
