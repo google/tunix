@@ -363,6 +363,7 @@ def build_flat_dict(
     compiled_mappings.append((src, re.compile(pattern), sharding))
 
   # ITERATE THROUGH ACTUAL PARAMETERS
+  unmapped_paths = []
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
     path = '.'.join(str(key) for key in keys)
@@ -403,8 +404,11 @@ def build_flat_dict(
         mapped = True
         break
     # There are no mappings for rng related params.
-    # if not mapped:
-    #   logging.warning('!!! No mapping for flat state: %s', path)
+    if not mapped:
+      unmapped_paths.append(path)
+
+  if unmapped_paths:
+    logging.warning('!!! No mapping for flat states: %s', unmapped_paths)
 
   # Sort layers based on layer index to ensure correct order.
   for key, (layers, paths, sharding) in new_flat_dict.items():
@@ -508,7 +512,7 @@ def _apply_transpose(
   elif all_key in transpose_keys and 'lora' not in all_key:
     target_key = all_key
   else:
-    for k, v in transpose_keys.items():
+    for k, _ in transpose_keys.items():
       if '*' in k:
         pattern = '^' + re.escape(k).replace('\\*', '.*') + '$'
         if re.match(pattern, all_key):

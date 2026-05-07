@@ -1517,14 +1517,14 @@ class UtilsTest(parameterized.TestCase):
     """Tests that wi_0 and wi_1 are fused into wi when target expects it."""
     wi_0_val = jnp.array([[1.0, 2.0], [5.0, 6.0]], dtype=jnp.float32)
     wi_1_val = jnp.array([[3.0, 4.0], [7.0, 8.0]], dtype=jnp.float32)
-    
+
     src_state = nnx.Dict(
         layers=nnx.Dict(
             wi_0=nnx.Param(wi_0_val),
             wi_1=nnx.Param(wi_1_val),
         )
     )
-    
+
     dst_state = nnx.Dict(
         layers=nnx.Dict(
             wi=nnx.Param(jnp.zeros((2, 4), dtype=jnp.float32))
@@ -1713,7 +1713,6 @@ class UtilsTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         dst_state['layers_1']['weight'][...], scanned[1]
     )
-
 
   def test_transfer_state_directly_fuses_moe_weights_with_padding(self):
     """Tests that wi_0 and wi_1 are fused, padded and interleaved into wi."""

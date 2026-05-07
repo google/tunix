@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 class BackendMappingMixin:

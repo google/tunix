@@ -197,7 +197,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
-    
+
     # Synchronization point before weight sync
     jax.effects_barrier()
 
@@ -206,19 +206,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if preprocess_fn:
         updated_weights = preprocess_fn(updated_weights)
 
-      # Mapped Weight Sync (e.g. Vanilla -> vLLM)
-      # # Save original weights for comparison (only for layer 0 to save memory)
-      # import copy
-      # orig_weights = {}
-      # for keys, param in self.transformer_state.flat_state():
-      #   key = '.'.join(str(k) for k in keys)
-      #   if 'layers.0.' in key:
-      #     orig_weights[key] = copy.deepcopy(param.value)
-
-      # for k, p in orig_weights.items():
-      #   print(f"Original weight {k}: shape={p.shape}")
-      sft_utils.show_hbm_usage(title="Before weight sync....")
-      jax.clear_caches()
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,
@@ -240,25 +227,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           ),
           tp_size=self.args.get("tensor_parallel_size", 1),
       )
-      
-      # # Compare weights
-      # print("Comparing weights before and after update (Layer 0 only):")
-      # updated_keys = set()
-      # for keys, param in self.transformer_state.flat_state():
-      #   key = '.'.join(str(k) for k in keys)
-      #   if 'layers.0.' in key:
-      #     updated_keys.add(key)
-      #     if key in orig_weights:
-      #       if not jax.numpy.allclose(orig_weights[key], param.value, atol=1e-2):
-      #         print(f"Weight changed for {key}")
-      #       else:
-      #         print(f"Weight unchanged for {key}")
-      #     else:
-      #       print(f"New weight {key} (not in original state)")
-            
-      # for key in orig_weights:
-      #   if key not in updated_keys:
-      #     print(f"Weight {key} was removed in update")
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
