@@ -253,13 +253,16 @@ class ORPOTrainerTest(parameterized.TestCase):
         "compute_logps",
         return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps)),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      loss_output = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
           lambda_orpo=0.1,
           label_smoothing=0,
       )
+      loss = loss_output.primary_loss.compute()
+      aux = loss_output.aux_metrics
+
       # Loss should be a scalar and finite
       self.assertEqual(loss.shape, ())
       self.assertTrue(jnp.isfinite(loss))
