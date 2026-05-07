@@ -34,6 +34,7 @@ from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import peft_trainer
 from tunix.sft import profiler
+from tunix.sft import utils
 from tunix.tests import test_common as tc
 from tunix.utils import compat
 
@@ -634,7 +635,67 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
     self.assertEqual(eval_invoke, {'foo': 1, 'bar': 16})
 
+  def test_loss_output_format(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        images: jax.Array | None = None,
+    ) -> utils.LossOutput:
+      del model, input_tokens, input_mask, positions, attention_mask, images
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.array(2.0, dtype=jnp.float32),
+              jnp.array(2.0, dtype=jnp.float32),
+          ),
+          aux_metrics={
+              'foo': utils.WeightedMetric(
+                  jnp.array(10.0, dtype=jnp.float32),
+                  jnp.array(5.0, dtype=jnp.float32),
+              ),
+              'bar': utils.WeightedMetric(
+                  jnp.array(6.0, dtype=jnp.float32),
+                  jnp.array(2.0, dtype=jnp.float32),
+              ),
+          },
+      )
+
+    train_invoke = {'foo': 0.0, 'bar': 0.0}
+    eval_invoke = {'foo': 0.0, 'bar': 0.0}
+
+    class CustomTrainer(peft_trainer.PeftTrainer):
+
+      def _post_process_train_step(self, aux):
+        train_invoke['foo'] += aux['foo']
+        train_invoke['bar'] += aux['bar']
+
+      def _post_process_eval_step(self, aux):
+        eval_invoke['foo'] += aux['foo']
+        eval_invoke['bar'] += aux['bar']
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    trainer = CustomTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(
+        custom_loss_fn
+    )  # Note: has_aux=False is default but LossOutput returns aux natively
+
+    trainer.train(self.train_ds, self.eval_ds)
+    # The dataset provides 2 training steps.
+    # foo = 10.0 / 5.0 = 2.0 per step.
+    # bar = 6.0 / 2.0 = 3.0 per step.
+    self.assertEqual(train_invoke, {'foo': 4.0, 'bar': 6.0})
+
+    # Since eval_ds is length 2, it evaluates at step 2.
+    self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
+
   def test_injected_params(self):
+
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
 
