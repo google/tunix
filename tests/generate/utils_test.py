@@ -45,9 +45,6 @@ class MockState:
     return MockState(new_params)
 
 
-from jax.tree_util import register_pytree_node_class
-
-# @register_pytree_node_class
 class MockParam:
 
   def __init__(self, value):
@@ -64,6 +61,10 @@ class MockParam:
   @property
   def ndim(self):
     return self.value.ndim
+
+  @property
+  def sharding(self):
+    return self.value.sharding
 
   def __getitem__(self, item):
     return self.value[item]
@@ -253,14 +254,14 @@ class UtilsTest(parameterized.TestCase):
     expected_layer_0_weight = jnp.arange(16).reshape(2, 8).T * 2
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["decoder.layer_0.weight"],
+            new_tgt_state.params["decoder.layer_0.weight"].value,
             expected_layer_0_weight,
         )
     )
     expected_layer_1_weight = jnp.arange(16, 32).reshape(2, 8).T
     self.assertTrue(
         jnp.array_equal(
-            new_tgt_state.params["encoder.layer_0.weight"],
+            new_tgt_state.params["encoder.layer_0.weight"].value,
             expected_layer_1_weight,
         )
     )
@@ -424,7 +425,7 @@ class UtilsTest(parameterized.TestCase):
       self.assertEqual(transferred.shape, (vocab_size, embed_dim))
       self.assertTrue(
           jnp.allclose(
-              transferred,
+              transferred.value,
               jnp.full(
                   (vocab_size, embed_dim), layer_idx + 1, dtype=jnp.float32
               ),
@@ -444,7 +445,7 @@ class UtilsTest(parameterized.TestCase):
 
       self.assertEqual(transferred.shape, (batch_size, vocab_size))
       self.assertTrue(
-          jnp.allclose(transferred, expected),
+          jnp.allclose(transferred.value, expected),
           f"Scanned bias layer {layer_idx} mismatch",
       )
 
@@ -454,7 +455,7 @@ class UtilsTest(parameterized.TestCase):
     self.assertEqual(transferred_embedding.shape, (embed_dim, vocab_size))
     self.assertTrue(
         jnp.allclose(
-            transferred_embedding,
+            transferred_embedding.value,
             jnp.full((embed_dim, vocab_size), 99.0, dtype=jnp.float32),
         ),
         "Regular parameter with transpose mismatch",
@@ -490,7 +491,7 @@ class UtilsTest(parameterized.TestCase):
             jnp.zeros((4, 2, 8, 16), dtype=jnp.float32)
         ),
         "model.layers.0.experts.kernel_down_proj_EFD": MockParam(
-            jnp.zeros((4, 8, 16), dtype=jnp.float32)
+            jnp.zeros((4, 16, 8), dtype=jnp.float32)
         ),
     }
     dst_state = MockState(dst_params)
@@ -537,11 +538,10 @@ class UtilsTest(parameterized.TestCase):
         )
     )
 
-    expected_linear = jnp.transpose(src_params["layers.0.moe.linear"].value, (0, 2, 1))
     self.assertTrue(
         jnp.array_equal(
             new_tgt_state.params["model.layers.0.experts.kernel_down_proj_EFD"],
-            expected_linear,
+            src_params["layers.0.moe.linear"].value,
         )
     )
 
@@ -1110,13 +1110,13 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layer.0.weight"].vaule, expected_layer_0
+            new_tgt_state.params["decoder.layer.0.weight"].value, expected_layer_0
         ),
         "Interleaved layer 0 mismatch",
     )
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layer.2.weight"], expected_layer_2
+            new_tgt_state.params["decoder.layer.2.weight"].value, expected_layer_2
         ),
         "Interleaved layer 2 mismatch",
     )
@@ -1124,14 +1124,14 @@ class UtilsTest(parameterized.TestCase):
     # Layers 1 and 3 should remain zero (not mapped)
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layer.1.weight"],
+            new_tgt_state.params["decoder.layer.1.weight"].value,
             jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32),
         ),
         "Non-interleaved layer 1 should be zero",
     )
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layer.3.weight"],
+            new_tgt_state.params["decoder.layer.3.weight"].value,
             jnp.zeros((vocab_size, embed_dim), dtype=jnp.float32),
         ),
         "Non-interleaved layer 3 should be zero",

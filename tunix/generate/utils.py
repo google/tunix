@@ -787,6 +787,8 @@ def transfer_state_with_mappings(
     transpose_keys=None,
     reshard_fn=None,
     rollout_engine=None,
+    delete_dst_buffers=False,
+    reshard_chunk_size=None,
     **kwargs,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
@@ -869,7 +871,19 @@ def transfer_state_with_mappings(
         key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
         for key, tgt_params in tgt_flat_list
     }
-    resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
+    
+    if reshard_chunk_size is not None:
+      resharded_values_flat_dict = _reshard_in_chunks(
+          src_flat=tgt_flat_dict,
+          spec_flat=sharding_dict,
+          reshard_fn=reshard_fn,
+          chunk_size=reshard_chunk_size,
+          delete_spec_buffers=delete_dst_buffers,
+      )
+    else:
+      if delete_dst_buffers:
+        _delete_target_buffers(sharding_dict, tgt_flat_dict)
+      resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
     for tgt_key, tgt_param in tgt_flat_list:
       assert (
@@ -1122,7 +1136,14 @@ def _snapshot_dst_sharding(arr: Any) -> Any:
   `_get_dst_sharding` accepts `NamedSharding` / `SingleDeviceSharding` leaves
   directly, so for those we return the existing sharding object (no rebuild).
   """
+  if isinstance(
+      arr, (jax.sharding.NamedSharding, jax.sharding.SingleDeviceSharding)
+  ):
+    return arr
+
+  assert hasattr(arr, 'sharding'), f'Expected array with sharding, got {type(arr)}'
   s = arr.sharding
+
   if isinstance(
       s, (jax.sharding.NamedSharding, jax.sharding.SingleDeviceSharding)
   ):

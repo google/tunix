@@ -17,6 +17,7 @@
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from tunix.utils import sharding_utils
 
 
 def _renormalization_factor(router_probs: jax.Array, choices: jax.Array):
@@ -95,7 +96,8 @@ class MoERagged(nnx.Module):
     self.router_logits = nnx.Param(
         nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(), (self.features, self.num_experts)
-        )
+        ),
+        sharding=config.shd_config.router_weight_de,
     )
     self.gating_einsum = nnx.Param(
         nnx.initializers.normal(dtype=config.param_dtype)(
@@ -110,10 +112,11 @@ class MoERagged(nnx.Module):
         sharding=config.shd_config.exp_weight_efd,
     )
     self.per_expert_scale = nnx.Param(
-        jnp.ones((self.num_experts,), dtype=config.param_dtype)
+        jnp.ones((self.num_experts,), dtype=config.param_dtype),
+        sharding=('ep',),
     )
     self.router_scale = nnx.Param(
-        jnp.ones((self.features,), dtype=config.param_dtype)
+        jnp.ones((self.features,), dtype=config.param_dtype),
     )
 
   def _router(self, router_logits: jax.Array):

@@ -71,6 +71,8 @@ class VllmConfig:
   data_parallel_size: int = -1
   tensor_parallel_size: int = -1
   expert_parallel_size: int = 1
+  # Default to True to ensure old weights are deleted to free up HBM memory
+  delete_dst_buffers: bool = True
   reshard_chunk_size: Optional[int] = None
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
@@ -216,6 +218,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       # for k, p in orig_weights.items():
       #   print(f"Original weight {k}: shape={p.shape}")
       sft_utils.show_hbm_usage(title="Before weight sync....")
+      jax.clear_caches()
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,
@@ -223,6 +226,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,
           reshard_fn=reshard.reshard_pytree,
+          delete_dst_buffers=self.config.delete_dst_buffers,
+          reshard_chunk_size=self.config.reshard_chunk_size,
           num_kv_heads=(
               None
               if not self._model_runner
@@ -274,7 +279,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           src_state=updated_weights,
           dst_state=self.transformer_state,
           reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
+          delete_dst_buffers=self.config.delete_dst_buffers,
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
     

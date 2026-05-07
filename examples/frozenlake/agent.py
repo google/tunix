@@ -15,9 +15,8 @@ import logging
 import re
 from typing import Any, Optional
 
-from env import FrozenLakeEnv  # noqa: E402
+from tunix.examples.frozenlake.env import FrozenLakeEnv
 
-import copy
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 
@@ -136,7 +135,7 @@ Now it is your turn, please show your thinking process and put the final action 
 
 class FrozenLakeAgent(base_agent.ConversationAgentBase):
   def __init__(self, system_prompt: Optional[str] = None,
-               use_multistep_prompt: bool | None = False):
+               use_multistep_prompt: bool | None = True):
     self.multistep_prompt = use_multistep_prompt
     system_prompt = SYSTEM_PROMPT if not use_multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT
     super().__init__(system_prompt=system_prompt)

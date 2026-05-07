@@ -1,4 +1,3 @@
-# %%
 from pprint import pprint
 import datasets as datasets_lib
 import grain
@@ -62,7 +61,7 @@ except Exception:
   cm = contextlib.nullcontext()
 
   file_open = fsspec.open
-
+  
 with cm:
   from tunix.models.qwen2 import model as qwen2_lib
   from tunix.models.qwen2 import params as qwen2_params_lib
@@ -111,77 +110,15 @@ MODEL_MAPPING = {
     ),
     
 }
-model_version = "google/gemma-4-26B-A4B-it"
+
+import os
+os.environ["TPU_LOG_DIR"] = "~/my_tpu_logs"
+os.environ["SKIP_JAX_PRECOMPILE"] = "True"
+
+
+# model_version = "google/gemma-4-26B-A4B-it"
+model_version = "google/gemma-4-31B-it"
 model_config, model_path = MODEL_MAPPING[model_version]
 
 tokenizer = AutoTokenizer.from_pretrained(model_version)
-
-trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:]).reshape(1, 2), axis_names=["fsdp", "tp"])
-rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:2]).reshape(1, 2), axis_names=["fsdp", "tp"])
-
-print("Loading model from safe tensors...")
-with trainer_mesh:
- trainer_model = gemma4_params_lib.create_model_from_safe_tensors(file_dir=model_path, config=model_config, mesh=trainer_mesh)
-
-from tunix.generate import vllm_sampler   # pylint: disable=g-import-not-at-top
-
-mapping_config = mappings.MappingConfig.build(
-    mapping_obj=None,
-    model=trainer_model,
-    backend="vllm_jax",
-)
-
-# from tunix.sft import utils as sft_utils
-# sft_utils.show_hbm_usage(title="Before creating VLLM sampler")
-sampler_vllm = vllm_sampler.VllmSampler(
-    tokenizer=tokenizer,
-    config=vllm_sampler.VllmConfig(
-        mesh=rollout_mesh,
-        hbm_utilization=0.75,
-        enable_dp_attention=True,
-        init_with_random_weights=False,
-        mapping_config=mapping_config,
-        engine_kwargs={
-            "model": model_version,
-            "max_model_len": 1024,
-            "max_num_seqs": 8,
-            "max_num_batched_tokens": 8 * 1024,
-        },
-    ),
-)
-
-      
-prompts = [[{"role": "user", "content": "which is bigger, 1 or 2"}]]
-sft_utils.show_hbm_usage(title="After weight sync to VLLM sampler")
-out_data = sampler_vllm(
-    input_strings=prompts,
-    max_generation_steps=64,
-    max_prompt_length=256,
-    temperature=0,
-    top_p=1,
-    top_k=None,
-    seed=None,
-    echo=False,
-    pad_output=False,
-)
-print("Output from VLLM sampler: ", out_data)
-
-prompt_tokens = [1, 2, 3, 4, 5]
-completion_tokens = out_data.tokens[0][:22]
-prompt_tokens, completion_tokens, _ = utils.pad_prompt_and_completion(
-    prompt_tokens=prompt_tokens,
-    completion_tokens=completion_tokens,
-    max_prompt_length=256,
-    max_generation_steps=64,
-    pad_id=tokenizer.pad_token_id,
-)
-prompt_tokens = jnp.repeat(jnp.array([prompt_tokens]), 4, axis=0)
-completion_tokens = jnp.repeat(jnp.array([completion_tokens]), 4, axis=0)
-
-ref_logps = rl_cluster.get_ref_per_token_logps(
-    prompt_tokens=prompt_tokens,
-    completion_tokens=completion_tokens,
-    pad_id=tokenizer.pad_token_id,
-    eos_id=tokenizer.eos_token_id,
-)
 

@@ -82,6 +82,14 @@ with cm:
   )
   from examples.frozenlake.env import FrozenLakeEnv
 
+sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
+os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+try:
+  from absl import flags
+  flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
+except Exception:
+  pass
+
 try:
   import pathwaysutils
 
@@ -139,9 +147,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(4, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(8, 4), ("fsdp", "tp")]
-REFERENCE_MESH = [(4, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(2, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -248,7 +256,7 @@ if trainer_devices + rollout_devices + reference_devices > jax.device_count():
 
 
 rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-    ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+    ROLLOUT_MESH[0], jax.devices()[:rollout_devices], allow_split_physical_axes=True
 )
 
 rollout_mesh = jax.sharding.Mesh(
@@ -258,7 +266,7 @@ rollout_mesh = jax.sharding.Mesh(
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
 reference_device_list = jax._src.mesh_utils.create_device_mesh(
-    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
+    REFERENCE_MESH[0], jax.devices()[-reference_devices-trainer_devices:-trainer_devices], allow_split_physical_axes=True
 )
 reference_mesh = jax.sharding.Mesh(
     reference_device_list,
@@ -267,7 +275,7 @@ reference_mesh = jax.sharding.Mesh(
 )
 print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
-    TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+    TRAINER_MESH[0], jax.devices()[-trainer_devices:], allow_split_physical_axes=True
 )
 trainer_mesh = jax.sharding.Mesh(
     trainer_device_list,
@@ -507,7 +515,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.7,
+    "rollout_vllm_hbm_utilization": 0.68,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
