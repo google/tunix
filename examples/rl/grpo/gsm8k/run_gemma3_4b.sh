@@ -45,6 +45,7 @@ python3 -m tunix.cli.grpo_main \
   model_config.model_path="gs://gemma-data/checkpoints/gemma3-4b-it" \
   model_config.model_source="gcs" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma3_4b" \
+  model_config.model_download_path="/tmp/models/gemma-3-4b-it" \
   model_config.mesh.shape="(2,4)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=42 \

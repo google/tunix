@@ -44,6 +44,7 @@ python3 -m tunix.cli.grpo_main \
   model_config.model_id="meta-llama/Llama-3.2-1B-Instruct" \
   model_config.model_source="huggingface" \
   model_config.intermediate_ckpt_dir="/tmp/tunix/experiments/grpo/llama3p2_1b_gsm8k" \
+  model_config.model_download_path="/tmp/models/llama3.2-1b" \
   model_config.mesh.shape="(4,1)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=42 \

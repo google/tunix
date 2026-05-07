@@ -43,6 +43,7 @@ python3 -m tunix.cli.grpo_main \
   model_config.model_name="llama-3.1-8b" \
   model_config.model_id="meta-llama/Llama-3.1-8B" \
   model_config.model_source="huggingface" \
+  model_config.model_download_path="/tmp/models/llama-3.1-8b" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
   model_config.mesh.shape="(2,4)" \
   model_config.mesh.axis_names="('fsdp','tp')" \

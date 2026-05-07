@@ -25,7 +25,7 @@ python3 -m tunix.cli.peft_main \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=0 \
   model_config.use_flash_attn=true \
-  model_config.model_download_path="/tmp/models" \
+  model_config.model_download_path="/tmp/models/qwen2.5-0.5b" \
   tokenizer_config.tokenizer_path="Qwen/Qwen2.5-0.5B"\
   tokenizer_config.tokenizer_type="huggingface" \
   dataset_name="mtnt/en-fr" \

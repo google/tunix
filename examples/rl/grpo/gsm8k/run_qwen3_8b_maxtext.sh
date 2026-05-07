@@ -75,6 +75,7 @@ python -m tunix.cli.grpo_main \
   model_config.rng_seed=42 \
   model_config.model_display=false \
   model_config.remat_config=3 \
+  model_config.model_download_path="/tmp/models/${model_name}" \
   `# -- Maxtext specific configs mapping ---------------------------------` \
   model_config.kwargs.base_emb_dim=4096 \
   model_config.kwargs.sparse_matmul=true \

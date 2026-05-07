@@ -20,6 +20,7 @@ python3 -m tunix.cli.peft_main \
   model_config.model_name="llama3.2-3b" \
   model_config.model_id="meta-llama/Llama-3.2-3B" \
   model_config.model_source="huggingface" \
+  model_config.model_download_path="/tmp/models/llama3.2-3b" \
   model_config.rng_seed=0 \
   model_config.lora_config={} \
   model_config.mesh.shape="(2,2)" \

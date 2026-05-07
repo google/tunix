@@ -74,6 +74,7 @@ python -m tunix.cli.grpo_main \
   model_config.model_name="$model_name" \
   model_config.model_id="$model_id" \
   model_config.model_source="huggingface" \
+  model_config.model_download_path="/tmp/models/${model_name}" \
   model_config.rng_seed=42 \
   model_config.model_display=false \
   model_config.remat_config=3 \

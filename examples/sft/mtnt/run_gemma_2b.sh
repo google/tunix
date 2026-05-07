@@ -21,7 +21,7 @@ python3 -m tunix.cli.peft_main \
   model_config.model_id="gemma_2b" \
   model_config.model_path="google/gemma/flax/2b" \
   model_config.model_source="kaggle" \
-  model_config.model_download_path="/tmp/models" \
+  model_config.model_download_path="/tmp/models/gemma_2b" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/" \
   model_config.mesh.shape="(2,2)" \
   model_config.mesh.axis_names="('fsdp','tp')" \

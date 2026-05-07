@@ -21,6 +21,7 @@ python3 -m tunix.cli.peft_main \
   model_config.model_id="google/gemma-3-4b-pt" \
   model_config.model_path="gs://gemma-data/checkpoints/gemma3-4b-pt" \
   model_config.model_source="gcs" \
+  model_config.model_download_path="/tmp/models/gemma-3-4b-pt" \
   model_config.lora_config={} \
   model_config.mesh.shape="(4,2)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
