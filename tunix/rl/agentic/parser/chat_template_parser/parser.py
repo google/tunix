@@ -17,6 +17,7 @@
 import abc
 import dataclasses
 from typing import Dict, List
+from tunix.utils import token_sanitization
 
 
 dataclass = dataclasses.dataclass
@@ -48,6 +49,11 @@ class BaseChatTemplateParser(ABC):
     self.enable_thinking = enable_thinking
     self.tokens = self._init_tokens()
     self.generation_prompt = self._init_generation_prompt()
+    self._tokens_to_sanitize = {
+        v
+        for v in dataclasses.asdict(self.tokens).values()
+        if isinstance(v, str) and v
+    }
 
   @abstractmethod
   def _init_tokens(self) -> TokenConfig:
@@ -87,6 +93,11 @@ class BaseChatTemplateParser(ABC):
   def _parse_message(self, message: Dict[str, str]) -> str:
     """Parse a single message based on its role."""
     role = message["role"]
+    content = token_sanitization.sanitize_control_tokens(
+        message["content"],
+        extra_tokens=self._tokens_to_sanitize,
+        include_default=not self._tokens_to_sanitize,
+    )
 
     parser_map = {
         "system": self._parse_system,
@@ -98,24 +109,22 @@ class BaseChatTemplateParser(ABC):
     if role not in parser_map:
       raise NotImplementedError(f"Unsupported message role: {role}")
 
-    return parser_map[role](message)
+    return parser_map[role](content)
 
-  def _parse_system(self, message: Dict[str, str]) -> str:
-    return self.tokens.system_token + message["content"] + self.tokens.eot_token
+  def _parse_system(self, content: str) -> str:
+    return self.tokens.system_token + content + self.tokens.eot_token
 
-  def _parse_user(self, message: Dict[str, str]) -> str:
-    return self.tokens.user_token + message["content"] + self.tokens.eot_token
+  def _parse_user(self, content: str) -> str:
+    return self.tokens.user_token + content + self.tokens.eot_token
 
-  def _parse_assistant(self, message: Dict[str, str]) -> str:
-    return (
-        self.tokens.assistant_token + message["content"] + self.tokens.eot_token
-    )
+  def _parse_assistant(self, content: str) -> str:
+    return self.tokens.assistant_token + content + self.tokens.eot_token
 
-  def _parse_tool(self, message: Dict[str, str]) -> str:
+  def _parse_tool(self, content: str) -> str:
     return (
         self.tokens.user_token
         + self.tokens.tool_response_start_token
-        + message["content"]
+        + content
         + self.tokens.tool_response_end_token
         + self.tokens.eot_token
     )
@@ -170,13 +179,9 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
     """Add default system message if first message is not system."""
     if messages[0]["role"] != "system":
-      return self._parse_system({
-          "role": "system",
-          "content": (
-              "You are Qwen, created by Alibaba Cloud. You are a helpful"
-              " assistant."
-          ),
-      })
+      return self._parse_system(
+          "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+      )
     return ""
 
 
@@ -213,13 +218,12 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
         assistant_token="<start_of_turn>model\n",
     )
 
-  def _parse_assistant(self, message: Dict[str, str]) -> str:
-    return self.tokens.assistant_token + message["content"]
+  def _parse_assistant(self, content: str) -> str:
+    return self.tokens.assistant_token + content
 
-  def _parse_system(self, message: Dict[str, str]) -> str:
+  def _parse_system(self, content: str) -> str:
     # This should not be called if parse() is used, as it handles the system
     # prompt by merging it. Raise error for unexpected system messages.
-    del message  # Unused.
     raise ValueError(
         "Gemma models do not support system messages directly. The system"
         " prompt should be the first message and is handled by merging with"

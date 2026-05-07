@@ -18,6 +18,8 @@ import os
 import datasets as hf_datasets
 import grain
 import tensorflow_datasets as tfds
+from tunix.utils import token_sanitization
+
 # For OSS usage
 import tensorflow_datasets.text.gsm8k
 
@@ -77,9 +79,10 @@ def apply_template(
       if isinstance(value, bytes):
         item[key] = value.decode("utf-8")
 
+    question = token_sanitization.sanitize_control_tokens(item["question"])
     return {
-        "prompts": _apply_template(item["question"]),
-        "question": item["question"],
+        "prompts": _apply_template(question),
+        "question": question,
         "answer": extract_hash_answer(item["answer"]),
     }
 
