@@ -211,6 +211,17 @@ grpo_config:
   # stable updates.
   epsilon: 0.2
 
+  # The advantage estimator to use. Supported values: "grpo", "rloo", "drgrpo".
+  # - "grpo": Group-mean baseline (default).
+  # - "rloo": Leave-one-out baseline for lower variance.
+  # - "drgrpo": Dr.GRPO advantage without centering/normalization.
+  # advantage_estimator: grpo
+
+  # The loss aggregation mode. Supported values:
+  # "sequence-mean-token-mean" (default), "token-mean",
+  # "sequence-mean-token-scale", "sequence-mean-token-sum-norm".
+  # loss_agg_mode: sequence-mean-token-mean
+
 
 ############################### Rollout Config ###############################
 rollout_config:

@@ -54,7 +54,6 @@ from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 
-
 _PATHWAYS_BNS = flags.DEFINE_string(
     "pathways_bns", None, "BNS address of the Pathways server."
 )
@@ -744,13 +743,7 @@ class GrpoPipeline(config.HyperParameters):
     rl_cluster = self.create_rl_cluster(tokenizer)
 
     if mode == "grpo":
-      from tunix.rl.grpo import grpo_learner
-
-      grpo_trainer = grpo_learner.GrpoLearner(
-          rl_cluster=rl_cluster,
-          reward_fns=self.obtain_reward_fn(),
-          algo_config=grpo_learner.GrpoConfig(**self.config["grpo_config"]),
-      )
+      grpo_trainer = self._create_grpo_learner(rl_cluster)
       grpo_trainer.train(dataset)
       return
 
@@ -788,6 +781,62 @@ class GrpoPipeline(config.HyperParameters):
 
     logging.info("Starting agentic GRPO training...")
     GRPOLearner(**learner_kwargs).train(dataset)
+
+  # ------------------------------------------------------------------
+  # Standard GRPO learner factory
+  # ------------------------------------------------------------------
+
+  # Maps advantage_estimator -> (module path, config class name, learner class
+  # name). Each entry resolves to a learner that shares the standard GRPO
+  # training loop but plugs in a different advantage estimator.
+  _STANDARD_GRPO_LEARNERS: dict[str, tuple[str, str, str]] = {
+      "grpo": ("tunix.rl.grpo.grpo_learner", "GrpoConfig", "GrpoLearner"),
+      "rloo": ("tunix.rl.grpo.rloo_learner", "RLOOConfig", "RLOOLearner"),
+      "drgrpo": (
+          "tunix.rl.grpo.drgrpo_learner",
+          "DrGRPOConfig",
+          "DrGRPOLearner",
+      ),
+  }
+
+  def _create_grpo_learner(self, rl_cluster: rl_cluster_lib.RLCluster):
+    """Build a standard GRPO learner based on ``grpo_config``.
+
+    The learner is selected by ``grpo_config.advantage_estimator``:
+
+    * ``"grpo"`` (default) — group-mean baseline.
+    * ``"rloo"`` — REINFORCE leave-one-out baseline (lower variance).
+    * ``"drgrpo"`` — Dr.GRPO (no centering/normalization).
+
+    Raises:
+      ValueError: if ``advantage_estimator`` is unknown.
+    """
+    grpo_config = dict(self.config["grpo_config"])
+    advantage_estimator = grpo_config.get("advantage_estimator", "grpo")
+
+    entry = self._STANDARD_GRPO_LEARNERS.get(advantage_estimator)
+    if entry is None:
+      supported = sorted(self._STANDARD_GRPO_LEARNERS)
+      raise ValueError(
+          f"Unsupported advantage_estimator {advantage_estimator!r} for"
+          f" training_mode='grpo'. Supported values: {supported}."
+      )
+    module_path, config_cls_name, learner_cls_name = entry
+    module = importlib.import_module(module_path)
+    config_cls = getattr(module, config_cls_name)
+    learner_cls = getattr(module, learner_cls_name)
+
+    # Subclass configs (RLOOConfig, DrGRPOConfig) declare ``algo_variant`` and
+    # ``advantage_estimator`` as init=False fields, so they cannot be passed via
+    # kwargs from YAML. Strip them before constructing the config.
+    init_fields = {f.name for f in dataclasses.fields(config_cls) if f.init}
+    config_kwargs = {k: v for k, v in grpo_config.items() if k in init_fields}
+
+    return learner_cls(
+        rl_cluster=rl_cluster,
+        reward_fns=self.obtain_reward_fn(),
+        algo_config=config_cls(**config_kwargs),
+    )
 
   # ------------------------------------------------------------------
   # Dispatcher
