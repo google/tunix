@@ -524,6 +524,12 @@ def aggregate_loss(
         norm, min=1e-6
     )
     loss = seq_loss.sum() / non_zero_rows
+  elif loss_agg_mode == "seq-mean-token-sum":
+    # 1) sum token losses within each sequence
+    # 2) average only across sequences that have at least one valid token
+    seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
+    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+    loss = (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
     # Get custom normalization factor from kwargs, default to number of
     # non-empty rows.
@@ -536,7 +542,8 @@ def aggregate_loss(
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
         " 'token-mean', 'sequence-mean-token-mean',"
-        " 'sequence-mean-token-scale', 'sequence-mean-token-sum-norm'."
+        " 'sequence-mean-token-scale', 'seq-mean-token-sum',"
+        " 'sequence-mean-token-sum-norm'."
     )
   return loss
 

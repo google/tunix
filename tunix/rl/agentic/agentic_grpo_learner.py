@@ -69,7 +69,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     policy_loss_fn: Name of the policy loss function.
     loss_agg_mode: Method for aggregating the loss. Supported values:
       "token-mean", "sequence-mean-token-mean", "sequence-mean-token-scale",
-      "sequence-mean-token-sum-norm".
+      "seq-mean-token-sum", "sequence-mean-token-sum-norm".
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
@@ -630,7 +630,6 @@ def grpo_loss_fn(
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
-
   if train_example.old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:

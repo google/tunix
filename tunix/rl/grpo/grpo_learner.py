@@ -50,8 +50,10 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
     algo_variant: The algorithm variant to use. Default: `grpo`.
     advantage_estimator: The advantage estimator to use. Default: `grpo`.
     policy_loss_fn: The policy loss function to use. Default: `grpo`.
-    loss_agg_mode: The aggregation mode for the loss function. Default:
-      `sequence-mean-token-mean`.
+    loss_agg_mode: The aggregation mode for the loss function. Supported values
+      include `token-mean`, `sequence-mean-token-mean`,
+      `sequence-mean-token-scale`, `seq-mean-token-sum`, and
+      `sequence-mean-token-sum-norm`. Default: `sequence-mean-token-mean`.
     reward_manager: The reward manager to use. Default: `sequence-level`.
     loss_algo: The loss algorithm to use. To be deprecated.
     num_generations: The number of times the policy generates multiple responses
