@@ -58,8 +58,8 @@ except:
   cm = contextlib.nullcontext()
 
 with cm:
-  from tunix.models.gemma4 import params_safetensors as params_lib
-  from tunix.models.gemma4 import model as model_lib
+  from tunix.models.qwen2 import model as  qwen2_model_lib
+  from tunix.models.qwen2 import params as qwen2_params_lib
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
@@ -75,8 +75,8 @@ with cm:
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
-  from tunix.examples.frozenlake.agent import FrozenLakeAgent
-  from tunix.examples.frozenlake.env import FrozenLakeEnv
+  from examples.frozenlake.agent import FrozenLakeAgent
+  from examples.frozenlake.env import FrozenLakeEnv
 
 try:
   import pathwaysutils
@@ -96,19 +96,19 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=16)
-arg_parser.add_argument("--mini_batch_size", type=int, default=16)
+arg_parser.add_argument("--batch_size", type=int, default=2)
+arg_parser.add_argument("--mini_batch_size", type=int, default=2)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=150)
-arg_parser.add_argument("--num_generations", type=int, default=1)
+arg_parser.add_argument("--num_batches", type=int, default=5)
+arg_parser.add_argument("--num_generations", type=int, default=2)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
-arg_parser.add_argument("--max_response_length", type=int, default=2048)
+arg_parser.add_argument("--max_prompt_length", type=int, default=128)
+arg_parser.add_argument("--max_response_length", type=int, default=1024)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
@@ -232,9 +232,11 @@ ROLLOUT_ENGINE = os.getenv(
 )  # one of "vanilla", "vllm" 
 
 
+jax.clear_caches()
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
-reference_devices = math.prod(REFERENCE_MESH[0])
+# reference_devices = math.prod(REFERENCE_MESH[0])
+reference_devices = 0
 
 if trainer_devices + rollout_devices + reference_devices > jax.device_count():
   raise ValueError(
@@ -253,15 +255,15 @@ rollout_mesh = jax.sharding.Mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
-reference_device_list = jax._src.mesh_utils.create_device_mesh(
-    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
-)
-reference_mesh = jax.sharding.Mesh(
-    reference_device_list,
-    axis_names=REFERENCE_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
-)
-print(f"{reference_device_list=} {reference_mesh.devices=}")
+# reference_device_list = jax._src.mesh_utils.create_device_mesh(
+#     REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
+# )
+# reference_mesh = jax.sharding.Mesh(
+#     reference_device_list,
+#     axis_names=REFERENCE_MESH[1],
+#     axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
+# )
+# print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
     TRAINER_MESH[0], jax.devices()[-trainer_devices:]
 )
@@ -302,8 +304,11 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
-MODEL_VERSION = "google/gemma-4-E4B-it"
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
+# MODEL_VERSION = "google/gemma-4-E4B-it"
+# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
+
+MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -380,76 +385,43 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.gemma4_31b()
+config = qwen2_model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
-if ENABLE_FLASH_ATTENTION:
-  config.use_flash_attention = True
-  config.flash_attention_block_size = 256
+  config.remat_config = qwen2_model_lib.RematConfig.DECODER
+# if ENABLE_FLASH_ATTENTION:
+#   config.use_flash_attention = True
+#   config.flash_attention_block_size = 256
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
-from huggingface_hub import snapshot_download
+# from huggingface_hub import snapshot_download
 
 # MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/snapshots/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
 print("MODEL_PATH: ", MODEL_PATH)
-gemma4_ref = params_lib.create_model_from_safe_tensors(
+reference_mesh = trainer_mesh 
+qwen2_ref = qwen2_params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
 )
-
 # %%
 show_hbm_usage("after loading gemma4_ref")
 
 
-# %%
-def get_lora_model(base_model, model_mesh):
-  lora_provider = qwix.LoraProvider(
-      module_path=(
-          ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
-          ".*attn_vec_einsum"
-      ),
-      rank=RANK,
-      alpha=ALPHA,
-  )
-
-  model_input = base_model.get_model_input()
-  lora_model = qwix.apply_lora_to_model(
-      base_model, lora_provider, **model_input
-  )
-
-  with compat.set_mesh(model_mesh):
-    state = nnx.state(lora_model)
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    nnx.update(lora_model, sharded_state)
-
-  return lora_model
-
-
-# %%
-if TRAIN_WITH_LORA:
-  gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
-else:
-  gemma4_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-  )
-  # graph, state = nnx.split(gemma4_ref)
-  # trainer_shardings = jax.tree_util.tree_map(
-  #   lambda x: jax.sharding.NamedSharding(
-  #       trainer_mesh,
-  #       x,
-  #   ),
-  #   nnx.get_partition_spec(state),
-  # )
-  # gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+qwen2_actor = qwen2_params_lib.create_model_from_safe_tensors(
+    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+)
+# graph, state = nnx.split(gemma4_ref)
+# trainer_shardings = jax.tree_util.tree_map(
+#   lambda x: jax.sharding.NamedSharding(
+#       trainer_mesh,
+#       x,
+#   ),
+#   nnx.get_partition_spec(state),
+# )
+# gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
-
-# %%
-ModelAgent = model_agent.ModelAgent
-TaskEnvironment = task_environment.TaskEnvironment
-TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 
 # %%
 # Ckpt saving
@@ -459,6 +431,7 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 
 # Metrics logger
 import wandb
+wandb.login() 
 wandb_config = vars(args)
 wandb_config.update({
     "WARMUP_STEPS": WARMUP_STEPS,
@@ -548,8 +521,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -566,6 +539,7 @@ grpo_config = GRPOConfig(
     off_policy_steps=OFF_POLICY_STEPS,
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
+    force_compute_kl=True,
 )
 
 # Perf Metrics logging
@@ -579,47 +553,14 @@ perf_metrics_config = PerfMetricsConfig(
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=gemma4_actor,
-    reference=gemma4_ref,
+    actor=qwen2_actor,
+    reference=qwen2_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
     perf_config=perf_metrics_config,
 )
 
 show_hbm_usage("after RLCluster creation")
-
-
-def length_penalty_reward_fn(
-    prompts: List[str], 
-    completions: List[str], 
-    trajectory_rewards: List[float], 
-    **kwargs
-) -> List[float]:
-  """Computes a group-relative length penalty inspired by Kimi 1.5.
-  
-  Promotes shorter successful paths and penalizes longer ones, 
-  while strictly penalizing long, unsuccessful paths.
-  """
-  lengths = np.array([len(c) for c in completions])
-  
-  min_len = np.min(lengths)
-  max_len = np.max(lengths)
-  
-  rewards = np.zeros_like(lengths, dtype=np.float32)
-  if max_len == min_len:
-    return list(rewards)
-  
-  lambdas = 0.5 - (lengths - min_len) / (max_len - min_len)
-  
-  for i in range(len(completions)):
-    is_correct = trajectory_rewards[i] > 0.1
-    if is_correct:
-      rewards[i] = lambdas[i]
-    else:
-      rewards[i] = min(0.0, lambdas[i])
-  
-  weight = 0.1
-  return list(rewards * weight)
 
 
 # %%
@@ -661,36 +602,5 @@ grpo_trainer = GRPOLearner(
     metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
-
-# %%
-try:
-  print("Defragmenting JAX/XLA memory before training...")
-  backend = None
-  try:
-    import jax.extend.backend as jax_backend
-    backend = jax_backend.get_backend()
-  except:
-    try:
-      backend = jax.devices()[0].client
-    except:
-      try:
-        from jax._src.lib import xla_bridge
-        backend = xla_bridge.get_backend()
-      except:
-        pass
-  if backend is not None and hasattr(backend, 'defragment'):
-    backend.defragment()
-    print("Defragmentation successful!")
-  else:
-    print("Defragmentation skipped: backend has no defragment attribute or could not be resolved.")
-except Exception as e:
-  print(f"Defragmentation failed: {e}")
-
-import gc
-import jax
-# 1. Force Python garbage collection to release unreferenced device buffers
-gc.collect()
-# 2. Clear JAX compilation and execution caches
-jax.clear_caches()
 
 grpo_trainer.train(train_dataset)

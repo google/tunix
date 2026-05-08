@@ -429,6 +429,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=None,
+            completion_mask=completion_mask,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
@@ -506,6 +507,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             clipped_completion_count / len(trajectories),
             np.mean,
         ),
+        "advantage/mean": (np.mean(advantages), np.mean),
+        "advantage/max": (np.max(advantages), np.max),
+        "advantage/min": (np.min(advantages), np.min),
+        "advantage/std": (np.std(advantages), np.mean),
     }
 
     # Extract time metrics (env_time and reward_time)

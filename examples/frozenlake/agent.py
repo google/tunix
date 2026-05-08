@@ -15,7 +15,7 @@ import logging
 import re
 from typing import Any, Optional
 
-from tunix.examples.frozenlake.env import FrozenLakeEnv
+from examples.frozenlake.env import FrozenLakeEnv
 
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
