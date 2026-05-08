@@ -28,9 +28,14 @@ from tunix.rl import reshard
 _DEFAULT_TOKENIZER_PATH = 'meta-llama/Llama-3.1-8B'
 
 
-def apply_lora_to_model(base_model, mesh, lora_config):
+def _describe_model_target(model_label: str | None) -> str:
+  return f'{model_label} model' if model_label else 'model'
+
+
+def apply_lora_to_model(base_model, mesh, lora_config, model_label: str | None = None):
   """Apply Lora to the base model if given lora config."""
   logging.info('lora_config %r', lora_config)
+  logging.info('Applying LoRA to %s', _describe_model_target(model_label))
   # Basic keyword arguments for LoraProvider
   lora_kwargs = {
       'module_path': lora_config['module_path'],
@@ -87,6 +92,7 @@ def create_model(
     model_config: dict[str, Any],
     tokenizer_config: dict[str, Any],
     mesh: jax.sharding.Mesh,
+    model_label: str | None = None,
 ) -> Tuple[nnx.Module, str]:
   """Creates a model and determines the tokenizer path based on the model config.
 
@@ -100,6 +106,7 @@ def create_model(
       tokenizer_config: A dictionary containing tokenizer configuration,
         including 'tokenizer_path'.
       mesh: The JAX sharding Mesh object.
+      model_label: Optional human-readable label used in logs.
 
   Returns:
       A tuple containing:
@@ -151,9 +158,14 @@ def create_model(
 
   if model_config.get('lora_config'):
     # Apply Lora to model if given lora config
-    model = apply_lora_to_model(model, mesh, model_config['lora_config'])
+    model = apply_lora_to_model(
+        model, mesh, model_config['lora_config'], model_label=model_label
+    )
   else:
-    logging.info('Training with Full Weight')
+    logging.info(
+        'Loading %s with full weights',
+        _describe_model_target(model_label),
+    )
 
   if model_config['model_display']:
     nnx.display(model)

@@ -261,6 +261,9 @@ class GrpoPipeline(config.HyperParameters):
     max_prompt = rollout_cfg.get("max_prompt_length", 0)
     max_response = rollout_cfg.get("total_generation_steps", 0)
 
+    kv_cache_size = 0
+    max_concurrency = 0
+
     if mode == "agentic_grpo":
       agentic_cfg = self._config_mapping("agentic_grpo_config")
       kv_cache_size = max_prompt + max_response + 256
@@ -268,25 +271,31 @@ class GrpoPipeline(config.HyperParameters):
       logging.info("kv_cache_size: %d", kv_cache_size)
 
       # Engine-specific extras
-      extra = self._agentic_engine_extra(
-          engine,
-          kv_cache_size,
-          agentic_cfg,
-          role_to_mesh=role_to_mesh,
-      )
-      filtered.update({k: v for k, v in extra.items() if k in valid_fields})
+      max_running_requests = agentic_cfg.get("max_concurrency", 16)
     else:
       # Standard: kv_cache_size = max_prompt + max_response + 256
       if max_prompt and max_response:
-        filtered["kv_cache_size"] = max_prompt + max_response + 256
+        kv_cache_size = max_prompt + max_response + 256
+        filtered["kv_cache_size"] = kv_cache_size
+      # Defaults to global batch size * num_generations to allow full concurrency
+      max_running_requests = self.config.get("batch_size", 1) * self.config.get("grpo_config", {}).get("num_generations", 1)
+
+    # Engine-specific extras
+    extra = self._rollout_engine_extra(
+        engine,
+        kv_cache_size,
+        max_running_requests,
+        role_to_mesh=role_to_mesh,
+    )
+    filtered.update({k: v for k, v in extra.items() if k in valid_fields})
 
     return base_rollout.RolloutConfig(**filtered)
 
-  def _agentic_engine_extra(
+  def _rollout_engine_extra(
       self,
       engine: str,
       kv_cache_size: int,
-      agentic_cfg: dict,
+      max_running_requests: int,
       role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
   ) -> dict:
     """Return engine-specific RolloutConfig fields for agentic mode."""
@@ -313,7 +322,7 @@ class GrpoPipeline(config.HyperParameters):
           ),
           rollout_sglang_jax_max_running_requests=sg.get(
               "max_running_requests",
-              agentic_cfg.get("max_concurrency", 768),
+              max_running_requests,
           ),
           rollout_sglang_jax_page_size=sg.get("page_size", 128),
           rollout_sglang_jax_use_sort_for_toppk_minp=sg.get(
@@ -459,17 +468,20 @@ class GrpoPipeline(config.HyperParameters):
       )
       del reference_model_config["lora_config"]
     reference_model, tokenizer_path = model_lib.create_model(
-      dict(reference_model_config),
+        dict(reference_model_config),
         tokenizer_config,
         role_to_mesh[rl_cluster_lib.Role.REFERENCE],
+        model_label="reference",
     )
     if actor_model_config.get("lora_config", None):
       actor_model = model_lib.apply_lora_to_model(
           reference_model,
           role_to_mesh[rl_cluster_lib.Role.ACTOR],
           actor_model_config["lora_config"],
+          model_label="actor",
       )
     else:
+      logging.info("Loading actor model with full weights")
       graph_def, params = nnx.split(reference_model)
       actor_model = nnx.merge(
           graph_def,
