@@ -1,26 +1,9 @@
-# Copyright 2025 Model AI Corp.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-import logging
 import re
 from typing import Any, Optional
 
 from examples.frozenlake.env import FrozenLakeEnv
-
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
-
-logger = logging.getLogger(__name__)
 
 # Prompting format inspired by the RAGEN project: https://github.com/RAGEN-AI/RAGEN
 SYSTEM_PROMPT: str = """You are walking on a frozen lake.
@@ -134,10 +117,18 @@ Now it is your turn, please show your thinking process and put the final action 
 
 
 class FrozenLakeAgent(base_agent.ConversationAgentBase):
-  def __init__(self, system_prompt: Optional[str] = None,
-               use_multistep_prompt: bool | None = True):
+
+  def __init__(
+      self,
+      system_prompt: Optional[str] = None,
+      use_multistep_prompt: bool | None = True,
+  ):
     self.multistep_prompt = use_multistep_prompt
-    system_prompt = SYSTEM_PROMPT if not use_multistep_prompt else MULTI_SHOT_SYSTEM_PROMPT
+    system_prompt = (
+        SYSTEM_PROMPT
+        if not self.multistep_prompt
+        else MULTI_SHOT_SYSTEM_PROMPT
+    )
     super().__init__(system_prompt=system_prompt)
     self.last_observation = None
 
@@ -151,7 +142,6 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
       system_prompt: The system prompt to use.
     """
     self._messages = [{"role": "system", "content": system_prompt or ""}]
-
 
   def update_from_env(
     self,
@@ -174,8 +164,6 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
 
     super().update_from_env(new_obs_str, reward, done, info)
     self.cur_step = agent_types.Step(observation=new_obs_str)
-    if done: 
-      print(f"Episode done, steps: {self.step}, final observation: {new_obs_str}")
 
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]

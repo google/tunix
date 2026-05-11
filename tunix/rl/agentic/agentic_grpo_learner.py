@@ -249,6 +249,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
         "kl_loss": np.mean,
+        "kl_loss": np.mean,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl"
@@ -512,10 +513,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             clipped_completion_count / len(trajectories),
             np.mean,
         ),
-        "advantage/mean": (np.mean(advantages), np.mean),
-        "advantage/max": (np.max(advantages), np.max),
-        "advantage/min": (np.min(advantages), np.min),
-        "advantage/std": (np.std(advantages), np.mean),
+        "rewards/advantage/mean": (np.mean(advantages), np.mean),
+        "rewards/advantage/max": (np.max(advantages), np.max),
+        "rewards/advantage/min": (np.min(advantages), np.min),
+        "rewards/advantage/std": (np.std(advantages), np.mean),
     }
 
     # Extract time metrics (env_time and reward_time)

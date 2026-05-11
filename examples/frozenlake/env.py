@@ -1,32 +1,21 @@
-# Copyright 2025 Model AI Corp.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# DISCLAIMER:
-# This implementation is based on the Gymnasium FrozenLake environment and the RAGEN project:
-# - Gymnasium: https://gymnasium.farama.org/environments/toy_text/frozen_lake/
-# - RAGEN: https://github.com/RAGEN-AI/RAGEN/blob/main/ragen/env/frozen_lake/env.py
-#
-# Some components have been modified or extended for custom use in this project.
+"""DISCLAIMER:
+
+This implementation is based on the Gymnasium FrozenLake environment and the
+RAGEN project:
+- Gymnasium: https://gymnasium.farama.org/environments/toy_text/frozen_lake/
+- RAGEN:
+https://github.com/RAGEN-AI/RAGEN/blob/main/ragen/env/frozen_lake/env.py
+
+ Some components have been modified or extended for custom use in this project.
+"""
 
 import copy
 from typing import Any, Dict
 from absl import logging
-
 import gymnasium as gym
-import numpy as np
 from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv as GymFrozenLakeEnv
 from gymnasium.utils import seeding
-
+import numpy as np
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
 
 MAX_STEPS: int = 5
@@ -59,14 +48,18 @@ def is_valid(board: list[list[str]], max_size: int) -> bool:
   return False
 
 
-def generate_random_map(size: int = 8, p: float = 0.8, seed: int = 0) -> tuple[list[str], tuple[int, int]]:
+def generate_random_map(
+    size: int = 8, p: float = 0.8, seed: int = 0
+) -> tuple[list[str], tuple[int, int]]:
   """Generates a random valid map (one that has a path from start to goal)
-    Args:
-      size: size of each side of the grid
-      p: probability that a tile is frozen
-      seed: seed to ensure the generation of reproducible maps
-    Returns:
-      A random valid map
+
+  Args:
+    size: size of each side of the grid
+    p: probability that a tile is frozen
+    seed: seed to ensure the generation of reproducible maps
+
+  Returns:
+    A random valid map
   """
   valid = False
   board: list[list[str]] = []  # initialize to make pyright happy
@@ -74,6 +67,7 @@ def generate_random_map(size: int = 8, p: float = 0.8, seed: int = 0) -> tuple[l
   np_random, _ = seeding.np_random(seed)
 
   # generate random start and end points
+  goal_r, goal_c = -1, -1
   while not valid:
     p = min(1, p)
     board = np_random.choice(["F", "H"], (size, size), p=[p, 1 - p]).tolist()
@@ -99,76 +93,84 @@ def get_goal_position(random_map):
 
 
 class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
-  """
-    Inherits from gymnasium.envs.toy_text.frozen_lake.FrozenLakeEnv
+  """Inherits from gymnasium.envs.toy_text.frozen_lake.FrozenLakeEnv
 
-    ## Description
-    The game starts with the player at random location of the frozen lake grid world with the
-    goal located at another random location for the 4x4 environment.
+  ## Description
+  The game starts with the player at random location of the frozen lake grid
+  world with the
+  goal located at another random location for the 4x4 environment.
 
-    ## Action Space
-    The action shape is `(1,)` in the range `{0, 3}` indicating
-    which direction to move the player.
-    NOTE the action space is different from gymnasium.envs.toy_text.frozen_lake.FrozenLakeEnv, start from 1
-    - 0: Still
-    - 1: Left
-    - 2: Down
-    - 3: Right
-    - 4: Up
+  ## Action Space
+  The action shape is `(1,)` in the range `{0, 3}` indicating
+  which direction to move the player.
+  NOTE the action space is different from
+  gymnasium.envs.toy_text.frozen_lake.FrozenLakeEnv, start from 1
+  - 0: Still
+  - 1: Left
+  - 2: Down
+  - 3: Right
+  - 4: Up
 
-    ## Starting State
-    The episode starts with the player at random location
+  ## Starting State
+  The episode starts with the player at random location
 
-    ## Rewards
-    NOTE added -0.1 as penalty for invalid action
-    Reward schedule:
-    - Reach goal: +1
-    - Reach hole: 0
-    - Reach frozen: 0
+  ## Rewards
+  NOTE added -0.1 as penalty for invalid action
+  Reward schedule:
+  - Reach goal: +1
+  - Reach hole: 0
+  - Reach frozen: 0
 
-    ## Arguments
-    `is_slippery`: if action is left and is_slippery is True, then:
-    - P(move left)=1/3
-    - P(move up)=1/3
-    - P(move down)=1/3
+  ## Arguments
+  `is_slippery`: if action is left and is_slippery is True, then:
+  - P(move left)=1/3
+  - P(move up)=1/3
+  - P(move down)=1/3
 
-    ## Example
-    P   _   _   _
-    _   _   _   O
-    O   _   O   _
-    O   _   _   G
+  ## Example
+  P   _   _   _
+  _   _   _   O
+  O   _   O   _
+  O   _   _   G
   """
 
   # Map gym state in integer
   MAP_LOOKUP = {
-    b"P": 0,
-    b"F": 1,
-    b"H": 2,
-    b"G": 3,
+      b"P": 0,
+      b"F": 1,
+      b"H": 2,
+      b"G": 3,
   }
 
   # Define rules to transform to rendered text observation of the environment
   GRID_LOOKUP = {
-    0: " P \t",  # player
-    1: " _ \t",  # frozen
-    2: " O \t",  # hole
-    3: " G \t",  # goal
-    4: " X \t",  # player fall into hole
-    5: " √ \t",  # player on goal
+      0: " P \t",  # player
+      1: " _ \t",  # frozen
+      2: " O \t",  # hole
+      3: " G \t",  # goal
+      4: " X \t",  # player fall into hole
+      5: " √ \t",  # player on goal
   }
 
   ACTION_LOOKUP = {
-    0: "None",
-    1: "Left",
-    2: "Down",
-    3: "Right",
-    4: "Up",
+      0: "None",
+      1: "Left",
+      2: "Down",
+      3: "Right",
+      4: "Up",
   }
 
   INVALID_ACTION = 0
   PENALTY_FOR_INVALID = -1
 
-  def __init__(self, entry: dict, group_id: int | None = None, pair_index: int | None = None, max_steps: int = 5, **kwargs):
+  def __init__(
+      self,
+      entry: dict[str, Any],
+      group_id: int | None = None,
+      pair_index: int | None = None,
+      max_steps: int = 5,
+      **kwargs,
+  ):
     global MAX_STEPS
     MAX_STEPS = max_steps
 
@@ -178,9 +180,10 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
     self.size = entry["size"].item() if "size" in entry else 8
     self.p = entry["p"].item() if "p" in entry else 0.8
 
-  
     if desc is None:
-      random_map, goal_position = generate_random_map(size=self.size, p=self.p, seed=self.seed)
+      random_map, goal_position = generate_random_map(
+          size=self.size, p=self.p, seed=self.seed
+      )
     else:
       random_map = np.asarray(copy.deepcopy(desc), dtype="c")
       goal_position = get_goal_position(random_map)
@@ -193,19 +196,19 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
     self.ACTION_SPACE = gym.spaces.Discrete(4, start=1)
 
     self.map_kwargs = {
-      "size": self.size,
-      "p": self.p,
+        "size": self.size,
+        "p": self.p,
     }
     self.env_kwargs = {
-      "is_slippery": is_slippery,
-      "desc": copy.deepcopy(desc),
-      "seed": self.seed,
+        "is_slippery": is_slippery,
+        "desc": copy.deepcopy(desc),
+        "seed": self.seed,
     }
     self.action_map = {
-      1: 0,
-      2: 1,
-      3: 2,
-      4: 3,
+        1: 0,
+        2: 1,
+        3: 2,
+        4: 3,
     }
 
     self.reward = 0
@@ -215,7 +218,6 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
       self.extra_kwargs = {}
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
-    # print(f"env extra_kwargs: {self.extra_kwargs = }")
 
   def _get_player_position(self):
     return (self.s // self.ncol, self.s % self.ncol)
@@ -225,7 +227,6 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
     self.reward = 0
     self._valid_actions = []
     init_observation = self.render(mode="tiny_rgb_array")
-    logging.info(f"reset initial observation: {init_observation}")
     return init_observation
 
   def finished(self):
@@ -233,58 +234,53 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
     return self.desc[player_pos] in b"GH"
 
   def success(self):
-    """
-      Check if the agent has reacched the goal (G) or hole (H)
-      """
+    """Check if the agent has reacched the goal (G) or hole (H)"""
     player_pos = self._get_player_position()
     return self.desc[player_pos] in b"G"
 
-
-  def step(self, action: Any) -> tuple[Any, float, bool, Dict[str, Any]]:
-    # print(f"frozenlake env action: {action}")
+  def step(self, action: Any) -> tuple[Any, float, bool, Dict[str, Any]]:  # type: ignore[signature-mismatch]
     return BaseTaskEnv.step(self, action)
- 
 
   def _step_impl(self, action: Any) -> EnvStepResult:
-    """
-      - Map custom action to gymnasium FrozenLakeEnv action and take the step
-      - Check if the action is effective (whether player moves in the env).
+    """- Map custom action to gymnasium FrozenLakeEnv action and take the step
+
+    - Check if the action is effective (whether player moves in the env).
     """
     if self.success():
       return EnvStepResult(
-        observation=self.render(),
-        reward=1.0,
-        done=True,
-        info={"action_is_effective": False},
+          observation=self.render(),
+          reward=1.0,
+          done=True,
+          info={"action_is_effective": False},
       )
 
     if not action:
       action = self.INVALID_ACTION
     action = int(action)
-    # print(f"frozenlake env step with action: {action}")
-    
+
     assert isinstance(action, int), "Action must be an integer"
     assert not self.success(), "Agent has already reached the goal or hole"
 
     if action == self.INVALID_ACTION:
       return EnvStepResult(
-        observation=self.render(),
-        reward=0.0,
-        done=False,
-        info={"action_is_effective": False},
+          observation=self.render(),
+          reward=0.0,
+          done=False,
+          info={"action_is_effective": False},
       )
 
     prev_player_position = int(self.s)
-    # print(f"{self.action_map[action]=}, {type(self.action_map[action])=}, {type(int(self.action_map[action]))=}")
 
-    player_pos, reward, done, _, prob = GymFrozenLakeEnv.step(self, int(self.action_map[action]))
+    player_pos, reward, done, _, prob = GymFrozenLakeEnv.step(
+        self, int(self.action_map[action])
+    )
 
     obs = self.render()
     return EnvStepResult(
-      observation=obs,
-      reward=float(reward),
-      done=done,
-      info={"action_is_effective": prev_player_position != int(player_pos)},
+        observation=obs,
+        reward=float(reward),
+        done=done,
+        info={"action_is_effective": prev_player_position != int(player_pos)},
     )
 
   def render(self, mode="tiny_rgb_array"):
@@ -323,21 +319,21 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
 
     if mode == "tiny_rgb_array":
       lookup = lambda cell: self.GRID_LOOKUP.get(cell, "?")
-      result = "\n".join("".join(lookup(cell) for cell in row) for row in room_state)
+      result = "\n".join(
+          "".join(lookup(cell) for cell in row) for row in room_state
+      )
       # result += f"Player Position is at ({position_P[0]}, {position_P[1]}), Goal Position is at ({self.goal_postion[0]}, {self.goal_postion[1]})"
       return result
 
-  def reset(self):
-    super().reset()
+  def reset(self):  # type: ignore[signature-mismatch]
+    BaseTaskEnv.reset(self)
     GymFrozenLakeEnv.reset(self, seed=self.seed)
     return self.render(mode="tiny_rgb_array"), {}
 
   @classmethod
   def from_dict(cls, env_info: dict) -> "FrozenLakeEnv":
     return cls(
-      size=env_info["size"],
-      seed=env_info["seed"],
-      p=env_info["p"],
-      max_turns=env_info.get("max_turns", MAX_STEPS),
-      is_slippery=env_info.get("is_slippery", False),
+        entry=env_info,
+        max_turns=env_info.get("max_turns", MAX_STEPS),
+        is_slippery=env_info.get("is_slippery", False),
     )
