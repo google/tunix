@@ -45,6 +45,9 @@ class MockState:
     return MockState(new_params)
 
 
+from jax.tree_util import register_pytree_node_class
+
+@register_pytree_node_class
 class MockParam:
 
   def __init__(self, value):
