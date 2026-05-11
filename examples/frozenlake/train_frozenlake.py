@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import sys
+from typing import List
 
 from absl import logging as absl_logging
 from flax import nnx
@@ -89,6 +90,11 @@ except:
   pass
 
 print("jax devices: ", jax.devices())
+try:
+  stats = jax.devices()[0].client.memory_stats()
+  print(f"--- Startup HBM Reserved Memory: {stats['bytes_reserved'] / 1e9:.2f} GB ---")
+except Exception as e:
+  print(f"Failed to query startup HBM stats: {e}")
 
 # %%
 import argparse
@@ -152,17 +158,11 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 16
-
-# Max number of tokens to be processed in parallel by vllm.
-# Divide by 8 for on policy, 1 step off divide by 4
-VLLM_MAX_BATCHED_TOKENS = 16 * 1024
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = 256
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
->>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -306,11 +306,9 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
-# MODEL_VERSION = "google/gemma-4-26B-A4B-it"
-MODEL_VERSION = "google/gemma-4-31B-it"
-# MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
-# MODEL_VERSION = "google/gemma-4-E4B-it"
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
+MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+# MODEL_VERSION = "google/gemma-4-31B-it"
+# MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -387,7 +385,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = model_lib.ModelConfig.gemma4_31b()
+config = model_lib.ModelConfig.gemma4_26b_a4b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -407,19 +405,6 @@ gemma4_ref = params_lib.create_model_from_safe_tensors(
 # %%
 show_hbm_usage("after loading gemma4_ref")
 
-<<<<<<< HEAD
-if ENABLE_MIX_PRECISION:
-  config.param_dtype = jnp.bfloat16
-
-from huggingface_hub import snapshot_download
-MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION)
-print("MODEL_PATH: ", MODEL_PATH)
-gemma4_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-)
-
-=======
->>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 
 # %%
 def get_lora_model(base_model, model_mesh):
@@ -547,7 +532,7 @@ else:
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.TRAINER: trainer_mesh,
+        rl_cluster_lib.Role.ACTOR: trainer_mesh,
         rl_cluster_lib.Role.REFERENCE: reference_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
@@ -602,6 +587,39 @@ rl_cluster = rl_cluster_lib.RLCluster(
 )
 
 show_hbm_usage("after RLCluster creation")
+
+
+def length_penalty_reward_fn(
+    prompts: List[str], 
+    completions: List[str], 
+    trajectory_rewards: List[float], 
+    **kwargs
+) -> List[float]:
+  """Computes a group-relative length penalty inspired by Kimi 1.5.
+  
+  Promotes shorter successful paths and penalizes longer ones, 
+  while strictly penalizing long, unsuccessful paths.
+  """
+  lengths = np.array([len(c) for c in completions])
+  
+  min_len = np.min(lengths)
+  max_len = np.max(lengths)
+  
+  rewards = np.zeros_like(lengths, dtype=np.float32)
+  if max_len == min_len:
+    return list(rewards)
+  
+  lambdas = 0.5 - (lengths - min_len) / (max_len - min_len)
+  
+  for i in range(len(completions)):
+    is_correct = trajectory_rewards[i] > 0.1
+    if is_correct:
+      rewards[i] = lambdas[i]
+    else:
+      rewards[i] = min(0.0, lambdas[i])
+  
+  weight = 0.1
+  return list(rewards * weight)
 
 
 # %%

@@ -90,14 +90,6 @@ try:
 except Exception:
   pass
 
-sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
-os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
-try:
-  from absl import flags
-  flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
-except Exception:
-  pass
-
 try:
   import pathwaysutils
 
@@ -155,8 +147,8 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(4, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
 REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -215,7 +207,7 @@ MAX_CONCURRENCY = args.max_concurrency
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 
-MODEL_DTYPE = jnp.float32
+MODEL_DTYPE = jnp.bfloat16
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -230,7 +222,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.5
+MAX_GRAD_NORM = 0.3
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -534,7 +526,7 @@ vllm_rollout_dict = {
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_delete_dst_buffers": True,
-    "rollout_vllm_reshard_chunk_size": 8,
+    "rollout_vllm_reshard_chunk_size": 16,
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
