@@ -75,8 +75,12 @@ with cm:
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
-  from tunix.examples.frozenlake.agent import FrozenLakeAgent
-  from tunix.examples.frozenlake.env import FrozenLakeEnv
+  from examples.frozenlake.agent import (
+      SYSTEM_PROMPT,
+      MULTI_SHOT_SYSTEM_PROMPT,
+      FrozenLakeAgent,
+  )
+  from examples.frozenlake.env import FrozenLakeEnv
 
 sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
 os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
@@ -112,8 +116,8 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=64)
-arg_parser.add_argument("--mini_batch_size", type=int, default=64)
+arg_parser.add_argument("--batch_size", type=int, default=16)
+arg_parser.add_argument("--mini_batch_size", type=int, default=16)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -124,12 +128,12 @@ arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
 arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
-arg_parser.add_argument("--max_response_length", type=int, default=4096)
+arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
-arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=512)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
+arg_parser.add_argument("--max_concurrency", type=int, default=128)
+arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
@@ -151,8 +155,8 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(2, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(4, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
 REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -170,7 +174,7 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 512
+VLLM_MAX_NUM_SEQS = 128
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -191,7 +195,7 @@ EPSILON_HIGH = args.epsilon_high
 # ====== Training ======
 ENABLE_REMAT = True
 ENABLE_FLASH_ATTENTION = True
-ENABLE_MIX_PRECISION = True
+ENABLE_MIX_PRECISION = False
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -211,7 +215,7 @@ MAX_CONCURRENCY = args.max_concurrency
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 
-MODEL_DTYPE = jnp.bfloat16
+MODEL_DTYPE = jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -397,12 +401,14 @@ show_hbm_usage("Done with loading datasets")
 # %%
 config = model_lib.ModelConfig.gemma4_26b_a4b()
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
+else:
+  config.dtype = jnp.float32
 
 from huggingface_hub import snapshot_download
 
@@ -445,18 +451,18 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  # gemma4_actor = params_lib.create_model_from_safe_tensors(
-  #     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-  # )
-  graph, state = nnx.split(gemma4_ref)
-  trainer_shardings = jax.tree_util.tree_map(
-    lambda x: jax.sharding.NamedSharding(
-        trainer_mesh,
-        x,
-    ),
-    nnx.get_partition_spec(state),
+  gemma4_actor = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
   )
-  gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+  # graph, state = nnx.split(gemma4_ref)
+  # trainer_shardings = jax.tree_util.tree_map(
+  #   lambda x: jax.sharding.NamedSharding(
+  #       trainer_mesh,
+  #       x,
+  #   ),
+  #   nnx.get_partition_spec(state),
+  # )
+  # gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -519,7 +525,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.68,
+    "rollout_vllm_hbm_utilization": 0.7,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -527,6 +533,8 @@ vllm_rollout_dict = {
     "rollout_vllm_init_with_random_weights": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
+    "rollout_vllm_delete_dst_buffers": True,
+    "rollout_vllm_reshard_chunk_size": 8,
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {

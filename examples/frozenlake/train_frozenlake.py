@@ -133,8 +133,8 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(2, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 2), ("fsdp", "tp")]
 REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -258,7 +258,7 @@ rollout_mesh = jax.sharding.Mesh(
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
 reference_device_list = jax._src.mesh_utils.create_device_mesh(
-    REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
+    REFERENCE_MESH[0], jax.devices()[-trainer_devices-reference_devices:-trainer_devices]
 )
 reference_mesh = jax.sharding.Mesh(
     reference_device_list,
@@ -306,14 +306,8 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
-<<<<<<< HEAD
-# MODEL_VERSION = "google/gemma-4-31B-it"
-MODEL_VERSION = "google/gemma-4-26B-A4B-it"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "gemma-4/gemma-4-26B-A4B-it")
-=======
 # MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 MODEL_VERSION = "google/gemma-4-31B-it"
->>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 # MODEL_PATH = "/app/models/models--google--gemma-4-26B-A4B-it/snapshots/7d4c97e54145f8ffd1a4dd1b4986a5015a517842"
 # MODEL_VERSION = "google/gemma-4-E4B-it"
 # MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
@@ -456,18 +450,18 @@ def get_lora_model(base_model, model_mesh):
 if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
-  gemma4_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+  # gemma4_actor = params_lib.create_model_from_safe_tensors(
+  #     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+  # )
+  graph, state = nnx.split(gemma4_ref)
+  trainer_shardings = jax.tree_util.tree_map(
+    lambda x: jax.sharding.NamedSharding(
+        trainer_mesh,
+        x,
+    ),
+    nnx.get_partition_spec(state),
   )
-#   graph, state = nnx.split(gemma4_ref)
-#   trainer_shardings = jax.tree_util.tree_map(
-#     lambda x: jax.sharding.NamedSharding(
-#         trainer_mesh,
-#         x,
-#     ),
-#     nnx.get_partition_spec(state),
-#   )
-#   gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+  gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
 show_hbm_usage("after loading gemma4_actor")
@@ -525,17 +519,12 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.6,
+    "rollout_vllm_hbm_utilization": 0.5,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
     "rollout_vllm_async_scheduling": True,
     "rollout_vllm_init_with_random_weights": True,
-<<<<<<< HEAD
-=======
-    "rollout_vllm_async_scheduling": True,
-    "rollout_vllm_enable_dp_attention": True,
->>>>>>> 4ec30393 (31B running on 64 and 128 cores)
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -558,11 +547,7 @@ else:
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-<<<<<<< HEAD
-        rl_cluster_lib.Role.ACTOR: trainer_mesh,
-=======
         rl_cluster_lib.Role.TRAINER: trainer_mesh,
->>>>>>> 4ec30393 (31B running on 64 and 128 cores)
         rl_cluster_lib.Role.REFERENCE: reference_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
