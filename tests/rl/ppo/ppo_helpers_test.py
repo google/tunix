@@ -158,6 +158,30 @@ class PPOHelpersTest(parameterized.TestCase):
     computed = ppo_helpers.masked_var(x, mask=mask)
     np.testing.assert_allclose(computed, expected_var, rtol=1e-5, atol=1e-5)
 
+  def test_masked_var_single_element(self):
+    """Bessel correction with mask_sum=1 should not produce inf."""
+    x = np.array([1.0, 2.0, 3.0])
+    mask = np.array([False, True, False])
+    computed = ppo_helpers.masked_var(x, mask=mask)
+    self.assertTrue(jnp.isfinite(computed), f'Expected finite, got {computed}')
+
+  def test_masked_var_empty_mask(self):
+    """Fully masked input should return zero variance, not nan/inf."""
+    x = np.array([1.0, 2.0, 3.0])
+    mask = np.array([False, False, False])
+    computed = ppo_helpers.masked_var(x, mask=mask)
+    self.assertTrue(jnp.isfinite(computed), f'Expected finite, got {computed}')
+
+  def test_masked_whiten_single_unmasked_token(self):
+    """masked_whiten should not produce inf/nan with a single unmasked token."""
+    x = jnp.array([[0.0, 5.0, 0.0]])
+    mask = jnp.array([[0.0, 1.0, 0.0]])
+    result = ppo_helpers.masked_whiten(x, mask)
+    self.assertTrue(
+        jnp.all(jnp.isfinite(result)),
+        f'Expected all finite, got {result}',
+    )
+
 
 if __name__ == '__main__':
   absltest.main()

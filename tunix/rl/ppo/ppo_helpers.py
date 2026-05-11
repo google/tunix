@@ -146,7 +146,9 @@ def masked_var(
   variance = masked_mean(jnp.square(x - mean), cast_mask)
 
   mask_sum = cast_mask.sum()
-  bessel_corr = mask_sum / (mask_sum - 1)
+  bessel_corr = jnp.where(
+      mask_sum > 1, mask_sum / (mask_sum - 1), 1.0
+  )
   return variance * bessel_corr
 
 
