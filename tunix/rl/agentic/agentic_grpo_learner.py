@@ -477,7 +477,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           rewards=rewards, num_generations=self.algo_config.num_generations
       )
 
-    logging.debug("Advantages computed: %s", advantages)
+    logging.info("Advantages computed: %s", advantages)
+    logging.info("Rewards computed: %s", rewards)
 
     if self.algo_config.degenerate_group_masking:
       if jnp.all(jnp.isclose(advantages, 0.0)):

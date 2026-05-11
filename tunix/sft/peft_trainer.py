@@ -704,7 +704,6 @@ class PeftTrainer:
             tags=tags,
         ) as span_v2:
           train_loss, aux, grad_norm = train_step(train_example)
-          print (f"aux = {aux}")
           span.device_end([train_loss])
           span_v2.async_end([train_loss])
 

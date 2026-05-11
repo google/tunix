@@ -174,6 +174,8 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
 
     super().update_from_env(new_obs_str, reward, done, info)
     self.cur_step = agent_types.Step(observation=new_obs_str)
+    if done: 
+      print(f"Episode done, steps: {self.step}, final observation: {new_obs_str}")
 
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]

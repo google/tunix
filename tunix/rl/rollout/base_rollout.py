@@ -161,6 +161,7 @@ class RolloutConfig:
   # Maximum number of concurrent sequences allowed to be processed in vLLM.
   rollout_vllm_max_num_seqs: Optional[int] = None
 
+  rollout_vllm_delete_dst_buffers: bool = False
   # Number of flat keys to reshard at a time when synchronizing weights between
   # trainer and vLLM model. None (default) reshards the whole model in one call.
   # Set to a smaller value to reduce peak HBM pressure on large models.
