@@ -31,6 +31,7 @@ from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import rl_learner
+from tunix.sft import utils as sft_utils
 
 TrainingInputT = rl_learner.TrainingInputT
 RewardFn = rl_learner.RewardFn
@@ -539,12 +540,12 @@ def grpo_loss_fn(
   # When unpacked, they are 1D [B].
   adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
 
+  denominator = jnp.sum(completion_mask)
+
   # Compute pg_clipfrac
   pg_losses_1 = -coef_1 * adv
   pg_losses_2 = -coef_2 * adv
-  pg_clipfrac = jnp.sum(
-      (pg_losses_2 > pg_losses_1) * completion_mask
-  ) / jnp.clip(jnp.sum(completion_mask), min=1)
+  unreduced_pg_clipfrac = jnp.sum((pg_losses_2 > pg_losses_1) * completion_mask)
 
   # TODO(tsbao): We should handle token level advantages.
   per_token_loss = -jnp.minimum(
@@ -553,26 +554,24 @@ def grpo_loss_fn(
   )
 
   # add KL penalty
-  mean_kl = 0.0
+  unreduced_kl = 0.0
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
         per_token_logps, train_example.ref_per_token_logps
     )
     per_token_loss = per_token_loss + beta * kl
-    mean_kl = (kl * completion_mask).sum() / jnp.clip(
-        completion_mask.sum(), min=1
-    )
+    unreduced_kl = (kl * completion_mask).sum()
 
   aux = {
-      "kl": mean_kl,
-      "pg_clipfrac": pg_clipfrac,
+      "kl": sft_utils.WeightedMetric(unreduced_kl, denominator, min_denom=1.0),
+      "pg_clipfrac": sft_utils.WeightedMetric(unreduced_pg_clipfrac, denominator, min_denom=1.0),
   }
 
-  loss = common.aggregate_loss(
+  weighted_loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
 
-  return loss, aux
+  return sft_utils.LossOutput(primary_loss=weighted_loss, aux_metrics=aux)
 
 
 @function_registry.register_advantage_estimator("grpo")

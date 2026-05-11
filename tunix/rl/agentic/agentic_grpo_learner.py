@@ -49,8 +49,8 @@ from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.rl.ppo import ppo_helpers
+from tunix.sft import utils as sft_utils
 from tunix.utils import trajectory_logger
-
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
@@ -74,8 +74,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
     kl_loss_mode: Method for computing the KL loss.
-    force_compute_kl: Whether to force compute KL divergence for logging
-      even when it would normally be skipped (e.g., when beta is 0.0).
+    force_compute_kl: Whether to force compute KL divergence for logging even
+      when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
     loss_algo: "grpo" or "gspo-token".
@@ -252,8 +252,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl"
-        if self.algo_config.force_compute_kl
-        or self.algo_config.beta != 0.0
+        if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
     ])
 
@@ -599,9 +598,7 @@ def grpo_loss_fn(
       else epsilon
   )
   epsilon_c = (
-      algo_config.epsilon_c
-      if hasattr(algo_config, "epsilon_c")
-      else 3.0
+      algo_config.epsilon_c if hasattr(algo_config, "epsilon_c") else 3.0
   )
   loss_aggregation_mode = algo_config.loss_agg_mode
 
@@ -638,7 +635,8 @@ def grpo_loss_fn(
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
   # Record KL divergence before clipping.
-  ppo_kl = ppo_helpers.masked_mean(-seq_importance_ratio, completion_mask)
+  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio * completion_mask)
+  token_denom = completion_mask.sum()
 
   seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
 
@@ -666,9 +664,7 @@ def grpo_loss_fn(
 
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
-  clipped_fraction = ppo_helpers.masked_mean(
-      jnp.greater(pg_loss_2, pg_loss_1), completion_mask
-  )
+  unreduced_clip_frac = jnp.sum(jnp.greater(pg_loss_2, pg_loss_1) * completion_mask)
 
   # dual-clip ppo loss
   pg_loss_3 = -epsilon_c * adv
@@ -676,25 +672,30 @@ def grpo_loss_fn(
   # pg_clipfrac_lower measures how often dual-clip ppo kicks in.
   # It kicks in when the standard clipped loss is larger than pg_loss_3
   # for instances with negative advantages.
-  unreduced_pg_clipfrac_lower = (
+  per_token_pg_clipfrac_lower = (
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
-  pg_clipfrac_lower = common.aggregate_loss(
-      unreduced_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+  unreduced_pg_clipfrac_lower = common.aggregate_loss(
+      per_token_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
-  loss = common.aggregate_loss(
+  weighted_loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
+
   aux = {
-      "kl": 0.0,
-      "kl_loss": 0.0,
-      "pg_loss": loss,
-      "pg_clipfrac": clipped_fraction,
-      "ppo_kl": ppo_kl,
-      "pg_clipfrac_lower": pg_clipfrac_lower,
+      "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
+      "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
+      "pg_loss": weighted_loss,
+      "pg_clipfrac": sft_utils.WeightedMetric(
+          unreduced_clip_frac, token_denom, min_denom=1.0
+      ),
+      "ppo_kl": sft_utils.WeightedMetric(
+          unreduced_ppo_kl, token_denom, min_denom=1.0
+      ),
+      "pg_clipfrac_lower": unreduced_pg_clipfrac_lower,
   }
   # We do not alwayscompute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
@@ -704,17 +705,19 @@ def grpo_loss_fn(
         train_example.ref_per_token_logps,
         algo_config.kl_loss_mode,
     )
-    # Log mean KL.
-    aux["kl"] = jnp.astype(
-        (kl * completion_mask).sum() / jnp.clip(completion_mask.sum(), min=1),
-        jnp.float32,
+    unreduced_kl = jnp.astype(jnp.sum(kl * completion_mask), jnp.float32)
+    aux["kl"] = sft_utils.WeightedMetric(
+        unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss(
-        kl, completion_mask, loss_aggregation_mode
-    )
+    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
     aux["kl_loss"] = kl_loss
     if beta is not None and beta != 0.0:
-      loss = loss + beta * kl_loss
+      weighted_loss = sft_utils.WeightedMetric(
+          weighted_loss.unreduced_sum + beta * kl_loss.unreduced_sum,
+          weighted_loss.denominator,
+          eps=weighted_loss.eps,
+          min_denom=weighted_loss.min_denom,
+      )
 
   token_entropy = ppo_helpers.compute_entropy_from_logits(logits)
   entropy_loss = common.aggregate_loss(
@@ -722,7 +725,7 @@ def grpo_loss_fn(
   )
   aux["entropy"] = entropy_loss
 
-  return loss, aux
+  return sft_utils.LossOutput(primary_loss=weighted_loss, aux_metrics=aux)
 
 
 @function_registry.register_advantage_estimator("agentic_grpo")

@@ -90,19 +90,23 @@ class DAPOlearnerTest(parameterized.TestCase):
     )
 
     # Call DAPO loss function
-    dapo_loss, dapo_aux = dapo_loss_fn_impl(
+    dapo_loss_output = dapo_loss_fn_impl(
         model, train_example, dapo_config, pad_id, eos_id
     )
+    dapo_loss = dapo_loss_output.primary_loss.compute()
+    dapo_aux = dapo_loss_output.aux_metrics
 
     # Call GRPO loss function
-    grpo_loss, grpo_aux = grpo_loss_fn_impl(
+    grpo_loss_output = grpo_loss_fn_impl(
         model, train_example, grpo_config, pad_id, eos_id
     )
+    grpo_loss = grpo_loss_output.primary_loss.compute()
+    grpo_aux = grpo_loss_output.aux_metrics
 
     # Assert that the loss values are different
     self.assertNotEqual(
-        dapo_loss.item(),
-        grpo_loss.item(),
+        dapo_loss,
+        grpo_loss,
         msg=(
             "DAPO and GRPO loss values should be different for the same input"
             " due to different loss aggregation logics."
@@ -111,7 +115,9 @@ class DAPOlearnerTest(parameterized.TestCase):
 
     self.assertIn("kl", dapo_aux)
     self.assertIn("kl", grpo_aux)
-    self.assertEqual(dapo_aux["kl"], 0.0)  # DAPO does not have KL term.
+    self.assertEqual(
+        dapo_aux["kl"].compute(), 0.0
+    )  # DAPO does not have KL term.
 
 
 class TestDAPOConfigPostInit(parameterized.TestCase):
