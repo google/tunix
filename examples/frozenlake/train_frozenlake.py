@@ -94,13 +94,13 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=16)
-arg_parser.add_argument("--mini_batch_size", type=int, default=16)
+arg_parser.add_argument("--batch_size", type=int, default=32)
+arg_parser.add_argument("--mini_batch_size", type=int, default=32)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=150)
+arg_parser.add_argument("--num_batches", type=int, default=300)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
@@ -110,7 +110,7 @@ arg_parser.add_argument("--max_response_length", type=int, default=4096)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=64)
+arg_parser.add_argument("--max_concurrency", type=int, default=256)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -134,11 +134,7 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
-<<<<<<< HEAD
-TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
-=======
 TRAINER_MESH = [(4, 4), ("fsdp", "tp")]
->>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -161,8 +157,6 @@ VLLM_MAX_NUM_SEQS = 16
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 VLLM_MAX_BATCHED_TOKENS = 16 * 1024
-<<<<<<< HEAD
-=======
 VLLM_MAX_NUM_SEQS = 64
 
 # Max number of tokens to be processed in parallel by vllm.
@@ -220,7 +214,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.5
+MAX_GRAD_NORM = 0.3
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -399,11 +393,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-<<<<<<< HEAD
-config = model_lib.ModelConfig.gemma4_26b_a4b()
-=======
 config = model_lib.ModelConfig.gemma4_31b()
->>>>>>> 4ec30393 (31B running on 64 and 128 cores)
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -483,11 +473,6 @@ else:
 show_hbm_usage("after loading gemma4_actor")
 
 # %%
-ModelAgent = model_agent.ModelAgent
-TaskEnvironment = task_environment.TaskEnvironment
-TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
-
-# %%
 # Ckpt saving
 checkpointing_options = ocp.CheckpointManagerOptions(
     save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
@@ -559,7 +544,6 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
-        "dtype": "bfloat16",
     },
 }
 
@@ -676,4 +660,33 @@ grpo_trainer = GRPOLearner(
 show_hbm_usage("after GRPOLearner creation")
 
 # %%
+try:
+  print("Defragmenting JAX/XLA memory before training...")
+  backend = None
+  try:
+    import jax.extend.backend as jax_backend
+    backend = jax_backend.get_backend()
+  except:
+    try:
+      backend = jax.devices()[0].client
+    except:
+      try:
+        from jax._src.lib import xla_bridge
+        backend = xla_bridge.get_backend()
+      except:
+        pass
+  if backend is not None and hasattr(backend, 'defragment'):
+    backend.defragment()
+    print("Defragmentation successful!")
+  else:
+    print("Defragmentation skipped: backend has no defragment attribute or could not be resolved.")
+except Exception as e:
+  print(f"Defragmentation failed: {e}")
+
+import gc
+import jax
+gc.collect()
+# Clear JAX compilation and execution caches
+jax.clear_caches()
+
 grpo_trainer.train(train_dataset)

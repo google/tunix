@@ -16,14 +16,10 @@ class BackendMappingMixin:
 
   @classmethod
   def _backend_registry(cls) -> Dict[str, Any]:
-    import sys
     # Use the explicit path if provided, otherwise fallback to the module path
     module = cls.BACKEND_PACKAGE_PATH or cls.__module__
 
     package_name = module.rsplit('.', 1)[0] if '.' in module else module
-    for k in list(sys.modules.keys()):
-      if k.startswith(package_name):
-        del sys.modules[k]
     package = importlib.import_module(package_name)
 
     return getattr(package, 'BACKEND_MAPPINGS', {})
