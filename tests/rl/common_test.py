@@ -581,5 +581,238 @@ class CommonTest(parameterized.TestCase):
     self.assertAlmostEqual(loss, 1.5, places=5)
 
 
+class SegmentedReductionTest(parameterized.TestCase):
+  """Tests for `segmented_sum` and `segmented_count` helpers."""
+
+  def test_segmented_sum_basic(self):
+    # Row 0: seg=0 holds idx 0 (value 1); seg=1 holds idx 1,2; seg=2 idx 3,4,5.
+    # Row 1: seg=0 holds idx 0,1; seg=1 idx 2; seg=2 idx 3,4; seg=3 unused.
+    values = jnp.array(
+        [
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            [10.0, 20.0, 30.0, 40.0, 50.0, 0.0],
+        ],
+        dtype=jnp.float32,
+    )
+    segment_ids = jnp.array(
+        [
+            [0, 1, 1, 2, 2, 2],
+            [0, 0, 1, 2, 2, 3],
+        ],
+        dtype=jnp.int32,
+    )
+    out = common.segmented_sum(values, segment_ids, num_segments=4)
+    expected = jnp.array(
+        [
+            [1.0, 5.0, 15.0, 0.0],
+            [30.0, 30.0, 90.0, 0.0],
+        ],
+        dtype=jnp.float32,
+    )
+    np.testing.assert_allclose(out, expected, rtol=0, atol=0)
+
+  def test_segmented_count_unmasked(self):
+    segment_ids = jnp.array(
+        [
+            [0, 1, 1, 2, 2, 2],
+            [0, 0, 1, 2, 2, 3],
+        ],
+        dtype=jnp.int32,
+    )
+    out = common.segmented_count(segment_ids, num_segments=4)
+    expected = jnp.array(
+        [
+            [1.0, 2.0, 3.0, 0.0],
+            [2.0, 1.0, 2.0, 1.0],
+        ],
+        dtype=jnp.float32,
+    )
+    np.testing.assert_allclose(out, expected, rtol=0, atol=0)
+
+  def test_segmented_count_masked(self):
+    segment_ids = jnp.array(
+        [
+            [0, 1, 1, 2, 2, 2],
+            [0, 0, 1, 2, 2, 3],
+        ],
+        dtype=jnp.int32,
+    )
+    # Mask out the seg=0 padding tokens and one token of seg=2 in row 0.
+    mask = jnp.array(
+        [
+            [0, 1, 1, 1, 1, 0],
+            [0, 0, 1, 1, 1, 1],
+        ],
+        dtype=jnp.float32,
+    )
+    out = common.segmented_count(segment_ids, num_segments=4, mask=mask)
+    expected = jnp.array(
+        [
+            [0.0, 2.0, 2.0, 0.0],
+            [0.0, 1.0, 2.0, 1.0],
+        ],
+        dtype=jnp.float32,
+    )
+    np.testing.assert_allclose(out, expected, rtol=0, atol=0)
+
+  def test_segmented_sum_only_padding_bucket(self):
+    # All tokens in seg=0 (the padding bucket). All real-segment slots should
+    # be zero — important property because `aggregate_loss` zeroes the
+    # padding bucket and these zeros must not feed the numerator.
+    values = jnp.array([[1.0, 2.0, 3.0]], dtype=jnp.float32)
+    segment_ids = jnp.zeros((1, 3), dtype=jnp.int32)
+    out = common.segmented_sum(values, segment_ids, num_segments=3)
+    np.testing.assert_allclose(
+        out, jnp.array([[6.0, 0.0, 0.0]], dtype=jnp.float32)
+    )
+
+
+class PackedAggregateLossTest(parameterized.TestCase):
+  """Numerical equivalence of packed vs unpacked `aggregate_loss`.
+
+  Trivial-packing setup: an unpacked batch of two rows, each fully scored, is
+  re-arranged into a single packed row where each original row becomes a
+  distinct segment (seg 1 and seg 2, with the seg=0 padding bucket left
+  empty). Every loss-aggregation mode should yield the same scalar within fp32
+  tolerance — vmap(segment_sum) reduces in a different order from .sum so we
+  test for numerical, not bit, equivalence (Md1 in the design notes).
+  """
+
+  def _make_inputs(self):
+    per_token_loss_unpacked = jnp.array(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [0.5, 1.5, 2.5, 3.5],
+        ],
+        dtype=jnp.float32,
+    )
+    completion_mask_unpacked = jnp.ones((2, 4), dtype=jnp.float32)
+
+    per_token_loss_packed = per_token_loss_unpacked.reshape(1, 8)
+    completion_mask_packed = completion_mask_unpacked.reshape(1, 8)
+    # Segment 1 covers row 0; segment 2 covers row 1; no padding bucket
+    # contributions because completion_mask is all ones.
+    segment_ids = jnp.array(
+        [[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32
+    )
+    return (
+        per_token_loss_unpacked,
+        completion_mask_unpacked,
+        per_token_loss_packed,
+        completion_mask_packed,
+        segment_ids,
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="token_mean", loss_agg_mode="token-mean", kwargs={}),
+      dict(
+          testcase_name="sequence_mean_token_mean",
+          loss_agg_mode="sequence-mean-token-mean",
+          kwargs={},
+      ),
+      dict(
+          testcase_name="sequence_mean_token_scale_explicit_norm",
+          loss_agg_mode="sequence-mean-token-scale",
+          # Force the same norm in unpacked (T=4) and packed (T=8) paths;
+          # otherwise the implicit default differs.
+          kwargs={"norm": 4.0},
+      ),
+      dict(
+          testcase_name="seq_mean_token_sum",
+          loss_agg_mode="seq-mean-token-sum",
+          kwargs={},
+      ),
+      dict(
+          testcase_name="sequence_mean_token_sum_norm",
+          loss_agg_mode="sequence-mean-token-sum-norm",
+          kwargs={},
+      ),
+  )
+  def test_packed_equals_unpacked(self, loss_agg_mode, kwargs):
+    (
+        per_token_loss_unpacked,
+        completion_mask_unpacked,
+        per_token_loss_packed,
+        completion_mask_packed,
+        segment_ids,
+    ) = self._make_inputs()
+
+    unpacked = _compute_loss(
+        per_token_loss_unpacked,
+        completion_mask_unpacked,
+        loss_agg_mode,
+        **kwargs,
+    )
+    packed = _compute_loss(
+        per_token_loss_packed,
+        completion_mask_packed,
+        loss_agg_mode,
+        segment_ids=segment_ids,
+        num_segments=3,
+        **kwargs,
+    )
+    np.testing.assert_allclose(packed, unpacked, rtol=1e-6, atol=1e-6)
+
+  def test_padding_bucket_excluded(self):
+    # Same loss values as the trivial-packing test, but stitched into a longer
+    # packed row with a leading padding-bucket region (seg=0, mask=0). The
+    # active-segment math must completely ignore that prefix.
+    per_token_loss = jnp.array(
+        [[7.0, 8.0, 1.0, 2.0, 3.0, 4.0, 0.5, 1.5, 2.5, 3.5]],
+        dtype=jnp.float32,
+    )
+    completion_mask = jnp.array(
+        [[0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]],
+        dtype=jnp.float32,
+    )
+    segment_ids = jnp.array(
+        [[0, 0, 1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32
+    )
+
+    per_token_loss_unpacked = jnp.array(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [0.5, 1.5, 2.5, 3.5],
+        ],
+        dtype=jnp.float32,
+    )
+    completion_mask_unpacked = jnp.ones((2, 4), dtype=jnp.float32)
+
+    for mode, kwargs in (
+        ("token-mean", {}),
+        ("sequence-mean-token-mean", {}),
+        ("sequence-mean-token-scale", {"norm": 4.0}),
+        ("seq-mean-token-sum", {}),
+        ("sequence-mean-token-sum-norm", {}),
+    ):
+      unpacked = _compute_loss(
+          per_token_loss_unpacked,
+          completion_mask_unpacked,
+          mode,
+          **kwargs,
+      )
+      packed = _compute_loss(
+          per_token_loss,
+          completion_mask,
+          mode,
+          segment_ids=segment_ids,
+          num_segments=3,
+          **kwargs,
+      )
+      np.testing.assert_allclose(
+          packed, unpacked, rtol=1e-6, atol=1e-6,
+          err_msg=f"mode={mode}",
+      )
+
+  def test_num_segments_required_when_segment_ids_provided(self):
+    with self.assertRaisesRegex(ValueError, "num_segments must be provided"):
+      common.aggregate_loss(
+          jnp.ones((1, 4), dtype=jnp.float32),
+          jnp.ones((1, 4), dtype=jnp.float32),
+          "token-mean",
+          segment_ids=jnp.array([[1, 1, 2, 2]], dtype=jnp.int32),
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -406,6 +406,8 @@ def grpo_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
+  segment_ids = getattr(train_example, "segment_ids", None)
+  num_segments = getattr(train_example, "num_segments", None)
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
@@ -419,7 +421,7 @@ def grpo_loss_fn(
       completion_mask=completion_mask,
       stop_gradient=False,
       return_logits=True,
-      segment_ids=getattr(train_example, "segment_ids", None),
+      segment_ids=segment_ids,
       segment_positions=getattr(train_example, "segment_positions", None),
       temperature=algo_config.temperature,
   )
@@ -443,13 +445,42 @@ def grpo_loss_fn(
 
   # TODO(sizhi): Refactor this to a separate function.
   if loss_algo == "gspo-token":
-    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
-        axis=-1
-    ) / jnp.clip(completion_mask.sum(-1), min=1)
+    if segment_ids is None:
+      # Per-row mean importance ratio. Each row is exactly one sequence.
+      seq_mean_ratio = (seq_importance_ratio * completion_mask).sum(
+          axis=-1
+      ) / jnp.clip(completion_mask.sum(-1), min=1)
+      # Broadcast the per-row scalar back to every token in the row.
+      per_token_ratio = jnp.expand_dims(
+          jax.lax.stop_gradient(seq_mean_ratio), axis=-1
+      )
+    else:
+      if num_segments is None:
+        raise ValueError(
+            "gspo-token under packing requires train_example.num_segments to"
+            " be set; got None."
+        )
+      # Per-segment mean importance ratio. With packing each row holds K
+      # segments; pooling per-row would mix sequences and produce a biased
+      # ratio. Compute per-segment means then look up each token's mean.
+      per_seg_sum = common.segmented_sum(
+          seq_importance_ratio * completion_mask, segment_ids, num_segments
+      )
+      per_seg_count = common.segmented_count(
+          segment_ids, num_segments, mask=completion_mask
+      )
+      per_seg_ratio = per_seg_sum / jnp.clip(per_seg_count, min=1.0)
+      # Look up each token's segment's mean ratio; padding bucket (seg=0) maps
+      # to per_seg_ratio[:, 0] which is contributed only by mask==0 tokens (so
+      # 0 / 0 → 0 under the clip). Those tokens are zeroed by completion_mask
+      # in the downstream loss anyway.
+      per_token_ratio = jnp.take_along_axis(
+          jax.lax.stop_gradient(per_seg_ratio),
+          segment_ids[:, :, None].astype(jnp.int32),
+          axis=1,
+      ).squeeze(-1)
     seq_importance_ratio = (
-        per_token_logps
-        - jax.lax.stop_gradient(per_token_logps)
-        + jnp.expand_dims(jax.lax.stop_gradient(seq_importance_ratio), axis=-1)
+        per_token_logps - jax.lax.stop_gradient(per_token_logps) + per_token_ratio
     )
     seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
 
@@ -482,13 +513,21 @@ def grpo_loss_fn(
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
   pg_clipfrac_lower = common.aggregate_loss(
-      per_token_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+      per_token_pg_clipfrac_lower,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
   weighted_loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
   aux = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
@@ -514,7 +553,13 @@ def grpo_loss_fn(
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
+    kl_loss = common.aggregate_loss(
+        kl,
+        completion_mask,
+        loss_aggregation_mode,
+        segment_ids=segment_ids,
+        num_segments=num_segments,
+    )
     aux["kl_loss"] = kl_loss
     if beta is not None and beta != 0.0:
       weighted_loss = sft_utils.WeightedMetric(
@@ -526,7 +571,11 @@ def grpo_loss_fn(
 
   token_entropy = compute_entropy_from_logits(logits)
   entropy_loss = common.aggregate_loss(
-      token_entropy, completion_mask, loss_aggregation_mode
+      token_entropy,
+      completion_mask,
+      loss_aggregation_mode,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
   aux["entropy"] = entropy_loss
 

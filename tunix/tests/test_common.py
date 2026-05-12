@@ -25,7 +25,9 @@ from typing import Any, List, Tuple
 from flax import nnx
 import huggingface_hub
 import jax
+from jax.interpreters import pxla
 import jax.numpy as jnp
+import jax.sharding as shd
 import numpy as np
 import qwix
 import tenacity
@@ -75,6 +77,20 @@ def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
   )
 
 
+def _segment_causal_mask(segment_ids: jax.Array) -> jax.Array:
+  """Build a `[B, 1, T, T]` boolean mask combining causality and same-segment.
+
+  ``mask[b, 0, q, k]`` is ``True`` iff ``q >= k`` (causal) **and**
+  ``segment_ids[b, q] == segment_ids[b, k]`` (no cross-segment attention).
+  Padding tokens (segment 0) attend only among themselves; their attention
+  output is masked downstream by ``completion_mask`` anyway.
+  """
+  t = segment_ids.shape[-1]
+  causal = jnp.tri(t, t, dtype=jnp.bool_)  # [T, T] lower-triangular incl. diag
+  same_seg = segment_ids[:, :, None] == segment_ids[:, None, :]  # [B, T, T]
+  return (causal[None, :, :] & same_seg)[:, None, :, :]  # [B, 1, T, T]
+
+
 class Decoder(nnx.Module):
   """Toy decoder for testing."""
 
@@ -105,8 +121,24 @@ class Decoder(nnx.Module):
         ),
     )
 
-  def __call__(self, x):
-    x = self.attn(x) + x
+  def __call__(self, x, segment_ids: jax.Array | None = None):
+    # When `segment_ids` is provided, apply a causal mask intersected with a
+    # same-segment mask so packed rows do not attend across segments. When it
+    # is None, fall back to full attention (existing behavior — kept so the
+    # large suite of toy-transformer tests that pin loss/grad values is not
+    # perturbed).
+    if segment_ids is not None:
+      mask = _segment_causal_mask(segment_ids)
+      x = self.attn(x, mask=mask) + x
+    else:
+      x = self.attn(x) + x
+    # Sequence-parallel sharding constraint. Gated on the mesh actually having
+    # an `sp` axis so that the common (fsdp, tp)-only tests are untouched.
+    mesh = pxla.thread_resources.env.physical_mesh
+    if not mesh.empty and 'sp' in mesh.axis_names:
+      x = jax.lax.with_sharding_constraint(
+          x, shd.NamedSharding(mesh, shd.PartitionSpec('fsdp', 'sp', 'tp'))
+      )
     h = nnx.relu(self.w1(x))
     h = self.w2(h) + x
     return h
@@ -186,7 +218,7 @@ class ToyTransformer(nnx.Module):
       )
 
     for layer in self.layers:
-      x = layer(x)
+      x = layer(x, segment_ids=segment_ids)
     if output_hidden_states:
       self.sow(
           nnx.Intermediate,

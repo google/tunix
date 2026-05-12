@@ -343,6 +343,7 @@ def pack_sequences(
     max_token_budget: int,
     pad_id: int = 0,
     num_packs: int = 1,
+    num_segments: int | None = None,
 ) -> Iterator[list[common.TrainExample]]:
   """Packs a stream of TrainExamples into 1D sequences up to a token budget.
 
@@ -360,11 +361,24 @@ def pack_sequences(
       size to ensure the yielded batch is shardable by JAX. Trailing packs are
       padded with dummy zero-mask data when the total number of packs is not a
       multiple of ``num_packs``. Defaults to 1.
+    num_segments: Static upper bound on the number of segments per packed row
+      (including the seg=0 padding bucket). Forwarded to ``TrainExample`` so
+      downstream `segmented_sum`/`segmented_count` calls have a JIT-stable
+      shape. When ``None`` (default), the emitted ``TrainExample`` leaves
+      ``num_segments`` unset and segment-aware reductions fall back to
+      computing per-row from the data (slower path). Callers under packing
+      should pass ``max_segments_per_packed_row + 1`` from the algorithm
+      config.
 
   Yields:
     A list of size 1 containing a single TrainExample whose arrays are stacked
     along the batch axis to shape ``[num_packs, max_token_budget]``.
   """
+  if num_segments is not None and num_segments <= 1:
+    raise ValueError(
+        f"num_segments must be >= 2 (1 padding bucket + >=1 real segment);"
+        f" got {num_segments}."
+    )
   buffer = []
   current_tokens = 0
   example_cls = common.TrainExample
@@ -453,6 +467,16 @@ def pack_sequences(
           _pad(per_token_feature_buffers[k], 0.0, pad_len)
       )[None, :]
 
+    if num_segments is not None and len(buffer) >= num_segments:
+      # The seg=0 padding bucket plus ``len(buffer)`` real segments must fit
+      # within the configured cap or downstream `segmented_sum` would silently
+      # collide segments. Loud failure is preferable to silent miscounting.
+      raise ValueError(
+          f"pack contains {len(buffer)} real segments but num_segments cap is"
+          f" {num_segments} (1 padding + {num_segments - 1} real). Raise"
+          " max_segments_per_packed_row."
+      )
+
     kwargs = dict(
         prompt_ids=p_ids_arr,
         prompt_mask=p_mask_arr,
@@ -464,6 +488,8 @@ def pack_sequences(
         segment_ids=seg_arr,
         segment_positions=pos_arr,
     )
+    if num_segments is not None:
+      kwargs["num_segments"] = num_segments
     for k in tracked_per_token_keys:
       kwargs[k] = per_token_features[k]
     if has_policy_version:
