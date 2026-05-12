@@ -316,6 +316,9 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
     p_len = int(np.sum(p_mask[i]))
     c_len = int(np.sum(c_mask[i]))
 
+    # `policy_version` is per-row: row `i` of the input maps to scalar
+    # `policy_version_np[i]`. We slice with `i:i+1` to keep a 1-D shape so that
+    # `pack_sequences` can stack scalars from multiple items unambiguously.
     item = {
         "prompt_ids": p_ids[i, -p_len:] if p_len > 0 else p_ids[i, :0],
         "prompt_mask": p_mask[i, -p_len:] if p_len > 0 else p_mask[i, :0],
@@ -327,7 +330,9 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "old_per_token_logps": old_logps[i, :c_len] if has_old else None,
         "returns": returns_np[i, :c_len] if has_returns else None,
         "old_values": old_values_np[i, :c_len] if has_old_values else None,
-        "policy_version": policy_version_np if has_policy_version else None,
+        "policy_version": (
+            policy_version_np[i : i + 1] if has_policy_version else None
+        ),
     }
     res.append(item)
   return res
@@ -387,6 +392,16 @@ def pack_sequences(
     ]
     per_token_feature_buffers = {k: [] for k in tracked_per_token_keys}
     has_policy_version = buffer[0].get("policy_version") is not None
+
+    if has_policy_version:
+      # Homogeneity invariant: every item in a single pack must share the same
+      # policy_version (enforced by the version-aware flush below). If this
+      # fires it indicates a bug in the buffering logic, not in caller data.
+      versions = [int(np.asarray(item["policy_version"]).item()) for item in buffer]
+      assert all(v == versions[0] for v in versions), (
+          f"pack_sequences invariant violation: heterogeneous policy_versions"
+          f" within a single pack: {versions}"
+      )
 
     for i, item in enumerate(buffer, start=1):
       p_ids = item["prompt_ids"]
@@ -499,6 +514,16 @@ def pack_sequences(
       return _stack_pending()
     return []
 
+  def _version_changed(item: dict[str, Any]) -> bool:
+    """True if `item` carries a `policy_version` different from `buffer[0]`."""
+    if not buffer:
+      return False
+    a = buffer[0].get("policy_version")
+    b = item.get("policy_version")
+    if a is None or b is None:
+      return False
+    return int(np.asarray(a).item()) != int(np.asarray(b).item())
+
   for item_list in item_iterator:
     for example in item_list:
       example_cls = type(example)
@@ -516,7 +541,10 @@ def pack_sequences(
           )
           continue
 
-        if current_tokens + tokens > max_token_budget:
+        # Version-aware flush: a pack must contain items from a single
+        # `policy_version` (so downstream off-policy filtering and per-row
+        # version bookkeeping are unambiguous).
+        if current_tokens + tokens > max_token_budget or _version_changed(item):
           out = _emit()
           if out:
             yield out

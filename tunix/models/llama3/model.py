@@ -625,6 +625,7 @@ class Llama3(BackendMappingMixin, nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
+      segment_ids: jaxtyping.Array | None = None,  # [B, L]; accepted, not yet honored in attention
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Llama3 model.
 
