@@ -33,6 +33,14 @@ class AlgorithmConfig:
   # Sequence packing configuration
   use_sequence_packing: bool = False
   max_token_len_per_tpu: int = 30_000
+  # Upper bound on the number of real (i.e. non-padding) segments that a
+  # packed row may hold. The packed `TrainExample` is emitted with
+  # `num_segments = max_segments_per_packed_row + 1` (the +1 reserves index
+  # 0 for the padding bucket). Forwarded to `pack_sequences` so downstream
+  # `segmented_sum` / `segmented_count` calls operate over a JIT-stable
+  # shape. With the default of 32, a packed row may carry up to 32 real
+  # sequences which is generous for typical RL rollouts.
+  max_segments_per_packed_row: int = 32
 
   def __post_init__(self):
     valid_algo_variants = [

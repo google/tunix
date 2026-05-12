@@ -470,15 +470,18 @@ def grpo_loss_fn(
           segment_ids, num_segments, mask=completion_mask
       )
       per_seg_ratio = per_seg_sum / jnp.clip(per_seg_count, min=1.0)
-      # Look up each token's segment's mean ratio; padding bucket (seg=0) maps
-      # to per_seg_ratio[:, 0] which is contributed only by mask==0 tokens (so
-      # 0 / 0 → 0 under the clip). Those tokens are zeroed by completion_mask
-      # in the downstream loss anyway.
+      # Look up each token's segment's mean ratio. `per_seg_ratio` is
+      # `[B, num_segments]` and `segment_ids` is `[B, T]`; `take_along_axis`
+      # requires `arr` and `indices` to share rank, so we pass both as 2-D
+      # with `axis=1` to broadcast each row's segment mean across its T
+      # tokens. Padding bucket (seg=0) maps to `per_seg_ratio[:, 0]`, which
+      # is contributed only by mask==0 tokens (so 0 / 0 → 0 under the
+      # clip); those tokens are zeroed by `completion_mask` downstream.
       per_token_ratio = jnp.take_along_axis(
           jax.lax.stop_gradient(per_seg_ratio),
-          segment_ids[:, :, None].astype(jnp.int32),
+          segment_ids.astype(jnp.int32),
           axis=1,
-      ).squeeze(-1)
+      )
     seq_importance_ratio = (
         per_token_logps - jax.lax.stop_gradient(per_token_logps) + per_token_ratio
     )

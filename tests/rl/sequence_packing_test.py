@@ -328,33 +328,64 @@ class GspoTokenSegmentAwareTest(absltest.TestCase):
         config=tc.ModelConfig(vocab_size=16, num_layers=1),
         rngs=nnx.Rngs(123),
     )
-    # 2 rows, each 4 tokens, all scored. Use the same data shape but pass
-    # segment_ids=None vs segment_ids=ones+num_segments=2; the gspo-token
-    # importance-ratio aggregation should match within tolerance.
+    # Layout: 5 input tokens per row. The first acts as the prompt context
+    # (the autoregressive shift in `compute_per_token_logps` consumes one
+    # token of leading context per row, so the unpacked path requires
+    # `prompt_ids` to be non-empty). The remaining 4 are scored
+    # completion. The unpacked and packed setups feed identical model
+    # inputs; only the wrapping into `TrainExample` differs.
     rng = np.random.default_rng(99)
-    tokens = rng.integers(low=1, high=8, size=(2, 4))
-    mask = np.ones((2, 4), dtype=np.float32)
+    full_tokens = rng.integers(low=1, high=8, size=(2, 5))
+    completion_mask_4 = np.ones((2, 4), dtype=np.float32)
     advantages = rng.normal(size=(2,)).astype(np.float32)
-    ref_logps = rng.normal(size=(2, 4)).astype(np.float32)
-    common_kwargs = dict(
-        prompt_ids=jnp.zeros((2, 0), dtype=jnp.int32),
-        prompt_mask=jnp.zeros((2, 0), dtype=jnp.int32),
-        completion_ids=jnp.asarray(tokens, dtype=jnp.int32),
-        completion_mask=jnp.asarray(mask),
+    ref_logps_4 = rng.normal(size=(2, 4)).astype(np.float32)
+
+    # Unpacked: 1-token prompt + 4-token scored completion. `segment_ids
+    # is None` drives the per-row gspo branch.
+    unpacked = common.TrainExample(
+        prompt_ids=jnp.asarray(full_tokens[:, :1], dtype=jnp.int32),
+        prompt_mask=jnp.ones((2, 1), dtype=jnp.int32),
+        completion_ids=jnp.asarray(full_tokens[:, 1:], dtype=jnp.int32),
+        completion_mask=jnp.asarray(completion_mask_4),
         advantages=jnp.asarray(advantages),
-        ref_per_token_logps=jnp.asarray(ref_logps),
+        ref_per_token_logps=jnp.asarray(ref_logps_4),
         old_per_token_logps=None,
     )
-    # Unpacked: segment_ids=None drives the per-row gspo branch.
-    unpacked = common.TrainExample(**common_kwargs)
-    # Packed-trivial: each row marked as one segment so the segmented gspo
-    # branch is taken. Toy model also flips on segment-causal attention.
+
+    # Packed-trivial: zero-length prompt, the full 5-token buffer is the
+    # "completion" sequence. `segment_ids = [0, 1, 1, 1, 1]` marks the
+    # first position as the leading-context bucket (segment 0) and the
+    # remaining 4 as one real segment, so the segmented gspo branch is
+    # taken and the toy model uses segment-causal attention. The packed
+    # path pads `per_token_logps` with 0.0 at the front, which is then
+    # zeroed by `completion_mask[:, 0] == 0` downstream.
+    segment_ids = jnp.broadcast_to(
+        jnp.asarray([0, 1, 1, 1, 1], dtype=jnp.int32)[None, :], (2, 5)
+    )
+    segment_positions = jnp.broadcast_to(
+        jnp.asarray([0, 0, 1, 2, 3], dtype=jnp.int32)[None, :], (2, 5)
+    )
+    completion_mask_5 = jnp.asarray(
+        np.broadcast_to([0.0, 1.0, 1.0, 1.0, 1.0], (2, 5)).copy(),
+        dtype=jnp.float32,
+    )
+    # Pre-pad ref logps to 5-wide so the packed branch's full-sequence
+    # contract is satisfied (position 0 contributes nothing under the
+    # 0-mask).
+    ref_logps_5 = jnp.concat(
+        [jnp.zeros((2, 1), dtype=jnp.float32), jnp.asarray(ref_logps_4)],
+        axis=1,
+    )
     packed_trivial = common.TrainExample(
-        **common_kwargs,
-        segment_ids=jnp.ones((2, 4), dtype=jnp.int32),
-        segment_positions=jnp.broadcast_to(
-            jnp.arange(4, dtype=jnp.int32)[None, :], (2, 4)
-        ),
+        prompt_ids=jnp.zeros((2, 0), dtype=jnp.int32),
+        prompt_mask=jnp.zeros((2, 0), dtype=jnp.int32),
+        completion_ids=jnp.asarray(full_tokens, dtype=jnp.int32),
+        completion_mask=completion_mask_5,
+        advantages=jnp.asarray(advantages),
+        ref_per_token_logps=ref_logps_5,
+        old_per_token_logps=None,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
         num_segments=2,
     )
 

@@ -77,18 +77,24 @@ def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
   )
 
 
-def _segment_causal_mask(segment_ids: jax.Array) -> jax.Array:
-  """Build a `[B, 1, T, T]` boolean mask combining causality and same-segment.
+def _same_segment_mask(segment_ids: jax.Array) -> jax.Array:
+  """Build a `[B, 1, T, T]` boolean same-segment mask for the toy model.
 
-  ``mask[b, 0, q, k]`` is ``True`` iff ``q >= k`` (causal) **and**
-  ``segment_ids[b, q] == segment_ids[b, k]`` (no cross-segment attention).
-  Padding tokens (segment 0) attend only among themselves; their attention
-  output is masked downstream by ``completion_mask`` anyway.
+  ``mask[b, 0, q, k]`` is ``True`` iff
+  ``segment_ids[b, q] == segment_ids[b, k]`` — i.e. positions inside the
+  same packed segment attend to each other; cross-segment attention is
+  forbidden. Padding tokens (segment 0) attend only among themselves;
+  their output is masked downstream by ``completion_mask`` anyway.
+
+  Note: the toy intentionally does *not* layer a causal mask on top.
+  The pre-packing toy used full attention over the row, and the
+  `compute_per_token_logps` equivalence tests (under
+  `seq-packed-single-item` / `seq-packed-multi-item`) compare logps
+  between an unpacked row and that same row's packed embedding. Adding
+  causality would diverge the packed-vs-unpacked logits even when each
+  row is a single segment.
   """
-  t = segment_ids.shape[-1]
-  causal = jnp.tri(t, t, dtype=jnp.bool_)  # [T, T] lower-triangular incl. diag
-  same_seg = segment_ids[:, :, None] == segment_ids[:, None, :]  # [B, T, T]
-  return (causal[None, :, :] & same_seg)[:, None, :, :]  # [B, 1, T, T]
+  return (segment_ids[:, :, None] == segment_ids[:, None, :])[:, None, :, :]
 
 
 class Decoder(nnx.Module):
@@ -122,13 +128,15 @@ class Decoder(nnx.Module):
     )
 
   def __call__(self, x, segment_ids: jax.Array | None = None):
-    # When `segment_ids` is provided, apply a causal mask intersected with a
-    # same-segment mask so packed rows do not attend across segments. When it
-    # is None, fall back to full attention (existing behavior — kept so the
-    # large suite of toy-transformer tests that pin loss/grad values is not
-    # perturbed).
+    # When `segment_ids` is provided, apply a same-segment (non-causal)
+    # mask so packed rows do not attend across segments while still
+    # matching the pre-packing toy's full-attention behavior *within* a
+    # segment. This is what the `compute_per_token_logps` equivalence
+    # tests require. When `segment_ids` is None, fall back to full
+    # attention (existing behavior — kept so the larger suite of
+    # toy-transformer tests that pin loss/grad values is not perturbed).
     if segment_ids is not None:
-      mask = _segment_causal_mask(segment_ids)
+      mask = _same_segment_mask(segment_ids)
       x = self.attn(x, mask=mask) + x
     else:
       x = self.attn(x) + x

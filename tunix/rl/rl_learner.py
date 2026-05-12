@@ -735,6 +735,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           train_data_gen,
           self.algo_config.max_token_len_per_tpu,
           num_packs=pack_size,
+          # `+1` for the seg=0 padding bucket. `pack_sequences` will raise
+          # if a pack would exceed this cap; downstream segmented reductions
+          # then operate over a JIT-stable [B, num_segments] shape.
+          num_segments=self.algo_config.max_segments_per_packed_row + 1,
       )
 
     curr_eval_ds = None
