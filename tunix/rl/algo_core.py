@@ -18,9 +18,11 @@ import functools
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import jax.sharding as shd
 import numpy as np
 from tunix.rl import common
 from tunix.rl import function_registry
+from tunix.rl import utils as rl_utils
 from tunix.sft import utils as sft_utils
 
 
@@ -425,6 +427,13 @@ def grpo_loss_fn(
       segment_positions=getattr(train_example, "segment_positions", None),
       temperature=algo_config.temperature,
   )
+  # Pin the sequence axis to the `sp` mesh axis (no-op when SP is not in the
+  # mesh). Downstream elementwise ops preserve this sharding; the reductions
+  # inside `aggregate_loss` then become partial-sum + cross-shard all-reduce
+  # under SP rather than fully replicated.
+  per_token_logps = rl_utils.apply_sp_sharding(
+      per_token_logps, shd.PartitionSpec("fsdp", "sp")
+  )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
@@ -525,6 +534,13 @@ def grpo_loss_fn(
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
+  # Re-pin: after the `jnp.where` branch resolution, the previous SP sharding
+  # could be lost depending on how XLA fuses; an explicit constraint right
+  # before the reduction keeps the per-token loss sequence-sharded so the
+  # `aggregate_loss` reduction is correctly distributed.
+  per_token_loss = rl_utils.apply_sp_sharding(
+      per_token_loss, shd.PartitionSpec("fsdp", "sp")
+  )
   weighted_loss = common.aggregate_loss(
       per_token_loss,
       completion_mask,

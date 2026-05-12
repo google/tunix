@@ -134,6 +134,74 @@ utilization:
     `compute_logps_micro_batch_size` (you can try to push it higher as well). If
     you are using the new agentic rollout, then you can omit this configuration.
 
+## Sequence Packing
+
+Sequence packing concatenates multiple shorter prompt+completion pairs into a
+single longer "packed" row so the trainer wastes no compute on padding tokens.
+A 256-token batch of three 80-token completions becomes a single 240-token
+packed row instead of three rows padded to 256 — roughly a 3× FLOPs reduction
+for the same effective batch.
+
+### When to enable
+
+Enable packing when (a) your completions vary in length and your unpacked
+batches are mostly padding; (b) you can budget a small CPU-side packing step
+between rollout and trainer; (c) you use one of the supported algorithms
+(GRPO, DAPO, Dr.GRPO — see `Learner.supports_sequence_packing`) and a
+supported model backbone (Qwen2 today; Qwen3 and Gemma4 in subsequent
+phases).
+
+Skip it for very-uniform-length data — the packing overhead can be net-loss
+when there are no padding tokens to recover.
+
+### Enabling it
+
+Set `use_sequence_packing=True` and `max_token_len_per_tpu=<budget>` on the
+algorithm config:
+
+```python
+from tunix.rl.grpo import grpo_learner as grpo_lib
+
+grpo_config = grpo_lib.GRPOConfig(
+    num_generations=2,
+    num_iterations=1,
+    use_sequence_packing=True,
+    max_token_len_per_tpu=4096,  # token budget per packed row
+)
+```
+
+`max_token_len_per_tpu` is the per-row token budget. Set it large enough to
+absorb the maximum (prompt+completion) length plus headroom for two or three
+extra items.
+
+### Interaction with batching and sharding
+
+| Config | Under packing |
+|---|---|
+| `train_micro_batch_size` (`rl_cluster`) | Specifies *rows* (packed sequences), not generations. With packing, one row holds K segments, so the effective sample count per micro-batch is `K * train_micro_batch_size`. |
+| `target_items_per_update` (PR #1505) | Specifies the number of *logical sequences* per accumulator update, independent of how the packer arranges them across rows. The accumulator finalizes the apply step once `Σ_microbatches segments ≥ target_items_per_update`. Tune this in tandem with `max_token_len_per_tpu` — a larger row budget means each row carries more segments, so a fixed `target_items_per_update` produces fewer rows-per-update. |
+| `mesh.shape['fsdp']` | The packer auto-sizes `num_packs = mesh.shape['fsdp']` so each FSDP shard sees one pack per row. No manual coordination needed today. |
+| `mesh.shape['sp']` | Sequence parallelism: the per-token loss intermediates inside `algo_core.grpo_loss_fn` are constrained along `('fsdp', 'sp')` so the long packed rows split across SP shards. The toy `ToyTransformer` in `tunix.tests.test_common` honors this too. Production model backbones must apply their own `with_sharding_constraint` calls in attention/MLP to fully realize SP gains; the loss-path constraint alone holds the gradient correctness invariant. |
+
+### Loss-aggregation modes
+
+All five `loss_agg_mode` values (`token-mean`, `sequence-mean-token-mean`,
+`sequence-mean-token-scale`, `seq-mean-token-sum`,
+`sequence-mean-token-sum-norm`) operate on **segments** under packing rather
+than on rows. A row containing K segments contributes K terms to the
+per-sequence average, not one. See `docs/algorithms.md` for the
+mode-by-mode contract.
+
+### Known limitations
+
+- Only Qwen2 honors `segment_ids` in attention. Llama3, Gemma, Gemma3,
+  Gemma4, and Qwen3 accept the kwarg as a no-op for now; segment-aware
+  attention will be wired through as additional backbones are covered.
+- PPO and DPO/ORPO under packing are not yet correct. The
+  `Learner.supports_sequence_packing` gate prevents accidentally enabling
+  them while support is being added.
+- Distillation under packing is not currently supported.
+
 ## Collocated vs Disaggregated Training
 
 Tunix provides two fundamental mechanisms for executing RL workflows: Collocated

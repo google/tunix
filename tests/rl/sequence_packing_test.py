@@ -44,6 +44,7 @@ import numpy as np
 from tunix.rl import algo_core  # noqa: F401
 from tunix.rl import common
 from tunix.rl import function_registry as fr
+from tunix.rl import utils as rl_utils
 from tunix.tests import test_common as tc
 
 
@@ -405,6 +406,118 @@ class GspoTokenSegmentAwareTest(absltest.TestCase):
     # outputs and that `gspo-token` doesn't crash under packing.
     self.assertTrue(jnp.isfinite(out_unpacked.primary_loss.compute()).all())
     self.assertTrue(jnp.isfinite(out_packed.primary_loss.compute()).all())
+
+
+class PackSequencesInvariantTest(parameterized.TestCase):
+  """Negative tests for `pack_sequences` invariants.
+
+  Coverage:
+  - First-token mask invariant: an empty prompt with ``completion_mask[0] !=
+    0`` would let the synthetic front-pad position in
+    ``compute_per_token_logps`` leak into the loss. The test verifies that
+    ``pack_sequences`` raises an ``AssertionError`` in this case, and that
+    a non-empty prompt prefix passes through cleanly.
+  - ``num_segments`` overflow: when more real segments are produced than the
+    declared cap, ``_build_pack`` raises a ``ValueError`` so segments do not
+    silently collide inside ``segmented_sum``.
+
+  Two related properties are validated elsewhere in the suite and are not
+  duplicated here:
+  - ``num_packs`` vs ``mesh['fsdp']`` mismatch: today ``num_packs`` is auto-
+    derived from the mesh at the ``rl_learner.py`` call site, so a user
+    cannot supply a mismatched value through configuration. A negative test
+    for this case requires a user-overridable knob that does not exist.
+  - Heterogeneous ``policy_version`` within one pack: the version-aware
+    flush in ``pack_sequences`` separates items into different packs, and
+    ``tests/rl/rl_utils_test.py::test_pack_sequences_version_aware_flush``
+    verifies the correct flush behavior. The homogeneity ``assert`` inside
+    ``_build_pack`` acts as a regression guard if the flush is ever bypassed.
+  """
+
+  def _make_unpacked(
+      self,
+      *,
+      prompt_len: int,
+      comp_len: int,
+      first_completion_mask: int = 0,
+  ) -> common.TrainExample:
+    """Build a `[1, prompt_len + comp_len]`-shape `TrainExample` for packing.
+
+    ``first_completion_mask`` controls whether the first completion token's
+    mask is 0 (default; passes the first-token mask check) or 1 (forces a
+    violation when ``prompt_len == 0``).
+    """
+    p_len = max(prompt_len, 0)
+    c_mask = [first_completion_mask] + [1] * (comp_len - 1) if comp_len > 0 else []
+    return common.TrainExample(
+        prompt_ids=jnp.zeros((1, p_len), dtype=jnp.int32),
+        prompt_mask=jnp.ones((1, p_len), dtype=jnp.int32),
+        completion_ids=jnp.arange(1, comp_len + 1, dtype=jnp.int32)[None, :],
+        completion_mask=jnp.asarray(c_mask, dtype=jnp.float32)[None, :],
+        advantages=jnp.asarray(0.1, dtype=jnp.float32)[None],
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+    )
+
+  def test_first_token_completion_mask_must_be_zero(self):
+    """Empty prompt + ``completion_mask[0] == 1`` raises an AssertionError.
+
+    With no prompt prefix to carry ``mask=0`` at the front, the synthetic
+    front-padded position in ``compute_per_token_logps`` would leak into the
+    loss. `pack_sequences` raises loud in this case.
+    """
+    bad_example = self._make_unpacked(
+        prompt_len=0, comp_len=3, first_completion_mask=1
+    )
+    with self.assertRaisesRegex(
+        AssertionError,
+        "first token of pack must carry completion_mask == 0",
+    ):
+      _ = list(
+          rl_utils.pack_sequences(
+              iter([[bad_example]]),
+              max_token_budget=8,
+              pad_id=0,
+              num_packs=1,
+          )
+      )
+
+  def test_non_empty_prompt_prefix_passes(self):
+    """Sanity check: with a non-empty prompt prefix the assertion does NOT fire."""
+    ok_example = self._make_unpacked(
+        prompt_len=1, comp_len=3, first_completion_mask=1
+    )
+    packs = list(
+        rl_utils.pack_sequences(
+            iter([[ok_example]]),
+            max_token_budget=8,
+            pad_id=0,
+            num_packs=1,
+        )
+    )
+    self.assertLen(packs, 1)
+    # First token of pack is the prompt prefix; its mask must be 0 by
+    # construction (the prompt prefix is masked out in `_build_pack`).
+    self.assertEqual(float(packs[0][0].completion_mask[0, 0]), 0.0)
+
+  def test_num_segments_overflow_raises(self):
+    """`num_segments` cap must be honored or `_build_pack` raises ValueError."""
+    # Two items, each contributing one segment -> 2 real segments + 1 padding
+    # bucket = 3 total. Set num_segments=2 (only 1 real allowed) → ValueError.
+    e1 = self._make_unpacked(prompt_len=1, comp_len=2)
+    e2 = self._make_unpacked(prompt_len=1, comp_len=2)
+    with self.assertRaisesRegex(
+        ValueError, "real segments but num_segments cap is"
+    ):
+      _ = list(
+          rl_utils.pack_sequences(
+              iter([[e1, e2]]),
+              max_token_budget=20,
+              pad_id=0,
+              num_packs=1,
+              num_segments=2,  # 1 padding + 1 real
+          )
+      )
 
 
 if __name__ == "__main__":

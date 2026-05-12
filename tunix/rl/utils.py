@@ -24,14 +24,40 @@ from flax import nnx
 from flax.nnx import filterlib
 from flax.nnx import statelib
 import jax
+from jax.interpreters import pxla
 from jax import tree_util
 import jax.numpy as jnp
+import jax.sharding as shd
 import jaxtyping
 import numpy as np
 from tunix.rl import common
 
 Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
+
+
+def apply_sp_sharding(
+    x: jax.Array, pspec_when_sp: shd.PartitionSpec
+) -> jax.Array:
+  """Apply a sequence-parallel sharding constraint when SP is in the mesh.
+
+  This is a no-op when the active mesh either is empty (single-device / CPU)
+  or does not contain an ``sp`` axis. Keeps the call-site terse and means the
+  large suite of ``(fsdp, tp)``-only tests pay zero cost.
+
+  Args:
+    x: The array to constrain.
+    pspec_when_sp: The ``PartitionSpec`` to apply when ``'sp' in mesh``.
+
+  Returns:
+    ``x``, possibly with a sharding constraint applied.
+  """
+  mesh = pxla.thread_resources.env.physical_mesh
+  if mesh.empty or "sp" not in mesh.axis_names:
+    return x
+  return jax.lax.with_sharding_constraint(
+      x, shd.NamedSharding(mesh, pspec_when_sp)
+  )
 
 _OPTIONAL_PER_TOKEN_KEYS = (
     "ref_per_token_logps",
@@ -456,7 +482,25 @@ def pack_sequences(
 
     # Pad all lists by pad_len
     c_ids_arr = jnp.array(_pad(packed_c_ids, pad_id, pad_len))[None, :]
-    c_mask_arr = jnp.array(_pad(packed_c_mask, 0, pad_len))[None, :]
+    packed_c_mask_np = _pad(packed_c_mask, 0, pad_len)
+    # The first token of every packed row must carry `completion_mask == 0`.
+    # `compute_per_token_logps` shifts the per-token-logp output left by one
+    # and pads the front with a synthetic zero; that synthetic position
+    # predicts nothing meaningful. If a caller feeds an item whose prompt is
+    # empty and whose `completion_mask[0] != 0`, the synthetic zero would
+    # leak into the loss. Python-side (non-JIT) check so the caller gets a
+    # clear stack trace.
+    if packed_c_mask_np.size > 0 and packed_c_mask_np[0] != 0:
+      raise AssertionError(
+          "pack_sequences: first token of pack must carry completion_mask "
+          "== 0 (the synthetic front-pad position in "
+          "compute_per_token_logps cannot contribute to the loss). Got "
+          f"completion_mask[0] = {packed_c_mask_np[0]}. This typically "
+          "indicates the first item in the pack has an empty prompt AND a "
+          "non-zero completion_mask[0]; fix the data pipeline so prompt "
+          "prefixes are non-empty or carry mask=0."
+      )
+    c_mask_arr = jnp.array(packed_c_mask_np)[None, :]
     adv_arr = jnp.array(_pad(packed_adv, 0.0, pad_len))[None, :]
     seg_arr = jnp.array(_pad(packed_segment_ids, 0, pad_len))[None, :]
     pos_arr = jnp.array(_pad(packed_positions, 0, pad_len))[None, :]

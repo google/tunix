@@ -318,6 +318,30 @@ out_data = sampler(
 )
 ```
 
+### Enabling Sequence Packing
+
+For workloads with variable-length completions, sequence packing reduces
+padding waste by concatenating multiple short sequences into longer "packed"
+rows. To enable it, set two flags on the algorithm config:
+
+```python
+from tunix.rl.grpo import grpo_learner as grpo_lib
+
+grpo_config = grpo_lib.GRPOConfig(
+    num_generations=2,
+    num_iterations=1,
+    use_sequence_packing=True,
+    max_token_len_per_tpu=4096,
+)
+```
+
+Sequence packing is currently supported on Qwen2 backbones with the GRPO,
+DAPO, and Dr.GRPO learners. See
+[Sequence Packing](performance.md#sequence-packing) for a full description
+of the trade-offs and configuration interactions, and
+[Loss Aggregation under Sequence Packing](algorithms.md#loss-aggregation-under-sequence-packing)
+for the per-mode loss contract.
+
 ### Trajectory Logging
 
 During reinforcement learning (RL) training, it is often useful to analyze the

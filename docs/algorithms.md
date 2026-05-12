@@ -207,3 +207,51 @@ class MyCustomRewardManager(AbstractRewardManager):
         return metrics_to_log
 
 ```
+
+--------------------------------------------------------------------------------
+
+## Loss Aggregation under Sequence Packing
+
+Tunix's `algo_core.grpo_loss_fn` supports five `loss_agg_mode` values. Under
+[sequence packing](performance.md#sequence-packing) each packed row contains
+multiple logical sequences (segments), so "per-sequence" aggregations operate
+on **segments**, not rows. The contract is:
+
+| `loss_agg_mode` | Unpacked formula | Packed formula |
+|---|---|---|
+| `token-mean` | `Σ (loss * mask) / Σ mask` over the batch. | Identical (mask handles everything). |
+| `sequence-mean-token-mean` | `Σ_rows (Σ_t (loss * mask)[r, t] / Σ_t mask[r, t]) / non_zero_rows` | `Σ_segments (L_seg / C_seg) / N_active_segments` |
+| `sequence-mean-token-scale` | `Σ_rows (Σ_t (loss * mask)[r, t]) / norm / non_zero_rows` | `Σ_segments (L_seg / norm) / N_active_segments` |
+| `seq-mean-token-sum` | `Σ_rows (Σ_t (loss * mask)[r, t]) / non_empty_rows` | `Σ_segments L_seg / N_active_segments` |
+| `sequence-mean-token-sum-norm` | `Σ (loss * mask) / norm` (default `norm = non_zero_rows`) | `Σ (loss * mask) / norm` (default `norm = N_active_segments`) |
+
+Notation:
+
+- `L_seg` is the masked sum of loss in segment `s`.
+- `C_seg` is the masked token count in segment `s`.
+- `N_active_segments` is the number of segments (excluding the seg=0 padding
+  bucket) with at least one scored token.
+
+The packed math is **equivalent in expectation** to the unpacked math when
+each row is a single segment. It is not bit-identical (the per-segment
+reduction uses `vmap` over `jax.ops.segment_sum`, which has a different
+reduction order from a flat `jnp.sum`), but it is numerically equivalent
+within fp32 tolerance (~1e-6). See
+`tests/rl/common_test.py::PackedAggregateLossTest` for the regression suite.
+
+**`sequence-mean-token-scale` caveat.** Its default `norm =
+per_token_loss.shape[-1]` is the *row length*, not the segment length.
+Under packing the row length is the full packed buffer (often much larger
+than any individual segment), so the default normalization differs between
+packed and unpacked unless `norm` is set explicitly. If you need the same
+scaling under packing, pass `norm` explicitly (currently requires going
+through `common.aggregate_loss` directly — `grpo_loss_fn` does not forward a
+user-supplied `norm`).
+
+**`gspo-token` under packing.** The per-token importance-ratio pooling that
+`gspo-token` performs is **per-segment** under packing rather than per-row:
+each token's importance ratio is replaced by the mean importance ratio of
+its segment, then exponentiated. Without this, packing would mix segments
+inside one row and produce a biased ratio. The unpacked code path is
+preserved bit-identically (single-segment-per-row reduces to the original
+formula).
