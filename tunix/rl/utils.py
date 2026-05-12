@@ -17,7 +17,7 @@
 import dataclasses
 from itertools import chain  # pylint: disable=g-importing-member
 import operator
-from typing import Any, Iterator, List, Optional, Sequence
+from typing import Any, Iterator, List, Mapping, Optional, Sequence
 
 from absl import logging
 from flax import nnx
