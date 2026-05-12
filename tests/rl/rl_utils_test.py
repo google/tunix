@@ -289,14 +289,52 @@ class UtilsTest(absltest.TestCase):
       self.assertEqual(pack.policy_version[0], 1)
 
     with self.subTest(name='dummy_pack_check'):
-      # Dummy pack check (index 1) - should be zeros for per-token features
-      # (mask=0 ensures it contributes nothing to loss). policy_version is
-      # inherited from the template; Fix #1 will revise this to a proper
-      # per-row array.
+      # Dummy pack check (index 1) - per-token features are zero (mask=0
+      # ensures it contributes nothing to loss). policy_version is inherited
+      # from the first real pack so off-policy filtering does not see a
+      # sentinel for padding rows.
       self.assertEqual(pack.returns[1, 0], 0.0)
       self.assertEqual(pack.old_values[1, 0], 0.0)
       self.assertEqual(pack.ref_per_token_logps[1, 0], 0.0)
       self.assertEqual(pack.policy_version[1], 1)
+
+    with self.subTest(name='policy_version_shape_is_per_row'):
+      # policy_version is a per-row array of shape (num_packs,) where row i
+      # carries the version of pack i. With num_packs=2 we expect length-2.
+      self.assertEqual(pack.policy_version.shape, (2,))
+
+  def test_pack_sequences_version_aware_flush(self):
+    """Items with different policy_versions must land in separate packs."""
+
+    @flax.struct.dataclass(frozen=True)
+    class VersionedExample(common.TrainExample):
+      policy_version: jax.Array | None = None
+
+    # Two examples with different policy_versions. Both fit in the budget so
+    # without version-aware flushing they would share a pack.
+    example_v3 = self._create_mock_train_example(
+        2, 3, cls=VersionedExample, policy_version=jnp.array([3])
+    )
+    example_v7 = self._create_mock_train_example(
+        2, 3, cls=VersionedExample, policy_version=jnp.array([7])
+    )
+
+    packed_iterator = utils.pack_sequences(
+        iter([[example_v3, example_v7]]),
+        max_token_budget=20,  # plenty of room for both
+        num_packs=2,
+    )
+    packed_batches = list(packed_iterator)
+    [[pack]] = packed_batches
+
+    with self.subTest(name='packs_are_separated'):
+      # Each example becomes its own pack -> shape (2, ...) after num_packs=2.
+      self.assertEqual(pack.completion_ids.shape[0], 2)
+
+    with self.subTest(name='per_row_policy_version'):
+      self.assertEqual(pack.policy_version.shape, (2,))
+      self.assertEqual(int(pack.policy_version[0]), 3)
+      self.assertEqual(int(pack.policy_version[1]), 7)
 
   def test_pack_sequences(self):
     # 3 sequences with lengths (P+C): (2+3=5), (1+2=3), (3+4=7)

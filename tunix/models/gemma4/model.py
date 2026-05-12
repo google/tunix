@@ -1106,6 +1106,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       positions=None,
       cache=None,
       attention_mask=None,
+      segment_ids=None,  # [B, L]; unused in Phase 1
   ):
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name

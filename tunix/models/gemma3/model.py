@@ -977,6 +977,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       cache: Cache | None = None,  # (sequence length L')
       attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
       output_hidden_states: bool = False,
+      segment_ids: jaxtyping.Array | None = None,  # [B, L]; unused in Phase 1
       *,
       images: jaxtyping.Array | None = None,  # [B, H, W, C] or [B, N, H, W, C]
   ) -> tuple[jaxtyping.Array, Cache | None]:
