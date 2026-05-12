@@ -105,6 +105,7 @@ class TrainExample:
   old_per_token_logps: jax.Array | None
   segment_ids: jax.Array | None = None
   segment_positions: jax.Array | None = None
+  is_update_step: jax.Array | None = None
 
 
 def compute_kl_divergence(
