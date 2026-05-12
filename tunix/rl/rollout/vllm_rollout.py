@@ -57,6 +57,7 @@ class VllmRollout(base_rollout.BaseRollout):
             data_parallel_size=rollout_config.data_parallel_size,
             expert_parallel_size=rollout_config.expert_parallel_size,
             reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
+            fuse_expert_scales=rollout_config.rollout_vllm_fuse_expert_scales,
             engine_kwargs={
                 "model": rollout_config.rollout_vllm_model_version,
                 "max_model_len": cache_config_or_size,

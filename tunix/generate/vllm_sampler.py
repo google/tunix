@@ -67,6 +67,7 @@ class VllmConfig:
   tensor_parallel_size: int = -1
   expert_parallel_size: int = 1
   reshard_chunk_size: Optional[int] = None
+  fuse_expert_scales: bool = False
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -240,6 +241,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_fn=reshard.reshard_pytree,
           delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
           reshard_chunk_size=self.config.reshard_chunk_size,
+          fuse_expert_scales=self.config.fuse_expert_scales,
       )
 
     if self.llm is not None:
