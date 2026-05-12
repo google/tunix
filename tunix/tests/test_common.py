@@ -142,10 +142,17 @@ class Decoder(nnx.Module):
       x = self.attn(x) + x
     # Sequence-parallel sharding constraint. Gated on the mesh actually having
     # an `sp` axis so that the common (fsdp, tp)-only tests are untouched.
+    # Axes that aren't present in the active mesh (e.g. `tp` under an
+    # `(fsdp, sp)`-only mesh) are downgraded to None so JAX doesn't raise
+    # `Resource axis: ... is not found in mesh`.
     mesh = pxla.thread_resources.env.physical_mesh
     if not mesh.empty and 'sp' in mesh.axis_names:
+      axis_set = set(mesh.axis_names)
+      pspec = shd.PartitionSpec(
+          *(a if a in axis_set else None for a in ('fsdp', 'sp', 'tp'))
+      )
       x = jax.lax.with_sharding_constraint(
-          x, shd.NamedSharding(mesh, shd.PartitionSpec('fsdp', 'sp', 'tp'))
+          x, shd.NamedSharding(mesh, pspec)
       )
     h = nnx.relu(self.w1(x))
     h = self.w2(h) + x

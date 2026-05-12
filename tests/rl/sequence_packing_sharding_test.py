@@ -58,22 +58,59 @@ from tunix.tests import test_common as tc
 _VOCAB_SIZE = 16
 
 
-def _create_sharded_model(rngs, mesh):
+def _filter_pspec_to_mesh(pspecs, mesh_axis_names: tuple[str, ...]):
+  """Replace any axis name not present in `mesh_axis_names` with `None`.
+
+  The toy model declares partitioning over `('fsdp', 'tp')`, but some
+  test mesh shapes only carry a subset of these axes. JAX raises if a
+  `PartitionSpec` references an axis missing from the active mesh, so
+  we walk the pspec tree and drop those references in place.
+  """
+  axis_set = set(mesh_axis_names)
+
+  def _fix(p):
+    if not isinstance(p, shd.PartitionSpec):
+      return p
+    new = tuple(
+        (a if (a is None or a in axis_set) else None) for a in p
+    )
+    return shd.PartitionSpec(*new)
+
+  return jax.tree_util.tree_map(
+      _fix, pspecs, is_leaf=lambda x: isinstance(x, shd.PartitionSpec)
+  )
+
+
+def _create_sharded_model(seed: int, mesh):
   """Place a small `ToyTransformer` on `mesh`. Returns the resharded model.
 
   Borrowed from `tests/distillation/distillation_trainer_test.py` —
   initializes the model under a `with_sharding_constraint(state, pspecs)`
   so all parameter arrays carry the partitioning declared on the layer.
+
+  The `Rngs` object is created *inside* the `nnx.jit`-wrapped builder so
+  its `RngCount` lives at the same trace level as the parameter init,
+  avoiding `TraceContextError: Cannot mutate RngCount from a different
+  trace level` (which fires under flax >= 0.12 if `Rngs(0)` is created
+  in the caller's outer trace and then mutated inside the jit).
+
+  Partition specs that reference mesh axes absent from this test's mesh
+  (e.g. `tp` when running with `(fsdp=2,)`) are downgraded to
+  unsharded — the goal of these tests is to validate the FSDP/SP code
+  paths, not TP, so silently dropping unknown axes is the right call.
   """
+  mesh_axis_names = tuple(mesh.axis_names)
 
   @nnx.jit
   def _make():
+    rngs = nnx.Rngs(seed)
     model = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=_VOCAB_SIZE, num_layers=1),
         rngs=rngs,
     )
     state = nnx.state(model)
     pspecs = nnx.get_partition_spec(state)
+    pspecs = _filter_pspec_to_mesh(pspecs, mesh_axis_names)
     sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
     nnx.update(model, sharded_state)
     return model
@@ -226,10 +263,9 @@ class SequencePackingShardingTest(parameterized.TestCase):
   )
   def test_packed_grpo_loss_on_mesh(self, mesh_shape, mesh_id):
     mesh = _build_mesh(mesh_shape)
-    rngs = nnx.Rngs(0)
 
     with mesh:
-      model = _create_sharded_model(rngs, mesh)
+      model = _create_sharded_model(seed=0, mesh=mesh)
 
     # batch_size = fsdp axis size so the batch dimension is shardable.
     train_example = _make_packed_example(batch_size=mesh_shape["fsdp"])
