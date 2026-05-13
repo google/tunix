@@ -87,6 +87,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   max_concurrency: int = 32
   off_policy_steps: int = 0
   num_generations: int = 1
+  eval_num_generations: int | None = None
   num_iterations: int = 1
   episode_timeout: float = 1800.0
   filter_statuses: Optional[Set] = None
@@ -591,8 +592,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """Returns the number of iterations per batch."""
     return self.algo_config.num_iterations
 
-  def _num_generations(self) -> int:
+  def _num_generations(self, mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN) -> int:
     """Returns the number of generations per prompt."""
+    if (
+        mode == rl_cluster_lib.Mode.EVAL
+        and self.algo_config.eval_num_generations is not None
+    ):
+      return self.algo_config.eval_num_generations
     return self.algo_config.num_generations
 
   async def _producer(
@@ -827,7 +833,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           async for batch in self._orchestrator_producer(
               current_eval_orchestrator,
               all_eval_prompts,
-              num_generations=self._num_generations(),
+              num_generations=self._num_generations(rl_cluster_lib.Mode.EVAL),
           ):
             eval_example = self._batch_to_train_example(
                 batch,
