@@ -319,6 +319,8 @@ class BaseTaskEnv(BaseEnv):
 
     # Enforce maximum episode length; if _step_impl has already finished
     # the episode, keep done=True.
+    if self.step_count >= self.max_steps:
+      print(f"Episode truncated at max_steps={self.max_steps}.")
     done = result.done or (self.step_count >= self.max_steps)
     return result.observation, result.reward, done, result.info
 
