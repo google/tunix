@@ -13,7 +13,6 @@ stack allows:
 - evaluation sampling: greedy via a separate eval rollout config
 
 Known gaps:
-- This uses Tunix's vanilla rollout backend for portability.
 - Validation cadence matches eval_every_n_steps, but there is no explicit
   val_at_end hook here.
 - Tunix does not expose the same KL variant label as the target config, so this
@@ -22,10 +21,13 @@ Known gaps:
 Run from repo root:
 
   python examples/agentic/qwen3_grpo_gsm8k_vtc_demo.py
+  python examples/agentic/qwen3_grpo_gsm8k_vtc_demo.py --rollout_engine=vllm
+  python examples/agentic/qwen3_grpo_gsm8k_vtc_demo.py --separate_rollout_mesh
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import sys
@@ -48,6 +50,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.cli.utils import model as model_utils
+from tunix.models.automodel import call_model_config
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
@@ -90,6 +93,9 @@ MAX_NEW_TOKENS = 1024
 MAX_PROMPT_LENGTH = MAX_INPUT_SEQUENCE_LENGTH
 MAX_GENERATION_LENGTH = MAX_NEW_TOKENS
 KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS
+DEFAULT_VLLM_HBM_UTILIZATION = 0.6
+DEFAULT_VLLM_MAX_NUM_SEQS = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 16384
 
 TRAIN_TEMPERATURE = 1.0
 TRAIN_TOP_P = 1.0
@@ -243,11 +249,173 @@ def vtc_reward(prompts, completions, answer, **kwargs):
   return scores
 
 
-def build_mesh() -> Mesh:
-  devices = np.array(jax.devices())
-  if devices.size == 0:
+def _mesh_from_devices(devices: list[jax.Device]) -> Mesh:
+  if not devices:
+    raise ValueError("Cannot build a mesh from an empty device list.")
+  return Mesh(np.array(devices).reshape((len(devices),)), axis_names=("fsdp",))
+
+
+def build_train_and_rollout_meshes(
+    *,
+    separate_rollout_mesh: bool,
+    rollout_mesh_fsdp: int | None,
+    rollout_mesh_tp: int | None,
+    train_mesh_fsdp: int | None,
+    train_mesh_tp: int | None,
+    train_mesh_sp: int | None,
+    rollout_split_fraction: float,
+) -> tuple[Mesh, Mesh, list[tuple[str, int]], list[tuple[str, int]]]:
+  devices = list(jax.devices())
+  if not devices:
     raise ValueError("No JAX devices found.")
-  return Mesh(devices.reshape((devices.size,)), axis_names=("fsdp",))
+
+  if not separate_rollout_mesh:
+    shared_mesh = _mesh_from_devices(devices)
+    return shared_mesh, shared_mesh, [("fsdp", len(devices))], [("fsdp", len(devices))]
+
+  total_devices = len(devices)
+  model_config = call_model_config(MODEL_NAME)
+
+  if rollout_mesh_fsdp is not None or rollout_mesh_tp is not None:
+    rollout_dims = []
+    if rollout_mesh_fsdp is not None:
+      rollout_dims.append(("fsdp", rollout_mesh_fsdp))
+    if rollout_mesh_tp is not None:
+      rollout_dims.append(("tp", rollout_mesh_tp))
+  else:
+    num_rollout_devices = int(total_devices * rollout_split_fraction)
+    if num_rollout_devices <= 0 or num_rollout_devices >= total_devices:
+      raise ValueError(
+          "rollout_split_fraction must allocate at least 1 rollout device and "
+          "leave at least 1 train device. "
+          f"Got total_devices={total_devices}, "
+          f"rollout_split_fraction={rollout_split_fraction}, "
+          f"num_rollout_devices={num_rollout_devices}."
+      )
+    rollout_tp = int(np.gcd(num_rollout_devices, model_config.num_kv_heads))
+    rollout_fsdp = num_rollout_devices // rollout_tp
+    rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+  num_rollout_devices = int(np.prod([dim for _, dim in rollout_dims]))
+
+  if any(v is not None for v in (train_mesh_fsdp, train_mesh_sp, train_mesh_tp)):
+    train_dims = []
+    train_dims.append(("fsdp", train_mesh_fsdp if train_mesh_fsdp is not None else 1))
+    if train_mesh_sp is not None:
+      train_dims.append(("sp", train_mesh_sp))
+    train_dims.append(("tp", train_mesh_tp if train_mesh_tp is not None else 1))
+  else:
+    num_train_devices = total_devices - num_rollout_devices
+    if num_train_devices <= 0:
+      raise ValueError(
+          "Separate rollout mesh resolution left no train devices. "
+          f"total_devices={total_devices}, num_rollout_devices={num_rollout_devices}."
+      )
+    train_fsdp = int(np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS))
+    train_tp = num_train_devices // train_fsdp
+    train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+  num_train_devices = int(np.prod([dim for _, dim in train_dims]))
+
+  if num_rollout_devices + num_train_devices > total_devices:
+    raise ValueError(
+        f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
+        f"train devices, but only {total_devices} devices are available."
+    )
+
+  rollout_axis_names = tuple(name for name, _ in rollout_dims)
+  rollout_shape = tuple(dim for _, dim in rollout_dims)
+  train_axis_names = tuple(name for name, _ in train_dims)
+  train_shape = tuple(dim for _, dim in train_dims)
+
+  rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
+  train_devices = np.array(
+      devices[num_rollout_devices : num_rollout_devices + num_train_devices]
+  ).reshape(train_shape)
+
+  rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
+  train_mesh = Mesh(train_devices, axis_names=train_axis_names)
+  return train_mesh, rollout_mesh, train_dims, rollout_dims
+
+
+def parse_args() -> argparse.Namespace:
+  parser = argparse.ArgumentParser(
+      description=(
+          "Run the Qwen3-1.7B GSM8K VTC GRPO demo with configurable rollout "
+          "backend and rollout mesh placement."
+      )
+  )
+  parser.add_argument(
+      "--rollout_engine",
+      type=str,
+      choices=("vanilla", "vllm"),
+      default="vanilla",
+      help="Rollout backend to use for training and evaluation.",
+  )
+  parser.add_argument(
+      "--separate_rollout_mesh",
+      action="store_true",
+      help=(
+          "Place rollout on a separate mesh instead of sharing the actor mesh. "
+          "When enabled, rollout devices are taken from the tail of jax.devices()."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_mesh_fsdp",
+      type=int,
+      default=None,
+      help="Optional override for rollout mesh FSDP dimension.",
+  )
+  parser.add_argument(
+      "--rollout_mesh_tp",
+      type=int,
+      default=None,
+      help="Optional override for rollout mesh TP dimension.",
+  )
+  parser.add_argument(
+      "--train_mesh_fsdp",
+      type=int,
+      default=None,
+      help="Optional override for train mesh FSDP dimension.",
+  )
+  parser.add_argument(
+      "--train_mesh_tp",
+      type=int,
+      default=None,
+      help="Optional override for train mesh TP dimension.",
+  )
+  parser.add_argument(
+      "--train_mesh_sp",
+      type=int,
+      default=None,
+      help="Optional override for train mesh SP dimension.",
+  )
+  parser.add_argument(
+      "--rollout_split_fraction",
+      type=float,
+      default=0.5,
+      help=(
+          "Fraction of total devices to allocate to rollout when separate "
+          "rollout mesh is enabled and no explicit rollout mesh dims are set."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_vllm_hbm_utilization",
+      type=float,
+      default=DEFAULT_VLLM_HBM_UTILIZATION,
+      help="HBM utilization target for the vLLM rollout backend.",
+  )
+  parser.add_argument(
+      "--rollout_vllm_max_num_seqs",
+      type=int,
+      default=DEFAULT_VLLM_MAX_NUM_SEQS,
+      help="Maximum concurrent sequences for the vLLM rollout backend.",
+  )
+  parser.add_argument(
+      "--rollout_vllm_max_num_batched_tokens",
+      type=int,
+      default=DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS,
+      help="Maximum batched tokens for the vLLM rollout backend.",
+  )
+  return parser.parse_args()
 
 
 def maybe_apply_lora(model: nnx.Module, mesh: Mesh) -> nnx.Module:
@@ -320,7 +488,16 @@ class VTCQwenChatTemplateParser(chat_parser_lib.QwenChatTemplateParser):
 
 
 def main():
-  mesh = build_mesh()
+  args = parse_args()
+  train_mesh, rollout_mesh, train_dims, rollout_dims = build_train_and_rollout_meshes(
+      separate_rollout_mesh=args.separate_rollout_mesh,
+      rollout_mesh_fsdp=args.rollout_mesh_fsdp,
+      rollout_mesh_tp=args.rollout_mesh_tp,
+      train_mesh_fsdp=args.train_mesh_fsdp,
+      train_mesh_tp=args.train_mesh_tp,
+      train_mesh_sp=args.train_mesh_sp,
+      rollout_split_fraction=args.rollout_split_fraction,
+  )
 
   train_dataset = build_gsm8k_dataset(
       split="train",
@@ -337,7 +514,7 @@ def main():
       shuffle=False,
   )
 
-  reference, actor, tokenizer_path = create_reference_and_actor(mesh)
+  reference, actor, tokenizer_path = create_reference_and_actor(train_mesh)
   tokenizer = AutoTokenizer.from_pretrained(
       tokenizer_path,
       token=os.getenv("HF_TOKEN"),
@@ -355,32 +532,60 @@ def main():
       flush_every_n_steps=10,
   )
 
-  train_rollout_config = base_rollout.RolloutConfig(
+  rollout_config_base = dict(
       max_tokens_to_generate=MAX_GENERATION_LENGTH,
       max_prompt_length=MAX_PROMPT_LENGTH,
       kv_cache_size=KV_CACHE_SIZE,
+      eos_tokens=qwen_eos_tokens,
+  )
+  train_rollout_kwargs = dict(
       temperature=TRAIN_TEMPERATURE,
       top_p=TRAIN_TOP_P,
       top_k=TRAIN_TOP_K,
-      eos_tokens=qwen_eos_tokens,
   )
-  eval_rollout_config = base_rollout.RolloutConfig(
-      max_tokens_to_generate=MAX_GENERATION_LENGTH,
-      max_prompt_length=MAX_PROMPT_LENGTH,
-      kv_cache_size=KV_CACHE_SIZE,
+  eval_rollout_kwargs = dict(
       temperature=EVAL_TEMPERATURE,
       top_p=EVAL_TOP_P,
       top_k=EVAL_TOP_K,
-      eos_tokens=qwen_eos_tokens,
+  )
+  if args.rollout_engine == "vllm":
+    vllm_rollout_kwargs = dict(
+        rollout_vllm_model_version=MODEL_ID,
+        rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
+        rollout_vllm_tpu_backend_type="jax",
+        rollout_vllm_server_mode=True,
+        rollout_vllm_async_scheduling=True,
+        tensor_parallel_size=rollout_mesh.shape.get("tp", 1),
+        data_parallel_size=rollout_mesh.shape.get("fsdp", 1),
+        rollout_vllm_max_num_seqs=args.rollout_vllm_max_num_seqs,
+        rollout_vllm_max_num_batched_tokens=(
+            args.rollout_vllm_max_num_batched_tokens
+        ),
+        rollout_vllm_kwargs={
+            "kv_cache_metrics": True,
+            "disable_log_stats": False,
+            "enable_prefix_caching": True,
+        },
+    )
+    train_rollout_kwargs.update(vllm_rollout_kwargs)
+    eval_rollout_kwargs.update(vllm_rollout_kwargs)
+
+  train_rollout_config = base_rollout.RolloutConfig(
+      **rollout_config_base,
+      **train_rollout_kwargs,
+  )
+  eval_rollout_config = base_rollout.RolloutConfig(
+      **rollout_config_base,
+      **eval_rollout_kwargs,
   )
 
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: mesh,
-          rl_cluster_lib.Role.REFERENCE: mesh,
-          rl_cluster_lib.Role.ROLLOUT: mesh,
+          rl_cluster_lib.Role.ACTOR: train_mesh,
+          rl_cluster_lib.Role.REFERENCE: train_mesh,
+          rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
-      rollout_engine="vanilla",
+      rollout_engine=args.rollout_engine,
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=create_optimizer(),
@@ -428,13 +633,23 @@ def main():
       chat_parser=chat_parser,
   )
 
-  print(f"Devices: {jax.device_count()} | Mesh: {mesh}")
+  print(f"Devices: {jax.device_count()}")
+  print(f"Train mesh: {train_mesh} | dims: {train_dims}")
+  print(f"Rollout mesh: {rollout_mesh} | dims: {rollout_dims}")
   print(f"Artifact root: {ARTIFACT_ROOT}")
   print(f"Checkpoint dir: {CHECKPOINT_ROOT}")
   print(
       "Config summary:",
       {
           "model": MODEL_ID,
+          "rollout_engine": args.rollout_engine,
+          "separate_rollout_mesh": args.separate_rollout_mesh,
+          "rollout_split_fraction": args.rollout_split_fraction,
+          "rollout_mesh_fsdp": args.rollout_mesh_fsdp,
+          "rollout_mesh_tp": args.rollout_mesh_tp,
+          "train_mesh_fsdp": args.train_mesh_fsdp,
+          "train_mesh_sp": args.train_mesh_sp,
+          "train_mesh_tp": args.train_mesh_tp,
           "batch_size": NUM_PROMPTS_PER_STEP,
           "num_generations": NUM_GENERATIONS,
           "eval_num_generations": 1,
@@ -443,6 +658,11 @@ def main():
           "max_total_sequence_length": MAX_TOTAL_SEQUENCE_LENGTH,
           "train_temperature": TRAIN_TEMPERATURE,
           "eval_temperature": EVAL_TEMPERATURE,
+          "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
+          "rollout_vllm_max_num_seqs": args.rollout_vllm_max_num_seqs,
+          "rollout_vllm_max_num_batched_tokens": (
+              args.rollout_vllm_max_num_batched_tokens
+          ),
       },
   )
 
