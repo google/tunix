@@ -161,7 +161,9 @@ class ORPOTrainerTest(parameterized.TestCase):
           orpo_trainer._train_steps,
       )
       self.assertLen(
-          orpo_trainer.metrics_logger.get_metric_history("", metric_name, "eval"),
+          orpo_trainer.metrics_logger.get_metric_history(
+              "", metric_name, "eval"
+          ),
           3,
       )
 
@@ -253,13 +255,16 @@ class ORPOTrainerTest(parameterized.TestCase):
         "compute_logps",
         return_value=(jnp.array(chosen_logps), jnp.array(rejected_logps)),
     ):
-      loss, aux = orpo_lib.dpo_loss_fn(
+      loss_output = orpo_lib.dpo_loss_fn(
           model,
           train_example,
           algorithm="orpo",
           lambda_orpo=0.1,
           label_smoothing=0,
       )
+      loss = loss_output.primary_loss.compute()
+      aux = loss_output.aux_metrics
+
       # Loss should be a scalar and finite
       self.assertEqual(loss.shape, ())
       self.assertTrue(jnp.isfinite(loss))
@@ -274,8 +279,8 @@ class ORPOTrainerTest(parameterized.TestCase):
       self.assertIn("odds_ratio", aux)
 
       # Check that accuracy is between 0 and 1
-      self.assertGreaterEqual(aux["rewards/accuracy"], 0.0)
-      self.assertLessEqual(aux["rewards/accuracy"], 1.0)
+      self.assertGreaterEqual(aux["rewards/accuracy"].compute(), 0.0)
+      self.assertLessEqual(aux["rewards/accuracy"].compute(), 1.0)
 
   def test_orpo_prepare_inputs_for_strings(self):
     tokenizer = tc.MockVocab()
