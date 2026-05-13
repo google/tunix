@@ -92,8 +92,8 @@ jobs:
         else:
             print(f'SUCCESS: Found {len(devices)} TPU device(s)')
         "
-
     - name: Run SFT shell scripts
+      shell: bash
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
@@ -109,23 +109,36 @@ jobs:
           exit 1
         fi
 
+        echo "### SFT Scripts Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+
         echo "🔍 Finding scripts in $SCRIPT_DIR"
+        FINAL_EXIT_CODE=0
         for script in "$SCRIPT_DIR"/*.sh; do
           if [ -f "$script" ]; then
-
-            echo "📦 Executing: $script"
+            echo "::group::📦 Executing: $script"
             echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
             chmod +x "$script"
             if bash "$script" \
                 --training_config.max_steps "$MAX_STEPS" \
                 --training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
               echo "✅ Successfully completed: $script"
+              echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
             else
               exit_code=$?
               echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+              FINAL_EXIT_CODE=1
             fi
+            echo "::endgroup::"
           fi
         done
+
+        if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
+          echo "🚫 One or more SFT scripts failed." >&2
+          exit "$FINAL_EXIT_CODE"
+        fi
         echo "🎉 All SFT scripts completed successfully."
 
 
@@ -146,34 +159,43 @@ jobs:
           exit 1
         fi
 
+        echo "### RL Scripts Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+
         echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
-        final_exit_code=0
+        FINAL_EXIT_CODE=0
 
         while IFS= read -r script; do
           if [ -f "$script" ]; then
             # TODO(b/510383570)
             if [[ "$script" == *"run_qwen3_8b"* ]]; then
               echo "⏭️ Skipping: $script"
+              echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
               continue
             fi
-            echo "📦 Executing: $script"
+
+            echo "::group::📦 Executing: $script"
             echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
             chmod +x "$script"
-            if ! bash "$script" \
+            if bash "$script" \
                 --rl_training_config.max_steps "$MAX_STEPS" \
                 --rl_training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              echo "✅ Successfully completed: $script"
+              echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+            else
               exit_code=$?
               echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
-              final_exit_code=$exit_code
-            else
-              echo "✅ Successfully completed: $script"
+              echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+              FINAL_EXIT_CODE=1
             fi
+            echo "::endgroup::"
           fi
         done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/")
 
-        if [ "$final_exit_code" -ne 0 ]; then
-          echo "🚫 One or more RL scripts failed. Exiting with code $final_exit_code." >&2
-          exit "$final_exit_code"
+        if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
+          echo "🚫 One or more RL scripts failed." >&2
+          exit "$FINAL_EXIT_CODE"
         fi
         echo "🎉 All RL scripts completed successfully."
 
@@ -183,42 +205,38 @@ jobs:
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       id: regression_tests
-      continue-on-error: true
       run: |
+        echo "### Regression Scripts Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+
+        FAILED=0
+
+        function run_and_log() {
+          local name="$1"
+          shift
+          echo "::group::📦 Executing: $name"
+          if "$@"; then
+            echo "✅ Successfully completed: $name"
+            echo "| $name | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Failed to complete: $name" >&2
+            echo "| $name | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+            FAILED=1
+          fi
+          echo "::endgroup::"
+        }
+
         # Download GSM8K dataset
         mkdir -p /tmp/grpo_test/rl/grpo/data
 
-        FAILED=0
-        echo "📦 Executing: examples/deepscaler/math_eval_nb.py..."
-        python examples/deepscaler/math_eval_nb.py || FAILED=1
-
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in colocated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 || FAILED=1
-
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 2 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way || FAILED=1
-
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 3 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || FAILED=1
-
-        # TODO(b/508252632): Re-enable once the bug is fixed.
-        # vLLM Tests
-        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in colocated mode ..."
-        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm || FAILED=1
-
-        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 2 way disaggregated mode ..."
-        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way || FAILED=1
-
-        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm rollout engine in 3 way disaggregated mode ..."
-        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way || FAILED=1
-
-        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 2 way disaggregated mode ..."
-        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
-
-        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode ..."
-        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way || FAILED=1
+        run_and_log "math_eval_nb.py" python examples/deepscaler/math_eval_nb.py
+        run_and_log "grpo_demo_llama3_qwen2.py (colocated)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20
+        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-2-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
+        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-3-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
 
         # SGLang Tests
+        echo "::group::📦 Setting up SGLang"
         unset JAX_PLATFORMS
         pip list | egrep 'jax|flax|libtpu'
         cd ..
@@ -226,22 +244,16 @@ jobs:
         pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24
         pip list | egrep 'jax|flax|libtpu'
         cd tunix
+        echo "::endgroup::"
 
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in colocated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax || FAILED=1
-
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 2 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way || FAILED=1
-
-        echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 3 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way || FAILED=1
-
-        # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax with LoRA ..."
-        # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine sglang_jax --enable-lora --lora-target-modules all || FAILED=1
-
+        run_and_log "sglang_jax colocated" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax"
+        run_and_log "sglang_jax disaggregated-2-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way"
+        run_and_log "sglang_jax disaggregated-3-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way"
 
         if [ "$FAILED" -ne 0 ]; then
-          echo "⚠️ One or more scripts failed, but continuing workflow..."
+          echo "🚫 One or more regression scripts failed." >&2
+          exit 1
         fi
+        echo "🎉 All regression scripts completed successfully."
 
 
