@@ -24,6 +24,11 @@ from tunix.tests import test_common as tc
 jax.config.update("jax_threefry_partitionable", False)
 jax.config.update("jax_default_matmul_precision", "highest")
 
+def _compute_loss(*args, **kwargs):
+  out = getattr(common, "aggregate_loss")(*args, **kwargs)
+  return out.compute()
+
+
 class CommonTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
@@ -446,7 +451,9 @@ class CommonTest(parameterized.TestCase):
           expected_loss=(0.1 + 0.2) / 4.0 / 1.0,
       ),
       dict(
-          testcase_name="sequence_mean_token_sum_norm_partial_zero_mask_default",
+          testcase_name=(
+              "sequence_mean_token_sum_norm_partial_zero_mask_default"
+          ),
           loss_agg_mode="sequence-mean-token-sum-norm",
           per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
           completion_mask_list=[[1, 1], [0, 0]],
@@ -496,7 +503,7 @@ class CommonTest(parameterized.TestCase):
   ):
     per_token_loss = jnp.array(per_token_loss_list)
     completion_mask = jnp.array(completion_mask_list)
-    actual_loss = common.aggregate_loss(
+    actual_loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode, **kwargs
     )
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-6, atol=1e-6)
@@ -505,7 +512,7 @@ class CommonTest(parameterized.TestCase):
     with self.assertRaisesRegex(
         ValueError, "Unsupported loss aggregation mode"
     ):
-      common.aggregate_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
+      _compute_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
 
   @parameterized.named_parameters(
       dict(
@@ -541,7 +548,7 @@ class CommonTest(parameterized.TestCase):
   )
   def test_invalid_norm(self, norm_val, loss_agg_mode):
     with self.assertRaisesRegex(ValueError, "Invalid 'norm' value"):
-      common.aggregate_loss(
+      _compute_loss(
           jnp.ones((2, 2)),
           jnp.ones((2, 2)),
           loss_agg_mode,
@@ -638,7 +645,7 @@ class CommonTest(parameterized.TestCase):
     per_token_loss = jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16)
     completion_mask = jnp.array([1, 1, 0], dtype=jnp.int32)
 
-    loss = common.aggregate_loss(
+    loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode="token-mean"
     )
     self.assertEqual(loss.dtype, jnp.float32)
