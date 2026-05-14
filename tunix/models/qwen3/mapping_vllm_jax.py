@@ -16,207 +16,179 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
 from tunix.generate import mappings as mappings_lib
-from tunix.generate import utils as transfer_utils
+from tunix.generate import param_mapping as param_mapping_lib
 
 Sharding = Tuple[str | None, ...]
 MappingEntry = Tuple[str, Sharding]
 
 
-@dataclass(frozen=True)
-class MappingRuleDef:
-  """Declarative Qwen3-to-vLLM mapping rule."""
+def _rule(
+    source: str,
+    target: str,
+    transforms: Tuple[param_mapping_lib.Transform, ...] = (),
+) -> param_mapping_lib.OperationRule:
+  return param_mapping_lib.OperationRule(
+      name=f'qwen3_vllm::{source}',
+      source_patterns=(source,),
+      target_patterns=(target,),
+      transforms=transforms,
+  )
 
-  source: str
-  target: str
-  sharding: Sharding
-  transforms: Tuple[transfer_utils.Transform, ...] = ()
+
+VLLM_JAX_WEIGHT_MAPPINGS: Dict[str, MappingEntry] = {
+  'embedder.input_embedding': ('model.embed_tokens.weight', ('model', None)),
+  'layers.*.input_layernorm.w': (
+    'model.layers.*.input_layernorm.weight',
+    (None,),
+  ),
+  'layers.*.mlp.down_proj.kernel': (
+    'model.layers.*.mlp.down_proj.weight',
+    ('model', None),
+  ),
+  'layers.*.mlp.gate_proj.kernel': (
+    'model.layers.*.mlp.gate_proj.weight',
+    (None, 'model'),
+  ),
+  'layers.*.mlp.up_proj.kernel': (
+    'model.layers.*.mlp.up_proj.weight',
+    (None, 'model'),
+  ),
+  'layers.*.post_attention_layernorm.w': (
+    'model.layers.*.post_attention_layernorm.weight',
+    (None,),
+  ),
+  'layers.*.attn.k_proj.w': (
+    'model.layers.*.self_attn.k_proj.weight',
+    (None, 'model', None),
+  ),
+  'layers.*.attn.k_norm.w': (
+    'model.layers.*.self_attn.k_norm.weight',
+    (None, 'model', None),
+  ),
+  'layers.*.attn.o_proj.w': (
+    'model.layers.*.self_attn.o_proj.weight',
+    ('model', None, None),
+  ),
+  'layers.*.attn.q_proj.w': (
+    'model.layers.*.self_attn.q_proj.weight',
+    (None, 'model', None),
+  ),
+  'layers.*.attn.q_norm.w': (
+    'model.layers.*.self_attn.q_norm.weight',
+    (None, 'model', None),
+  ),
+  'layers.*.attn.v_proj.w': (
+    'model.layers.*.self_attn.v_proj.weight',
+    (None, 'model', None),
+  ),
+  'final_norm.w': ('model.norm.weight', (None,)),
+  'lm_head.w': ('lm_head.weight', (None, 'model')),
+}
 
 
-VLLM_JAX_WEIGHT_RULE_DEFS: Tuple[MappingRuleDef, ...] = (
-    MappingRuleDef(
-        source='embedder.input_embedding',
-        target='model.embed_tokens.weight',
-        sharding=('model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.input_layernorm.w',
-        target='model.layers.*.input_layernorm.weight',
-        sharding=(None,),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.down_proj.kernel',
-        target='model.layers.*.mlp.down_proj.weight',
-        sharding=('model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.gate_proj.kernel',
-        target='model.layers.*.mlp.gate_proj.weight',
-        sharding=(None, 'model'),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.up_proj.kernel',
-        target='model.layers.*.mlp.up_proj.weight',
-        sharding=(None, 'model'),
-    ),
-    MappingRuleDef(
-        source='layers.*.post_attention_layernorm.w',
-        target='model.layers.*.post_attention_layernorm.weight',
-        sharding=(None,),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.k_proj.w',
-        target='model.layers.*.self_attn.k_proj.weight',
-        sharding=(None, 'model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.k_norm.w',
-        target='model.layers.*.self_attn.k_norm.weight',
-        sharding=(None, 'model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.o_proj.w',
-        target='model.layers.*.self_attn.o_proj.weight',
-        sharding=('model', None, None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.q_proj.w',
-        target='model.layers.*.self_attn.q_proj.weight',
-        sharding=(None, 'model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.q_norm.w',
-        target='model.layers.*.self_attn.q_norm.weight',
-        sharding=(None, 'model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.v_proj.w',
-        target='model.layers.*.self_attn.v_proj.weight',
-        sharding=(None, 'model', None),
-    ),
-    MappingRuleDef(
-        source='final_norm.w',
-        target='model.norm.weight',
-        sharding=(None,),
-    ),
-    MappingRuleDef(
-        source='lm_head.w',
-        target='lm_head.weight',
-        sharding=(None, 'model'),
-    ),
+VLLM_JAX_LORA_MAPPINGS: Dict[str, MappingEntry] = {
+  'layers.*.mlp.gate_proj.kernel_lora_a': (
+    'model.layers.*.mlp.gate_proj.weight_lora_a',
+    (None, None),
+  ),
+  'layers.*.mlp.gate_proj.kernel_lora_b': (
+    'model.layers.*.mlp.gate_proj.weight_lora_b',
+    (None, 'model'),
+  ),
+  'layers.*.mlp.up_proj.kernel_lora_a': (
+    'model.layers.*.mlp.up_proj.weight_lora_a',
+    (None, None),
+  ),
+  'layers.*.mlp.up_proj.kernel_lora_b': (
+    'model.layers.*.mlp.up_proj.weight_lora_b',
+    (None, 'model'),
+  ),
+  'layers.*.mlp.down_proj.kernel_lora_a': (
+    'model.layers.*.mlp.down_proj.weight_lora_a',
+    ('model', None),
+  ),
+  'layers.*.mlp.down_proj.kernel_lora_b': (
+    'model.layers.*.mlp.down_proj.weight_lora_b',
+    (None, None),
+  ),
+  'layers.*.attn.q_proj.w_lora_a': (
+    'model.layers.*.self_attn.q_proj.weight_lora_a',
+    ('model', None),
+  ),
+  'layers.*.attn.q_proj.w_lora_b': (
+    'model.layers.*.self_attn.q_proj.weight_lora_b',
+    (None, None),
+  ),
+  'layers.*.attn.k_proj.w_lora_a': (
+    'model.layers.*.self_attn.k_proj.weight_lora_a',
+    ('model', None),
+  ),
+  'layers.*.attn.k_proj.w_lora_b': (
+    'model.layers.*.self_attn.k_proj.weight_lora_b',
+    (None, None),
+  ),
+  'layers.*.attn.v_proj.w_lora_a': (
+    'model.layers.*.self_attn.v_proj.weight_lora_a',
+    ('model', None),
+  ),
+  'layers.*.attn.v_proj.w_lora_b': (
+    'model.layers.*.self_attn.v_proj.weight_lora_b',
+    (None, None),
+  ),
+  'layers.*.attn.o_proj.w_lora_a': (
+    'model.layers.*.self_attn.o_proj.weight_lora_a',
+    ('model', None),
+  ),
+  'layers.*.attn.o_proj.w_lora_b': (
+    'model.layers.*.self_attn.o_proj.weight_lora_b',
+    (None, None),
+  ),
+}
+
+
+VLLM_JAX_WEIGHT_RULES: Tuple[param_mapping_lib.OperationRule, ...] = (
+  tuple(_rule(source, target) for source, (target, _) in VLLM_JAX_WEIGHT_MAPPINGS.items())
 )
 
 
-VLLM_JAX_LORA_RULE_DEFS: Tuple[MappingRuleDef, ...] = (
-    MappingRuleDef(
-        source='layers.*.mlp.gate_proj.kernel_lora_a',
-        target='model.layers.*.mlp.gate_proj.weight_lora_a',
-        sharding=(None, None),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.gate_proj.kernel_lora_b',
-        target='model.layers.*.mlp.gate_proj.weight_lora_b',
-        sharding=(None, 'model'),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.up_proj.kernel_lora_a',
-        target='model.layers.*.mlp.up_proj.weight_lora_a',
-        sharding=(None, None),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.up_proj.kernel_lora_b',
-        target='model.layers.*.mlp.up_proj.weight_lora_b',
-        sharding=(None, 'model'),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.down_proj.kernel_lora_a',
-        target='model.layers.*.mlp.down_proj.weight_lora_a',
-        sharding=('model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.mlp.down_proj.kernel_lora_b',
-        target='model.layers.*.mlp.down_proj.weight_lora_b',
-        sharding=(None, None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.q_proj.w_lora_a',
-        target='model.layers.*.self_attn.q_proj.weight_lora_a',
-        sharding=('model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.q_proj.w_lora_b',
-        target='model.layers.*.self_attn.q_proj.weight_lora_b',
-        sharding=(None, None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.k_proj.w_lora_a',
-        target='model.layers.*.self_attn.k_proj.weight_lora_a',
-        sharding=('model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.k_proj.w_lora_b',
-        target='model.layers.*.self_attn.k_proj.weight_lora_b',
-        sharding=(None, None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.v_proj.w_lora_a',
-        target='model.layers.*.self_attn.v_proj.weight_lora_a',
-        sharding=('model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.v_proj.w_lora_b',
-        target='model.layers.*.self_attn.v_proj.weight_lora_b',
-        sharding=(None, None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.o_proj.w_lora_a',
-        target='model.layers.*.self_attn.o_proj.weight_lora_a',
-        sharding=('model', None),
-    ),
-    MappingRuleDef(
-        source='layers.*.attn.o_proj.w_lora_b',
-        target='model.layers.*.self_attn.o_proj.weight_lora_b',
-        sharding=(None, None),
-    ),
+VLLM_JAX_LORA_RULES: Tuple[param_mapping_lib.OperationRule, ...] = (
+  tuple(_rule(source, target) for source, (target, _) in VLLM_JAX_LORA_MAPPINGS.items())
 )
 
 
 def _mapping_table(
-    rule_defs: Tuple[MappingRuleDef, ...],
+  mapping_table: Dict[str, MappingEntry],
 ) -> Dict[str, MappingEntry]:
-  return {
-      rule.source: (rule.target, rule.sharding)
-      for rule in rule_defs
-  }
+  return dict(mapping_table)
 
 
 def _transpose_table(
-    rule_defs: Tuple[MappingRuleDef, ...],
+    rules: Tuple[param_mapping_lib.OperationRule, ...],
 ) -> Dict[str, Tuple[int, ...]] | None:
   transpose_rules = {}
-  for rule in rule_defs:
+  for rule in rules:
     for transform in rule.transforms:
       if transform.kind == 'transpose':
-        transpose_rules[rule.source] = tuple(transform.args['axes'])
+        transpose_rules[rule.source_patterns[0]] = tuple(transform.args['axes'])
   return transpose_rules or None
 
 
 def to_hf_mappings() -> Dict[str, MappingEntry]:
   """Returns the vanilla-to-vLLM key mappings for Qwen3."""
-  return _mapping_table(VLLM_JAX_WEIGHT_RULE_DEFS)
+  return _mapping_table(VLLM_JAX_WEIGHT_MAPPINGS)
 
 
 def lora_to_hf_mappings() -> Dict[str, MappingEntry]:
   """Returns the LoRA-to-vLLM key mappings for Qwen3."""
-  return _mapping_table(VLLM_JAX_LORA_RULE_DEFS)
+  return _mapping_table(VLLM_JAX_LORA_MAPPINGS)
 
 
 def to_hf_transpose_keys() -> Dict[str, Tuple[int, ...]] | None:
   """Returns transpose rules used during Qwen3 weight sync to vLLM."""
-  return _transpose_table(VLLM_JAX_WEIGHT_RULE_DEFS)
+  return _transpose_table(VLLM_JAX_WEIGHT_RULES)
 
 
 def to_hf_hook_fns() -> Dict[str, Any] | None:
@@ -224,24 +196,16 @@ def to_hf_hook_fns() -> Dict[str, Any] | None:
   return None
 
 
-def to_hf_weight_rules() -> Tuple[transfer_utils.WeightRule, ...]:
+def to_hf_operation_rules() -> Tuple[param_mapping_lib.OperationRule, ...]:
   """Returns planner-ready explicit rules for Qwen3 vLLM sync."""
-  return tuple(
-      transfer_utils.WeightRule(
-          name=f'qwen3_vllm::{rule.source}',
-          source=rule.source,
-          target=rule.target,
-          transforms=rule.transforms,
-      )
-      for rule in VLLM_JAX_WEIGHT_RULE_DEFS
-  )
+  return VLLM_JAX_WEIGHT_RULES
 
 
-def make_vllm_jax_mapping_spec() -> transfer_utils.MappingSpec:
+def make_vllm_jax_mapping_spec() -> param_mapping_lib.MappingSpec:
   """Returns the default DSL-first MappingSpec for Qwen3 to vLLM transfer."""
-  return transfer_utils.MappingSpec(
+  return param_mapping_lib.MappingSpec(
       model_type='qwen3_vllm_jax',
-      weight_rules=to_hf_weight_rules(),
+      operation_rules=to_hf_operation_rules(),
   )
 
 
@@ -268,13 +232,12 @@ VLLM_JAX_MAPPING: Dict[str, Any] = {
 __all__ = [
     'make_vllm_jax_mapping_config',
     'make_vllm_jax_mapping_spec',
-    'MappingRuleDef',
-    'VLLM_JAX_LORA_RULE_DEFS',
+    'VLLM_JAX_LORA_RULES',
     'VLLM_JAX_MAPPING',
-    'VLLM_JAX_WEIGHT_RULE_DEFS',
+    'VLLM_JAX_WEIGHT_RULES',
     'lora_to_hf_mappings',
     'to_hf_hook_fns',
     'to_hf_mappings',
+    'to_hf_operation_rules',
     'to_hf_transpose_keys',
-    'to_hf_weight_rules',
 ]

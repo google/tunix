@@ -21,6 +21,7 @@ from jax import sharding
 import jax.numpy as jnp
 import numpy as np
 from unittest import mock
+from tunix.generate import param_mapping
 from tunix.generate import utils
 from tunix.rl import reshard
 
@@ -277,6 +278,106 @@ class UtilsTest(parameterized.TestCase):
         jnp.allclose(
             new_tgt_state.params["decoder.layers.5.attn.k_proj"][:, :, 64:], 0.0
         )
+    )
+
+  def test_transfer_state_with_mappings_preserves_unmapped_params_with_reshard(self):
+    src = MockState({
+        "encoder.weight": MockParam(jnp.array([1.0, 2.0], dtype=jnp.float32)),
+    })
+    dst = MockState({
+        "decoder.weight": MockParam(jnp.zeros(2, dtype=jnp.float32)),
+        "decoder.bias": MockParam(jnp.array([-1.0, -1.0], dtype=jnp.float32)),
+    })
+    mappings = {
+        "encoder.weight": ("decoder.weight", None),
+    }
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        mappings,
+        reshard_fn=lambda source, target: source,
+    )
+
+    np.testing.assert_array_equal(
+        result.params["decoder.weight"],
+        src.params["encoder.weight"].value,
+    )
+    np.testing.assert_array_equal(
+        result.params["decoder.bias"],
+        jnp.array([-1.0, -1.0], dtype=jnp.float32),
+    )
+
+  def test_transfer_state_with_mappings_delete_dst_buffers_no_chunking(self):
+    src = MockState({
+        "encoder.weight": MockParam(jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)),
+    })
+    dst = MockState({
+        "decoder.weight": MockParam(jnp.zeros(3, dtype=jnp.float32)),
+    })
+    inspected_targets = []
+
+    def reshard_fn(source, target):
+      inspected_targets.extend(jax.tree_util.tree_leaves(target))
+      return source
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        {"encoder.weight": ("decoder.weight", None)},
+        reshard_fn=reshard_fn,
+        delete_dst_buffers=True,
+    )
+
+    self.assertNotEmpty(inspected_targets)
+    for leaf in inspected_targets:
+      self.assertIsInstance(
+          leaf, (NamedSharding, sharding.SingleDeviceSharding)
+      )
+    np.testing.assert_array_equal(
+        result.params["decoder.weight"],
+        src.params["encoder.weight"].value,
+    )
+
+  def test_transfer_state_with_mappings_delete_dst_buffers_chunked(self):
+    src = MockState({
+        "encoder.weight0": MockParam(jnp.array([1.0], dtype=jnp.float32)),
+        "encoder.weight1": MockParam(jnp.array([2.0], dtype=jnp.float32)),
+    })
+    dst = MockState({
+        "decoder.weight0": MockParam(jnp.array([0.0], dtype=jnp.float32)),
+        "decoder.weight1": MockParam(jnp.array([0.0], dtype=jnp.float32)),
+    })
+    inspected_targets = []
+
+    def reshard_fn(source, target):
+      inspected_targets.extend(jax.tree_util.tree_leaves(target))
+      return source
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        {
+            "encoder.weight0": ("decoder.weight0", None),
+            "encoder.weight1": ("decoder.weight1", None),
+        },
+        reshard_fn=reshard_fn,
+        delete_dst_buffers=True,
+        reshard_chunk_size=1,
+    )
+
+    self.assertNotEmpty(inspected_targets)
+    for leaf in inspected_targets:
+      self.assertIsInstance(
+          leaf, (NamedSharding, sharding.SingleDeviceSharding)
+      )
+    np.testing.assert_array_equal(
+        result.params["decoder.weight0"],
+        src.params["encoder.weight0"].value,
+    )
+    np.testing.assert_array_equal(
+        result.params["decoder.weight1"],
+        src.params["encoder.weight1"].value,
     )
 
   def test_transfer_state_with_bias_padding_and_reshape(self):
@@ -645,7 +746,7 @@ class UtilsTest(parameterized.TestCase):
 
     mappings = {"mlp.fc1.weight": ("mlp.fc1.weight", None)}
 
-    with self.assertRaises(utils.ShapeMismatchError) as context:
+    with self.assertRaises(param_mapping.ShapeMismatchError) as context:
       utils.transfer_state_with_mappings(src, dst, mappings)
 
     self.assertIn(
@@ -666,7 +767,7 @@ class UtilsTest(parameterized.TestCase):
 
     mappings = {"attn.k_proj": ("attn.k_proj", None)}
 
-    with self.assertRaises(utils.ShapeMismatchError) as context:
+    with self.assertRaises(param_mapping.ShapeMismatchError) as context:
       utils.transfer_state_with_mappings(src, dst, mappings)
 
     self.assertIn("not divisible", str(context.exception))
@@ -684,7 +785,7 @@ class UtilsTest(parameterized.TestCase):
 
     mappings = {"attn.k_proj": ("attn.k_proj", None)}
 
-    with self.assertRaises(utils.ShapeMismatchError) as context:
+    with self.assertRaises(param_mapping.ShapeMismatchError) as context:
       utils.transfer_state_with_mappings(src, dst, mappings)
 
     self.assertIn("Cannot shrink", str(context.exception))
@@ -902,288 +1003,6 @@ class UtilsTest(parameterized.TestCase):
         dst_state['untouched_variable'][...], jnp.array(-1)
     )
 
-  def test_transfer_planning_helpers_preserve_match_rule_order(self):
-    rules = utils._default_structural_match_rules()
-
-    self.assertEqual(
-        [rule.name for rule in rules],
-        ['direct_match', 'scanned_layers', 'scanned_fused_moe'],
-    )
-    self.assertTrue(
-        utils._match_rule_applies(
-            rules[1], ('decoder', 'layers_7', 'mlp', 'weight')
-        )
-    )
-    self.assertFalse(
-        utils._match_rule_applies(rules[2], ('decoder', 'layers_7', 'mlp'))
-    )
-
-  def test_transfer_planning_helpers_extract_and_rewrite_layer_keys(self):
-    target_key = ('decoder', 'layers_7', 'mlp', 'weight')
-
-    self.assertEqual(utils._extract_layer_index(target_key), 7)
-    self.assertEqual(
-        utils._replace_layers_n_with_layers(target_key),
-        ('decoder', 'layers', 'mlp', 'weight'),
-    )
-    self.assertEqual(
-        utils._remove_layers_n_component(target_key),
-        ('decoder', 'mlp', 'weight'),
-    )
-
-  def test_transfer_planning_helpers_derive_fused_moe_source_keys(self):
-    target_key = ('decoder', 'layers_3', 'mlp', 'wi')
-
-    wi_0_key, wi_1_key = utils._derive_moe_source_keys(target_key)
-
-    self.assertEqual(wi_0_key, ('decoder', 'layers_3', 'mlp', 'wi_0'))
-    self.assertEqual(wi_1_key, ('decoder', 'layers_3', 'mlp', 'wi_1'))
-
-  def test_transfer_planning_helpers_reject_non_wi_moe_derivation(self):
-    with self.assertRaises(utils.MappingError):
-      utils._derive_moe_source_keys(('decoder', 'layers_3', 'mlp', 'wo'))
-
-  def test_build_transfer_plan_direct_match(self):
-    src_flat = {('decoder', 'layer0', 'weight'): jnp.array([1.0, 2.0])}
-    tgt_flat = {
-        ('decoder', 'layer0', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-
-    self.assertLen(plan, 1)
-    self.assertEqual(plan[0].rule_name, 'direct_match')
-    self.assertEqual(plan[0].source_keys, (('decoder', 'layer0', 'weight'),))
-    self.assertEqual(plan[0].target_key, ('decoder', 'layer0', 'weight'))
-
-  def test_build_transfer_plan_scanned_layer_match(self):
-    src_flat = {
-        ('decoder', 'layers', 'mlp', 'weight'): jnp.array([[1.0], [2.0]])
-    }
-    tgt_flat = {
-        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((1,), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-
-    self.assertLen(plan, 1)
-    self.assertEqual(plan[0].rule_name, 'scanned_layers')
-    self.assertEqual(
-        plan[0].source_keys,
-        (('decoder', 'layers', 'mlp', 'weight'),),
-    )
-    self.assertEqual(plan[0].target_key, ('decoder', 'layers_1', 'mlp', 'weight'))
-
-  def test_build_transfer_plan_implicit_layers_match(self):
-    src_flat = {('layers', 'mlp', 'weight'): jnp.array([1.0, 2.0])}
-    tgt_flat = {
-        ('layers', 'layers_1', 'mlp', 'weight'): jnp.zeros((), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-
-    self.assertLen(plan, 1)
-    self.assertEqual(plan[0].rule_name, 'scanned_layers')
-    self.assertEqual(plan[0].source_keys, (('layers', 'mlp', 'weight'),))
-
-  def test_build_transfer_plan_scanned_fused_moe_match(self):
-    src_flat = {
-        ('decoder', 'layers', 'mlp', 'wi_0'): jnp.ones((2, 3, 2), dtype=jnp.float32),
-        ('decoder', 'layers', 'mlp', 'wi_1'): jnp.ones((2, 3, 2), dtype=jnp.float32),
-    }
-    tgt_flat = {
-        ('decoder', 'layers_2', 'mlp', 'wi'): jnp.zeros((2, 4), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-
-    self.assertLen(plan, 1)
-    self.assertEqual(plan[0].rule_name, 'scanned_fused_moe')
-    self.assertEqual(
-        plan[0].source_keys,
-        (
-            ('decoder', 'layers', 'mlp', 'wi_0'),
-            ('decoder', 'layers', 'mlp', 'wi_1'),
-        ),
-    )
-
-  def test_build_transfer_plan_explicit_rule_wins_first(self):
-    src_flat = {
-        ('decoder', 'layers', 'mlp', 'weight'): jnp.array([[1.0], [2.0]]),
-        ('decoder', 'custom_layer', 'weight'): jnp.array([9.0], dtype=jnp.float32),
-    }
-    tgt_flat = {
-        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((1,), dtype=jnp.float32)
-    }
-    weight_rules = (
-        utils.WeightRule(
-            name='explicit_override',
-            source=('decoder', 'custom_layer', 'weight'),
-            target=('decoder', 'layers_1', 'mlp', 'weight'),
-            transforms=(
-                utils.Transform('align_shape'),
-                utils.Transform('cast_to_target'),
-            ),
-        ),
-    )
-
-    plan = utils.build_transfer_plan(
-        src_flat,
-        tgt_flat,
-        weight_rules=weight_rules,
-        match_rules=utils._default_structural_match_rules(),
-    )
-
-    self.assertLen(plan, 1)
-    self.assertEqual(plan[0].rule_name, 'explicit_override')
-    self.assertEqual(
-        plan[0].source_keys,
-        (('decoder', 'custom_layer', 'weight'),),
-    )
-
-  def test_materialize_structural_plan_direct_match(self):
-    src_flat = {('decoder', 'layer0', 'weight'): jnp.array([1.0, 2.0])}
-    tgt_flat = {
-        ('decoder', 'layer0', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-    filtered_src_flat, filtered_tgt_flat = utils._materialize_structural_plan(
-        plan, src_flat, tgt_flat, scan_axis=0
-    )
-
-    np.testing.assert_array_equal(
-        filtered_src_flat[('decoder', 'layer0', 'weight')],
-        jnp.array([1.0, 2.0]),
-    )
-    self.assertEqual(filtered_tgt_flat, tgt_flat)
-
-  def test_execute_transfer_plan_direct_match(self):
-    src_flat = {('decoder', 'layer0', 'weight'): jnp.array([1.0, 2.0])}
-    tgt_flat = {
-        ('decoder', 'layer0', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-    filtered_src_flat, filtered_tgt_flat = utils.execute_transfer_plan(
-        plan, src_flat, tgt_flat, scan_axis=0
-    )
-
-    np.testing.assert_array_equal(
-        filtered_src_flat[('decoder', 'layer0', 'weight')],
-        jnp.array([1.0, 2.0]),
-    )
-    self.assertEqual(filtered_tgt_flat, tgt_flat)
-
-  def test_materialize_structural_plan_scanned_layer_match(self):
-    src_flat = {
-        ('decoder', 'layers', 'mlp', 'weight'): jnp.array(
-            [[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32
-        )
-    }
-    tgt_flat = {
-        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-    filtered_src_flat, filtered_tgt_flat = utils._materialize_structural_plan(
-        plan, src_flat, tgt_flat, scan_axis=0
-    )
-
-    np.testing.assert_array_equal(
-        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'weight')],
-        jnp.array([20.0, 21.0], dtype=jnp.float32),
-    )
-    self.assertEqual(
-        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'weight')].shape,
-        (2,),
-    )
-
-  def test_execute_transfer_plan_scanned_layer_match(self):
-    src_flat = {
-        ('decoder', 'layers', 'mlp', 'weight'): jnp.array(
-            [[10.0, 11.0], [20.0, 21.0]], dtype=jnp.float32
-        )
-    }
-    tgt_flat = {
-        ('decoder', 'layers_1', 'mlp', 'weight'): jnp.zeros((2,), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-    filtered_src_flat, filtered_tgt_flat = utils.execute_transfer_plan(
-        plan, src_flat, tgt_flat, scan_axis=0
-    )
-
-    np.testing.assert_array_equal(
-        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'weight')],
-        jnp.array([20.0, 21.0], dtype=jnp.float32),
-    )
-    self.assertEqual(
-        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'weight')].shape,
-        (2,),
-    )
-
-  def test_materialize_structural_plan_scanned_fused_moe_match(self):
-    wi_0 = jnp.array(
-        [[[1.0, 2.0], [10.0, 20.0]], [[3.0, 4.0], [30.0, 40.0]]],
-        dtype=jnp.float32,
-    )
-    wi_1 = jnp.array(
-        [[[100.0, 200.0], [1000.0, 2000.0]], [[300.0, 400.0], [3000.0, 4000.0]]],
-        dtype=jnp.float32,
-    )
-    src_flat = {
-        ('decoder', 'layers', 'mlp', 'wi_0'): wi_0,
-        ('decoder', 'layers', 'mlp', 'wi_1'): wi_1,
-    }
-    tgt_flat = {
-        ('decoder', 'layers_1', 'mlp', 'wi'): jnp.zeros((2, 4), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-    filtered_src_flat, filtered_tgt_flat = utils._materialize_structural_plan(
-        plan, src_flat, tgt_flat, scan_axis=1
-    )
-
-    np.testing.assert_array_equal(
-        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'wi')],
-        jnp.concatenate([wi_0[:, 1, :], wi_1[:, 1, :]], axis=-1),
-    )
-    self.assertEqual(
-        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'wi')].shape,
-        (2, 4),
-    )
-
-  def test_execute_transfer_plan_scanned_fused_moe_match(self):
-    wi_0 = jnp.array(
-        [[[1.0, 2.0], [10.0, 20.0]], [[3.0, 4.0], [30.0, 40.0]]],
-        dtype=jnp.float32,
-    )
-    wi_1 = jnp.array(
-        [[[100.0, 200.0], [1000.0, 2000.0]], [[300.0, 400.0], [3000.0, 4000.0]]],
-        dtype=jnp.float32,
-    )
-    src_flat = {
-        ('decoder', 'layers', 'mlp', 'wi_0'): wi_0,
-        ('decoder', 'layers', 'mlp', 'wi_1'): wi_1,
-    }
-    tgt_flat = {
-        ('decoder', 'layers_1', 'mlp', 'wi'): jnp.zeros((2, 4), dtype=jnp.float32)
-    }
-
-    plan = utils.build_transfer_plan(src_flat, tgt_flat)
-    filtered_src_flat, filtered_tgt_flat = utils.execute_transfer_plan(
-        plan, src_flat, tgt_flat, scan_axis=1
-    )
-
-    np.testing.assert_array_equal(
-        filtered_src_flat[('decoder', 'layers_1', 'mlp', 'wi')],
-        jnp.concatenate([wi_0[:, 1, :], wi_1[:, 1, :]], axis=-1),
-    )
-    self.assertEqual(
-        filtered_tgt_flat[('decoder', 'layers_1', 'mlp', 'wi')].shape,
-        (2, 4),
-    )
 
   def test_attention_weight_num_heads_repetition_and_rank_alignment(self):
     """Test repeating num_heads dimension (non-last axis) for attention weights."""
@@ -1614,17 +1433,6 @@ class UtilsTest(parameterized.TestCase):
         dst_state['layers_1']['attn']['kv_weight'][...],
         expected,
     )
-
-  def test_slice_scanned_param_with_repeatable_target(self):
-    """_slice_scanned_param finds scan axis even when post-slice shape needs repeat."""
-    # src: (embed=4, layers=3, kv_heads=2, head_dim=8)
-    # tgt: (embed=4, kv_heads=4, head_dim=8) — 2x repeat on kv_heads axis
-    src = jnp.arange(4 * 3 * 2 * 8, dtype=jnp.float32).reshape(4, 3, 2, 8)
-    tgt = jnp.zeros((4, 4, 8), dtype=jnp.float32)
-    result = utils._unstack_scanned_param(src, tgt, key_path='test')[1]
-    # Should return layer 1 slice: shape (4, 2, 8)
-    np.testing.assert_equal(result.shape, (4, 2, 8))
-    np.testing.assert_array_equal(result, src[:, 1, :, :])
 
   def test_transfer_state_directly_scanned_with_repeated_kv_heads(self):
     """Scanned src + KV-head-repeated dst transfer works end-to-end."""
@@ -2179,55 +1987,6 @@ class UtilsTest(parameterized.TestCase):
     np.testing.assert_array_equal(
         dst_state["layers_1"]["wi_0"][...], expected_layer_1
     )
-
-  def test_align_per_axis_attention_pure_repeat(self):
-    """Attention key path → pure `repeat` on every mismatched axis.
-
-    KV-head expansion and head_dim padding never co-occur on a single
-    tensor in production, so `_align_per_axis` no longer composes both:
-    attention keys take the repeat-only path. This pins that contract.
-    """
-    src = jnp.array(
-        [[1., 2., 3., 4.], [5., 6., 7., 8.]], dtype=jnp.float32
-    )  # shape (2, 4) — kv_heads=2, head_dim=4
-    tgt_shape = (8, 4)  # 4x KV-head expansion only.
-    result = utils._align_per_axis(
-        src, tgt_shape, tgt_sharding=None, key_path="layers.0.attn.q_proj"
-    )
-    self.assertEqual(result.shape, tgt_shape)
-    expected = jnp.repeat(src, 4, axis=0)
-    np.testing.assert_array_equal(np.asarray(result), expected)
-
-  def test_align_per_axis_non_repeatable_non_moe_raises(self):
-    """Non-MoE key with a non-integer-multiple mismatch raises.
-
-    The simplified single-mode aligner no longer falls back to zero-pad
-    for attention head_dim mismatches; if a non-MoE tensor has an axis
-    that isn't an integer multiple, it's a configuration error.
-    """
-    src = jnp.zeros((2, 3), dtype=jnp.float32)
-    with self.assertRaises(utils.ShapeMismatchError):
-      utils._align_per_axis(
-          src, (8, 4), tgt_sharding=None, key_path="layers.0.attn.q_proj"
-      )
-
-  def test_align_per_axis_moe_two_axes_zero_pad(self):
-    """MoE `wi` style: multiple mismatched axes, all classified as zero_pad.
-
-    Pre-refactor `_align_to_model_shape` only padded the *last* mismatched
-    axis on MoE keys (and warned). The new per-axis aligner handles every
-    mismatched axis. This test exercises a synthetic case to pin that down.
-    """
-    src = jnp.array(
-        [[[1., 2.], [3., 4.]]],  # (1, 2, 2)
-        dtype=jnp.float32,
-    )
-    result = utils._align_per_axis(
-        src, tgt_shape=(2, 2, 4), tgt_sharding=None, key_path="layers.0.wi"
-    )
-    self.assertEqual(result.shape, (2, 2, 4))
-    expected = jnp.pad(src, ((0, 1), (0, 0), (0, 2)))
-    np.testing.assert_array_equal(np.asarray(result), expected)
 
 
 class ResolveParallelismSizesTest(parameterized.TestCase):
