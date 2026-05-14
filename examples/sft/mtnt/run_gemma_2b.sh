@@ -30,7 +30,6 @@ python3 -m tunix.cli.peft_main \
   model_config.lora_config.weight_qtype="nf4" \
   model_config.lora_config.tile_size=256 \
   model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj" \
-  tokenizer_config.tokenizer_path="/tmp/models/models/google/gemma/flax/2b/2/tokenizer.model" \
   tokenizer_config.tokenizer_type="sentencepiece" \
   dataset_name="mtnt/en-fr" \
   optimizer_config.opt_type="adamw" \
