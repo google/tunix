@@ -248,10 +248,14 @@ def vtc_reward(prompts, completions, answer, **kwargs):
   return scores
 
 
-def _mesh_from_devices(devices: list[jax.Device]) -> Mesh:
+def _mesh_from_dims(
+    devices: list[jax.Device], dims: list[tuple[str, int]]
+) -> tuple[Mesh, list[tuple[str, int]]]:
   if not devices:
     raise ValueError("Cannot build a mesh from an empty device list.")
-  return Mesh(np.array(devices).reshape((len(devices),)), axis_names=("fsdp",))
+  shape = tuple(size for _, size in dims)
+  axis_names = tuple(name for name, _ in dims)
+  return Mesh(np.array(devices).reshape(shape), axis_names=axis_names), dims
 
 
 def build_train_and_rollout_meshes(
@@ -269,8 +273,14 @@ def build_train_and_rollout_meshes(
     raise ValueError("No JAX devices found.")
 
   if not separate_rollout_mesh:
-    shared_mesh = _mesh_from_devices(devices)
-    return shared_mesh, shared_mesh, [("fsdp", len(devices))], [("fsdp", len(devices))]
+    total_devices = len(devices)
+    shared_fsdp = int(
+        np.gcd(total_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
+    )
+    shared_tp = total_devices // shared_fsdp
+    shared_dims = [("fsdp", shared_fsdp), ("tp", shared_tp)]
+    shared_mesh, shared_dims = _mesh_from_dims(devices, shared_dims)
+    return shared_mesh, shared_mesh, shared_dims, list(shared_dims)
 
   total_devices = len(devices)
   model_config = call_model_config(MODEL_NAME)
