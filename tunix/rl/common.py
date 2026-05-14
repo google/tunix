@@ -335,6 +335,8 @@ def compute_per_token_logps(
     logits_to_keep = completion_tokens.shape[1]
 
   logits = logits[:, -logits_to_keep - 1 : -1, :]
+  if temperature != 0.0 and temperature != 1.0:
+    logits /= temperature
 
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
   per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
