@@ -436,7 +436,7 @@ def maybe_apply_lora(model: nnx.Module, mesh: Mesh) -> nnx.Module:
 def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]:
   model_config = {
       "model_name": MODEL_NAME,
-      "model_source": "hf",
+      "model_source": "huggingface",
       "model_id": MODEL_ID,
       "model_download_path": MODEL_DOWNLOAD_DIR,
       "intermediate_ckpt_dir": INTERMEDIATE_CKPT_DIR,
