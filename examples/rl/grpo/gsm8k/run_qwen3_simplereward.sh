@@ -97,4 +97,5 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.num_iterations=1 \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
-  reward_functions="['tunix/cli/reward_fn/simple_math.py']"
+  reward_functions="['tunix/cli/reward_fn/simple_math.py']" \
+  "$@"
