@@ -694,6 +694,193 @@ class PeftTrainerTest(parameterized.TestCase):
     # Since eval_ds is length 2, it evaluates at step 2.
     self.assertEqual(eval_invoke, {'foo': 8.0, 'bar': 12.0})
 
+  # ---------------------------------------------------------------------------
+  # Numerical-equivalence tests for the LossOutput / WeightedMetric refactor.
+  #
+  # These tests pin three contracts the refactor must keep intact:
+  #
+  #   1. `_default_loss_fn` reproduces the pre-refactor
+  #      `-Σ log_softmax * one_hot / (Σmask + 1e-8)` value.
+  #   2. The trainer-side gradient-scaling trick
+  #      (differentiate `unreduced_sum`, multiply grads by `compute_scale()`)
+  #      yields gradients numerically identical to differentiating the
+  #      reduced scalar loss directly. This is the property that lets us
+  #      reuse the loss-grad-then-rescale pattern in grad-accumulation,
+  #      where each micro-batch contributes its own `(sum, denom)` pair.
+  #   3. End-to-end: a `_train_step` driven by the new `LossOutput` contract
+  #      ends with the same model parameters as one driven by the legacy
+  #      `(loss, aux)` tuple contract for the same loss formula.
+  # ---------------------------------------------------------------------------
+
+  def test_default_loss_fn_matches_legacy_one_over_sum_plus_eps(self):
+    """`_default_loss_fn` swap: legacy `1/(Σmask + 1e-8)` -> WeightedMetric.
+
+    Reconstructs the OLD formula in-test and asserts `compute()` equals it
+    bit-for-bit (rtol 1e-6). Captures both shape and value so an
+    unintentional change to denominator semantics (e.g. dropping `eps`) is
+    caught immediately.
+    """
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    vocab = tc.MockVocab().GetPieceSize()
+    rng = jax.random.PRNGKey(7)
+    input_tokens = jax.random.randint(rng, (2, 4), 0, vocab)
+    input_mask = jnp.array([[1, 1, 1, 1], [1, 1, 1, 0]])
+    positions = jnp.tile(jnp.arange(4), (2, 1))
+    attention_mask = jnp.tril(jnp.ones((2, 4, 4)))
+    out = peft_trainer._default_loss_fn(
+        model, input_tokens, input_mask, positions, attention_mask
+    )
+    self.assertIsInstance(out, utils.LossOutput)
+    np.testing.assert_allclose(out.primary_loss.denominator, 5.0)
+    # Lock in the eps-based denominator semantics (`1/(N+1e-8)`): this is
+    # the field that distinguishes the SFT loss from the RL loss aux
+    # metrics (which use `min_denom=1.0`).
+    self.assertEqual(out.primary_loss.eps, 1e-8)
+    # Reconstruct the OLD reduction by hand. Cross-environment-stable
+    # comparison: we do NOT hardcode a golden absolute value here because
+    # this test file runs with `--xla_force_host_platform_device_count=4`,
+    # which changes JAX RNG splitting and therefore model init weights;
+    # the *property* under test is "new == old formula", not the absolute
+    # number.
+    logits, _ = model(input_tokens, positions, None, attention_mask)
+    shift_logits = logits[:, :-1, :]
+    target_tokens = input_tokens[:, 1:]
+    target_mask = input_mask[:, 1:]
+    one_hot = jax.nn.one_hot(target_tokens, shift_logits.shape[-1])
+    one_hot = one_hot * target_mask.astype(one_hot.dtype)[..., None]
+    legacy = -jnp.sum(jax.nn.log_softmax(shift_logits) * one_hot) / (
+        jnp.sum(target_mask) + 1e-8
+    )
+    np.testing.assert_allclose(
+        out.primary_loss.compute(), float(legacy), rtol=1e-6, atol=1e-6
+    )
+
+  def test_grad_scaling_equivalent_to_reduced_loss_grad(self):
+    """`grad(unreduced_sum) * compute_scale() == grad(unreduced_sum / denom)`.
+
+    This is the math underpinning the new `_train_step` path: the trainer
+    autodiffs the unreduced primary loss and then multiplies the grads by
+    `compute_scale()`. For a denominator that is independent of the
+    parameters (which is always the case for `Σ completion_mask`,
+    `batch_size`, etc. in our loss fns), this is identically equal to
+    autodiff'ing the reduced scalar loss.
+
+    The test exercises this with a small linear regression so the legacy
+    and refactored paths can be compared at fp32 precision (rtol 1e-6).
+    """
+    rng = jax.random.PRNGKey(0)
+    k1, k2 = jax.random.split(rng)
+
+    class Tiny(nnx.Module):
+
+      def __init__(self, k):
+        self.w = nnx.Param(jax.random.normal(k, (4, 3)))
+
+      def __call__(self, x):
+        return x @ self.w[...]
+
+    model_a = Tiny(k1)
+    model_b = Tiny(k1)  # same init
+    x = jax.random.normal(k2, (5, 4))
+    y = jax.random.normal(k2, (5, 3))
+    # Variable denominator to exercise the `compute_scale()` codepath: use
+    # the count of "valid" rows as a param-independent denominator.
+    valid_mask = jnp.array([1.0, 1.0, 0.0, 1.0, 1.0])
+    denom = jnp.sum(valid_mask)
+
+    # ---- (A) Legacy: differentiate the reduced loss directly. ----
+    def reduced_loss(model):
+      per_row = jnp.sum(((model(x) - y) ** 2) * valid_mask[:, None], axis=-1)
+      return jnp.sum(per_row) / denom
+
+    grad_a = nnx.value_and_grad(reduced_loss)(model_a)[1]
+
+    # ---- (B) Refactor: differentiate `unreduced_sum`, then scale. ----
+    def unreduced_loss(model):
+      per_row = jnp.sum(((model(x) - y) ** 2) * valid_mask[:, None], axis=-1)
+      unreduced = jnp.sum(per_row)
+      return unreduced, utils.LossOutput(
+          primary_loss=utils.WeightedMetric(unreduced, denom),
+          aux_metrics={},
+      )
+
+    (_, out), unscaled_grad = nnx.value_and_grad(
+        unreduced_loss, has_aux=True
+    )(model_b)
+    scale = out.primary_loss.compute_scale()
+    grad_b = jax.tree.map(lambda g: g * scale, unscaled_grad)
+
+    # Compare per-leaf to be robust against future pytree-key changes.
+    leaves_a, _ = jax.tree.flatten(grad_a)
+    leaves_b, _ = jax.tree.flatten(grad_b)
+    self.assertEqual(len(leaves_a), len(leaves_b))
+    for la, lb in zip(leaves_a, leaves_b):
+      np.testing.assert_allclose(la, lb, rtol=1e-6, atol=1e-6)
+
+  def test_train_step_lossoutput_matches_legacy_aux_tuple(self):
+    """End-to-end: a `_train_step` driven by `LossOutput` ends with the same
+    post-step params as one driven by the legacy `(loss, aux)` tuple,
+    given the same loss formula and the same optimizer.
+
+    This is the integration-level guarantee that the refactor is observably
+    a no-op for any model that adopts the new contract — drop-in
+    compatibility is part of the spec.
+    """
+    cfg = peft_trainer.TrainingConfig(eval_every_n_steps=10, max_steps=10)
+    # Identical init seed for both trainers — `PeftTrainer.__init__` builds
+    # the `nnx.Optimizer` itself, so we pass a raw `optax` GradientTransformation.
+    model_new = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer_new = peft_trainer.PeftTrainer(
+        model_new, optax.sgd(1e-3), cfg
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn).with_loss_fn(
+        peft_trainer._default_loss_fn  # `LossOutput` contract.
+    )
+    model_old = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    def loss_fn_legacy(
+        model, input_tokens, input_mask, positions, attention_mask
+    ):
+      # Pre-refactor formula returned as a scalar (no LossOutput wrapping):
+      # the legacy path drops through the `else` branches in `_train_step`.
+      lo = peft_trainer._default_loss_fn(
+          model, input_tokens, input_mask, positions, attention_mask
+      )
+      return lo.primary_loss.compute()
+
+    trainer_old = peft_trainer.PeftTrainer(
+        model_old, optax.sgd(1e-3), cfg
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn).with_loss_fn(
+        loss_fn_legacy
+    )
+
+    inputs = peft_trainer.TrainingInput(
+        input_tokens=jnp.arange(32).reshape(2, 16),
+        input_mask=jnp.ones((2, 16), dtype=jnp.int32),
+    )
+
+    train_step_new = trainer_new.create_train_step_fn()
+    train_step_old = trainer_old.create_train_step_fn()
+    loss_new, _, _ = train_step_new(
+        trainer_new.model, trainer_new.optimizer, inputs
+    )
+    loss_old, _, _ = train_step_old(
+        trainer_old.model, trainer_old.optimizer, inputs
+    )
+    np.testing.assert_allclose(
+        float(loss_new), float(loss_old), rtol=1e-6, atol=1e-6
+    )
+
+    # Post-step params must match leaf-by-leaf. Per-leaf comparison so a
+    # future structural pytree change shows up as a clearer failure than
+    # a single tree-wide allclose.
+    new_params = nnx.state(trainer_new.model, nnx.Param)
+    old_params = nnx.state(trainer_old.model, nnx.Param)
+    new_leaves, _ = jax.tree.flatten(new_params)
+    old_leaves, _ = jax.tree.flatten(old_params)
+    self.assertEqual(len(new_leaves), len(old_leaves))
+    for ln, lol in zip(new_leaves, old_leaves):
+      np.testing.assert_allclose(ln, lol, rtol=1e-6, atol=1e-6)
+
   def test_injected_params(self):
 
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)

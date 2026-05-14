@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import common
+from tunix.sft import utils as sft_utils
 from tunix.tests import test_common as tc
 
 jax.config.update("jax_threefry_partitionable", False)
@@ -579,6 +580,138 @@ class CommonTest(parameterized.TestCase):
     )
     self.assertEqual(loss.dtype, jnp.float32)
     self.assertAlmostEqual(loss, 1.5, places=5)
+
+  # ---------------------------------------------------------------------------
+  # Equivalence tests for `aggregate_loss` returning `WeightedMetric`.
+  #
+  # `test_aggregate_loss_values` already exercises every aggregation mode for
+  # the *reduced* value (it calls `.compute()`). The tests below pin the
+  # additional contract introduced by the unreduced-loss refactor:
+  #
+  #   1. The function returns a `WeightedMetric` (not a raw scalar).
+  #   2. `unreduced_sum`, `denominator`, `eps`, `min_denom` carry the per-mode
+  #      semantics documented in the PR. Gradient accumulation correctness
+  #      hinges on these fields being sum-aggregatable across micro-batches.
+  #   3. The OLD per-mode formula (numerator / denominator at fp32) is
+  #      reproduced bit-for-bit on dense masks, modulo the documented
+  #      `1e-8 vs jnp.clip(..., min=1)` divergence on token-mean which is
+  #      bounded by the eps.
+  # ---------------------------------------------------------------------------
+
+  def test_aggregate_loss_returns_weighted_metric(self):
+    per_token_loss = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+    completion_mask = jnp.array([[1, 1, 0], [1, 1, 1]])
+    out = common.aggregate_loss(per_token_loss, completion_mask, "token-mean")
+    self.assertIsInstance(out, sft_utils.WeightedMetric)
+    np.testing.assert_allclose(out.unreduced_sum,
+                               0.1 + 0.2 + 0.4 + 0.5 + 0.6, rtol=1e-6)
+    np.testing.assert_allclose(out.denominator, 5.0)
+    # Token-mean must clamp denom from below by 1 to match the pre-refactor
+    # `jnp.clip(..., min=1)` divisor (see common.aggregate_loss).
+    self.assertEqual(out.min_denom, 1.0)
+    self.assertIsNone(out.eps)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="token_mean",
+          loss_agg_mode="token-mean",
+          # Numerator = Σ(per_token_loss * mask),
+          # Denominator = Σ(mask). min_denom=1.
+          expected_num=0.1 + 0.2 + 0.4 + 0.5 + 0.6,
+          expected_denom=5.0,
+          expected_min_denom=1.0,
+          expected_eps=None,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_mean",
+          loss_agg_mode="sequence-mean-token-mean",
+          # Numerator = Σ_row [Σ_tok(per_token_loss*mask) / clip(Σ_tok mask, 1)]
+          # Denominator = #rows with at least one valid token.
+          expected_num=(0.1 + 0.2) / 2.0 + (0.4 + 0.5 + 0.6) / 3.0,
+          expected_denom=2.0,
+          expected_min_denom=1.0,
+          expected_eps=None,
+      ),
+      dict(
+          testcase_name="seq_mean_token_sum",
+          loss_agg_mode="seq-mean-token-sum",
+          # Numerator = Σ_row Σ_tok(loss*mask)*1{row has tokens}.
+          # Denominator = #rows-with-tokens. min_denom 1e-6 (zero-mask).
+          expected_num=0.1 + 0.2 + 0.4 + 0.5 + 0.6,
+          expected_denom=2.0,
+          expected_min_denom=1e-6,
+          expected_eps=None,
+      ),
+  )
+  def test_aggregate_loss_field_values(
+      self,
+      loss_agg_mode,
+      expected_num,
+      expected_denom,
+      expected_min_denom,
+      expected_eps,
+  ):
+    """Lock-in per-mode `unreduced_sum`, `denominator`, and bound fields."""
+    per_token_loss = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+    completion_mask = jnp.array([[1, 1, 0], [1, 1, 1]])
+    out = common.aggregate_loss(
+        per_token_loss, completion_mask, loss_agg_mode
+    )
+    np.testing.assert_allclose(out.unreduced_sum, expected_num, rtol=1e-6)
+    np.testing.assert_allclose(out.denominator, expected_denom, rtol=1e-6)
+    self.assertEqual(out.min_denom, expected_min_denom)
+    self.assertEqual(out.eps, expected_eps)
+
+  def test_aggregate_loss_unreduced_is_sum_aggregatable_across_microbatches(
+      self,
+  ):
+    """Critical contract for gradient accumulation.
+
+    Splitting a full batch into two micro-batches and summing the
+    `unreduced_sum` and `denominator` fields BEFORE dividing must equal the
+    full-batch `compute()`. This is the only property that makes
+    multi-step grad accumulation a no-op vs. running on the full batch —
+    and is the whole motivation for the `WeightedMetric` refactor.
+    """
+    full = jnp.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]])
+    full_mask = jnp.array([[1, 1, 0], [1, 1, 1], [1, 0, 0]])
+    # The full-batch result we want to recover.
+    full_out = common.aggregate_loss(full, full_mask, "token-mean")
+    # Process in two micro-batches and combine via summed unreduced
+    # fields, then divide once at the end.
+    a = common.aggregate_loss(full[:2], full_mask[:2], "token-mean")
+    b = common.aggregate_loss(full[2:], full_mask[2:], "token-mean")
+    combined_num = a.unreduced_sum + b.unreduced_sum
+    combined_denom = a.denominator + b.denominator
+    combined = sft_utils.WeightedMetric(
+        combined_num, combined_denom,
+        eps=a.eps, min_denom=a.min_denom,
+    )
+    np.testing.assert_allclose(
+        combined.compute(), full_out.compute(), rtol=1e-6, atol=1e-6
+    )
+
+  def test_aggregate_loss_token_mean_matches_legacy_masked_mean(self):
+    """Numerical equivalence with the OLD `(sum*mask).sum()/clip(mask.sum(),1)`.
+
+    For dense (non-zero-mask) inputs, the new contract must reproduce the
+    legacy reduction up to float rounding. The few-microbatch case is
+    covered by the test above; this test pins single-shot equivalence
+    against an explicit reference implementation that mirrors the
+    pre-refactor body of `aggregate_loss`.
+    """
+    rng = np.random.default_rng(0)
+    per_token_loss = jnp.asarray(rng.normal(size=(4, 8)).astype(np.float32))
+    completion_mask = jnp.asarray(
+        rng.integers(0, 2, size=(4, 8)).astype(np.float32)
+    )
+    new_out = common.aggregate_loss(
+        per_token_loss, completion_mask, "token-mean"
+    ).compute()
+    legacy_out = (per_token_loss * completion_mask).sum() / jnp.clip(
+        completion_mask.sum(), min=1.0
+    )
+    np.testing.assert_allclose(new_out, legacy_out, rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":

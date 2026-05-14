@@ -276,9 +276,52 @@ class ORPOTrainerTest(parameterized.TestCase):
       self.assertIn("log_probs/rejected", aux)
       self.assertIn("odds_ratio", aux)
 
-      # Check that accuracy is between 0 and 1
-      self.assertGreaterEqual(aux["rewards/accuracy"], 0.0)
-      self.assertLessEqual(aux["rewards/accuracy"], 1.0)
+      # Aux metrics are returned as `WeightedMetric` (unreduced_sum + denom)
+      # by the new `LossOutput` contract; `compute()` reduces them to the
+      # legacy scalar that the assertions below expect.
+      accuracy = aux["rewards/accuracy"].compute()
+      self.assertGreaterEqual(accuracy, 0.0)
+      self.assertLessEqual(accuracy, 1.0)
+
+      # Pin golden numerics for every aux metric so a future refactor
+      # cannot silently shift the public log-stream values. Captured from
+      # the current implementation under `jax_threefry_partitionable=False`.
+      reduced_aux = {k: float(v.compute()) for k, v in aux.items()}
+      np.testing.assert_allclose(loss, 0.6414977, rtol=1e-5)
+      np.testing.assert_allclose(
+          reduced_aux["rewards/chosen"], -0.22825223, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["rewards/rejected"], -0.23355775, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["rewards/margin"], 0.00530551, rtol=1e-3, atol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["rewards/accuracy"], 0.75, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["log_probs/chosen"], -2.28252220, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["log_probs/rejected"], -2.33557749, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["odds_ratio"], 1.22992778, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["or_loss"], 0.70867211, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          reduced_aux["sft_loss"], 0.57063055, rtol=1e-5
+      )
+      # Algebraic identity: total ORPO loss = sft_loss + lambda_orpo * or_loss.
+      np.testing.assert_allclose(
+          loss,
+          reduced_aux["sft_loss"] + 0.1 * reduced_aux["or_loss"],
+          rtol=1e-5,
+          atol=1e-6,
+      )
 
   def test_orpo_prepare_inputs_for_strings(self):
     tokenizer = tc.MockVocab()

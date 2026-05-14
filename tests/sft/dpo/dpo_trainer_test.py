@@ -276,11 +276,87 @@ class DPOTrainerTest(parameterized.TestCase):
       loss = loss_output.primary_loss.compute()
       np.testing.assert_allclose(loss, 0.753059, atol=1e-5)
 
+      # Pin every aux metric value: with the LossOutput refactor each aux
+      # entry is a `WeightedMetric` whose `compute()` must equal the legacy
+      # `.mean()` reduction over the 4-example batch. Numerics captured
+      # from the current implementation under
+      # `jax_threefry_partitionable=False` (set at module load).
+      aux = {k: float(v.compute())
+             for k, v in loss_output.aux_metrics.items()}
+      np.testing.assert_allclose(
+          aux["rewards/chosen"], 1.95037532, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          aux["rewards/rejected"], 1.37575150, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          aux["rewards/margin"], 0.57462382, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          aux["rewards/accuracy"], 0.75, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          aux["log_probs/chosen"], 13.29850006, rtol=1e-5
+      )
+      np.testing.assert_allclose(
+          aux["log_probs/rejected"], 3.97500539, rtol=1e-5
+      )
+      # The `rewards/margin` aux must equal `rewards/chosen -
+      # rewards/rejected` to the level of fp32 reduction order; this is
+      # an algebraic identity the refactor must preserve.
+      np.testing.assert_allclose(
+          aux["rewards/margin"],
+          aux["rewards/chosen"] - aux["rewards/rejected"],
+          rtol=1e-5,
+          atol=1e-6,
+      )
+
       loss_output = dpo_lib.dpo_loss_fn(
           model, train_example, beta=0.1, label_smoothing=0.3
       )
       loss = loss_output.primary_loss.compute()
       np.testing.assert_allclose(loss, 0.925447, atol=1e-5)
+
+  def test_dpo_loss_fn_aux_metrics_are_weighted_metric(self):
+    """Public-contract test: every aux entry must be a `WeightedMetric`.
+
+    Downstream `_compute_legacy_aux` in the trainer assumes uniform
+    `WeightedMetric` types and would silently mis-handle raw scalars; lock
+    that in here so a future revert/regression is caught immediately.
+    """
+    from tunix.sft import utils as sft_utils
+    np.random.seed(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    per_token_logps = np.random.normal(0, 5, size=(8, 4))
+    ref_per_token_logps = np.random.normal(0, 5, size=(8, 4)).sum(axis=-1)
+    train_example = dpo_lib.TrainExample(
+        input_ids=jnp.arange(0, 32).reshape(8, 4),
+        positions=jnp.ones((8, 4)),
+        attention_mask=jnp.ones((8, 4, 4)),
+        ref_chosen_logps=ref_per_token_logps[:4],
+        ref_rejected_logps=ref_per_token_logps[4:],
+        logits_to_keep=4,
+        completion_mask=jnp.ones((8, 4)),
+    )
+    with mock.patch.object(
+        common, "get_per_token_logps", return_value=jnp.array(per_token_logps)
+    ):
+      out = dpo_lib.dpo_loss_fn(model, train_example, beta=0.1)
+    self.assertIsInstance(out, sft_utils.LossOutput)
+    self.assertIsInstance(out.primary_loss, sft_utils.WeightedMetric)
+    self.assertEqual(
+        sorted(out.aux_metrics),
+        sorted([
+            "rewards/chosen", "rewards/rejected", "rewards/margin",
+            "rewards/accuracy", "log_probs/chosen", "log_probs/rejected",
+        ]),
+    )
+    for k, v in out.aux_metrics.items():
+      with self.subTest(aux=k):
+        self.assertIsInstance(v, sft_utils.WeightedMetric)
+        # Per-batch DPO aux normalises by `batch_size=4` (chosen/rejected
+        # split of 8).
+        np.testing.assert_allclose(v.denominator, 4.0)
 
   def test_dpo_prepare_inputs_for_strings(self):
     tokenizer = tc.MockVocab()
