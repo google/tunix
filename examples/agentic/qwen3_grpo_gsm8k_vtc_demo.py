@@ -110,16 +110,14 @@ LORA_RANK = 64
 LORA_ALPHA = 64.0
 
 ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_vtc")
-TRAIN_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data", "train")
-TEST_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data", "test")
+TFDS_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data")
 MODEL_DOWNLOAD_DIR = os.path.join(ARTIFACT_ROOT, "models")
 INTERMEDIATE_CKPT_DIR = os.path.join(ARTIFACT_ROOT, "intermediate_ckpt")
 CHECKPOINT_ROOT = os.path.join(ARTIFACT_ROOT, "checkpoints", str(int(time.time())))
 LOG_DIR = os.path.join(ARTIFACT_ROOT, "logs")
 
 for path in [
-    TRAIN_DATA_DIR,
-    TEST_DATA_DIR,
+    TFDS_DATA_DIR,
     MODEL_DOWNLOAD_DIR,
     INTERMEDIATE_CKPT_DIR,
     CHECKPOINT_ROOT,
@@ -503,14 +501,14 @@ def main():
       split="train",
       seed=SEED,
       batch_size=NUM_PROMPTS_PER_STEP,
-      data_dir=TRAIN_DATA_DIR,
+      data_dir=TFDS_DATA_DIR,
       shuffle=True,
   ).repeat(NUM_EPOCHS)
   eval_dataset = build_gsm8k_dataset(
       split="test",
       seed=SEED,
       batch_size=EVAL_BATCH_SIZE,
-      data_dir=TEST_DATA_DIR,
+      data_dir=TFDS_DATA_DIR,
       shuffle=False,
   )
 
