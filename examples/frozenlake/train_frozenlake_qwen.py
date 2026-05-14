@@ -58,8 +58,8 @@ except:
   cm = contextlib.nullcontext()
 
 with cm:
-  from tunix.models.qwen2 import model as  qwen2_model_lib
-  from tunix.models.qwen2 import params as qwen2_params_lib
+  from tunix.models.qwen3 import model as  qwen3_model_lib
+  from tunix.models.qwen3 import params as qwen3_params_lib
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
@@ -135,9 +135,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(1, 2), ("fsdp", "tp")]
-TRAINER_MESH = [(1, 2), ("fsdp", "tp")]
-REFERENCE_MESH = [(1, 2), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(1, 4), ("fsdp", "tp")]
+REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -235,14 +235,14 @@ ROLLOUT_ENGINE = os.getenv(
 jax.clear_caches()
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
-# reference_devices = math.prod(REFERENCE_MESH[0])
-reference_devices = 0
+# # reference_devices = math.prod(REFERENCE_MESH[0])
+# reference_devices = 0
 
-if trainer_devices + rollout_devices + reference_devices > jax.device_count():
-  raise ValueError(
-      "Trainer devices must be less than or equal to the number of devices"
-      " available."
-  )
+# if trainer_devices + rollout_devices + reference_devices > jax.device_count():
+#   raise ValueError(
+#       "Trainer devices must be less than or equal to the number of devices"
+#       " available."
+#   )
 
 
 rollout_device_list = jax._src.mesh_utils.create_device_mesh(
@@ -307,8 +307,10 @@ CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 # MODEL_VERSION = "google/gemma-4-E4B-it"
 # MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
 
-MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+# MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
+MODEL_VERSION = "Qwen/Qwen3-4B-Instruct-2507"
+MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "Qwen3-4B-Instruct-2507")
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -385,7 +387,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = qwen2_model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
+config = qwen3_model_lib.ModelConfig.qwen3_4b_instruct_2507()
 if ENABLE_REMAT:
   config.remat_config = qwen2_model_lib.RematConfig.DECODER
 # if ENABLE_FLASH_ATTENTION:
@@ -396,18 +398,18 @@ if ENABLE_MIX_PRECISION:
 
 # from huggingface_hub import snapshot_download
 
-# MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/snapshots/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
+MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
+# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/snapshots/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
 print("MODEL_PATH: ", MODEL_PATH)
 reference_mesh = trainer_mesh 
-qwen2_ref = qwen2_params_lib.create_model_from_safe_tensors(
+qwen3_ref = qwen3_params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
 )
 # %%
-show_hbm_usage("after loading gemma4_ref")
+show_hbm_usage("after loading qwen3_ref")
 
 
-qwen2_actor = qwen2_params_lib.create_model_from_safe_tensors(
+qwen3_actor = qwen3_params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
 # graph, state = nnx.split(gemma4_ref)
@@ -421,7 +423,7 @@ qwen2_actor = qwen2_params_lib.create_model_from_safe_tensors(
 # gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
-show_hbm_usage("after loading gemma4_actor")
+show_hbm_usage("after loading qwen3_actor")
 
 # %%
 # Ckpt saving
@@ -553,8 +555,8 @@ perf_metrics_config = PerfMetricsConfig(
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen2_actor,
-    reference=qwen2_ref,
+    actor=qwen3_actor,
+    reference=qwen3_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
     perf_config=perf_metrics_config,

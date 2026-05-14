@@ -16,10 +16,8 @@
 
 from __future__ import annotations
 
-import re
-import sys
 from typing import Any, Dict, Tuple
-import jax.numpy as jnp
+from flax import nnx
 
 Sharding = Tuple[str | None, ...]
 MappingEntry = Tuple[str, Sharding]
@@ -105,7 +103,6 @@ TO_HF_MAPPINGS = {
         (None, None, 'model'),
     ),
     'layers.*.moe.linear': (
-    'layers.*.moe.linear': (
         'model.layers.*.experts.kernel_down_proj_EFD',
         ('model', None, None),
     ),
@@ -140,7 +137,6 @@ def preprocess_src_state(src_state: Any) -> Any:
         k_keys = keys[:-2] + ('k_einsum', 'w')
         v_keys = keys[:-2] + ('v_einsum', 'w')
         if hasattr(param, 'value'):
-          from flax import nnx
           new_flat_state.append((k_keys, nnx.Param(k_val)))
           new_flat_state.append((v_keys, nnx.Param(v_val)))
         else:

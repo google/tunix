@@ -367,7 +367,6 @@ def build_flat_dict(
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
     path = '.'.join(str(key) for key in keys)
-    print(f"target path: {path}, shape: {v.value.shape}")
     mapped = False
     for src, regex, sharding in compiled_mappings:
       matched = regex.match(path)
@@ -405,8 +404,6 @@ def build_flat_dict(
         mapped = True
         break
     # There are no mappings for rng related params.
-    # if not mapped:
-    #   logging.warning('!!! No mapping for flat state: %s', path)
     if not mapped:
       unmapped_paths.append(path)
 
@@ -463,8 +460,6 @@ def _unroll_scanned_layers(
 
   unscanned_flat = {}
 
-  for src_key, (_, tgt_path, _) in src_to_tgt_map.items():
-    print(f"Source key: {src_key}, Target path: {tgt_path}")
   for src_keys, src_val in src_state.flat_state():
     src_key = '.'.join(str(k) for k in src_keys)
 
@@ -633,7 +628,7 @@ def _align_shape(
           repeated_dim = tgt_shape[-1] // padded_dim
           new_tgt_shape = tgt_shape[:-1] + (repeated_dim, padded_dim)
     elif re.compile(r'layers\..*\.moe\.gating_einsum').match(src_key):
-      tp_size = kwargs["tp_size"]
+      tp_size = kwargs['tp_size']
       num_experts, expert_dim, embed_dim = val.shape[0], val.shape[2], val.shape[3]
       gate_chunks, up_chunks = val[:, 0, :, :], val[:, 1, :, :]
       chunk_size = expert_dim // tp_size
@@ -796,8 +791,6 @@ def transfer_state_with_mappings(
     transpose_keys=None,
     reshard_fn=None,
     rollout_engine=None,
-    delete_dst_buffers=False,
-    reshard_chunk_size=None,
     **kwargs,
 ):
   """Transfer state using mappings, with optional transpose and shard logic.
@@ -835,7 +828,6 @@ def transfer_state_with_mappings(
         )
         for key, tgt_params in tgt_flat_list
     }
-<<<<<<< HEAD
 
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
@@ -854,7 +846,6 @@ def transfer_state_with_mappings(
 
     # Apply optional hook function
     if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
-      print(f'Applying hook function for {flat_src_key}')
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
@@ -882,17 +873,16 @@ def transfer_state_with_mappings(
         key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
         for key, tgt_params in tgt_flat_list
     }
-    
-    if reshard_chunk_size is not None:
+    if kwargs.get('reshard_chunk_size', None) is not None:
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
           spec_flat=sharding_dict,
           reshard_fn=reshard_fn,
-          chunk_size=reshard_chunk_size,
-          delete_spec_buffers=delete_dst_buffers,
+          chunk_size=kwargs['reshard_chunk_size'],
+          delete_spec_buffers=kwargs.get('delete_dst_buffers', False),
       )
     else:
-      if delete_dst_buffers:
+      if kwargs.get('delete_dst_buffers', False):
         _delete_target_buffers(sharding_dict, tgt_flat_dict)
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
