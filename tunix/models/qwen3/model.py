@@ -486,6 +486,7 @@ class Attention(nnx.Module):
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array | None,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
 
@@ -571,19 +572,59 @@ class Attention(nnx.Module):
           shd.NamedSharding(mesh, P(shd_n, shd_t))
       )
 
-      @partial(
-          shard_map,
-          mesh=mesh,
-          in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
-          out_specs=shd_spec,
-          check_rep=False,
-      )
-      def sharded_splash_attn(kernel, q_block, k_block, v_block):
-        return jax.vmap(kernel)(q_block, k_block, v_block)
+      # Per-position segment ids let splash suppress cross-segment attention
+      # (e.g. real-token to pad-token, or sequence-packing cross-boundary).
+      # The pallas splash kernel only accepts a static causal mask kernel-side,
+      # so per-batch dynamic padding masks have to flow in via segment_ids.
+      if segment_ids is not None:
+        seg_spec = P(shd_b, shd_t)
+        unsharded_seg_spec = P(shd_b, None)
 
-      qkv = sharded_splash_attn(
-          splash_attn_kernel, query_proj, key_proj, value_proj
-      )
+        @partial(
+            shard_map,
+            mesh=mesh,
+            in_specs=(
+                kernel_spec,
+                shd_spec,
+                unsharded_seq,
+                unsharded_seq,
+                seg_spec,
+                unsharded_seg_spec,
+            ),
+            out_specs=shd_spec,
+            check_rep=False,
+        )
+        def sharded_splash_attn(
+            kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
+        ):
+          seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
+          return jax.vmap(kernel)(
+              q_block, k_block, v_block, segment_ids=seg_ids
+          )
+
+        qkv = sharded_splash_attn(
+            splash_attn_kernel,
+            query_proj,
+            key_proj,
+            value_proj,
+            segment_ids,
+            segment_ids,
+        )
+      else:
+
+        @partial(
+            shard_map,
+            mesh=mesh,
+            in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
+            out_specs=shd_spec,
+            check_rep=False,
+        )
+        def sharded_splash_attn(kernel, q_block, k_block, v_block):
+          return jax.vmap(kernel)(q_block, k_block, v_block)
+
+        qkv = sharded_splash_attn(
+            splash_attn_kernel, query_proj, key_proj, value_proj
+        )
       qkv = qkv.transpose(0, 2, 1, 3)
     else:
       # GQA
@@ -621,6 +662,7 @@ class Attention(nnx.Module):
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array | None,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if (
         self.config.remat_config == RematConfig.BLOCK
@@ -629,10 +671,10 @@ class Attention(nnx.Module):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
       return nnx.remat(self.block.__func__)(
-          self, x, segment_pos, cache, attn_mask
+          self, x, segment_pos, cache, attn_mask, segment_ids
       )
     else:
-      return self.block(x, segment_pos, cache, attn_mask)
+      return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
 
   @property
   def head_dim(self):
@@ -1052,6 +1094,7 @@ class DecoderLayer(nnx.Module):
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     inputs_normalized = self.input_layernorm(x)
     cache, attn_output = self.attn(
@@ -1059,6 +1102,7 @@ class DecoderLayer(nnx.Module):
         segment_pos,
         cache,
         attn_mask,
+        segment_ids=segment_ids,
     )
     attn_output += x
     residual = attn_output
@@ -1073,14 +1117,19 @@ class DecoderLayer(nnx.Module):
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
+      segment_ids: jaxtyping.Array | None = None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
     if (
         self.config.remat_config == RematConfig.DECODER
         or self.config.remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__)(self, x, segment_pos, cache, attn_mask)
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask, segment_ids
+      )
     else:
-      return self.block(x, segment_pos, cache, attn_mask)
+      return self.block(
+          x, segment_pos, cache, attn_mask, segment_ids=segment_ids
+      )
 
 
 class Qwen3(BackendMappingMixin, nnx.Module):
@@ -1146,6 +1195,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
       cache: Cache | None,  # (sequence length L')
       attention_mask: jaxtyping.Array,  # [B, L, L']
       output_hidden_states: bool = False,
+      segment_ids: jaxtyping.Array | None = None,  # [B, L]
   ) -> tuple[jaxtyping.Array, Cache | None]:
     """Qwen3 model.
 
@@ -1155,6 +1205,11 @@ class Qwen3(BackendMappingMixin, nnx.Module):
       cache: Attention KV cache or None.
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
+      segment_ids: optional per-position segment identifiers, [B, L]. Used by
+        flash attention to suppress cross-segment attention (e.g. real-token
+        to pad-token, or sequence-packing across document boundaries). Pass a
+        1/0 mask to skip pad positions; pass increasing integer ids per packed
+        document for sequence packing.
 
     Returns:
       predicted_logits, new_cache
@@ -1173,6 +1228,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
           positions,
           layer_cache,
           attention_mask,
+          segment_ids=segment_ids,
       )
       if cache is not None:
         new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch

@@ -105,6 +105,12 @@ class TrainExample:
   old_per_token_logps: jax.Array | None
   segment_ids: jax.Array | None = None
   segment_positions: jax.Array | None = None
+  # Truncated importance-sampling correction weights for off-policy
+  # correction between the rollout sampler and the trainer. Per-token,
+  # detached, multiplied into the policy-gradient loss BEFORE aggregation
+  # to dampen positions where the trainer's recomputed log-probability
+  # diverges from the rollout sampler's. ``None`` disables the correction.
+  sampler_is_weights: jax.Array | None = None
 
 
 def compute_kl_divergence(
@@ -230,20 +236,41 @@ def process_ids(
           "segment_positions must be explicitly provided for packed sequences. "
       )
     attn_mask = None  # Relies on segment_ids inside the model
-    return prompt_completion_ids, segment_positions, attn_mask
+    # Packed callers supply their own segment_ids that already separate
+    # distinct documents in the buffer; no need for an additional padding
+    # mask here.
+    return prompt_completion_ids, segment_positions, attn_mask, None
 
   prompt_mask = prompt_tokens != pad_id
 
-  if completion_mask is None:
-    completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+  # Attention/RoPE-position mask MUST include every real token in the sequence.
+  # The caller-provided `completion_mask` (in multi-turn agentic learners) is
+  # the assistant-vs-env loss mask, with 0s on env tokens — using that for
+  # attention causes env-observation tokens to be masked out of context AND
+  # positions don't advance through them, so the trainer's logits for the
+  # first assistant token of turn k+1 are computed without seeing the env
+  # observation that triggered turn k+1, producing 30-50 nat sampler-trainer
+  # diffs at every turn boundary. Ignore the passed-in completion_mask for
+  # attention purposes; loss aggregation is the caller's responsibility.
+  del completion_mask
+  attn_completion_mask = completion_tokens != pad_id
 
   prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, completion_mask], axis=-1
+      [prompt_mask, attn_completion_mask], axis=-1
   )
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
 
-  return prompt_completion_ids, positions, attn_mask
+  # 1-D per-position non-pad mask for the full prompt+completion sequence.
+  # Used as ``segment_ids`` by attention kernels that cannot consume the 2-D
+  # ``attn_mask`` directly (e.g. pallas splash attention takes only a causal
+  # mask kernel-side and respects per-position segment ids to suppress
+  # cross-segment attention). With pad=0 and real=1, a real position never
+  # attends to a pad position regardless of where padding lives in the
+  # sequence (typically left-padded for prompt-side alignment).
+  input_seg_ids = prompt_completion_mask.astype(jnp.int32)
+
+  return prompt_completion_ids, positions, attn_mask, input_seg_ids
 
 
 @partial(
@@ -304,7 +331,7 @@ def compute_per_token_logps(
     derivatives.
   """
   model = nnx.merge(graphdef, state)
-  input_tokens, calculated_positions, attn_mask = process_ids(
+  input_tokens, calculated_positions, attn_mask, input_seg_ids = process_ids(
       prompt_tokens,
       completion_tokens,
       pad_id,
@@ -319,8 +346,14 @@ def compute_per_token_logps(
       "cache": None,
       "attention_mask": attn_mask,
   }
+  # Pass through any segment ids so the model's attention kernel can respect
+  # them: caller-provided packing ids take precedence; otherwise we pass the
+  # per-position non-pad mask derived in ``process_ids`` so flash-attention
+  # variants that lack a separate padding-mask input still skip pad positions.
   if segment_ids is not None:
     model_kwargs["segment_ids"] = segment_ids
+  elif input_seg_ids is not None:
+    model_kwargs["segment_ids"] = input_seg_ids
   if images is not None:
     model_kwargs["images"] = images
 
@@ -373,7 +406,12 @@ def compute_score(
     segment_positions: jax.Array | None = None,
 ):
   """Computes reward using the provided model."""
-  prompt_completion_ids, calculated_positions, attn_mask = process_ids(
+  (
+      prompt_completion_ids,
+      calculated_positions,
+      attn_mask,
+      input_seg_ids,
+  ) = process_ids(
       prompt_tokens,
       completion_tokens,
       pad_id,
@@ -388,6 +426,8 @@ def compute_score(
     model_kwargs["segment_ids"] = segment_ids
   else:
     model_kwargs["attention_mask"] = attn_mask
+    if input_seg_ids is not None:
+      model_kwargs["segment_ids"] = input_seg_ids
 
   out = model(prompt_completion_ids, **model_kwargs)
   per_token_scores = out[0] if isinstance(out, tuple) else out

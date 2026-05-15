@@ -189,6 +189,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # Current iter steps for micro-batch based training.
     self._iter_steps = self.rl_cluster.actor_trainer.iter_steps
     self._eval_iter_steps = 0
+    # Tracks the last train_step value at which evaluation was run. The
+    # optimizer is wrapped in ``optax.MultiSteps(grad_accum_steps)``, which
+    # keeps ``actor_trainer.train_steps`` constant for ``grad_accum_steps``
+    # consecutive micro-iterations. Without this guard, the
+    # ``train_steps % eval_every_n_steps == 0`` check would fire at every
+    # micro-iteration during an eval boundary, causing the full evaluation
+    # rollout to be replayed ``grad_accum_steps`` times for the same step.
+    self._last_eval_train_step = -1
 
     # Sync weights if the actor model and rollout model are not sharing weights.
     self.should_sync_weights = not (
@@ -813,12 +821,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       # --- Evaluation Logic ---
       current_eval_dataset = None
+      current_train_step = self.rl_cluster.actor_trainer.train_steps
       if (
           all_eval_prompts
-          and self.rl_cluster.actor_trainer.train_steps
-          % training_config.eval_every_n_steps
-          == 0
+          and current_train_step % training_config.eval_every_n_steps == 0
+          and current_train_step != self._last_eval_train_step
       ):
+        self._last_eval_train_step = current_train_step
         self._eval_iter_steps = 0
         eval_orchestrator = self._build_orchestrator()
 
@@ -846,17 +855,44 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # --- Training Step ---
       iterations = self._num_iterations() if self._process_in_consumer else 1
 
+      # When ``train_micro_batch_size < mini_batch_size`` we want the trainer
+      # to invoke ``train_step`` multiple times per outer iteration so the
+      # optimizer (which fires every ``gradient_accumulation_steps`` micro-
+      # steps) sees ``mini_batch_size``-shaped gradients while peak HBM is
+      # only ``train_micro_batch_size``-shaped. Slice the merged train
+      # example along its batch axis into chunks sized to one micro-step,
+      # and pass the list to ``update_actor``; ``peft_trainer.train``
+      # iterates the list and calls ``train_step`` once per chunk.
+      seqs_per_chunk = (
+          train_micro_batch_size * self.algo_config.num_generations
+      )
+      n_total = merged_train_micro_batch.completion_ids.shape[0]
+      if n_total > seqs_per_chunk:
+        chunked_train_micro_batch = [
+            jax.tree_util.tree_map(
+                lambda x: (
+                    x[i : i + seqs_per_chunk]
+                    if hasattr(x, "shape") and x.shape and x.shape[0] == n_total
+                    else x
+                ),
+                merged_train_micro_batch,
+            )
+            for i in range(0, n_total, seqs_per_chunk)
+        ]
+      else:
+        chunked_train_micro_batch = [merged_train_micro_batch]
+
       for i in range(iterations):
         if self._process_in_consumer and i > 0:
           # TODO(b/483779605) Sub-step checkpointing.
           self._iter_steps += 1
 
         self.rl_cluster.update_actor(
-            [merged_train_micro_batch], current_eval_dataset, skip_jit
+            chunked_train_micro_batch, current_eval_dataset, skip_jit
         )
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
-              [merged_train_micro_batch], current_eval_dataset, skip_jit
+              chunked_train_micro_batch, current_eval_dataset, skip_jit
           )
 
       # --- Weight Sync Logic ---

@@ -272,26 +272,52 @@ class TrajectoryCollectEngine:
       conversation_tokens, conversation_masks, logprobs = [], [], []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
 
+      # vLLM is configured with `include_stop_str_in_output=True`, so
+      # assistant_tokens from vllm DO include the trailing eos (`<|im_end|>`
+      # for Qwen3). But the chat template separates messages with `\n` after
+      # each `<|im_end|>`, and the per-message env_tokens for the next turn
+      # starts with `<|im_start|>` — no leading `\n`. So we need to insert a
+      # single `\n` between assistant_tokens and env_tokens for the trainer-
+      # side concatenation to match vllm's whole-string tokenization.
+      bridge_arr = None
+      if self.tokenizer is not None:
+        try:
+          nl_ids = self.tokenizer.encode("\n", add_special_tokens=False)
+        except TypeError:
+          nl_ids = self.tokenizer.encode("\n")
+        if nl_ids:
+          bridge_arr = np.asarray([int(x) for x in nl_ids], dtype=np.int32)
+
       for step in self.agent.trajectory.steps:
-        # assistant tokens
-        if getattr(step, "assistant_tokens", None) is not None:
-          conversation_tokens.append(step.assistant_tokens)
+        # Append assistant tokens + matching logprobs (zeros if missing) in
+        # lockstep, then env tokens + matching zero-logprobs. The independent
+        # ifs that this replaces would skip the logprobs append for a step that
+        # had `env_tokens` but no `logprobs` (e.g. initial-observation step or
+        # any step where vllm returned no tokens), offsetting the logprobs
+        # array vs conversation_tokens by `len(env_tokens)` for that step and
+        # every step thereafter.
+        assistant_tokens = getattr(step, "assistant_tokens", None)
+        env_tokens = getattr(step, "env_tokens", None)
+        step_logprobs = getattr(step, "logprobs", None)
+        if assistant_tokens is not None:
+          conversation_tokens.append(assistant_tokens)
           conversation_masks.append(step.assistant_masks)
-
-        # env tokens
-        if getattr(step, "env_tokens", None) is not None:
-          conversation_tokens.append(step.env_tokens)
+          if step_logprobs is not None:
+            assert len(step_logprobs) == len(assistant_tokens), (
+                f"Logprobs length {len(step_logprobs)} does not match assistant"
+                f" tokens length {len(assistant_tokens)}"
+            )
+            logprobs.append(step_logprobs)
+          else:
+            logprobs.append(np.zeros(len(assistant_tokens)))
+        if env_tokens is not None:
+          if assistant_tokens is not None and bridge_arr is not None:
+            conversation_tokens.append(bridge_arr)
+            conversation_masks.append(np.zeros(bridge_arr.shape[0], dtype=np.int32))
+            logprobs.append(np.zeros(bridge_arr.shape[0]))
+          conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
-
-        # logprobs
-        if getattr(step, "logprobs", None) is not None:
-          assert len(step.logprobs) == len(step.assistant_tokens), (
-              f"Logprobs length {len(step.logprobs)} does not match assistant"
-              f" tokens length {len(step.assistant_tokens)}"
-          )
-          logprobs.append(step.logprobs)
-          if getattr(step, "env_tokens", None) is not None:
-            logprobs.append(np.zeros(len(step.env_tokens)))
+          logprobs.append(np.zeros(len(env_tokens)))
 
       conversation_tokens = [
           np.asarray(tokens)

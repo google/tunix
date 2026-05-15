@@ -458,6 +458,16 @@ def grpo_loss_fn(
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
+
+  # Optional truncated importance-sampling (TIS) correction for the residual
+  # sampler-vs-trainer log-probability mismatch. The weights are precomputed
+  # upstream (already detached and threshold-clipped) and applied per token
+  # BEFORE loss aggregation so they affect the gradient through the loss
+  # magnitude only, not as a stop-gradient bias on the ratio.
+  sampler_is_weights = getattr(train_example, "sampler_is_weights", None)
+  if sampler_is_weights is not None:
+    per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
+
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )

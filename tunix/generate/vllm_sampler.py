@@ -349,10 +349,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         input_strings, request_outputs
     ):
       for idx, single_output in enumerate(multi_sampling_output.outputs):
-        # vLLM still returns 1 eos id even if we ask it to stop at eos.
-        if single_output.token_ids[-1] == self.tokenizer.eos_id():
-          single_output.token_ids = single_output.token_ids[:-1]
-          single_output.logprobs = single_output.logprobs[:-1]
+        # KEEP the eos token in the returned token_ids — needed so multi-turn
+        # consumers (agentic engine) can reconstruct the exact sequence the
+        # next turn's prompt was rendered from. Combined with
+        # `include_stop_str_in_output=True`, vLLM emits one eos at the end of
+        # each generation. Stripping it (the previous behavior) made
+        # trainer-side concatenation miss `<|im_end|>` at every turn boundary
+        # and produced 30+ nat sampler-trainer logp diffs.
 
         out_tokens[idx].append(
             np.array(single_output.token_ids, dtype=np.int32)
@@ -461,6 +464,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.prompt_logprobs = 0
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
+      # Keep the stop token in the returned ``token_ids`` so multi-turn
+      # consumers can reconstruct the exact sequence the model was sampled
+      # on. This makes the trainer-side concatenation align with what
+      # ``apply_chat_template`` produces for the next turn's prompt; without
+      # it, the trailing ``<|im_end|>`` (or equivalent eos token) is missing
+      # at every turn boundary in the recorded sequence, biasing logp
+      # recomputation against the model's actual sampling context.
+      sampling_params.include_stop_str_in_output = True
 
       if top_p is not None:
         sampling_params.top_p = top_p

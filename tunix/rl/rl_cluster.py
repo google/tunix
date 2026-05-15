@@ -1079,8 +1079,17 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       completion_mask: jax.Array | None = None,
+      temperature: float | None = None,
   ) -> jax.Array:
-    """Gets per-token logps from the actor model on the trainer side."""
+    """Gets per-token logps from the actor model on the trainer side.
+
+    Mirrors `get_ref_per_token_logps` — must pass through the rollout temperature
+    so the actor's recomputed logps match the temperature scaling used at
+    sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
+    yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
+    """
+    if temperature is None:
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
     batch_size = prompt_tokens.shape[0]
     if batch_size == 0:
       raise ValueError(
@@ -1109,26 +1118,16 @@ class RLCluster:
       else:
         dest_completion_mask = None
 
-      actor_trainer_state_on_device = self._is_state_on_device(
-          nnx.state(self.actor_trainer.model)
-      )
-      if actor_trainer_state_on_device:
-        self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
-        gc.collect()
-
-      graphdef, actor_state = nnx.split(self.actor_trainer.model)
-      actor_pspecs = nnx.get_partition_spec(actor_state)
-      actor_model_sharding = jax.tree.map(
-          lambda x: jax.sharding.NamedSharding(
-              mesh,
-              x if x is not None else jax.sharding.PartitionSpec(),
-              memory_kind=self._default_memory_kind,
-          ),
-          actor_pspecs,
-      )
-      state = reshard.reshard_pytree(
-          self._anchor_policy_state, actor_model_sharding
-      )
+      # NOTE: removed the actor-to-pinned-host offload dance and replaced with
+      # a straight compute using the current actor weights (already on device).
+      # The original code moved actor → host, resharded anchor → device,
+      # computed, moved actor → back. That round-trip left the actor's
+      # layernorm weights on `float32<host>` after the call returned, then
+      # the next train_step's `mul` op crashed with memory_space mismatch.
+      # For sampler-trainer diff metric (single-iteration GRPO), the
+      # "anchor" state equals the current actor state anyway, so we just
+      # compute directly from the actor model.
+      graphdef, state = nnx.split(self.actor_trainer.model)
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
@@ -1146,15 +1145,12 @@ class RLCluster:
                 else dest_completion_mask[batch_slice],
                 stop_gradient=True,
                 return_logits=False,
+                temperature=temperature,
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)
       del state
       gc.collect()
-      if actor_trainer_state_on_device:
-        self._put_model_on_memory_kind(
-            self.actor_trainer.model, self._default_memory_kind
-        )
       return actor_per_token_logps
 
   def sync_weights(self):
