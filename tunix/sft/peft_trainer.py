@@ -164,6 +164,33 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+def _promote_opt_state_floats_to_float32(optimizer: nnx.Optimizer) -> None:
+  """Cast the optimizer state's floating-point leaves to float32 in-place.
+
+  See the call site in ``PeftTrainer.__init__`` for the rationale: keeps the
+  init dtype of optax moments in sync with the float32 dtype they get
+  promoted to inside ``optimizer.update`` when the learning rate is a
+  float32 tracer (e.g., under ``optax.inject_hyperparams``), so that the
+  ``apply_updates`` / ``skip_updates`` branches of ``nnx.cond`` in
+  ``_train_step`` agree on the dtype of every opt_state leaf they return.
+  """
+
+  def _cast(v):
+    if isinstance(v, nnx.Variable):
+      val = v[...]
+      if (
+          hasattr(val, 'dtype')
+          and jnp.issubdtype(val.dtype, jnp.floating)
+          and val.dtype != jnp.float32
+      ):
+        v.set_value(val.astype(jnp.float32))
+
+  opt_state = nnx.state(optimizer, nnx.optimizer.OptState)
+  jax.tree_util.tree_map(
+      _cast, opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -280,6 +307,20 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
+    # Optax adam/adamw (and other stateful transforms) silently promote their
+    # moments to float32 inside `update` whenever the learning rate is a
+    # float32 tracer — which is exactly what `optax.inject_hyperparams` (used
+    # by the CLI) creates. The optimizer's init dtype, however, matches the
+    # parameter dtype, which may be bf16. Without pre-casting, the
+    # `nnx.cond(is_update_step, apply_updates, skip_updates, ...)` in
+    # `_train_step` would observe a bf16 opt_state from `skip_updates` but a
+    # float32 opt_state from `apply_updates` on the very first call, and
+    # `jax.lax.cond` rejects the trace with
+    # `TypeError: cond branches must have equal output types`. Promoting at
+    # init makes both branches see float32 throughout. This matches the
+    # steady-state dtype the optimizer would settle on after step 1 anyway,
+    # so it does not change observable training results.
+    _promote_opt_state_floats_to_float32(self.optimizer)
     self.grad_accumulator = GradientAccumulator(self.model, wrt_target)
 
     self.loss_fn = _default_loss_fn
