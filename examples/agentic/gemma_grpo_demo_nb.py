@@ -565,6 +565,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         max_tokens_to_generate=TOTAL_GENERATION_STEPS,
         max_prompt_length=MAX_PROMPT_LENGTH,
         kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
+        return_logprobs=True,
         temperature=TEMPERATURE,
         top_p=TOP_P,
         top_k=TOP_K,
