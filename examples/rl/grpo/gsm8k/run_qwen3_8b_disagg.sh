@@ -25,7 +25,7 @@ set -euo pipefail
 
 export SKIP_JAX_PRECOMPILE=true
 
-model_name="${model_name:-Qwen3-8B}"
+model_name="${model_name:-qwen3-8b}"
 model_id="${model_id:-Qwen/Qwen3-8B}"
 tokenizer_path="${tokenizer_path:-$model_id}"
 
@@ -142,7 +142,6 @@ python -m tunix.cli.grpo_main \
   agentic_grpo_config.max_concurrency=128 \
   agentic_grpo_config.max_response_length=768 \
   agentic_grpo_config.max_turns=1 \
-  agentic_grpo_config.context_ratio=1 \
   \
   `# -- Optimizer --------------------------------------------------------` \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \

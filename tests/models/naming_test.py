@@ -135,8 +135,8 @@ class TestNaming(parameterized.TestCase):
 
   def test_get_model_name_from_model_id_nested_path(self):
     self.assertEqual(
-        naming.get_model_name_from_model_id('google/gemma-2/flax/gemma2-2b-it'),
-        'gemma2-2b-it',
+        naming.get_model_name_from_model_id('google/gemma-2/flax/gemma-2-2b-it'),
+        'gemma-2-2b-it',
     )
 
   def test_get_model_name_from_model_id_empty_model_name(self):
@@ -193,7 +193,7 @@ class TestNaming(parameterized.TestCase):
 
   def test_get_model_family_and_version_format_agnostic(self):
     self.assertEqual(
-        naming.get_model_family_and_version('gemma2-2b-it'),
+        naming.get_model_family_and_version('gemma-2-2b-it'),
         naming.get_model_family_and_version('gemma2_2b_it'),
     )
 

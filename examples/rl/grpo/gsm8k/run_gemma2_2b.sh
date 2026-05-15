@@ -38,12 +38,15 @@ warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
 echo "Max steps: $max_steps"
 echo "Rounded warmup steps: $warmup_steps"
 
+intermediate_ckpt_dir=${intermediate_ckpt_dir:-"/tmp/intermediate_ckpt/gemma2_2b_grpo"}
+
+
 python3 -m tunix.cli.grpo_main \
   tunix/cli/base_config.yaml \
   override_config_file=examples/rl/grpo/gsm8k/configs/gemma2_2b.yaml \
-  model_config.model_download_path="/tmp/models/gemma2-2b" \
-  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/1" \
-  tokenizer_config.tokenizer_path="/tmp/models/gemma2-2b/models/google/gemma-2/flax/gemma2-2b-it/1/tokenizer.model" \
+  model_config.model_download_path="/tmp/models/gemma-2-2b" \
+  model_config.intermediate_ckpt_dir="$intermediate_ckpt_dir" \
+  tokenizer_config.tokenizer_path="/tmp/models/gemma-2-2b/models/google/gemma-2/flax/gemma-2-2b-it/1/tokenizer.model" \
   batch_size=$batch_size \
   num_batches=$num_batches \
   num_train_epochs=$num_train_epochs \
@@ -52,5 +55,6 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.actor_optimizer_config.warmup_steps=$warmup_steps \
   rl_training_config.actor_optimizer_config.decay_steps=$max_steps \
   rl_training_config.max_steps=$max_steps \
-  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo"
+  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo" \
+  "$@"
 

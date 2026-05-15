@@ -24,6 +24,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.generate import utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
@@ -64,6 +65,8 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
     beta: The coefficient for the KL divergence penalty (𝛽) in the GRPO loss
       function. This term prevents policy updates from deviating too far from
       the reference model. A value of 0.0 means no KL penalty is applied.
+    kl_loss_mode: The divergence mode used for KL penalty estimation. Default:
+      `kl`.
     epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
       PPO, it ensures stable updates.
     epsilon_high: Epsilon value for upper bound clipping.
@@ -90,6 +93,7 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
   num_generations: int = 2
   num_iterations: int = 1
   beta: float = 0.04
+  kl_loss_mode: str = "kl"
   epsilon: float = 0.2
 
   def __post_init__(self):
@@ -452,148 +456,6 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       skip_jit: Whether to skip JIT compilation of the training loop.
     """
     super().train(train_ds, eval_ds, skip_jit)
-
-
-@function_registry.register_policy_loss_fn("grpo")
-def grpo_loss_fn(
-    model,
-    train_example,
-    algo_config,
-    pad_id,
-    eos_id,
-):
-  """GRPO loss function.
-
-  The loss aims to maximize the expected advantage of the chosen actions while
-  constraining the policy updates to stay within a certain range of the
-  reference policy.
-
-  Args:
-    model: The policy model to be trained.
-    train_example: A `TrainExample` instance containing the processed input
-      data, including prompt IDs, completion IDs, masks, advantages, and
-      per-token log probabilities from the reference and policy models.
-    algo_config: The algorithm config.
-    pad_id: The pad ID from tokenizer.
-    eos_id: The eos ID from.
-
-  Returns:
-    A tuple containing the loss and an aux dictionary.
-  """
-  beta = algo_config.beta
-  epsilon = algo_config.epsilon
-  loss_algo = algo_config.loss_algo
-  epsilon_high = (
-      algo_config.epsilon_high
-      if hasattr(algo_config, "epsilon_high")
-      else epsilon
-  )
-  loss_aggregation_mode = algo_config.loss_agg_mode
-
-  completion_ids, completion_mask = (
-      train_example.completion_ids,
-      train_example.completion_mask,
-  )
-
-  # TODO(yangmu): trace this part as "actor_inference_and_training".
-  # with perf_tracer.span("...", list(completion_ids.devices())):
-  graphdef, state = nnx.split(model)
-  per_token_logps = common.compute_per_token_logps(
-      graphdef,
-      state,
-      prompt_tokens=train_example.prompt_ids,
-      completion_tokens=completion_ids,
-      pad_id=pad_id,
-      eos_id=eos_id,
-      stop_gradient=False,
-      return_logits=False,
-      segment_ids=getattr(train_example, "segment_ids", None),
-      segment_positions=getattr(train_example, "segment_positions", None),
-      temperature=algo_config.temperature,
-  )
-  advantages = train_example.advantages
-
-  if train_example.old_per_token_logps is None:
-    old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
-  else:
-    old_per_token_logps = train_example.old_per_token_logps
-
-  seq_importance_ratio = per_token_logps - old_per_token_logps
-  # TODO(sizhi): Refactor this to a separate function.
-  if loss_algo == "gspo-token":
-    seq_importance_ratio = (seq_importance_ratio * completion_mask).sum(
-        axis=-1
-    ) / jnp.clip(completion_mask.sum(-1), min=1)
-    seq_importance_ratio = (
-        per_token_logps
-        - jax.lax.stop_gradient(per_token_logps)
-        + jnp.expand_dims(jax.lax.stop_gradient(seq_importance_ratio), axis=-1)
-    )
-    seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
-
-  coef_1 = jnp.exp(seq_importance_ratio)
-  coef_2 = jnp.clip(coef_1, 1 - epsilon, 1 + epsilon_high)
-
-  # Advantages must be broadcast against seq_length.
-  # When sequence packing is used, advantages are already 2D [B, seq_length].
-  # When unpacked, they are 1D [B].
-  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
-
-  # Compute pg_clipfrac
-  pg_losses_1 = -coef_1 * adv
-  pg_losses_2 = -coef_2 * adv
-  pg_clipfrac = jnp.sum(
-      (pg_losses_2 > pg_losses_1) * completion_mask
-  ) / jnp.clip(jnp.sum(completion_mask), min=1)
-
-  # TODO(tsbao): We should handle token level advantages.
-  per_token_loss = -jnp.minimum(
-      coef_1 * adv,
-      coef_2 * adv,
-  )
-
-  # add KL penalty
-  mean_kl = 0.0
-  if beta is not None and beta != 0.0:
-    kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
-    )
-    per_token_loss = per_token_loss + beta * kl
-    mean_kl = (kl * completion_mask).sum() / jnp.clip(
-        completion_mask.sum(), min=1
-    )
-
-  aux = {
-      "kl": mean_kl,
-      "pg_clipfrac": pg_clipfrac,
-  }
-
-  loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
-  )
-
-  return loss, aux
-
-
-@function_registry.register_advantage_estimator("grpo")
-def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
-  """Compute group relative advantages.
-
-  Args:
-    rewards: reward functions output.
-    num_generations: Number of generations.
-
-  Returns:
-    Group relative advantages.
-  """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
-  std_grouped_rewards = rewards.reshape(-1, num_generations).std(
-      axis=-1, ddof=1
-  )
-
-  mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
-  std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
 
 
 GrpoConfig = GRPOConfig

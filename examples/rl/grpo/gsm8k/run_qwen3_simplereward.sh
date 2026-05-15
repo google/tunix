@@ -16,7 +16,7 @@
 set -x # Enable xtrace
 
 # specify at cmd line to override defaults, e.g.
-model_name=${model_name:-"Qwen3-1.7B-base"}
+model_name=${model_name:-"qwen3-1.7b-base"}
 batch_size=${batch_size:-1}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}

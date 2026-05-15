@@ -127,6 +127,14 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
+  @classmethod
+  def qwen2p5_0p5b_instruct(cls):
+    return cls.qwen2p5_0p5b()
+
+  @classmethod
+  def qwen2p5_coder_0p5b(cls):
+    return cls.qwen2p5_0p5b()
+
   # DeepSeek-R1-Distill-Qwen-1.5B
   @classmethod
   def deepseek_r1_distill_qwen_1p5b(cls):
@@ -159,6 +167,10 @@ class ModelConfig:
     )
 
   @classmethod
+  def qwen2p5_1p5b_instruct(cls):
+    return cls.qwen2p5_1p5b()
+
+  @classmethod
   def qwen2p5_math_1p5b(cls):  # qwen2.5-math-1.5B
     return cls(
         num_layers=28,
@@ -189,6 +201,14 @@ class ModelConfig:
         use_tied_embedding=True,
     )
 
+  @classmethod
+  def qwen2p5_3b_instruct(cls):
+    return cls.qwen2p5_3b()
+
+  @classmethod
+  def qwen2p5_coder_3b(cls):
+    return cls.qwen2p5_3b()
+
   # qwen2.5-7B and qwen2.5-coder-7B share the same config.
   @classmethod
   def qwen2p5_7b(cls):
@@ -204,6 +224,14 @@ class ModelConfig:
         rope_theta=1_000_000,
         use_tied_embedding=False,
     )
+
+  @classmethod
+  def qwen2p5_7b_instruct(cls):
+    return cls.qwen2p5_7b()
+
+  @classmethod
+  def qwen2p5_coder_7b(cls):
+    return cls.qwen2p5_7b()
 
   # TODO(linchai): add other qwen2.5 model configs.
 

@@ -19,6 +19,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import function_registry as fr
 from tunix.rl.grpo import drgrpo_learner as drgrpo_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
@@ -102,7 +103,7 @@ class DrGRPOlearnerTest(parameterized.TestCase):
     )
     # Dr. GRPO advantages are not scaled by the standard deviation.
     # Std. across groups above is the same by construction.
-    std_factor = jnp.array([1.0, 2.0]).std(ddof=1) + 1e-4
+    std_factor = jnp.array([1.0, 2.0]).std(ddof=1) + 1e-6
     np.testing.assert_allclose(grpo_advantages * std_factor, drgrpo_advantages)
 
   def test_drgrpo_loss_fn(self):
@@ -135,7 +136,7 @@ class DrGRPOlearnerTest(parameterized.TestCase):
     rewards = jnp.array(
         [[0.57450044, 0.09968603, 0.7419659, 0.8941783, 0.59656656, 0.45325184]]
     )
-    advantages = drgrpo_lib.compute_advantages(rewards, num_generations=3)
+    advantages = algo_core.compute_drgrpo_advantages(rewards, num_generations=3)
     expected_array = jnp.array([
         [0.10245, -0.372365, 0.269915, 0.246179, -0.051432, -0.194747],
     ])

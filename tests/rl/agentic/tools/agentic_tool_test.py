@@ -93,6 +93,35 @@ class BaseToolTest(absltest.TestCase):
     with self.assertRaises(NotImplementedError):
       asyncio.run(tool.apply_async())
 
+  def test_base_tool_immutability(self):
+
+    class MultiAttrTool(base_tool.BaseTool):
+
+      def __init__(self, name: str, description: str, extra: str):
+        super().__init__(name, description)
+        self.extra = extra
+
+      def get_json_schema(self) -> dict[str, Any]:
+        return {}
+
+    tool = MultiAttrTool(name="test", description="desc", extra="val")
+
+    # Verify initial values
+    self.assertEqual(tool.name, "test")
+    self.assertEqual(tool.description, "desc")
+    self.assertEqual(tool.extra, "val")
+
+    # Attempt to modify existing attribute
+    with self.assertRaisesRegex(AttributeError, "Cannot modify immutable"):
+      tool.name = "new_name"
+
+    with self.assertRaisesRegex(AttributeError, "Cannot modify immutable"):
+      tool.extra = "new_val"
+
+    # Attempt to add new attribute
+    with self.assertRaisesRegex(AttributeError, "Cannot modify immutable"):
+      tool.new_attr = 42
+
 
 class ToolManagerTest(unittest.IsolatedAsyncioTestCase, parameterized.TestCase):
 

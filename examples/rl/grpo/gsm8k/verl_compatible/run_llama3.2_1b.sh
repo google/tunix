@@ -40,7 +40,7 @@ echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
-  model_config.model_name="llama3.2-1b" \
+  model_config.model_name="llama-3.2-1b" \
   model_config.model_id="meta-llama/Llama-3.2-1B-Instruct" \
   model_config.model_source="huggingface" \
   model_config.intermediate_ckpt_dir="/tmp/tunix/experiments/grpo/llama3p2_1b_gsm8k" \

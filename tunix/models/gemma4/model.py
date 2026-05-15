@@ -278,6 +278,7 @@ class Embedder(nnx.Module):
         nnx.initializers.normal(dtype=self.param_dtype)(
             rngs.params(), (self.vocab_size, self.embed_dim)
         ),
+        sharding=config.shd_config.emb_vd,
     )
 
     if config.per_layer_input_dim > 0:

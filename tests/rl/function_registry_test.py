@@ -52,7 +52,7 @@ class FunctionRegistryTest(parameterized.TestCase):
   def test_empty_categories_instance(self):
     # Test-specific instance for empty categories
     registry = function_registry.FunctionRegistry(allowed_categories=[])
-    self.assertLen(registry.list_categories(), 3)
+    self.assertLen(registry.list_categories(), 4)
 
   @parameterized.named_parameters(
       dict(

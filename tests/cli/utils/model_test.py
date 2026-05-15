@@ -124,7 +124,7 @@ class ModelTest(parameterized.TestCase):
       dict(
           testcase_name='no_lora_gemma_kaggle_tokenizer',
           model_config={
-              'model_name': 'gemma-2b',
+              'model_name': 'gemma-2-2b',
               'model_source': 'kaggle',
               'model_id': 'google/gemma-2/flax/gemma2-2b',
               'model_display': False,

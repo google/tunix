@@ -21,6 +21,8 @@ batch_size=${batch_size:-8}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
 train_fraction=${train_fraction:-0.8}
+actor_mesh_shape=${actor_mesh_shape:-"(2,4)"}
+rollout_mesh_shape=${rollout_mesh_shape:-"(2,4)"}
 checkpoint_dir=${checkpoint_dir:-"/tmp/grpo_checkpoints/${model_name}"}
 
 echo "Using parameters:"
@@ -28,6 +30,8 @@ echo "  Batch Size: $batch_size"
 echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
+echo "  Actor Mesh Shape: $actor_mesh_shape"
+echo "  Rollout Mesh Shape: $rollout_mesh_shape"
 echo "  Checkpoint Directory: $checkpoint_dir"
 
 python3 -m tunix.cli.grpo_main \
@@ -38,19 +42,13 @@ python3 -m tunix.cli.grpo_main \
   model_config.use_flash_attention=true \
   model_config.flash_attention_block_size=256 \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}" \
-  model_config.model_download_path="/tmp/models/${model_name}" \
-  model_config.mesh.shape="(2,4)" \
-  model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=42 \
-  actor_model_config.lora_config.rank=64 \
-  actor_model_config.lora_config.alpha=64.0 \
-  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj" \
-  actor_model_config.mesh.shape="(2,4)" \
+  actor_model_config.mesh.shape=${actor_mesh_shape} \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   reference_model_config.mesh=null \
   reference_model_config.same_mesh_as="actor" \
-  rollout_model_config.mesh=null \
-  rollout_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh.shape=${rollout_mesh_shape} \
+  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
   tokenizer_config.tokenizer_path=Qwen/${model_name} \
   tokenizer_config.tokenizer_type=huggingface \
   tokenizer_config.add_bos=false \
@@ -58,7 +56,6 @@ python3 -m tunix.cli.grpo_main \
   batch_size=$batch_size \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
-  train_fraction=$train_fraction \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
@@ -81,7 +78,8 @@ python3 -m tunix.cli.grpo_main \
   rollout_config.temperature=0.9 \
   rollout_config.top_p=1.0 \
   rollout_config.top_k=50 \
-  rollout_engine="vanilla" \
+  rollout_engine="vllm" \
+  vllm_config.async_scheduling=false \
   offload_to_cpu=false \
   grpo_config.num_generations=4 \
   grpo_config.num_iterations=1 \

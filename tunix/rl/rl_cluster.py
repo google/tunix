@@ -45,6 +45,7 @@ from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -197,6 +198,7 @@ class RLCluster:
     self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
     self._init_backbone_sharing_map(actor, reference)
+    self._anchor_policy_state = None
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
@@ -334,7 +336,7 @@ class RLCluster:
         dst_shardings = jax.tree_util.tree_map(
             lambda x: jax.sharding.NamedSharding(
                 mesh,
-                x,
+                x if x is not None else jax.sharding.PartitionSpec(),
                 memory_kind=self._default_memory_kind
                 if is_on_device
                 else "pinned_host",
@@ -582,6 +584,9 @@ class RLCluster:
     del self.rollout_actor
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+        nnx.state(self.actor_trainer.model), "pinned_host"
+    )
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
@@ -630,6 +635,20 @@ class RLCluster:
             else self.actor_trainer.model
         )
         nnx.update(actor_model, params)
+
+  def _is_state_on_device(self, state: jaxtyping.PyTree) -> bool:
+    shardings = jax.tree.map(
+        lambda x: x.sharding if hasattr(x, "sharding") else None, state
+    )
+    return jax.tree_util.tree_reduce(
+        operator.or_,
+        jax.tree.map(
+            lambda x: x is not None
+            and x.memory_kind == self._default_memory_kind,
+            shardings,
+        ),
+        initializer=False,
+    )
 
   def _maybe_load_model_from_cpu(self, model: nnx.Module, role: Role):
     """Loads model from CPU if needed."""
@@ -981,6 +1000,13 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
+      if completion_mask is not None:
+        dest_completion_mask = sharding_utils.shard_input(
+            completion_mask,
+            self.cluster_config.training_config.data_sharding_axis,
+        )
+      else:
+        dest_completion_mask = None
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -996,8 +1022,8 @@ class RLCluster:
                 pad_id,
                 eos_id,
                 completion_mask=None
-                if completion_mask is None
-                else completion_mask[batch_slice],
+                if dest_completion_mask is None
+                else dest_completion_mask[batch_slice],
                 temperature=temperature,
             )
         )
@@ -1045,6 +1071,88 @@ class RLCluster:
         self.rollout.update_params(nnx.state(model))
       return per_token_logps
 
+  def get_actor_per_token_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int | None = None,
+      completion_mask: jax.Array | None = None,
+      temperature: float | None = None,
+  ) -> jax.Array:
+    """Gets per-token logps from the actor model on the trainer side.
+
+    Mirrors `get_ref_per_token_logps` — must pass through the rollout temperature
+    so the actor's recomputed logps match the temperature scaling used at
+    sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
+    yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
+    """
+    if temperature is None:
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+    batch_size = prompt_tokens.shape[0]
+    if batch_size == 0:
+      raise ValueError(
+          "Cannot get actor log probabilities from an empty batch."
+      )
+    if self._anchor_policy_state is None:
+      raise ValueError(
+          "Anchor policy state is not initialized. Please run `sync_weights`"
+          " first."
+      )
+    micro_batch_size = micro_batch_size or batch_size
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
+      dest_prompt_tokens = sharding_utils.shard_input(
+          prompt_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion_tokens = sharding_utils.shard_input(
+          completion_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      if completion_mask is not None:
+        dest_completion_mask = sharding_utils.shard_input(
+            completion_mask,
+            self.cluster_config.training_config.data_sharding_axis,
+        )
+      else:
+        dest_completion_mask = None
+
+      # NOTE: removed the actor-to-pinned-host offload dance and replaced with
+      # a straight compute using the current actor weights (already on device).
+      # The original code moved actor → host, resharded anchor → device,
+      # computed, moved actor → back. That round-trip left the actor's
+      # layernorm weights on `float32<host>` after the call returned, then
+      # the next train_step's `mul` op crashed with memory_space mismatch.
+      # For sampler-trainer diff metric (single-iteration GRPO), the
+      # "anchor" state equals the current actor state anyway, so we just
+      # compute directly from the actor model.
+      graphdef, state = nnx.split(self.actor_trainer.model)
+      outs = []
+      for batch_slice in rl_utils.chunk_slices_by_size(
+          stop=batch_size, step=micro_batch_size
+      ):
+        outs.append(
+            common.compute_per_token_logps(
+                graphdef,
+                state,
+                prompt_tokens=dest_prompt_tokens[batch_slice],
+                completion_tokens=dest_completion_tokens[batch_slice],
+                pad_id=pad_id,
+                eos_id=eos_id,
+                completion_mask=None
+                if dest_completion_mask is None
+                else dest_completion_mask[batch_slice],
+                stop_gradient=True,
+                return_logits=False,
+                temperature=temperature,
+            )
+        )
+      actor_per_token_logps = jnp.concatenate(outs, axis=0)
+      del state
+      gc.collect()
+      return actor_per_token_logps
+
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
     if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
@@ -1061,6 +1169,10 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
+      # The anchor policy state is snapshotted from actor_trainer.model.
+      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+          nnx.state(self.actor_trainer.model), "pinned_host"
+      )
 
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1

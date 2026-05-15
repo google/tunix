@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-model_name="${model_name:-Qwen3-8B}"
+model_name="${model_name:-qwen3-8b}"
 model_id="${model_id:-/tmp/maxtext_qwen3_8b}"
 tokenizer_path="${tokenizer_path:-$model_id}"
 
@@ -83,6 +83,7 @@ python -m tunix.cli.grpo_main \
   model_config.kwargs.base_emb_dim=4096 \
   model_config.kwargs.sparse_matmul=true \
   model_config.kwargs.remat_policy="minimal" \
+  `# -- Mesh configurations ----------------------------------------------` \
   actor_model_config.mesh.shape="$train_mesh" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   reference_model_config.mesh=null \
@@ -144,7 +145,6 @@ python -m tunix.cli.grpo_main \
   agentic_grpo_config.max_concurrency=128 \
   agentic_grpo_config.max_response_length=768 \
   agentic_grpo_config.max_turns=1 \
-  agentic_grpo_config.context_ratio=1 \
   \
   `# -- Optimizer --------------------------------------------------------` \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \

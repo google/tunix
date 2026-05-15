@@ -206,19 +206,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if preprocess_fn:
         updated_weights = preprocess_fn(updated_weights)
 
-      # Mapped Weight Sync (e.g. Vanilla -> vLLM)
-      # # Save original weights for comparison (only for layer 0 to save memory)
-      # import copy
-      # orig_weights = {}
-      # for keys, param in self.transformer_state.flat_state():
-      #   key = '.'.join(str(k) for k in keys)
-      #   if 'layers.0.' in key:
-      #     orig_weights[key] = copy.deepcopy(param.value)
-
-      # for k, p in orig_weights.items():
-      #   print(f"Original weight {k}: shape={p.shape}")
-      sft_utils.show_hbm_usage(title="Before weight sync....")
-      jax.clear_caches()
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,
@@ -240,25 +227,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           ),
           tp_size=self.args.get("tensor_parallel_size", 1),
       )
-      
-      # # Compare weights
-      # print("Comparing weights before and after update (Layer 0 only):")
-      # updated_keys = set()
-      # for keys, param in self.transformer_state.flat_state():
-      #   key = '.'.join(str(k) for k in keys)
-      #   if 'layers.0.' in key:
-      #     updated_keys.add(key)
-      #     if key in orig_weights:
-      #       if not jax.numpy.allclose(orig_weights[key], param.value, atol=1e-2):
-      #         print(f"Weight changed for {key}")
-      #       else:
-      #         print(f"Weight unchanged for {key}")
-      #     else:
-      #       print(f"New weight {key} (not in original state)")
-            
-      # for key in orig_weights:
-      #   if key not in updated_keys:
-      #     print(f"Weight {key} was removed in update")
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
@@ -282,34 +250,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           delete_dst_buffers=self.config.delete_dst_buffers,
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
-    
-    import vllm.config.vllm
 
-    if not hasattr(vllm.config.vllm.get_current_vllm_config, "__is_patched__"):
-      _original_get_config = vllm.config.vllm.get_current_vllm_config
-
-      def _patched_get_current_vllm_config():
-        try:
-          return _original_get_config()
-        except AssertionError:
-          global _GLOBAL_VLLM_CONFIG
-          if _GLOBAL_VLLM_CONFIG is not None:
-            return _GLOBAL_VLLM_CONFIG
-          raise
-
-      _patched_get_current_vllm_config.__is_patched__ = True
-      vllm.config.vllm.get_current_vllm_config = _patched_get_current_vllm_config
-
-      import vllm.config
-      vllm.config.get_current_vllm_config = _patched_get_current_vllm_config
-      
-      try:
-        import tpu_inference.offload.utils
-        tpu_inference.offload.utils.get_current_vllm_config = _patched_get_current_vllm_config
-      except ImportError:
-        pass
-
-    global _GLOBAL_VLLM_CONFIG
     if self.llm is not None:
       _GLOBAL_VLLM_CONFIG = self.llm.llm_engine.vllm_config
       try:
@@ -421,10 +362,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         input_strings, request_outputs
     ):
       for idx, single_output in enumerate(multi_sampling_output.outputs):
-        # vLLM still returns 1 eos id even if we ask it to stop at eos.
-        if single_output.token_ids[-1] == self.tokenizer.eos_id():
-          single_output.token_ids = single_output.token_ids[:-1]
-          single_output.logprobs = single_output.logprobs[:-1]
+        # KEEP the eos token in the returned token_ids — needed so multi-turn
+        # consumers (agentic engine) can reconstruct the exact sequence the
+        # next turn's prompt was rendered from. Combined with
+        # `include_stop_str_in_output=True`, vLLM emits one eos at the end of
+        # each generation. Stripping it (the previous behavior) made
+        # trainer-side concatenation miss `<|im_end|>` at every turn boundary
+        # and produced 30+ nat sampler-trainer logp diffs.
 
         out_tokens[idx].append(
             np.array(single_output.token_ids, dtype=np.int32)
@@ -533,6 +477,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         sampling_params.prompt_logprobs = 0
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
+      # Keep the stop token in the returned ``token_ids`` so multi-turn
+      # consumers can reconstruct the exact sequence the model was sampled
+      # on. This makes the trainer-side concatenation align with what
+      # ``apply_chat_template`` produces for the next turn's prompt; without
+      # it, the trailing ``<|im_end|>`` (or equivalent eos token) is missing
+      # at every turn boundary in the recorded sequence, biasing logp
+      # recomputation against the model's actual sampling context.
+      sampling_params.include_stop_str_in_output = True
 
       if top_p is not None:
         sampling_params.top_p = top_p

@@ -39,62 +39,18 @@ echo "Max steps: $max_steps"
 echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
-  base_config.yaml \
-  model_config.model_name="gemma-3-4b-it" \
-  model_config.model_id="google/gemma-3-4b-it" \
+  tunix/cli/base_config.yaml \
+  override_config_file=examples/rl/grpo/gsm8k/configs/gemma3_4b.yaml \
   model_config.model_path="gs://gemma-data/checkpoints/gemma3-4b-it" \
-  model_config.model_source="gcs" \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma3_4b" \
   model_config.model_download_path="/tmp/models/gemma-3-4b-it" \
-  model_config.mesh.shape="(2,4)" \
-  model_config.mesh.axis_names="('fsdp','tp')" \
-  model_config.rng_seed=42 \
-  actor_model_config.lora_config.rank=64 \
-  actor_model_config.lora_config.alpha=64.0 \
-  actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \
-  actor_model_config.mesh.shape="(2,4)" \
-  actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  reference_model_config.mesh=null \
-  reference_model_config.same_mesh_as="actor" \
-  rollout_model_config.mesh=null \
-  rollout_model_config.same_mesh_as="actor" \
   tokenizer_config.tokenizer_path="gs://gemma-data/tokenizers/tokenizer_gemma3.model" \
-  tokenizer_config.tokenizer_type="sentencepiece" \
-  tokenizer_config.add_bos=false \
-  dataset_name="gsm8k" \
   batch_size=$batch_size \
   num_batches=$num_batches \
-  num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
   train_fraction=$train_fraction \
-  rl_training_config.actor_optimizer_config.opt_type="adamw" \
-  rl_training_config.actor_optimizer_config.peak_value=3e-6 \
-  rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
-  rl_training_config.actor_optimizer_config.init_value=0.0 \
-  rl_training_config.actor_optimizer_config.end_value=0.0 \
   rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio \
   rl_training_config.actor_optimizer_config.warmup_steps=$warmup_steps \
   rl_training_config.actor_optimizer_config.decay_steps=$max_steps \
-  rl_training_config.actor_optimizer_config.b1=0.9 \
-  rl_training_config.actor_optimizer_config.b2=0.99 \
-  rl_training_config.actor_optimizer_config.weight_decay=0.1 \
-  rl_training_config.actor_optimizer_config.max_grad_norm=0.1 \
-  rl_training_config.eval_every_n_steps=10 \
   rl_training_config.max_steps=$max_steps \
-  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo_gemma3_4b" \
-  rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
-  rl_training_config.checkpointing_options.save_interval_steps=500 \
-  rl_training_config.checkpointing_options.max_to_keep=4 \
-  rl_training_config.profiler_options={} \
-  rollout_config.total_generation_steps=768 \
-  rollout_config.max_prompt_length=256 \
-  rollout_config.temperature=0.9 \
-  rollout_config.top_p=1.0 \
-  rollout_config.top_k=50 \
-  rollout_engine="vanilla" \
-  offload_to_cpu=false \
-  grpo_config.num_generations=2 \
-  grpo_config.num_iterations=1 \
-  grpo_config.beta=0.08 \
-  grpo_config.epsilon=0.2 \
-  reward_functions="['tunix/cli/reward_fn/gsm8k.py']"
+  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo_gemma3_4b"

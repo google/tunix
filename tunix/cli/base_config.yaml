@@ -14,18 +14,26 @@
 
 ################################## LOAD MODEL ##################################
 model_config: &base_model_config
-  # The unique full name identifier of the model, matching exactly with the name used in Huggingface
-  # e.g., "gemma-2b","llama-3.1-8b", or Kaggle, e.g., "gemma2-2b-it".
-  model_name: "llama3.1-8b"
+  # The unique full name identifier of the model.
+  # Can be the Huggingface model name, e.g., "gemma-2b", "llama-3.1-8b", or
+  # Tunix standard format, e.g., "gemma2_2b_it", "llama3p1_8b".
+  model_name: "llama-3.1-8b"
 
-  # Chagne model source to your downloading model workflow. Example: "kaggle" | "huggingface" | "gcs" | ""
+  # Change model source to your downloading model workflow. Example: "kaggle" | "huggingface" | "gcs" | ""
   model_source: "huggingface"
 
-  # Full model name identifier (case sensitive), as it appears on Huggingface, or Kaggle, e.g.,
-  # "meta-llama/Llama-3.1-8B" or "google/gemma-2/flax/gemma2-2b-it".
+  # Model identifier used by Tunix to determine model architecture and configuration.
+  # Can be a HuggingFace Hub model ID (e.g., "google/gemma-2-2b-it", "meta-llama/Llama-3.1-8B")
+  # or a Tunix native model config ID (e.g., "gemma2_2b_it", "llama3p1_8b").
+  # If model_source is "huggingface", this ID is used to download model from HuggingFace Hub.
   model_id: "meta-llama/Llama-3.1-8B"
 
-  # For models from GCS or internal sources, specify the path to the model files.
+  # Path or identifier for model source.
+  # If model_source is Kaggle, this is Kaggle Hub model identifier (e.g. "google/gemma-2/flax/gemma2-2b-it").
+  # If model_source is GCS or internal, this is the GCS/CNS path to model files.
+  # If model_source is Maxtext, this is the checkpoint path.
+  # If model_source is huggingface, this field is ignored. Model files are downloaded from Hugging Face Hub
+  # using model_id and stored in model_download_path.
   model_path: ""
 
   ################################## Checkpoint ##################################
@@ -33,13 +41,15 @@ model_config: &base_model_config
   model_download_path: "/tmp/models"
 
   ################################## KAGGLE ##################################
-  # If download checkpoint from kaggle, specify your kaggle credentials `KAGGLE_USERNAME` and `KAGGLE_KEY ` in envrionment variable.
+  # If download checkpoint from kaggle, specify your kaggle credentials `KAGGLE_USERNAME` and `KAGGLE_KEY ` in environment variable.
 
   ################################## HF ##################################
-  # If download checkpoint from huggingface, specifcy your hf credentials `HF_TOKEN` in environnebt variable.
+  # If download checkpoint from huggingface, specify your hf credentials `HF_TOKEN` in environment variable.
 
   ################################## NNX ##################################
-  # Integer seed to create `nnx.Rngs` to mangage the random state.
+  # Integer seed to create `nnx.Rngs` to manage the random state.
+
+  ################################## MAXTEXT ##################################
   # Optional keyword arguments passed to the underlying model architecture.
   # When using `model_source: "maxtext"`, you can safely pass MaxText-specific
   # configuration overrides under `kwargs`. Tunix will automatically forward valid
@@ -228,6 +238,8 @@ rollout_config:
 ############################### Other RL  Config ###############################
 
 rollout_engine: "vanilla"
+vllm_config: {}
+sglang_jax_config: {}
 
 offload_to_cpu: false
 

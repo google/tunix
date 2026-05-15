@@ -147,7 +147,11 @@ class ConfigTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="gcs_ckpt_source",
-          overrides=["model_name=gemma3-1b-pt", "model_source=gcs"],
+          overrides=["model_name=gemma-3-1b-pt", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="maxtext_source",
+          overrides=["model_name=qwen2.5-0.5b", "model_source=maxtext"],
       ),
       dict(
           testcase_name="maxtext_source",
@@ -530,29 +534,29 @@ class ConfigTest(parameterized.TestCase):
     # Test that actor_model_config inherits from model_config
     # Scenario 1: Override model_config.model_name, actor should inherit
     hp = self.initialize_config([
-        "model_config.model_name=gemma2-2b-it",
+        "model_config.model_name=gemma-2-2b-it",
         "model_config.model_source=kaggle",
     ])
-    self.assertEqual(hp.config["model_config"]["model_name"], "gemma2-2b-it")
+    self.assertEqual(hp.config["model_config"]["model_name"], "gemma-2-2b-it")
     self.assertEqual(
-        hp.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+        hp.config["actor_model_config"]["model_name"], "gemma-2-2b-it"
     )
 
     # Scenario 2: Override actor, reference and rollout model name to different value, it should keep override
     hp2 = self.initialize_config([
-        "actor_model_config.model_name=gemma2-2b-it",
+        "actor_model_config.model_name=gemma-2-2b-it",
         "actor_model_config.model_source=kaggle",
-        "reference_model_config.model_name=gemma3-4b",
+        "reference_model_config.model_name=gemma-3-4b",
         "reference_model_config.model_source=gcs",
         "rollout_model_config.model_name=gemma-3-1b-it",
         "rollout_model_config.model_source=gcs",
     ])
-    self.assertEqual(hp2.config["model_config"]["model_name"], "llama3.1-8b")
+    self.assertEqual(hp2.config["model_config"]["model_name"], "llama-3.1-8b")
     self.assertEqual(
-        hp2.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+        hp2.config["actor_model_config"]["model_name"], "gemma-2-2b-it"
     )
     self.assertEqual(
-        hp2.config["reference_model_config"]["model_name"], "gemma3-4b"
+        hp2.config["reference_model_config"]["model_name"], "gemma-3-4b"
     )
     self.assertEqual(
         hp2.config["rollout_model_config"]["model_name"], "gemma-3-1b-it"
@@ -560,19 +564,19 @@ class ConfigTest(parameterized.TestCase):
 
     # Scenario 3: Override actor_model_config and reference_model_config have higher priority than model_config, it should keep override
     hp3 = self.initialize_config([
-        "model_config.model_name=gemma3-12b",
+        "model_config.model_name=gemma-3-12b",
         "model_config.model_source=gcs",
-        "actor_model_config.model_name=gemma2-2b-it",
+        "actor_model_config.model_name=gemma-2-2b-it",
         "actor_model_config.model_source=kaggle",
-        "reference_model_config.model_name=gemma3-4b",
+        "reference_model_config.model_name=gemma-3-4b",
         "reference_model_config.model_source=gcs",
     ])
-    self.assertEqual(hp3.config["model_config"]["model_name"], "gemma3-12b")
+    self.assertEqual(hp3.config["model_config"]["model_name"], "gemma-3-12b")
     self.assertEqual(
-        hp3.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+        hp3.config["actor_model_config"]["model_name"], "gemma-2-2b-it"
     )
     self.assertEqual(
-        hp3.config["reference_model_config"]["model_name"], "gemma3-4b"
+        hp3.config["reference_model_config"]["model_name"], "gemma-3-4b"
     )
 
   @parameterized.named_parameters(

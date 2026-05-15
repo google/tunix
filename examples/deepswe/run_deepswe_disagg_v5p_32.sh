@@ -25,7 +25,7 @@ set -euo pipefail
 
 export SKIP_JAX_PRECOMPILE=true
 
-model_name="${model_name:-Qwen3-32B}"
+model_name="${model_name:-qwen3-32b}"
 model_id="${model_id:-Qwen/Qwen3-32B}"
 
 tokenizer_path="${tokenizer_path:-$model_id}"

@@ -236,7 +236,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-  context_ratio: 1
 sglang_jax_config:
   mem_fraction_static: 0.8
 vllm_config:
@@ -289,7 +288,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-  context_ratio: 1
 sglang_jax_config:
   mem_fraction_static: 0.8
 vllm_config:
@@ -333,7 +331,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-  context_ratio: 1
 sglang_jax_config:
   mem_fraction_static: 0.8
 vllm_config:
@@ -383,7 +380,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-  context_ratio: 1
 sglang_jax_config:
   mem_fraction_static: 0.8
 vllm_config:
@@ -448,7 +444,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-  context_ratio: 1
 sglang_jax_config:
   mem_fraction_static: 0.8
 vllm_config:
@@ -514,7 +509,7 @@ verl_compatible: false
 
 class RolloutConfigTest(absltest.TestCase):
 
-  def _make_agentic_pipeline(self, max_turns, context_ratio):
+  def _make_agentic_pipeline(self, max_turns):
     extra = f"""
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
@@ -542,7 +537,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: {max_turns}
-  context_ratio: {context_ratio}
 sglang_jax_config:
   mem_fraction_static: 0.8
 vllm_config:
@@ -551,13 +545,13 @@ vllm_config:
     return _make_pipeline(extra)
 
   def test_single_turn_kv_cache(self):
-    p = self._make_agentic_pipeline(max_turns=1, context_ratio=1)
+    p = self._make_agentic_pipeline(max_turns=1)
     cfg = p.create_rollout_config()
     # max_prompt=256, max_response=512, single-turn → +256
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
 
   def test_multi_turn_kv_cache(self):
-    p = self._make_agentic_pipeline(max_turns=20, context_ratio=2)
+    p = self._make_agentic_pipeline(max_turns=20)
     cfg = p.create_rollout_config()
     self.assertEqual(cfg.kv_cache_size, 256 + 512 + 256)
 
@@ -696,7 +690,6 @@ agentic_grpo_config:
   max_concurrency: 1
   off_policy_steps: 0
   max_turns: 1
-  context_ratio: 1
 sglang_jax_config:
   mem_fraction_static: 0.8
 vllm_config:

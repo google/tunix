@@ -146,7 +146,6 @@ python -m tunix.cli.grpo_main \
   agentic_grpo_config.loss_agg_mode="token-mean" \
   agentic_grpo_config.kl_loss_mode="low_var_kl" \
   agentic_grpo_config.max_turns=1 \
-  agentic_grpo_config.context_ratio=1 \
   \
   `# ── Optimizer ────────────────────────────────────────────────────────` \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \

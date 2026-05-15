@@ -38,6 +38,9 @@ You can also store model checkpoints to GCS. So if you have GCS bucket resources
 MODEL_PATH = "gs://<your-bucket-dev>/your-model-checkpoints"
 ```
 
+#### Maxtext
+Tunix also allows loading fully optimized models from [Maxtext](https://github.com/AI-Hypercomputer/maxtext).
+
 Once you have an accessible model path from one of the above approach, you are able to load it through Tunix model loading API as following:
 
 ```python
@@ -46,6 +49,7 @@ mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.A
 with mesh:
   gemma = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh)
 ```
+
 
 ## Fully optimized models
 Model optimization is critical for efficient model execution. This includes optimal shardings on TPUs, optimization with Pallas kernels, etc. Tunix provides a lightweight suite of models which is only optimized to some extent. Integration of Tunix and [Maxtext](https://github.com/AI-Hypercomputer/maxtext) enables users to run the RL workloads with fully optimized models. Refer to the [single-host](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/posttraining/rl.md) and [multi-host](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/tutorials/posttraining/rl_on_multi_host.md) tutorial on how to run an optimized model RL workload with Maxtext and Tunix.
@@ -130,6 +134,36 @@ model, model_path = AutoModel.from_pretrained(
     model_path="gs://my-bucket/gemma-2-2b-it"
 )
 ```
+
+#### From Maxtext:
+
+For Maxtext, you must provide the `model_id`, the `model_name` (to specify the exact architecture expected by MaxText), and the `model_path` (which can be a parameter path or omitted if loading base configuration).
+
+```python
+model, model_path = AutoModel.from_pretrained(
+    model_id="llama3p1_8b",
+    mesh=mesh,
+    model_source=ModelSource.MAXTEXT,
+    model_name="llama3.1-8b",
+    model_path="gs://my-bucket/maxtext-checkpoint",
+    base_emb_dim=4096,
+    sparse_matmul=True,
+    remat_policy="minimal"
+)
+```
+
+To load a Maxtext model when launching training via a shell script, append the corresponding override arguments directly to the script execution:
+
+```bash
+bash examples/rl/grpo/gsm8k/run_qwen3.sh \
+  --model_config.model_name="Qwen3-0.5B" \
+  --model_config.model_source="maxtext" \
+  --model_config.model_path="gs://my-bucket/maxtext-checkpoint" \
+  --model_config.kwargs.base_emb_dim=4096 \
+  --model_config.kwargs.sparse_matmul=true \
+  --model_config.kwargs.remat_policy="minimal"
+```
+
 
 ### Model Download Path
 

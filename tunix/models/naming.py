@@ -136,19 +136,12 @@ class _ModelFamilyInfo:
 # HF model family info mapping.
 _HF_MODEL_FAMILY_INFO_MAPPING = immutabledict.immutabledict({
     'gemma-': _ModelFamilyInfo(family='gemma', config_category='gemma'),
-    'gemma1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
     'gemma-1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
-    'gemma2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
     'gemma-2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
-    'gemma3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
     'gemma-3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
-    'gemma4-': _ModelFamilyInfo(family='gemma4', config_category='gemma4'),
     'gemma-4-': _ModelFamilyInfo(family='gemma4', config_category='gemma4'),
-    'llama3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
     'llama-3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
-    'llama3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
     'llama-3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
-    'llama3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'llama-3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'qwen2.5-': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
     'qwen3-': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
@@ -198,7 +191,7 @@ def split(model_name: str) -> tuple[str, str]:
   stripping leading hyphens.
 
   Args:
-    model_name: The model name, e.g., llama3.1-8b.
+    model_name: The model name, e.g., llama-3.1-8b.
 
   Returns:
     A tuple containing the un-standardized model_family and model_version.
@@ -289,7 +282,7 @@ def get_model_name_from_model_id(model_id: HFModelId | ConfigId | str) -> str:
           f'Invalid model ID format: {model_id!r}. Model name cannot be empty.'
       )
     if model_name.startswith('meta-llama-'):
-      return model_name.replace('meta-llama-', 'llama-', 1)
+      model_name = model_name.replace('meta-llama-', 'llama-', 1)
     return model_name
   elif _is_config_id_type(model_id):
     return model_id.lower()

@@ -1,4 +1,7 @@
 import dataclasses
+import os
+import sys
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -14,28 +17,12 @@ def _get_all_models_test_parameters():
       dict(testcase_name="gemma-2b-it", model_name="gemma-2b-it"),
       dict(testcase_name="gemma-7b", model_name="gemma-7b"),
       dict(testcase_name="gemma-7b-it", model_name="gemma-7b-it"),
-      dict(testcase_name="gemma1.1-2b-it", model_name="gemma1.1-2b-it"),
-      dict(testcase_name="gemma1.1-7b-it", model_name="gemma1.1-7b-it"),
       dict(testcase_name="gemma-1.1-2b-it", model_name="gemma-1.1-2b-it"),
       dict(testcase_name="gemma-1.1-7b-it", model_name="gemma-1.1-7b-it"),
-      dict(testcase_name="gemma2-2b", model_name="gemma2-2b"),
-      dict(testcase_name="gemma2-2b-it", model_name="gemma2-2b-it"),
-      dict(testcase_name="gemma2-9b", model_name="gemma2-9b"),
-      dict(testcase_name="gemma2-9b-it", model_name="gemma2-9b-it"),
       dict(testcase_name="gemma-2-2b", model_name="gemma-2-2b"),
       dict(testcase_name="gemma-2-2b-it", model_name="gemma-2-2b-it"),
       dict(testcase_name="gemma-2-9b", model_name="gemma-2-9b"),
       dict(testcase_name="gemma-2-9b-it", model_name="gemma-2-9b-it"),
-      dict(testcase_name="gemma3-270m", model_name="gemma3-270m"),
-      dict(testcase_name="gemma3-270m-it", model_name="gemma3-270m-it"),
-      dict(testcase_name="gemma3-1b-pt", model_name="gemma3-1b-pt"),
-      dict(testcase_name="gemma3-1b-it", model_name="gemma3-1b-it"),
-      dict(testcase_name="gemma3-4b-pt", model_name="gemma3-4b-pt"),
-      dict(testcase_name="gemma3-4b-it", model_name="gemma3-4b-it"),
-      dict(testcase_name="gemma3-12b-pt", model_name="gemma3-12b-pt"),
-      dict(testcase_name="gemma3-12b-it", model_name="gemma3-12b-it"),
-      dict(testcase_name="gemma3-27b-pt", model_name="gemma3-27b-pt"),
-      dict(testcase_name="gemma3-27b-it", model_name="gemma3-27b-it"),
       dict(testcase_name="gemma-3-270m", model_name="gemma-3-270m"),
       dict(testcase_name="gemma-3-270m-it", model_name="gemma-3-270m-it"),
       dict(testcase_name="gemma-3-1b-pt", model_name="gemma-3-1b-pt"),
@@ -46,38 +33,52 @@ def _get_all_models_test_parameters():
       dict(testcase_name="gemma-3-12b-it", model_name="gemma-3-12b-it"),
       dict(testcase_name="gemma-3-27b-pt", model_name="gemma-3-27b-pt"),
       dict(testcase_name="gemma-3-27b-it", model_name="gemma-3-27b-it"),
-      dict(testcase_name="llama3-70b", model_name="llama3-70b"),
       dict(testcase_name="llama-3-70b", model_name="llama-3-70b"),
-      dict(testcase_name="llama3.1-70b", model_name="llama3.1-70b"),
       dict(testcase_name="llama-3.1-70b", model_name="llama-3.1-70b"),
-      dict(testcase_name="llama3.1-405b", model_name="llama3.1-405b"),
       dict(testcase_name="llama-3.1-405b", model_name="llama-3.1-405b"),
-      dict(testcase_name="llama3.1-8b", model_name="llama3.1-8b"),
       dict(testcase_name="llama-3.1-8b", model_name="llama-3.1-8b"),
-      dict(testcase_name="llama3.2-1b", model_name="llama3.2-1b"),
       dict(
           testcase_name="llama-3.2-1b-instruct",
           model_name="llama-3.2-1b-instruct",
       ),
-      dict(
-          testcase_name="llama3.2-1b-instruct",
-          model_name="llama3.2-1b-instruct",
-      ),
       dict(testcase_name="llama-3.2-1b", model_name="llama-3.2-1b"),
-      dict(testcase_name="llama3.2-3b", model_name="llama3.2-3b"),
       dict(
           testcase_name="llama-3.2-3b-instruct",
           model_name="llama-3.2-3b-instruct",
       ),
-      dict(
-          testcase_name="llama3.2-3b-instruct",
-          model_name="llama3.2-3b-instruct",
-      ),
       dict(testcase_name="llama-3.2-3b", model_name="llama-3.2-3b"),
       dict(testcase_name="qwen2.5-0.5b", model_name="qwen2.5-0.5b"),
+      dict(
+          testcase_name="qwen2.5-0.5b-instruct",
+          model_name="qwen2.5-0.5b-instruct",
+      ),
+      dict(
+          testcase_name="qwen2.5-coder-0.5b",
+          model_name="qwen2.5-coder-0.5b",
+      ),
       dict(testcase_name="qwen2.5-1.5b", model_name="qwen2.5-1.5b"),
+      dict(
+          testcase_name="qwen2.5-1.5b-instruct",
+          model_name="qwen2.5-1.5b-instruct",
+      ),
       dict(testcase_name="qwen2.5-3b", model_name="qwen2.5-3b"),
+      dict(
+          testcase_name="qwen2.5-3b-instruct",
+          model_name="qwen2.5-3b-instruct",
+      ),
+      dict(
+          testcase_name="qwen2.5-coder-3b",
+          model_name="qwen2.5-coder-3b",
+      ),
       dict(testcase_name="qwen2.5-7b", model_name="qwen2.5-7b"),
+      dict(
+          testcase_name="qwen2.5-7b-instruct",
+          model_name="qwen2.5-7b-instruct",
+      ),
+      dict(
+          testcase_name="qwen2.5-coder-7b",
+          model_name="qwen2.5-coder-7b",
+      ),
       dict(testcase_name="qwen2.5-math-1.5b", model_name="qwen2.5-math-1.5b"),
       dict(
           testcase_name="deepseek-r1-distill-qwen-1.5b",
@@ -120,75 +121,90 @@ def _get_non_gemma_models_test_parameters():
 
 class AutoModelTest(parameterized.TestCase):
 
-
-
-  @mock.patch("tunix.models.automodel.download_model", return_value="gs://my-bucket/my-model")
+  @mock.patch(
+      "tunix.models.automodel.download_model",
+      return_value="gs://my-bucket/my-model",
+  )
   def test_from_pretrained_maxtext(self, mock_download):
-    import sys
-    import types
-    import unittest.mock as mock
 
     m_maxtext = types.ModuleType("maxtext")
     m_maxtext_configs = types.ModuleType("maxtext.configs")
     m_maxtext_configs_pyconfig = types.ModuleType("maxtext.configs.pyconfig")
     m_maxtext_configs_types = types.ModuleType("maxtext.configs.types")
     m_maxtext_utils = types.ModuleType("maxtext.utils")
-    m_maxtext_utils_model_creation_utils = types.ModuleType("maxtext.utils.model_creation_utils")
+    m_maxtext_utils_model_creation_utils = types.ModuleType(
+        "maxtext.utils.model_creation_utils"
+    )
 
-    with mock.patch.dict("sys.modules", {
-        "maxtext": m_maxtext,
-        "maxtext.configs": m_maxtext_configs,
-        "maxtext.configs.pyconfig": m_maxtext_configs_pyconfig,
-        "maxtext.configs.types": m_maxtext_configs_types,
-        "maxtext.utils": m_maxtext_utils,
-        "maxtext.utils.model_creation_utils": m_maxtext_utils_model_creation_utils
-    }):
-        setattr(m_maxtext_utils, "model_creation_utils", m_maxtext_utils_model_creation_utils)
-        setattr(m_maxtext_configs, "pyconfig", m_maxtext_configs_pyconfig)
-        setattr(m_maxtext_configs, "types", m_maxtext_configs_types)
-        setattr(m_maxtext, "configs", m_maxtext_configs)
-        setattr(m_maxtext, "utils", m_maxtext_utils)
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "maxtext": m_maxtext,
+            "maxtext.configs": m_maxtext_configs,
+            "maxtext.configs.pyconfig": m_maxtext_configs_pyconfig,
+            "maxtext.configs.types": m_maxtext_configs_types,
+            "maxtext.utils": m_maxtext_utils,
+            "maxtext.utils.model_creation_utils": (
+                m_maxtext_utils_model_creation_utils
+            ),
+        },
+    ):
+      setattr(
+          m_maxtext_utils,
+          "model_creation_utils",
+          m_maxtext_utils_model_creation_utils,
+      )
+      setattr(m_maxtext_configs, "pyconfig", m_maxtext_configs_pyconfig)
+      setattr(m_maxtext_configs, "types", m_maxtext_configs_types)
+      setattr(m_maxtext, "configs", m_maxtext_configs)
+      setattr(m_maxtext, "utils", m_maxtext_utils)
 
-        mock_config = mock.MagicMock()
-        m_maxtext_configs_pyconfig.initialize = mock.MagicMock(return_value=mock_config)
-        m_maxtext_utils_model_creation_utils.from_pretrained = mock.MagicMock()
+      mock_config = mock.MagicMock()
+      m_maxtext_configs_pyconfig.initialize = mock.MagicMock(
+          return_value=mock_config
+      )
+      m_maxtext_utils_model_creation_utils.from_pretrained = mock.MagicMock()
 
-        class MockMaxTextConfig:
-            model_fields = {"skip_jax_distributed_system": True, "hf_access_token": "mock"}
+      class MockMaxTextConfig:
+        model_fields = {
+            "skip_jax_distributed_system": True,
+            "hf_access_token": "mock",
+        }
 
-        m_maxtext_configs_types.MaxTextConfig = MockMaxTextConfig
+      m_maxtext_configs_types.MaxTextConfig = MockMaxTextConfig
 
-        mock_mesh = mock.MagicMock()
-        import os
-        with mock.patch.dict(os.environ, {"HF_TOKEN": "mock_token"}):
-            automodel.AutoModel.from_pretrained(
-                "qwen2.5-0.5b",
-                mesh=mock_mesh,
-                model_source=automodel.ModelSource.MAXTEXT,
-                use_flash_attention=True,
-                tunix_fake_arg_that_should_be_dropped=False,
-                skip_jax_distributed_system=False,
-            )
-
-        m_maxtext_configs_pyconfig.initialize.assert_called_once()
-
-        called_argv = m_maxtext_configs_pyconfig.initialize.call_args[0][0]
-
-        self.assertIn("model_name=qwen2.5-0.5b", called_argv)
-        has_load_params = any("load_parameters_path" in arg for arg in called_argv)
-        self.assertFalse(has_load_params)
-        self.assertIn("hf_access_token=mock_token", called_argv)
-
-        self.assertIn("skip_jax_distributed_system=false", called_argv)
-
-        self.assertNotIn("use_flash_attention=true", called_argv)
-
-        for arg in called_argv:
-            self.assertNotIn("tunix_fake_arg_that_should_be_dropped", arg)
-
-        m_maxtext_utils_model_creation_utils.from_pretrained.assert_called_once_with(
-            mock_config, mesh=mock_mesh
+      mock_mesh = mock.MagicMock()
+      with mock.patch.dict(os.environ, {"HF_TOKEN": "mock_token"}):
+        automodel.AutoModel.from_pretrained(
+            "qwen2.5-0.5b",
+            mesh=mock_mesh,
+            model_source=automodel.ModelSource.MAXTEXT,
+            use_flash_attention=True,
+            tunix_fake_arg_that_should_be_dropped=False,
+            skip_jax_distributed_system=False,
         )
+
+      m_maxtext_configs_pyconfig.initialize.assert_called_once()
+
+      called_argv = m_maxtext_configs_pyconfig.initialize.call_args[0][0]
+
+      self.assertIn("model_name=qwen2.5-0.5b", called_argv)
+      has_load_params = any(
+          "load_parameters_path" in arg for arg in called_argv
+      )
+      self.assertFalse(has_load_params)
+      self.assertIn("hf_access_token=mock_token", called_argv)
+
+      self.assertIn("skip_jax_distributed_system=false", called_argv)
+
+      self.assertNotIn("use_flash_attention=true", called_argv)
+
+      for arg in called_argv:
+        self.assertNotIn("tunix_fake_arg_that_should_be_dropped", arg)
+
+      m_maxtext_utils_model_creation_utils.from_pretrained.assert_called_once_with(
+          mock_config, mesh=mock_mesh, wrap_with_tunix_adapter=True
+      )
   @parameterized.named_parameters(*_get_all_models_test_parameters())
   def test_obtain_model_params_valid(self, model_name: str):
     automodel.call_model_config(model_name)
@@ -259,18 +275,13 @@ class AutoModelTest(parameterized.TestCase):
           expected_version="2b",
       ),
       dict(
-          testcase_name="gemma2-2b-it",
-          model_name="gemma2-2b-it",
-          expected_version="2-2b_it",
-      ),
-      dict(
           testcase_name="gemma-2-2b-it",
           model_name="gemma-2-2b-it",
           expected_version="2-2b_it",
       ),
       dict(
-          testcase_name="gemma1.1-2b-it",
-          model_name="gemma1.1-2b-it",
+          testcase_name="gemma-1.1-2b-it",
+          model_name="gemma-1.1-2b-it",
           expected_version="1.1-2b_it",
       ),
   )
@@ -294,6 +305,60 @@ class AutoModelTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
+      dict(
+          testcase_name="gemma-2b",
+          model_name="gemma-2b",
+          expected_dir_name="2b",
+      ),
+      dict(
+          testcase_name="gemma-1.1-2b-it",
+          model_name="gemma-1.1-2b-it",
+          expected_dir_name="gemma-1.1-2b-it",
+      ),
+      dict(
+          testcase_name="gemma-1.1-7b-it",
+          model_name="gemma-1.1-7b-it",
+          expected_dir_name="gemma-1.1-7b-it",
+      ),
+      dict(
+          testcase_name="gemma-2-9b",
+          model_name="gemma-2-9b",
+          expected_dir_name="gemma-2-9b",
+      ),
+  )
+  @mock.patch.object(automodel, "create_gemma_model_from_params", autospec=True)
+  @mock.patch.object(automodel, "_get_gemma_base_model", autospec=True)
+  @mock.patch("tunix.models.automodel.ocp.StandardCheckpointer", autospec=True)
+  @mock.patch("os.path.exists", return_value=False)
+  def test_create_gemma_model_with_nnx_conversion_dir_name(
+      self,
+      mock_exists,
+      mock_checkpointer,
+      mock_get_gemma_base_model,
+      mock_create_gemma_model_from_params,
+      model_name,
+      expected_dir_name,
+  ):
+    del mock_exists, mock_checkpointer, mock_get_gemma_base_model
+    mock_create_gemma_model_from_params.return_value = (
+        mock.Mock(),
+        mock.Mock(),
+    )
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    automodel.create_gemma_model_with_nnx_conversion(
+        model_name=model_name,
+        ckpt_path="dummy_ckpt_path",
+        intermediate_ckpt_dir="dummy_intermediate_ckpt_dir",
+        rng_seed=0,
+        mesh=mesh,
+    )
+    mock_create_gemma_model_from_params.assert_called_once()
+    calls = mock_create_gemma_model_from_params.call_args_list
+    self.assertEqual(
+        calls[0][0][0], os.path.join("dummy_ckpt_path", expected_dir_name)
+    )
+
+  @parameterized.named_parameters(
       dict(testcase_name="kaggle", model_source=automodel.ModelSource.KAGGLE),
       dict(testcase_name="gcs", model_source=automodel.ModelSource.GCS),
       dict(
@@ -312,7 +377,6 @@ class AutoModelTest(parameterized.TestCase):
           model_source=model_source,
           model_path=None,
       )
-
 
   @mock.patch.object(naming, "ModelNaming", autospec=True)
   @mock.patch.object(automodel, "call_model_config", autospec=True)

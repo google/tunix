@@ -153,6 +153,11 @@ class RolloutConfig:
   # axes, which can help reduce memory usage for large models with few KV heads.
   rollout_vllm_enable_dp_attention: bool = False
 
+  # Whether to delete destination buffers when synchronizing weights between
+  # trainer and vLLM model. Default to True to ensure old weights are deleted
+  # to free up HBM memory.
+  rollout_vllm_delete_dst_buffers: bool = True
+
   # Maximum number of batched tokens allowed in vLLM. This allows for pending prefill requests
   # to be batched along with decode requests if enough tokens are available. Only used when
   # chunked prefill is enabled.

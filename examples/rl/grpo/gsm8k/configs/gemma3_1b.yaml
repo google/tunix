@@ -13,10 +13,9 @@
 # limitations under the License.
 
 model_config:
-  model_name: "gemma-2-2b-it"
-  model_id: "google/gemma-2-2b-it"
-  model_path: "google/gemma-2/flax/gemma2-2b-it"
-  model_source: "kaggle"
+  model_name: "gemma-3-1b-it"
+  model_id: "google/gemma-3-1b-it"
+  model_source: "gcs"
   mesh:
     shape: "(2,4)"
     axis_names: "('fsdp','tp')"
@@ -29,16 +28,15 @@ actor_model_config:
   mesh:
     shape: "(2,4)"
     axis_names: "('fsdp','tp')"
-rollout_model_config:
+reference_model_config:
   mesh: null
   same_mesh_as: "actor"
-reference_model_config:
+rollout_model_config:
   mesh: null
   same_mesh_as: "actor"
 tokenizer_config:
   tokenizer_type: "sentencepiece"
   add_bos: False
-data_source: "tfds"
 dataset_name: "gsm8k"
 batch_size: 1
 num_batches: 3738

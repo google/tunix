@@ -89,9 +89,11 @@ class DAPOlearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
 
-    # Call DAPO loss function
+    # Call DAPO loss function (DAPO sets ref_per_token_logps to None as it doesn't fetch it)
+    dapo_train_example = self.create_train_example()
+    dapo_train_example.ref_per_token_logps = None
     dapo_loss, dapo_aux = dapo_loss_fn_impl(
-        model, train_example, dapo_config, pad_id, eos_id
+        model, dapo_train_example, dapo_config, pad_id, eos_id
     )
 
     # Call GRPO loss function

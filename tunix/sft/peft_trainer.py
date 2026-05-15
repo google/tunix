@@ -655,7 +655,8 @@ class PeftTrainer:
 
         # Stop training if max_steps is reached.
         if (
-            self.config.max_steps is not None
+            not self.is_managed_externally
+            and self.config.max_steps is not None
             and self._train_steps >= self.config.max_steps
         ):
           break

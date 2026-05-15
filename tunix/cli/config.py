@@ -621,7 +621,9 @@ class HyperParameters:
     )
     # Wrap the optimizer function with inject_hyperparams so that
     # the learning rate can be tracked and logged during training.
-    injected_opt_func = optax.inject_hyperparams(opt_func)
+    injected_opt_func = optax.inject_hyperparams(
+        opt_func, hyperparam_dtype=jax.numpy.float32
+    )
     # Call the optimizer function with the extracted kwargs
     try:
       return injected_opt_func(**opt_kwargs)

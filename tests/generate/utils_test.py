@@ -41,7 +41,9 @@ class MockState:
   def from_flat_path(self, flat_path):
     new_params = {}
     for keys, param in flat_path:
-      new_params[".".join(keys)] = param if hasattr(param, "value") else MockParam(param)
+      new_params[".".join(keys)] = (
+          param if hasattr(param, "value") else MockParam(param)
+      )
     return MockState(new_params)
 
 
@@ -479,7 +481,7 @@ class UtilsTest(parameterized.TestCase):
     }
     src_state = MockState(src_params)
 
-    # Mock destination state (vLLM style)
+    # Mock destination state (vLLM Jax backend style)
     dst_params = {
         "model.layers.0.self_attn.k_proj.weight": MockParam(
             jnp.zeros((16, 2, 8), dtype=jnp.float32)
@@ -514,10 +516,10 @@ class UtilsTest(parameterized.TestCase):
     src_val = jnp.arange(2 * 2 * 16 * 8, dtype=jnp.float32).reshape(2, 2, 16, 8)
     k_val_src = src_val[0]
     v_val_src = src_val[1]
-    
+
     expected_k = jnp.transpose(k_val_src, (1, 0, 2))
     expected_v = jnp.transpose(v_val_src, (1, 0, 2))
-    
+
     self.assertTrue(
         jnp.array_equal(
             new_tgt_state.params["model.layers.0.self_attn.k_proj.weight"],
@@ -1110,13 +1112,15 @@ class UtilsTest(parameterized.TestCase):
 
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layer.0.weight"].value, expected_layer_0
+            new_tgt_state.params["decoder.layer.0.weight"].value,
+            expected_layer_0,
         ),
         "Interleaved layer 0 mismatch",
     )
     self.assertTrue(
         jnp.allclose(
-            new_tgt_state.params["decoder.layer.2.weight"].value, expected_layer_2
+            new_tgt_state.params["decoder.layer.2.weight"].value,
+            expected_layer_2,
         ),
         "Interleaved layer 2 mismatch",
     )
@@ -1511,7 +1515,6 @@ class UtilsTest(parameterized.TestCase):
     self.assertEqual(result.params[src_key].shape, (1024,))
     expected = jnp.tile(src_k_bias, 8)
     self.assertTrue(jnp.allclose(result.params[src_key].value, expected))
-
 
   def test_transfer_state_directly_fuses_moe_weights(self):
     """Tests that wi_0 and wi_1 are fused into wi when target expects it."""

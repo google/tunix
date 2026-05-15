@@ -44,7 +44,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly
+      image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -93,26 +93,145 @@ jobs:
             print(f'SUCCESS: Found {len(devices)} TPU device(s)')
         "
 
+    - name: Run SFT shell scripts
+      id: sft_tests
+      continue-on-error: true
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        SCRIPT_DIR="./examples/sft/mtnt"
+        MAX_STEPS=5
+        EVAL_EVERY_N_STEPS=1
+        final_exit_code=0
+        failed_scripts=()
+
+        # Check if directory exists
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist"
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR"
+        for script in "$SCRIPT_DIR"/*.sh; do
+          if [ -f "$script" ]; then
+
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            if bash "$script" \
+                --training_config.max_steps "$MAX_STEPS" \
+                --training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
+              echo "✅ Successfully completed: $script"
+            else
+              exit_code=$?
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              final_exit_code=$exit_code
+              failed_scripts+=("$script")
+            fi
+          fi
+        done
+
+        if [ "$final_exit_code" -ne 0 ]; then
+          echo "🚫 One or more SFT scripts failed:" >&2
+          printf ' - %s\n' "${failed_scripts[@]}" >&2
+          exit "$final_exit_code"
+        fi
+
+        echo "🎉 All SFT scripts completed successfully."
+
+
+    - name: Run RL shell scripts
+      id: rl_tests
+      shell: bash
+      continue-on-error: true
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        SCRIPT_DIR="./examples/rl/grpo/gsm8k"
+        EXCLUDE_DIR="verl_compatible"
+        MAX_STEPS=5
+        EVAL_EVERY_N_STEPS=1
+
+        if [ ! -d "$SCRIPT_DIR" ]; then
+          echo "Directory $SCRIPT_DIR does not exist" >&2
+          exit 1
+        fi
+
+        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
+        final_exit_code=0
+        failed_scripts=()
+
+        while IFS= read -r script; do
+          if [ -f "$script" ]; then
+            # TODO(b/510383570)
+            if [[ "$script" == *"run_qwen3_8b"* ]]; then
+              echo "⏭️ Skipping: $script"
+              continue
+            fi
+            echo "📦 Executing: $script"
+            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+            chmod +x "$script"
+            bash "$script" \
+              --rl_training_config.max_steps "$MAX_STEPS" \
+              --rl_training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"
+            exit_code=$?
+            if [ "$exit_code" -ne 0 ]; then
+              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+              final_exit_code=$exit_code
+              failed_scripts+=("$script")
+            else
+              echo "✅ Successfully completed: $script"
+            fi
+          fi
+        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/")
+
+        if [ "$final_exit_code" -ne 0 ]; then
+          echo "🚫 One or more RL scripts failed. Exiting with code $final_exit_code." >&2
+          printf ' - %s\n' "${failed_scripts[@]}" >&2
+          exit "$final_exit_code"
+        fi
+        echo "🎉 All RL scripts completed successfully."
+
+
     - name: Run regression scripts
+      shell: bash
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       id: regression_tests
+      continue-on-error: true
       run: |
         # Download GSM8K dataset
         mkdir -p /tmp/grpo_test/rl/grpo/data
 
         FAILED=0
+        failed_commands=()
         echo "📦 Executing: examples/deepscaler/math_eval_nb.py..."
-        python examples/deepscaler/math_eval_nb.py || FAILED=1
+        python examples/deepscaler/math_eval_nb.py || {
+          FAILED=1
+          failed_commands+=("python examples/deepscaler/math_eval_nb.py")
+        }
 
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in colocated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 || {
+          FAILED=1
+          failed_commands+=("python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20")
+        }
 
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 2 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way || {
+          FAILED=1
+          failed_commands+=("python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way")
+        }
 
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with vanilla rollout engine in 3 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way || {
+          FAILED=1
+          failed_commands+=("python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way")
+        }
 
         # TODO(b/508252632): Re-enable once the bug is fixed.
         # vLLM Tests
@@ -141,110 +260,144 @@ jobs:
         cd tunix
 
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in colocated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax || {
+          FAILED=1
+          failed_commands+=("python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax")
+        }
 
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 2 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way || {
+          FAILED=1
+          failed_commands+=("python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way")
+        }
 
         echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax in 3 way disaggregated mode ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way || {
+          FAILED=1
+          failed_commands+=("python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way")
+        }
 
         # echo "📦 Executing: scripts/grpo_demo_llama3_qwen2.py with sglang_jax with LoRA ..."
         # python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine sglang_jax --enable-lora --lora-target-modules all || FAILED=1
 
 
         if [ "$FAILED" -ne 0 ]; then
-          echo "One or more scripts failed!"
+          echo "🚫 One or more regression scripts failed:" >&2
+          printf ' - %s\n' "${failed_commands[@]}" >&2
           exit 1
         fi
 
-    - name: Run SFT shell scripts
+    - name: Fail if any run_prod suite failed
+      if: always()
+      run: |
+        failed_steps=()
+
+        if [ "${{ steps.sft_tests.outcome }}" = "failure" ]; then
+          failed_steps+=("Run SFT shell scripts")
+        fi
+
+        if [ "${{ steps.rl_tests.outcome }}" = "failure" ]; then
+          failed_steps+=("Run RL shell scripts")
+        fi
+
+        if [ "${{ steps.regression_tests.outcome }}" = "failure" ]; then
+          failed_steps+=("Run regression scripts")
+        fi
+
+        if [ "${#failed_steps[@]}" -ne 0 ]; then
+          echo "🚫 run_prod completed with failing suites:" >&2
+          printf ' - %s\n' "${failed_steps[@]}" >&2
+          exit 1
+        fi
+
+  run_latest:
+    runs-on: [linux-x86-ct5lp-224-8tpu]
+    environment: testing
+    container:
+      image: vllm/vllm-tpu:nightly
+      options: --privileged
+      env:
+        CLOUD_TPU_ACCELERATOR: v5e-8
+        JAX_PLATFORMS: tpu,cpu
+    steps:
+
+    # Cache Hugging Face hub
+    - name: Cache HF hub
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+        restore-keys: |
+          hf-${{ runner.os }}-
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install tunix dependencies and latest LKG vLLM
+      run: |
+        pip install -e .[prod,test,cli]
+
+        # Fetch latest vllm lkg commit hash from tpu-inference repo
+        echo "Fetching latest vLLM LKG version..."
+        VLLM_COMMIT=$(curl -sSL https://raw.githubusercontent.com/vllm-project/tpu-inference/main/.buildkite/vllm_lkg.version)
+        if [ -z "$VLLM_COMMIT" ]; then
+          echo "ERROR: Failed to fetch vLLM LKG commit hash."
+          exit 1
+        fi
+        echo "Fetched vLLM LKG commit: $VLLM_COMMIT"
+
+        # Install vllm from lkg commit
+        export VLLM_TARGET_DEVICE=tpu
+        pip install "vllm @ git+https://github.com/vllm-project/vllm.git@${VLLM_COMMIT}"
+
+        # Install tpu-inference from main
+        pip install "tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@main"
+
+    - name: Verify TPU availability
+      run: |
+        python -c "
+        import jax
+        print(f'JAX version: {jax.__version__}')
+        print(f'JAX devices: {jax.devices()}')
+
+        devices = jax.devices()
+        has_tpu = len(devices) > 0 and all(device.platform == 'tpu' for device in devices)
+        print(f'TPU available: {has_tpu}')
+
+        if not has_tpu:
+            print('ERROR: No TPU devices found!')
+            exit(1)
+        else:
+            print(f'SUCCESS: Found {len(devices)} TPU device(s)')
+        "
+
+    - name: Run latest tests
+      shell: bash
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
-        SCRIPT_DIR="./examples/sft/mtnt"
-        MAX_STEPS=5
-        EVAL_EVERY_N_STEPS=1
+        mkdir -p /tmp/grpo_test/rl/grpo/data
+        FAILED=0
 
-        # Check if directory exists
-        if [ ! -d "$SCRIPT_DIR" ]; then
-          echo "Directory $SCRIPT_DIR does not exist"
+        echo "📦 Executing Non-Agentic CLI (vLLM Batch Mode, Colocated) ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm || FAILED=1
+
+        echo "📦 Executing Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way) ..."
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
+
+        echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4) ..."
+        model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
+          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || FAILED=1
+
+        echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, vLLM Batch Mode, Colocated 4:4 override) ..."
+        model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_ckpts_batch" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
+          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh vllm_config.server_mode=false || FAILED=1
+
+        if [ "$FAILED" -ne 0 ]; then
+          echo "❌ One or more run_latest tests failed."
           exit 1
+        else
+          echo "✅ All run_latest tests completed successfully."
         fi
-
-        echo "🔍 Finding scripts in $SCRIPT_DIR"
-        for script in "$SCRIPT_DIR"/*.sh; do
-          if [ -f "$script" ]; then
-            # TODO(b/510383584)
-            if [[ "$script" == *"run_gemma_2b.sh" ]]; then
-              echo "⏭️ Skipping: $script"
-              continue
-            fi
-
-            echo "📦 Executing: $script"
-            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
-            chmod +x "$script"
-            if bash "$script" \
-                --training_config.max_steps "$MAX_STEPS" \
-                --training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
-              echo "✅ Successfully completed: $script"
-            else
-              exit_code=$?
-              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
-              exit "$exit_code"
-            fi
-          fi
-        done
-        echo "🎉 All SFT scripts completed successfully."
-
-    - name: Run RL shell scripts
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-      run: |
-        SCRIPT_DIR="./examples/rl/grpo/gsm8k"
-        EXCLUDE_DIR="verl_compatible"
-        MAX_STEPS=5
-        EVAL_EVERY_N_STEPS=1
-
-        if [ ! -d "$SCRIPT_DIR" ]; then
-          echo "Directory $SCRIPT_DIR does not exist" >&2
-          exit 1
-        fi
-
-        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
-        final_exit_code=0
-
-        while IFS= read -r script; do
-          if [ -f "$script" ]; then
-            # TODO(b/510383570)
-            if [[ "$script" == *"run_qwen3_8b"* ]]; then
-              echo "⏭️ Skipping: $script"
-              continue
-            fi
-            echo "📦 Executing: $script"
-            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
-            chmod +x "$script"
-            if ! bash "$script" \
-                --rl_training_config.max_steps "$MAX_STEPS" \
-                --rl_training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
-              exit_code=$?
-              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
-              final_exit_code=$exit_code
-              # Stop processing further scripts after the first failure
-              break
-            else
-              echo "✅ Successfully completed: $script"
-            fi
-          fi
-        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/")
-
-        if [ "$final_exit_code" -ne 0 ]; then
-          echo "🚫 One or more RL scripts failed. Exiting with code $final_exit_code." >&2
-          exit "$final_exit_code"
-        fi
-        echo "🎉 All RL scripts completed successfully."
-
