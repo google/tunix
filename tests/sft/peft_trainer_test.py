@@ -42,6 +42,17 @@ TEST_LEARNING_RATE = 1e-3
 # CPU environment setup to simulate multi device env.
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
+# Force float32 matmul precision so the tests are deterministic across
+# backends. On CPU the platform default is already float32; on TPU it is
+# bf16-input, which makes the matmul non-associative — the
+# `GradientAccumulator` tests that compare a partitioned grad
+# (Σ_i grad(sub_batch_i)) against the full-batch grad would then diverge
+# by bf16-precision (~1e-3) purely from reduction-order differences. This
+# is not a correctness bug in the accumulator; it's a precision mismatch
+# of the test's reference computation, fixed here by pinning the matmul
+# precision so both paths run the same arithmetic.
+jax.config.update('jax_default_matmul_precision', 'highest')
+
 
 def create_sharded_model(model_ctor, rngs, mesh):
   @nnx.jit(static_argnums=(0,))
@@ -1126,6 +1137,46 @@ class GradientAccumulatorTest(parameterized.TestCase):
     self.assertNotEmpty(float_dtypes)
     for d in float_dtypes:
       self.assertEqual(d, jnp.bfloat16)
+
+  def test_peft_trainer_train_runs_with_bf16_params(self):
+    """End-to-end regression: `PeftTrainer.train` with bf16 model params.
+
+    Drives the production `_train_step` directly: that closure's
+    `nnx.cond(is_update_step, apply_updates, skip_updates, ...)` returns
+    `(opt_state, grad_norm)` from each branch. With bf16 params, both
+    leaves can drift from float32:
+
+    * `opt_state.mu/nu` (Adam moments) — `skip_updates` leaves them at
+      bf16; `apply_updates` would promote them to float32 if
+      `GradientAccumulator.get()` returned float32 grads.
+    * `grad_norm` (scalar) — `skip_updates` returns float32; a naive
+      `optax.global_norm` on bf16 grads in `apply_updates` returns bf16.
+
+    Either mismatch raises ``TypeError: cond branches must have equal
+    output types`` at trace time. This test casts a real `ToyTransformer`
+    to bf16 and runs a few training steps end-to-end with Adam (which has
+    state, unlike SGD) — covering both paths simultaneously. It is the
+    minimal pin that actually exercises the production closure; the
+    hand-rolled `test_cond_apply_vs_skip_branches_*` tests above only
+    pin the *pattern* and are blind to a regression that touches solely
+    the production helpers.
+    """
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    bf16_state = jax.tree.map(
+        lambda x: x.astype(jnp.bfloat16) if jnp.issubdtype(x.dtype, jnp.floating)
+        else x,
+        nnx.state(model, nnx.Param),
+    )
+    nnx.update(model, bf16_state)
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=2)
+    trainer = peft_trainer.PeftTrainer(model, optax.adam(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    trainer.train(dummy_datasets(batch_size=4))
+
+    self.assertGreater(trainer._train_steps, 0)
 
 
 if __name__ == '__main__':

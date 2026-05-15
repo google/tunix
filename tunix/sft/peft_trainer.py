@@ -427,7 +427,16 @@ class PeftTrainer:
 
     def apply_updates(model, optimizer, grad_accumulator):
       acc_grads = grad_accumulator.get()
-      norm = optax.global_norm(acc_grads)
+      # Compute the norm in float32 — (1) `skip_updates` returns a float32
+      # zero and `nnx.cond` requires both branches to agree on the dtype of
+      # every output leaf; (2) for production-size models the sum-of-squares
+      # over bf16 grads quickly exhausts bf16's ~7-bit mantissa, so the
+      # promotion is also numerically necessary for the norm to be useful
+      # (logging / clipping). The grads passed to `optimizer.update` stay at
+      # the accumulator's dtype, so the optimizer state isn't affected.
+      norm = optax.global_norm(
+          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
+      )
       optimizer.update(model, acc_grads)
       grad_accumulator.reset()
       return norm
