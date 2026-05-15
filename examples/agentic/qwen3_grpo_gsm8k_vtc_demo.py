@@ -49,6 +49,17 @@ from transformers import AutoTokenizer
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
+PATHWAYS_ROOT = os.path.join(os.path.dirname(REPO_ROOT), "pathways-utils")
+if PATHWAYS_ROOT not in sys.path:
+  sys.path.insert(0, PATHWAYS_ROOT)
+
+try:
+  import pathwaysutils  # pytype: disable=import-error
+except ImportError:
+  pathwaysutils = None
+
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS") == "proxy":
+  pathwaysutils.initialize()
 
 from tunix.cli.utils import model as model_utils
 from tunix.models.automodel import call_model_config
