@@ -579,6 +579,7 @@ grpo_config = GRPOConfig(
     epsilon=EPSILON,
     system_prompt='',
     max_concurrency=8,
+    max_response_length=TOTAL_GENERATION_STEPS,
 )
 
 # %%
