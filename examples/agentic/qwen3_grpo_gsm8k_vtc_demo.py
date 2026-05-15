@@ -125,6 +125,8 @@ KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS
 DEFAULT_VLLM_HBM_UTILIZATION = 0.6
 DEFAULT_VLLM_MAX_NUM_SEQS = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
 DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 16384
+DEFAULT_SHARED_MESH_FSDP = 16
+DEFAULT_SHARED_MESH_TP = 1
 
 TRAIN_TEMPERATURE = 1.0
 TRAIN_TOP_P = 1.0
@@ -306,6 +308,8 @@ def _mesh_from_dims(
 def build_train_and_rollout_meshes(
     *,
     separate_rollout_mesh: bool,
+    shared_mesh_fsdp: int | None,
+    shared_mesh_tp: int | None,
     rollout_mesh_fsdp: int | None,
     rollout_mesh_tp: int | None,
     train_mesh_fsdp: int | None,
@@ -316,19 +320,38 @@ def build_train_and_rollout_meshes(
   devices = list(jax.devices())
   if not devices:
     raise ValueError("No JAX devices found.")
+  model_config = call_model_config(MODEL_NAME)
 
   if not separate_rollout_mesh:
     total_devices = len(devices)
-    shared_fsdp = int(
-        np.gcd(total_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
-    )
-    shared_tp = total_devices // shared_fsdp
+    if shared_mesh_fsdp is not None or shared_mesh_tp is not None:
+      shared_fsdp = shared_mesh_fsdp if shared_mesh_fsdp is not None else 1
+      shared_tp = shared_mesh_tp if shared_mesh_tp is not None else 1
+    else:
+      shared_tp = int(np.gcd(total_devices, model_config.num_kv_heads))
+      if shared_tp <= 0:
+        shared_tp = 1
+      shared_fsdp = int(
+          np.gcd(
+              total_devices // shared_tp,
+              TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS,
+          )
+      )
+      if shared_fsdp <= 0:
+        shared_fsdp = 1
+    shared_num_devices = shared_fsdp * shared_tp
+    if shared_num_devices > total_devices:
+      raise ValueError(
+          f"Requested shared mesh fsdp={shared_fsdp}, tp={shared_tp} "
+          f"({shared_num_devices} devices), but only {total_devices} devices are available."
+      )
     shared_dims = [("fsdp", shared_fsdp), ("tp", shared_tp)]
-    shared_mesh, shared_dims = _mesh_from_dims(devices, shared_dims)
+    shared_mesh, shared_dims = _mesh_from_dims(
+        devices[:shared_num_devices], shared_dims
+    )
     return shared_mesh, shared_mesh, shared_dims, list(shared_dims)
 
   total_devices = len(devices)
-  model_config = call_model_config(MODEL_NAME)
 
   if rollout_mesh_fsdp is not None or rollout_mesh_tp is not None:
     rollout_dims = []
@@ -410,6 +433,24 @@ def parse_args() -> argparse.Namespace:
       help=(
           "Place rollout on a separate mesh instead of sharing the actor mesh. "
           "When enabled, rollout devices are taken from the tail of jax.devices()."
+      ),
+  )
+  parser.add_argument(
+      "--shared_mesh_fsdp",
+      type=int,
+      default=DEFAULT_SHARED_MESH_FSDP,
+      help=(
+          "Explicit FSDP dimension for the shared train/rollout mesh. "
+          "Used only when --separate_rollout_mesh is not set."
+      ),
+  )
+  parser.add_argument(
+      "--shared_mesh_tp",
+      type=int,
+      default=DEFAULT_SHARED_MESH_TP,
+      help=(
+          "Explicit TP dimension for the shared train/rollout mesh. "
+          "Used only when --separate_rollout_mesh is not set."
       ),
   )
   parser.add_argument(
@@ -563,6 +604,8 @@ def main():
   args = parse_args()
   train_mesh, rollout_mesh, train_dims, rollout_dims = build_train_and_rollout_meshes(
       separate_rollout_mesh=args.separate_rollout_mesh,
+      shared_mesh_fsdp=args.shared_mesh_fsdp,
+      shared_mesh_tp=args.shared_mesh_tp,
       rollout_mesh_fsdp=args.rollout_mesh_fsdp,
       rollout_mesh_tp=args.rollout_mesh_tp,
       train_mesh_fsdp=args.train_mesh_fsdp,
@@ -719,6 +762,8 @@ def main():
           "model": MODEL_ID,
           "rollout_engine": args.rollout_engine,
           "separate_rollout_mesh": args.separate_rollout_mesh,
+          "shared_mesh_fsdp": args.shared_mesh_fsdp,
+          "shared_mesh_tp": args.shared_mesh_tp,
           "rollout_split_fraction": args.rollout_split_fraction,
           "rollout_mesh_fsdp": args.rollout_mesh_fsdp,
           "rollout_mesh_tp": args.rollout_mesh_tp,
