@@ -53,6 +53,7 @@ if REPO_ROOT not in sys.path:
 from tunix.cli.utils import model as model_utils
 from tunix.models.automodel import call_model_config
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import utils as rl_utils
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.rl.rollout import base_rollout
@@ -460,6 +461,12 @@ def maybe_apply_lora(model: nnx.Module, mesh: Mesh) -> nnx.Module:
   return model_utils.apply_lora_to_model(model, mesh=mesh, lora_config=lora_config)
 
 
+def put_model_on_device(model: nnx.Module) -> nnx.Module:
+  graph_def, state = nnx.split(model)
+  state = rl_utils.put_params_on_memory_kind(state, "device")
+  return nnx.merge(graph_def, state)
+
+
 def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]:
   model_config = {
       "model_name": MODEL_NAME,
@@ -478,7 +485,9 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]
   reference, tokenizer_path = model_utils.create_model(
       model_config, tokenizer_config, mesh
   )
+  reference = put_model_on_device(reference)
   actor = maybe_apply_lora(reference, mesh)
+  actor = put_model_on_device(actor)
   return reference, actor, tokenizer_path
 
 
@@ -622,7 +631,10 @@ def main():
           rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
       rollout_engine=args.rollout_engine,
-      offload_to_cpu=False,
+      # Force explicit host<->device materialization for vanilla rollout.
+      # This avoids mixed host/device memory spaces inside sampler gather ops on
+      # TPU, which can happen with shared-mesh Qwen3 demo setup.
+      offload_to_cpu=(args.rollout_engine == "vanilla"),
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=create_optimizer(),
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
