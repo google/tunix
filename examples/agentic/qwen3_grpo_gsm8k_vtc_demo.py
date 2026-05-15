@@ -47,35 +47,22 @@ import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if REPO_ROOT not in sys.path:
-  sys.path.insert(0, REPO_ROOT)
-PATHWAYS_ROOT = os.path.join(os.path.dirname(REPO_ROOT), "pathways-utils")
-if PATHWAYS_ROOT not in sys.path:
-  sys.path.insert(0, PATHWAYS_ROOT)
+workdir = os.getcwd()
+tunix_root = os.path.join(workdir, "tunix")
+pathways_root = os.path.join(workdir, "pathways-utils")
+r2egym_root = os.path.join(workdir, "r2egym")
+
+for root in [REPO_ROOT, workdir, tunix_root, pathways_root, r2egym_root]:
+  if root not in sys.path:
+    sys.path.insert(0, root)
 
 try:
   import pathwaysutils  # pytype: disable=import-error
 except ImportError:
   pathwaysutils = None
 
-if os.getenv("JAX_PLATFORMS") == "proxy":
-  if pathwaysutils is not None:
-    try:
-      pathwaysutils.initialize()
-    except Exception as e:  # pylint: disable=broad-except
-      print(
-          "WARNING: Failed to initialize proxy backend via pathwaysutils. "
-          f"Falling back to default JAX backend. Error: {e}"
-      )
-      os.environ["JAX_PLATFORMS"] = ""
-      os.environ.pop("JAX_PLATFORM_NAME", None)
-  else:
-    print(
-        "WARNING: JAX_PLATFORMS=proxy but pathwaysutils is unavailable. "
-        "Falling back to default JAX backend."
-    )
-    os.environ["JAX_PLATFORMS"] = ""
-    os.environ.pop("JAX_PLATFORM_NAME", None)
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS") == "proxy":
+  pathwaysutils.initialize()
 
 from tunix.cli.utils import model as model_utils
 from tunix.models.automodel import call_model_config
