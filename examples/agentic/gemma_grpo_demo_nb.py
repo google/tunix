@@ -15,6 +15,7 @@ import contextlib
 import os
 from pprint import pprint
 import re
+import sys
 import time
 
 # %%
@@ -39,6 +40,10 @@ import jax
 from jax import numpy as jnp
 import optax
 from orbax import checkpoint as ocp
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if REPO_ROOT not in sys.path:
+  sys.path.insert(0, REPO_ROOT)
 
 # %%
 if ENV == 'g3':
