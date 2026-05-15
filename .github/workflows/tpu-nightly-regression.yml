@@ -137,9 +137,9 @@ jobs:
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
           echo "🚫 One or more SFT scripts failed." >&2
-          exit "$FINAL_EXIT_CODE"
+          echo "SFT_FAILED=1" >> $GITHUB_ENV
         fi
-        echo "🎉 All SFT scripts completed successfully."
+        echo "🎉 All SFT scripts completed execution."
 
 
     - name: Run RL shell scripts
@@ -195,9 +195,9 @@ jobs:
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
           echo "🚫 One or more RL scripts failed." >&2
-          exit "$FINAL_EXIT_CODE"
+          echo "RL_FAILED=1" >> $GITHUB_ENV
         fi
-        echo "🎉 All RL scripts completed successfully."
+        echo "🎉 All RL scripts completed execution."
 
 
     - name: Run regression scripts
@@ -252,8 +252,17 @@ jobs:
 
         if [ "$FAILED" -ne 0 ]; then
           echo "🚫 One or more regression scripts failed." >&2
+          echo "REGRESSION_FAILED=1" >> $GITHUB_ENV
+        fi
+        echo "🎉 All regression scripts completed execution."
+
+    - name: Final status check
+      if: always()
+      run: |
+        if [ "$SFT_FAILED" == "1" ] || [ "$RL_FAILED" == "1" ] || [ "$REGRESSION_FAILED" == "1" ]; then
+          echo "❌ One or more test suites failed." >&2
           exit 1
         fi
-        echo "🎉 All regression scripts completed successfully."
+        echo "✅ All test suites passed."
 
 
