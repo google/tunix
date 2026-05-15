@@ -108,8 +108,8 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=16)
-arg_parser.add_argument("--mini_batch_size", type=int, default=16)
+arg_parser.add_argument("--batch_size", type=int, default=32)
+arg_parser.add_argument("--mini_batch_size", type=int, default=32)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
@@ -126,7 +126,7 @@ arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=128)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
-arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument("--seed", type=int, default=123)
 arg_parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
 )
@@ -517,7 +517,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.7,
+    "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -581,6 +581,7 @@ grpo_config = GRPOConfig(
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
     force_compute_kl=True,
+    degenerate_group_masking=False,
 )
 
 # Perf Metrics logging

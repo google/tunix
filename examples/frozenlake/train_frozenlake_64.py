@@ -58,8 +58,8 @@ except:
   cm = contextlib.nullcontext()
 
 with cm:
-  from tunix.models.qwen3 import model as  qwen3_model_lib
-  from tunix.models.qwen3 import params as qwen3_params_lib
+  from tunix.models.gemma4 import params_safetensors as params_lib
+  from tunix.models.gemma4 import model as model_lib
   from tunix.sft import metrics_logger
   from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from tunix.rl.agentic.agents import model_agent
@@ -75,8 +75,20 @@ with cm:
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
-  from examples.frozenlake.agent import FrozenLakeAgent
+  from examples.frozenlake.agent import (
+      SYSTEM_PROMPT,
+      MULTI_SHOT_SYSTEM_PROMPT,
+      FrozenLakeAgent,
+  )
   from examples.frozenlake.env import FrozenLakeEnv
+
+sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
+os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+try:
+  from absl import flags
+  flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
+except Exception:
+  pass
 
 try:
   import pathwaysutils
@@ -96,13 +108,13 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=16)
-arg_parser.add_argument("--mini_batch_size", type=int, default=16)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=5)
+arg_parser.add_argument("--num_batches", type=int, default=150)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
@@ -110,11 +122,11 @@ arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
 arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
 arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
-arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=64)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
-arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument("--max_concurrency", type=int, default=768)
+arg_parser.add_argument("--shuffle_data", type=bool, default=True)
+arg_parser.add_argument("--seed", type=int, default=123)
 arg_parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
 )
@@ -135,9 +147,9 @@ ALPHA = 64.0
 TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
-ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
-TRAINER_MESH = [(1, 4), ("fsdp", "tp")]
-REFERENCE_MESH = [(1, 4), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
@@ -154,7 +166,7 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 64
+VLLM_MAX_NUM_SEQS = 128
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
@@ -175,7 +187,7 @@ EPSILON_HIGH = args.epsilon_high
 # ====== Training ======
 ENABLE_REMAT = True
 ENABLE_FLASH_ATTENTION = True
-ENABLE_MIX_PRECISION = True
+ENABLE_MIX_PRECISION = False
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -210,7 +222,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.5
+MAX_GRAD_NORM = 0.3
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -232,21 +244,19 @@ ROLLOUT_ENGINE = os.getenv(
 )  # one of "vanilla", "vllm" 
 
 
-jax.clear_caches()
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
-# # reference_devices = math.prod(REFERENCE_MESH[0])
-# reference_devices = 0
+reference_devices = math.prod(REFERENCE_MESH[0])
 
-# if trainer_devices + rollout_devices + reference_devices > jax.device_count():
-#   raise ValueError(
-#       "Trainer devices must be less than or equal to the number of devices"
-#       " available."
-#   )
+if trainer_devices + rollout_devices + reference_devices > jax.device_count():
+  raise ValueError(
+      "Trainer devices must be less than or equal to the number of devices"
+      " available."
+  )
 
 
 rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-    ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+    ROLLOUT_MESH[0], jax.devices()[:rollout_devices], allow_split_physical_axes=True
 )
 
 rollout_mesh = jax.sharding.Mesh(
@@ -255,17 +265,17 @@ rollout_mesh = jax.sharding.Mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
 print(f"{rollout_device_list=} {rollout_mesh.devices=}")
-# reference_device_list = jax._src.mesh_utils.create_device_mesh(
-#     REFERENCE_MESH[0], jax.devices()[rollout_devices:rollout_devices+reference_devices]
-# )
-# reference_mesh = jax.sharding.Mesh(
-#     reference_device_list,
-#     axis_names=REFERENCE_MESH[1],
-#     axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
-# )
-# print(f"{reference_device_list=} {reference_mesh.devices=}")
+reference_device_list = jax._src.mesh_utils.create_device_mesh(
+    REFERENCE_MESH[0], jax.devices()[-reference_devices-trainer_devices:-trainer_devices], allow_split_physical_axes=True
+)
+reference_mesh = jax.sharding.Mesh(
+    reference_device_list,
+    axis_names=REFERENCE_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
+)
+print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
-    TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+    TRAINER_MESH[0], jax.devices()[-trainer_devices:], allow_split_physical_axes=True
 )
 trainer_mesh = jax.sharding.Mesh(
     trainer_device_list,
@@ -304,13 +314,7 @@ import datetime
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
-# MODEL_VERSION = "google/gemma-4-E4B-it"
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/83df0a889143b1dbfc61b591bbc639540fd9ce4c"
-
-# MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-# MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
-MODEL_VERSION = "Qwen/Qwen3-1.7B"
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
+MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -324,15 +328,13 @@ Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
 
 
-# TRAIN_DATA_PATH = os.path.join(
-#     DATA_PATH_PREFIX, "train.parquet"
-# )
-# TEST_DATA_PATH = os.path.join(
-#     DATA_PATH_PREFIX, "test.parquet"
-# )
+TRAIN_DATA_PATH = os.path.join(
+    DATA_PATH_PREFIX, "train.parquet"
+)
+TEST_DATA_PATH = os.path.join(
+    DATA_PATH_PREFIX, "test.parquet"
+)
 
-TRAIN_DATA_PATH = os.path.join("/mnt/disks/linchai-data/gemma4_flax/workspace/tunix/examples/frozenlake/data/frozenlake/train.parquet")
-TEST_DATA_PATH = os.path.join("/mnt/disks/linchai-data/gemma4_flax/workspace/tunix/examples/frozenlake/data/frozenlake/test.parquet")
 
 def create_datasets(
     train_ds_path: str = TRAIN_DATA_PATH,
@@ -389,43 +391,78 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
+config = model_lib.ModelConfig.gemma4_26b_a4b()
 if ENABLE_REMAT:
-  config.remat_config = qwen3_model_lib.RematConfig.DECODER
-# if ENABLE_FLASH_ATTENTION:
-#   config.use_flash_attention = True
-#   config.flash_attention_block_size = 256
+  config.remat_config = model_lib.RematConfig.DECODER
+if ENABLE_FLASH_ATTENTION:
+  config.use_flash_attention = True
+  config.flash_attention_block_size = 256
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
+else:
+  config.dtype = jnp.float32
 
-# from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download
 
-# MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/snapshots/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
+MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
 print("MODEL_PATH: ", MODEL_PATH)
-reference_mesh = trainer_mesh 
-qwen3_ref = qwen3_params_lib.create_model_from_safe_tensors(
+gemma4_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, reference_mesh, dtype=MODEL_DTYPE
 )
-# %%
-show_hbm_usage("after loading qwen3_ref")
-
-
-qwen3_actor = qwen3_params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-)
-# graph, state = nnx.split(gemma4_ref)
-# trainer_shardings = jax.tree_util.tree_map(
-#   lambda x: jax.sharding.NamedSharding(
-#       trainer_mesh,
-#       x,
-#   ),
-#   nnx.get_partition_spec(state),
-# )
-# gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
 
 # %%
-show_hbm_usage("after loading qwen3_actor")
+show_hbm_usage("after loading gemma4_ref")
+
+
+# %%
+def get_lora_model(base_model, model_mesh):
+  lora_provider = qwix.LoraProvider(
+      module_path=(
+          ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
+          ".*attn_vec_einsum"
+      ),
+      rank=RANK,
+      alpha=ALPHA,
+  )
+
+  model_input = base_model.get_model_input()
+  lora_model = qwix.apply_lora_to_model(
+      base_model, lora_provider, **model_input
+  )
+
+  with compat.set_mesh(model_mesh):
+    state = nnx.state(lora_model)
+    pspecs = nnx.get_partition_spec(state)
+    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
+    nnx.update(lora_model, sharded_state)
+
+  return lora_model
+
+
+# %%
+if TRAIN_WITH_LORA:
+  gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
+else:
+  gemma4_actor = params_lib.create_model_from_safe_tensors(
+      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+  )
+  # graph, state = nnx.split(gemma4_ref)
+  # trainer_shardings = jax.tree_util.tree_map(
+  #   lambda x: jax.sharding.NamedSharding(
+  #       trainer_mesh,
+  #       x,
+  #   ),
+  #   nnx.get_partition_spec(state),
+  # )
+  # gemma4_actor = nnx.merge(graph, reshard.reshard_pytree(state, trainer_shardings))
+
+# %%
+show_hbm_usage("after loading gemma4_actor")
+
+# %%
+ModelAgent = model_agent.ModelAgent
+TaskEnvironment = task_environment.TaskEnvironment
+TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 
 # %%
 # Ckpt saving
@@ -435,14 +472,12 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 
 # Metrics logger
 import wandb
-wandb.login() 
 wandb_config = vars(args)
 wandb_config.update({
     "WARMUP_STEPS": WARMUP_STEPS,
     "num_steps": MAX_STEPS,
     "rollout_engine": ROLLOUT_ENGINE,
 })
-wandb.login()
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="gs://linchai-bucket-dev/tensorboard/grpo",
     flush_every_n_steps=20,
@@ -465,7 +500,7 @@ if MAX_GRAD_NORM is not None:
 
 # %%
 # Training config
-print("# Rollout mesh: ", rollout_mesh)
+print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
 print("Reference mesh: ", reference_mesh)
 
@@ -482,7 +517,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.7,
+    "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
@@ -490,13 +525,14 @@ vllm_rollout_dict = {
     "rollout_vllm_init_with_random_weights": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
+    "rollout_vllm_delete_dst_buffers": True,
+    "rollout_vllm_reshard_chunk_size": 16,
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
-        "dtype": "bfloat16",
     },
 }
 
@@ -526,8 +562,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        # checkpoint_root_directory=CKPT_DIR,
-        # checkpointing_options=checkpointing_options,
+        checkpoint_root_directory=CKPT_DIR,
+        checkpointing_options=checkpointing_options,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -545,6 +581,7 @@ grpo_config = GRPOConfig(
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
     force_compute_kl=True,
+    degenerate_group_masking=False,
 )
 
 # Perf Metrics logging
@@ -558,14 +595,47 @@ perf_metrics_config = PerfMetricsConfig(
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen3_actor,
-    reference=qwen3_ref,
+    actor=gemma4_actor,
+    reference=gemma4_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
     perf_config=perf_metrics_config,
 )
 
 show_hbm_usage("after RLCluster creation")
+
+
+def length_penalty_reward_fn(
+    prompts: List[str], 
+    completions: List[str], 
+    trajectory_rewards: List[float], 
+    **kwargs
+) -> List[float]:
+  """Computes a group-relative length penalty inspired by Kimi 1.5.
+  
+  Promotes shorter successful paths and penalizes longer ones, 
+  while strictly penalizing long, unsuccessful paths.
+  """
+  lengths = np.array([len(c) for c in completions])
+  
+  min_len = np.min(lengths)
+  max_len = np.max(lengths)
+  
+  rewards = np.zeros_like(lengths, dtype=np.float32)
+  if max_len == min_len:
+    return list(rewards)
+  
+  lambdas = 0.5 - (lengths - min_len) / (max_len - min_len)
+  
+  for i in range(len(completions)):
+    is_correct = trajectory_rewards[i] > 0.1
+    if is_correct:
+      rewards[i] = lambdas[i]
+    else:
+      rewards[i] = min(0.0, lambdas[i])
+  
+  weight = 0.1
+  return list(rewards * weight)
 
 
 # %%
@@ -607,5 +677,35 @@ grpo_trainer = GRPOLearner(
     metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
+
+# %%
+try:
+  print("Defragmenting JAX/XLA memory before training...")
+  backend = None
+  try:
+    import jax.extend.backend as jax_backend
+    backend = jax_backend.get_backend()
+  except:
+    try:
+      backend = jax.devices()[0].client
+    except:
+      try:
+        from jax._src.lib import xla_bridge
+        backend = xla_bridge.get_backend()
+      except:
+        pass
+  if backend is not None and hasattr(backend, 'defragment'):
+    backend.defragment()
+    print("Defragmentation successful!")
+  else:
+    print("Defragmentation skipped: backend has no defragment attribute or could not be resolved.")
+except Exception as e:
+  print(f"Defragmentation failed: {e}")
+
+import gc
+import jax
+gc.collect()
+# Clear JAX compilation and execution caches
+jax.clear_caches()
 
 grpo_trainer.train(train_dataset)
