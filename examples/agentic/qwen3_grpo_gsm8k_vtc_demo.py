@@ -48,20 +48,27 @@ from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 workdir = os.getcwd()
-tunix_root = os.path.join(workdir, "tunix")
-pathways_root = os.path.join(workdir, "pathways-utils")
-r2egym_root = os.path.join(workdir, "r2egym")
+if os.path.exists(os.path.join(workdir, "tunix")):
+  workspace_root = workdir
+else:
+  workspace_root = os.path.dirname(REPO_ROOT)
 
-for root in [REPO_ROOT, workdir, tunix_root, pathways_root, r2egym_root]:
+tunix_root = os.path.join(workspace_root, "tunix")
+pathways_root = os.path.join(workspace_root, "pathways-utils")
+r2egym_root = os.path.join(workspace_root, "r2egym")
+
+for root in [REPO_ROOT, workspace_root, tunix_root, pathways_root, r2egym_root]:
   if root not in sys.path:
     sys.path.insert(0, root)
 
 try:
+  import tunix  # pytype: disable=import-error  # noqa: F401
   import pathwaysutils  # pytype: disable=import-error
+  import r2egym  # pytype: disable=import-error  # noqa: F401
 except ImportError:
   pathwaysutils = None
 
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS") == "proxy":
+if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
 
 from tunix.cli.utils import model as model_utils
