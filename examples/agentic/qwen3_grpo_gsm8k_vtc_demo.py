@@ -28,11 +28,17 @@ Run from repo root:
 from __future__ import annotations
 
 import argparse
+import importlib.resources as stdlib_importlib_resources
 import os
 import re
 import sys
 import time
 from typing import Any
+
+try:
+  import importlib_resources  # pytype: disable=import-error  # noqa: F401
+except ModuleNotFoundError:
+  sys.modules["importlib_resources"] = stdlib_importlib_resources
 
 import grain
 from flax import nnx
