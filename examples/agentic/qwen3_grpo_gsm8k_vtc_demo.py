@@ -58,8 +58,24 @@ try:
 except ImportError:
   pathwaysutils = None
 
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS") == "proxy":
-  pathwaysutils.initialize()
+if os.getenv("JAX_PLATFORMS") == "proxy":
+  if pathwaysutils is not None:
+    try:
+      pathwaysutils.initialize()
+    except Exception as e:  # pylint: disable=broad-except
+      print(
+          "WARNING: Failed to initialize proxy backend via pathwaysutils. "
+          f"Falling back to default JAX backend. Error: {e}"
+      )
+      os.environ["JAX_PLATFORMS"] = ""
+      os.environ.pop("JAX_PLATFORM_NAME", None)
+  else:
+    print(
+        "WARNING: JAX_PLATFORMS=proxy but pathwaysutils is unavailable. "
+        "Falling back to default JAX backend."
+    )
+    os.environ["JAX_PLATFORMS"] = ""
+    os.environ.pop("JAX_PLATFORM_NAME", None)
 
 from tunix.cli.utils import model as model_utils
 from tunix.models.automodel import call_model_config
