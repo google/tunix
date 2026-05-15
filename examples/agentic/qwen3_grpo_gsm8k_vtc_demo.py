@@ -227,6 +227,23 @@ def normalize_answer(text: str | None) -> str | None:
   return str(text).replace(",", "").strip()
 
 
+def _normalize_example_value(value: Any) -> Any:
+  if isinstance(value, np.ndarray):
+    flat = value.reshape(-1).tolist()
+    if len(flat) == 1:
+      return _normalize_example_value(flat[0])
+    return [_normalize_example_value(v) for v in flat]
+  if isinstance(value, np.bytes_):
+    return value.tobytes().decode("utf-8")
+  if isinstance(value, bytes):
+    return value.decode("utf-8")
+  return value
+
+
+def normalize_single_example(example: dict[str, Any]) -> dict[str, Any]:
+  return {key: _normalize_example_value(value) for key, value in example.items()}
+
+
 def vtc_reward(prompts, completions, answer, **kwargs):
   del prompts, kwargs
   scores = []
@@ -496,6 +513,16 @@ class VTCQwenChatTemplateParser(chat_parser_lib.QwenChatTemplateParser):
     return super()._parse_system(content)
 
 
+class VTCGRPOLearner(GRPOLearner):
+  """Demo-local learner that normalizes TFDS string payloads to Python str."""
+
+  def _create_agent_env_pair(self, single_example, group_id: int, pair_index: int):
+    normalized_example = normalize_single_example(single_example)
+    return super()._create_agent_env_pair(
+        normalized_example, group_id=group_id, pair_index=pair_index
+    )
+
+
 def main():
   args = parse_args()
   train_mesh, rollout_mesh, train_dims, rollout_dims = build_train_and_rollout_meshes(
@@ -635,7 +662,7 @@ def main():
       cluster_config=cluster_config,
   )
 
-  trainer = GRPOLearner(
+  trainer = VTCGRPOLearner(
       rl_cluster=rl_cluster,
       reward_fns=[vtc_reward],
       algo_config=grpo_config,
