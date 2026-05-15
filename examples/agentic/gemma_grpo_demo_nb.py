@@ -17,6 +17,7 @@ from pprint import pprint
 import re
 import sys
 import time
+from typing import Any
 
 # %%
 # Environment detection
@@ -38,6 +39,7 @@ if ENV == 'oss':
 # %%
 import jax
 from jax import numpy as jnp
+import numpy as np
 import optax
 from orbax import checkpoint as ocp
 
@@ -233,6 +235,23 @@ def extract_hash_answer(text: str) -> str | None:
   if '####' not in text:
     return None
   return text.split('####')[1].strip()
+
+
+def _normalize_example_value(value: Any) -> Any:
+  if isinstance(value, np.ndarray):
+    flat = value.reshape(-1).tolist()
+    if len(flat) == 1:
+      return _normalize_example_value(flat[0])
+    return [_normalize_example_value(v) for v in flat]
+  if isinstance(value, np.bytes_):
+    return value.tobytes().decode('utf-8')
+  if isinstance(value, bytes):
+    return value.decode('utf-8')
+  return value
+
+
+def normalize_single_example(example: dict[str, Any]) -> dict[str, Any]:
+  return {key: _normalize_example_value(value) for key, value in example.items()}
 
 
 # %%
@@ -601,7 +620,16 @@ rl_cluster = rl_cluster_lib.RLCluster(
 
 # %%
 # GRPO Trainer
-grpo_trainer = GRPOLearner(
+class DemoGRPOLearner(GRPOLearner):
+
+  def _create_agent_env_pair(self, single_example, group_id: int, pair_index: int):
+    normalized_example = normalize_single_example(single_example)
+    return super()._create_agent_env_pair(
+        normalized_example, group_id=group_id, pair_index=pair_index
+    )
+
+
+grpo_trainer = DemoGRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=[
         match_format_exactly,
