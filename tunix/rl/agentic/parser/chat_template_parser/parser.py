@@ -53,10 +53,13 @@ class BaseChatTemplateParser(ABC):
     self.enable_thinking = enable_thinking
     self.tokens = self._init_tokens()
     self.generation_prompt = self._init_generation_prompt()
+    # message_separator is a per-turn formatting hint (e.g. "\n"), not a
+    # control token; including it would strip every newline from message
+    # content.
     self._tokens_to_sanitize = {
         v
-        for v in dataclasses.asdict(self.tokens).values()
-        if isinstance(v, str) and v
+        for k, v in dataclasses.asdict(self.tokens).items()
+        if k != "message_separator" and isinstance(v, str) and v
     }
 
   @abstractmethod
