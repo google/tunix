@@ -273,25 +273,28 @@ class TrajectoryCollectEngine:
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
 
       for step in self.agent.trajectory.steps:
-        # assistant tokens
-        if getattr(step, "assistant_tokens", None) is not None:
-          conversation_tokens.append(step.assistant_tokens)
+        # Keep tokens/masks/logprobs appended in lockstep — a step with env_tokens
+        # but no vllm logprobs (initial observation, empty completion) would
+        # otherwise leave the logprobs array short by `len(env_tokens)` and offset
+        # every subsequent step.
+        assistant_tokens = getattr(step, "assistant_tokens", None)
+        env_tokens = getattr(step, "env_tokens", None)
+        step_logprobs = getattr(step, "logprobs", None)
+        if assistant_tokens is not None:
+          conversation_tokens.append(assistant_tokens)
           conversation_masks.append(step.assistant_masks)
-
-        # env tokens
-        if getattr(step, "env_tokens", None) is not None:
-          conversation_tokens.append(step.env_tokens)
+          if step_logprobs is not None:
+            assert len(step_logprobs) == len(assistant_tokens), (
+                f"Logprobs length {len(step_logprobs)} does not match assistant"
+                f" tokens length {len(assistant_tokens)}"
+            )
+            logprobs.append(step_logprobs)
+          else:
+            logprobs.append(np.zeros(len(assistant_tokens)))
+        if env_tokens is not None:
+          conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
-
-        # logprobs
-        if getattr(step, "logprobs", None) is not None:
-          assert len(step.logprobs) == len(step.assistant_tokens), (
-              f"Logprobs length {len(step.logprobs)} does not match assistant"
-              f" tokens length {len(step.assistant_tokens)}"
-          )
-          logprobs.append(step.logprobs)
-          if getattr(step, "env_tokens", None) is not None:
-            logprobs.append(np.zeros(len(step.env_tokens)))
+          logprobs.append(np.zeros(len(env_tokens)))
 
       conversation_tokens = [
           np.asarray(tokens)

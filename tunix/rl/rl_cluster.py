@@ -1079,8 +1079,17 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       completion_mask: jax.Array | None = None,
+      temperature: float | None = None,
   ) -> jax.Array:
-    """Gets per-token logps from the actor model on the trainer side."""
+    """Gets per-token logps from the actor model on the trainer side.
+
+    Mirrors `get_ref_per_token_logps` — must pass through the rollout temperature
+    so the actor's recomputed logps match the temperature scaling used at
+    sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
+    yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
+    """
+    if temperature is None:
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
     batch_size = prompt_tokens.shape[0]
     if batch_size == 0:
       raise ValueError(
@@ -1109,13 +1118,17 @@ class RLCluster:
       else:
         dest_completion_mask = None
 
+      # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
+      # reference the same policy vllm sampled with even when mini_batch_size <
+      # full_batch_size or num_iterations > 1. Only offload the live actor when
+      # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
+      # was both unnecessary and risked leaving stray weights pinned to host.
       actor_trainer_state_on_device = self._is_state_on_device(
           nnx.state(self.actor_trainer.model)
       )
       if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
         self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
         gc.collect()
-
       graphdef, actor_state = nnx.split(self.actor_trainer.model)
       actor_pspecs = nnx.get_partition_spec(actor_state)
       actor_model_sharding = jax.tree.map(
@@ -1155,6 +1168,7 @@ class RLCluster:
                 else dest_completion_mask[batch_slice],
                 stop_gradient=True,
                 return_logits=False,
+                temperature=temperature,
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)

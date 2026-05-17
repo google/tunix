@@ -39,6 +39,10 @@ class TokenConfig:
   tool_end_token: str = ""
   tool_response_start_token: str = ""
   tool_response_end_token: str = ""
+  # Separator inserted between consecutive messages by `parse()`. Match what
+  # the model's `apply_chat_template` writes between successive messages so
+  # incremental per-message rendering can be concatenated without a fixup.
+  message_separator: str = ""
 
 
 class BaseChatTemplateParser(ABC):
@@ -71,18 +75,31 @@ class BaseChatTemplateParser(ABC):
       add_generation_prompt: bool = False,
       is_first_msg: bool = False,
   ) -> str:
-    """Parse messages into chat template format."""
-    result = ""
+    """Parse messages into chat template format.
+
+    When `is_first_msg=False` the call renders a continuation of an existing
+    conversation, so the result is prefixed with `message_separator` to
+    re-introduce the inter-message boundary that the previous turn's eot did
+    not emit. This lets per-message incremental rendering be concatenated
+    directly to prior tokens without external fixups.
+    """
+    parts = []
 
     if is_first_msg:
-      result += self._handle_first_message(messages)
+      first_chunk = self._handle_first_message(messages)
+      if first_chunk:
+        parts.append(first_chunk)
 
     for message in messages:
-      result += self._parse_message(message)
+      parts.append(self._parse_message(message))
 
     if add_generation_prompt:
-      result += self.generation_prompt
+      parts.append(self.generation_prompt)
 
+    sep = self.tokens.message_separator
+    result = sep.join(parts)
+    if not is_first_msg and result:
+      result = sep + result
     return result
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
@@ -157,7 +174,7 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
     return TokenConfig(
         bos_token=self.tokenizer.bos_token,
         eos_token=self.tokenizer.eos_token,
-        eot_token="<|im_end|>\n",
+        eot_token="<|im_end|>",
         system_token="<|im_start|>system\n",
         user_token="<|im_start|>user\n",
         assistant_token=self._get_assistant_token(),
@@ -165,6 +182,7 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
         tool_end_token="\n</tool_call>",
         tool_response_start_token="<tool_response>\n",
         tool_response_end_token="\n</tool_response>",
+        message_separator="\n",
     )
 
   def _get_assistant_token(self) -> str:
