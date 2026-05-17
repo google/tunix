@@ -66,7 +66,7 @@ calls in parallel for efficiency.
 ### Agent/Environment interaction
 
 <p align="center">
-  <img src="images/agentic_agent:env.png" alt="Batch vs Async Rollout" width="80%">
+  <img src="images/agentic_agent_env.png" alt="Batch vs Async Rollout" width="80%">
 </p>
 
 --------------------------------------------------------------------------------
