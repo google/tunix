@@ -365,7 +365,7 @@ def create_datasets(
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 
-chat_parser = parser.DefaultChatTemplateParser(tokenizer)
+chat_parser = parser.DefaultChatTemplateParser(tokenizer, enable_thinking=False)
 
 # %%
 train_dataset, test_dataset = create_datasets()
@@ -581,7 +581,6 @@ grpo_config = GRPOConfig(
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
     force_compute_kl=True,
-    degenerate_group_masking=False,
 )
 
 # Perf Metrics logging

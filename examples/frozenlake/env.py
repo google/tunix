@@ -18,7 +18,7 @@ from gymnasium.utils import seeding
 import numpy as np
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
 
-MAX_STEPS: int = 5
+MAX_STEPS: int = 20
 
 
 # DFS to check that it's a valid path.
@@ -168,7 +168,7 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
       entry: dict[str, Any],
       group_id: int | None = None,
       pair_index: int | None = None,
-      max_steps: int = 5,
+      max_steps: int = 20,
       **kwargs,
   ):
     global MAX_STEPS

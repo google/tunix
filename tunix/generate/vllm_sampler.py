@@ -519,10 +519,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           )
 
       self.sampling_params = sampling_params
-
-    print("type of input_strings: ", type(input_strings))
-    for x in input_strings:
-      print("type of each input string: ", type(x))
     prompt_ids = [self.tokenize(x) for x in input_strings]
     prompt_objects = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids]
     if self._driver is not None:

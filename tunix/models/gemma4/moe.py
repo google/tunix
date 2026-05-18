@@ -97,7 +97,6 @@ class MoERagged(nnx.Module):
         nnx.initializers.normal(dtype=config.param_dtype)(
             rngs.params(), (self.features, self.num_experts)
         ),
-        sharding=config.shd_config.router_weight_de,
     )
     self.gating_einsum = nnx.Param(
         nnx.initializers.normal(dtype=config.param_dtype)(
@@ -113,7 +112,6 @@ class MoERagged(nnx.Module):
     )
     self.per_expert_scale = nnx.Param(
         jnp.ones((self.num_experts,), dtype=config.param_dtype),
-        sharding=('ep',),
     )
     self.router_scale = nnx.Param(
         jnp.ones((self.features,), dtype=config.param_dtype),

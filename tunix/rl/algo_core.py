@@ -517,6 +517,7 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   Returns:
     Group relative advantages.
   """
+  print(f"Rewards before advantage computation: {rewards}")
   mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
   std_grouped_rewards = rewards.reshape(-1, num_generations).std(
       axis=-1, ddof=1

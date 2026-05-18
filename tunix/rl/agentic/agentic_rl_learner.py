@@ -396,7 +396,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
     )
-    logging.info(f"env extra_kwargs : {env.extra_kwargs=}")
 
     return agent, env
 

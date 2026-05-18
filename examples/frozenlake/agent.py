@@ -115,6 +115,86 @@ Assistant: G is at the bottom right corner of P. I can move left, right, or up. 
 Now it is your turn, please show your thinking process and put the final action in ``` ```. In every turn, the final action MUST be one of Up, Down, Left, Right.
 """
 
+MULTI_SHOT_SYSTEM_PROMPT_NO_THINK: str = """You are a helpful assistant. You are walking on a frozen lake.
+
+FrozenLake Quick Guide
+Goal: Reach the goal (G). Player (P) and Goal (G) must overlap.
+
+Symbols:
+_ Frozen | O Hole | G Goal | P Player
+
+Rules:
+1. Avoid falling into holes (O).
+2. Frozen tiles are slippery, you may move perpendicular to your intended direction.
+
+Valid Action (separated by | ):
+Up | Down | Left | Right
+
+Rewards:
+Fall into hole: 0
+Reach goal: +1.0
+
+You will be provided the current observation, please decide on the next Action.
+You must ONLY output the NEXT ACTION in ``` ```. Do not output any thinking process, explanations, or other text. For example, if you want to move up, you should output ```Up```.
+You should plan ahead and need to achieve it in minimum number of steps.
+
+Below are examples for an interaction:
+Example1:
+User: Current Observation:
+P   _   _   _   _
+O   _   _   O   _
+O   _   O   _   _
+O   _   _   G   _
+_   _   _   _   _
+You have not achieved the goal, P has not reached G yet. Please give the next action.
+
+Assistant: Action: ```Right```
+
+Example2:
+User: Current Observation:
+_   _   _   _
+_   _   _   O
+_   O   _   P
+O   _   _   G
+You have not achieved the goal, P has not reached G yet. Please give the next action.
+
+Assistant: Action: ```Down```
+
+Example3:
+User: Current Observation:
+_   _   _   O   _
+O   _   P   O   _
+O   _   O   _   _
+O   _   _   G   _
+_   _   _   _   _
+You have not achieved the goal, P has not reached G yet. Please give the next action.
+
+Assistant: Action: ```Left```
+
+Example4:
+User: Current Observation:
+_   _   _   _
+_   _   _   O
+_   O   _   O
+O   G   P   _
+You have not achieved the goal, P has not reached G yet. Please give the next action.
+
+Assistant: Action: ```Left```
+
+Example5:
+User: Current Observation:
+_   _   _   O   _
+O   _   P   _   _
+O   _   O   O   O
+O   _   O   G   _
+O   _   _   _   _
+You have not achieved the goal, P has not reached G yet. Please give the next action.
+
+Assistant: Action: ```Left```
+
+Now it is your turn, please put the final action in ``` ```. In every turn, the final action MUST be one of Up, Down, Left, Right.
+"""
+
 
 class FrozenLakeAgent(base_agent.ConversationAgentBase):
 
@@ -123,11 +203,12 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
       system_prompt: Optional[str] = None,
       use_multistep_prompt: bool | None = True,
   ):
+    # print(f"Using {'multi-step' if use_multistep_prompt else 'single-step'} prompting format.")
     self.multistep_prompt = use_multistep_prompt
     system_prompt = (
         SYSTEM_PROMPT
         if not self.multistep_prompt
-        else MULTI_SHOT_SYSTEM_PROMPT
+        else MULTI_SHOT_SYSTEM_PROMPT_NO_THINK
     )
     super().__init__(system_prompt=system_prompt)
     self.last_observation = None
@@ -164,6 +245,10 @@ class FrozenLakeAgent(base_agent.ConversationAgentBase):
 
     super().update_from_env(new_obs_str, reward, done, info)
     self.cur_step = agent_types.Step(observation=new_obs_str)
+    if done:
+      print(f"Episode finished. Final observation: {observation}, reward: {reward}, info: {info}, self.step: {self.step}")
+    # else:
+    #   print(f"Step {self.step} observation: {observation}, reward: {reward}, info: {info}")
 
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]

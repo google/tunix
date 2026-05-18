@@ -16,6 +16,7 @@
 
 import abc
 import dataclasses
+from absl import logging
 from typing import Dict, List
 from tunix.utils import token_sanitization
 
@@ -134,6 +135,7 @@ class DefaultChatTemplateParser(BaseChatTemplateParser):
   """Default parser using tokenizer's built-in chat template."""
 
   def _init_tokens(self) -> TokenConfig:
+    print(f"self.enable_thinking: {self.enable_thinking}")
     return TokenConfig()
 
   def _init_generation_prompt(self) -> str:
@@ -145,9 +147,15 @@ class DefaultChatTemplateParser(BaseChatTemplateParser):
       add_generation_prompt: bool = False,
       is_first_msg: bool = False,
   ) -> str:
-    return self.tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=add_generation_prompt
+    prompts = self.tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=add_generation_prompt, enable_thinking=self.enable_thinking,
     )
+    logging.log_first_n(
+      logging.INFO,
+      f"Using DefaultChatTemplateParser. Parsed prompt:\n{prompts}\n",
+      10,
+    )
+    return prompts
 
 
 class QwenChatTemplateParser(BaseChatTemplateParser):

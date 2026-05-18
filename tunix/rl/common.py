@@ -350,12 +350,12 @@ def compute_per_token_logps(
   # them: caller-provided packing ids take precedence; otherwise we pass the
   # per-position non-pad mask derived in ``process_ids`` so flash-attention
   # variants that lack a separate padding-mask input still skip pad positions.
-  if segment_ids is not None:
-    model_kwargs["segment_ids"] = segment_ids
-  elif input_seg_ids is not None:
-    model_kwargs["segment_ids"] = input_seg_ids
-  if images is not None:
-    model_kwargs["images"] = images
+  # if segment_ids is not None:
+  #   model_kwargs["segment_ids"] = segment_ids
+  # elif input_seg_ids is not None:
+  #   model_kwargs["segment_ids"] = input_seg_ids
+  # if images is not None:
+  #   model_kwargs["images"] = images
 
   logits, _ = model(input_tokens, **model_kwargs)
 

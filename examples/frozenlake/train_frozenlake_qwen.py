@@ -100,7 +100,7 @@ arg_parser.add_argument("--batch_size", type=int, default=16)
 arg_parser.add_argument("--mini_batch_size", type=int, default=16)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
-arg_parser.add_argument("--b2", type=float, default=0.99)
+arg_parser.add_argument("--b2", type=float, default=0.999)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
 arg_parser.add_argument("--num_batches", type=int, default=5)
 arg_parser.add_argument("--num_generations", type=int, default=8)
@@ -110,10 +110,10 @@ arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
 arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
 arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
-arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--top_p", type=float, default=1.0)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=64)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
+arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
@@ -158,7 +158,7 @@ VLLM_MAX_NUM_SEQS = 64
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -309,8 +309,8 @@ CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, f"frozenlake/{now_str}")
 
 # MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 # MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
-MODEL_VERSION = "Qwen/Qwen3-1.7B"
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
+MODEL_VERSION = "Qwen/Qwen3-8B"
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
 
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
@@ -363,7 +363,7 @@ def create_datasets(
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 
-chat_parser = parser.DefaultChatTemplateParser(tokenizer)
+chat_parser = parser.QwenChatTemplateParser(tokenizer, enable_thinking=False)
 
 # %%
 train_dataset, test_dataset = create_datasets()
@@ -398,10 +398,9 @@ if ENABLE_REMAT:
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
-# from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download
 
-# MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
-# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/snapshots/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
+MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
 print("MODEL_PATH: ", MODEL_PATH)
 reference_mesh = trainer_mesh 
 qwen3_ref = qwen3_params_lib.create_model_from_safe_tensors(
@@ -442,7 +441,6 @@ wandb_config.update({
     "num_steps": MAX_STEPS,
     "rollout_engine": ROLLOUT_ENGINE,
 })
-wandb.login()
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir="gs://linchai-bucket-dev/tensorboard/grpo",
     flush_every_n_steps=20,
@@ -545,6 +543,7 @@ grpo_config = GRPOConfig(
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
     force_compute_kl=True,
+    sampler_is_threshold=2.0,
 )
 
 # Perf Metrics logging
