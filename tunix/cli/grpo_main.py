@@ -467,6 +467,7 @@ class GrpoPipeline(config.HyperParameters):
                 cluster_config=cluster_config,
                 enable_trace_writer=perf_metrics_options.enable_trace_writer,
                 trace_dir=perf_metrics_options.trace_dir,
+                trace_shard_steps=perf_metrics_options.trace_shard_steps,
             ).export_metrics
         )
     return perf_config

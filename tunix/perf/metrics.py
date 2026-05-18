@@ -90,6 +90,12 @@ class PerfMetricsOptions:
       enabled when perf metrics are enabled. If False, the trace will not be
       written out.
     trace_dir: Directory the trace writer writes the raw metrics/events to.
+    trace_shard_steps: Number of committed steps per sealed perfetto trace
+      shard file. Lower values write more (smaller) shard files and bound
+      in-memory span history more tightly; higher values write fewer (larger)
+      shard files. Must be >= 1. The env var ``TUNIX_TRACE_SHARD_STEPS``, if
+      set to a positive integer, overrides this value at trace writer
+      construction time.
   """
 
   enable_perf_v1: bool = True
@@ -98,6 +104,7 @@ class PerfMetricsOptions:
   custom_export_fn_path_v2: str = ""
   enable_trace_writer: bool = True
   trace_dir: str = ""
+  trace_shard_steps: int = 100
 
   def __post_init__(self):
     if self.custom_export_fn_path and not self.enable_perf_v1:
@@ -118,6 +125,11 @@ class PerfMetricsOptions:
       logging.warning(
           "trace_dir is set to %r but enable_trace_writer is False.",
           self.trace_dir,
+      )
+    if self.trace_shard_steps < 1:
+      raise ValueError(
+          "trace_shard_steps must be a positive integer, got"
+          f" {self.trace_shard_steps!r}."
       )
 
 

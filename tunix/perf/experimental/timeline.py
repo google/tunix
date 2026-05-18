@@ -266,6 +266,42 @@ class Timeline:
 
       self._cur_step = {}
 
+  def drop_oldest_committed_steps(self, n: int) -> list[dict[int, Span]]:
+    """Removes the ``n`` oldest committed step dicts from history.
+
+    This is the memory-release path for consumers that have durably persisted
+    the dropped steps somewhere else (e.g., a sealed trace file on disk). Once
+    a step is dropped, it cannot be recovered from the timeline.
+
+    Args:
+      n: Number of oldest committed step dicts to remove. Must be non-negative.
+        If ``n`` exceeds the number of committed steps currently held, all
+        committed steps are dropped and the method returns whatever was held.
+
+    Returns:
+      The list of step dicts that were removed, in order from oldest to most
+      recent. Callers that need to inspect or write out the dropped steps can
+      use the returned list; callers that just want to free memory can ignore
+      it.
+
+    Raises:
+      ValueError: If ``n`` is negative.
+    """
+    if n < 0:
+      raise ValueError(f"n must be non-negative, got {n}")
+    if n == 0:
+      return []
+    with self._lock:
+      n = min(n, len(self._committed_steps))
+      if n == 0:
+        return []
+      dropped = self._committed_steps[:n]
+      # Copy-on-write to preserve the lock-free read invariant on
+      # `committed_steps` (a concurrent reader may still hold a reference to
+      # the previous list).
+      self._committed_steps = self._committed_steps[n:]
+      return dropped
+
   def __repr__(self) -> str:
     parts = [f"Timeline({self.id}, {self.born:.6f})\n"]
     with self._lock:
@@ -404,7 +440,3 @@ class BatchAsyncTimelines:
 
     for timeline in self._timelines:
       timeline.span(name, thread_span_begin, waitlist, tags=tags)
-
-
-# TODO(noghabi): remove Spans items from timeline after they are processed.
-# Currently, they are never removed.
