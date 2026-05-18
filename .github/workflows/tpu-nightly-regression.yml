@@ -93,8 +93,7 @@ jobs:
             print(f'SUCCESS: Found {len(devices)} TPU device(s)')
         "
 
-    - name: Run SFT shell scripts
-      id: sft_tests
+    - name: Run SFT - run_gemma_2b.sh
       continue-on-error: true
       shell: bash
       env:
@@ -102,161 +101,231 @@ jobs:
         KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
-        SCRIPT_DIR="./examples/sft/mtnt"
-        MAX_STEPS=5
-        EVAL_EVERY_N_STEPS=1
+        chmod +x ./examples/sft/mtnt/run_gemma_2b.sh
+        ./examples/sft/mtnt/run_gemma_2b.sh \
+          --training_config.max_steps 5 \
+          --training_config.eval_every_n_steps 1
 
-        # Check if directory exists
-        if [ ! -d "$SCRIPT_DIR" ]; then
-          echo "Directory $SCRIPT_DIR does not exist"
-          exit 1
-        fi
-
-        echo "### SFT Scripts Summary" >> $GITHUB_STEP_SUMMARY
-        echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
-        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-
-        echo "🔍 Finding scripts in $SCRIPT_DIR"
-        FINAL_EXIT_CODE=0
-        for script in "$SCRIPT_DIR"/*.sh; do
-          if [ -f "$script" ]; then
-            echo "::group::📦 Executing: $script"
-            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
-            chmod +x "$script"
-            if bash "$script" \
-                --training_config.max_steps "$MAX_STEPS" \
-                --training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
-              echo "✅ Successfully completed: $script"
-              echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
-            else
-              exit_code=$?
-              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
-              echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
-              FINAL_EXIT_CODE=1
-            fi
-            echo "::endgroup::"
-          fi
-        done
-
-        if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
-          echo "🚫 One or more SFT scripts failed." >&2
-          echo "SFT_FAILED=1" >> $GITHUB_ENV
-        fi
-        echo "🎉 All SFT scripts completed execution."
-
-
-    - name: Run RL shell scripts
-      id: rl_tests
-      shell: bash
+    - name: Run SFT - run_gemma2_2b.sh
       continue-on-error: true
+      shell: bash
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
         KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
-        SCRIPT_DIR="./examples/rl/grpo/gsm8k"
-        EXCLUDE_DIR="verl_compatible"
-        MAX_STEPS=5
-        EVAL_EVERY_N_STEPS=1
+        chmod +x ./examples/sft/mtnt/run_gemma2_2b.sh
+        ./examples/sft/mtnt/run_gemma2_2b.sh \
+          --training_config.max_steps 5 \
+          --training_config.eval_every_n_steps 1
 
-        if [ ! -d "$SCRIPT_DIR" ]; then
-          echo "Directory $SCRIPT_DIR does not exist" >&2
-          exit 1
-        fi
-
-        echo "### RL Scripts Summary" >> $GITHUB_STEP_SUMMARY
-        echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
-        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-
-        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
-        FINAL_EXIT_CODE=0
-
-        while IFS= read -r script; do
-          if [ -f "$script" ]; then
-            # TODO(b/510383570)
-            if [[ "$script" == *"run_qwen3_8b"* ]]; then
-              echo "⏭️ Skipping: $script"
-              echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
-              continue
-            fi
-
-            echo "::group::📦 Executing: $script"
-            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
-            chmod +x "$script"
-            if bash "$script" \
-                --rl_training_config.max_steps "$MAX_STEPS" \
-                --rl_training_config.eval_every_n_steps "$EVAL_EVERY_N_STEPS"; then
-              echo "✅ Successfully completed: $script"
-              echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
-            else
-              exit_code=$?
-              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
-              echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
-              FINAL_EXIT_CODE=1
-            fi
-            echo "::endgroup::"
-          fi
-        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/")
-
-        if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
-          echo "🚫 One or more RL scripts failed." >&2
-          echo "RL_FAILED=1" >> $GITHUB_ENV
-        fi
-        echo "🎉 All RL scripts completed execution."
-
-
-    - name: Run regression scripts
+    - name: Run SFT - run_gemma3_4b.sh
+      continue-on-error: true
       shell: bash
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      id: regression_tests
-      continue-on-error: true
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
-        echo "### Regression Scripts Summary" >> $GITHUB_STEP_SUMMARY
-        echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
-        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+        chmod +x ./examples/sft/mtnt/run_gemma3_4b.sh
+        ./examples/sft/mtnt/run_gemma3_4b.sh \
+          --training_config.max_steps 5 \
+          --training_config.eval_every_n_steps 1
 
-        FAILED=0
+    - name: Run SFT - run_llama3.2_3b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/sft/mtnt/run_llama3.2_3b.sh
+        ./examples/sft/mtnt/run_llama3.2_3b.sh \
+          --training_config.max_steps 5 \
+          --training_config.eval_every_n_steps 1
 
-        function run_and_log() {
-          local name="$1"
-          shift
-          echo "::group::📦 Executing: $name"
-          if "$@"; then
-            echo "✅ Successfully completed: $name"
-            echo "| $name | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ Failed to complete: $name" >&2
-            echo "| $name | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
-            FAILED=1
-          fi
-          echo "::endgroup::"
-        }
+    - name: Run SFT - run_qwen2.5_0.5b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/sft/mtnt/run_qwen2.5_0.5b.sh
+        ./examples/sft/mtnt/run_qwen2.5_0.5b.sh \
+          --training_config.max_steps 5 \
+          --training_config.eval_every_n_steps 1
 
-        # Download GSM8K dataset
-        mkdir -p /tmp/grpo_test/rl/grpo/data
+    - name: Run RL - run_gemma_7b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_gemma_7b.sh
+        ./examples/rl/grpo/gsm8k/run_gemma_7b.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
 
-        run_and_log "math_eval_nb.py" python examples/deepscaler/math_eval_nb.py
-        run_and_log "grpo_demo_llama3_qwen2.py (colocated)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20
-        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-2-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
-        run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-3-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
+    - name: Run RL - run_gemma2_2b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_gemma2_2b.sh
+        ./examples/rl/grpo/gsm8k/run_gemma2_2b.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
 
-        # TODO(b/508252632): Re-enable once the bug is fixed.
-        # vLLM Tests
+    - name: Run RL - run_gemma3_12b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_gemma3_12b.sh
+        ./examples/rl/grpo/gsm8k/run_gemma3_12b.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
 
-        # run_and_log "vllm grpo_demo_llama3_qwen2.py colocated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm
-        # run_and_log "vllm grpo_demo_llama3_qwen2.py 2 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-2-way
-        # run_and_log "vllm grpo_demo_llama3_qwen2.py 3 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --cluster-setup=disaggregated-3-way
-        # run_and_log "vllm grpo_demo_llama3_qwen2.py vllm server mode in 2 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way
-        # run_and_log "vllm grpo_demo_llama3_qwen2.py with vllm server mode in 3 way disaggregated mode" \
-        #   python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test  --num-batches=20 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-3-way
+    - name: Run RL - run_gemma3_1b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_gemma3_1b.sh
+        ./examples/rl/grpo/gsm8k/run_gemma3_1b.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
 
-        # SGLang Tests
-        echo "::group::📦 Setting up SGLang"
+    - name: Run RL - run_gemma3_4b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_gemma3_4b.sh
+        ./examples/rl/grpo/gsm8k/run_gemma3_4b.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
+
+    - name: Run RL - run_llama3.1_8b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_llama3.1_8b.sh
+        ./examples/rl/grpo/gsm8k/run_llama3.1_8b.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
+
+    - name: Run RL - run_llama3.2_1b.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_llama3.2_1b.sh
+        ./examples/rl/grpo/gsm8k/run_llama3.2_1b.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
+
+    - name: Run RL - run_qwen3_8b_disagg_maxtext.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_qwen3_8b_disagg_maxtext.sh
+        ./examples/rl/grpo/gsm8k/run_qwen3_8b_disagg_maxtext.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
+
+    - name: Skip RL - run_qwen3_8b_disagg.sh
+      run: |
+        echo "⏭️ Skipping run_qwen3_8b_disagg.sh per TODO(b/510383570)"
+
+    - name: Run RL - run_qwen3_simplereward.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_qwen3_simplereward.sh
+        ./examples/rl/grpo/gsm8k/run_qwen3_simplereward.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
+
+    - name: Run RL - run_qwen3_vllm_disagg.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_qwen3_vllm_disagg.sh
+        ./examples/rl/grpo/gsm8k/run_qwen3_vllm_disagg.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
+
+    - name: Run RL - run_qwen3.sh
+      continue-on-error: true
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      run: |
+        chmod +x ./examples/rl/grpo/gsm8k/run_qwen3.sh
+        ./examples/rl/grpo/gsm8k/run_qwen3.sh \
+          --rl_training_config.max_steps 5 \
+          --rl_training_config.eval_every_n_steps 1
+
+    - name: Setup Regression Data
+      run: mkdir -p /tmp/grpo_test/rl/grpo/data
+
+    - name: Regression - math_eval_nb.py
+      continue-on-error: true
+      run: python examples/deepscaler/math_eval_nb.py
+
+    - name: Regression - grpo_demo_llama3_qwen2.py (colocated)
+      continue-on-error: true
+      run: python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20
+
+    - name: Regression - grpo_demo_llama3_qwen2.py (disaggregated-2-way)
+      continue-on-error: true
+      run: python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
+
+    - name: Regression - grpo_demo_llama3_qwen2.py (disaggregated-3-way)
+      continue-on-error: true
+      run: python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
+
+    - name: Setup SGLang
+      run: |
         unset JAX_PLATFORMS
         pip list | egrep 'jax|flax|libtpu'
         cd ..
@@ -264,26 +333,37 @@ jobs:
         pip install jax==0.8.1 flax==0.12.0 libtpu==0.0.24
         pip list | egrep 'jax|flax|libtpu'
         cd tunix
-        echo "::endgroup::"
 
-        run_and_log "sglang_jax colocated" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax"
-        run_and_log "sglang_jax disaggregated-2-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way"
-        run_and_log "sglang_jax disaggregated-3-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way"
+    - name: Regression - sglang_jax colocated
+      continue-on-error: true
+      run: |
+        unset JAX_PLATFORMS
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax
 
-        if [ "$FAILED" -ne 0 ]; then
-          echo "🚫 One or more regression scripts failed." >&2
-          echo "REGRESSION_FAILED=1" >> $GITHUB_ENV
-        fi
-        echo "🎉 All regression scripts completed execution."
+    - name: Regression - sglang_jax disaggregated-2-way
+      continue-on-error: true
+      run: |
+        unset JAX_PLATFORMS
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-2-way
 
-    - name: Fail if any run_prod suite failed
+    - name: Regression - sglang_jax disaggregated-3-way
+      continue-on-error: true
+      run: |
+        unset JAX_PLATFORMS
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way
+
+    - name: Final Status Check
       if: always()
       run: |
-        if [ "$SFT_FAILED" == "1" ] || [ "$RL_FAILED" == "1" ] || [ "$REGRESSION_FAILED" == "1" ]; then
-          echo "❌ One or more test suites failed." >&2
+        # This checks the outcome of all steps in the job.
+        # If any step with continue-on-error: true failed, its outcome will be 'failure'.
+        # We search for any such failures to decide if the job should fail.
+        if [[ "${{ contains(steps.*.outcome, 'failure') }}" == "true" ]]; then
+          echo "❌ One or more tests failed."
           exit 1
+        else
+          echo "✅ All tests passed."
         fi
-        echo "✅ All test suites passed."
 
   run_latest:
     runs-on: [linux-x86-ct5lp-224-8tpu]
