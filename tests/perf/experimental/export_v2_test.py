@@ -27,7 +27,6 @@ from tunix.rl import rl_cluster
 class ExportTest(parameterized.TestCase):
 
   def test_perf_metrics_export(self):
-    # Backward compatibility check
     with tempfile.TemporaryDirectory() as tmp_dir:
       with export.PerfMetricsExport(trace_dir=tmp_dir) as exporter:
         # Create dummy timeline
@@ -36,9 +35,14 @@ class ExportTest(parameterized.TestCase):
           time.sleep(0.001)
         t.export()
 
-      files = os.listdir(tmp_dir)
-      self.assertLen(files, 1)
-      self.assertStartsWith(files[0], "perfetto_trace_v2_")
+      # With a single committed step and the default shard size, no shard
+      # has been sealed yet; the in-flight pending file holds the only data.
+      files = set(os.listdir(tmp_dir))
+      self.assertIn("trace.shard_pending.binpb", files)
+      self.assertGreater(
+          os.path.getsize(os.path.join(tmp_dir, "trace.shard_pending.binpb")),
+          0,
+      )
 
   def test_basic_metrics_export(self):
     with self.assertLogs(level="INFO") as logs:
@@ -76,7 +80,9 @@ class ExportTest(parameterized.TestCase):
     with export.PerfMetricsExport(
         enable_trace_writer=True, trace_dir=trace_dir
     ) as exporter:
-      mock_writer_cls.assert_called_once_with(expected_dir, role_to_devices=None)
+      mock_writer_cls.assert_called_once_with(
+          expected_dir, role_to_devices=None, shard_steps=None
+      )
       # export_metrics shouldn't crash
       exporter.export_metrics({})
 
@@ -148,9 +154,33 @@ class ExportTest(parameterized.TestCase):
         "rollout": ["tpu4", "tpu5", "tpu6", "tpu7"],
     }
     mock_writer_cls.assert_called_once_with(
-        "/test/dir", role_to_devices=expected_role_to_devices
+        "/test/dir",
+        role_to_devices=expected_role_to_devices,
+        shard_steps=None,
     )
     self.assertIs(exporter._writer, mock_writer_cls.return_value)
+
+  def test_from_cluster_config_passes_trace_shard_steps(self):
+    """``from_cluster_config`` must forward ``trace_shard_steps`` to the writer
+    so per-run overrides reach the on-disk shard layout."""
+    with mock.patch.object(
+        export.trace_writer_lib,
+        "PerfettoTraceWriter",
+        autospec=True,
+    ) as mock_writer_cls:
+      mock_cluster_config = mock.create_autospec(
+          rl_cluster.ClusterConfig, instance=True, spec_set=True
+      )
+      del mock_cluster_config.role_to_mesh
+      export.PerfMetricsExport.from_cluster_config(
+          mock_cluster_config,
+          enable_trace_writer=True,
+          trace_dir="/test/dir",
+          trace_shard_steps=42,
+      )
+      mock_writer_cls.assert_called_once_with(
+          "/test/dir", role_to_devices={}, shard_steps=42
+      )
 
   def test_safe_write_exception(self):
     with export.PerfMetricsExport(enable_trace_writer=False) as exporter:
@@ -192,7 +222,9 @@ class ExportTest(parameterized.TestCase):
         trace_dir="/test/dir",
     )
 
-    mock_writer_cls.assert_called_once_with("/test/dir", role_to_devices={})
+    mock_writer_cls.assert_called_once_with(
+        "/test/dir", role_to_devices={}, shard_steps=None
+    )
     self.assertIs(exporter._writer, mock_writer_cls.return_value)
 
 if __name__ == "__main__":

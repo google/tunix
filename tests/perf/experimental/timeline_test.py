@@ -134,6 +134,60 @@ class TimelineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "ended at .* before it began"):
       t.stop_span(1.0)
 
+  def test_drop_oldest_committed_steps_basic(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    span_ids = []
+    for i in range(5):
+      s = t.start_span(f"span{i}", float(i))
+      t.stop_span(float(i) + 0.1)
+      span_ids.append(s.id)
+      t.commit_step()
+    self.assertLen(t.committed_steps, 5)
+
+    # Snapshot reference before drop to confirm copy-on-write semantics.
+    pre_drop_ref = t.committed_steps
+
+    dropped = t.drop_oldest_committed_steps(2)
+
+    with self.subTest("dropped_returned_oldest_first"):
+      self.assertLen(dropped, 2)
+      self.assertIn(span_ids[0], dropped[0])
+      self.assertIn(span_ids[1], dropped[1])
+
+    with self.subTest("post_drop_state"):
+      self.assertLen(t.committed_steps, 3)
+      self.assertIn(span_ids[2], t.committed_steps[0])
+      self.assertIn(span_ids[4], t.committed_steps[-1])
+
+    with self.subTest("copy_on_write_preserves_prior_snapshot"):
+      # The reference captured before the drop must remain unchanged so
+      # concurrent readers iterating the old snapshot are not affected.
+      self.assertLen(pre_drop_ref, 5)
+
+  def test_drop_oldest_committed_steps_zero_is_noop(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    t.start_span("s", 1.0)
+    t.stop_span(2.0)
+    t.commit_step()
+    dropped = t.drop_oldest_committed_steps(0)
+    self.assertEmpty(dropped)
+    self.assertLen(t.committed_steps, 1)
+
+  def test_drop_oldest_committed_steps_more_than_held(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    for _ in range(3):
+      t.start_span("s", 1.0)
+      t.stop_span(2.0)
+      t.commit_step()
+    dropped = t.drop_oldest_committed_steps(10)
+    self.assertLen(dropped, 3)
+    self.assertEmpty(t.committed_steps)
+
+  def test_drop_oldest_committed_steps_negative_raises(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    with self.assertRaisesRegex(ValueError, "n must be non-negative"):
+      t.drop_oldest_committed_steps(-1)
+
   def test_nested_timeline_with_tags_repr(self):
     born = 1000.0
     t = timeline.Timeline("test_tl", born)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import json
 import os
 import tempfile
 from unittest import mock
@@ -413,24 +414,24 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
       writer.write_timelines(timelines)
 
-      # Check if file was created and has content
-      files = os.listdir(tmp_dir)
+      files = set(os.listdir(tmp_dir))
 
-      with self.subTest("file_created"):
-        self.assertLen(files, 1)
+      with self.subTest("pending_file_written_with_content"):
+        self.assertIn("trace.shard_pending.binpb", files)
+        self.assertGreater(
+            os.path.getsize(os.path.join(tmp_dir, "trace.shard_pending.binpb")),
+            0,
+        )
 
-      if files:
-        file_name = files[0]
-        with self.subTest("file_name_prefix"):
-          self.assertStartsWith(file_name, "perfetto_trace_v2_")
-
-        with self.subTest("file_name_suffix"):
-          self.assertEndsWith(file_name, ".pb")
-
-        with self.subTest("file_content"):
-          self.assertGreater(
-              os.path.getsize(os.path.join(tmp_dir, file_name)), 0
-          )
+      # With the default shard size and a single committed step, no shard
+      # has been sealed yet -- only the pending file is present.
+      with self.subTest("no_sealed_shards_yet"):
+        sealed = [
+            f
+            for f in files
+            if f.startswith("trace.shard_") and "pending" not in f
+        ]
+        self.assertEmpty(sealed)
 
   def test_perfetto_trace_writer_invalid_dir(self):
     # Use a file path as directory to cause failure
@@ -473,6 +474,302 @@ class NoopTraceWriterTest(absltest.TestCase):
     t.commit_step()
     # Should not crash and do nothing.
     writer.write_timelines({"timeline": t})
+
+
+def _flush_steps(writer, timelines, num_steps, span_factory):
+  """Commits ``num_steps`` synchronized steps across the given timelines and
+  flushes each one through ``writer.write_timelines`` so the writer's per-call
+  state advances naturally.
+
+  Args:
+    writer: The trace writer under test.
+    timelines: A mapping of timeline IDs to Timeline objects.
+    num_steps: How many steps to commit and flush.
+    span_factory: Callable ``(step_index, tl_id) -> Iterable[(name, begin, end)]``
+      describing the spans to add to each timeline for each step.
+  """
+  for step_idx in range(num_steps):
+    for tl_id, tl in timelines.items():
+      for name, begin, end in span_factory(step_idx, tl_id):
+        tl.start_span(name, begin)
+        tl.stop_span(end)
+      tl.commit_step()
+    writer.write_timelines(timelines)
+
+
+class ShardedWriteTest(absltest.TestCase):
+  """End-to-end tests for the sharded write protocol.
+
+  These tests exercise real ``write_bytes`` calls (no mocking of the proto
+  builder) so they exercise the actual seal/pending/manifest file outputs.
+  """
+
+  def test_seal_at_shard_boundary(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=3
+      )
+      t = tracer.Timeline("host-1", 0.0)
+
+      def factory(step_idx, _tl_id):
+        return [(f"s{step_idx}", float(step_idx), float(step_idx) + 0.1)]
+
+      # First two steps: no seal yet, only pending.
+      _flush_steps(writer, {"host-1": t}, num_steps=2, span_factory=factory)
+      files = set(os.listdir(tmp_dir))
+      self.assertNotIn("trace.shard_0001.binpb", files)
+      self.assertIn("trace.shard_pending.binpb", files)
+      self.assertEmpty(writer.sealed_shards)
+
+      # Third step crosses the boundary -- one shard is sealed.
+      _flush_steps(writer, {"host-1": t}, num_steps=1, span_factory=factory)
+      files = set(os.listdir(tmp_dir))
+      with self.subTest("shard_0001_sealed"):
+        self.assertIn("trace.shard_0001.binpb", files)
+        self.assertEqual(writer.sealed_shards, ["trace.shard_0001.binpb"])
+      with self.subTest("sealed_steps_freed_from_timeline_memory"):
+        self.assertEmpty(t.committed_steps)
+      with self.subTest("manifest_reflects_seal"):
+        manifest_path = os.path.join(tmp_dir, "trace.manifest.json")
+        with open(manifest_path) as f:
+          manifest = json.load(f)
+        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(manifest["shard_steps"], 3)
+        self.assertEqual(manifest["sealed_step_count"], 3)
+        self.assertEqual(
+            manifest["sealed_shards"], ["trace.shard_0001.binpb"]
+        )
+
+  def test_multiple_seals_in_one_flush(self):
+    """A long pause between flushes can produce multiple shards in one call."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=2
+      )
+      t = tracer.Timeline("host-1", 0.0)
+      # Commit 5 steps without flushing in between.
+      for i in range(5):
+        t.start_span(f"s{i}", float(i))
+        t.stop_span(float(i) + 0.1)
+        t.commit_step()
+      writer.write_timelines({"host-1": t})
+      self.assertEqual(
+          writer.sealed_shards,
+          ["trace.shard_0001.binpb", "trace.shard_0002.binpb"],
+      )
+      # Two shards * 2 steps = 4 sealed; one remains in pending.
+      self.assertLen(t.committed_steps, 1)
+      self.assertIn(
+          "trace.shard_pending.binpb", set(os.listdir(tmp_dir))
+      )
+
+  def test_pending_removed_when_no_unsealed_data(self):
+    """After everything has been sealed, the pending file is removed so a
+    naive ``cat trace.shard_*.binpb`` is a complete trace."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=1
+      )
+      t = tracer.Timeline("host-1", 0.0)
+      for i in range(3):
+        t.start_span(f"s{i}", float(i))
+        t.stop_span(float(i) + 0.1)
+        t.commit_step()
+        writer.write_timelines({"host-1": t})
+      files = set(os.listdir(tmp_dir))
+      self.assertNotIn("trace.shard_pending.binpb", files)
+      self.assertLen(writer.sealed_shards, 3)
+
+
+class LaneAndUuidStabilityTest(absltest.TestCase):
+  """Lane indices and timeline UUIDs must be stable across shards so a
+  concatenated trace shows consistent track layout."""
+
+  def test_lane_count_only_grows_across_shards(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=1
+      )
+      t = tracer.Timeline("overlap_tl", 0.0)
+
+      # Step 0: two overlapping spans -> 2 lanes.
+      t.start_span("a", 0.0)
+      t.start_span("b", 0.1)
+      t.stop_span(1.0)  # ends 'b'
+      t.stop_span(1.1)  # ends 'a'
+      t.commit_step()
+      writer.write_timelines({"overlap_tl": t})
+
+      with self.subTest("lanes_after_first_seal"):
+        self.assertLen(writer._lane_busy_until["overlap_tl"], 2)  # pylint: disable=protected-access
+
+      # Step 1: three overlapping spans -> grows to 3 lanes.
+      t.start_span("c", 2.0)
+      t.start_span("d", 2.05)
+      t.start_span("e", 2.1)
+      t.stop_span(3.0)
+      t.stop_span(3.1)
+      t.stop_span(3.2)
+      t.commit_step()
+      writer.write_timelines({"overlap_tl": t})
+
+      with self.subTest("lanes_after_second_seal_only_grow"):
+        self.assertLen(writer._lane_busy_until["overlap_tl"], 3)  # pylint: disable=protected-access
+
+      # Step 2: one span -> lane count stays at 3 (never shrinks).
+      t.start_span("f", 4.0)
+      t.stop_span(5.0)
+      t.commit_step()
+      writer.write_timelines({"overlap_tl": t})
+
+      with self.subTest("lanes_persist_at_max"):
+        self.assertLen(writer._lane_busy_until["overlap_tl"], 3)  # pylint: disable=protected-access
+
+  def test_timeline_uuids_stable_across_seals(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=1
+      )
+      timelines = {
+          "host-1": tracer.Timeline("host-1", 0.0),
+          "host-2": tracer.Timeline("host-2", 0.0),
+      }
+
+      def factory(step_idx, _tl_id):
+        return [(f"s{step_idx}", float(step_idx), float(step_idx) + 0.1)]
+
+      _flush_steps(writer, timelines, num_steps=1, span_factory=factory)
+      uuids_after_first_seal = dict(writer._timeline_uuids)  # pylint: disable=protected-access
+
+      _flush_steps(writer, timelines, num_steps=4, span_factory=factory)
+      uuids_after_more_seals = dict(writer._timeline_uuids)  # pylint: disable=protected-access
+
+      self.assertEqual(uuids_after_first_seal, uuids_after_more_seals)
+
+  def test_sealed_shard_byte_content_does_not_change_after_subsequent_seals(
+      self,
+  ):
+    """An already-sealed shard file must never be rewritten."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=1
+      )
+      t = tracer.Timeline("host-1", 0.0)
+
+      t.start_span("first", 0.0)
+      t.stop_span(0.1)
+      t.commit_step()
+      writer.write_timelines({"host-1": t})
+
+      shard1_path = os.path.join(tmp_dir, "trace.shard_0001.binpb")
+      first_bytes = open(shard1_path, "rb").read()
+      first_mtime = os.path.getmtime(shard1_path)
+
+      # Generate more activity and additional seals.
+      for i in range(1, 5):
+        t.start_span(f"s{i}", float(i))
+        t.stop_span(float(i) + 0.1)
+        t.commit_step()
+        writer.write_timelines({"host-1": t})
+
+      with self.subTest("shard_bytes_unchanged"):
+        self.assertEqual(open(shard1_path, "rb").read(), first_bytes)
+      with self.subTest("shard_mtime_unchanged"):
+        self.assertAlmostEqual(
+            os.path.getmtime(shard1_path), first_mtime, delta=0.001
+        )
+
+
+class ShardStepsResolutionTest(absltest.TestCase):
+
+  def test_env_var_overrides_arg(self):
+    with mock.patch.dict(os.environ, {"TUNIX_TRACE_SHARD_STEPS": "7"}):
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        writer = trace_writer_lib.PerfettoTraceWriter(
+            trace_dir=tmp_dir, shard_steps=100
+        )
+        self.assertEqual(writer.shard_steps, 7)
+
+  def test_arg_used_when_env_var_unset(self):
+    # Sanitize the env var even if the host has it set.
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("TUNIX_TRACE_SHARD_STEPS", None)
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        writer = trace_writer_lib.PerfettoTraceWriter(
+            trace_dir=tmp_dir, shard_steps=42
+        )
+        self.assertEqual(writer.shard_steps, 42)
+
+  def test_default_when_neither_set(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("TUNIX_TRACE_SHARD_STEPS", None)
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+        self.assertEqual(writer.shard_steps, 100)
+
+  def test_invalid_env_var_is_ignored(self):
+    with mock.patch.dict(os.environ, {"TUNIX_TRACE_SHARD_STEPS": "not-a-number"}):
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        writer = trace_writer_lib.PerfettoTraceWriter(
+            trace_dir=tmp_dir, shard_steps=11
+        )
+        self.assertEqual(writer.shard_steps, 11)
+
+  def test_zero_or_negative_env_var_is_ignored(self):
+    with mock.patch.dict(os.environ, {"TUNIX_TRACE_SHARD_STEPS": "0"}):
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        writer = trace_writer_lib.PerfettoTraceWriter(
+            trace_dir=tmp_dir, shard_steps=11
+        )
+        self.assertEqual(writer.shard_steps, 11)
+
+  def test_invalid_arg_raises(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("TUNIX_TRACE_SHARD_STEPS", None)
+      with tempfile.TemporaryDirectory() as tmp_dir:
+        with self.assertRaisesRegex(
+            ValueError, "shard_steps must be a positive integer"
+        ):
+          trace_writer_lib.PerfettoTraceWriter(
+              trace_dir=tmp_dir, shard_steps=0
+          )
+
+
+class MemoryBoundednessTest(absltest.TestCase):
+
+  def test_timeline_memory_stays_bounded_across_many_steps(self):
+    """``Timeline._committed_steps`` must not grow unboundedly when the
+    writer is actively sealing shards."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      shard_steps = 4
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=shard_steps
+      )
+      t = tracer.Timeline("host-1", 0.0)
+      for i in range(50):
+        t.start_span(f"s{i}", float(i))
+        t.stop_span(float(i) + 0.1)
+        t.commit_step()
+        writer.write_timelines({"host-1": t})
+        with self.subTest(f"after_step_{i}"):
+          # At most ``shard_steps - 1`` steps live in memory after each flush
+          # (anything reaching the boundary gets sealed and dropped).
+          self.assertLessEqual(len(t.committed_steps), shard_steps - 1)
+
+  def test_drop_clears_lane_assignment_entries_for_dropped_spans(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=1
+      )
+      t = tracer.Timeline("host-1", 0.0)
+      for i in range(5):
+        t.start_span(f"s{i}", float(i))
+        t.stop_span(float(i) + 0.1)
+        t.commit_step()
+        writer.write_timelines({"host-1": t})
+      # All spans are sealed and dropped; the assignment cache should be
+      # empty (only pending spans remain, of which there are none).
+      self.assertEmpty(writer._lane_assignment.get("host-1", {}))  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":
