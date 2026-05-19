@@ -313,7 +313,10 @@ jobs:
     - name: Install tunix dependencies and latest LKG vLLM
       run: |
         # Install compiler and build dependencies for compiling vLLM from source
-        apt-get update && apt-get install -y build-essential cmake
+        apt-get update && apt-get install -y build-essential cmake ninja-build
+
+        # Ensure build requirements are upgraded and present
+        pip install packaging setuptools wheel
 
         pip install -e .[prod,test,cli]
 
@@ -326,12 +329,13 @@ jobs:
         fi
         echo "Fetched vLLM LKG commit: $VLLM_COMMIT"
 
-        # Install vllm from lkg commit
+        # Install vllm from lkg commit with no build isolation
         export VLLM_TARGET_DEVICE=tpu
-        pip install "vllm @ git+https://github.com/vllm-project/vllm.git@${VLLM_COMMIT}"
+        pip install --no-build-isolation "vllm @ git+https://github.com/vllm-project/vllm.git@${VLLM_COMMIT}"
 
-        # Install tpu-inference from main
-        pip install "tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@main"
+        # Install tpu-inference from main with no build isolation
+        pip install --no-build-isolation "tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@main"
+
 
     - name: Verify TPU availability
       run: |
