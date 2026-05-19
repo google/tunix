@@ -21,8 +21,6 @@ Known gaps:
 Run from repo root:
 
   python examples/agentic/qwen3_grpo_gsm8k_vtc_demo.py
-  python examples/agentic/qwen3_grpo_gsm8k_vtc_demo.py --rollout_engine=vllm
-  python examples/agentic/qwen3_grpo_gsm8k_vtc_demo.py --separate_rollout_mesh
 """
 
 from __future__ import annotations
@@ -125,8 +123,6 @@ KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS
 DEFAULT_VLLM_HBM_UTILIZATION = 0.6
 DEFAULT_VLLM_MAX_NUM_SEQS = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
 DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 16384
-DEFAULT_SHARED_MESH_FSDP = 16
-DEFAULT_SHARED_MESH_TP = 1
 
 TRAIN_TEMPERATURE = 1.0
 TRAIN_TOP_P = 1.0
@@ -416,42 +412,9 @@ def build_train_and_rollout_meshes(
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description=(
-          "Run the Qwen3-1.7B GSM8K VTC GRPO demo with configurable rollout "
-          "backend and rollout mesh placement."
+          "Run the Qwen3-1.7B GSM8K VTC GRPO demo with vLLM rollout engine "
+          "on a separate mesh."
       )
-  )
-  parser.add_argument(
-      "--rollout_engine",
-      type=str,
-      choices=("vanilla", "vllm"),
-      default="vanilla",
-      help="Rollout backend to use for training and evaluation.",
-  )
-  parser.add_argument(
-      "--separate_rollout_mesh",
-      action="store_true",
-      help=(
-          "Place rollout on a separate mesh instead of sharing the actor mesh. "
-          "When enabled, rollout devices are taken from the tail of jax.devices()."
-      ),
-  )
-  parser.add_argument(
-      "--shared_mesh_fsdp",
-      type=int,
-      default=DEFAULT_SHARED_MESH_FSDP,
-      help=(
-          "Explicit FSDP dimension for the shared train/rollout mesh. "
-          "Used only when --separate_rollout_mesh is not set."
-      ),
-  )
-  parser.add_argument(
-      "--shared_mesh_tp",
-      type=int,
-      default=DEFAULT_SHARED_MESH_TP,
-      help=(
-          "Explicit TP dimension for the shared train/rollout mesh. "
-          "Used only when --separate_rollout_mesh is not set."
-      ),
   )
   parser.add_argument(
       "--rollout_mesh_fsdp",
@@ -488,8 +451,8 @@ def parse_args() -> argparse.Namespace:
       type=float,
       default=0.5,
       help=(
-          "Fraction of total devices to allocate to rollout when separate "
-          "rollout mesh is enabled and no explicit rollout mesh dims are set."
+          "Fraction of total devices to allocate to rollout when explicit "
+          "mesh dims are not set."
       ),
   )
   parser.add_argument(
@@ -603,9 +566,9 @@ class VTCGRPOLearner(GRPOLearner):
 def main():
   args = parse_args()
   train_mesh, rollout_mesh, train_dims, rollout_dims = build_train_and_rollout_meshes(
-      separate_rollout_mesh=args.separate_rollout_mesh,
-      shared_mesh_fsdp=args.shared_mesh_fsdp,
-      shared_mesh_tp=args.shared_mesh_tp,
+      separate_rollout_mesh=True,
+      shared_mesh_fsdp=None,
+      shared_mesh_tp=None,
       rollout_mesh_fsdp=args.rollout_mesh_fsdp,
       rollout_mesh_tp=args.rollout_mesh_tp,
       train_mesh_fsdp=args.train_mesh_fsdp,
@@ -663,27 +626,26 @@ def main():
       top_p=EVAL_TOP_P,
       top_k=EVAL_TOP_K,
   )
-  if args.rollout_engine == "vllm":
-    vllm_rollout_kwargs = dict(
-        rollout_vllm_model_version=MODEL_ID,
-        rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
-        rollout_vllm_tpu_backend_type="jax",
-        rollout_vllm_server_mode=True,
-        rollout_vllm_async_scheduling=True,
-        tensor_parallel_size=rollout_mesh.shape.get("tp", 1),
-        data_parallel_size=rollout_mesh.shape.get("fsdp", 1),
-        rollout_vllm_max_num_seqs=args.rollout_vllm_max_num_seqs,
-        rollout_vllm_max_num_batched_tokens=(
-            args.rollout_vllm_max_num_batched_tokens
-        ),
-        rollout_vllm_kwargs={
-            "kv_cache_metrics": True,
-            "disable_log_stats": False,
-            "enable_prefix_caching": True,
-        },
-    )
-    train_rollout_kwargs.update(vllm_rollout_kwargs)
-    eval_rollout_kwargs.update(vllm_rollout_kwargs)
+  vllm_rollout_kwargs = dict(
+      rollout_vllm_model_version=MODEL_ID,
+      rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
+      rollout_vllm_tpu_backend_type="jax",
+      rollout_vllm_server_mode=True,
+      rollout_vllm_async_scheduling=True,
+      tensor_parallel_size=rollout_mesh.shape.get("tp", 1),
+      data_parallel_size=rollout_mesh.shape.get("fsdp", 1),
+      rollout_vllm_max_num_seqs=args.rollout_vllm_max_num_seqs,
+      rollout_vllm_max_num_batched_tokens=(
+          args.rollout_vllm_max_num_batched_tokens
+      ),
+      rollout_vllm_kwargs={
+          "kv_cache_metrics": True,
+          "disable_log_stats": False,
+          "enable_prefix_caching": True,
+      },
+  )
+  train_rollout_kwargs.update(vllm_rollout_kwargs)
+  eval_rollout_kwargs.update(vllm_rollout_kwargs)
 
   train_rollout_config = base_rollout.RolloutConfig(
       **rollout_config_base,
@@ -700,10 +662,13 @@ def main():
           rl_cluster_lib.Role.REFERENCE: train_mesh,
           rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
-      rollout_engine=args.rollout_engine,
+      rollout_engine="vllm",
       # Force explicit host<->device materialization for vanilla rollout.
       # This avoids mixed host/device memory spaces inside sampler gather ops on
       # TPU, which can happen with shared-mesh Qwen3 demo setup.
+      #
+      # Setting to False to avoid gather memory space mismatch error on TPU,
+      # where weights are on host and indices on device.
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=create_optimizer(),
@@ -760,10 +725,10 @@ def main():
       "Config summary:",
       {
           "model": MODEL_ID,
-          "rollout_engine": args.rollout_engine,
-          "separate_rollout_mesh": args.separate_rollout_mesh,
-          "shared_mesh_fsdp": args.shared_mesh_fsdp,
-          "shared_mesh_tp": args.shared_mesh_tp,
+          "rollout_engine": "vllm",
+          "separate_rollout_mesh": True,
+          "shared_mesh_fsdp": None,
+          "shared_mesh_tp": None,
           "rollout_split_fraction": args.rollout_split_fraction,
           "rollout_mesh_fsdp": args.rollout_mesh_fsdp,
           "rollout_mesh_tp": args.rollout_mesh_tp,
