@@ -408,7 +408,7 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]
       "add_eos": False,
   }
   reference, tokenizer_path = model_utils.create_model(
-      model_config, tokenizer_config, mesh, dtype=jnp.float32
+      model_config, tokenizer_config, mesh
   )
   reference = put_model_on_device(reference)
   actor = maybe_apply_lora(reference, mesh)
