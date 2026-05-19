@@ -317,25 +317,25 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
       "--rollout_mesh_fsdp",
       type=int,
-      default=8,
+      default=None,
       help="Optional override for rollout mesh FSDP dimension.",
   )
   parser.add_argument(
       "--rollout_mesh_tp",
       type=int,
-      default=1,
+      default=None,
       help="Optional override for rollout mesh TP dimension.",
   )
   parser.add_argument(
       "--train_mesh_fsdp",
       type=int,
-      default=8,
+      default=None,
       help="Optional override for train mesh FSDP dimension.",
   )
   parser.add_argument(
       "--train_mesh_tp",
       type=int,
-      default=1,
+      default=None,
       help="Optional override for train mesh TP dimension.",
   )
   parser.add_argument(
@@ -371,7 +371,8 @@ def parse_args() -> argparse.Namespace:
       default=DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS,
       help="Maximum batched tokens for the vLLM rollout backend.",
   )
-  return parser.parse_args()
+  args, _ = parser.parse_known_args()
+  return args
 
 
 def maybe_apply_lora(model: nnx.Module, mesh: Mesh) -> nnx.Module:
