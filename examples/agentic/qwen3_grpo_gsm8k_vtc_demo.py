@@ -672,7 +672,7 @@ def main():
       degenerate_group_masking=False,
       use_rollout_logps=False,
       system_prompt="",
-      max_concurrency=8,
+      max_concurrency=1024,
       loss_agg_mode="sequence-mean-token-mean",
   )
 
