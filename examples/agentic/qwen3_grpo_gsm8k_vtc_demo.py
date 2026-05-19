@@ -28,12 +28,13 @@ from __future__ import annotations
 import argparse
 import importlib.resources as stdlib_importlib_resources
 import os
-
-# Disable pathways subslice check before any XLA/JAX initialization
-os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
-
 import re
 import sys
+
+# Disable pathways subslice check by appending it to sys.argv before JAX/absl parse it.
+if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
+  sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+
 import time
 from typing import Any
 
@@ -108,9 +109,9 @@ MODEL_NAME = "Qwen3-1.7B"
 MODEL_ID = f"Qwen/{MODEL_NAME}"
 SEED = 42
 
-NUM_PROMPTS_PER_STEP = 4
+NUM_PROMPTS_PER_STEP = 16
 NUM_GENERATIONS = 8
-TRAIN_GLOBAL_BATCH_SIZE = 16  # 2 prompt groups x 8 generations/group
+TRAIN_GLOBAL_BATCH_SIZE = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS  # 128
 TRAIN_MICRO_BATCH_SIZE = 1  # one prompt group at a time
 
 MAX_STEPS = 200
@@ -137,7 +138,7 @@ MAX_GENERATION_LENGTH = MAX_NEW_TOKENS
 KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS + 256
 DEFAULT_VLLM_HBM_UTILIZATION = 0.6
 DEFAULT_VLLM_MAX_NUM_SEQS = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
-DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 16384
+DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 65536
 
 TRAIN_TEMPERATURE = 1.0
 TRAIN_TOP_P = 1.0
@@ -348,8 +349,8 @@ def parse_args() -> argparse.Namespace:
       type=float,
       default=0.5,
       help=(
-          "Fraction of total devices to allocate to rollout when explicit "
-          "mesh dims are not set."
+          "Fraction of total devices to allocate to rollout. Default is 0.5 "
+          "which splits devices evenly between Rollout and Train."
       ),
   )
   parser.add_argument(
@@ -470,74 +471,83 @@ def main():
   devices = jax.devices()
   total_devices = len(devices)
 
-  # 1. Resolve Rollout Mesh Dimensions
-  rollout_fsdp = args.rollout_mesh_fsdp
-  rollout_tp = args.rollout_mesh_tp
-  if rollout_fsdp is not None or rollout_tp is not None:
-    rollout_dims = []
-    if rollout_fsdp is not None:
-      rollout_dims.append(("fsdp", rollout_fsdp))
-    if rollout_tp is not None:
-      rollout_dims.append(("tp", rollout_tp))
+  # 1. Resolve Mesh Dimensions
+  if args.rollout_split_fraction == 1.0:
+    # Use Shared Mesh: All devices for both Rollout and Train
+    print(f"Using Shared Mesh for Rollout and Train (100% of {total_devices} devices).")
+    num_rollout_devices = total_devices
+    num_train_devices = total_devices
+    
+    tp_size = int(np.gcd(total_devices, config.num_kv_heads))
+    fsdp_size = total_devices // tp_size
+    
+    rollout_dims = [("fsdp", fsdp_size), ("tp", tp_size)]
+    train_dims = [("fsdp", fsdp_size), ("tp", tp_size)]
+    
+    rollout_axis_names = tuple(name for name, _ in rollout_dims)
+    rollout_shape = tuple(d for _, d in rollout_dims)
+    train_axis_names = tuple(name for name, _ in train_dims)
+    train_shape = tuple(d for _, d in train_dims)
+
+    rollout_devices = np.array(devices).reshape(rollout_shape)
+    train_devices = np.array(devices).reshape(train_shape)
+
+    rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
+    train_mesh = Mesh(train_devices, axis_names=train_axis_names)
+
   else:
-    num_rollout_devices = int(total_devices * args.rollout_split_fraction)
-    if num_rollout_devices <= 0 or num_rollout_devices >= total_devices:
-      raise ValueError(
-          "rollout_split_fraction must allocate at least 1 rollout device and "
-          "leave at least 1 train device. "
-          f"Got total_devices={total_devices}, "
-          f"rollout_split_fraction={args.rollout_split_fraction}, "
-          f"num_rollout_devices={num_rollout_devices}."
-      )
-    rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
-    rollout_fsdp = num_rollout_devices // rollout_tp
-    rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
-  num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
+    # Use Separate Meshes
+    rollout_fsdp = args.rollout_mesh_fsdp
+    rollout_tp = args.rollout_mesh_tp
+    if rollout_fsdp is not None or rollout_tp is not None:
+      rollout_dims = []
+      if rollout_fsdp is not None:
+        rollout_dims.append(("fsdp", rollout_fsdp))
+      if rollout_tp is not None:
+        rollout_dims.append(("tp", rollout_tp))
+    else:
+      num_rollout_devices = int(total_devices * args.rollout_split_fraction)
+      if num_rollout_devices <= 0 or num_rollout_devices >= total_devices:
+        raise ValueError(
+            "rollout_split_fraction must allocate at least 1 rollout device and "
+            "leave at least 1 train device."
+        )
+      rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
+      rollout_fsdp = num_rollout_devices // rollout_tp
+      rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+    num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 
-  # 2. Resolve Train Mesh Dimensions
-  train_fsdp = args.train_mesh_fsdp
-  train_sp = args.train_mesh_sp
-  train_tp = args.train_mesh_tp
-  if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
-    train_dims = []
-    train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
-    if train_sp is not None:
-      train_dims.append(("sp", train_sp))
-    train_dims.append(("tp", train_tp if train_tp is not None else 1))
-  else:
-    num_train_devices = total_devices - num_rollout_devices
-    if num_train_devices <= 0:
-      raise ValueError(
-          "Separate rollout mesh resolution left no train devices. "
-          f"total_devices={total_devices}, num_rollout_devices={num_rollout_devices}."
-      )
-    train_fsdp = int(
-        np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
-    )
-    train_tp = num_train_devices // train_fsdp
-    train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
-  num_train_devices = int(np.prod([d for _, d in train_dims]))
+    train_fsdp = args.train_mesh_fsdp
+    train_sp = args.train_mesh_sp
+    train_tp = args.train_mesh_tp
+    if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
+      train_dims = []
+      train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
+      if train_sp is not None:
+        train_dims.append(("sp", train_sp))
+      train_dims.append(("tp", train_tp if train_tp is not None else 1))
+    else:
+      num_train_devices = total_devices - num_rollout_devices
+      if num_train_devices <= 0:
+        raise ValueError("Separate rollout mesh resolution left no train devices.")
+      train_tp = int(np.gcd(num_train_devices, config.num_kv_heads))
+      train_fsdp = num_train_devices // train_tp
+      train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+    num_train_devices = int(np.prod([d for _, d in train_dims]))
 
-  # 3. Sanity Check
-  if num_rollout_devices + num_train_devices > total_devices:
-    raise ValueError(
-        f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
-        f"train devices, but cluster only has {total_devices} available."
-    )
+    if num_rollout_devices + num_train_devices > total_devices:
+      raise ValueError("Requested devices exceed total available devices.")
 
-  # 4. Route to Meshes
-  rollout_axis_names = tuple(name for name, _ in rollout_dims)
-  rollout_shape = tuple(d for _, d in rollout_dims)
-  train_axis_names = tuple(name for name, _ in train_dims)
-  train_shape = tuple(d for _, d in train_dims)
+    rollout_axis_names = tuple(name for name, _ in rollout_dims)
+    rollout_shape = tuple(d for _, d in rollout_dims)
+    train_axis_names = tuple(name for name, _ in train_dims)
+    train_shape = tuple(d for _, d in train_dims)
 
-  rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
-  train_devices = np.array(
-      devices[num_rollout_devices : num_rollout_devices + num_train_devices]
-  ).reshape(train_shape)
+    rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
+    train_devices = np.array(devices[num_rollout_devices : num_rollout_devices + num_train_devices]).reshape(train_shape)
 
-  rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
-  train_mesh = Mesh(train_devices, axis_names=train_axis_names)
+    rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
+    train_mesh = Mesh(train_devices, axis_names=train_axis_names)
 
   train_dataset = build_gsm8k_dataset(
       split="train",
