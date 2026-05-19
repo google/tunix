@@ -704,7 +704,7 @@ def main():
       # Force explicit host<->device materialization for vanilla rollout.
       # This avoids mixed host/device memory spaces inside sampler gather ops on
       # TPU, which can happen with shared-mesh Qwen3 demo setup.
-      offload_to_cpu=(args.rollout_engine == "vanilla"),
+      offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=create_optimizer(),
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
