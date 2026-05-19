@@ -310,25 +310,25 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
       "--rollout_mesh_fsdp",
       type=int,
-      default=None,
+      default=8,
       help="Optional override for rollout mesh FSDP dimension.",
   )
   parser.add_argument(
       "--rollout_mesh_tp",
       type=int,
-      default=None,
+      default=1,
       help="Optional override for rollout mesh TP dimension.",
   )
   parser.add_argument(
       "--train_mesh_fsdp",
       type=int,
-      default=None,
+      default=8,
       help="Optional override for train mesh FSDP dimension.",
   )
   parser.add_argument(
       "--train_mesh_tp",
       type=int,
-      default=None,
+      default=1,
       help="Optional override for train mesh TP dimension.",
   )
   parser.add_argument(
@@ -397,7 +397,7 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]
       "model_download_path": MODEL_DOWNLOAD_DIR,
       "intermediate_ckpt_dir": INTERMEDIATE_CKPT_DIR,
       "model_display": False,
-      "use_flash_attention": True,
+      "use_flash_attention": False,
       "flash_attention_block_size": 1024,
       "dtype": jnp.bfloat16,
   }
