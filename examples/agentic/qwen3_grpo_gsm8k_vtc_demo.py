@@ -130,7 +130,7 @@ MAX_INPUT_SEQUENCE_LENGTH = 1024
 MAX_NEW_TOKENS = 1024
 MAX_PROMPT_LENGTH = MAX_INPUT_SEQUENCE_LENGTH
 MAX_GENERATION_LENGTH = MAX_NEW_TOKENS
-KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS
+KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS + 256
 DEFAULT_VLLM_HBM_UTILIZATION = 0.6
 DEFAULT_VLLM_MAX_NUM_SEQS = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
 DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 16384
@@ -590,6 +590,7 @@ def main():
       rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
       rollout_vllm_tpu_backend_type="jax",
       rollout_vllm_server_mode=True,
+      rollout_vllm_enable_dp_attention=True,
       rollout_vllm_async_scheduling=True,
       tensor_parallel_size=rollout_mesh.shape.get("tp", 1),
       data_parallel_size=rollout_mesh.shape.get("fsdp", 1),
