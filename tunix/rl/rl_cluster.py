@@ -1126,8 +1126,17 @@ class RLCluster:
           ),
           actor_pspecs,
       )
+      state_sharding = jax.sharding.NamedSharding(
+          mesh,
+          jax.sharding.PartitionSpec(),
+          memory_kind=self._default_memory_kind,
+      )
+      anchor_policy_state_on_device = jax.tree.map(
+          lambda x: jax.device_put(x, state_sharding),
+          self._anchor_policy_state,
+      )
       state = reshard.reshard_pytree(
-          self._anchor_policy_state, actor_model_sharding
+          anchor_policy_state_on_device, actor_model_sharding
       )
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
