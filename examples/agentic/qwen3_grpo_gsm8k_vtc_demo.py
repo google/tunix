@@ -84,7 +84,6 @@ except ImportError:
   pathwaysutils = None
 
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
-  os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
   pathwaysutils.initialize()
 
 from tunix.cli.utils import model as model_utils
@@ -313,25 +312,25 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
       "--rollout_mesh_fsdp",
       type=int,
-      default=8,
+      default=None,
       help="Optional override for rollout mesh FSDP dimension.",
   )
   parser.add_argument(
       "--rollout_mesh_tp",
       type=int,
-      default=1,
+      default=None,
       help="Optional override for rollout mesh TP dimension.",
   )
   parser.add_argument(
       "--train_mesh_fsdp",
       type=int,
-      default=8,
+      default=None,
       help="Optional override for train mesh FSDP dimension.",
   )
   parser.add_argument(
       "--train_mesh_tp",
       type=int,
-      default=1,
+      default=None,
       help="Optional override for train mesh TP dimension.",
   )
   parser.add_argument(
