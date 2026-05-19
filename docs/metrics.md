@@ -326,6 +326,7 @@ rl_training_config:
     enable_perf_v2: false        # Enable v2 (default: false)
     enable_trace_writer: true    # Enable writing Perfetto trace files (default: true)
     trace_dir: "/tmp/perf_trace" # Directory to write the trace files to
+    trace_shard_steps: 100       # v2 only: committed steps per sealed shard (default: 100)
     custom_export_fn_path: "path.to.my.custom_fn"       # Optional path to a custom v1 export function
     custom_export_fn_path_v2: "path.to.my.custom_fn_v2" # Optional path to a custom v2 export function
 ```
@@ -338,6 +339,33 @@ allowing you to use one or both systems simultaneously. If you wish to use a
 custom export function instead of the defaults, you must provide the fully
 qualified import path to your function via `custom_export_fn_path` (for v1) and
 `custom_export_fn_path_v2` (for v2).
+
+#### Tuning `trace_shard_steps` (v2)
+
+The v2 trace writer splits long runs into a directory of immutable shard files
+(see [Visualizing with Perfetto](#visualizing-with-perfetto) for the on-disk
+layout). `trace_shard_steps` controls how many committed training steps each
+sealed shard contains, and indirectly bounds the writer's in-memory span
+history.
+
+*   **Default**: `100`. Suitable for runs from a few hundred to a few hundred
+    thousand steps.
+*   **Smaller values (e.g. `10`–`50`)**: tighter memory footprint and more
+    frequent flushes to durable storage at the cost of more (smaller) files
+    on disk. Recommended on memory-constrained hosts, or when you want
+    finer-grained progress visibility while the run is in flight.
+*   **Larger values (e.g. `500`–`1000`)**: fewer (larger) files on disk and
+    less I/O overhead per flush, at the cost of more memory held per
+    timeline and a longer in-flight window before history becomes durable.
+
+A per-run override is also available via the environment variable
+**`TUNIX_TRACE_SHARD_STEPS`**. When set to a positive integer, it takes
+precedence over the configured value -- handy for one-off debugging without
+editing the run config:
+
+```bash
+TUNIX_TRACE_SHARD_STEPS=25 python -m tunix.cli.grpo_main --config ...
+```
 
 ### Using Performance Metrics via Code
 
@@ -405,11 +433,19 @@ cluster = rl_cluster.RLCluster(
 #### Experimental Version (v2)
 
 For the experimental version, you can use the default export function, which
-writes the raw timelines to a Perfetto trace file by using the
-`PerfMetricExport` class. The trace files can be written to a directory
-by defining `trace_dir`. If `trace_dir` is not provided, it defaults to
-`/tmp/perf_traces`. The v2 version supports local files and remote endpoints
-supported by `etils.epath` including GCS such as `gs://your-bucket/path/`.
+writes the raw timelines to a directory of sharded Perfetto trace files by
+using the `PerfMetricExport` class. The trace directory can be set with
+`trace_dir`; if not provided, it defaults to `/tmp/perf_traces`. The v2
+version supports local files and remote endpoints supported by `etils.epath`
+including GCS such as `gs://your-bucket/path/`. See
+[Visualizing with Perfetto](#visualizing-with-perfetto) for the on-disk
+layout and the bundled `perfetto_cat` utility for reassembling shards into a
+single file.
+
+The shard size is configurable via `trace_shard_steps` (default `100`
+committed steps per sealed shard; can also be overridden per-run with the
+`TUNIX_TRACE_SHARD_STEPS` environment variable -- see
+[Tuning `trace_shard_steps`](#tuning-trace_shard_steps-v2)).
 
 Note that v2 is still experimental and additional
 capabilities, such as exporting aggregated metrics to TensorBoard, are WIP. Once
@@ -432,6 +468,7 @@ perf_metrics_config = PerfMetricsConfig(
     custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
         cluster_config=cluster_config,
         trace_dir="/tmp/agentic_perf",
+        trace_shard_steps=100,  # Optional; defaults to 100. See section above.
     ).export_metrics
 )
 
@@ -486,13 +523,58 @@ perf_config.custom_export_fn_v2 = my_custom_export_fn_v2
 
 ### Visualizing with Perfetto
 
-If you have enabled the trace writer (by setting `enable_trace_writer: true` via
-the CLI or by specifying `trace_dir` in your configuration), a proto-formatted
-file (e.g., `perfetto_trace_1771973518.pb`) containing the raw spans and
-timelines will be saved to the specified directory (which defaults to
-`/tmp/perf_traces`). To view the trace, download the file to your local
-machine and drag-and-drop it into the
+If you have enabled the trace writer (by setting `enable_trace_writer: true`
+via the CLI or by specifying `trace_dir` in your configuration), a
+proto-formatted trace containing the raw spans and timelines will be saved to
+the specified directory (which defaults to `/tmp/perf_traces`). To view the
+trace, download the file(s) to your local machine and drag-and-drop into the
 [Perfetto UI](https://ui.perfetto.dev/). The interface allows you to
 interactively zoom, pan, and query the execution trace, as shown below:
 
 ![Perf Metrics Perfetto](images/perf_metrics_perfetto.png)
+
+The v1 and v2 writers produce slightly different on-disk layouts:
+
+*   **v1**: a single proto file per run (e.g., `perfetto_trace_1771973518.pb`).
+    Drop it directly into the Perfetto UI.
+*   **v2**: a *directory* of immutable sharded files. The writer seals one
+    shard every `trace_shard_steps` committed steps so memory stays bounded
+    and history is durable on append-only stores like GCS. A typical run
+    looks like:
+
+    ```text
+    /tmp/perf_traces/
+      trace.shard_0001.binpb        # sealed, never rewritten
+      trace.shard_0002.binpb        # sealed, never rewritten
+      ...
+      trace.shard_pending.binpb     # in-flight tail, rewritten on each flush
+      trace.manifest.json           # list of sealed shards
+    ```
+
+    Perfetto's `TracePacket` format is concatenable, so the full trace is
+    just the sealed shards (in numeric order) followed by the pending file.
+
+#### Reassembling sharded v2 traces with `perfetto_cat`
+
+Tunix ships a small CLI that handles the concatenation for you, including
+remote (`gs://...`) sources and large multi-gigabyte traces (the shards are
+streamed in fixed-size chunks rather than buffered in memory):
+
+```bash
+# Write the full trace to a local file you can drop into ui.perfetto.dev
+python -m tunix.cli.perfetto_cat /tmp/perf_traces -o trace.binpb
+
+# Or stream straight to stdout, e.g. into a remote uploader
+python -m tunix.cli.perfetto_cat gs://my-bucket/runs/123/perf > trace.binpb
+
+# Skip the in-flight pending file (e.g. when archiving a completed run)
+python -m tunix.cli.perfetto_cat /tmp/perf_traces --no-pending -o trace.binpb
+
+# Tune the streaming chunk size (default 8 MiB) for very large traces
+python -m tunix.cli.perfetto_cat /tmp/perf_traces -o trace.binpb --chunk-bytes 33554432
+```
+
+If you prefer the equivalent shell one-liner, `cat trace.shard_*.binpb
+trace.shard_pending.binpb > trace.binpb` works for local directories whose
+shard filenames sort lexicographically (which the writer guarantees by
+zero-padding the index).

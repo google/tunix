@@ -144,6 +144,96 @@ class ConcatTraceTest(absltest.TestCase):
       )
 
 
+class StreamTraceToTest(absltest.TestCase):
+  """The streaming entry point is the one the CLI uses for multi-GB traces.
+
+  These tests confirm correctness across chunk boundaries and verify that the
+  per-file copy stays bounded to the requested chunk size, so reassembling a
+  large trace does not OOM.
+  """
+
+  def test_stream_matches_concat_bytes(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      _populate_trace_dir(tmp_dir, pending_content=b"PENDING")
+      sink = io.BytesIO()
+      total = perfetto_cat.stream_trace_to(epath.Path(tmp_dir), sink)
+      expected = perfetto_cat.concat_trace(epath.Path(tmp_dir))
+      self.assertEqual(sink.getvalue(), expected)
+      self.assertEqual(total, len(expected))
+
+  def test_stream_respects_chunk_size_at_boundaries(self):
+    """A 1-byte chunk size must still reassemble the exact bytes; this
+    exercises the chunked read loop at every byte boundary."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      # Use payloads of varying lengths so chunks cross file boundaries in
+      # non-uniform ways.
+      _populate_trace_dir(
+          tmp_dir,
+          sealed_shards=("trace.shard_0001.binpb", "trace.shard_0002.binpb"),
+          pending_content=b"PENDING_PAYLOAD_OF_NONTRIVIAL_LENGTH",
+      )
+      sink = io.BytesIO()
+      perfetto_cat.stream_trace_to(epath.Path(tmp_dir), sink, chunk_bytes=1)
+      expected = perfetto_cat.concat_trace(epath.Path(tmp_dir))
+      self.assertEqual(sink.getvalue(), expected)
+
+  def test_stream_does_not_buffer_more_than_chunk_size(self):
+    """Verifies the streaming property: no individual ``write`` call sees
+    more than ``chunk_bytes`` at a time. This is the property that keeps
+    multi-gigabyte traces from blowing up memory."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      # Use shards substantially larger than the chunk size so streaming
+      # actually emits multiple chunks per file.
+      large_payload = b"x" * (256 * 1024)
+      for name in ("trace.shard_0001.binpb", "trace.shard_0002.binpb"):
+        epath.Path(os.path.join(tmp_dir, name)).write_bytes(large_payload)
+      epath.Path(
+          os.path.join(tmp_dir, "trace.shard_pending.binpb")
+      ).write_bytes(large_payload)
+
+      chunk_bytes = 4096
+      sizes_seen: list[int] = []
+
+      class _RecordingSink:
+        def write(self_inner, data):  # pylint: disable=no-self-argument
+          sizes_seen.append(len(data))
+          return len(data)
+
+      perfetto_cat.stream_trace_to(
+          epath.Path(tmp_dir),
+          _RecordingSink(),
+          chunk_bytes=chunk_bytes,
+      )
+
+      self.assertNotEmpty(sizes_seen)
+      with self.subTest("no_write_exceeds_chunk_size"):
+        self.assertLessEqual(max(sizes_seen), chunk_bytes)
+      with self.subTest("total_matches_input"):
+        # 3 files * 256 KiB.
+        self.assertEqual(sum(sizes_seen), 3 * len(large_payload))
+
+  def test_stream_skips_pending_when_requested(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      _populate_trace_dir(tmp_dir, pending_content=b"PENDING")
+      sink = io.BytesIO()
+      perfetto_cat.stream_trace_to(
+          epath.Path(tmp_dir), sink, include_pending=False
+      )
+      self.assertEqual(
+          sink.getvalue(),
+          b"trace.shard_0001.binpb" + b"trace.shard_0002.binpb",
+      )
+
+  def test_stream_invalid_chunk_size_raises(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      _populate_trace_dir(tmp_dir)
+      sink = io.BytesIO()
+      with self.assertRaisesRegex(ValueError, "chunk_bytes must be positive"):
+        perfetto_cat.stream_trace_to(
+            epath.Path(tmp_dir), sink, chunk_bytes=0
+        )
+
+
 class MainTest(absltest.TestCase):
 
   def test_main_writes_to_output_file(self):
@@ -180,6 +270,48 @@ class MainTest(absltest.TestCase):
   def test_main_empty_directory_returns_error(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
       rc = perfetto_cat.main([tmp_dir, "-o", os.path.join(tmp_dir, "out.bin")])
+      self.assertEqual(rc, 1)
+
+  def test_main_respects_chunk_bytes_flag(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      _populate_trace_dir(tmp_dir, pending_content=b"P" * 100)
+      out_path = os.path.join(tmp_dir, "combined.binpb")
+      with mock.patch.object(
+          perfetto_cat, "stream_trace_to", wraps=perfetto_cat.stream_trace_to
+      ) as wrapped:
+        rc = perfetto_cat.main(
+            [tmp_dir, "-o", out_path, "--chunk-bytes", "17"]
+        )
+      self.assertEqual(rc, 0)
+      # Confirm the flag flowed through to the streaming entry point.
+      _, kwargs = wrapped.call_args
+      self.assertEqual(kwargs["chunk_bytes"], 17)
+      # And the output is still byte-correct.
+      self.assertEqual(
+          epath.Path(out_path).read_bytes(),
+          b"trace.shard_0001.binpb" + b"trace.shard_0002.binpb" + b"P" * 100,
+      )
+
+  def test_main_skips_pending_when_no_pending_flag(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      _populate_trace_dir(tmp_dir, pending_content=b"PENDING")
+      out_path = os.path.join(tmp_dir, "sealed_only.binpb")
+      rc = perfetto_cat.main([tmp_dir, "-o", out_path, "--no-pending"])
+      self.assertEqual(rc, 0)
+      self.assertEqual(
+          epath.Path(out_path).read_bytes(),
+          b"trace.shard_0001.binpb" + b"trace.shard_0002.binpb",
+      )
+
+  def test_main_returns_error_when_no_pending_and_only_pending_exists(self):
+    """If a trace dir only has a pending file and the user opts out of
+    including it, treat that as 'no input'."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      epath.Path(
+          os.path.join(tmp_dir, "trace.shard_pending.binpb")
+      ).write_bytes(b"PENDING")
+      out_path = os.path.join(tmp_dir, "out.bin")
+      rc = perfetto_cat.main([tmp_dir, "-o", out_path, "--no-pending"])
       self.assertEqual(rc, 1)
 
 

@@ -36,15 +36,22 @@ Usage::
     python -m tunix.cli.perfetto_cat <trace_dir> --no-pending      # sealed only
 
 Remote paths supported by ``etils.epath`` (e.g. ``gs://...``) are accepted for
-the input directory.
+both the input directory and the output file.
+
+Memory: the concatenation is streamed in fixed-size chunks (default 8 MiB)
+from each shard directly into the output handle, so multi-gigabyte traces
+reassemble without buffering the full trace in RAM. The chunk size is tunable
+via ``--chunk-bytes``.
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
 import sys
+from typing import BinaryIO
 
 from etils import epath
 
@@ -52,6 +59,12 @@ from etils import epath
 _MANIFEST_FILE = "trace.manifest.json"
 _PENDING_FILE = "trace.shard_pending.binpb"
 _SHARD_FILE_RE = re.compile(r"^trace\.shard_(\d{4,})\.binpb$")
+
+# Default streaming chunk size. Sized to balance syscall overhead against
+# peak RSS during concatenation: 8 MiB is small enough to keep memory flat
+# even for traces in the hundreds of gigabytes, and large enough that read
+# throughput is dominated by storage bandwidth rather than read() overhead.
+_DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
 
 
 def _shard_index(name: str) -> int | None:
@@ -96,29 +109,85 @@ def list_sealed_shards(trace_dir: epath.Path) -> list[epath.Path]:
   return [p for _, p in found]
 
 
+def _copy_file_to(
+    src: epath.Path,
+    dst: BinaryIO,
+    chunk_bytes: int,
+) -> int:
+  """Streams ``src`` into ``dst`` in ``chunk_bytes``-sized reads.
+
+  Returns the total number of bytes copied.
+  """
+  total = 0
+  with src.open("rb") as f:
+    while True:
+      chunk = f.read(chunk_bytes)
+      if not chunk:
+        break
+      dst.write(chunk)
+      total += len(chunk)
+  return total
+
+
+def stream_trace_to(
+    trace_dir: epath.Path,
+    output: BinaryIO,
+    *,
+    include_pending: bool = True,
+    chunk_bytes: int = _DEFAULT_CHUNK_BYTES,
+) -> int:
+  """Streams all trace fragments under ``trace_dir`` into ``output``.
+
+  Sealed shards are emitted in concatenation order, followed by the in-flight
+  pending file if it exists and ``include_pending`` is True. Memory use stays
+  bounded to ~``chunk_bytes`` regardless of total trace size, so this is the
+  preferred entry point for multi-gigabyte traces.
+
+  Args:
+    trace_dir: Directory containing the sharded trace.
+    output: A writable binary file-like object (e.g. ``open(path, 'wb')``,
+      ``sys.stdout.buffer``, or an ``epath.Path.open('wb')`` handle).
+    include_pending: When True, append ``trace.shard_pending.binpb`` (if it
+      exists) so the result contains in-flight data too.
+    chunk_bytes: Read/write chunk size. Must be positive.
+
+  Returns:
+    The total number of bytes written to ``output``.
+  """
+  if chunk_bytes <= 0:
+    raise ValueError(f"chunk_bytes must be positive, got {chunk_bytes!r}")
+  total = 0
+  for shard in list_sealed_shards(trace_dir):
+    total += _copy_file_to(shard, output, chunk_bytes)
+  if include_pending:
+    pending = trace_dir / _PENDING_FILE
+    if pending.exists():
+      total += _copy_file_to(pending, output, chunk_bytes)
+  return total
+
+
 def concat_trace(
     trace_dir: epath.Path,
     *,
     include_pending: bool = True,
 ) -> bytes:
-  """Concatenates all trace fragments under ``trace_dir`` into a single blob.
+  """Concatenates all trace fragments under ``trace_dir`` into one ``bytes``.
+
+  Convenience wrapper for callers that want the bytes in-process (tests,
+  small ad-hoc analyses). Buffers the full trace in memory; prefer
+  :func:`stream_trace_to` for large traces.
 
   Args:
     trace_dir: Directory containing the sharded trace.
     include_pending: When True, append ``trace.shard_pending.binpb`` (if it
-      exists) so the result contains in-flight data too.
+      exists).
 
   Returns:
     The concatenated trace bytes.
   """
-  parts: list[bytes] = []
-  for shard in list_sealed_shards(trace_dir):
-    parts.append(shard.read_bytes())
-  if include_pending:
-    pending = trace_dir / _PENDING_FILE
-    if pending.exists():
-      parts.append(pending.read_bytes())
-  return b"".join(parts)
+  buf = io.BytesIO()
+  stream_trace_to(trace_dir, buf, include_pending=include_pending)
+  return buf.getvalue()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -154,7 +223,27 @@ def _build_parser() -> argparse.ArgumentParser:
           " when copying a completed trace; not needed for the live view."
       ),
   )
+  parser.add_argument(
+      "--chunk-bytes",
+      type=int,
+      default=_DEFAULT_CHUNK_BYTES,
+      help=(
+          "Streaming chunk size in bytes. Defaults to %(default)d (8 MiB)."
+          " Memory use stays bounded to roughly this value regardless of"
+          " total trace size."
+      ),
+  )
   return parser
+
+
+def _has_any_input(
+    trace_dir: epath.Path, *, include_pending: bool
+) -> bool:
+  if list_sealed_shards(trace_dir):
+    return True
+  if include_pending and (trace_dir / _PENDING_FILE).exists():
+    return True
+  return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -168,8 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Not a directory: {trace_dir}", file=sys.stderr)
     return 1
 
-  payload = concat_trace(trace_dir, include_pending=not args.no_pending)
-  if not payload:
+  include_pending = not args.no_pending
+  if not _has_any_input(trace_dir, include_pending=include_pending):
     print(
         f"No trace files found under {trace_dir}; nothing to concatenate.",
         file=sys.stderr,
@@ -177,12 +266,22 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
   if args.output == "-":
-    # Use the underlying buffer so we don't accidentally re-encode bytes.
-    sys.stdout.buffer.write(payload)
+    stream_trace_to(
+        trace_dir,
+        sys.stdout.buffer,
+        include_pending=include_pending,
+        chunk_bytes=args.chunk_bytes,
+    )
     sys.stdout.buffer.flush()
   else:
     out_path = epath.Path(args.output)
-    out_path.write_bytes(payload)
+    with out_path.open("wb") as f:
+      stream_trace_to(
+          trace_dir,
+          f,
+          include_pending=include_pending,
+          chunk_bytes=args.chunk_bytes,
+      )
   return 0
 
 
