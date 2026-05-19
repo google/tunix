@@ -35,6 +35,8 @@ import sys
 if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
   sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
 
+os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+
 import time
 from typing import Any
 
@@ -315,6 +317,30 @@ def parse_args() -> argparse.Namespace:
       )
   )
   parser.add_argument(
+      "--batch_size",
+      type=int,
+      default=16,
+      help="Global batch size (number of prompts per step).",
+  )
+  parser.add_argument(
+      "--max_steps",
+      type=int,
+      default=200,
+      help="Maximum number of training steps.",
+  )
+  parser.add_argument(
+      "--train_micro_batch_size",
+      type=int,
+      default=1,
+      help="Micro batch size for training.",
+  )
+  parser.add_argument(
+      "--max_response_length",
+      type=int,
+      default=1024,
+      help="Maximum length of the generated response.",
+  )
+  parser.add_argument(
       "--rollout_mesh_fsdp",
       type=int,
       default=None,
@@ -362,13 +388,13 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
       "--rollout_vllm_max_num_seqs",
       type=int,
-      default=DEFAULT_VLLM_MAX_NUM_SEQS,
+      default=None,
       help="Maximum concurrent sequences for the vLLM rollout backend.",
   )
   parser.add_argument(
       "--rollout_vllm_max_num_batched_tokens",
       type=int,
-      default=DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS,
+      default=None,
       help="Maximum batched tokens for the vLLM rollout backend.",
   )
   args, _ = parser.parse_known_args()
@@ -467,6 +493,15 @@ class VTCGRPOLearner(GRPOLearner):
 
 def main():
   args = parse_args()
+
+  global MAX_STEPS, TRAIN_MICRO_BATCH_SIZE, MAX_NEW_TOKENS, MAX_GENERATION_LENGTH, KV_CACHE_SIZE, NUM_PROMPTS_PER_STEP, TRAIN_GLOBAL_BATCH_SIZE
+  MAX_STEPS = args.max_steps
+  NUM_PROMPTS_PER_STEP = args.batch_size
+  TRAIN_GLOBAL_BATCH_SIZE = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+  TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
+  MAX_NEW_TOKENS = args.max_response_length
+  MAX_GENERATION_LENGTH = args.max_response_length
+  KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS + 256
 
   config = call_model_config(MODEL_NAME)
   devices = jax.devices()
@@ -599,7 +634,9 @@ def main():
       top_p=EVAL_TOP_P,
       top_k=EVAL_TOP_K,
   )
-  os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+  vllm_max_num_seqs = args.rollout_vllm_max_num_seqs if args.rollout_vllm_max_num_seqs is not None else (NUM_PROMPTS_PER_STEP * NUM_GENERATIONS)
+  vllm_max_batched_tokens = args.rollout_vllm_max_num_batched_tokens if args.rollout_vllm_max_num_batched_tokens is not None else ((vllm_max_num_seqs * KV_CACHE_SIZE) // 8)
+
   vllm_rollout_kwargs = dict(
       rollout_vllm_model_version=MODEL_ID,
       rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
@@ -608,14 +645,13 @@ def main():
       rollout_vllm_async_scheduling=True,
       tensor_parallel_size=rollout_mesh.shape.get("tp", 1),
       data_parallel_size=rollout_mesh.shape.get("fsdp", 1),
-      rollout_vllm_max_num_seqs=args.rollout_vllm_max_num_seqs,
-      rollout_vllm_max_num_batched_tokens=(
-          args.rollout_vllm_max_num_batched_tokens
-      ),
+      rollout_vllm_max_num_seqs=vllm_max_num_seqs,
+      rollout_vllm_max_num_batched_tokens=vllm_max_batched_tokens,
       rollout_vllm_kwargs={
           "kv_cache_metrics": True,
           "disable_log_stats": False,
           "enable_prefix_caching": True,
+          "max_model_len": KV_CACHE_SIZE,
       },
   )
   train_rollout_kwargs.update(vllm_rollout_kwargs)
