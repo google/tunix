@@ -654,7 +654,6 @@ def main():
           "kv_cache_metrics": True,
           "disable_log_stats": False,
           "enable_prefix_caching": True,
-          "max_model_len": KV_CACHE_SIZE,
       },
   )
   train_rollout_kwargs.update(vllm_rollout_kwargs)
