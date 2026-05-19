@@ -84,7 +84,7 @@ except ImportError:
   pathwaysutils = None
 
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
-  jax.config.update("pathways_enforce_subset_devices_form_subslice", False)
+  os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
   pathwaysutils.initialize()
 
 from tunix.cli.utils import model as model_utils
