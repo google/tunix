@@ -30,6 +30,13 @@ Timeline = tracer.Timeline
 
 DEFAULT_TRACE_DIR = "/tmp/perf_traces"
 
+# Mirror the canonical default from ``PerfMetricsOptions`` here so callers that
+# bypass the options dataclass (constructing ``PerfMetricsExport`` directly,
+# e.g. in tests or notebooks) still get the configured default without each
+# call-site having to know the value. The single source of truth remains
+# ``PerfMetricsOptions.trace_shard_steps``; this is just a forwarded view.
+_DEFAULT_TRACE_SHARD_STEPS = metrics.PerfMetricsOptions().trace_shard_steps
+
 
 def log_metric_export_fn(timelines: Mapping[str, Timeline]) -> MetricsT:
   """Logs the timelines."""
@@ -49,7 +56,7 @@ class PerfMetricsExport:
       cluster_config: rl_cluster.ClusterConfig,
       enable_trace_writer: bool = True,
       trace_dir: str | None = None,
-      trace_shard_steps: int | None = None,
+      trace_shard_steps: int = _DEFAULT_TRACE_SHARD_STEPS,
   ) -> PerfMetricsExport:
     """Creates an instance from a ClusterConfig.
 
@@ -58,8 +65,8 @@ class PerfMetricsExport:
       enable_trace_writer: Whether to initialize the trace writer.
       trace_dir: The directory to write the Perfetto trace files to.
       trace_shard_steps: Number of committed steps per sealed perfetto trace
-        shard. ``None`` defers to the trace writer's resolution path (env var
-        ``TUNIX_TRACE_SHARD_STEPS`` then the built-in default).
+        shard. Must be >= 1. Defaults to the canonical
+        ``PerfMetricsOptions.trace_shard_steps`` value.
 
     Returns:
       A new PerfMetricsExport instance configured with role to device mappings.
@@ -85,7 +92,7 @@ class PerfMetricsExport:
       enable_trace_writer: bool = True,
       trace_dir: str | None = None,
       role_to_devices: Mapping[str, Any] | None = None,
-      trace_shard_steps: int | None = None,
+      trace_shard_steps: int = _DEFAULT_TRACE_SHARD_STEPS,
   ):
     """Initializes the instance.
 
@@ -98,8 +105,8 @@ class PerfMetricsExport:
       role_to_devices: An optional mapping from role names to their assigned
         devices, passed to the trace writer.
       trace_shard_steps: Number of committed steps per sealed perfetto trace
-        shard. ``None`` defers to the trace writer's resolution path (env var
-        ``TUNIX_TRACE_SHARD_STEPS`` then the built-in default).
+        shard. Must be >= 1. Defaults to the canonical
+        ``PerfMetricsOptions.trace_shard_steps`` value.
     """
     self._trace_writer_enabled = enable_trace_writer
     self._writer: trace_writer_lib.TraceWriter
@@ -107,8 +114,8 @@ class PerfMetricsExport:
       resolved_trace_dir = trace_dir or DEFAULT_TRACE_DIR
       self._writer = trace_writer_lib.PerfettoTraceWriter(
           resolved_trace_dir,
-          role_to_devices=role_to_devices,
           shard_steps=trace_shard_steps,
+          role_to_devices=role_to_devices,
       )
       # We need to keep max_workers = 1 to serialize writes
       self._executor = concurrent.futures.ThreadPoolExecutor(

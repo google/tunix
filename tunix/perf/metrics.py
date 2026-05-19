@@ -93,9 +93,7 @@ class PerfMetricsOptions:
     trace_shard_steps: Number of committed steps per sealed perfetto trace
       shard file. Lower values write more (smaller) shard files and bound
       in-memory span history more tightly; higher values write fewer (larger)
-      shard files. Must be >= 1. The env var ``TUNIX_TRACE_SHARD_STEPS``, if
-      set to a positive integer, overrides this value at trace writer
-      construction time.
+      shard files. Must be >= 1.
   """
 
   enable_perf_v1: bool = True

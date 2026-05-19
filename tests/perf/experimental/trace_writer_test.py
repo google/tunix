@@ -115,7 +115,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     mock_builder.add_packet.side_effect = add_packet_side_effect
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=100
+      )
 
       t = tracer.Timeline("timeline_test", 1000.0)
       # Create a span with a specific tag
@@ -182,7 +184,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     mock_builder.add_packet.side_effect = add_packet_side_effect
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=100
+      )
 
       t = tracer.Timeline("overlap_timeline", 1000.0)
 
@@ -309,6 +313,7 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     with tempfile.TemporaryDirectory() as tmp_dir:
       writer = trace_writer_lib.PerfettoTraceWriter(
           trace_dir=tmp_dir,
+          shard_steps=100,
           role_to_devices={
               "actor": ["tpu0", "tpu1"],
               "rollout": ["tpu0"],
@@ -392,7 +397,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
   def test_perfetto_trace_writer_integration(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=100
+      )
 
       # Create multiple timelines with various configs to verify E2E flow.
       t1 = tracer.Timeline("timeline1", 1000.0)
@@ -438,7 +445,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
     with tempfile.NamedTemporaryFile() as tmp_file:
       # Expect initialization to fail gracefully (log error, no crash)
       with self.assertLogs(level="ERROR") as cm:
-        writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_file.name)
+        writer = trace_writer_lib.PerfettoTraceWriter(
+            trace_dir=tmp_file.name, shard_steps=100
+        )
 
       t = tracer.Timeline("timeline", 1000.0)
       # Expect write to fail gracefully
@@ -449,7 +458,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
   def test_perfetto_trace_writer_empty_timelines(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=100
+      )
       writer.write_timelines({})
       files = os.listdir(tmp_dir)
       # No content should be written.
@@ -457,7 +468,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
   def test_perfetto_trace_writer_timeline_with_empty_committed_steps(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
-      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=100
+      )
       t = tracer.Timeline("timeline_test", 1000.0)
       writer.write_timelines({"timeline_test": t})
       files = os.listdir(tmp_dir)
@@ -680,59 +693,32 @@ class LaneAndUuidStabilityTest(absltest.TestCase):
         )
 
 
-class ShardStepsResolutionTest(absltest.TestCase):
+class ShardStepsValidationTest(parameterized.TestCase):
+  """``shard_steps`` is supplied by the caller (typically via
+  ``PerfMetricsOptions.trace_shard_steps``); the writer holds the value
+  verbatim and rejects non-positive values."""
 
-  def test_env_var_overrides_arg(self):
-    with mock.patch.dict(os.environ, {"TUNIX_TRACE_SHARD_STEPS": "7"}):
-      with tempfile.TemporaryDirectory() as tmp_dir:
-        writer = trace_writer_lib.PerfettoTraceWriter(
-            trace_dir=tmp_dir, shard_steps=100
+  @parameterized.named_parameters(
+      dict(testcase_name="zero", shard_steps=0),
+      dict(testcase_name="negative", shard_steps=-1),
+      dict(testcase_name="float", shard_steps=1.5),
+      dict(testcase_name="string", shard_steps="100"),
+  )
+  def test_invalid_shard_steps_raises(self, shard_steps):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      with self.assertRaisesRegex(
+          ValueError, "shard_steps must be a positive integer"
+      ):
+        trace_writer_lib.PerfettoTraceWriter(
+            trace_dir=tmp_dir, shard_steps=shard_steps
         )
-        self.assertEqual(writer.shard_steps, 7)
 
-  def test_arg_used_when_env_var_unset(self):
-    # Sanitize the env var even if the host has it set.
-    with mock.patch.dict(os.environ, {}, clear=False):
-      os.environ.pop("TUNIX_TRACE_SHARD_STEPS", None)
-      with tempfile.TemporaryDirectory() as tmp_dir:
-        writer = trace_writer_lib.PerfettoTraceWriter(
-            trace_dir=tmp_dir, shard_steps=42
-        )
-        self.assertEqual(writer.shard_steps, 42)
-
-  def test_default_when_neither_set(self):
-    with mock.patch.dict(os.environ, {}, clear=False):
-      os.environ.pop("TUNIX_TRACE_SHARD_STEPS", None)
-      with tempfile.TemporaryDirectory() as tmp_dir:
-        writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
-        self.assertEqual(writer.shard_steps, 100)
-
-  def test_invalid_env_var_is_ignored(self):
-    with mock.patch.dict(os.environ, {"TUNIX_TRACE_SHARD_STEPS": "not-a-number"}):
-      with tempfile.TemporaryDirectory() as tmp_dir:
-        writer = trace_writer_lib.PerfettoTraceWriter(
-            trace_dir=tmp_dir, shard_steps=11
-        )
-        self.assertEqual(writer.shard_steps, 11)
-
-  def test_zero_or_negative_env_var_is_ignored(self):
-    with mock.patch.dict(os.environ, {"TUNIX_TRACE_SHARD_STEPS": "0"}):
-      with tempfile.TemporaryDirectory() as tmp_dir:
-        writer = trace_writer_lib.PerfettoTraceWriter(
-            trace_dir=tmp_dir, shard_steps=11
-        )
-        self.assertEqual(writer.shard_steps, 11)
-
-  def test_invalid_arg_raises(self):
-    with mock.patch.dict(os.environ, {}, clear=False):
-      os.environ.pop("TUNIX_TRACE_SHARD_STEPS", None)
-      with tempfile.TemporaryDirectory() as tmp_dir:
-        with self.assertRaisesRegex(
-            ValueError, "shard_steps must be a positive integer"
-        ):
-          trace_writer_lib.PerfettoTraceWriter(
-              trace_dir=tmp_dir, shard_steps=0
-          )
+  def test_valid_shard_steps_is_held_verbatim(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=37
+      )
+      self.assertEqual(writer.shard_steps, 37)
 
 
 class MemoryBoundednessTest(absltest.TestCase):
@@ -770,6 +756,43 @@ class MemoryBoundednessTest(absltest.TestCase):
       # All spans are sealed and dropped; the assignment cache should be
       # empty (only pending spans remain, of which there are none).
       self.assertEmpty(writer._lane_assignment.get("host-1", {}))  # pylint: disable=protected-access
+
+  def test_timeline_drop_works_without_trace_writer(self):
+    """The memory-release path is owned by ``Timeline``, not the writer --
+    a non-writer consumer (e.g. a future aggregator that pushes to
+    TensorBoard) can drive drops on its own when trace writing is disabled.
+    """
+    t = tracer.Timeline("host-1", 0.0)
+    t.register_consumer("aggregator", start_at_current_head=False)
+    for i in range(20):
+      t.start_span(f"s{i}", float(i))
+      t.stop_span(float(i) + 0.1)
+      t.commit_step()
+      # Each "round" the aggregator consumes the step it just observed.
+      t.advance_consumer("aggregator", 1)
+    self.assertEmpty(t.committed_steps)
+    self.assertEqual(t.dropped_step_count, 20)
+
+  def test_writer_does_not_starve_other_consumers(self):
+    """When a slow downstream (aggregator) is also registered, the writer's
+    own advances do not release steps until the slow consumer has caught up.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(
+          trace_dir=tmp_dir, shard_steps=2
+      )
+      t = tracer.Timeline("host-1", 0.0)
+      t.register_consumer("aggregator", start_at_current_head=False)
+      for i in range(4):
+        t.start_span(f"s{i}", float(i))
+        t.stop_span(float(i) + 0.1)
+        t.commit_step()
+      writer.write_timelines({"host-1": t})
+      # The writer wants to advance past step 4, but the aggregator is at 0,
+      # so memory still holds all 4 steps until the aggregator catches up.
+      self.assertLen(t.committed_steps, 4)
+      t.advance_consumer("aggregator", 4)
+      self.assertEmpty(t.committed_steps)
 
 
 if __name__ == "__main__":

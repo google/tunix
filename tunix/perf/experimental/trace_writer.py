@@ -25,9 +25,11 @@ shard files (``trace.shard_NNNN.binpb``) plus a single in-flight pending file
   runs.
 * The pending file is rewritten on every flush and contains everything since
   the last seal. It is what users see "live" while a run is in progress.
-* Sealed shards' steps are dropped from ``Timeline`` memory immediately after
-  sealing, so memory stays bounded to a few shards' worth of spans regardless
-  of run length.
+* The writer registers itself as a consumer on each timeline it observes and
+  advances its cursor on every seal. Memory release is driven by the
+  timeline's consumer-cursor protocol, not by the writer directly poking the
+  timeline's internals -- so timelines stay bounded even when this writer is
+  disabled, as long as some other consumer (e.g. an aggregator) is advancing.
 
 A ``trace.manifest.json`` companion file tracks which shards have been sealed
 so far. Perfetto's TracePacket format is concatenable, so a complete trace can
@@ -49,11 +51,10 @@ consistent track layout.
 from __future__ import annotations
 
 import abc
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 import dataclasses
 import itertools
 import json
-import os
 import time
 from typing import Any
 
@@ -72,49 +73,10 @@ Timeline = timeline.Timeline
 
 _UUID_OFFSET = 100_000  # Offset for lane UUIDs.
 
-_DEFAULT_SHARD_STEPS = 100
-_SHARD_STEPS_ENV = "TUNIX_TRACE_SHARD_STEPS"
-
 _SHARD_FILE_FMT = "trace.shard_{index:04d}.binpb"
 _PENDING_FILE = "trace.shard_pending.binpb"
 _MANIFEST_FILE = "trace.manifest.json"
 _MANIFEST_VERSION = 1
-
-
-def _resolve_shard_steps(shard_steps: int | None) -> int:
-  """Resolves the effective shard size from arg + env var override.
-
-  Args:
-    shard_steps: The value requested by the caller, or ``None`` to fall back to
-      the env var / default.
-
-  Returns:
-    A positive integer to use as the number of committed steps per sealed
-    shard. The env var ``TUNIX_TRACE_SHARD_STEPS``, when set to a parseable
-    positive integer, takes precedence over the caller-provided value to give
-    operators a uniform override across all writers in a run.
-  """
-  env_val = os.environ.get(_SHARD_STEPS_ENV)
-  if env_val is not None:
-    try:
-      parsed = int(env_val)
-    except ValueError:
-      logging.warning(
-          "%s=%r is not a valid integer; ignoring.", _SHARD_STEPS_ENV, env_val
-      )
-    else:
-      if parsed >= 1:
-        return parsed
-      logging.warning(
-          "%s=%d is not >= 1; ignoring.", _SHARD_STEPS_ENV, parsed
-      )
-  if shard_steps is None:
-    return _DEFAULT_SHARD_STEPS
-  if shard_steps < 1:
-    raise ValueError(
-        f"shard_steps must be a positive integer, got {shard_steps!r}."
-    )
-  return shard_steps
 
 
 def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
@@ -193,27 +155,36 @@ class PerfettoTraceWriter(TraceWriter):
     trace_dir: Local path or remote URI (e.g. ``gs://...``). The directory is
       created if it does not exist. If creation fails the writer enters a
       no-op mode -- tracing is best-effort and never crashes the application.
+    shard_steps: Committed steps per sealed shard. Required; must be a
+      positive integer. Configured by the caller (typically via
+      ``PerfMetricsOptions.trace_shard_steps``).
     role_to_devices: Optional mapping from role names to the device IDs that
       handle that role. Used to label per-device tracks ("Actor Cluster",
       "Rollout Cluster", etc.).
-    shard_steps: Committed steps per sealed shard. ``None`` defers to the
-      ``TUNIX_TRACE_SHARD_STEPS`` env var, then to a built-in default. The
-      env var, if valid, wins over an explicit caller value to provide a
-      uniform per-run override for operators.
   """
 
   def __init__(
       self,
       trace_dir: str,
+      shard_steps: int,
       role_to_devices: Mapping[str, Any] | None = None,
-      *,
-      shard_steps: int | None = None,
   ):
-    self._shard_steps = _resolve_shard_steps(shard_steps)
+    if not isinstance(shard_steps, int) or shard_steps < 1:
+      raise ValueError(
+          f"shard_steps must be a positive integer, got {shard_steps!r}."
+      )
+    self._shard_steps = shard_steps
     self._trace_dir_raw = trace_dir
     self._role_to_devices = (
         dict(role_to_devices) if role_to_devices is not None else {}
     )
+
+    # Unique per-writer-instance id used when registering as a consumer on
+    # each observed timeline. Including ``id(self)`` lets multiple writer
+    # instances coexist on the same timeline without colliding cursors.
+    self._consumer_id = f"perfetto_trace_writer:{id(self):x}"
+    # Timelines this writer has already registered itself on.
+    self._registered_timelines: set[str] = set()
 
     # Parent track grouping (e.g. "Host - Main threads", "Actor Cluster"),
     # populated lazily on first observation of each timeline.
@@ -234,7 +205,10 @@ class PerfettoTraceWriter(TraceWriter):
     # many committed step boundaries have occurred since the most recent seal,
     # using the maximum delta across timelines as the synchronized count (all
     # timelines created at tracer init commit in lockstep, so this collapses
-    # to the per-step delta in practice).
+    # to the per-step delta in practice). The per-timeline observed value is
+    # an *absolute* committed-step count
+    # (``dropped_step_count + len(committed_steps)``) so we still detect new
+    # commits correctly across drops by any consumer.
     self._observed_committed_count: dict[str, int] = {}
     self._unsealed_step_count = 0
     self._sealed_step_count = 0
@@ -384,26 +358,44 @@ class PerfettoTraceWriter(TraceWriter):
               "Failed to get track name for timeline ID: %s", tl_id
           )
 
+  def _register_new_timelines(
+      self, timelines: Mapping[str, Timeline]
+  ) -> None:
+    """Registers this writer as a consumer on any newly-observed timeline.
+
+    Registration uses ``start_at_current_head=False`` so the writer is
+    responsible for processing any committed steps currently held by the
+    timeline -- this matters when the writer is created after some commits
+    have already accumulated (e.g. in tests, or if tracing is enabled mid-run
+    in the future).
+    """
+    for tl_id, tl in timelines.items():
+      if tl_id in self._registered_timelines:
+        continue
+      tl.register_consumer(
+          self._consumer_id, start_at_current_head=False
+      )
+      self._registered_timelines.add(tl_id)
+
   def _detect_and_track_commits(
       self, timelines: Mapping[str, Timeline]
   ) -> None:
     """Detects new commit_step boundaries since the previous flush.
 
-    Per-call delta is computed per timeline and the maximum is taken as the
-    synchronized step count, since the tracer commits all timelines together.
-    Using the max (rather than min) makes the writer robust to timelines that
-    are created or first observed mid-run -- they catch up over subsequent
-    commits without blocking sealing of the older timelines.
+    Uses each timeline's *absolute* committed-step count
+    (``dropped_step_count + len(committed_steps)``) so new commits are still
+    detected correctly after any consumer (including this writer) has caused
+    steps to be released from memory. Per-call delta is computed per timeline
+    and the maximum is taken as the synchronized step count, since the tracer
+    commits all timelines together.
     """
     max_delta = 0
     for tl_id, tl in timelines.items():
-      actual = len(tl.committed_steps)
-      observed = self._observed_committed_count.get(tl_id, 0)
-      if actual > observed:
-        max_delta = max(max_delta, actual - observed)
-      # Always refresh; if a timeline drained (actual < observed) we lower it
-      # so the next call accounts only for genuinely new commits.
-      self._observed_committed_count[tl_id] = actual
+      actual_abs = tl.dropped_step_count + len(tl.committed_steps)
+      observed_abs = self._observed_committed_count.get(tl_id, 0)
+      if actual_abs > observed_abs:
+        max_delta = max(max_delta, actual_abs - observed_abs)
+      self._observed_committed_count[tl_id] = actual_abs
     self._unsealed_step_count += max_delta
 
   def _update_lane_assignments(
@@ -421,8 +413,7 @@ class PerfettoTraceWriter(TraceWriter):
         continue
       assignments = self._lane_assignment.setdefault(tl_id, {})
       busy = self._lane_busy_until.setdefault(tl_id, [])
-      # Sort by (begin, id) for deterministic placement; matches the original
-      # _assign_lanes behavior.
+      # Sort by (begin, id) for deterministic, stable placement.
       all_spans = sorted(
           itertools.chain.from_iterable(
               step.values() for step in tl.committed_steps
@@ -561,14 +552,45 @@ class PerfettoTraceWriter(TraceWriter):
     self._emit_events_for_steps(builder, timelines, step_slice)
     return builder
 
+  def _prune_lane_cache_to_live_spans(
+      self, timelines: Mapping[str, Timeline]
+  ) -> None:
+    """Drops cache entries for spans no longer present in committed_steps.
+
+    The writer's lane-assignment cache (``_lane_assignment[tl_id][span_id]``)
+    can outlive the spans it points at once memory release happens -- whether
+    triggered by this writer's own advance or by another consumer's advance.
+    Pruning to the live span-id set keeps the cache bounded without coupling
+    it to the specific event that caused the drop.
+    """
+    for tl_id in list(self._lane_assignment):
+      tl = timelines.get(tl_id)
+      if tl is None:
+        continue
+      assignments = self._lane_assignment[tl_id]
+      live: set[int] = set()
+      for step in tl.committed_steps:
+        live.update(step.keys())
+      stale = [sid for sid in assignments if sid not in live]
+      for sid in stale:
+        del assignments[sid]
+
   def _seal_one_shard(self, timelines: Mapping[str, Timeline]) -> None:
-    """Seals the next shard from the first ``shard_steps`` of each timeline."""
+    """Seals the next shard from the first ``shard_steps`` of each timeline.
+
+    The writer advances its consumer cursor by ``shard_steps`` on every
+    timeline after a successful write. Whether the underlying step dicts are
+    actually released from memory at that point depends on the position of
+    every *other* registered consumer -- if some downstream consumer (e.g. an
+    aggregator) has not yet processed the same steps, they remain in memory
+    until that consumer catches up.
+    """
     if self._trace_dir is None:
-      # If the directory failed to initialize, still advance the bookkeeping
-      # so we don't accumulate memory forever. Best-effort drop of steps.
-      for tl_id, tl in timelines.items():
-        tl.drop_oldest_committed_steps(self._shard_steps)
-        self._observed_committed_count[tl_id] = len(tl.committed_steps)
+      # If the directory failed to initialize, still advance the consumer
+      # cursors so we don't pin memory forever just because trace writing is
+      # broken.
+      for tl in timelines.values():
+        tl.advance_consumer(self._consumer_id, self._shard_steps)
       self._unsealed_step_count = max(
           0, self._unsealed_step_count - self._shard_steps
       )
@@ -581,20 +603,13 @@ class PerfettoTraceWriter(TraceWriter):
     )
     ok = self._safe_write_bytes(shard_path, builder.serialize())
     if not ok:
-      # Don't drop spans we couldn't write; let the next flush retry.
+      # Don't advance our cursor on a failed write; let the next flush retry.
       return
 
-    # Drop the sealed steps from each timeline's memory and from the lane
-    # assignment cache so we don't hold them forever.
-    for tl_id, tl in timelines.items():
-      dropped = tl.drop_oldest_committed_steps(self._shard_steps)
-      if dropped:
-        assignments = self._lane_assignment.get(tl_id)
-        if assignments is not None:
-          for step in dropped:
-            for sid in step:
-              assignments.pop(sid, None)
-      self._observed_committed_count[tl_id] = len(tl.committed_steps)
+    for tl in timelines.values():
+      tl.advance_consumer(self._consumer_id, self._shard_steps)
+
+    self._prune_lane_cache_to_live_spans(timelines)
 
     self._sealed_shards.append(shard_name)
     self._next_shard_index += 1
@@ -632,6 +647,7 @@ class PerfettoTraceWriter(TraceWriter):
       return
 
     self._init_tracks(timelines)
+    self._register_new_timelines(timelines)
     self._detect_and_track_commits(timelines)
     self._update_lane_assignments(timelines)
 
@@ -649,47 +665,6 @@ class PerfettoTraceWriter(TraceWriter):
     self._write_pending(timelines)
 
 
-# Backwards-compatible alias retained for callers that imported the
-# internal helper directly. Equivalent to one-shot lane assignment over a
-# bag of spans; the writer itself now uses the streaming assignment on
-# ``PerfettoTraceWriter``.
-def _assign_lanes(
-    spans: Iterable[timeline.Span],
-) -> tuple[Mapping[int, int], int]:
-  """Assigns lanes to spans to handle overlaps (one-shot, no streaming state).
-
-  Perfetto requires spans on the same track to be strictly non-overlapping.
-  This helper assigns a lane index to each span such that spans in the same
-  lane do not overlap. It is left here for callers that previously used it
-  directly; the trace writer uses streaming lane assignment internally.
-
-  Args:
-    spans: An iterable of spans to assign to lanes.
-
-  Returns:
-    A tuple ``(lane_by_span_id, num_lanes)``.
-  """
-  sorted_spans = sorted(spans, key=lambda s: (s.begin, s.id))
-  lanes_end_times: list[float] = []
-  lane_by_span_id: dict[int, int] = {}
-
-  for s in sorted_spans:
-    placed = False
-    for lane_idx, lane_end in enumerate(lanes_end_times):
-      if lane_end <= s.begin:
-        lanes_end_times[lane_idx] = s.end
-        lane_by_span_id[s.id] = lane_idx
-        placed = True
-        break
-    if not placed:
-      lane_by_span_id[s.id] = len(lanes_end_times)
-      lanes_end_times.append(s.end)
-
-  return lane_by_span_id, len(lanes_end_times)
-
-
-# Module-level sentinel used by tests that previously patched ``TraceProtoBuilder``.
-# Kept as a public attribute so existing test mocks keep working.
 __all__ = [
     "PerfettoTraceWriter",
     "NoopTraceWriter",
@@ -697,7 +672,6 @@ __all__ = [
     "TraceWriter",
     "TraceProtoBuilder",
     "_create_span_name",
-    "_assign_lanes",
     "TrackDescriptor",
     "TrackEvent",
 ]

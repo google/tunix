@@ -178,6 +178,16 @@ class Timeline:
     self._cur_step: dict[int, Span] = {}
     self._last_span_id = -1
     self._committed_steps: list[dict[int, Span]] = []
+    # Multi-consumer bookkeeping for bounded-memory mode. ``_dropped_step_count``
+    # is the number of committed steps that have been dropped from
+    # ``_committed_steps`` so far; ``_consumer_cursors[name]`` is the absolute
+    # count of committed steps each registered consumer has finished
+    # processing. Steps are released from memory once every registered consumer
+    # has advanced past them. With no consumers registered, the timeline keeps
+    # everything (the default; preserves the pre-existing behavior for tests
+    # and direct users).
+    self._dropped_step_count: int = 0
+    self._consumer_cursors: dict[str, int] = {}
     self._lock = threading.RLock()
 
   @property
@@ -266,41 +276,145 @@ class Timeline:
 
       self._cur_step = {}
 
-  def drop_oldest_committed_steps(self, n: int) -> list[dict[int, Span]]:
-    """Removes the ``n`` oldest committed step dicts from history.
+  @property
+  def dropped_step_count(self) -> int:
+    """Number of committed steps that have been dropped from memory so far.
 
-    This is the memory-release path for consumers that have durably persisted
-    the dropped steps somewhere else (e.g., a sealed trace file on disk). Once
-    a step is dropped, it cannot be recovered from the timeline.
+    Together with ``len(committed_steps)``, this lets callers compute the
+    absolute count of committed steps observed by this timeline:
+    ``absolute_count = dropped_step_count + len(committed_steps)``.
+    """
+    return self._dropped_step_count
+
+  def register_consumer(
+      self, consumer_id: str, *, start_at_current_head: bool = True
+  ) -> None:
+    """Registers a consumer of this timeline's committed steps.
+
+    A consumer represents a downstream system that reads committed step dicts
+    -- e.g. a trace writer, an aggregator that pushes metrics to TensorBoard,
+    a registry computer, etc. Once at least one consumer is registered, the
+    timeline enters bounded-memory mode: committed steps are retained until
+    every registered consumer has advanced its cursor past them, then they
+    are released.
+
+    With ``start_at_current_head=True`` (the default), the new consumer
+    inherits the current head of the committed history, so it is only
+    responsible for steps committed *after* registration. Set this to False
+    if the consumer wants to replay everything currently held in memory.
 
     Args:
-      n: Number of oldest committed step dicts to remove. Must be non-negative.
-        If ``n`` exceeds the number of committed steps currently held, all
-        committed steps are dropped and the method returns whatever was held.
+      consumer_id: A stable, unique identifier for this consumer. Calling
+        ``register_consumer`` with an already-registered id is a no-op (the
+        consumer's cursor is unchanged).
+      start_at_current_head: When True, the consumer's cursor is initialized
+        to the current absolute committed-step count (i.e. it skips anything
+        already held). When False, the cursor is initialized to
+        ``dropped_step_count`` so the consumer must traverse all currently
+        held steps before any can be released.
+    """
+    with self._lock:
+      if consumer_id in self._consumer_cursors:
+        return
+      if start_at_current_head:
+        self._consumer_cursors[consumer_id] = (
+            self._dropped_step_count + len(self._committed_steps)
+        )
+      else:
+        self._consumer_cursors[consumer_id] = self._dropped_step_count
+
+  def unregister_consumer(self, consumer_id: str) -> int:
+    """Unregisters a previously registered consumer.
+
+    Useful when a consumer shuts down (e.g. trace writer disabled mid-run or
+    closed) -- without this, that consumer's stale cursor would pin the
+    timeline's memory forever. Removal of a laggard cursor may immediately
+    advance the effective min cursor; any steps that become reachable as a
+    result are released right away.
+
+    If no consumers remain after this call, the timeline reverts to keeping
+    all committed steps.
+
+    Args:
+      consumer_id: The id passed to ``register_consumer``. Unknown ids are a
+        no-op.
 
     Returns:
-      The list of step dicts that were removed, in order from oldest to most
-      recent. Callers that need to inspect or write out the dropped steps can
-      use the returned list; callers that just want to free memory can ignore
-      it.
+      The number of committed step dicts that were dropped from memory as a
+      direct result of removing this consumer (zero in the common case where
+      this consumer was not the slowest, or where no consumers remain).
+    """
+    with self._lock:
+      if consumer_id not in self._consumer_cursors:
+        return 0
+      del self._consumer_cursors[consumer_id]
+      if not self._consumer_cursors:
+        return 0
+      min_cursor = min(self._consumer_cursors.values())
+      to_drop = max(0, min_cursor - self._dropped_step_count)
+      if to_drop == 0:
+        return 0
+      self._drop_oldest_committed_steps_locked(to_drop)
+      return to_drop
+
+  def advance_consumer(self, consumer_id: str, n: int = 1) -> int:
+    """Advances ``consumer_id``'s cursor by ``n`` committed steps.
+
+    Once every registered consumer has advanced past a step, that step is
+    released from the in-memory ``committed_steps`` list. This is the path by
+    which any downstream consumer (trace writer, aggregator, ...) signals "I
+    am done with the next N committed steps; free their memory if no one else
+    still needs them".
+
+    Args:
+      consumer_id: A consumer previously passed to ``register_consumer``.
+      n: How many committed steps the consumer just finished processing. Must
+        be non-negative. Advancing past the absolute committed-step count is
+        clamped to the current count (so callers don't have to worry about
+        racing with new commits).
+
+    Returns:
+      The number of committed step dicts that were dropped from memory as a
+      result of this call. Zero if some other registered consumer is still
+      behind, or if ``n`` is zero.
 
     Raises:
-      ValueError: If ``n`` is negative.
+      ValueError: If ``n`` is negative or ``consumer_id`` was never
+        registered.
     """
     if n < 0:
       raise ValueError(f"n must be non-negative, got {n}")
-    if n == 0:
-      return []
     with self._lock:
-      n = min(n, len(self._committed_steps))
+      if consumer_id not in self._consumer_cursors:
+        raise ValueError(
+            f"consumer {consumer_id!r} is not registered on timeline"
+            f" {self.id!r}; call register_consumer first."
+        )
       if n == 0:
-        return []
-      dropped = self._committed_steps[:n]
-      # Copy-on-write to preserve the lock-free read invariant on
-      # `committed_steps` (a concurrent reader may still hold a reference to
-      # the previous list).
-      self._committed_steps = self._committed_steps[n:]
-      return dropped
+        return 0
+      max_cursor = self._dropped_step_count + len(self._committed_steps)
+      self._consumer_cursors[consumer_id] = min(
+          self._consumer_cursors[consumer_id] + n, max_cursor
+      )
+      min_cursor = min(self._consumer_cursors.values())
+      to_drop = max(0, min_cursor - self._dropped_step_count)
+      if to_drop == 0:
+        return 0
+      self._drop_oldest_committed_steps_locked(to_drop)
+      return to_drop
+
+  def _drop_oldest_committed_steps_locked(self, n: int) -> None:
+    """Internal: drops the ``n`` oldest committed step dicts.
+
+    Must be called with ``self._lock`` held. ``n`` must be in
+    ``[0, len(self._committed_steps)]``. Uses copy-on-write on
+    ``_committed_steps`` so concurrent lock-free readers iterating a previous
+    snapshot are unaffected.
+    """
+    if n <= 0:
+      return
+    self._committed_steps = self._committed_steps[n:]
+    self._dropped_step_count += n
 
   def __repr__(self) -> str:
     parts = [f"Timeline({self.id}, {self.born:.6f})\n"]

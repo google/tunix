@@ -358,15 +358,6 @@ history.
     less I/O overhead per flush, at the cost of more memory held per
     timeline and a longer in-flight window before history becomes durable.
 
-A per-run override is also available via the environment variable
-**`TUNIX_TRACE_SHARD_STEPS`**. When set to a positive integer, it takes
-precedence over the configured value -- handy for one-off debugging without
-editing the run config:
-
-```bash
-TUNIX_TRACE_SHARD_STEPS=25 python -m tunix.cli.grpo_main --config ...
-```
-
 ### Using Performance Metrics via Code
 
 If you are initializing the `RLCluster` programmatically, you must construct a
@@ -443,8 +434,7 @@ layout and the bundled `perfetto_cat` utility for reassembling shards into a
 single file.
 
 The shard size is configurable via `trace_shard_steps` (default `100`
-committed steps per sealed shard; can also be overridden per-run with the
-`TUNIX_TRACE_SHARD_STEPS` environment variable -- see
+committed steps per sealed shard; see
 [Tuning `trace_shard_steps`](#tuning-trace_shard_steps-v2)).
 
 Note that v2 is still experimental and additional

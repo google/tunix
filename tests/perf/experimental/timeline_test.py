@@ -134,59 +134,149 @@ class TimelineTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "ended at .* before it began"):
       t.stop_span(1.0)
 
-  def test_drop_oldest_committed_steps_basic(self):
-    t = timeline.Timeline("test_tl", 0.0)
+  def _commit_simple_steps(self, tl, n):
+    """Helper: commits ``n`` steps with one span each, returns the span ids."""
     span_ids = []
-    for i in range(5):
-      s = t.start_span(f"span{i}", float(i))
-      t.stop_span(float(i) + 0.1)
+    for i in range(n):
+      s = tl.start_span(f"span{i}", float(i))
+      tl.stop_span(float(i) + 0.1)
       span_ids.append(s.id)
-      t.commit_step()
-    self.assertLen(t.committed_steps, 5)
+      tl.commit_step()
+    return span_ids
 
+  def test_no_consumer_means_no_drops(self):
+    """With no registered consumers, committed_steps grows unboundedly --
+    this preserves the pre-existing behavior for direct timeline users."""
+    t = timeline.Timeline("test_tl", 0.0)
+    self._commit_simple_steps(t, 5)
+    self.assertLen(t.committed_steps, 5)
+    self.assertEqual(t.dropped_step_count, 0)
+
+  def test_single_consumer_drops_after_advance(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    self._commit_simple_steps(t, 5)
+    t.register_consumer("writer", start_at_current_head=False)
     # Snapshot reference before drop to confirm copy-on-write semantics.
     pre_drop_ref = t.committed_steps
 
-    dropped = t.drop_oldest_committed_steps(2)
+    dropped = t.advance_consumer("writer", 2)
+    self.assertEqual(dropped, 2)
+    self.assertLen(t.committed_steps, 3)
+    self.assertEqual(t.dropped_step_count, 2)
+    # The previously captured list is unchanged.
+    self.assertLen(pre_drop_ref, 5)
 
-    with self.subTest("dropped_returned_oldest_first"):
-      self.assertLen(dropped, 2)
-      self.assertIn(span_ids[0], dropped[0])
-      self.assertIn(span_ids[1], dropped[1])
+    # Advancing the remaining 3 drains the rest.
+    dropped = t.advance_consumer("writer", 3)
+    self.assertEqual(dropped, 3)
+    self.assertEmpty(t.committed_steps)
+    self.assertEqual(t.dropped_step_count, 5)
 
-    with self.subTest("post_drop_state"):
-      self.assertLen(t.committed_steps, 3)
-      self.assertIn(span_ids[2], t.committed_steps[0])
-      self.assertIn(span_ids[4], t.committed_steps[-1])
-
-    with self.subTest("copy_on_write_preserves_prior_snapshot"):
-      # The reference captured before the drop must remain unchanged so
-      # concurrent readers iterating the old snapshot are not affected.
-      self.assertLen(pre_drop_ref, 5)
-
-  def test_drop_oldest_committed_steps_zero_is_noop(self):
+  def test_slowest_consumer_pins_memory(self):
+    """When multiple consumers are registered, the slowest one holds memory."""
     t = timeline.Timeline("test_tl", 0.0)
-    t.start_span("s", 1.0)
-    t.stop_span(2.0)
-    t.commit_step()
-    dropped = t.drop_oldest_committed_steps(0)
-    self.assertEmpty(dropped)
-    self.assertLen(t.committed_steps, 1)
+    self._commit_simple_steps(t, 5)
+    t.register_consumer("fast", start_at_current_head=False)
+    t.register_consumer("slow", start_at_current_head=False)
 
-  def test_drop_oldest_committed_steps_more_than_held(self):
-    t = timeline.Timeline("test_tl", 0.0)
-    for _ in range(3):
-      t.start_span("s", 1.0)
-      t.stop_span(2.0)
-      t.commit_step()
-    dropped = t.drop_oldest_committed_steps(10)
-    self.assertLen(dropped, 3)
+    # Fast consumer races ahead; nothing should be dropped because slow is
+    # still at 0.
+    self.assertEqual(t.advance_consumer("fast", 5), 0)
+    self.assertLen(t.committed_steps, 5)
+
+    # Slow consumer advances by 2; min cursor becomes 2 -> drop 2.
+    self.assertEqual(t.advance_consumer("slow", 2), 2)
+    self.assertLen(t.committed_steps, 3)
+    self.assertEqual(t.dropped_step_count, 2)
+
+    # Slow consumer catches up; everything drains.
+    self.assertEqual(t.advance_consumer("slow", 3), 3)
     self.assertEmpty(t.committed_steps)
 
-  def test_drop_oldest_committed_steps_negative_raises(self):
+  def test_unregister_consumer_releases_pinned_memory(self):
+    """A laggard consumer that goes away must not pin memory forever."""
     t = timeline.Timeline("test_tl", 0.0)
+    self._commit_simple_steps(t, 5)
+    t.register_consumer("active", start_at_current_head=False)
+    t.register_consumer("laggard", start_at_current_head=False)
+    # Active races ahead; laggard never moves.
+    self.assertEqual(t.advance_consumer("active", 5), 0)
+    self.assertLen(t.committed_steps, 5)
+
+    # Removing the laggard immediately drops the steps it was pinning.
+    self.assertEqual(t.unregister_consumer("laggard"), 5)
+    self.assertEmpty(t.committed_steps)
+    self.assertEqual(t.dropped_step_count, 5)
+
+  def test_unregister_unknown_consumer_is_noop(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    self.assertEqual(t.unregister_consumer("never_registered"), 0)
+
+  def test_unregister_last_consumer_stops_drops(self):
+    """If the last consumer is removed, the timeline reverts to keep-all."""
+    t = timeline.Timeline("test_tl", 0.0)
+    self._commit_simple_steps(t, 3)
+    t.register_consumer("only", start_at_current_head=False)
+    self.assertEqual(t.advance_consumer("only", 1), 1)
+    t.unregister_consumer("only")
+    # Further commits should accumulate forever -- no consumer left to drop.
+    self._commit_simple_steps(t, 4)
+    self.assertLen(t.committed_steps, 2 + 4)  # 2 leftover + 4 new
+
+  def test_register_with_start_at_current_head_skips_existing(self):
+    """``start_at_current_head=True`` is about *consumer responsibility*, not
+    memory: the late consumer never sees the pre-existing steps as work to
+    process, but those steps still drop from memory as soon as the timeline
+    catches up (here, immediately on registration since no other consumer is
+    holding them)."""
+    t = timeline.Timeline("test_tl", 0.0)
+    self._commit_simple_steps(t, 3)
+    # Pre-existing 3 steps are still in memory (no consumers registered).
+    self.assertLen(t.committed_steps, 3)
+
+    t.register_consumer("late", start_at_current_head=True)
+    # Late consumer's cursor is at the absolute count (3), so without any
+    # advance the min cursor is already 3 -- but drops only fire on advance
+    # or unregister calls, so the 3 are still in memory at this exact point.
+    self.assertLen(t.committed_steps, 3)
+
+    # Commit 2 more; advance by 2 (the late consumer's "new work").
+    self._commit_simple_steps(t, 2)
+    self.assertEqual(t.advance_consumer("late", 2), 5)
+    # All 5 are now released: 3 because the cursor was already past them at
+    # registration, and the new 2 because the cursor just advanced through.
+    self.assertEmpty(t.committed_steps)
+    self.assertEqual(t.dropped_step_count, 5)
+
+  def test_advance_clamps_to_current_max_cursor(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    self._commit_simple_steps(t, 3)
+    t.register_consumer("c", start_at_current_head=False)
+    # Asking to advance past the end is clamped, not an error.
+    self.assertEqual(t.advance_consumer("c", 100), 3)
+    self.assertEmpty(t.committed_steps)
+
+  def test_advance_unknown_consumer_raises(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    with self.assertRaisesRegex(ValueError, "is not registered"):
+      t.advance_consumer("ghost", 1)
+
+  def test_advance_negative_raises(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    t.register_consumer("c")
     with self.assertRaisesRegex(ValueError, "n must be non-negative"):
-      t.drop_oldest_committed_steps(-1)
+      t.advance_consumer("c", -1)
+
+  def test_register_consumer_idempotent(self):
+    t = timeline.Timeline("test_tl", 0.0)
+    self._commit_simple_steps(t, 3)
+    t.register_consumer("c", start_at_current_head=False)
+    self.assertEqual(t.advance_consumer("c", 1), 1)
+    # Re-registering must NOT reset the cursor (which would re-pin the dropped
+    # step and break monotonicity).
+    t.register_consumer("c", start_at_current_head=False)
+    self.assertEqual(t.advance_consumer("c", 2), 2)
+    self.assertEmpty(t.committed_steps)
 
   def test_nested_timeline_with_tags_repr(self):
     born = 1000.0

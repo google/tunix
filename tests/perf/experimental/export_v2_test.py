@@ -81,7 +81,9 @@ class ExportTest(parameterized.TestCase):
         enable_trace_writer=True, trace_dir=trace_dir
     ) as exporter:
       mock_writer_cls.assert_called_once_with(
-          expected_dir, role_to_devices=None, shard_steps=None
+          expected_dir,
+          shard_steps=export._DEFAULT_TRACE_SHARD_STEPS,
+          role_to_devices=None,
       )
       # export_metrics shouldn't crash
       exporter.export_metrics({})
@@ -155,8 +157,8 @@ class ExportTest(parameterized.TestCase):
     }
     mock_writer_cls.assert_called_once_with(
         "/test/dir",
+        shard_steps=export._DEFAULT_TRACE_SHARD_STEPS,
         role_to_devices=expected_role_to_devices,
-        shard_steps=None,
     )
     self.assertIs(exporter._writer, mock_writer_cls.return_value)
 
@@ -179,7 +181,7 @@ class ExportTest(parameterized.TestCase):
           trace_shard_steps=42,
       )
       mock_writer_cls.assert_called_once_with(
-          "/test/dir", role_to_devices={}, shard_steps=42
+          "/test/dir", shard_steps=42, role_to_devices={}
       )
 
   def test_safe_write_exception(self):
@@ -223,7 +225,9 @@ class ExportTest(parameterized.TestCase):
     )
 
     mock_writer_cls.assert_called_once_with(
-        "/test/dir", role_to_devices={}, shard_steps=None
+        "/test/dir",
+        shard_steps=export._DEFAULT_TRACE_SHARD_STEPS,
+        role_to_devices={},
     )
     self.assertIs(exporter._writer, mock_writer_cls.return_value)
 
