@@ -1112,7 +1112,7 @@ class RLCluster:
       actor_trainer_state_on_device = self._is_state_on_device(
           nnx.state(self.actor_trainer.model)
       )
-      if actor_trainer_state_on_device:
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
         self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
         gc.collect()
 
@@ -1151,7 +1151,7 @@ class RLCluster:
       actor_per_token_logps = jnp.concatenate(outs, axis=0)
       del state
       gc.collect()
-      if actor_trainer_state_on_device:
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
         self._put_model_on_memory_kind(
             self.actor_trainer.model, self._default_memory_kind
         )
