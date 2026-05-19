@@ -579,6 +579,7 @@ def main():
       top_p=EVAL_TOP_P,
       top_k=EVAL_TOP_K,
   )
+  os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
   vllm_rollout_kwargs = dict(
       rollout_vllm_model_version=MODEL_ID,
       rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
