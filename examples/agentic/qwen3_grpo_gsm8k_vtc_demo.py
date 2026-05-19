@@ -397,6 +397,9 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]
       "model_download_path": MODEL_DOWNLOAD_DIR,
       "intermediate_ckpt_dir": INTERMEDIATE_CKPT_DIR,
       "model_display": False,
+      "use_flash_attention": True,
+      "flash_attention_block_size": 1024,
+      "dtype": jnp.bfloat16,
   }
   tokenizer_config = {
       "tokenizer_path": MODEL_ID,
@@ -405,7 +408,7 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]
       "add_eos": False,
   }
   reference, tokenizer_path = model_utils.create_model(
-      model_config, tokenizer_config, mesh
+      model_config, tokenizer_config, mesh, dtype=jnp.float32
   )
   reference = put_model_on_device(reference)
   actor = maybe_apply_lora(reference, mesh)
