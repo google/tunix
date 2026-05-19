@@ -615,7 +615,7 @@ class Attention(nnx.Module):
           ),
           rngs=rngs,
           sharding=(None, None, 'fsdp', None)
-          if self.num_kv_heads == 1
+          if self.num_kv_heads in [1, 2]
           else config.shd_config.kv_weight_cndh,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
