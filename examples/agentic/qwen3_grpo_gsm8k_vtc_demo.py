@@ -655,8 +655,6 @@ def main():
           "disable_log_stats": False,
           "enable_prefix_caching": True,
           "max_model_len": KV_CACHE_SIZE,
-          "tpu_rpa_version": 2,
-          "disable_mosaic_attn": True,
       },
   )
   train_rollout_kwargs.update(vllm_rollout_kwargs)

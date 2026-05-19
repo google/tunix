@@ -293,6 +293,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def _build_engine_args(self) -> EngineArgs:
     engine_kwargs = dict(self.args)
     engine_kwargs.setdefault("disable_log_stats", True)
+
+    import os
+    os.environ["VLLM_TPU_RPA_VERSION"] = "2"
+    os.environ["DISABLE_MOSAIC_ATTN"] = "1"
+    
     return EngineArgs(**engine_kwargs)
 
   def _create_driver(self) -> VLLMInProcessDriver:
