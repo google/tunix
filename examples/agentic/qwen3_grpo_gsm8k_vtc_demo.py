@@ -37,6 +37,9 @@ if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
 
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
+os.environ["VLLM_TPU_RPA_VERSION"] = "2" 
+os.environ["DISABLE_MOSAIC_ATTN"] = "1"
+
 import time
 from typing import Any
 
