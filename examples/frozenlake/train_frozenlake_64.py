@@ -674,7 +674,6 @@ grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
-    agent_kwargs={},
     env_class=FrozenLakeEnv,
     env_kwargs={"max_steps": 10},
     algo_config=grpo_config,

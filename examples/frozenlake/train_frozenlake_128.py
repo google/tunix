@@ -117,8 +117,12 @@ arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=150)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
-arg_parser.add_argument("--epsilon", type=float, default=0.2)
-arg_parser.add_argument("--epsilon_high", type=float, default=0.2)
+arg_parser.add_argument("--epsilon", type=float, default=0.003)
+arg_parser.add_argument("--epsilon_high", type=float, default=0.005)
+arg_parser.add_argument(
+    "--loss_algo", type=str, default="gspo-token",
+    help="'grpo' (per-token PPO) or 'gspo-token' (sequence-mean IS).",
+)
 arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
 arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
@@ -132,6 +136,10 @@ arg_parser.add_argument(
 )
 arg_parser.add_argument(
     "--kl_loss_mode", type=str, default="low_var_kl"
+)
+arg_parser.add_argument(
+    "--advantage_estimator", type=str, default="rloo",
+    help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
 args, _ = arg_parser.parse_known_args()
 
@@ -148,7 +156,7 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
-TRAINER_MESH = [(8, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
 REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -187,7 +195,7 @@ EPSILON_HIGH = args.epsilon_high
 # ====== Training ======
 ENABLE_REMAT = True
 ENABLE_FLASH_ATTENTION = True
-ENABLE_MIX_PRECISION = True
+ENABLE_MIX_PRECISION = False
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -218,7 +226,7 @@ WEIGHT_DECAY = args.weight_decay
 # Linearly increase learning rate from 0. to 5e-6 in the first 10% training
 # steps, and then gradually decrease the learning rate to 0 using cosine
 # scheduler.
-WARMUP_STEPS = int(0.1 * MAX_STEPS)
+WARMUP_STEPS = 0
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
@@ -444,7 +452,7 @@ if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
   gemma4_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=jnp.float32
+      MODEL_PATH, config, trainer_mesh, dtype=jnp.bfloat16
   )
   # graph, state = nnx.split(gemma4_ref)
   # trainer_shardings = jax.tree_util.tree_map(
@@ -521,7 +529,7 @@ vllm_rollout_dict = {
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
-    "rollout_vllm_async_scheduling": True,
+    "rollout_vllm_async_scheduling": False,
     "rollout_vllm_init_with_random_weights": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
@@ -533,6 +541,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
+        "dtype": "bfloat16",
     },
 }
 
@@ -580,10 +589,11 @@ grpo_config = GRPOConfig(
     off_policy_steps=OFF_POLICY_STEPS,
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
+    loss_algo=args.loss_algo,
     force_compute_kl=True,
     sampler_is="token",
     sampler_is_threshold=2.0,
-    advantage_estimator="rloo",
+    advantage_estimator=args.advantage_estimator,
 )
 
 # Perf Metrics logging
@@ -641,29 +651,31 @@ def length_penalty_reward_fn(
 
 
 # %%
+
+_metric_call_idx = 0
+
+
 def metric_fn(prompts, completions, rewards, advantages, **kwargs):
   del prompts, completions, advantages, kwargs
+  global _metric_call_idx
+  _metric_call_idx += 1
   solve_all = (rewards > 0.1).all()
   solve_none = (rewards == 0).all()
   solve_partial = (~solve_all) and (~solve_none)
   solve_ratio = (rewards > 0.1).mean()
+  reward_mean = float(rewards.mean())
+  reward_max = float(rewards.max())
+  absl_logging.info(
+      "[rollout-metric] call=%d n=%d solve_ratio=%.3f reward_mean=%.3f"
+      " reward_max=%.3f solve_all=%d solve_none=%d",
+      _metric_call_idx, len(rewards), float(solve_ratio), reward_mean,
+      reward_max, int(solve_all), int(solve_none),
+  )
   return {
-      "rewards/solve_all": (
-          1 if solve_all else 0,
-          np.mean,
-      ),
-      "rewards/solve_none": (
-          1 if solve_none else 0,
-          np.mean,
-      ),
-      "rewards/solve_partial": (
-          1 if solve_partial else 0,
-          np.mean,
-      ),
-      "rewards/solve_ratio": (
-          solve_ratio,
-          np.mean,
-      ),
+      "rewards/solve_all": (1 if solve_all else 0, np.mean),
+      "rewards/solve_none": (1 if solve_none else 0, np.mean),
+      "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
+      "rewards/solve_ratio": (solve_ratio, np.mean),
   }
 
 
@@ -672,8 +684,9 @@ grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
     # reward_fns=[length_penalty_reward_fn],
     agent_class=FrozenLakeAgent,
-    agent_kwargs={},
+    agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,
+    env_kwargs={"max_steps": 10},
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],
