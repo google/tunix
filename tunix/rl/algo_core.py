@@ -471,6 +471,24 @@ def grpo_loss_fn(
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
+  # Per-token diagnostics — log only over assistant tokens (completion_mask).
+  is_ratio_mean = masked_mean(is_ratio, completion_mask)
+  is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
+  is_ratio_min = jnp.min(
+      jnp.where(completion_mask > 0, is_ratio, jnp.inf)
+  )
+  log_ratio_abs_mean = masked_mean(
+      jnp.abs(seq_importance_ratio), completion_mask
+  )
+  pg_loss_1_mean = masked_mean(pg_loss_1, completion_mask)
+  pg_loss_2_mean = masked_mean(pg_loss_2, completion_mask)
+  adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
+  adv_abs_mean = masked_mean(jnp.abs(adv_broadcast), completion_mask)
+  adv_max = jnp.max(jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf))
+  adv_min = jnp.min(jnp.where(completion_mask > 0, adv_broadcast, jnp.inf))
+  nonzero_adv_frac = masked_mean(
+      (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
+  )
   aux = {
       "kl": 0.0,
       "kl_loss": 0.0,
@@ -478,7 +496,26 @@ def grpo_loss_fn(
       "pg_clipfrac": clipped_fraction,
       "ppo_kl": ppo_kl,
       "pg_clipfrac_lower": pg_clipfrac_lower,
+      "is_ratio/mean": is_ratio_mean,
+      "is_ratio/max": is_ratio_max,
+      "is_ratio/min": is_ratio_min,
+      "log_ratio/abs_mean": log_ratio_abs_mean,
+      "pg_loss/unclipped_mean": pg_loss_1_mean,
+      "pg_loss/clipped_mean": pg_loss_2_mean,
+      "advantage/abs_mean": adv_abs_mean,
+      "advantage/max": adv_max,
+      "advantage/min": adv_min,
+      "advantage/nonzero_frac": nonzero_adv_frac,
   }
+  if sampler_is_weights is not None:
+    sis = sampler_is_weights.astype(jnp.float32)
+    aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
+    aux["sampler_is/weight_min"] = jnp.min(
+        jnp.where(completion_mask > 0, sis, jnp.inf)
+    )
+  else:
+    aux["sampler_is/weight_mean"] = jnp.float32(1.0)
+    aux["sampler_is/weight_min"] = jnp.float32(1.0)
   # We do not always compute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
   if train_example.ref_per_token_logps is not None:
@@ -517,7 +554,6 @@ def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
   Returns:
     Group relative advantages.
   """
-  print(f"Rewards before advantage computation: {rewards}")
   mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
   std_grouped_rewards = rewards.reshape(-1, num_generations).std(
       axis=-1, ddof=1

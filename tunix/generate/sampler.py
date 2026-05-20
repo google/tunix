@@ -783,8 +783,10 @@ class Sampler(base_sampler.BaseSampler):
       processed_images = jnp.array(processed_images)
 
     max_tokens_length = max(len(x) for x in tokens)
+    print(f'Max prompt length (in tokens): {max_prompt_length}')
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
+    print(f'Using max_prompt_length={max_prompt_length} for sampling.')
 
     all_input_ids = np.array([
         utils.pad_to_length(

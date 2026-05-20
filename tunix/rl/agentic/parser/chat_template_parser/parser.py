@@ -16,7 +16,6 @@
 
 import abc
 import dataclasses
-from absl import logging
 from typing import Dict, List
 from tunix.utils import token_sanitization
 
@@ -40,6 +39,10 @@ class TokenConfig:
   tool_end_token: str = ""
   tool_response_start_token: str = ""
   tool_response_end_token: str = ""
+  # Separator inserted between consecutive messages by `parse()`. Match what
+  # the model's `apply_chat_template` writes between successive messages so
+  # incremental per-message rendering can be concatenated without a fixup.
+  message_separator: str = ""
 
 
 class BaseChatTemplateParser(ABC):
@@ -50,10 +53,13 @@ class BaseChatTemplateParser(ABC):
     self.enable_thinking = enable_thinking
     self.tokens = self._init_tokens()
     self.generation_prompt = self._init_generation_prompt()
+    # message_separator is a per-turn formatting hint (e.g. "\n"), not a
+    # control token; including it would strip every newline from message
+    # content.
     self._tokens_to_sanitize = {
         v
-        for v in dataclasses.asdict(self.tokens).values()
-        if isinstance(v, str) and v
+        for k, v in dataclasses.asdict(self.tokens).items()
+        if k != "message_separator" and isinstance(v, str) and v
     }
 
   @abstractmethod
@@ -72,18 +78,31 @@ class BaseChatTemplateParser(ABC):
       add_generation_prompt: bool = False,
       is_first_msg: bool = False,
   ) -> str:
-    """Parse messages into chat template format."""
-    result = ""
+    """Parse messages into chat template format.
+
+    When `is_first_msg=False` the call renders a continuation of an existing
+    conversation, so the result is prefixed with `message_separator` to
+    re-introduce the inter-message boundary that the previous turn's eot did
+    not emit. This lets per-message incremental rendering be concatenated
+    directly to prior tokens without external fixups.
+    """
+    parts = []
 
     if is_first_msg:
-      result += self._handle_first_message(messages)
+      first_chunk = self._handle_first_message(messages)
+      if first_chunk:
+        parts.append(first_chunk)
 
     for message in messages:
-      result += self._parse_message(message)
+      parts.append(self._parse_message(message))
 
     if add_generation_prompt:
-      result += self.generation_prompt
+      parts.append(self.generation_prompt)
 
+    sep = self.tokens.message_separator
+    result = sep.join(parts)
+    if not is_first_msg and result:
+      result = sep + result
     return result
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
@@ -135,7 +154,6 @@ class DefaultChatTemplateParser(BaseChatTemplateParser):
   """Default parser using tokenizer's built-in chat template."""
 
   def _init_tokens(self) -> TokenConfig:
-    print(f"self.enable_thinking: {self.enable_thinking}")
     return TokenConfig()
 
   def _init_generation_prompt(self) -> str:
@@ -147,15 +165,9 @@ class DefaultChatTemplateParser(BaseChatTemplateParser):
       add_generation_prompt: bool = False,
       is_first_msg: bool = False,
   ) -> str:
-    prompts = self.tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=add_generation_prompt, enable_thinking=self.enable_thinking,
+    return self.tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=add_generation_prompt
     )
-    logging.log_first_n(
-      logging.INFO,
-      f"Using DefaultChatTemplateParser. Parsed prompt:\n{prompts}\n",
-      10,
-    )
-    return prompts
 
 
 class QwenChatTemplateParser(BaseChatTemplateParser):
@@ -165,7 +177,7 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
     return TokenConfig(
         bos_token=self.tokenizer.bos_token,
         eos_token=self.tokenizer.eos_token,
-        eot_token="<|im_end|>\n",
+        eot_token="<|im_end|>",
         system_token="<|im_start|>system\n",
         user_token="<|im_start|>user\n",
         assistant_token=self._get_assistant_token(),
@@ -173,6 +185,7 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
         tool_end_token="\n</tool_call>",
         tool_response_start_token="<tool_response>\n",
         tool_response_end_token="\n</tool_response>",
+        message_separator="\n",
     )
 
   def _get_assistant_token(self) -> str:
@@ -276,3 +289,41 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
 
   def _init_generation_prompt(self) -> str:
     return self.tokens.assistant_token
+
+
+class Gemma4ChatTemplateParser(BaseChatTemplateParser):
+  """Parser for Gemma4 models."""
+
+  def _init_tokens(self) -> TokenConfig:
+    return TokenConfig(
+        bos_token="<bos>",
+        eos_token="<eos>",
+        eot_token="<turn|>\n",
+        system_token="<|turn>system\n",
+        user_token="<|turn>user\n",
+        assistant_token=self._get_assistant_token(),
+    )
+
+  def _get_assistant_token(self) -> str:
+    token = "<|turn>model\n"
+    if not self.enable_thinking:
+      token += "<|channel>thought\n<channel|>"
+    else:
+      token += "<|channel>thought\n"
+    return token
+
+  def _init_generation_prompt(self) -> str:
+    return self.tokens.assistant_token
+  
+  def _parse_message(self, message: Dict[str, str]) -> str:
+    message = dict(message)
+    content = message.get("content", "")
+    if isinstance(content, str):
+      eot = self.tokens.eot_token.strip()
+      if content.endswith(eot):
+        content = content[:-len(eot)].rstrip()
+      eos = self.tokens.eos_token.strip()
+      if eos and content.endswith(eos):
+        content = content[:-len(eos)].rstrip()
+      message["content"] = content
+    return super()._parse_message(message)

@@ -196,7 +196,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # ``train_steps % eval_every_n_steps == 0`` check would fire at every
     # micro-iteration during an eval boundary, causing the full evaluation
     # rollout to be replayed ``grad_accum_steps`` times for the same step.
-    self._last_eval_train_step = -1
+    # Initialized to 0 (not -1) so the eval-at-step-0 baseline pass is
+    # skipped; it adds ~1-2 min to startup without exercising any trained
+    # weights. Subsequent evals at train_steps == eval_every_n_steps still
+    # fire normally.
+    self._last_eval_train_step = 0
 
     # Sync weights if the actor model and rollout model are not sharing weights.
     self.should_sync_weights = not (
@@ -245,6 +249,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     loop_thread.start()
     self.loop = loop_queue.get()
     self._global_step_start_time = time.time()
+
+    # Per-step reward accumulators populated inside ``_compute_rewards``.
+    # Drained at the global-step boundary to emit a one-line per-step
+    # summary that mirrors what an external metric logger would show.
+    # Each bin keeps at most ``full_batch_size``-worth of recent values
+    # so a producer that races one batch ahead of the consumer does not
+    # double-count.
+    self._train_rewards_window: List[float] = []
+    self._eval_rewards_window: List[float] = []
+    self._rewards_window_lock = threading.Lock()
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
@@ -308,7 +322,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       raise ValueError(f"kwargs already contains mode as a key: {kwargs}")
     kwargs["mode"] = str(mode)
 
-    # print("compute rewards")
     rewards_info = self.reward_manager(
         prompts=prompts,
         completions=completions,
@@ -322,6 +335,25 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.rl_cluster.buffer_metrics_async(
         rewards_info["log_metrics"], mode=mode, step=expected_step
     )
+
+    rewards_array = np.asarray(rewards_info["rewards"])
+    with self._rewards_window_lock:
+      target = (
+          self._train_rewards_window
+          if mode == rl_cluster_lib.Mode.TRAIN
+          else self._eval_rewards_window
+      )
+      target.extend(rewards_array.tolist())
+      # Cap train window at full_batch_size * num_generations (one full step's
+      # worth of per-sequence rewards) to bound the producer-vs-consumer
+      # race: the producer can race up to ``off_policy_steps + 1`` batches
+      # ahead, so without a cap the window would over-count next-step rewards
+      # at the current step's boundary.
+      if mode == rl_cluster_lib.Mode.TRAIN and self._full_batch_size > 0:
+        cap = self._full_batch_size * self.algo_config.num_generations
+        excess = len(target) - cap
+        if excess > 0:
+          del target[:excess]
 
     return rewards_info["rewards"]
 
@@ -384,14 +416,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       A tuple of agent and environment.
     """
 
-    # print(f"{self.algo_config.system_prompt = }, {self.agent_kwargs=}")
     agent = self.agent_class(
         **{"system_prompt": self.algo_config.system_prompt, **self.agent_kwargs}
     )  # if agent_kwargs contains "system_prompt", it will be honored.
 
     assert "group_id" not in self.env_kwargs
     assert "pair_index" not in self.env_kwargs
-    # print (f"{single_example=}")
     env = self.env_class(
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},
@@ -433,7 +463,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
     )
-    jax.block_until_ready(result)
 
     return result
 
@@ -443,8 +472,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         model_call=self._model_call,
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
-        max_response_length=self.algo_config.max_response_length,
         timeout=self.algo_config.episode_timeout,
+        max_response_length=self.algo_config.max_response_length,
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
         perf_v2=self.rl_cluster.perf_v2,
@@ -496,7 +525,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
-            # logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
       else:
@@ -512,7 +540,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for pair_index in range(num_generations)
           ])
           for agent, env in agent_env_pairs:
-            # logging.info("env extra kwargs: {env.extra_kwargs=}")
             yield agent, env
           group_id += 1
 
@@ -621,9 +648,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     async def _iterate_micro_batches():
       async for item in async_queue_iter:
-        # print(f"item = {item}")
         for prompt in self._create_micro_batch_iterator(iter([item]), 1):
-          # print(f"prompt from the item = {prompt}")
           yield prompt
 
     prompt_iterator = _iterate_micro_batches()
@@ -634,13 +659,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           num_generations=self.algo_config.num_generations,
           collect_mode="Token",
       ):
-
-        # snapshot = tracemalloc.take_snapshot()
-        # top_stats = snapshot.statistics('lineno')
-
-        # print("[ Top 10 memory consumers ]")
-        # for stat in top_stats[:10]:
-        #   print(stat)
         try:
           if self._process_in_consumer:
             # Put raw batch (list of trajectories) into queue.
@@ -656,20 +674,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 train_data_queue.put(train_example)
         except Exception as e:
           if not isinstance(e, RuntimeError):
-            # print("Exception in _producer while processing")
             logging.exception(
                 "Exception in _producer while processing batch: %s", e
             )
-          # print("Hererererere?")
           raise
     finally:
       # Signal production is complete for this batch, even if errors occurred.
-      # print("Single production is complete for this batch")
       train_data_queue.put(None)
       # Ensure that any background threads waiting on the prompt queue are
       # unblocked.
       prompt_queue.put(None)
-    # print("Hererererere before returning?")
 
   def _data_consumer_batch_generator(
       self, queue: queue_lib.AbstractDataQueue, batch_size: int
@@ -689,7 +703,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
-    # tracemalloc.start()
     full_batch_iterator = iter(train_dataset)
 
     if self.rl_cluster.global_steps > 0:
@@ -788,7 +801,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self.loop,
     )
 
-    # print("after producing train examples")
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
@@ -803,13 +815,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     micro_batches_since_last_sync = 0
     micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
-    # print(f"micro_batches_per_full_batch = ")
+    did_eval_this_global_step = False
     for train_micro_batch in train_data_gen:
       if (
           self._training_config.max_steps
           and self.rl_cluster.global_steps >= self._training_config.max_steps
       ):
-        # print("Done!!!")
         logging.info(
             "Reached max_steps: %d >= %d",
             self.rl_cluster.global_steps,
@@ -818,7 +829,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         prompt_queue.put(None)
         break
       self._iter_steps += 1
-      print(f"{self._iter_steps=}")
 
       # TODO(tsbao): Re-enable this once off-policy filtering is needed.
       # Filter out examples that are too old (off-policy).
@@ -875,6 +885,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         eval_examples = eval_future.result()
         self._eval_iter_steps += 1
         current_eval_dataset = eval_examples
+        did_eval_this_global_step = True
 
       # --- Training Step ---
       iterations = self._num_iterations() if self._process_in_consumer else 1
@@ -919,17 +930,93 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               chunked_train_micro_batch, current_eval_dataset, skip_jit
           )
 
-      import gc
-      gc.collect()
-
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
       if micro_batches_since_last_sync == micro_batches_per_full_batch:
-        # print("Time to sync weights....")
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
             f" {global_step_time:.2f} seconds."
+        )
+        # One-line per-step diagnostic: raw rewards, solve rate, completion
+        # length, advantage scale, and eval (when an eval just fired this
+        # step). Mirrors the per-iter view a wandb dashboard would show
+        # without depending on the async metric logger pipeline.
+        with self._rewards_window_lock:
+          train_rewards = np.asarray(self._train_rewards_window, dtype=np.float32)
+          eval_rewards = np.asarray(self._eval_rewards_window, dtype=np.float32)
+          self._train_rewards_window.clear()
+          if did_eval_this_global_step:
+            self._eval_rewards_window.clear()
+        adv = np.asarray(merged_train_micro_batch.advantages, dtype=np.float32)
+        cmask = np.asarray(
+            merged_train_micro_batch.completion_mask, dtype=np.float32
+        )
+        compl_len = cmask.sum(axis=-1).mean() if cmask.size else 0.0
+        adv_abs_mean = float(np.abs(adv).mean()) if adv.size else float("nan")
+        train_r_mean = (
+            float(train_rewards.mean()) if train_rewards.size else float("nan")
+        )
+        train_solve = (
+            float((train_rewards > 0.1).mean())
+            if train_rewards.size
+            else float("nan")
+        )
+        if eval_rewards.size and did_eval_this_global_step:
+          eval_r_mean = float(eval_rewards.mean())
+          eval_solve = float((eval_rewards > 0.1).mean())
+          eval_str = (
+              f" eval_reward={eval_r_mean:.3f}"
+              f" eval_solve={eval_solve:.3f}"
+              f" eval_n={eval_rewards.size}"
+          )
+        else:
+          eval_str = ""
+        # Best-effort read of trainer-side per-step metrics (grad_norm,
+        # pg_loss, entropy, kl) directly from the actor trainer's metric
+        # buffer so they appear in the per-step absl log alongside the
+        # rollout metrics, independently of any external metric logger.
+        trainer_str = ""
+        try:
+          actor_trainer = self.rl_cluster.actor_trainer
+          trainer_buf = (
+              getattr(actor_trainer, "_prev_buffered_train_metrics", None)
+              or getattr(actor_trainer, "_buffered_train_metrics", None)
+          )
+          if trainer_buf is not None:
+            extras = []
+            if trainer_buf.losses:
+              extras.append(f"loss={float(trainer_buf.loss):.4f}")
+            am = trainer_buf.additional_metrics
+            for key, label in (
+                ("grad_norm", "grad_norm"),
+                ("pg_loss", "pg_loss"),
+                ("entropy", "entropy"),
+                ("kl", "kl"),
+                ("log_ratio/abs_mean", "log_ratio_abs"),
+                ("pg_clipfrac", "clipfrac"),
+            ):
+              if key in am:
+                vals, _ = am[key]
+                if vals:
+                  v = float(np.mean([np.asarray(x) for x in vals]))
+                  extras.append(f"{label}={v:.4f}")
+            if extras:
+              trainer_str = " " + " ".join(extras)
+        except Exception as e:  # pylint: disable=broad-except
+          logging.debug("Failed to read trainer buffered metrics: %s", e)
+        logging.info(
+            "[step %d] train_reward=%.3f train_solve=%.3f n=%d"
+            " adv_abs_mean=%.3f compl_len=%.1f time=%.1fs%s%s",
+            self.rl_cluster.global_steps,
+            train_r_mean,
+            train_solve,
+            int(train_rewards.size),
+            adv_abs_mean,
+            float(compl_len),
+            global_step_time,
+            trainer_str,
+            eval_str,
         )
         self.rl_cluster.buffer_metrics_async(
             {"perf/global_step_time": (global_step_time, np.mean)},
@@ -970,7 +1057,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             logging.info("Sync lock released.")
         else:
           self.rl_cluster.global_steps += 1
-          # print(f"global steps: {self.rl_cluster.global_steps}")
           try:
             with self.rl_cluster.perf_v2.span(
                 perf_constants.DATA_LOADING,
@@ -988,6 +1074,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             mode=rl_cluster_lib.Mode.TRAIN,
         )
         micro_batches_since_last_sync = 0
+        did_eval_this_global_step = False
         self._global_step_start_time = time.time()
 
     _ = producer_future.result()
@@ -1009,7 +1096,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       batch: The batch of prompts (TrainingInputT).
     """
     current_batch_size = len(next(iter(batch.values())))
-    # print("_put_prompts_to_queue...")
     if (
         self._training_config.max_steps
         and self.rl_cluster.global_steps >= self._training_config.max_steps

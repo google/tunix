@@ -108,23 +108,23 @@ except Exception as e:
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train FrozenLake parameters")
-arg_parser.add_argument("--batch_size", type=int, default=32)
-arg_parser.add_argument("--mini_batch_size", type=int, default=32)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
-arg_parser.add_argument("--b2", type=float, default=0.99)
-arg_parser.add_argument("--weight_decay", type=float, default=0.01)
+arg_parser.add_argument("--b2", type=float, default=0.95)
+arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=150)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
-arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
+arg_parser.add_argument("--epsilon_high", type=float, default=0.2)
 arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
 arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
 arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=128)
+arg_parser.add_argument("--max_concurrency", type=int, default=512)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=123)
 arg_parser.add_argument(
@@ -148,7 +148,7 @@ TRAIN_WITH_LORA = False
 
 # ====== Sharding ======
 ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
-TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 4), ("fsdp", "tp")]
 REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -166,11 +166,11 @@ TOP_K = args.top_k
 NUM_GENERATIONS = args.num_generations
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 128
+VLLM_MAX_NUM_SEQS = 512
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -187,7 +187,7 @@ EPSILON_HIGH = args.epsilon_high
 # ====== Training ======
 ENABLE_REMAT = True
 ENABLE_FLASH_ATTENTION = True
-ENABLE_MIX_PRECISION = False
+ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -222,7 +222,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.3
+MAX_GRAD_NORM = 100.0
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -444,7 +444,7 @@ if TRAIN_WITH_LORA:
   gemma4_actor = get_lora_model(gemma4_ref, trainer_mesh)
 else:
   gemma4_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
+      MODEL_PATH, config, trainer_mesh, dtype=jnp.float32
   )
   # graph, state = nnx.split(gemma4_ref)
   # trainer_shardings = jax.tree_util.tree_map(
@@ -581,6 +581,9 @@ grpo_config = GRPOConfig(
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
     force_compute_kl=True,
+    sampler_is="token",
+    sampler_is_threshold=2.0,
+    advantage_estimator="rloo",
 )
 
 # Perf Metrics logging

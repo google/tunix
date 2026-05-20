@@ -600,7 +600,7 @@ class Attention(nnx.Module):
               self.head_dim,
           ),
           rngs=rngs,
-          sharding=config.shd_config.q_weight_ndh,
+          sharding=config.shd_config.q_weight_ndh if self.num_kv_heads > 2 else (None, "fsdp", None),
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
@@ -615,7 +615,7 @@ class Attention(nnx.Module):
           ),
           rngs=rngs,
           sharding=(None, None, 'fsdp', None)
-          if self.num_kv_heads == 1
+          if self.num_kv_heads in [1, 2]
           else config.shd_config.kv_weight_cndh,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
@@ -832,17 +832,6 @@ class Attention(nnx.Module):
       return self.block(
           x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
       )
-    if (
-        self.config.remat_config == RematConfig.BLOCK
-        or self.config.remat_config == RematConfig.BLOCK.value
-    ):
-      return nnx.remat(self.block.__func__)(
-          self, x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
-      )
-    else:
-      return self.block(
-          x, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
-      )
 
 
 
@@ -921,16 +910,6 @@ class FeedForward(nnx.Module):
 
   def block(self, x):
     return self.down_proj(nnx.gelu(self.gate_proj(x)) * self.up_proj(x))
-
-  def __call__(self, x):
-    if (
-        self.config.remat_config == RematConfig.BLOCK
-        or self.config.remat_config == RematConfig.BLOCK.value
-    ):
-      return nnx.remat(self.block.__func__)(self, x)
-    else:
-      return self.block(x)
-
 
   def __call__(self, x):
     if (

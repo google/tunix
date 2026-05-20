@@ -1,3 +1,4 @@
+
 # %%
 
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
@@ -118,7 +119,7 @@ arg_parser.add_argument("--num_batches", type=int, default=150)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
-arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
+arg_parser.add_argument("--epsilon_high", type=float, default=0.22)
 arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
 arg_parser.add_argument("--max_response_length", type=int, default=2048)
 arg_parser.add_argument("--temperature", type=float, default=0.7)
@@ -222,7 +223,7 @@ WARMUP_STEPS = int(0.1 * MAX_STEPS)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 0.3
+MAX_GRAD_NORM = 100
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 5
@@ -365,7 +366,7 @@ def create_datasets(
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 
-chat_parser = parser.DefaultChatTemplateParser(tokenizer)
+chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
 
 # %%
 train_dataset, test_dataset = create_datasets()
@@ -521,7 +522,7 @@ vllm_rollout_dict = {
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,
-    "rollout_vllm_async_scheduling": True,
+    "rollout_vllm_async_scheduling": False,
     "rollout_vllm_init_with_random_weights": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
@@ -533,6 +534,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
+        "dtype": "bfloat16",
     },
 }
 
@@ -581,7 +583,9 @@ grpo_config = GRPOConfig(
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
     force_compute_kl=True,
-    degenerate_group_masking=False,
+    sampler_is="token",
+    sampler_is_threshold=2.0,
+    advantage_estimator="rloo",
 )
 
 # Perf Metrics logging
@@ -668,10 +672,11 @@ def metric_fn(prompts, completions, rewards, advantages, **kwargs):
 # GRPO Trainer
 grpo_trainer = GRPOLearner(
     rl_cluster=rl_cluster,
-    # reward_fns=[length_penalty_reward_fn],
     agent_class=FrozenLakeAgent,
+    agent_kwargs={"use_multistep_prompt": True},
     agent_kwargs={},
     env_class=FrozenLakeEnv,
+    env_kwargs={"max_steps": 10},
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],

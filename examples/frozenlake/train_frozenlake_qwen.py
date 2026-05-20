@@ -100,8 +100,8 @@ arg_parser.add_argument("--batch_size", type=int, default=16)
 arg_parser.add_argument("--mini_batch_size", type=int, default=16)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
-arg_parser.add_argument("--b2", type=float, default=0.999)
-arg_parser.add_argument("--weight_decay", type=float, default=0.01)
+arg_parser.add_argument("--b2", type=float, default=0.95)
+arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=5)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
@@ -364,6 +364,8 @@ def create_datasets(
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 
 chat_parser = parser.QwenChatTemplateParser(tokenizer, enable_thinking=False)
+print("Tokenizer and chat parser initialized.")
+print(f"chat_parser generation prompt: {chat_parser.generation_prompt}")
 
 # %%
 train_dataset, test_dataset = create_datasets()
@@ -389,7 +391,7 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage("Done with loading datasets")
 
 # %%
-config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
+config = qwen3_model_lib.ModelConfig.qwen3_8b()
 if ENABLE_REMAT:
   config.remat_config = qwen3_model_lib.RematConfig.DECODER
 # if ENABLE_FLASH_ATTENTION:
@@ -480,7 +482,7 @@ base_rollout_dict = {
 vllm_rollout_dict = {
     # vllm-tpu specific configs
     "rollout_vllm_model_version": MODEL_VERSION,
-    "rollout_vllm_hbm_utilization": 0.7,
+    "rollout_vllm_hbm_utilization": 0.3,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_enable_dp_attention": True,

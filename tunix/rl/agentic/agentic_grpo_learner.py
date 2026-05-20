@@ -264,6 +264,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
         "kl_loss": np.mean,
+        "is_ratio/mean": np.mean,
+        "is_ratio/max": np.max,
+        "is_ratio/min": np.min,
+        "log_ratio/abs_mean": np.mean,
+        "pg_loss/unclipped_mean": np.mean,
+        "pg_loss/clipped_mean": np.mean,
+        "advantage/abs_mean": np.mean,
+        "advantage/max": np.max,
+        "advantage/min": np.min,
+        "advantage/nonzero_frac": np.mean,
+        "sampler_is/weight_mean": np.mean,
+        "sampler_is/weight_min": np.min,
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl"
