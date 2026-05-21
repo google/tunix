@@ -1,37 +1,12 @@
 """Agentic FrozenLake GRPO recipe for Qwen3-8B on a single TPU host.
 
-Designed for v5p-8 / v6e-4 -class hosts where actor, reference, and rollout
-share a single mesh. Configuration is env-driven so the same image runs
-unchanged on any spot VM:
-
-  HF_TOKEN              Hugging Face token for model download.
-  WANDB_API_KEY         Wandb API key (auto-picked-up by wandb lib).
-  WANDB_PROJECT         Wandb project name (default "tunix-frozenlake").
-  WANDB_RUN_NAME        Wandb run name (default uses timestamp).
-  MODEL_DOWNLOAD_DIR    Local dir for HF safetensors (default
-                        /tmp/models/Qwen3-8B).
-  DATA_DIR              Local or gs:// dir holding train.parquet / test.parquet
-                        (default gs://tunix/data/Frozenlake).
-  CKPT_DIR              Output checkpoint dir. Checkpointing is opt-in; if
-                        unset, no checkpoints are written.
-  TB_LOG_DIR            TensorBoard log dir (default /tmp/tunix-tb/frozenlake).
-  SHARED_MESH_SHAPE     Override the (fsdp, tp) mesh shape. Defaults to
-                        (1, jax.device_count()) (pure tensor parallel).
-  ROLLOUT_ENGINE        "vanilla" | "vllm"  (default "vllm" — the disaggregated
-                        vLLM server avoids the trace-context issues of running
-                        the in-process sampler under REMAT and offers higher
-                        throughput at full concurrency).
-  MODEL_DTYPE           "bf16" (default) | "fp32" — storage/compute dtype for
-                        the reference policy and trainer forward path.
-  MIX_PRECISION         "1" (default) | "0" — when 0, runs the model in fp32
-                        end-to-end (set together with MODEL_DTYPE=fp32).
-  FLASH_ATTN            "1" (default) | "0" — splash flash attention kernel.
-  TRAIN_MICRO_BS        Trainer forward+backward micro-batch (default 4).
-  COMPUTE_LOGPS_MICRO_BS  Logp recomputation micro-batch (default 4).
+Targets v5p-8 / v6e-4 -class hosts where actor, reference, and rollout share
+a single mesh. Hyperparameters are exposed via argparse; the rollout backend
+is selected via the ``ROLLOUT_ENGINE`` environment variable ("vllm" or
+"vanilla", default "vllm").
 """
 
 import contextlib
-import datetime
 import logging
 import math
 import os
@@ -167,14 +142,10 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-# Default: v5p-8 → 8 chips, pure TP (fsdp=1) because rollout sampler prefills
-# batch=1 sequences and fsdp>1 + splash kernel mismatch.
-# Override SHARED_MESH_SHAPE via env for other slice sizes (e.g. v6e-4 → 1,4).
-_mesh_env = os.getenv("SHARED_MESH_SHAPE")
-if _mesh_env:
-  SHARED_MESH_SHAPE = tuple(int(x) for x in _mesh_env.split(","))
-else:
-  SHARED_MESH_SHAPE = (1, jax.device_count())
+# Single shared mesh across actor / reference / rollout. Pure tensor-parallel
+# (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
+# fsdp axis.
+SHARED_MESH_SHAPE = (1, jax.device_count())
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
@@ -209,8 +180,8 @@ ENABLE_REMAT = True
 # in via per-position segment ids. The model now plumbs segment ids derived
 # from the non-pad mask into splash, so left-padded prompts no longer
 # contaminate real-token attention outputs.
-ENABLE_FLASH_ATTENTION = os.environ.get("FLASH_ATTN", "1") not in ("0", "false", "False")
-ENABLE_MIX_PRECISION = os.environ.get("MIX_PRECISION", "1") not in ("0", "false", "False")
+ENABLE_FLASH_ATTENTION = True
+ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -227,9 +198,7 @@ MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
 MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
-MODEL_DTYPE = {"bf16": jnp.bfloat16, "bfloat16": jnp.bfloat16, "fp32": jnp.float32, "float32": jnp.float32}[
-    os.environ.get("MODEL_DTYPE", "bf16").lower()
-]
+MODEL_DTYPE = jnp.bfloat16
 
 LEARNING_RATE = args.learning_rate
 B1 = args.b1
@@ -256,17 +225,14 @@ MAX_TO_KEEP = 1
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 
-# ====== Paths (env-driven so the same image runs anywhere) ======
+# ====== Paths ======
 MODEL_VERSION = "Qwen/Qwen3-8B"
-MODEL_DOWNLOAD_DIR = os.getenv("MODEL_DOWNLOAD_DIR", "/tmp/models/Qwen3-8B")
-DATA_DIR = os.getenv("DATA_DIR", "/tmp/data/frozenlake")
+MODEL_DOWNLOAD_DIR = "/tmp/models/Qwen3-8B"
+DATA_DIR = "/tmp/data/frozenlake"
 
-now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-# Checkpointing is opt-in: set CKPT_DIR to enable, otherwise nothing is written.
-# Orbax's CheckpointManager force-saves the first step regardless of the
-# configured save_interval_steps, so a large interval alone does not disable it.
-CKPT_DIR = os.getenv("CKPT_DIR") or None
-TB_LOG_DIR = os.getenv("TB_LOG_DIR", "/tmp/tunix-tb/frozenlake")
+# Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
+CKPT_DIR = None
+TB_LOG_DIR = "/tmp/tunix-tb/frozenlake"
 
 
 # ====== Build the single shared mesh ======
@@ -405,15 +371,11 @@ wandb_config.update({
     "model_id": MODEL_VERSION,
     "mesh_shape": SHARED_MESH_SHAPE,
 })
-wandb_kwargs = {"config": wandb_config}
-# Tunix's WandbBackend already forwards project_name+run_name; don't put `name`
-# in wandb_kwargs (would collide with `name=run_name` kwarg in metrics_logger).
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=TB_LOG_DIR,
-    project_name=os.getenv("WANDB_PROJECT", "tunix-frozenlake"),
-    run_name=os.getenv("WANDB_RUN_NAME", ""),
+    project_name="tunix-frozenlake",
     flush_every_n_steps=1,
-    backend_kwargs={"wandb": wandb_kwargs},
+    backend_kwargs={"wandb": {"config": wandb_config}},
 )
 
 optimizer = optax.adamw(
@@ -450,7 +412,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": float(os.environ.get("VLLM_HBM_UTIL", "0.20")),
+    "rollout_vllm_hbm_utilization": 0.20,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -506,8 +468,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # dominant allocation on small TPU slices) at the cost of more
         # micro-step launches per optimizer update. It does NOT change the
         # effective optimizer batch size or training dynamics.
-        train_micro_batch_size=int(os.environ.get("TRAIN_MICRO_BS", 4)),
-        compute_logps_micro_batch_size=int(os.environ.get("COMPUTE_LOGPS_MICRO_BS", 4)),
+        train_micro_batch_size=4,
+        compute_logps_micro_batch_size=4,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
