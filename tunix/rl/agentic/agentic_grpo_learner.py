@@ -210,11 +210,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         metrics_logger_options.log_dir if metrics_logger_options else None
     )
 
-    if metrics_log_dir:
-      self._trajectory_logger = trajectory_logger.AsyncTrajectoryLogger(
-          metrics_log_dir
-      )
-    else:
+    self._trajectory_logger = (
+        trajectory_logger.AsyncTrajectoryLogger.from_config(
+            log_dir=metrics_log_dir,
+            config=algo_config,
+        )
+    )
+    if not self._trajectory_logger.has_backends:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
     self.algo_config.temperature = self.rl_cluster.get_rollout_config(
@@ -334,6 +336,30 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if self._trajectory_logger and trajectories_to_log:
       for traj in trajectories_to_log:
         self._trajectory_logger.log_item_async(traj)
+      messages_list = []
+      metadata_list = []
+      for trajectory_index, traj in enumerate(trajectories_to_log):
+        messages = traj.get("conversation_text") or []
+        if not messages:
+          continue
+        messages_list.append(messages)
+        metadata_list.append({
+            "trajectory_index": trajectory_index,
+            "trajectory_reward": traj.get("trajectory_reward"),
+            "status": traj.get("status"),
+            "policy_version": traj.get("policy_version"),
+        })
+      self._trajectory_logger.log_messages(
+          messages_list=messages_list,
+          mode=mode,
+          step=self.rl_cluster.global_steps,
+          metadata_list=metadata_list,
+          metadata={
+              "algorithm": self.algo_config.algo_variant,
+              "num_generations": self.algo_config.num_generations,
+          },
+          trace_key="agentic/trajectories",
+      )
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_cluster.cluster_config.rollout_config
