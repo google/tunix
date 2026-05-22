@@ -1,0 +1,100 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+model_config:
+  rng_seed: 42
+  model_display: false
+  remat_config: 3
+
+actor_model_config:
+  mesh:
+    shape: "(8,1)"
+    axis_names: "('fsdp','tp')"
+
+rollout_model_config:
+  mesh:
+    shape: "(1,8)"
+    axis_names: "('fsdp','tp')"
+
+reference_model_config:
+  mesh: null
+  same_mesh_as: "actor"
+
+data_source: "huggingface"
+dataset_name: "openai/gsm8k:main"
+prompt_key: "question"
+
+training_mode: "agentic_grpo"
+num_test_batches: 100
+reward_functions:
+  - "tunix/cli/reward_fn/gsm8k.py"
+verl_compatible: false
+
+rollout_engine: "vllm"
+offload_to_cpu: false
+
+rollout_config:
+  max_prompt_length: 256
+  total_generation_steps: 768
+  max_tokens_to_generate: 768
+  temperature: 0.9
+  top_p: 1.0
+  top_k: 50
+  return_logprobs: true
+
+vllm_config:
+  hbm_utilization: 0.4
+  tpu_backend_type: "jax"
+  server_mode: true
+  async_scheduling: true
+  kwargs:
+    kv_cache_metrics: true
+    disable_log_stats: false
+    enable_prefix_caching: true
+
+chat_parser_config:
+  type: "qwen"
+
+tokenizer_config:
+  tokenizer_type: "huggingface"
+  add_bos: false
+  add_eos: false
+
+agentic_grpo_config:
+  num_iterations: 1
+  beta: 0.08
+  epsilon: 0.2
+  system_prompt: "You are given a grade school math problem. Think step by step and respond using <reasoning>...</reasoning> followed by <answer>...</answer> with only the final numeric answer inside <answer>."
+  max_concurrency: 128
+  max_response_length: 768
+  max_turns: 1
+
+rl_training_config:
+  actor_optimizer_config:
+    opt_type: "adamw"
+    learning_rate: 3e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    peak_value: 3e-6
+    end_value: 0.0
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.1
+    max_grad_norm: 0.1
+  eval_every_n_steps: 10
+  checkpointing_options:
+    save_interval_steps: 250
+    max_to_keep: 4
+  metrics_logging_options:
+    flush_every_n_steps: 20
