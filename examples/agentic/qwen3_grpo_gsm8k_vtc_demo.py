@@ -31,9 +31,12 @@ import os
 import re
 import sys
 
+
 # Disable pathways subslice check by appending it to sys.argv before JAX/absl parse it.
 if "--pathways_enforce_subset_devices_form_subslice=false" not in sys.argv:
   sys.argv.append("--pathways_enforce_subset_devices_form_subslice=false")
+if "--xla_tpu_use_enhanced_launch_barrier=false" not in sys.argv:
+  sys.argv.append("--xla_tpu_use_enhanced_launch_barrier=false")
 
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
@@ -42,8 +45,6 @@ os.environ["DISABLE_MOSAIC_ATTN"] = "1"
 
 import time
 from typing import Any
-
-from absl import flags
 
 try:
   import importlib_resources  # pytype: disable=import-error  # noqa: F401
@@ -81,20 +82,8 @@ else:
 tunix_root = os.path.join(workspace_root, "tunix")
 pathways_root = os.path.join(workspace_root, "pathways-utils")
 r2egym_root = os.path.join(workspace_root, "r2egym")
-tpu_inference_roots = [
-    os.path.join(workspace_root, "tpu-inference"),
-    os.path.join(os.path.dirname(workspace_root), "tpu-inference"),
-    os.path.join(REPO_ROOT, "tpu-inference"),
-]
 
-for root in [
-    REPO_ROOT,
-    workspace_root,
-    tunix_root,
-    pathways_root,
-    r2egym_root,
-    *tpu_inference_roots,
-]:
+for root in [REPO_ROOT, workspace_root, tunix_root, pathways_root, r2egym_root]:
   if root not in sys.path:
     sys.path.insert(0, root)
 
@@ -107,119 +96,6 @@ except ImportError:
 
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
-
-
-def patch_vtc_rpa_block_sizes() -> None:
-  """Keep the VTC demo off a Mosaic reshape layout that fails on TPU."""
-  try:
-    from tpu_inference.layers.common import attention_interface
-  except ImportError:
-    return
-
-  if getattr(attention_interface, "_vtc_rpa_block_size_patch", False):
-    return
-
-  def sharded_ragged_paged_attention(
-      mesh,
-      q,
-      k,
-      v,
-      kv_cache,
-      kv_lens,
-      page_indices,
-      cu_q_lens,
-      distribution,
-      attention_sink,
-      sm_scale,
-      attention_chunk_size=None,
-      q_scale=None,
-      k_scale=None,
-      v_scale=None,
-  ):
-    if attention_interface.ShardingAxisName.ATTN_HEAD in mesh.shape:
-      tp_size = mesh.shape[attention_interface.ShardingAxisName.ATTN_HEAD]
-      num_kv_heads = k.shape[1]
-      if num_kv_heads < tp_size:
-        if tp_size % num_kv_heads != 0:
-          raise ValueError(
-              f"For GQA/MQA, tp_size {tp_size} must be divisible by"
-              f" num_kv_heads {num_kv_heads}"
-          )
-        factor = tp_size // num_kv_heads
-        k = jnp.repeat(k, factor, axis=1)
-        v = jnp.repeat(v, factor, axis=1)
-
-    qkv_spec = attention_interface.P(
-        attention_interface.ShardingAxisName.ATTN_DATA,
-        attention_interface.ShardingAxisName.ATTN_HEAD,
-        None,
-    )
-    kv_cache_spec = attention_interface.P(
-        attention_interface.ShardingAxisName.ATTN_DATA,
-        None,
-        attention_interface.ShardingAxisName.ATTN_HEAD,
-        None,
-        None,
-    )
-    in_specs = (
-        qkv_spec,
-        qkv_spec,
-        qkv_spec,
-        kv_cache_spec,
-        attention_interface.P(attention_interface.ShardingAxisName.ATTN_DATA),
-        attention_interface.P(attention_interface.ShardingAxisName.ATTN_DATA),
-        attention_interface.P(attention_interface.ShardingAxisName.ATTN_DATA),
-        attention_interface.P(attention_interface.ShardingAxisName.ATTN_DATA),
-    )
-    out_specs = (qkv_spec, kv_cache_spec)
-    args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
-
-    use_hd64 = q.shape[-1] == 64
-    func = (
-        attention_interface.ragged_paged_attention_hd64
-        if use_hd64
-        else attention_interface.ragged_paged_attention
-    )
-    if attention_sink is not None:
-      if not use_hd64:
-        raise NotImplementedError(
-            "Attention sink support is only available when head_dim==64"
-        )
-      in_specs += (
-          attention_interface.P(attention_interface.ShardingAxisName.ATTN_HEAD),
-      )
-      args += (attention_sink,)
-
-    def _ragged_paged_attention(*args):
-      max_num_tokens = q.shape[0]
-      max_num_seqs = kv_lens.shape[0]
-      pages_per_seq = page_indices.shape[0] // max_num_seqs
-      return func(
-          *args,
-          sm_scale=sm_scale,
-          sliding_window=attention_chunk_size,
-          num_kv_pages_per_block=min(pages_per_seq, 4),
-          num_queries_per_block=min(max_num_tokens, 4),
-          q_scale=q_scale,
-          k_scale=k_scale,
-          v_scale=v_scale,
-      )
-
-    return jax.shard_map(
-        _ragged_paged_attention,
-        mesh=mesh,
-        in_specs=in_specs,
-        out_specs=out_specs,
-        check_vma=False,
-    )(*args)
-
-  attention_interface.sharded_ragged_paged_attention = (
-      sharded_ragged_paged_attention
-  )
-  attention_interface._vtc_rpa_block_size_patch = True
-
-
-patch_vtc_rpa_block_sizes()
 
 from tunix.cli.utils import model as model_utils
 from tunix.models.automodel import call_model_config
@@ -649,10 +525,6 @@ def main():
 
   config = call_model_config(MODEL_NAME)
   devices = jax.devices()
-  try:
-    flags.FLAGS.xla_tpu_use_enhanced_launch_barrier = False
-  except Exception:
-    pass
   total_devices = len(devices)
 
   if args.rollout_split_fraction == 1.0:
