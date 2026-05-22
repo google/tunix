@@ -141,6 +141,7 @@ MAX_INPUT_SEQUENCE_LENGTH = 1024
 MAX_NEW_TOKENS = 1024
 MAX_PROMPT_LENGTH = MAX_INPUT_SEQUENCE_LENGTH
 MAX_GENERATION_LENGTH = MAX_NEW_TOKENS
+KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS + 256
 DEFAULT_VLLM_HBM_UTILIZATION = 0.6
 DEFAULT_VLLM_MAX_NUM_SEQS = 8
 DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 65536
@@ -157,19 +158,6 @@ EVAL_TOP_K = 1
 USE_LORA = False
 LORA_RANK = 64
 LORA_ALPHA = 64.0
-
-
-def get_tpu_friendly_kv_cache_size(
-    max_prompt_length: int, max_generation_length: int
-) -> int:
-  """Rounds vLLM max_model_len away from Mosaic-unfriendly page layouts."""
-  requested_size = max_prompt_length + max_generation_length + 256
-  return 1 << (requested_size - 1).bit_length()
-
-
-KV_CACHE_SIZE = get_tpu_friendly_kv_cache_size(
-    MAX_INPUT_SEQUENCE_LENGTH, MAX_NEW_TOKENS
-)
 
 ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_vtc")
 TFDS_DATA_DIR = os.path.join(ARTIFACT_ROOT, "data")
@@ -518,9 +506,7 @@ def main():
   TRAIN_MICRO_BATCH_SIZE = args.train_micro_batch_size
   MAX_NEW_TOKENS = args.max_response_length
   MAX_GENERATION_LENGTH = args.max_response_length
-  KV_CACHE_SIZE = get_tpu_friendly_kv_cache_size(
-      MAX_INPUT_SEQUENCE_LENGTH, MAX_NEW_TOKENS
-  )
+  KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS + 256
 
   config = call_model_config(MODEL_NAME)
   devices = jax.devices()
