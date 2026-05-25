@@ -413,21 +413,48 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
           mode=mode,
       )
 
+    agg_prompt_mask = np.asarray(jax.device_get(prompt_mask.sum(axis=-1)))
+    self.rl_cluster.buffer_metrics(
+        {
+            "generation/prompts/mean_length": (
+                agg_prompt_mask,
+                np.mean,
+            ),
+            "generation/prompts/max_length": (
+                agg_prompt_mask,
+                np.max,
+            ),
+            "generation/prompts/min_length": (
+                agg_prompt_mask,
+                np.min,
+            ),
+            "generation/prompts/total_tokens": (
+                agg_prompt_mask,
+                np.sum,
+            ),
+        },
+        mode=mode,
+    )
+
     # Log completion lengths.
     agg_completion_mask = completion_mask.sum(axis=-1)
     self.rl_cluster.buffer_metrics(
         {
             "generation/completions/mean_length": (
-                np.mean(agg_completion_mask),
+          agg_completion_mask,
                 np.mean,
             ),
             "generation/completions/max_length": (
-                np.max(agg_completion_mask),
+          agg_completion_mask,
                 np.max,
             ),
             "generation/completions/min_length": (
-                np.min(agg_completion_mask),
+          agg_completion_mask,
                 np.min,
+            ),
+            "generation/completions/total_tokens": (
+          agg_completion_mask,
+              np.sum,
             ),
         },
         mode=mode,

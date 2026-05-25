@@ -255,6 +255,30 @@ class RlClusterTest(parameterized.TestCase):
             eval_every_n_steps=1,
         )
 
+  def test_log_metrics_derives_token_throughput(self):
+    rl_cluster = rl_cluster_lib.RLCluster.__new__(rl_cluster_lib.RLCluster)
+    rl_cluster._rl_metrics_logger = mock.Mock()
+    rl_cluster._external_metrics_logger = None
+
+    metrics_buffer = rl_cluster_lib.MetricsBuffer(global_steps=3, mode='train')
+    metrics_buffer.metrics = {
+        'perf/global_step_time': ([2.0], None),
+        'generation/prompts/total_tokens': ([100.0, 50.0], np.sum),
+        'generation/completions/total_tokens': ([80.0, 20.0], np.sum),
+    }
+
+    rl_cluster._log_metrics(metrics_buffer)
+
+    logged_metrics = {
+        (call.args[0], call.args[1]): float(call.args[2])
+        for call in rl_cluster._rl_metrics_logger.log.call_args_list
+    }
+
+    self.assertEqual(logged_metrics[('perf', 'global_step_time')], 2.0)
+    self.assertEqual(logged_metrics[('perf', 'input_tokens_per_sec')], 75.0)
+    self.assertEqual(logged_metrics[('perf', 'output_tokens_per_sec')], 50.0)
+    self.assertEqual(logged_metrics[('perf', 'total_tokens_per_sec')], 125.0)
+
   def test_generate_with_chat_template(self):  # pylint: disable=g-doc-args
     mesh = Mesh(
         np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp')

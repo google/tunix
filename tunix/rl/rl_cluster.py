@@ -699,6 +699,8 @@ class RLCluster:
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
+    aggregated_metrics = {}
+
     for metric_name, (value, op) in metrics_buffer.metrics.items():
       # Convert to numpy array immediately.
       # This handles nested lists, mixed types, and JAX arrays automatically.
@@ -732,6 +734,32 @@ class RLCluster:
         if agg_value.size > 0:
           agg_value = op(agg_value)
 
+      aggregated_metrics[metric_name] = agg_value
+
+    global_step_time = aggregated_metrics.get("perf/global_step_time")
+    input_token_count = aggregated_metrics.get("generation/prompts/total_tokens")
+    output_token_count = aggregated_metrics.get(
+        "generation/completions/total_tokens"
+    )
+
+    if global_step_time is not None:
+      global_step_time = float(global_step_time)
+      if global_step_time > 0:
+        if input_token_count is not None:
+          aggregated_metrics["perf/input_tokens_per_sec"] = (
+              float(input_token_count) / global_step_time
+          )
+        if output_token_count is not None:
+          aggregated_metrics["perf/output_tokens_per_sec"] = (
+              float(output_token_count) / global_step_time
+          )
+        if input_token_count is not None and output_token_count is not None:
+          aggregated_metrics["perf/total_tokens_per_sec"] = (
+              (float(input_token_count) + float(output_token_count))
+              / global_step_time
+          )
+
+    for metric_name, agg_value in aggregated_metrics.items():
       if "/" in metric_name:
         prefix, metric_name = metric_name.split("/", maxsplit=1)
       else:
