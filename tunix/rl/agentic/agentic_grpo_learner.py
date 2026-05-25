@@ -454,11 +454,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
 
     prompt_token_len = len(prompt_tokens_list[0])
+    total_prompt_tokens = prompt_token_len * len(prompt_tokens_list)
     self.rl_cluster.buffer_metrics_async(
         {
-            "generation/prompts/mean_length": (prompt_token_len, np.mean),
-            "generation/prompts/max_length": (prompt_token_len, np.max),
-            "generation/prompts/min_length": (prompt_token_len, np.min),
+        "generation/prompts/mean_length": (prompt_token_len, np.mean),
+        "generation/prompts/max_length": (prompt_token_len, np.max),
+        "generation/prompts/min_length": (prompt_token_len, np.min),
+        "generation/prompts/total_tokens": (total_prompt_tokens, np.sum),
         },
         mode=mode,
         step=expected_step,
@@ -502,20 +504,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     agg_completion_mask = completion_mask.sum(axis=-1)
     metrics_to_log = {
         "generation/completions/mean_length": (
-            np.mean(agg_completion_mask),
+        agg_completion_mask,
             np.mean,
         ),
         "generation/completions/max_length": (
-            np.max(agg_completion_mask),
+        agg_completion_mask,
             np.max,
         ),
         "generation/completions/min_length": (
-            np.min(agg_completion_mask),
+        agg_completion_mask,
             np.min,
         ),
         "generation/completions/clip_ratio": (
             clipped_completion_count / len(trajectories),
             np.mean,
+        ),
+        "generation/completions/total_tokens": (
+        agg_completion_mask,
+        np.sum,
         ),
         "rewards/advantage/mean": (np.mean(advantages), np.mean),
         "rewards/advantage/max": (np.max(advantages), np.max),
