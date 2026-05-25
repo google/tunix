@@ -1,6 +1,8 @@
 """Tests for safetensors_loader."""
 
+import json
 import os
+import struct
 import tempfile
 from unittest import mock
 
@@ -14,6 +16,22 @@ from safetensors import numpy as stnp
 from tunix.models import safetensors_loader
 from tunix.tests import test_common
 from tunix.utils import env_utils
+
+
+class DummyConfig:
+  pass
+
+
+class DummyModel(nnx.Module):
+
+  def __init__(self, config, *, rngs):
+    del config
+    self.linear = nnx.Linear(2, 2, rngs=rngs)
+
+
+def dummy_key_mapping(config):
+  del config
+  return {'linear.weight': ('linear.kernel', None)}
 
 
 def key_mapping(config):
@@ -87,15 +105,19 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           np.array(layer_state['w2']['bias'].value),
       )
 
-  @parameterized.named_parameters(
-      *(([dict(testcase_name='opt_loader_enabled', mode='optimized')] 
-         if not env_utils.is_internal_env() else []) + [
+  @parameterized.named_parameters(*(
+      (
+          [dict(testcase_name='opt_loader_enabled', mode='optimized')]
+          if not env_utils.is_internal_env()
+          else []
+      )
+      + [
           dict(testcase_name='absolute_path', path_type='abs'),
           dict(testcase_name='relative_path', path_type='rel'),
           dict(testcase_name='relative_dot_path', path_type='rel_dot'),
           dict(testcase_name='opt_loader_disabled', mode='original'),
-      ])
-  )
+      ]
+  ))
   def test_load_and_create_model(
       self, path_type='abs', mode='auto'
   ):
@@ -166,6 +188,69 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         np.testing.assert_array_equal,
         self.state,
         loaded_state,
+    )
+
+  @mock.patch.object(env_utils, 'is_pathways_initialized', return_value=True)
+  @mock.patch('tunix.models.safetensors_loader.epath.Path')
+  @mock.patch('tunix.models.safetensors_loader.colocated_python')
+  @mock.patch('tunix.models.safetensors_loader.RemoteModelLoader')
+  @mock.patch('builtins.open', new_callable=mock.mock_open)
+  def test_remote_loading(
+      self,
+      mock_open,
+      mock_remote_loader,
+      mock_colocated,
+      mock_path,
+      mock_is_pathways,
+  ):
+    mock_path.return_value.expanduser.return_value.glob.return_value = [
+        'dummy1.safetensors',
+    ]
+    mock_device = mock.MagicMock()
+    mock_device.logical_task_id = 0
+    mock_device.id = 0
+    mock_colocated.colocated_cpu_devices.return_value = [mock_device]
+
+    header = {
+        'linear.weight': {
+            'dtype': 'F32',
+            'shape': [2, 2],
+            'data_offsets': [0, 16],
+        },
+        '__metadata__': {'format': 'pt'},
+    }
+    header_bytes = json.dumps(header).encode('utf-8')
+    header_size = len(header_bytes)
+
+    mock_file = mock_open.return_value
+    mock_file.read.side_effect = [
+        struct.pack('<Q', header_size),
+        header_bytes,
+    ]
+
+    mock_loader_instance = mock_remote_loader.return_value
+    mock_loader_instance.load.specialize.return_value = lambda: {
+        'linear.kernel': jnp.ones((2, 2))
+    }
+
+    mesh = jax.sharding.Mesh(jax.devices(), ('x',))
+
+    model = safetensors_loader.load_and_create_model(
+        file_dir='/tmp/dummy',
+        model_class=DummyModel,
+        config=DummyConfig(),
+        key_mapping=dummy_key_mapping,
+        mesh=mesh,
+        remote_loading=True,
+    )
+
+    self.assertIsNotNone(model)
+    mock_is_pathways.assert_called()
+    mock_colocated.colocated_cpu_devices.assert_called_once()
+    mock_remote_loader.assert_called_once()
+
+    self.assertTrue(
+        jnp.array_equal(model.linear.kernel.value, jnp.ones((2, 2)))
     )
 
 
