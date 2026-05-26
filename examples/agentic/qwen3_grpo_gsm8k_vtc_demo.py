@@ -703,7 +703,7 @@ def main():
       rollout_vllm_kwargs={
           "kv_cache_metrics": True,
           "disable_log_stats": False,
-          "enable_prefix_caching": True,
+          "enable_prefix_caching": False,
       },
   )
   if jax.default_backend() == "tpu":
@@ -740,6 +740,7 @@ def main():
               args.eval_every_n_steps if args.enable_eval else MAX_STEPS + 1
           ),
           max_steps=MAX_STEPS,
+          max_inflight_computations=1,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
               CHECKPOINT_ROOT if ENABLE_CHECKPOINTING else None
