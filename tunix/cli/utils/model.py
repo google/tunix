@@ -131,6 +131,8 @@ def create_model(
           'flash_attention_block_size', 1024
       ),
       remat_config=model_config.get('remat_config', 1),
+      dtype=model_config.get('dtype'),
+      param_dtype=model_config.get('param_dtype'),
   )
 
   # Handle Tokenizer Path overrides

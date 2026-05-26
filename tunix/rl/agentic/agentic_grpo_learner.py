@@ -462,7 +462,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.algo_config.num_generations
+            ),
             completion_mask=attn_completion_mask,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
@@ -494,7 +497,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+          micro_batch_size=(
+              self._compute_logps_micro_batch_size
+              * self.algo_config.num_generations
+          ),
           completion_mask=attn_completion_mask,
       )
       old_per_token_logps = trainer_per_token_logps
@@ -529,7 +535,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=(
+                self._compute_logps_micro_batch_size
+                * self.algo_config.num_generations
+            ),
             completion_mask=completion_mask,
         )
         interval_v2.async_end([ref_per_token_logps])
