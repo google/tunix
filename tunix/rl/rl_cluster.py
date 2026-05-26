@@ -837,7 +837,7 @@ class RLCluster:
       buffered_metrics = self._buffered_eval_metrics
 
     if not buffered_metrics:
-      buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
+      buffered_metrics.append(MetricsBuffer(self.global_steps, mode=str(mode)))
     else:
       if step != buffered_metrics[-1].global_steps:
         buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
@@ -852,23 +852,19 @@ class RLCluster:
       else:
         cur_metrics.metrics[metric_name][0].append(value)
 
-    # Async rollout/reward metrics can be produced ahead of optimizer updates.
-    # Flush train-mode metrics only once the actor trainer has actually reached
-    # that optimizer step; otherwise W&B sees future-step rollout metrics
-    # before trainer metrics and later rejects the trainer-side step as
-    # non-monotonic. Eval-mode metrics continue to track outer global steps.
-    ready_train_step = getattr(self.actor_trainer, "train_steps", 0)
-    while (
+    # Global steps are incremented, log the previous metrics.
+    if (
         self._buffered_train_metrics
-        and self._buffered_train_metrics[0].global_steps <= ready_train_step
+        and self._buffered_train_metrics[0].global_steps < self.global_steps
     ):
-      self._log_metrics(self._buffered_train_metrics.pop(0))
-
-    while (
+      for m in [self._buffered_train_metrics.pop(0)]:
+        self._log_metrics(m)
+    if (
         self._buffered_eval_metrics
-        and self._buffered_eval_metrics[0].global_steps <= self.global_steps
+        and self._buffered_eval_metrics[0].global_steps < self.global_steps
     ):
-      self._log_metrics(self._buffered_eval_metrics.pop(0))
+      for m in [self._buffered_eval_metrics.pop(0)]:
+        self._log_metrics(m)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):

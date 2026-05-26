@@ -354,109 +354,35 @@ def vtc_reward(prompts, completions, answer, **kwargs):
 
 
 def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
-  del prompts, kwargs
+  del prompts, completions, advantages, answer, kwargs
   global _metric_call_idx
   _metric_call_idx += 1
 
   rewards = np.asarray(rewards, dtype=np.float32)
-  advantages = np.asarray(advantages, dtype=np.float32)
-
-  outcome_tuples = [
-      _vtc_completion_outcome(completion, gold)
-      for completion, gold in zip(completions, answer)
-  ]
-  scores = np.asarray([item[0] for item in outcome_tuples], dtype=np.float32)
-  format_ok = np.asarray([item[1] for item in outcome_tuples], dtype=np.float32)
-  answer_ok = np.asarray([item[2] for item in outcome_tuples], dtype=np.float32)
-  extracted_ok = np.asarray(
-      [item[3] for item in outcome_tuples], dtype=np.float32
-  )
-  completion_char_lens = np.asarray(
-      [len(completion) for completion in completions], dtype=np.float32
-  )
-
   solve_all = bool(np.all(rewards > 0.1))
   solve_none = bool(np.all(np.isclose(rewards, 0.0)))
   solve_partial = (not solve_all) and (not solve_none)
   solve_ratio = float(np.mean(rewards > 0.1))
+  reward_mean = float(rewards.mean())
+  reward_max = float(rewards.max())
 
-  metrics = {
+  absl_logging.info(
+      "[rollout-metric] call=%d n=%d solve_ratio=%.3f reward_mean=%.3f"
+      " reward_max=%.3f solve_all=%d solve_none=%d",
+      _metric_call_idx,
+      len(rewards),
+      solve_ratio,
+      reward_mean,
+      reward_max,
+      int(solve_all),
+      int(solve_none),
+  )
+  return {
       "rewards/solve_all": (1 if solve_all else 0, np.mean),
       "rewards/solve_none": (1 if solve_none else 0, np.mean),
       "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
       "rewards/solve_ratio": (solve_ratio, np.mean),
-      "rewards/mean": (float(rewards.mean()), np.mean),
-      "rewards/max": (float(rewards.max()), np.max),
-      "rewards/min": (float(rewards.min()), np.min),
-      "rewards/std": (float(rewards.std()), np.mean),
-      "rewards/vtc/format_ratio": (float(format_ok.mean()), np.mean),
-      "rewards/vtc/answer_correct_ratio": (float(answer_ok.mean()), np.mean),
-      "rewards/vtc/extracted_ratio": (float(extracted_ok.mean()), np.mean),
-      "rewards/vtc/score_0_ratio": (
-          float(np.mean(np.isclose(scores, 0.0))),
-          np.mean,
-      ),
-      "rewards/vtc/score_0p1_ratio": (
-          float(np.mean(np.isclose(scores, 0.1))),
-          np.mean,
-      ),
-      "rewards/vtc/score_0p5_ratio": (
-          float(np.mean(np.isclose(scores, 0.5))),
-          np.mean,
-      ),
-      "rewards/vtc/score_1_ratio": (
-          float(np.mean(np.isclose(scores, 1.0))),
-          np.mean,
-      ),
-      "rewards/vtc/adv_abs_mean": (float(np.abs(advantages).mean()), np.mean),
-      "generation/vtc/mean_chars": (float(completion_char_lens.mean()), np.mean),
-      "generation/vtc/max_chars": (float(completion_char_lens.max()), np.max),
-      "generation/vtc/min_chars": (float(completion_char_lens.min()), np.min),
   }
-
-  if len(scores) % NUM_GENERATIONS == 0:
-    grouped_scores = scores.reshape(-1, NUM_GENERATIONS)
-    grouped_format_ok = format_ok.reshape(-1, NUM_GENERATIONS)
-    grouped_answer_ok = answer_ok.reshape(-1, NUM_GENERATIONS)
-    metrics.update({
-        "rewards/vtc/group_best_reward_mean": (
-            float(grouped_scores.max(axis=-1).mean()),
-            np.mean,
-        ),
-        "rewards/vtc/group_mean_reward_mean": (
-            float(grouped_scores.mean(axis=-1).mean()),
-            np.mean,
-        ),
-        "rewards/vtc/group_any_correct_ratio": (
-            float((grouped_answer_ok.max(axis=-1) > 0).mean()),
-            np.mean,
-        ),
-        "rewards/vtc/group_all_correct_ratio": (
-            float((grouped_answer_ok.min(axis=-1) > 0).mean()),
-            np.mean,
-        ),
-        "rewards/vtc/group_any_format_ratio": (
-            float((grouped_format_ok.max(axis=-1) > 0).mean()),
-            np.mean,
-        ),
-        "rewards/vtc/group_all_format_ratio": (
-            float((grouped_format_ok.min(axis=-1) > 0).mean()),
-            np.mean,
-        ),
-    })
-
-  absl_logging.info(
-      "[vtc-metric] call=%d n=%d solve_ratio=%.3f format_ratio=%.3f"
-      " answer_ratio=%.3f reward_mean=%.3f reward_max=%.3f",
-      _metric_call_idx,
-      len(rewards),
-      solve_ratio,
-      float(format_ok.mean()),
-      float(answer_ok.mean()),
-      float(rewards.mean()),
-      float(rewards.max()),
-  )
-  return metrics
 
 
 def parse_args() -> argparse.Namespace:
