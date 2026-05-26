@@ -22,7 +22,8 @@ MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-2}"
 TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-1}"
 COMPUTE_LOGPS_MICRO_BATCH_SIZE="${COMPUTE_LOGPS_MICRO_BATCH_SIZE:-1}"
 ROLLOUT_SPLIT_FRACTION="${ROLLOUT_SPLIT_FRACTION:-1.0}"
-ROLLOUT_VLLM_HBM_UTILIZATION="${ROLLOUT_VLLM_HBM_UTILIZATION:-0.6}"
+ROLLOUT_VLLM_HBM_UTILIZATION="${ROLLOUT_VLLM_HBM_UTILIZATION:-0.2}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
 
 if [[ -z "${HF_TOKEN:-}" ]]; then
   echo "WARNING: HF_TOKEN is not set. This is fine if Qwen3-1.7B is already cached locally." >&2
@@ -39,6 +40,7 @@ cmd=(
   --compute_logps_micro_batch_size "${COMPUTE_LOGPS_MICRO_BATCH_SIZE}"
   --rollout_split_fraction "${ROLLOUT_SPLIT_FRACTION}"
   --rollout_vllm_hbm_utilization "${ROLLOUT_VLLM_HBM_UTILIZATION}"
+  --max_concurrency "${MAX_CONCURRENCY}"
 )
 
 for opt in rollout_mesh_fsdp rollout_mesh_tp train_mesh_fsdp train_mesh_tp train_mesh_sp \
