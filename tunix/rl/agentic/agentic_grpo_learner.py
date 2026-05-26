@@ -422,42 +422,58 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_ids.shape,
     )
 
-    # Sampler-trainer log-probability mismatch diagnostic. We always compute
-    # the trainer's recomputed logprobs whenever rollout logprobs are present
-    # so the per-batch diff, max, and Pearson correlation metrics can be
-    # logged below. Training itself still uses whichever logp source is
-    # configured via ``use_rollout_logps``. Cost: one extra trainer forward
-    # pass per training step.
+    # Sampler-trainer log-probability mismatch diagnostic. When rollout
+    # logprobs are present we recompute the trainer's logprobs so the per-batch
+    # diff, max, and Pearson correlation metrics can be logged below. Training
+    # itself still uses whichever logp source is configured via
+    # ``use_rollout_logps``. The diagnostic forward pass is skipped when the
+    # actor is attached to an empty mesh (e.g. unit-test environments without a
+    # device topology) because the actor sharding path requires a real mesh;
+    # the metrics are still emitted when running on real accelerators. Cost
+    # when active: one extra trainer forward pass per training step.
+    actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
+    have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
     rollout_per_token_logps = None
     trainer_per_token_logps = None
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
-      # NOTE: pass a NON-PADDING mask (1 for both assistant AND env tokens) for
-      # attention/position construction inside compute_per_token_logps, not the
-      # assistant-vs-env mask. process_ids uses `completion_mask` to build the
-      # causal attention pattern AND to drive `build_positions_from_mask`. If
-      # we pass the asst-vs-env mask, env tokens get masked OUT of attention
-      # AND positions don't advance through them — so when predicting the
-      # first assistant token of turn k+1, the trainer's model has no memory
-      # of the env observation that triggered turn k+1. That makes the
-      # trainer's logp at multi-turn boundaries diverge from vllm's (which
-      # always sees the full conversation in attention) by 30-50 nat.
-      attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
-      trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
-          prompt_tokens=prompt_ids,
-          completion_tokens=completion_ids,
-          pad_id=pad_value,
-          eos_id=eos_value,
-          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-          completion_mask=attn_completion_mask,
-      )
       old_per_token_logps = rollout_per_token_logps
+      # The diagnostic pass (and the sampler-IS ``token`` path, which needs the
+      # trainer's recomputed logp as ``old_per_token_logps``) requires a real
+      # actor mesh; skip when not available.
+      need_trainer_logps = (
+          have_actor_mesh or self.algo_config.sampler_is == "token"
+      )
+      if need_trainer_logps:
+        # NOTE: pass a NON-PADDING mask (1 for both assistant AND env tokens)
+        # for attention/position construction inside compute_per_token_logps,
+        # not the assistant-vs-env mask. process_ids uses ``completion_mask``
+        # to build the causal attention pattern AND to drive
+        # ``build_positions_from_mask``. If we pass the asst-vs-env mask, env
+        # tokens get masked OUT of attention AND positions don't advance
+        # through them — so when predicting the first assistant token of turn
+        # k+1, the trainer's model has no memory of the env observation that
+        # triggered turn k+1. That makes the trainer's logp at multi-turn
+        # boundaries diverge from the rollout sampler's (which always sees the
+        # full conversation in attention) by 30-50 nat.
+        attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
+        trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+            prompt_tokens=prompt_ids,
+            completion_tokens=completion_ids,
+            pad_id=pad_value,
+            eos_id=eos_value,
+            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            completion_mask=attn_completion_mask,
+        )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
       # ``exp(current_logp - trainer_logp)`` rather than against the rollout
       # sampler's logp directly. The IS weight computed below corrects for
       # the trainer-vs-sampler divergence.
-      if self.algo_config.sampler_is == "token":
+      if (
+          self.algo_config.sampler_is == "token"
+          and trainer_per_token_logps is not None
+      ):
         old_per_token_logps = trainer_per_token_logps
     elif self.algo_config.use_rollout_logps:
       old_per_token_logps = None
