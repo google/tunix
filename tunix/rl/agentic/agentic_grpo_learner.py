@@ -737,12 +737,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"{prefix}/{sub_key}/max": (np.max(vals), np.max),
             f"{prefix}/{sub_key}/min": (np.min(vals), np.min),
         })
-
-    self.rl_cluster.buffer_metrics_async(
-        metrics_to_log,
-        mode=mode,
-        step=expected_step,
-    )
+        self.rl_cluster.buffer_metrics_async(
+            metrics_to_log,
+            mode=mode,
+            step=expected_step,
+        )
 
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
