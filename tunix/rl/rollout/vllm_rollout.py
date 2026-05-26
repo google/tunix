@@ -138,3 +138,12 @@ class VllmRollout(base_rollout.BaseRollout):
 
   def model(self) -> nnx.Module:
     return self._sampler.transformer
+
+  def stop(self) -> None:
+    """Stops the underlying vLLM sampler/driver and releases its resources."""
+    if hasattr(self, "_sampler") and self._sampler is not None:
+      self._sampler.stop()
+
+  def close(self) -> None:
+    """Alias for stop() so cluster teardown can call a uniform API."""
+    self.stop()
