@@ -361,6 +361,20 @@ def parse_args() -> argparse.Namespace:
       help="Maximum length of the generated response.",
   )
   parser.add_argument(
+      "--enable_eval",
+      action="store_true",
+      help=(
+          "Enable GSM8K evaluation. Disabled by default so the demo runs "
+          "train-only."
+      ),
+  )
+  parser.add_argument(
+      "--eval_every_n_steps",
+      type=int,
+      default=EVAL_EVERY_N_STEPS,
+      help="Evaluation period in train steps when --enable_eval is set.",
+  )
+  parser.add_argument(
       "--rollout_mesh_fsdp",
       type=int,
       default=None,
@@ -630,13 +644,15 @@ def main():
       data_dir=TFDS_DATA_DIR,
       shuffle=True,
   ).repeat(NUM_EPOCHS)
-  eval_dataset = build_gsm8k_dataset(
-      split="test",
-      seed=SEED,
-      batch_size=EVAL_BATCH_SIZE,
-      data_dir=TFDS_DATA_DIR,
-      shuffle=False,
-  )
+  eval_dataset = None
+  if args.enable_eval:
+    eval_dataset = build_gsm8k_dataset(
+        split="test",
+        seed=SEED,
+        batch_size=EVAL_BATCH_SIZE,
+        data_dir=TFDS_DATA_DIR,
+        shuffle=False,
+    )
 
   reference, actor, tokenizer_path = create_reference_and_actor(train_mesh)
   tokenizer = AutoTokenizer.from_pretrained(
@@ -720,7 +736,9 @@ def main():
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=create_optimizer(),
-          eval_every_n_steps=EVAL_EVERY_N_STEPS,
+          eval_every_n_steps=(
+              args.eval_every_n_steps if args.enable_eval else MAX_STEPS + 1
+          ),
           max_steps=MAX_STEPS,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
@@ -751,8 +769,8 @@ def main():
       system_prompt="",
       max_response_length=MAX_GENERATION_LENGTH,
       max_concurrency=1024,
-      eval_at_start=EVAL_AT_START,
-      eval_at_end=EVAL_AT_END,
+      eval_at_start=args.enable_eval and EVAL_AT_START,
+      eval_at_end=args.enable_eval and EVAL_AT_END,
       loss_agg_mode="sequence-mean-token-mean",
   )
 
@@ -805,6 +823,10 @@ def main():
           "compute_logps_micro_batch_groups": COMPUTE_LOGPS_MICRO_BATCH_SIZE,
           "optimizer_batch_sequences": MINI_BATCH_SIZE * NUM_GENERATIONS,
           "max_steps": MAX_STEPS,
+          "eval_enabled": args.enable_eval,
+          "eval_every_n_steps": (
+              args.eval_every_n_steps if args.enable_eval else None
+          ),
           "max_total_sequence_length": MAX_TOTAL_SEQUENCE_LENGTH,
           "train_temperature": TRAIN_TEMPERATURE,
           "eval_temperature": EVAL_TEMPERATURE,

@@ -1033,10 +1033,36 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             eval_str,
         )
         self.rl_cluster.buffer_metrics_async(
-            {"perf/global_step_time": (global_step_time, np.mean)},
+            {
+                "diagnostics/reward_mean": (train_r_mean, np.mean),
+                "diagnostics/solve_rate": (train_solve, np.mean),
+                "diagnostics/adv_abs_mean": (adv_abs_mean, np.mean),
+                "diagnostics/completion_mean_length": (
+                    float(compl_len),
+                    np.mean,
+                ),
+                "diagnostics/reward_count": (
+                    float(train_rewards.size),
+                    np.mean,
+                ),
+                "perf/global_step_time": (global_step_time, np.mean),
+            },
             mode=rl_cluster_lib.Mode.TRAIN,
             step=self.rl_cluster.global_steps,
         )
+        if eval_rewards.size and did_eval_this_global_step:
+          self.rl_cluster.buffer_metrics_async(
+              {
+                  "diagnostics/reward_mean": (eval_r_mean, np.mean),
+                  "diagnostics/solve_rate": (eval_solve, np.mean),
+                  "diagnostics/reward_count": (
+                      float(eval_rewards.size),
+                      np.mean,
+                  ),
+              },
+              mode=rl_cluster_lib.Mode.EVAL,
+              step=self.rl_cluster.global_steps,
+          )
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()
