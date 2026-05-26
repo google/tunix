@@ -955,6 +955,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self.rl_cluster.update_critic(
               chunked_train_micro_batch, current_eval_dataset, skip_jit
           )
+        self.rl_cluster.flush_ready_async_metrics(
+            train_step=self.rl_cluster.actor_trainer.train_steps
+        )
 
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
