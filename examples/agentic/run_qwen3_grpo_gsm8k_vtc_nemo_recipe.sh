@@ -8,7 +8,7 @@
 #   - 4 prompts/step x 8 generations
 #   - effective 16-sequence optimizer batch
 #   - beta=0.04, lr=2e-7, wd=0.01, max_grad_norm=1.0
-#   - eval every 50 steps, plus val_at_start / val_at_end
+#   - train-only by default; pass --enable_eval to turn validation back on
 
 set -euo pipefail
 
