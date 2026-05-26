@@ -20,7 +20,9 @@ Run from repo root:
 from __future__ import annotations
 
 import argparse
+import gc
 import importlib.resources as stdlib_importlib_resources
+import math
 import os
 import re
 import sys
@@ -320,6 +322,28 @@ def normalize_single_example(example: dict[str, Any]) -> dict[str, Any]:
   return {key: _normalize_example_value(value) for key, value in example.items()}
 
 
+def _shutdown_rollout_runtime(rl_cluster) -> None:
+  """Stops rollout-side runtime so repeated runs don't leak HBM in-process."""
+  rollout = getattr(rl_cluster, "rollout", None)
+  if rollout is not None:
+    for method_name in ("close", "stop", "shutdown"):
+      method = getattr(rollout, method_name, None)
+      if callable(method):
+        try:
+          method()
+        except Exception:  # pylint: disable=broad-exception-caught
+          absl_logging.exception(
+              "Failed to %s rollout runtime during demo teardown.",
+              method_name,
+          )
+        break
+  gc.collect()
+  try:
+    jax.clear_caches()
+  except Exception:  # pylint: disable=broad-exception-caught
+    absl_logging.exception("Failed to clear JAX caches during demo teardown.")
+
+
 def vtc_reward(prompts, completions, answer, **kwargs):
   del prompts, kwargs
   scores = []
@@ -488,43 +512,19 @@ def parse_args() -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--rollout_mesh_fsdp",
+      "--mesh_tp",
       type=int,
       default=None,
-      help="Optional override for rollout mesh FSDP dimension.",
-  )
-  parser.add_argument(
-      "--rollout_mesh_tp",
-      type=int,
-      default=None,
-      help="Optional override for rollout mesh TP dimension.",
-  )
-  parser.add_argument(
-      "--train_mesh_fsdp",
-      type=int,
-      default=None,
-      help="Optional override for train mesh FSDP dimension.",
-  )
-  parser.add_argument(
-      "--train_mesh_tp",
-      type=int,
-      default=None,
-      help="Optional override for train mesh TP dimension.",
-  )
-  parser.add_argument(
-      "--train_mesh_sp",
-      type=int,
-      default=None,
-      help="Optional override for train mesh SP dimension.",
-  )
-  parser.add_argument(
-      "--rollout_split_fraction",
-      type=float,
-      default=1.0,
       help=(
-          "Fraction of total devices to allocate to rollout. Default is 1.0 "
-          "which colocates rollout and training on the full device mesh."
+          "TP dimension of the shared mesh. Defaults to jax.device_count(). "
+          "Must satisfy fsdp * tp == device_count."
       ),
+  )
+  parser.add_argument(
+      "--mesh_fsdp",
+      type=int,
+      default=None,
+      help="FSDP dimension of the shared mesh. Defaults to 1.",
   )
   parser.add_argument(
       "--rollout_vllm_hbm_utilization",
@@ -668,93 +668,26 @@ def main():
       else NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
   )
 
-  devices = jax.devices()
-  total_devices = len(devices)
-
-  # 1. Resolve Mesh Dimensions
-  if args.rollout_split_fraction == 1.0:
-    # Use Shared Mesh: All devices for both Rollout and Train.
-    # Match FrozenLake's default: pure tensor parallelism on the shared mesh
-    # so rollout prefill/decode is not split across an fsdp axis.
-    print(f"Using Shared Mesh for Rollout and Train (100% of {total_devices} devices).")
-    num_rollout_devices = total_devices
-    num_train_devices = total_devices
-
-    tp_size = args.train_mesh_tp or args.rollout_mesh_tp or total_devices
-    fsdp_size = args.train_mesh_fsdp or args.rollout_mesh_fsdp or 1
-    if fsdp_size * tp_size != total_devices:
-      raise ValueError(
-          "Shared mesh dimensions must multiply to the total device count. "
-          f"Received fsdp={fsdp_size}, tp={tp_size}, total_devices={total_devices}."
-      )
-
-    rollout_dims = [("fsdp", fsdp_size), ("tp", tp_size)]
-    train_dims = [("fsdp", fsdp_size), ("tp", tp_size)]
-
-    rollout_axis_names = tuple(name for name, _ in rollout_dims)
-    rollout_shape = tuple(d for _, d in rollout_dims)
-    train_axis_names = tuple(name for name, _ in train_dims)
-    train_shape = tuple(d for _, d in train_dims)
-
-    rollout_devices = np.array(devices).reshape(rollout_shape)
-    train_devices = np.array(devices).reshape(train_shape)
-
-    rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
-    train_mesh = Mesh(train_devices, axis_names=train_axis_names)
-
-  else:
-    # Use Separate Meshes
-    rollout_fsdp = args.rollout_mesh_fsdp
-    rollout_tp = args.rollout_mesh_tp
-    if rollout_fsdp is not None or rollout_tp is not None:
-      rollout_dims = []
-      if rollout_fsdp is not None:
-        rollout_dims.append(("fsdp", rollout_fsdp))
-      if rollout_tp is not None:
-        rollout_dims.append(("tp", rollout_tp))
-    else:
-      num_rollout_devices = int(total_devices * args.rollout_split_fraction)
-      if num_rollout_devices <= 0 or num_rollout_devices >= total_devices:
-        raise ValueError(
-            "rollout_split_fraction must allocate at least 1 rollout device and "
-            "leave at least 1 train device."
-        )
-      rollout_tp = num_rollout_devices
-      rollout_fsdp = 1
-      rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
-    num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
-
-    train_fsdp = args.train_mesh_fsdp
-    train_sp = args.train_mesh_sp
-    train_tp = args.train_mesh_tp
-    if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
-      train_dims = []
-      train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
-      if train_sp is not None:
-        train_dims.append(("sp", train_sp))
-      train_dims.append(("tp", train_tp if train_tp is not None else 1))
-    else:
-      num_train_devices = total_devices - num_rollout_devices
-      if num_train_devices <= 0:
-        raise ValueError("Separate rollout mesh resolution left no train devices.")
-      train_tp = num_train_devices
-      train_fsdp = 1
-      train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
-    num_train_devices = int(np.prod([d for _, d in train_dims]))
-
-    if num_rollout_devices + num_train_devices > total_devices:
-      raise ValueError("Requested devices exceed total available devices.")
-
-    rollout_axis_names = tuple(name for name, _ in rollout_dims)
-    rollout_shape = tuple(d for _, d in rollout_dims)
-    train_axis_names = tuple(name for name, _ in train_dims)
-    train_shape = tuple(d for _, d in train_dims)
-
-    rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
-    train_devices = np.array(devices[num_rollout_devices : num_rollout_devices + num_train_devices]).reshape(train_shape)
-
-    rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
-    train_mesh = Mesh(train_devices, axis_names=train_axis_names)
+  # Single shared mesh for actor, reference, and rollout — pure TP so the
+  # rollout prefill/decode is not split across an fsdp axis (matches FrozenLake).
+  fsdp_size = args.mesh_fsdp or 1
+  tp_size = args.mesh_tp or (jax.device_count() // fsdp_size)
+  if fsdp_size * tp_size != jax.device_count():
+    raise ValueError(
+        "Shared mesh dimensions must multiply to device_count. "
+        f"Got fsdp={fsdp_size}, tp={tp_size}, devices={jax.device_count()}."
+    )
+  mesh_shape = (fsdp_size, tp_size)
+  mesh_axis_names = ("fsdp", "tp")
+  shared_device_list = jax._src.mesh_utils.create_device_mesh(
+      mesh_shape, jax.devices()[: math.prod(mesh_shape)]
+  )
+  shared_mesh = jax.sharding.Mesh(
+      shared_device_list,
+      axis_names=mesh_axis_names,
+      axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape),
+  )
+  print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 
   train_dataset = build_gsm8k_dataset(
       split="train",
@@ -771,7 +704,7 @@ def main():
       shuffle=False,
   )
 
-  reference, actor, tokenizer_path = create_reference_and_actor(train_mesh)
+  reference, actor, tokenizer_path = create_reference_and_actor(shared_mesh)
   tokenizer = AutoTokenizer.from_pretrained(
       tokenizer_path,
       token=os.getenv("HF_TOKEN"),
@@ -786,6 +719,7 @@ def main():
   )
   wandb_config = {
       "model": MODEL_ID,
+      "mesh_shape": mesh_shape,
       "max_steps": MAX_STEPS,
       "num_prompts_per_step": NUM_PROMPTS_PER_STEP,
       "num_generations": NUM_GENERATIONS,
@@ -828,8 +762,8 @@ def main():
       rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
       rollout_vllm_server_mode=True,
       rollout_vllm_async_scheduling=False,
-      tensor_parallel_size=rollout_mesh.shape.get("tp", 1),
-      data_parallel_size=rollout_mesh.shape.get("fsdp", 1),
+      tensor_parallel_size=shared_mesh.shape.get("tp", 1),
+      data_parallel_size=shared_mesh.shape.get("fsdp", 1),
       rollout_vllm_max_num_seqs=vllm_max_num_seqs,
       rollout_vllm_max_num_batched_tokens=vllm_max_batched_tokens,
       rollout_vllm_kwargs={
@@ -854,9 +788,9 @@ def main():
 
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: train_mesh,
-          rl_cluster_lib.Role.REFERENCE: train_mesh,
-          rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+          rl_cluster_lib.Role.ACTOR: shared_mesh,
+          rl_cluster_lib.Role.REFERENCE: shared_mesh,
+          rl_cluster_lib.Role.ROLLOUT: shared_mesh,
       },
       rollout_engine="vllm",
       # Force explicit host<->device materialization for vanilla rollout.
@@ -921,8 +855,7 @@ def main():
   )
 
   print(f"Devices: {jax.device_count()}")
-  print(f"Train mesh: {train_mesh} | dims: {train_dims}")
-  print(f"Rollout mesh: {rollout_mesh} | dims: {rollout_dims}")
+  print(f"Shared mesh: {shared_mesh} shape={mesh_shape}")
   print(f"Artifact root: {ARTIFACT_ROOT}")
   print(
       "Checkpoint dir:"
@@ -933,19 +866,8 @@ def main():
       {
           "model": MODEL_ID,
           "rollout_engine": "vllm",
-          "separate_rollout_mesh": args.rollout_split_fraction != 1.0,
-          "shared_mesh_fsdp": (
-              train_mesh.shape["fsdp"] if args.rollout_split_fraction == 1.0 else None
-          ),
-          "shared_mesh_tp": (
-              train_mesh.shape["tp"] if args.rollout_split_fraction == 1.0 else None
-          ),
-          "rollout_split_fraction": args.rollout_split_fraction,
-          "rollout_mesh_fsdp": args.rollout_mesh_fsdp,
-          "rollout_mesh_tp": args.rollout_mesh_tp,
-          "train_mesh_fsdp": args.train_mesh_fsdp,
-          "train_mesh_sp": args.train_mesh_sp,
-          "train_mesh_tp": args.train_mesh_tp,
+          "mesh_fsdp": fsdp_size,
+          "mesh_tp": tp_size,
           "prompts_per_step": NUM_PROMPTS_PER_STEP,
           "trajectories_per_step": NUM_PROMPTS_PER_STEP * NUM_GENERATIONS,
           "num_generations": NUM_GENERATIONS,
@@ -975,6 +897,8 @@ def main():
     except Exception:
       rl_cluster.close()
       raise
+    finally:
+      _shutdown_rollout_runtime(rl_cluster)
 
 
 if __name__ == "__main__":

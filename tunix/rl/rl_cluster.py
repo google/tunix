@@ -693,9 +693,27 @@ class RLCluster:
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
+    rollout = getattr(self, "_rollout", None)
+    if rollout is not None:
+      for method_name in ("close", "stop", "shutdown"):
+        method = getattr(rollout, method_name, None)
+        if callable(method):
+          try:
+            method()
+          except Exception:  # pylint: disable=broad-exception-caught
+            logging.exception(
+                "Failed to %s rollout during RLCluster.close().",
+                method_name,
+            )
+          break
     self.actor_trainer.close()
     if getattr(self, "critic_trainer", None):
       self.critic_trainer.close()
+    gc.collect()
+    try:
+      jax.clear_caches()
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception("Failed to clear JAX caches during RLCluster.close().")
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
