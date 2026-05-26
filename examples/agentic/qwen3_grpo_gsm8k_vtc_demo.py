@@ -64,6 +64,7 @@ from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
 import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
 from transformers import AutoTokenizer
+from absl import logging as absl_logging
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 workdir = os.getcwd()
@@ -119,6 +120,7 @@ NUM_GENERATIONS = 8
 MINI_BATCH_SIZE = 2
 TRAIN_MICRO_BATCH_SIZE = 1
 COMPUTE_LOGPS_MICRO_BATCH_SIZE = 1
+MAX_CONCURRENCY = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
 
 MAX_STEPS = 200
 NUM_EPOCHS = 1000
@@ -186,6 +188,8 @@ Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags. 
 Problem: {}
 <reasoning>
 """
+
+_metric_call_idx = 0
 
 
 def extract_hash_answer(text: str) -> str | None:
@@ -279,6 +283,26 @@ def normalize_answer(text: str | None) -> str | None:
   return str(text).replace(",", "").strip()
 
 
+def _vtc_completion_outcome(
+    completion: str, gold: Any
+) -> tuple[float, bool, bool, bool]:
+  format_ok = is_vtc_format_correct(completion)
+  pred = normalize_answer(extract_boxed_answer(completion))
+  true = normalize_answer(_normalize_example_value(gold))
+  answer_ok = pred is not None and true is not None and pred == true
+  extracted_ok = pred is not None
+
+  if format_ok and answer_ok:
+    score = 1.0
+  elif format_ok and not answer_ok:
+    score = 0.1
+  elif not format_ok and answer_ok:
+    score = 0.5
+  else:
+    score = 0.0
+  return score, format_ok, answer_ok, extracted_ok
+
+
 def _normalize_example_value(value: Any) -> Any:
   if isinstance(value, np.ndarray):
     flat = value.reshape(-1).tolist()
@@ -300,21 +324,111 @@ def vtc_reward(prompts, completions, answer, **kwargs):
   del prompts, kwargs
   scores = []
   for completion, gold in zip(completions, answer):
-    format_ok = is_vtc_format_correct(completion)
-    pred = normalize_answer(extract_boxed_answer(completion))
-    true = normalize_answer(gold)
-    answer_ok = pred is not None and true is not None and pred == true
-
-    if format_ok and answer_ok:
-      score = 1.0
-    elif format_ok and not answer_ok:
-      score = 0.1
-    elif not format_ok and answer_ok:
-      score = 0.5
-    else:
-      score = 0.0
+    score, _, _, _ = _vtc_completion_outcome(completion, gold)
     scores.append(score)
   return scores
+
+
+def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
+  del prompts, kwargs
+  global _metric_call_idx
+  _metric_call_idx += 1
+
+  rewards = np.asarray(rewards, dtype=np.float32)
+  advantages = np.asarray(advantages, dtype=np.float32)
+
+  outcome_tuples = [
+      _vtc_completion_outcome(completion, gold)
+      for completion, gold in zip(completions, answer)
+  ]
+  scores = np.asarray([item[0] for item in outcome_tuples], dtype=np.float32)
+  format_ok = np.asarray([item[1] for item in outcome_tuples], dtype=np.float32)
+  answer_ok = np.asarray([item[2] for item in outcome_tuples], dtype=np.float32)
+  extracted_ok = np.asarray(
+      [item[3] for item in outcome_tuples], dtype=np.float32
+  )
+  completion_char_lens = np.asarray(
+      [len(completion) for completion in completions], dtype=np.float32
+  )
+
+  solve_all = bool(np.all(rewards > 0.1))
+  solve_none = bool(np.all(np.isclose(rewards, 0.0)))
+  solve_partial = (not solve_all) and (not solve_none)
+  solve_ratio = float(np.mean(rewards > 0.1))
+
+  metrics = {
+      "rewards/solve_all": (1 if solve_all else 0, np.mean),
+      "rewards/solve_none": (1 if solve_none else 0, np.mean),
+      "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
+      "rewards/solve_ratio": (solve_ratio, np.mean),
+      "rewards/vtc/format_ratio": (float(format_ok.mean()), np.mean),
+      "rewards/vtc/answer_correct_ratio": (float(answer_ok.mean()), np.mean),
+      "rewards/vtc/extracted_ratio": (float(extracted_ok.mean()), np.mean),
+      "rewards/vtc/score_0_ratio": (
+          float(np.mean(np.isclose(scores, 0.0))),
+          np.mean,
+      ),
+      "rewards/vtc/score_0p1_ratio": (
+          float(np.mean(np.isclose(scores, 0.1))),
+          np.mean,
+      ),
+      "rewards/vtc/score_0p5_ratio": (
+          float(np.mean(np.isclose(scores, 0.5))),
+          np.mean,
+      ),
+      "rewards/vtc/score_1_ratio": (
+          float(np.mean(np.isclose(scores, 1.0))),
+          np.mean,
+      ),
+      "rewards/vtc/adv_abs_mean": (float(np.abs(advantages).mean()), np.mean),
+      "generation/vtc/mean_chars": (float(completion_char_lens.mean()), np.mean),
+      "generation/vtc/max_chars": (float(completion_char_lens.max()), np.max),
+      "generation/vtc/min_chars": (float(completion_char_lens.min()), np.min),
+  }
+
+  if len(scores) % NUM_GENERATIONS == 0:
+    grouped_scores = scores.reshape(-1, NUM_GENERATIONS)
+    grouped_format_ok = format_ok.reshape(-1, NUM_GENERATIONS)
+    grouped_answer_ok = answer_ok.reshape(-1, NUM_GENERATIONS)
+    metrics.update({
+        "rewards/vtc/group_best_reward_mean": (
+            float(grouped_scores.max(axis=-1).mean()),
+            np.mean,
+        ),
+        "rewards/vtc/group_mean_reward_mean": (
+            float(grouped_scores.mean(axis=-1).mean()),
+            np.mean,
+        ),
+        "rewards/vtc/group_any_correct_ratio": (
+            float((grouped_answer_ok.max(axis=-1) > 0).mean()),
+            np.mean,
+        ),
+        "rewards/vtc/group_all_correct_ratio": (
+            float((grouped_answer_ok.min(axis=-1) > 0).mean()),
+            np.mean,
+        ),
+        "rewards/vtc/group_any_format_ratio": (
+            float((grouped_format_ok.max(axis=-1) > 0).mean()),
+            np.mean,
+        ),
+        "rewards/vtc/group_all_format_ratio": (
+            float((grouped_format_ok.min(axis=-1) > 0).mean()),
+            np.mean,
+        ),
+    })
+
+  absl_logging.info(
+      "[vtc-metric] call=%d n=%d solve_ratio=%.3f format_ratio=%.3f"
+      " answer_ratio=%.3f reward_mean=%.3f reward_max=%.3f",
+      _metric_call_idx,
+      len(rewards),
+      solve_ratio,
+      float(format_ok.mean()),
+      float(answer_ok.mean()),
+      float(rewards.mean()),
+      float(rewards.max()),
+  )
+  return metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -359,6 +473,15 @@ def parse_args() -> argparse.Namespace:
       type=int,
       default=1024,
       help="Maximum length of the generated response.",
+  )
+  parser.add_argument(
+      "--max_concurrency",
+      type=int,
+      default=None,
+      help=(
+          "Maximum concurrent rollout workers. Defaults to "
+          "prompts_per_step * num_generations."
+      ),
   )
   parser.add_argument(
       "--rollout_mesh_fsdp",
@@ -456,8 +579,8 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module, str]
   ensure_model_downloaded()
 
   model_config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
-  model_config.use_flash_attention = False
-  model_config.flash_attention_block_size = 1024
+  model_config.use_flash_attention = True
+  model_config.flash_attention_block_size = 256
   model_config.dtype = jnp.bfloat16
   model_config.param_dtype = jnp.float32
   model_config.remat_config = qwen3_model_lib.RematConfig.DECODER
@@ -526,6 +649,7 @@ def main():
   global MAX_STEPS, MINI_BATCH_SIZE, TRAIN_MICRO_BATCH_SIZE
   global COMPUTE_LOGPS_MICRO_BATCH_SIZE, MAX_NEW_TOKENS
   global MAX_GENERATION_LENGTH, KV_CACHE_SIZE, NUM_PROMPTS_PER_STEP
+  global MAX_CONCURRENCY
   MAX_STEPS = args.max_steps
   NUM_PROMPTS_PER_STEP = args.batch_size
   MINI_BATCH_SIZE = args.mini_batch_size
@@ -534,6 +658,11 @@ def main():
   MAX_NEW_TOKENS = args.max_response_length
   MAX_GENERATION_LENGTH = args.max_response_length
   KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS + 256
+  MAX_CONCURRENCY = (
+      args.max_concurrency
+      if args.max_concurrency is not None
+      else NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+  )
 
   devices = jax.devices()
   total_devices = len(devices)
@@ -751,7 +880,7 @@ def main():
       use_rollout_logps=False,
       system_prompt="",
       max_response_length=MAX_GENERATION_LENGTH,
-      max_concurrency=1024,
+      max_concurrency=MAX_CONCURRENCY,
       eval_at_start=EVAL_AT_START,
       eval_at_end=EVAL_AT_END,
       loss_agg_mode="sequence-mean-token-mean",
@@ -769,6 +898,7 @@ def main():
       reward_fns=[vtc_reward],
       algo_config=grpo_config,
       chat_parser=chat_parser,
+      metric_fns=[vtc_metric_fn],
   )
 
   print(f"Devices: {jax.device_count()}")
@@ -801,6 +931,7 @@ def main():
           "trajectories_per_step": NUM_PROMPTS_PER_STEP * NUM_GENERATIONS,
           "num_generations": NUM_GENERATIONS,
           "eval_num_generations": 1,
+          "max_concurrency": MAX_CONCURRENCY,
           "mini_batch_groups": MINI_BATCH_SIZE,
           "train_micro_batch_groups": TRAIN_MICRO_BATCH_SIZE,
           "compute_logps_micro_batch_groups": COMPUTE_LOGPS_MICRO_BATCH_SIZE,
