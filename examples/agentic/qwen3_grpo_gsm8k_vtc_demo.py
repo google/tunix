@@ -39,8 +39,6 @@ os.environ["DISABLE_MOSAIC_ATTN"] = "1"
 import time
 from typing import Any
 
-from absl import flags
-
 try:
   import importlib_resources  # pytype: disable=import-error  # noqa: F401
 except ModuleNotFoundError:
@@ -149,8 +147,6 @@ MAX_PROMPT_LENGTH = MAX_INPUT_SEQUENCE_LENGTH
 MAX_GENERATION_LENGTH = MAX_NEW_TOKENS
 KV_CACHE_SIZE = MAX_INPUT_SEQUENCE_LENGTH + MAX_NEW_TOKENS + 256
 DEFAULT_VLLM_HBM_UTILIZATION = 0.6
-DEFAULT_VLLM_MAX_NUM_SEQS = NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
-DEFAULT_VLLM_MAX_NUM_BATCHED_TOKENS = 65536
 
 TRAIN_TEMPERATURE = 1.0
 TRAIN_TOP_P = 1.0
@@ -344,13 +340,12 @@ def _shutdown_rollout_runtime(rl_cluster) -> None:
     absl_logging.exception("Failed to clear JAX caches during demo teardown.")
 
 
-def vtc_reward(prompts, completions, answer, **kwargs):
-  del prompts, kwargs
-  scores = []
-  for completion, gold in zip(completions, answer):
-    score, _, _, _ = _vtc_completion_outcome(completion, gold)
-    scores.append(score)
-  return scores
+def vtc_env_reward(task, action):
+  """TaskEnvironment-compatible VTC reward for trajectory rewards."""
+  gold = task.get("answer")
+  completion = action.action if hasattr(action, "action") else action
+  score, _, _, _ = _vtc_completion_outcome(completion, gold)
+  return score
 
 
 def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
@@ -475,10 +470,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def maybe_apply_lora(model: nnx.Module, mesh: Mesh) -> nnx.Module:
-  if not USE_LORA:
-    graph_def, params = nnx.split(model)
-    return nnx.merge(graph_def, jax.tree.map(jnp.copy, params))
-
   lora_config = {
       "module_path": (
           ".*q_proj|.*k_proj|.*v_proj|.*o_proj|"
@@ -680,8 +671,16 @@ def main():
       top_p=EVAL_TOP_P,
       top_k=EVAL_TOP_K,
   )
-  vllm_max_num_seqs = args.rollout_vllm_max_num_seqs if args.rollout_vllm_max_num_seqs is not None else (NUM_PROMPTS_PER_STEP * NUM_GENERATIONS)
-  vllm_max_batched_tokens = args.rollout_vllm_max_num_batched_tokens if args.rollout_vllm_max_num_batched_tokens is not None else ((vllm_max_num_seqs * KV_CACHE_SIZE) // 8)
+  vllm_max_num_seqs = (
+      args.rollout_vllm_max_num_seqs
+      if args.rollout_vllm_max_num_seqs is not None
+      else NUM_PROMPTS_PER_STEP * NUM_GENERATIONS
+  )
+  vllm_max_batched_tokens = (
+      args.rollout_vllm_max_num_batched_tokens
+      if args.rollout_vllm_max_num_batched_tokens is not None
+      else (vllm_max_num_seqs * KV_CACHE_SIZE) // 8
+  )
 
   vllm_rollout_kwargs = dict(
       rollout_vllm_model_version=MODEL_ID,
@@ -774,10 +773,10 @@ def main():
 
   trainer = VTCGRPOLearner(
       rl_cluster=rl_cluster,
-      reward_fns=[vtc_reward],
       algo_config=grpo_config,
       chat_parser=chat_parser,
       metric_fns=[vtc_metric_fn],
+      env_kwargs={"reward_fn": vtc_env_reward},
   )
 
   print(f"Devices: {jax.device_count()}")

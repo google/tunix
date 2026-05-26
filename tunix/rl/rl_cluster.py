@@ -771,6 +771,31 @@ class RLCluster:
     self._external_metrics_logger = external_metrics_logger
     return self
 
+  def flush_ready_async_metrics(self, train_step: int | None = None) -> None:
+    """Flushes async metrics whose logging step is now safe to emit.
+
+    Train-mode async metrics are produced on the rollout/reward path ahead of
+    the trainer and must not be logged to W&B before the actor trainer has
+    actually reached that optimizer step. Eval-mode async metrics continue to
+    use outer RL global steps.
+    """
+    ready_train_step = (
+        train_step
+        if train_step is not None
+        else getattr(self.actor_trainer, "train_steps", self.global_steps)
+    )
+    while (
+        self._buffered_train_metrics
+        and self._buffered_train_metrics[0].global_steps <= ready_train_step
+    ):
+      self._log_metrics(self._buffered_train_metrics.pop(0))
+
+    while (
+        self._buffered_eval_metrics
+        and self._buffered_eval_metrics[0].global_steps <= self.global_steps
+    ):
+      self._log_metrics(self._buffered_eval_metrics.pop(0))
+
   def buffer_metrics(
       self,
       metrics: MetricsT,
@@ -837,7 +862,7 @@ class RLCluster:
       buffered_metrics = self._buffered_eval_metrics
 
     if not buffered_metrics:
-      buffered_metrics.append(MetricsBuffer(self.global_steps, mode=str(mode)))
+      buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
     else:
       if step != buffered_metrics[-1].global_steps:
         buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
@@ -852,19 +877,7 @@ class RLCluster:
       else:
         cur_metrics.metrics[metric_name][0].append(value)
 
-    # Global steps are incremented, log the previous metrics.
-    if (
-        self._buffered_train_metrics
-        and self._buffered_train_metrics[0].global_steps < self.global_steps
-    ):
-      for m in [self._buffered_train_metrics.pop(0)]:
-        self._log_metrics(m)
-    if (
-        self._buffered_eval_metrics
-        and self._buffered_eval_metrics[0].global_steps < self.global_steps
-    ):
-      for m in [self._buffered_eval_metrics.pop(0)]:
-        self._log_metrics(m)
+    self.flush_ready_async_metrics()
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
