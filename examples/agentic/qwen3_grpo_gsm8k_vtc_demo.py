@@ -734,7 +734,7 @@ def main():
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=LOG_DIR,
       project_name="tunix-gsm8k-vtc",
-      flush_every_n_steps=10,
+      flush_every_n_steps=1,
       backend_kwargs={"wandb": {"config": wandb_config}},
   )
 
