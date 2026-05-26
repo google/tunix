@@ -951,7 +951,11 @@ def main():
   with script_utils.profile_and_capture_log(
       "qwen3_grpo_gsm8k_vtc_demo", enable_profile=False
   ):
-    trainer.train(train_dataset, eval_dataset=eval_dataset)
+    try:
+      trainer.train(train_dataset, eval_dataset=eval_dataset)
+    except Exception:
+      rl_cluster.close()
+      raise
 
 
 if __name__ == "__main__":

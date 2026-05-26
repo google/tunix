@@ -235,6 +235,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.policy_version = self.rl_cluster.global_steps
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
     self._full_batch_size = 0
+    self._optimizer_steps_per_full_batch = 1
+    self._train_step_offset = 0
     self._process_in_consumer: bool = False
 
     loop_queue = queue.Queue()
@@ -600,7 +602,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # Create a merged training_input where each field from the original input
     # is repeated G times to align with the G completions.
     if mode == rl_cluster_lib.Mode.TRAIN:
-      expected_step = batch_results[0].group_id // self._full_batch_size
+      outer_step = batch_results[0].group_id // self._full_batch_size
+      expected_step = (
+          (outer_step + 1) * self._optimizer_steps_per_full_batch
+          + self._train_step_offset
+      )
     else:
       expected_step = self.rl_cluster.global_steps
 
@@ -794,6 +800,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         (mini_batch_size, f"{mini_batch_size=}"),
     ]:
       rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
+    self._optimizer_steps_per_full_batch = full_batch_size // mini_batch_size
+    self._train_step_offset = (
+        self.rl_cluster.actor_trainer.train_steps
+        - self.rl_cluster.global_steps * self._optimizer_steps_per_full_batch
+    )
     grad_acc_steps = self._training_config.get_with_default(
         "gradient_accumulation_steps", 1
     )
@@ -801,7 +812,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     logging.info(  # pylint: disable=logging-fstring-interpolation
         f"Training with {full_batch_size=}, {mini_batch_size=},"
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=},"
+        f" {self._optimizer_steps_per_full_batch=}, {self._train_step_offset=}"
     )
 
     logging.info("Starting AgenticRLLearner training loop.")
@@ -1032,10 +1044,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             trainer_str,
             eval_str,
         )
+        metric_step = self.rl_cluster.actor_trainer.train_steps
         self.rl_cluster.buffer_metrics_async(
             {"perf/global_step_time": (global_step_time, np.mean)},
             mode=rl_cluster_lib.Mode.TRAIN,
-            step=self.rl_cluster.global_steps,
+            step=metric_step,
         )
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
