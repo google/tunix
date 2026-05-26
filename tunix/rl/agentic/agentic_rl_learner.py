@@ -93,6 +93,8 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
+  eval_at_start: bool = False
+  eval_at_end: bool = False
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -197,11 +199,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # ``train_steps % eval_every_n_steps == 0`` check would fire at every
     # micro-iteration during an eval boundary, causing the full evaluation
     # rollout to be replayed ``grad_accum_steps`` times for the same step.
-    # Initialized to 0 (not -1) so the eval-at-step-0 baseline pass is
-    # skipped; it adds ~1-2 min to startup without exercising any trained
-    # weights. Subsequent evals at train_steps == eval_every_n_steps still
-    # fire normally.
-    self._last_eval_train_step = 0
+    # By default we skip the eval-at-step-0 baseline pass because it adds
+    # startup latency without exercising any trained weights. Recipes that want
+    # NeMo-style val_at_start can opt in via algo_config.eval_at_start.
+    self._last_eval_train_step = -1 if algo_config.eval_at_start else 0
 
     # Sync weights if the actor model and rollout model are not sharing weights.
     self.should_sync_weights = not (
@@ -702,6 +703,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         return  # The iterator is exhausted.
       yield batch
 
+  def _build_eval_examples(
+      self,
+      all_eval_prompts: list[TrainingInputT],
+  ) -> list[Any]:
+    """Runs agentic eval rollouts and materializes trainer-side eval examples."""
+    self._eval_iter_steps = 0
+    eval_orchestrator = self._build_orchestrator()
+
+    async def _eval_runner_async(current_eval_orchestrator):
+      eval_examples = []
+      async for batch in self._orchestrator_producer(
+          current_eval_orchestrator,
+          all_eval_prompts,
+          num_generations=self._num_generations(rl_cluster_lib.Mode.EVAL),
+      ):
+        eval_example = self._batch_to_train_example(
+            batch,
+            rl_cluster_lib.Mode.EVAL,
+        )
+        eval_examples.extend(eval_example)
+      return eval_examples
+
+    eval_future = asyncio.run_coroutine_threadsafe(
+        _eval_runner_async(eval_orchestrator), self.loop
+    )
+    eval_examples = eval_future.result()
+    self._eval_iter_steps += 1
+    return eval_examples
+
   def train(
       self,
       train_dataset: Iterable[TrainingInputT],
@@ -868,29 +898,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           and current_train_step != self._last_eval_train_step
       ):
         self._last_eval_train_step = current_train_step
-        self._eval_iter_steps = 0
-        eval_orchestrator = self._build_orchestrator()
-
-        async def _eval_runner_async(current_eval_orchestrator):
-          eval_examples = []
-          async for batch in self._orchestrator_producer(
-              current_eval_orchestrator,
-              all_eval_prompts,
-              num_generations=self._num_generations(rl_cluster_lib.Mode.EVAL),
-          ):
-            eval_example = self._batch_to_train_example(
-                batch,
-                rl_cluster_lib.Mode.EVAL,
-            )
-            eval_examples.extend(eval_example)
-          return eval_examples
-
-        eval_future = asyncio.run_coroutine_threadsafe(
-            _eval_runner_async(eval_orchestrator), self.loop
-        )
-        eval_examples = eval_future.result()
-        self._eval_iter_steps += 1
-        current_eval_dataset = eval_examples
+        current_eval_dataset = self._build_eval_examples(all_eval_prompts)
         did_eval_this_global_step = True
 
       # --- Training Step ---
@@ -1084,6 +1092,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self._global_step_start_time = time.time()
 
     _ = producer_future.result()
+    if all_eval_prompts and self.algo_config.eval_at_end:
+      final_train_step = self.rl_cluster.actor_trainer.train_steps
+      if final_train_step != self._last_eval_train_step:
+        logging.info(
+            "Running final evaluation on train step %d.", final_train_step
+        )
+        final_eval_dataset = self._build_eval_examples(all_eval_prompts)
+        self._last_eval_train_step = final_train_step
+        self.rl_cluster.update_actor([], final_eval_dataset, skip_jit)
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic([], final_eval_dataset, skip_jit)
     self.rl_cluster.close()
 
   def _put_prompts_to_queue(
