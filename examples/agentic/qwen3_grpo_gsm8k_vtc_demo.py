@@ -361,6 +361,10 @@ def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
       "rewards/solve_none": (1 if solve_none else 0, np.mean),
       "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
       "rewards/solve_ratio": (solve_ratio, np.mean),
+      "rewards/mean": (float(rewards.mean()), np.mean),
+      "rewards/max": (float(rewards.max()), np.max),
+      "rewards/min": (float(rewards.min()), np.min),
+      "rewards/std": (float(rewards.std()), np.mean),
       "rewards/vtc/format_ratio": (float(format_ok.mean()), np.mean),
       "rewards/vtc/answer_correct_ratio": (float(answer_ok.mean()), np.mean),
       "rewards/vtc/extracted_ratio": (float(extracted_ok.mean()), np.mean),
@@ -780,9 +784,24 @@ def main():
       save_interval_steps=MAX_STEPS,
       max_to_keep=1,
   )
+  wandb_config = {
+      "model": MODEL_ID,
+      "max_steps": MAX_STEPS,
+      "num_prompts_per_step": NUM_PROMPTS_PER_STEP,
+      "num_generations": NUM_GENERATIONS,
+      "mini_batch_size": MINI_BATCH_SIZE,
+      "train_micro_batch_size": TRAIN_MICRO_BATCH_SIZE,
+      "learning_rate": LEARNING_RATE,
+      "beta": BETA,
+      "epsilon": EPSILON,
+      "train_temperature": TRAIN_TEMPERATURE,
+      "max_response_length": MAX_GENERATION_LENGTH,
+  }
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=LOG_DIR,
+      project_name="tunix-gsm8k-vtc",
       flush_every_n_steps=10,
+      backend_kwargs={"wandb": {"config": wandb_config}},
   )
 
   rollout_config_base = dict(
