@@ -21,70 +21,102 @@ batch_size=${batch_size:-8}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
 train_fraction=${train_fraction:-0.8}
-checkpoint_dir=${checkpoint_dir:-"/tmp/grpo_checkpoints/${model_name}"}
+actor_mesh_shape=${actor_mesh_shape:-"(2,4)"}
+rollout_mesh_shape=${rollout_mesh_shape:-${rollout_mesh:-""}}
+checkpoint_dir=${checkpoint_dir-"/tmp/grpo_checkpoints/${model_name}"}
+
+if [[ -n "$checkpoint_dir" ]]; then
+  checkpoint_args=(
+    rl_training_config.checkpoint_root_directory=${checkpoint_dir}
+    rl_training_config.checkpointing_options.save_interval_steps=500
+    rl_training_config.checkpointing_options.max_to_keep=4
+  )
+else
+  checkpoint_args=(
+    rl_training_config.checkpoint_root_directory=null
+    rl_training_config.checkpointing_options=null
+  )
+fi
+
+if [[ -n "$rollout_mesh_shape" ]]; then
+  rollout_mesh_summary="$rollout_mesh_shape"
+  rollout_mesh_args=(
+    rollout_model_config.mesh.shape=${rollout_mesh_shape}
+    rollout_model_config.mesh.axis_names="('fsdp','tp')"
+  )
+else
+  rollout_mesh_summary="actor"
+  rollout_mesh_args=(
+    rollout_model_config.mesh=null
+    rollout_model_config.same_mesh_as="actor"
+  )
+fi
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
 echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
+echo "  Actor Mesh Shape: $actor_mesh_shape"
+echo "  Rollout Mesh Shape: $rollout_mesh_summary"
 echo "  Checkpoint Directory: $checkpoint_dir"
 
-python3 -m tunix.cli.grpo_main \
-  base_config.yaml \
-  model_config.model_name=${model_name} \
-  model_config.model_id=Qwen/${model_name} \
-  model_config.model_source=huggingface \
-  model_config.use_flash_attention=true \
-  model_config.flash_attention_block_size=256 \
-  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}" \
-  model_config.model_download_path="/tmp/models/${model_name}" \
-  model_config.mesh.shape="(2,4)" \
-  model_config.mesh.axis_names="('fsdp','tp')" \
-  model_config.rng_seed=42 \
-  actor_model_config.lora_config.rank=64 \
-  actor_model_config.lora_config.alpha=64.0 \
-  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj" \
-  actor_model_config.mesh.shape="(2,4)" \
-  actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  reference_model_config.mesh=null \
-  reference_model_config.same_mesh_as="actor" \
-  rollout_model_config.mesh=null \
-  rollout_model_config.same_mesh_as="actor" \
-  tokenizer_config.tokenizer_path=Qwen/${model_name} \
-  tokenizer_config.tokenizer_type=huggingface \
-  tokenizer_config.add_bos=false \
-  dataset_name="gsm8k" \
-  batch_size=$batch_size \
-  num_test_batches=100 \
-  num_train_epochs=$num_train_epochs \
-  train_fraction=$train_fraction \
-  rl_training_config.actor_optimizer_config.opt_type="adamw" \
-  rl_training_config.actor_optimizer_config.peak_value=3e-6 \
-  rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
-  rl_training_config.actor_optimizer_config.init_value=0.0 \
-  rl_training_config.actor_optimizer_config.end_value=0.0 \
-  rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio \
-  rl_training_config.actor_optimizer_config.b1=0.9 \
-  rl_training_config.actor_optimizer_config.b2=0.99 \
-  rl_training_config.actor_optimizer_config.weight_decay=0.1 \
-  rl_training_config.actor_optimizer_config.max_grad_norm=0.1 \
-  rl_training_config.eval_every_n_steps=10 \
-  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/${model_name}" \
-  rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
-  rl_training_config.checkpoint_root_directory="$checkpoint_dir" \
-  rl_training_config.checkpointing_options.save_interval_steps=500 \
-  rl_training_config.checkpointing_options.max_to_keep=4 \
-  rl_training_config.profiler_options={} \
-  rollout_config.total_generation_steps=768 \
-  rollout_config.max_prompt_length=256 \
-  rollout_config.temperature=0.9 \
-  rollout_config.top_p=1.0 \
-  rollout_config.top_k=50 \
-  rollout_engine="vanilla" \
-  offload_to_cpu=false \
-  grpo_config.num_generations=4 \
-  grpo_config.num_iterations=1 \
-  grpo_config.beta=0.08 \
-  grpo_config.epsilon=0.2 \
+grpo_args=(
+  base_config.yaml
+  model_config.model_name=${model_name}
+  model_config.model_id=Qwen/${model_name}
+  model_config.model_source=huggingface
+  model_config.use_flash_attention=true
+  model_config.flash_attention_block_size=256
+  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}"
+  model_config.model_download_path="/tmp/models/${model_name}"
+  model_config.mesh.shape=${actor_mesh_shape}
+  model_config.mesh.axis_names="('fsdp','tp')"
+  model_config.rng_seed=42
+  actor_model_config.lora_config.rank=64
+  actor_model_config.lora_config.alpha=64.0
+  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj"
+  actor_model_config.mesh.shape=${actor_mesh_shape}
+  actor_model_config.mesh.axis_names="('fsdp','tp')"
+  reference_model_config.mesh=null
+  reference_model_config.same_mesh_as="actor"
+  "${rollout_mesh_args[@]}"
+  tokenizer_config.tokenizer_path=Qwen/${model_name}
+  tokenizer_config.tokenizer_type=huggingface
+  tokenizer_config.add_bos=false
+  dataset_name="gsm8k"
+  batch_size=$batch_size
+  num_test_batches=100
+  num_train_epochs=$num_train_epochs
+  train_fraction=$train_fraction
+  rl_training_config.actor_optimizer_config.opt_type="adamw"
+  rl_training_config.actor_optimizer_config.peak_value=3e-6
+  rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule"
+  rl_training_config.actor_optimizer_config.init_value=0.0
+  rl_training_config.actor_optimizer_config.end_value=0.0
+  rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio
+  rl_training_config.actor_optimizer_config.b1=0.9
+  rl_training_config.actor_optimizer_config.b2=0.99
+  rl_training_config.actor_optimizer_config.weight_decay=0.1
+  rl_training_config.actor_optimizer_config.max_grad_norm=0.1
+  rl_training_config.eval_every_n_steps=10
+  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/${model_name}"
+  rl_training_config.metrics_logging_options.flush_every_n_steps=20
+  rl_training_config.perf_metrics_options.enable_perf_v1=true
+  "${checkpoint_args[@]}"
+  rl_training_config.profiler_options={}
+  rollout_config.total_generation_steps=768
+  rollout_config.max_prompt_length=256
+  rollout_config.temperature=0.9
+  rollout_config.top_p=1.0
+  rollout_config.top_k=50
+  rollout_engine="vanilla"
+  offload_to_cpu=false
+  grpo_config.num_generations=4
+  grpo_config.num_iterations=1
+  grpo_config.beta=0.08
+  grpo_config.epsilon=0.2
   reward_functions="['tunix/cli/reward_fn/gsm8k.py']"
+)
+
+python3 -m tunix.cli.grpo_main "${grpo_args[@]}"

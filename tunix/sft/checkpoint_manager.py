@@ -47,7 +47,7 @@ class CheckpointManager:
       options: The options for the checkpoint manager.
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
-    if root_directory is not None:
+    if root_directory:
       # When using Pathways, the checkpoint manager only supports persistence
       # APIs now.
       if 'proxy' in os.getenv('JAX_PLATFORMS', ''):

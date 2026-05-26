@@ -788,7 +788,7 @@ class HyperParameters:
         else:
           constructed_training_config[key] = None
       elif key == "perf_metrics_options":
-        if value:
+        if value is not None:
           try:
             constructed_training_config[key] = perf_metrics.PerfMetricsOptions(
                 **value

@@ -24,6 +24,7 @@ from flax import nnx
 import jax
 import optax
 from tunix.cli import config
+from tunix.perf import metrics as perf_metrics
 from tunix.sft import peft_trainer
 from tunix.tests import test_common as tc
 from tunix.utils import env_utils
@@ -117,6 +118,17 @@ class ConfigTest(parameterized.TestCase):
         config_dict["training_config"]["data_sharding_axis"], ["fsdp", "dp"]
     )
     self.run_test_peft_trainer(hp)
+
+    def test_grpo_default_perf_metrics_options_are_enabled(self):
+        hp = config.initialize(["grpo_main", "base_config.yaml"])
+
+        rl_training_config = hp.obtain_training_config_dict("rl_training_config")
+
+        self.assertIsInstance(
+                rl_training_config["perf_metrics_options"],
+                perf_metrics.PerfMetricsOptions,
+        )
+        self.assertTrue(rl_training_config["perf_metrics_options"].enable_perf_v1)
 
   def test_override_training_config_complex(self):
     with tempfile.TemporaryDirectory() as log_dir:

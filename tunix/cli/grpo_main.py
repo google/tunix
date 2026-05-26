@@ -287,7 +287,7 @@ class GrpoPipeline(config.HyperParameters):
     max_concurrency = 0
     if mode == "agentic_grpo":
       agentic_cfg = self._config_mapping("agentic_grpo_config")
-      kv_cache_size = max_prompt + max_response + 256
+      kv_cache_size = max_prompt + max_response
       filtered["kv_cache_size"] = kv_cache_size
       logging.info("kv_cache_size: %d", kv_cache_size)
 
@@ -296,7 +296,7 @@ class GrpoPipeline(config.HyperParameters):
       grpo_cfg = self._config_mapping("grpo_config")
       # Standard: kv_cache_size = max_prompt + max_response + 256
       if max_prompt and max_response:
-        kv_cache_size = max_prompt + max_response + 256
+        kv_cache_size = max_prompt + max_response
         filtered["kv_cache_size"] = kv_cache_size
       # Defaults to global batch size * num_generations to allow full concurrency
       max_running_requests = self.config.get("batch_size", 1) * grpo_cfg.get(
