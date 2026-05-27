@@ -84,14 +84,20 @@ for root in [
 _DISTRIBUTED_INITIALIZED = False
 try:
   import tunix  # pytype: disable=import-error  # noqa: F401
-  import pathwaysutils  # pytype: disable=import-error
-  import r2egym  # pytype: disable=import-error  # noqa: F401
-
-  if os.getenv("JAX_PLATFORMS") == "proxy":
-    pathwaysutils.initialize()
-    _DISTRIBUTED_INITIALIZED = True
 except Exception:
-  pathwaysutils = None
+  pass
+
+try:
+  import r2egym  # pytype: disable=import-error  # noqa: F401
+except Exception:
+  pass
+
+try:
+  import pathwaysutils  # pytype: disable=import-error
+  pathwaysutils.initialize()
+  _DISTRIBUTED_INITIALIZED = True
+except Exception:
+  pass
 
 if not _DISTRIBUTED_INITIALIZED:
   try:
