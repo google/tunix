@@ -185,6 +185,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+      self.llm.collective_rpc("delete_kv_cache") # will free hbm
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+      self._driver.llm_engine.collective_rpc("delete_kv_cache")
 
     if self.llm is not None:
       self.llm.reset_prefix_cache()
