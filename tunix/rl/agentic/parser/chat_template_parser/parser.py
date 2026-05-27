@@ -103,7 +103,7 @@ class BaseChatTemplateParser(ABC):
     result = sep.join(parts)
     if not is_first_msg and result:
       result = sep + result
-    print(f"parsed results: {result=}")
+    # print(f"parsed results: {result=}")
     return result
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
@@ -139,7 +139,10 @@ class BaseChatTemplateParser(ABC):
     return self.tokens.user_token + content + self.tokens.eot_token
 
   def _parse_assistant(self, content: str) -> str:
-    return self.tokens.assistant_token + content + self.tokens.eot_token
+    print(f"Original assistant content: {content=}")
+    returned_assistant_content= self.tokens.assistant_token + content + self.tokens.eot_token
+    print(f"Returned assistant content: {returned_assistant_content=}")
+    return returned_assistant_content
 
   def _parse_tool(self, content: str) -> str:
     return (
@@ -351,14 +354,17 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
   def _parse_user(self, content: str) -> str:
     return self.tokens.user_token + content.strip() + self.tokens.eot_token
 
-  def _parse_assistant(self, content: str) -> str:
-    import re
-    # Strip private thought channel <|channel>thought...<channel|> to match
-    # the `strip_thinking` macro behavior in the stock Gemma 4 jinja template.
-    cleaned_content = re.sub(
-        r"<\|channel\>thought[\s\S]*?\<channel\|\>", "", content
-    ).strip()
-    return "<|turn>model\n" + cleaned_content + self.tokens.eot_token
+  # def _parse_assistant(self, content: str) -> str:
+  #   print(f"Original assistant content: {content=}")
+  #   import re
+  #   # Strip private thought channel <|channel>thought...<channel|> to match
+  #   # the `strip_thinking` macro behavior in the stock Gemma 4 jinja template.
+  #   cleaned_content = re.sub(
+  #       r"<\|channel\>thought[\s\S]*?\<channel\|\>", "", content
+  #   ).strip()
+  #   cleaned_content =  "<|turn>model\n" + cleaned_content + self.tokens.eot_token
+  #   print(f"Cleaned assistant content: {cleaned_content=}")
+  #   return cleaned_content
 
 
 

@@ -1071,7 +1071,7 @@ class FeedForward(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+      return nnx.remat(self.block.__func__)(self, x)
     else:
       return self.block(x)
 
@@ -1242,7 +1242,7 @@ class DecoderLayer(nnx.Module):
         remat_config == RematConfig.DECODER
         or remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
+      return nnx.remat(self.block.__func__)(
           self,
           x,
           segment_pos,
