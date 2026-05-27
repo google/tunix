@@ -519,6 +519,7 @@ class TrajectoryCollectEngine:
         None,
         _safe_model_call,
     )
+    print(f"rollout_output.text[0] = {rollout_output.text[0]}")
     logging.debug("%s model_call done", self._debug_prefix)
 
     # Align trajectory prompt tokens with the rollout worker's actual

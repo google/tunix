@@ -5,12 +5,42 @@ import grain
 import pandas as pd
 import os
 import fsspec
+import numpy as np
+import numpy as np
 
 import transformers
 from tunix.generate import mappings
 
 Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
+
+from absl import logging as absl_logging
+
+import logging
+import sys
+
+# ====== Logging Configuration ======
+# 1. Force absl to use python logging
+absl_logging.use_python_logging()
+
+# 2. Configure the root logger
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+
+# 3. Explicitly set levels for relevant loggers
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger("absl").setLevel(logging.INFO)
+
+# 4. Set absl verbosity
+absl_logging.set_verbosity(absl_logging.INFO)
+absl_logging.set_stderrthreshold("info")
+
+print("Logging configured at INFO level.")
 
 try:
   from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
@@ -37,6 +67,8 @@ except Exception:
 with cm:
   from tunix.models.qwen2 import model as qwen2_lib
   from tunix.models.qwen2 import params as qwen2_params_lib
+  from tunix.models.gemma4 import model as gemma4_lib
+  from tunix.models.gemma4 import params_safetensors as gemma4_params_lib
   from tunix.generate import sampler as sampler_lib
   from tunix.utils import math_utils
 # %%
@@ -209,7 +241,9 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:3]).reshape(1, 1), axis_names=["fsdp", "tp"])
+    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape(1, 1), axis_names=["fsdp", "tp"])
+    # self.rollout_mesh_backup = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(1, 4), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
     self.sampler = None
@@ -221,14 +255,12 @@ class Qwen25MathEvaluator:
 
   def model_from_safe_tensors(self):
     print("Loading model from safe tensors...")
-    with self.mesh:
-      self.model = qwen2_params_lib.create_model_from_safe_tensors(
-          file_dir=self.model_path, config=self.model_config, mesh=self.mesh
-      )
+    with self.trainer_mesh:
+      self.model = gemma4_params_lib.create_model_from_safe_tensors(file_dir=self.model_path, config=self.model_config, mesh=self.trainer_mesh)
 
   def model_from_orbax_ckpt(self):
     print(f"Loading model from orbax checkpoint {self.model_path}...")
-    with self.mesh:
+    with self.trainer_mesh:
       abs_model: nnx.Module = nnx.eval_shape(
           lambda: qwen2_lib.Qwen2(self.model_config, rngs=nnx.Rngs(params=0))
       )
@@ -236,7 +268,7 @@ class Qwen25MathEvaluator:
       abs_state = jax.tree.map(
           lambda a, s: jax.ShapeDtypeStruct(a.shape, jnp.bfloat16, sharding=s),
           abs_state,
-          nnx.get_named_sharding(abs_state, self.mesh),
+          nnx.get_named_sharding(abs_state, self.trainer_mesh),
       )
       item_handlers = {
           "model_params": ocp.PyTreeCheckpointHandler(),
@@ -282,6 +314,7 @@ class Qwen25MathEvaluator:
     else:
       self.model_from_orbax_ckpt()
     print("Model loaded successfully!")
+    print("Skipping model loading for testing purposes...")
     print("Creating sampler...")
     cache_config = sampler_lib.CacheConfig(
         cache_size=self.max_prompt_length + self.max_generation_steps + 100,
@@ -307,12 +340,12 @@ class Qwen25MathEvaluator:
       self.sampler_sglang = sglang_jax_sampler.SglangJaxSampler(
           tokenizer=self.tokenizer,
           config=sglang_jax_sampler.SglangJaxConfig(
-              mesh=self.mesh,
+              mesh=self.rollout_mesh,
               context_length=self.max_prompt_length
               + self.max_generation_steps
               + 100,
               model_version=self.model_version,
-              mem_fraction_static=0.4,
+              mem_fraction_static=0.3,
               init_with_random_weights=False,
               disable_radix_cache=True,
               enable_deterministic_sampling=False,
@@ -321,35 +354,157 @@ class Qwen25MathEvaluator:
       )
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to SGLang JAX sampler...")
-      self.sampler_sglang.update_params(nnx.state(self.model))
+      # self.sampler_sglang.update_params(nnx.state(self.model))
     elif self.sampler_type == "vllm":
-      from tunix.google.stubs import vllm_sampler_stub as vllm_sampler  # pylint: disable=g-import-not-at-top
+      from tunix.generate import vllm_sampler   # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
           model=self.model,
           backend="vllm_jax",
       )
+      # from tunix.models.gemma4 import mapping_vllm_jax  # pylint: disable=g-import-not-at-top
+      # mapping_config = mappings.MappingConfig(**mapping_vllm_jax.VLLM_JAX_MAPPING)
+      from tunix.sft import utils as sft_utils
+      sft_utils.show_hbm_usage(title="Before creating VLLM sampler")
       self.sampler_vllm = vllm_sampler.VllmSampler(
           tokenizer=self.tokenizer,
           config=vllm_sampler.VllmConfig(
-              mesh=self.mesh,
-              hbm_utilization=0.8,
-              init_with_random_weights=False,
+              mesh=self.rollout_mesh,
+              hbm_utilization=0.3,
+              enable_dp_attention=False,
+              init_with_random_weights=True,
               mapping_config=mapping_config,
+              # delete_dst_buffers=True,
+              # reshard_chunk_size=128,
               engine_kwargs={
                   "model": self.model_version,
-                  "max_model_len": (
-                      self.max_prompt_length + self.max_generation_steps + 100
-                  ),
-                  "max_num_seqs": 30,
-                  "max_num_batched_tokens": 30 * 10 * 1024 // 8,
+                  "max_model_len": 1024,
+                  "max_num_seqs": 8,
+                  "max_num_batched_tokens": 8 * 1024,
               },
           ),
       )
+      
+      sft_utils.show_hbm_usage(title="After creating VLLM sampler")
       # sync weights from self.model to the sampler's internal model
       print("Syncing model weights to VLLM sampler...")
       self.sampler_vllm.update_params(nnx.state(self.model))
+      print("weight sync done....")
+      sft_utils.show_hbm_usage(title="After weight sync to VLLM sampler")
+      # ========================================================================
+      # Standalone Raw Weight Loading (Bypassing VllmSampler Engine Creation)
+      # ========================================================================
+      from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
+      from vllm.model_executor.model_loader import get_model_loader
+      from tpu_inference.utils import to_jax_dtype
+      from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
+      from vllm.config import set_current_vllm_config
+
+      print("\n" + "=" * 80)
+      print("Loading raw safetensors weights into standalone vLLM JAX PyTree...")
+
+      # Extract the underlying vllm_config object from the active sampler runner
+      if hasattr(self.sampler_vllm, "_driver") and self.sampler_vllm._driver:
+        vllm_config_obj = (
+            self.sampler_vllm._driver.llm_engine.model_executor.driver_worker.model_runner.vllm_config
+        )
+      elif hasattr(self.sampler_vllm, "llm") and self.sampler_vllm.llm:
+        vllm_config_obj = (
+            self.sampler_vllm.llm.llm_engine.model_executor.driver_worker.model_runner.vllm_config
+        )
+      else:
+        raise RuntimeError(
+            "Could not locate active vllm_config from sampler_vllm."
+        )
+
+      # Temporarily ensure load_format is set to 'hf' so the loader reads real safetensors
+      # instead of generating dummy weights
+      orig_load_format = vllm_config_obj.load_config.load_format
+      vllm_config_obj.load_config.load_format = "hf"
+
+      # Temporarily convert model_config.dtype to jax dtype so nnx layers initialize correctly
+      orig_dtype = vllm_config_obj.model_config.dtype
+      vllm_config_obj.model_config.dtype = to_jax_dtype(orig_dtype)
+      orig_quant_config = vllm_config_obj.quant_config
+      vllm_config_obj.quant_config = get_tpu_quantization_config(vllm_config_obj)
+
+      # 1. Create bare nnx model matching vLLM JAX structural definitions
+      with self.sampler_vllm.mesh, set_current_vllm_config(vllm_config_obj):
+        raw_model = Gemma4ForCausalLM(
+            vllm_config_obj, jax.random.PRNGKey(0), self.sampler_vllm.mesh
+        )
+
+        # Monkeypatch raw_model.load_weights to filter out audio tower weights
+        orig_load_weights = raw_model.load_weights
+        def patched_load_weights(weights):
+          filtered_weights = (
+              (name, tensor) for name, tensor in weights if "audio" not in name
+          )
+          return orig_load_weights(filtered_weights)
+        raw_model.load_weights = patched_load_weights
+
+        # 2. Load raw weights directly from safetensors into raw_model's nnx.Params
+        weight_loader = get_model_loader(vllm_config_obj.load_config)
+        weight_loader.load_weights(raw_model, vllm_config_obj.model_config)
+
+      # Restore original configs
+      vllm_config_obj.load_config.load_format = orig_load_format
+      vllm_config_obj.model_config.dtype = orig_dtype
+      vllm_config_obj.quant_config = orig_quant_config
+
+      # ========================================================================
+      # State PyTree Comparison Logic
+      # ========================================================================
+      print("Comparing state pytrees between raw safetensors and sampler_vllm:")
+      bak_state_flat = {
+          ".".join(str(k) for k in keys): p.value if hasattr(p, "value") else p
+          for keys, p in nnx.state(raw_model).flat_state()
+      }
+      vllm_state_flat = {
+          ".".join(str(k) for k in keys): p.value if hasattr(p, "value") else p
+          for keys, p in self.sampler_vllm.transformer_state.flat_state()
+      }
+
+      bak_keys = set(bak_state_flat.keys())
+      vllm_keys = set(vllm_state_flat.keys())
+
+      missing = vllm_keys - bak_keys
+      extra = bak_keys - vllm_keys
+      if missing:
+        print(
+            f"  Keys in sampler_vllm NOT in raw safetensors ({len(missing)}):"
+        )
+        for k in sorted(missing):
+          print(f"    MISSING: {k}")
+      if extra:
+        print(
+            f"  Keys in raw safetensors NOT in sampler_vllm ({len(extra)}):"
+        )
+        for k in sorted(extra):
+          print(f"    EXTRA: {k}")
+
+      mismatches = 0
+      for k in sorted(bak_keys & vllm_keys):
+        arr_bak = np.asarray(jax.device_get(bak_state_flat[k]))
+        arr_vllm = np.asarray(jax.device_get(vllm_state_flat[k]))
+        if arr_bak.shape != arr_vllm.shape:
+          print(
+              f"  [SHAPE MISMATCH] {k}: raw={arr_bak.shape} vs"
+              f" vllm={arr_vllm.shape}"
+          )
+          mismatches += 1
+        else:
+          diff = float(np.linalg.norm(arr_bak - arr_vllm)) / (
+              float(np.linalg.norm(arr_vllm)) + 1e-8
+          )
+          if diff > 1e-5:
+            print(f"  [VALUE MISMATCH] {k}: rel_diff={diff:.6f}")
+            mismatches += 1
+
+      if mismatches == 0 and not missing and not extra:
+        print("  State pytrees match perfectly!")
+      print("=" * 80 + "\n")
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
 
@@ -479,6 +634,7 @@ class Qwen25MathEvaluator:
       )
     else:
       raise ValueError(f"Unsupported sampler type: {self.sampler_type}")
+    # print(f"{out_data.text=}")
     return out_data.text
 
   def evaluate(
@@ -519,7 +675,10 @@ class Qwen25MathEvaluator:
     debug_count = 0
 
     # Evaluate batch by batch
+    max_batches = 4
     for batch_idx, batch in enumerate(tqdm(dataset, desc="Evaluating")):
+      if batch_idx >= max_batches:
+        break
       prompts = batch["prompt"]
 
       questions = batch["question"]
@@ -651,6 +810,11 @@ MODEL_MAPPING = {
         qwen2_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b(),
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
+    "google/gemma-4-E2B-it": (
+      gemma4_lib.ModelConfig.gemma4_e2b(),
+      "/home/linchai_google_com/.cache/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db/",
+    ),
+    
 }
 
 mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
@@ -660,7 +824,10 @@ num_batches_env = os.environ.get("NUM_BATCHES")
 num_batches = int(num_batches_env) if num_batches_env and int(num_batches_env) > 0 else None
 
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
-model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# model_version = "google/gemma-4-26B-A4B-it"
+# model_version = "google/gemma-4-31B-it"
+model_version = "google/gemma-4-E2B-it"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -672,6 +839,7 @@ evaluator = Qwen25MathEvaluator(
     mesh_config=mesh_config,
     max_prompt_length=1024,  # Increased
     max_generation_steps=1024,  # Increased
+    sampler_type="vllm", 
 )
 
 evaluator.load_model()
@@ -679,7 +847,7 @@ evaluator.load_model()
 print("\nStarting evaluation...")
 results = evaluator.evaluate(
     batch_size=8,
-    num_batches=num_batches,
+    num_batches=5,
     temperature=0.6,
     top_k=50,
     top_p=0.95,
@@ -696,45 +864,45 @@ print(f"Dataset: {dataset}")
 print(f"Correct: {results['correct']}/{results['total']}")
 print(f"Accuracy: {results['accuracy']:.2f}%")
 print("=" * 60)
-# %%
-# AIME-2024
-model_version = "agentica-org/DeepScaleR-1.5B-Preview"
-# model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-dataset = AIME_2024_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
+# # %%
+# # AIME-2024
+# model_version = "agentica-org/DeepScaleR-1.5B-Preview"
+# # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+# dataset = AIME_2024_DATA_PATH
+# model_config, model_path = MODEL_MAPPING[model_version]
 
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=2048,  # Increased
-    max_generation_steps=32768,  # Increased
-)
+# evaluator = Qwen25MathEvaluator(
+#     model_config=model_config,
+#     model_version=model_version,
+#     model_path=model_path,
+#     dataset=dataset,
+#     mesh_config=mesh_config,
+#     max_prompt_length=2048,  # Increased
+#     max_generation_steps=32768,  # Increased
+# )
 
-evaluator.load_model()
+# evaluator.load_model()
 
-print("\nStarting evaluation...")
+# print("\nStarting evaluation...")
 
-results = evaluator.evaluate(
-    batch_size=1,
-    num_batches=num_batches,
-    temperature=0.6,
-    top_k=None,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
+# results = evaluator.evaluate(
+#     batch_size=1,
+#     num_batches=None,
+#     temperature=0.6,
+#     top_k=None,
+#     top_p=0.95,
+#     num_passes=1,
+#     debug_first_n=5,
+# )
 
-# Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
-# %%
+# # Print results
+# print("\n" + "=" * 60)
+# print("Evaluation Results")
+# print("=" * 60)
+# print(f"Model: {model_path}")
+# print(f"Dataset: {dataset}")
+# print(f"Correct: {results['correct']}/{results['total']}")
+# print(f"Accuracy: {results['accuracy']:.2f}%")
+# print("=" * 60)
+# # %%
