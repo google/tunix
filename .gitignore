@@ -26,3 +26,4 @@
 /docs/generated
 build/*
 wandb/
+vllm_tpu_inference/

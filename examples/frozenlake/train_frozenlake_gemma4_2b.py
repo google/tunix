@@ -56,8 +56,8 @@ absl_logging.set_verbosity(absl_logging.INFO)
 absl_logging.set_stderrthreshold("info")
 print("Logging configured at INFO level.")
 
-from tunix.models.qwen3 import params as params_lib
-from tunix.models.qwen3 import model as model_lib
+from tunix.models.gemma4 import params_safetensors as params_lib
+from tunix.models.gemma4 import model as model_lib
 from tunix.oss import utils as oss_utils
 from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
@@ -167,9 +167,10 @@ SEED = args.seed
 # if _mesh_env:
 #   SHARED_MESH_SHAPE = tuple(int(x) for x in _mesh_env.split(","))
 # else:
-SHARED_MESH_SHAPE = (1, jax.device_count())
+TRAINER_MESH_SHAPE = (jax.device_count(), 1)
+ROLLOUT_MESH_SHAPE = (1, jax.device_count())
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
-print(f"Using shared mesh shape {SHARED_MESH_SHAPE} with axis names {SHARED_MESH_AXIS_NAMES}")
+print(f"Using shared mesh shape {ROLLOUT_MESH_SHAPE} with axis names {SHARED_MESH_AXIS_NAMES}")
 
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
@@ -250,9 +251,8 @@ MAX_TO_KEEP = 1
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 
 # ====== Paths (env-driven so the same image runs anywhere) ======
-MODEL_VERSION = "Qwen/Qwen3-8B"
-# MODEL_DOWNLOAD_DIR = os.getenv("MODEL_DOWNLOAD_DIR", "/tmp/models/Qwen3-8B")
-MODEL_DOWNLOAD_DIR = "/home/linchai_google_com/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218"
+MODEL_VERSION = "google/gemma-4-E2B-it"
+MODEL_DOWNLOAD_DIR = "/home/linchai_google_com/.cache/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
 DATA_DIR = "gs://tunix/data/Frozenlake"
 
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -260,26 +260,35 @@ now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 # Orbax's CheckpointManager force-saves the first step regardless of the
 # configured save_interval_steps, so a large interval alone does not disable it.
 CKPT_DIR = os.getenv("CKPT_DIR") or None
-TB_LOG_DIR = os.getenv("TB_LOG_DIR", "/tmp/tunix-tb/frozenlake")
+TB_LOG_DIR = "gs://linchai-bucket-dev/tensorboard/grpo"
 
 
 # ====== Build the single shared mesh ======
-if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
+if jax.device_count() < math.prod(TRAINER_MESH_SHAPE):
   raise ValueError(
-      f"Expected at least {math.prod(SHARED_MESH_SHAPE)} devices for mesh "
-      f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
+      f"Expected at least {math.prod(TRAINER_MESH_SHAPE)} devices for mesh "
+      f"{TRAINER_MESH_SHAPE}, got {jax.device_count()}."
   )
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+trainer_device_list = jax._src.mesh_utils.create_device_mesh(
+    TRAINER_MESH_SHAPE, jax.devices()[: math.prod(TRAINER_MESH_SHAPE)]
 )
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
+trainer_mesh = jax.sharding.Mesh(
+    trainer_device_list,
     axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH_SHAPE),
 )
-print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
+print(f"trainer_mesh.devices.shape={trainer_mesh.devices.shape}")
 
+rollout_device_list = jax._src.mesh_utils.create_device_mesh(
+    ROLLOUT_MESH_SHAPE, jax.devices()[: math.prod(ROLLOUT_MESH_SHAPE)]
+)
+rollout_mesh = jax.sharding.Mesh(
+    trainer_device_list,
+    axis_names=SHARED_MESH_AXIS_NAMES,
+    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH_SHAPE),
+)
+print(f"rollout_mesh.devices.shape={rollout_mesh.devices.shape}")
 # ====== Data ======
 import pandas as pd
 import datasets as datasets_lib
@@ -328,7 +337,7 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 # step-by-step reasoning; with thinking enabled the model writes hundreds of
 # ``<think>...</think>`` tokens per turn and exhausts the response budget
 # before producing an action.
-chat_parser = parser.QwenChatTemplateParser(tokenizer, enable_thinking=False)
+chat_parser = parser.DefaultChatTemplateParser(tokenizer, enable_thinking=False)
 
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(

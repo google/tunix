@@ -104,6 +104,7 @@ class BaseChatTemplateParser(ABC):
     result = sep.join(parts)
     if not is_first_msg and result:
       result = sep + result
+    print(f"parsed results: {result=}")
     return result
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
