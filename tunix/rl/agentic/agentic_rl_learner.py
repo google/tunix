@@ -436,11 +436,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       env.task["policy_version"] = self.policy_version
 
     if self.chat_parser:
+      print(f"Using own chat parser to parse chat_lists: {chat_lists}")  # Debug print to verify input
       chat_lists = self.chat_parser.parse(
           messages=chat_lists,
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
+      print(f"Parsed chat_lists: {chat_lists}")  # Debug print to verify parsing
+    else:
+      print(f"No chat parser provided, using raw chat_lists: {chat_lists}")  # Debug print for raw input
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
       if "group_id" in env.extra_kwargs:

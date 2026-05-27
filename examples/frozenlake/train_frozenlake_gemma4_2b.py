@@ -1,4 +1,4 @@
-"""Agentic FrozenLake GRPO recipe for Qwen3-8B on a single TPU host.
+"""Agentic FrozenLake GRPO recipe for Gemma4-2B on a single TPU host.
 
 Designed for v5p-8 / v6e-4 -class hosts where actor, reference, and rollout
 share a single mesh. Configuration is env-driven so the same image runs
@@ -9,7 +9,7 @@ unchanged on any spot VM:
   WANDB_PROJECT         Wandb project name (default "tunix-frozenlake").
   WANDB_RUN_NAME        Wandb run name (default uses timestamp).
   MODEL_DOWNLOAD_DIR    Local dir for HF safetensors (default
-                        /tmp/models/Qwen3-8B).
+                        /tmp/models/Gemma4-2B).
   DATA_DIR              Local or gs:// dir holding train.parquet / test.parquet
                         (default gs://tunix/data/Frozenlake).
   CKPT_DIR              Output checkpoint dir. Checkpointing is opt-in; if
@@ -92,7 +92,7 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(
-    description="Train FrozenLake on Qwen3-8B (single-host TPU)."
+    description="Train FrozenLake on Gemma4-2B (single-host TPU)."
 )
 # Effective on-policy batch is `batch_size * num_generations` per global step.
 # Tuned together with `num_generations=8` to keep per-step rollout latency
@@ -167,10 +167,9 @@ SEED = args.seed
 # if _mesh_env:
 #   SHARED_MESH_SHAPE = tuple(int(x) for x in _mesh_env.split(","))
 # else:
-TRAINER_MESH_SHAPE = (jax.device_count(), 1)
-ROLLOUT_MESH_SHAPE = (1, jax.device_count())
+SHARED_MESH_SHAPE = (1, jax.device_count())
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
-print(f"Using shared mesh shape {ROLLOUT_MESH_SHAPE} with axis names {SHARED_MESH_AXIS_NAMES}")
+print(f"Using shared mesh shape {SHARED_MESH_SHAPE} with axis names {SHARED_MESH_AXIS_NAMES}")
 
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
@@ -264,31 +263,22 @@ TB_LOG_DIR = "gs://linchai-bucket-dev/tensorboard/grpo"
 
 
 # ====== Build the single shared mesh ======
-if jax.device_count() < math.prod(TRAINER_MESH_SHAPE):
+if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
   raise ValueError(
-      f"Expected at least {math.prod(TRAINER_MESH_SHAPE)} devices for mesh "
-      f"{TRAINER_MESH_SHAPE}, got {jax.device_count()}."
+      f"Expected at least {math.prod(SHARED_MESH_SHAPE)} devices for mesh "
+      f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
   )
 
-trainer_device_list = jax._src.mesh_utils.create_device_mesh(
-    TRAINER_MESH_SHAPE, jax.devices()[: math.prod(TRAINER_MESH_SHAPE)]
+shared_device_list = jax._src.mesh_utils.create_device_mesh(
+    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
 )
-trainer_mesh = jax.sharding.Mesh(
-    trainer_device_list,
+shared_mesh = jax.sharding.Mesh(
+    shared_device_list,
     axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH_SHAPE),
+    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
 )
-print(f"trainer_mesh.devices.shape={trainer_mesh.devices.shape}")
+print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 
-rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-    ROLLOUT_MESH_SHAPE, jax.devices()[: math.prod(ROLLOUT_MESH_SHAPE)]
-)
-rollout_mesh = jax.sharding.Mesh(
-    trainer_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH_SHAPE),
-)
-print(f"rollout_mesh.devices.shape={rollout_mesh.devices.shape}")
 # ====== Data ======
 import pandas as pd
 import datasets as datasets_lib
@@ -333,11 +323,11 @@ def create_datasets(
 
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
-# Disable Qwen3 thinking mode. The agent prompt already requests explicit
+# Disable Gemma4 thinking mode. The agent prompt already requests explicit
 # step-by-step reasoning; with thinking enabled the model writes hundreds of
-# ``<think>...</think>`` tokens per turn and exhausts the response budget
+# ``<|channel>..<channel|>`` tokens per turn and exhausts the response budget
 # before producing an action.
-chat_parser = parser.DefaultChatTemplateParser(tokenizer, enable_thinking=False)
+chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
 
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
@@ -368,7 +358,7 @@ if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
   os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
   oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
 
-config = model_lib.ModelConfig.qwen3_8b()
+config = model_lib.ModelConfig.gemma4_e2b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
@@ -378,19 +368,19 @@ if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
 # Reference: keep bf16 storage (frozen, never updated -> HBM savings safe).
-qwen_ref = params_lib.create_model_from_safe_tensors(
+gemma4_ref = params_lib.create_model_from_safe_tensors(
     MODEL_DOWNLOAD_DIR, config, shared_mesh, dtype=MODEL_DTYPE
 )
-show_hbm_usage("after loading qwen_ref")
+show_hbm_usage("after loading gemma4_ref")
 
 # Actor: storage MUST be fp32. At LR=1e-6 with typical weight magnitudes
 # ~1e-2, Adam updates are ~1e-6, well below bf16 ULP (~7.8e-5). bf16 storage
 # silently rounds every update to zero in optax.apply_updates, so the policy
 # never moves. Forward compute can still be bf16 via config.dtype.
-qwen_actor = params_lib.create_model_from_safe_tensors(
+gemma4_actor = params_lib.create_model_from_safe_tensors(
     MODEL_DOWNLOAD_DIR, config, shared_mesh, dtype=jnp.float32
 )
-show_hbm_usage("after loading qwen_actor")
+show_hbm_usage("after loading gemma4_actor")
 
 # ====== Checkpoint + metrics + optimizer ======
 if CKPT_DIR:
@@ -551,8 +541,8 @@ grpo_config = GRPOConfig(
 )
 
 rl_cluster = rl_cluster_lib.RLCluster(
-    actor=qwen_actor,
-    reference=qwen_ref,
+    actor=gemma4_actor,
+    reference=gemma4_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
