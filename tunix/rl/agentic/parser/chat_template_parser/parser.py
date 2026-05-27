@@ -103,6 +103,7 @@ class BaseChatTemplateParser(ABC):
     result = sep.join(parts)
     if not is_first_msg and result:
       result = sep + result
+    print(f"parsed results: {result=}")
     return result
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
@@ -289,3 +290,75 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
 
   def _init_generation_prompt(self) -> str:
     return self.tokens.assistant_token
+
+
+class Gemma4ChatTemplateParser(BaseChatTemplateParser):
+  """Parser for Gemma 4 models."""
+
+  def __init__(self, tokenizer, enable_thinking: bool = True):
+    super().__init__(tokenizer, enable_thinking=enable_thinking)
+    # Also sanitize the base <turn|> token (without trailing newline) to guard
+    # against model-generated control tokens trailing in message contents.
+    self._tokens_to_sanitize.add("<turn|>")
+
+  def _init_tokens(self) -> TokenConfig:
+    return TokenConfig(
+        bos_token="<bos>",
+        eot_token="<turn|>\n",
+        system_token=self._get_system_token(),
+        user_token="<|turn>user\n",
+        assistant_token=self._get_assistant_token(),
+        tool_start_token="<|tool_call>",
+        tool_end_token="<tool_call|>",
+        tool_response_start_token="<|tool_response>",
+        tool_response_end_token="<tool_response|>",
+        message_separator="",
+    )
+
+  def _get_system_token(self) -> str:
+    token = "<|turn>system\n"
+    if self.enable_thinking:
+      token += "<|think|>"
+    return token
+
+  def _get_assistant_token(self) -> str:
+    token = "<|turn>model\n"
+    if not self.enable_thinking:
+      token += "<|channel>thought\n<channel|>"
+    return token
+
+  def _init_generation_prompt(self) -> str:
+    return self.tokens.assistant_token
+
+  def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
+    """Prepend bos and system think token if needed."""
+    prefix = self.tokens.bos_token
+    if messages and messages[0]["role"] not in ("system", "developer"):
+      if self.enable_thinking:
+        prefix += "<|turn>system\n<|think|><turn|>\n"
+    return prefix
+
+  def _parse_tool(self, content: str) -> str:
+    return (
+        self.tokens.tool_response_start_token
+        + content
+        + self.tokens.tool_response_end_token
+    )
+
+  def _parse_system(self, content: str) -> str:
+    return self.tokens.system_token + content.strip() + self.tokens.eot_token
+
+  def _parse_user(self, content: str) -> str:
+    return self.tokens.user_token + content.strip() + self.tokens.eot_token
+
+  def _parse_assistant(self, content: str) -> str:
+    import re
+    # Strip private thought channel <|channel>thought...<channel|> to match
+    # the `strip_thinking` macro behavior in the stock Gemma 4 jinja template.
+    cleaned_content = re.sub(
+        r"<\|channel\>thought[\s\S]*?\<channel\|\>", "", content
+    ).strip()
+    return "<|turn>model\n" + cleaned_content + self.tokens.eot_token
+
+
+
