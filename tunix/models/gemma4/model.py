@@ -137,7 +137,6 @@ class ModelConfig:
   dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
-  use_sliding_window_kv_cache: bool = True
 
   # MoE config
   enable_moe: bool = False
@@ -145,13 +144,6 @@ class ModelConfig:
   num_experts_per_tok: int | None = None
   expert_dim: int | None = None
   moe_dense_hidden_dim: int | None = None
-
-  def __post_init__(self):
-    # TODO: support flash attention with sliding window KV cache
-    if self.use_sliding_window_kv_cache and self.use_flash_attention:
-      raise ValueError(
-          'Flash attention and sliding window KV cache are mutually exclusive.'
-      )
 
   @classmethod
   def gemma4_e2b(
@@ -649,11 +641,7 @@ class Attention(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
       kv_shared_cache: LayerCache | None = None,
-  ) -> tuple[
-      LayerCache | None,
-      jaxtyping.Array,
-      tuple[jaxtyping.Array, jaxtyping.Array],
-  ]:
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
     x = x.astype(self.config.dtype)
     seq_len = x.shape[1]
     query_proj = self.q_einsum(x)
@@ -668,7 +656,6 @@ class Attention(nnx.Module):
     )
 
     if kv_shared_cache is not None:
-      assert cache is None
       key_proj = kv_shared_cache['k']
       value_proj = kv_shared_cache['v']
     else:
@@ -694,53 +681,19 @@ class Attention(nnx.Module):
       )
 
     if cache is not None:
-      assert kv_shared_cache is None
-      # Update cache with new kv projections
-      cache_len = cache['v'].shape[1]
-      if seq_len > 1:  # prefill
-        if self.config.use_sliding_window_kv_cache:
-          # Sliding window cache update (prefill).
-          # Does not support chunked prefill.
-          valid_len = min(seq_len, cache_len)
-          latest_indices = jnp.arange(seq_len - valid_len, seq_len) % cache_len
-          cache_v = (
-              cache['v']
-              .at[:, latest_indices, ...]
-              .set(value_proj[:, -valid_len:, ...])
-          )
-          cache_k = (
-              cache['k']
-              .at[:, latest_indices, ...]
-              .set(key_proj[:, -valid_len:, ...])
-          )
-        else:
-          cache_v = cache['v'].at[:, :seq_len, ...].set(value_proj)
-          cache_k = cache['k'].at[:, :seq_len, ...].set(key_proj)
-
-        new_cache = {
-            'v': cache_v,
-            'k': cache_k,
-            'end_index': cache['end_index'] + seq_len,
-        }
-      else:  # decode
-        end_index = cache['end_index'][0]
-        slice_indices = (0, end_index % cache_len, 0, 0)
-        value_proj = jax.lax.dynamic_update_slice(
-            cache['v'], value_proj, slice_indices
-        )
-        key_proj = jax.lax.dynamic_update_slice(
-            cache['k'], key_proj, slice_indices
-        )
-        new_cache = {
-            'v': value_proj,
-            'k': key_proj,
-            'end_index': cache['end_index'] + seq_len,
-        }
+      end_index = cache['end_index'][0]
+      slice_indices = (0, end_index % cache['v'].shape[1], 0, 0)
+      value_proj = jax.lax.dynamic_update_slice(
+          cache['v'], value_proj, slice_indices
+      )
+      key_proj = jax.lax.dynamic_update_slice(
+          cache['k'], key_proj, slice_indices
+      )
+      cache_value_proj = value_proj
+      cache_key_proj = key_proj
     else:
-      new_cache = {
-          'v': value_proj,
-          'k': key_proj,
-      }
+      cache_value_proj = value_proj
+      cache_key_proj = key_proj
 
     b, t, qh, d = query_proj.shape
     _, _, kh, _ = key_proj.shape
@@ -820,54 +773,18 @@ class Attention(nnx.Module):
       else:
         logits = jnp.einsum('BTNH,BSNH->BTNS', query_proj, key_proj)
 
-      if seq_len > 1:
-        # Only compute attention scores for the actual sequence length.
-        attn_mask = attn_mask[..., :seq_len]
-
       if self.attn_type == AttentionType.LOCAL_SLIDING:
-        if (
-            segment_pos.shape[1] == 1
-            and self.config.use_sliding_window_kv_cache
-        ):
-          # for decoding with sliding window cache
-          active_cache = cache if cache is not None else kv_shared_cache
-          if active_cache is None:
-            raise ValueError(
-                'Cache or shared cache is required for local sliding attention'
-                ' in decoding.'
-            )
-          cache_len = key_proj.shape[1]
-          end_idx = active_cache['end_index']
-          if cache is None and kv_shared_cache is not None:
-            # In case of shared KV cache, the origin layer already updated the
-            # end index. We need to subtract 1 to get the correct end index of
-            # the previous token.
-            end_idx = end_idx - 1
-          end_idx = end_idx[:, None, None]
-          p = jnp.arange(cache_len)[None, None, :]
-
-          # map physical index to logical index
-          logical_indices = end_idx - ((end_idx - p) % cache_len)
-
-          # identify uninitialized slots (before the cache fills up)
-          valid_physical = logical_indices >= 0
-          logical_indices = jnp.maximum(0, logical_indices)
-
-          attn_mask = jnp.take_along_axis(attn_mask, logical_indices, axis=-1)
-          attn_mask = attn_mask * valid_physical
-        elif segment_pos.shape[1] == 1:
-          # for decoding without sliding window cache
+        if segment_pos.shape[1] == 1:  # for decoding
           sliding_mask = create_sliding_window_mask(
               attn_mask,
               sliding_window_size=self.config.sliding_window_size,
           )
-          attn_mask = sliding_mask * attn_mask
         else:  # for prefill
           all_ones = jnp.ones_like(attn_mask)
           sliding_mask = jnp.triu(
               all_ones, -1 * self.config.sliding_window_size + 1
           ) * jnp.tril(all_ones, self.config.sliding_window_size - 1)
-          attn_mask = sliding_mask * attn_mask
+        attn_mask = sliding_mask * attn_mask
 
       attn = jnp.where((jnp.expand_dims(attn_mask, -2)), logits, K_MASK)
       attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
@@ -886,7 +803,17 @@ class Attention(nnx.Module):
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
-    return new_cache, attn_output, (key_proj, value_proj)
+
+    if cache is not None:
+      new_cache = {
+          'v': cache_value_proj,
+          'k': cache_key_proj,
+          'end_index': cache['end_index'] + seq_len,
+      }
+    else:
+      new_cache = None
+
+    return new_cache, attn_output
 
   @property
   def use_gqa(self):
@@ -910,19 +837,11 @@ class Attention(nnx.Module):
       )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
-    cache_len = max_seq_len
-    if (
-        self.config.use_sliding_window_kv_cache
-        and self.attn_type == AttentionType.LOCAL_SLIDING
-        and self.config.sliding_window_size is not None
-    ):
-      cache_len = min(max_seq_len, self.config.sliding_window_size)
-
     return {
         'k': jnp.zeros(
             (
                 batch_size,
-                cache_len,
+                max_seq_len,
                 self.num_kv_heads,
                 self.head_dim,
             ),
@@ -931,7 +850,7 @@ class Attention(nnx.Module):
         'v': jnp.zeros(
             (
                 batch_size,
-                cache_len,
+                max_seq_len,
                 self.num_kv_heads,
                 self.head_dim,
             ),
@@ -1120,7 +1039,7 @@ class DecoderLayer(nnx.Module):
       kv_shared_cache=None,
   ):
     norm = self.pre_attention_norm(x)
-    cache, attn, kv = self.attn(
+    cache, attn = self.attn(
         norm, segment_pos, cache, attn_mask, kv_shared_cache=kv_shared_cache
     )
     attn = self.post_attention_norm(attn)
@@ -1147,7 +1066,7 @@ class DecoderLayer(nnx.Module):
       ffw += mapped
 
     ffw = ffw * self.skip_scale.value
-    return cache, ffw, kv
+    return cache, ffw
 
   def __call__(
       self,
@@ -1206,10 +1125,6 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         share_local=True,
         attention_types=tuple(attention_types),
     )
-    # Layers that shared layers depend on.
-    self.shared_layer_origins = {
-        j for i, j in enumerate(self.kv_cache_sharing_patterns) if i != j
-    }
 
     self.layers = compat.ModuleList()
     for i in range(config.num_layers):
@@ -1240,46 +1155,33 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       positions=None,
       cache=None,
       attention_mask=None,
-      decode_only_last_token=False,
   ):
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
       positions = jnp.tile(jnp.arange(T)[None, :], (B, 1))
 
-    new_cache = {}
+    new_cache = None if cache is None else {}
     x = self.embedder.encode(tokens)
 
     per_layer_inputs = None
     if self.config.per_layer_input_dim > 0:
       per_layer_inputs = self.embedder.encode_per_layer_input(x, tokens)
 
-    # Stores the raw KV projections for the current forward pass. Used for
-    # KV cache sharing during prefill.
-    transient_kvs = {}
-    is_prefill = tokens.shape[1] > 1
-
     for i, layer in enumerate(self.layers):
+
       layer_name = f'layer_{i}'
+      layer_cache = cache[layer_name] if cache else None
 
       shared_idx = self.kv_cache_sharing_patterns[i]
-      is_shared = shared_idx != i
-      if is_shared:
-        assert shared_idx in self.shared_layer_origins
-        layer_cache = None
+      if shared_idx != i:
         shared_layer_name = f'layer_{shared_idx}'
-        if is_prefill:
-          # During prefill, use full KV projections from the shared layer.
-          shared_k, shared_v = transient_kvs[shared_layer_name]
-          kv_shared_cache = {'k': shared_k, 'v': shared_v}
-        else:
-          # During decoding, use the shared layer's cache (which may be
-          # an optimized sliding window ring cache).
-          kv_shared_cache = new_cache.get(shared_layer_name)
+        kv_shared_cache = (
+            new_cache.get(shared_layer_name) if new_cache is not None else None
+        )
       else:
-        layer_cache = cache[layer_name] if cache else None
         kv_shared_cache = None
 
-      layer_cache, x, layers_kvs = layer(
+      layer_cache, x = layer(
           x,
           positions,
           layer_cache,
@@ -1289,29 +1191,21 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           else None,
           kv_shared_cache=kv_shared_cache,
       )
-      if is_prefill and i in self.shared_layer_origins:
-        transient_kvs[layer_name] = layers_kvs
-      if not is_shared:
-        new_cache[layer_name] = layer_cache
+
+      if new_cache is not None:
+        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
-    if decode_only_last_token:
-      # Only compute logits for the last token. This can significantly reduce
-      # memory requirements during prefill (when sampling), since we only need
-      # the logits for the last token to sample from.
-      x = x[:, -1:, :]
     logits = self.embedder.decode(x).astype(jnp.float32)
 
     if self.config.final_logit_softcap is not None:
       logits /= self.config.final_logit_softcap
       logits = jnp.tanh(logits) * self.config.final_logit_softcap
 
-    return logits, (None if cache is None else new_cache)
+    return logits, new_cache  # pytype: disable=container-type-mismatch
 
   def init_cache(self, batch_size, max_seq_len, dtype):
     cache = {}
     for i, layer in enumerate(self.layers):
-      if self.kv_cache_sharing_patterns[i] != i:
-        continue  # Skip shared layers.
       cache[f'layer_{i}'] = layer.init_cache(batch_size, max_seq_len, dtype)
     return cache
