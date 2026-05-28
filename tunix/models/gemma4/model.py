@@ -935,7 +935,20 @@ class Attention(nnx.Module):
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
-    return new_cache, attn_output, (key_proj, value_proj)
+
+    if cache is not None:
+      new_cache = {
+          'v': cache_value_proj,
+          'k': cache_key_proj,
+          'end_index': cache['end_index'] + seq_len,
+      }
+    else:
+      new_cache = {
+          'v': cache_value_proj,
+          'k': cache_key_proj,
+      }
+
+    return new_cache, attn_output
 
   @property
   def use_gqa(self):
@@ -1318,6 +1331,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       B, T = tokens.shape  # pylint: disable=invalid-name
       positions = jnp.tile(jnp.arange(T)[None, :], (B, 1))
 
+    return_cache = cache is not None
     new_cache = {}
     x = self.embedder.encode(tokens)
 
@@ -1339,16 +1353,8 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         assert shared_idx in self.shared_layer_origins
         layer_cache = None
         shared_layer_name = f'layer_{shared_idx}'
-        if is_prefill:
-          # During prefill, use full KV projections from the shared layer.
-          shared_k, shared_v = transient_kvs[shared_layer_name]
-          kv_shared_cache = {'k': shared_k, 'v': shared_v}
-        else:
-          # During decoding, use the shared layer's cache (which may be
-          # an optimized sliding window ring cache).
-          kv_shared_cache = new_cache.get(shared_layer_name)
+        kv_shared_cache = new_cache.get(shared_layer_name)
       else:
-        layer_cache = cache[layer_name] if cache else None
         kv_shared_cache = None
 
       layer_cache, x, layers_kvs = layer(
@@ -1362,10 +1368,8 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           kv_shared_cache=kv_shared_cache,
           segment_ids=segment_ids,
       )
-      if is_prefill and i in self.shared_layer_origins:
-        transient_kvs[layer_name] = layers_kvs
-      if not is_shared:
-        new_cache[layer_name] = layer_cache
+
+      new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
     x = self.final_norm(x)
     if decode_only_last_token:
@@ -1379,7 +1383,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       logits /= self.config.final_logit_softcap
       logits = jnp.tanh(logits) * self.config.final_logit_softcap
 
-    return logits, (None if cache is None else new_cache)
+    return logits, (new_cache if return_cache else None)  # pytype: disable=container-type-mismatch
 
   def init_cache(self, batch_size, max_seq_len, dtype):
     cache = {}
