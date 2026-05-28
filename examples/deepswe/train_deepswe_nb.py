@@ -227,7 +227,7 @@ parser.add_argument(
 
 parser.add_argument("--use_flash_attention", type=bool, default=True)
 parser.add_argument("--flash_attention_block_size", type=int, default=1024)
-parser.add_argument("--metric_logger_dir", type=str, default=None)
+parser.add_argument("--metrics_logger_dir", type=str, default=None)
 parser.add_argument(
     "--logging_level",
     type=str,
