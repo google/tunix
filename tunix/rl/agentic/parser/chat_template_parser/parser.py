@@ -104,7 +104,6 @@ class BaseChatTemplateParser(ABC):
     result = sep.join(parts)
     if not is_first_msg and result:
       result = sep + result
-    # print(f"parsed results: {result=}")
     return result
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
@@ -140,10 +139,7 @@ class BaseChatTemplateParser(ABC):
     return self.tokens.user_token + content + self.tokens.eot_token
 
   def _parse_assistant(self, content: str) -> str:
-    print(f"Original assistant content: {content=}")
-    returned_assistant_content= self.tokens.assistant_token + content + self.tokens.eot_token
-    print(f"Returned assistant content: {returned_assistant_content=}")
-    return returned_assistant_content
+    return self.tokens.assistant_token + content + self.tokens.eot_token
 
   def _parse_tool(self, content: str) -> str:
     return (

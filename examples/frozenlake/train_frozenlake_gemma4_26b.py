@@ -69,6 +69,14 @@ from tunix.cli.utils import data as data_lib
 from examples.frozenlake.agent import FrozenLakeAgent
 from examples.frozenlake.env import FrozenLakeEnv
 
+sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
+os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+try:
+  from absl import flags
+  flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
+except Exception:
+  pass
+
 _DISTRIBUTED_INITIALIZED = False
 try:
   import pathwaysutils
@@ -92,7 +100,7 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(
-    description="Train FrozenLake on Gemma4-2B (single-host TPU)."
+    description="Train FrozenLake on Gemma4-26B."
 )
 # Effective on-policy batch is `batch_size * num_generations` per global step.
 # Tuned together with `num_generations=8` to keep per-step rollout latency
@@ -160,18 +168,9 @@ TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-# Default: v5p-8 → 8 chips, pure TP (fsdp=1) because rollout sampler prefills
-# batch=1 sequences and fsdp>1 + splash kernel mismatch.
-# Override SHARED_MESH_SHAPE via env for other slice sizes (e.g. v6e-4 → 1,4).
-# _mesh_env = os.getenv("SHARED_MESH_SHAPE")
-# if _mesh_env:
-#   SHARED_MESH_SHAPE = tuple(int(x) for x in _mesh_env.split(","))
-# else:
-ROLLOUT_MESH_SHAPE = (1, jax.device_count())
-TRAINER_MESH_SHAPE = (jax.device_count(), 1)
-SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
-print(f"Using rollout mesh shape {ROLLOUT_MESH_SHAPE} with axis names {SHARED_MESH_AXIS_NAMES}")
-print(f"Using trainer mesh shape {TRAINER_MESH_SHAPE} with axis names {SHARED_MESH_AXIS_NAMES}")
+ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
 MAX_RESPONSE_LENGTH = args.max_response_length
@@ -251,8 +250,12 @@ MAX_TO_KEEP = 1
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 
 # ====== Paths (env-driven so the same image runs anywhere) ======
-MODEL_VERSION = "google/gemma-4-E2B-it"
-MODEL_DOWNLOAD_DIR = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
+MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+from huggingface_hub import snapshot_download
+
+MODEL_DOWNLOAD_DIR = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
+print("MODEL_PATH: ", MODEL_DOWNLOAD_DIR)
+
 DATA_DIR = "gs://tunix/data/Frozenlake"
 
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -264,32 +267,45 @@ TB_LOG_DIR = "gs://linchai-bucket-dev/tensorboard/grpo"
 
 
 
-# ====== Build the single shared mesh ======
-if jax.device_count() < math.prod(ROLLOUT_MESH_SHAPE):
+trainer_devices = math.prod(TRAINER_MESH[0])
+rollout_devices = math.prod(ROLLOUT_MESH[0])
+reference_devices = math.prod(REFERENCE_MESH[0])
+
+if trainer_devices + rollout_devices + reference_devices > jax.device_count():
   raise ValueError(
-      f"Expected at least {math.prod(ROLLOUT_MESH_SHAPE)} devices for mesh "
-      f"{ROLLOUT_MESH_SHAPE}, got {jax.device_count()}."
+      "Trainer devices must be less than or equal to the number of devices"
+      " available."
   )
 
+
 rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-    ROLLOUT_MESH_SHAPE, jax.devices()[: math.prod(ROLLOUT_MESH_SHAPE)]
+    ROLLOUT_MESH[0], jax.devices()[:rollout_devices], allow_split_physical_axes=True
 )
+
 rollout_mesh = jax.sharding.Mesh(
     rollout_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH_SHAPE),
+    axis_names=ROLLOUT_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
-print(f"rollout_mesh.devices.shape={rollout_mesh.devices.shape}")
-
+print(f"{rollout_device_list=} {rollout_mesh.devices=}")
+reference_device_list = jax._src.mesh_utils.create_device_mesh(
+    REFERENCE_MESH[0], jax.devices()[-reference_devices-trainer_devices:-trainer_devices], allow_split_physical_axes=True
+)
+reference_mesh = jax.sharding.Mesh(
+    reference_device_list,
+    axis_names=REFERENCE_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
+)
+print(f"{reference_device_list=} {reference_mesh.devices=}")
 trainer_device_list = jax._src.mesh_utils.create_device_mesh(
-    TRAINER_MESH_SHAPE, jax.devices()[: math.prod(TRAINER_MESH_SHAPE)]
+    TRAINER_MESH[0], jax.devices()[-trainer_devices:], allow_split_physical_axes=True
 )
 trainer_mesh = jax.sharding.Mesh(
     trainer_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH_SHAPE),
+    axis_names=TRAINER_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
 )
-print(f"trainer_mesh.devices.shape={trainer_mesh.devices.shape}")
+print(f"{trainer_device_list=} {trainer_mesh.devices=}")
 
 # ====== Data ======
 import pandas as pd
@@ -362,13 +378,6 @@ test_dataset, _ = data_lib.post_init_dataset(
 show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
 
-# ====== Download + load model ======
-# # Download safetensors from HF if not present locally.
-# if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
-#     f.endswith(".safetensors") for f in os.listdir(MODEL_DOWNLOAD_DIR)
-# ):
-#   os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
-#   oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
 
 config = model_lib.ModelConfig.gemma4_e2b()
 if ENABLE_REMAT:
@@ -381,7 +390,7 @@ if ENABLE_MIX_PRECISION:
 
 # Reference: keep bf16 storage (frozen, never updated -> HBM savings safe).
 gemma4_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_DOWNLOAD_DIR, config, trainer_mesh, dtype=MODEL_DTYPE
+    MODEL_DOWNLOAD_DIR, config, reference_mesh, dtype=MODEL_DTYPE
 )
 show_hbm_usage("after loading gemma4_ref")
 
@@ -409,7 +418,9 @@ wandb_config.update({
     "num_steps": MAX_STEPS,
     "rollout_engine": ROLLOUT_ENGINE,
     "model_id": MODEL_VERSION,
-    "mesh_shape": TRAINER_MESH_SHAPE,
+    "trainer_mesh_shape": TRAINER_MESH[0],
+    "rollout_mesh_shape": ROLLOUT_MESH[0],
+    "reference_mesh_shape": REFERENCE_MESH[0],
 })
 wandb_kwargs = {"config": wandb_config, "settings": wandb.Settings(console="off")}
 # Tunix's WandbBackend already forwards project_name+run_name; don't put `name`
@@ -437,6 +448,7 @@ if MAX_GRAD_NORM is not None:
 # ====== Rollout + RL cluster ======
 print("Rollout mesh:", rollout_mesh)
 print("Trainer mesh:", trainer_mesh)
+print("Reference mesh:", reference_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -457,7 +469,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.28,
+    "rollout_vllm_hbm_utilization": 0.6,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -489,7 +501,7 @@ else:
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
         rl_cluster_lib.Role.ACTOR: trainer_mesh,
-        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
+        rl_cluster_lib.Role.REFERENCE: reference_mesh,
         rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
@@ -594,7 +606,7 @@ grpo_trainer = GRPOLearner(
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,
-    env_kwargs={"max_steps": 8},
+    env_kwargs={"max_steps": 10},
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],

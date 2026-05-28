@@ -143,9 +143,7 @@ def convert_single_message(
   Returns:
     A tuple containing (tokens, mask).
   """
-  print(f"In convert_single_message, original message: {msg=}, is_first={is_first}, is_generation={is_generation}")
   processed_messages = convert_messages_to_string(msg)
-  print(f"In convert_single_message, processed_messages: {processed_messages=}, is_first={is_first}, is_generation={is_generation}")
   msg_text = parser.parse(
       messages=[processed_messages],
       add_generation_prompt=is_generation,
@@ -154,7 +152,6 @@ def convert_single_message(
 
   # Remove assistant token if present (it's in the prior generation prompt).
   if msg["role"] == "assistant" and hasattr(parser, "assistant_token"):
-    print(f"Original assistant msg_text before removing assistant token: {msg_text=}")
     assistant_token = parser.assistant_token
     if msg_text.startswith(assistant_token):
       msg_text = msg_text[len(assistant_token) :]
@@ -166,7 +163,6 @@ def convert_single_message(
     tokens = tokenizer.encode(msg_text, add_special_tokens=False)
   except TypeError:
     tokens = tokenizer.encode(msg_text)
-  print(f"Tokenized message: {tokens=}")
 
   # Create mask (1 for assistant, 0 for others)
   mask_value = 1 if msg["role"] == "assistant" else 0
@@ -198,6 +194,20 @@ def tokenize_and_generate_masks(
   Returns:
     A tuple containing (all_tokens, all_masks).
   """
+  # if isinstance(tokenizer, tok_adapter.TokenizerAdapter):
+  #   full_text = parser.parse(
+  #       messages,
+  #       add_generation_prompt=contains_generation_msg,
+  #       is_first_msg=contains_first_msg,
+  #   )
+  #   try:
+  #     all_tokens = tokenizer.encode(full_text, add_special_tokens=False)
+  #   except TypeError:
+  #     all_tokens = tokenizer.encode(full_text)
+  #   all_tokens = tokenizer.dedup_bos_ids(all_tokens)
+  #   all_masks = [0] * len(all_tokens)
+  #   return all_tokens, all_masks
+
   # For parsers that require preprocessing (e.g., merging system messages),
   # apply it before iterating message by message.
   if hasattr(parser, "preprocess_messages"):
