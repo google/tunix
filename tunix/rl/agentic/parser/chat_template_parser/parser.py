@@ -16,9 +16,10 @@
 
 import abc
 import dataclasses
-from typing import Dict, List
-from tunix.utils import token_sanitization
+from typing import Dict, List, Tuple
 
+import numpy as np
+from tunix.utils import token_sanitization
 
 dataclass = dataclasses.dataclass
 abstractmethod = abc.abstractmethod
@@ -148,6 +149,18 @@ class BaseChatTemplateParser(ABC):
         + self.tokens.tool_response_end_token
         + self.tokens.eot_token
     )
+
+  @property
+  def newline_tokens(self) -> list[int]:
+    """Returns the tokenized newline "\n"."""
+    return []
+
+  def update_assistant_end_tokens(
+      self,
+      tokens: np.ndarray,
+  ) -> Tuple[np.ndarray, int]:
+    """Ensures the assistant response ends with the correct tokens."""
+    return tokens, 0
 
 
 class DefaultChatTemplateParser(BaseChatTemplateParser):
@@ -289,3 +302,110 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
 
   def _init_generation_prompt(self) -> str:
     return self.tokens.assistant_token
+
+
+class Gemma4ChatTemplateParser(BaseChatTemplateParser):
+  """Parser for Gemma 4 models."""
+
+  def __init__(
+      self,
+      tokenizer,
+      enable_thinking: bool = True,
+  ):
+    super().__init__(tokenizer, enable_thinking=enable_thinking)
+    # Also sanitize the base <turn|> token (without trailing newline) to guard
+    # against model-generated control tokens trailing in message contents.
+    self._tokens_to_sanitize.add("<turn|>")
+
+  def _init_tokens(self) -> TokenConfig:
+    return TokenConfig(
+        bos_token="<bos>",
+        eot_token="<turn|>\n",
+        system_token=self._get_system_token(),
+        user_token="<|turn>user\n",
+        assistant_token=self._get_assistant_token(),
+        tool_start_token="<|tool_call>",
+        tool_end_token="<tool_call|>",
+        tool_response_start_token="<|tool_response>",
+        tool_response_end_token="<tool_response|>",
+        message_separator="",
+    )
+
+  def _get_system_token(self) -> str:
+    token = "<|turn>system\n"
+    if self.enable_thinking:
+      token += "<|think|>"
+    return token
+
+  def _get_assistant_token(self) -> str:
+    token = "<|turn>model\n"
+    if not self.enable_thinking:
+      token += "<|channel>thought\n<channel|>"
+    return token
+
+  def _init_generation_prompt(self) -> str:
+    return self.tokens.assistant_token
+
+  def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
+    """Prepend bos and system think token if needed."""
+    prefix = self.tokens.bos_token
+    if messages and messages[0]["role"] not in ("system", "developer"):
+      if self.enable_thinking:
+        prefix += "<|turn>system\n<|think|><turn|>\n"
+    return prefix
+
+  def _parse_tool(self, content: str) -> str:
+    return (
+        self.tokens.tool_response_start_token
+        + content
+        + self.tokens.tool_response_end_token
+    )
+
+  def _parse_system(self, content: str) -> str:
+    return self.tokens.system_token + content.strip() + self.tokens.eot_token
+
+  def _parse_user(self, content: str) -> str:
+    return self.tokens.user_token + content.strip() + self.tokens.eot_token
+
+  def _parse_assistant(self, content: str) -> str:
+    """Parses an assistant message, optionally stripping thinking blocks."""
+    # TODO(linchai): Support stripping thinking tokens in multi-turn.
+    # Historical thinking tokens are typically stripped per official Gemma 4
+    # guidelines to match inference-time prompt formatting.
+    cleaned_content = content.strip()
+    prefix = (
+        "<|turn>model\n"
+        if self.enable_thinking
+        else self.tokens.assistant_token
+    )
+    if cleaned_content.endswith("<turn|>"):
+      return prefix + cleaned_content + "\n"
+    return prefix + cleaned_content + self.tokens.eot_token
+
+  def update_assistant_end_tokens(
+      self,
+      tokens: np.ndarray,
+  ) -> Tuple[np.ndarray, int]:
+    """Ensures the assistant response ends with the correct tokens."""
+    # We append "\n" when pasing assistant message above so here we need to match the tokens with newline,
+    # otherwise there will be logprobs mismatch between rollout and trainer.
+    tokens = np.concatenate(
+        [tokens, np.array(self.newline_tokens, dtype=np.int32)], axis=0
+    )
+    return tokens, len(self.newline_tokens)
+
+  @property
+  def newline_tokens(self) -> list[int]:
+    """Returns the tokenized newline "\n"."""
+    nl_str = "\n"
+    try:
+      suffix_tokens = self.tokenizer.encode(nl_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(nl_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
