@@ -26,6 +26,7 @@ from tunix.examples.data import translation_dataset as data_lib
 from tunix.sft import peft_trainer
 from tunix.sft import utils
 from tunix.utils import mesh as mesh_lib
+import os
 
 _PATHWAYS_BNS = flags.DEFINE_string(
     "pathways_bns", None, "BNS address of the Pathways server."
@@ -95,10 +96,18 @@ def _setup_jax_pathways(pathways_bns: str):
   jax.config.update("jax_xla_backend", "pathways")
   jax.config.update("jax_backend_target", pathways_bns)
 
+def _setup_pathways_on_cloud():
+  import pathwaysutils  # type: ignore[import-not-found,import-untyped]  # pytype: disable=import-error  # pyright: ignore[reportMissingImports]  # pylint: disable=g-import-not-at-top
+
+  pathwaysutils.initialize()
 
 def main(argv, **kwargs):
   if _PATHWAYS_BNS.value:
     _setup_jax_pathways(_PATHWAYS_BNS.value)
+
+  if os.getenv("JAX_PLATFORMS") == "proxy":
+    _setup_pathways_on_cloud()
+
   pipeline = PeftPipeline(argv, **kwargs)
   logging.info(
       "--- Launching PEFT pipeline with following config ---\n"

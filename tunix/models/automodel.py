@@ -452,15 +452,25 @@ class AutoModel:
         from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
         from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
 
-      # We provide load_parameters_path instead of model_path since that's what maxtext expects.
+        # Pass an absolute base config path so MaxText does not resolve a bare
+        # `base.yml` relative to the caller's working directory.
       argv = [
-          '',
-          'base.yml',
-          f'model_name={naming_info.model_name}',
+        '',
+        os.path.join(pyconfig.MAXTEXT_CONFIGS_DIR, 'base.yml'),
+        f'model_name={naming_info.model_name}',
       ]
 
-      if model_path is not None:
+      has_explicit_checkpoint_path = bool(model_path)
+      if has_explicit_checkpoint_path:
         argv.append(f'load_parameters_path={resolved_model_path}')
+      elif 'convert_checkpoint_if_possible' not in kwargs:
+        kwargs['convert_checkpoint_if_possible'] = True
+
+      if (
+          model_download_path
+          and 'base_output_directory' not in kwargs
+      ):
+        kwargs['base_output_directory'] = model_download_path
 
       # We handle jax distribution outside or it's not needed by default.
       if 'skip_jax_distributed_system' not in kwargs:
@@ -482,7 +492,7 @@ class AutoModel:
 
       maxtext_config = pyconfig.initialize(argv)
       model = maxtext_model_creation_utils.from_pretrained(
-          maxtext_config, mesh=mesh, wrap_with_tunix_adapter=True
+          maxtext_config, mesh=None, wrap_with_tunix_adapter=True
       )
       return model, resolved_model_path
     # For other native Tunix models with special handling cases for Gemma3 models

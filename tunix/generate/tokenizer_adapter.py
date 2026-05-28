@@ -15,7 +15,10 @@
 """Adapt tokenizers to a common interface."""
 
 import enum
+import importlib
+import importlib.util
 import inspect
+import os
 from typing import Any
 
 from etils import epath
@@ -23,6 +26,46 @@ import numpy as np
 from tunix.utils import token_sanitization
 
 import sentencepiece as spm
+
+
+def _load_transformers_for_tokenizer() -> Any:
+  """Imports transformers without GPU-only extras for tokenizer-only use.
+
+  On TPU/Pathways runs, importing `transformers` can eagerly discover
+  `torchvision`, which then pulls in PyTorch Triton/CUDA modules and may crash
+  before tokenization starts. For tokenizer-only code paths, hide torchvision
+  during import and disable Transformers' PyTorch backend.
+  """
+  use_tokenizer_only_import = os.environ.get(
+      'TUNIX_TOKENIZER_ONLY_TRANSFORMERS'
+  ) == '1' or os.environ.get('JAX_PLATFORMS') == 'proxy'
+  if not use_tokenizer_only_import:
+    return importlib.import_module('transformers')
+
+  original_find_spec = importlib.util.find_spec
+  original_use_torch = os.environ.get('USE_TORCH')
+  original_use_tf = os.environ.get('USE_TF')
+
+  def _patched_find_spec(name: str, package: str | None = None):
+    if name == 'torchvision':
+      return None
+    return original_find_spec(name, package)
+
+  importlib.util.find_spec = _patched_find_spec
+  os.environ['USE_TORCH'] = '0'
+  os.environ.setdefault('USE_TF', '0')
+  try:
+    return importlib.import_module('transformers')
+  finally:
+    importlib.util.find_spec = original_find_spec
+    if original_use_torch is None:
+      os.environ.pop('USE_TORCH', None)
+    else:
+      os.environ['USE_TORCH'] = original_use_torch
+    if original_use_tf is None:
+      os.environ.pop('USE_TF', None)
+    else:
+      os.environ['USE_TF'] = original_use_tf
 
 
 class TokenizerType(enum.Enum):
@@ -240,7 +283,7 @@ class Tokenizer(TokenizerAdapter):
 
     self.tokenizer_type = tokenizer_type
     if tokenizer_type == 'huggingface':
-      import transformers  # pylint: disable=g-import-not-at-top
+      transformers = _load_transformers_for_tokenizer()
 
       tokenizer = transformers.AutoTokenizer.from_pretrained(
           pretrained_model_name_or_path=tokenizer_path,

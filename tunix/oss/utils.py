@@ -19,7 +19,6 @@ from typing import Any
 from absl import logging
 import fsspec
 import huggingface_hub as hf
-import kagglehub
 
 
 def pathways_available() -> bool:
@@ -58,6 +57,13 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
 
 def kaggle_pipeline(model_id: str, model_download_path: str):
   """Download model from Kaggle."""
+  try:
+    import kagglehub  # pylint: disable=g-import-not-at-top
+  except ImportError as e:
+    raise ImportError(
+        'Please install kagglehub and a compatible kagglesdk to load model from Kaggle.'
+    ) from e
+
   if 'KAGGLE_USERNAME' not in os.environ or 'KAGGLE_KEY' not in os.environ:
     kagglehub.login()
   os.environ['KAGGLEHUB_CACHE'] = model_download_path

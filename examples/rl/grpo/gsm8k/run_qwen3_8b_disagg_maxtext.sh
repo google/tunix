@@ -24,8 +24,8 @@
 set -euo pipefail
 
 model_name="${model_name:-Qwen3-8B}"
-model_id="${model_id:-/tmp/maxtext_qwen3_8b}"
-tokenizer_path="${tokenizer_path:-$model_id}"
+# model_id="${model_id:-Qwen/maxtext_qwen3_8b}"
+# tokenizer_path="${tokenizer_path:-$model_id}"
 
 batch_size="${batch_size:-8}"
 num_batches="${num_batches:-934}"
@@ -72,8 +72,8 @@ python -m tunix.cli.grpo_main \
   tunix/cli/base_agentic_config.yaml \
   \
   `# -- Model ------------------------------------------------------------` \
-  model_config.model_name="$model_name" \
-  model_config.model_id="$model_id" \
+  model_config.model_name=${model_name} \
+  model_config.model_id=Qwen/${model_name} \
   model_config.model_source="maxtext" \
   model_config.rng_seed=42 \
   model_config.model_display=false \
@@ -131,8 +131,8 @@ python -m tunix.cli.grpo_main \
   \
   `# -- Tokenizer / chat parsing ----------------------------------------` \
   chat_parser_config.type="qwen" \
-  tokenizer_config.tokenizer_type="huggingface" \
-  tokenizer_config.tokenizer_path="$tokenizer_path" \
+  tokenizer_config.tokenizer_path=Qwen/${model_name} \
+  tokenizer_config.tokenizer_type=huggingface \
   tokenizer_config.add_bos=false \
   tokenizer_config.add_eos=false \
   \

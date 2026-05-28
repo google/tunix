@@ -36,7 +36,7 @@ class MeshUtilsTest(absltest.TestCase):
       def __init__(self):
         self.task_id = 9
 
-    self.assertEqual(mesh.device_host_key(FakeDevice()), (None, 9))
+    self.assertEqual(mesh.device_host_key(FakeDevice()), (0, 9))
 
   def test_device_host_key_prefers_task_id_over_process_index(self):
     class FakeDevice:
@@ -48,11 +48,28 @@ class MeshUtilsTest(absltest.TestCase):
 
     self.assertEqual(mesh.device_host_key(FakeDevice()), (4, 9))
 
+
+  def test_device_host_key_parses_slice_from_attr_logical_task_from_repr(self):
+    class FakeDevice:
+      def __init__(self):
+        self.slice_index = 4 # Keep it different from repr on purpose
+        self.process_index = 0
+        self.task_id = 0
+
+      def __repr__(self):
+        return (
+            "device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=11,"
+            "slice=3,default_mem=device,mem_spaces=3)"
+        )
+
+    with mock.patch.object(mesh.topology, "_is_pathways_backend_used", return_value=True):
+      self.assertEqual(mesh.device_host_key(FakeDevice()), (4, 11))
+
   def test_device_host_key_returns_none_without_task_metadata(self):
     class FakeDevice:
       pass
 
-    self.assertIsNone(mesh.device_host_key(FakeDevice()))
+    self.assertEqual(mesh.device_host_key(FakeDevice()), (0, 0))
 
   def test_device_slice_id_uses_slice_index_only(self):
     class SliceIndexDevice:
@@ -248,6 +265,22 @@ class MeshUtilsTest(absltest.TestCase):
         [{"id": 11, "coords": (1, 2, 0), "host": (6, 5)}],
     )
 
+  def test_summarize_devices_for_debug_logging_omits_redundant_host_fields(self):
+    class FakeDevice:
+
+      def __init__(self):
+        self.id = 11
+        self.coords = (1, 2, 0)
+        self.core_on_chip = 1
+        self.process_index = 5
+        self.task_id = 6
+        self.slice_index = 7
+
+    self.assertEqual(
+        mesh.summarize_devices_for_debug_logging([FakeDevice()]),
+        [{"id": 11, "coords": (1, 2, 0), "core_on_chip": 1, "host": (7, 6)}],
+    )
+
   def test_group_devices_by_host_groups_equal_sized_hosts(self):
     class FakeDevice:
 
@@ -349,17 +382,27 @@ class MeshUtilsTest(absltest.TestCase):
 
     self.assertLess(compact_score, stretched_score)
 
-  def test_split_coord_region_returns_z_y_x_remainders(self):
+  def test_split_coord_region_returns_x_y_z_remainders(self):
     region = mesh.CoordRegion((0, 0, 0), (16, 16, 16))
 
     self.assertEqual(
       mesh._split_coord_region(region, (0, 0, 0), (4, 4, 8)),
         (
-            mesh.CoordRegion((0, 0, 8), (4, 4, 8)),
-            mesh.CoordRegion((0, 4, 0), (4, 12, 16)),
             mesh.CoordRegion((4, 0, 0), (12, 16, 16)),
+            mesh.CoordRegion((0, 4, 0), (4, 12, 16)),
+            mesh.CoordRegion((0, 0, 8), (4, 4, 8)),
         ),
     )
+
+  def test_coord_box_score_prioritizes_x_then_y_then_z_start_order(self):
+    first = mesh._coord_box_score((0, 0, 0, 0), (2, 1, 1, 2))
+    next_in_x = mesh._coord_box_score((2, 0, 0, 0), (2, 1, 1, 2))
+    next_in_y = mesh._coord_box_score((0, 1, 0, 0), (2, 1, 1, 2))
+    next_in_z = mesh._coord_box_score((0, 0, 1, 0), (2, 1, 1, 2))
+
+    self.assertLess(first, next_in_x)
+    self.assertLess(next_in_x, next_in_y)
+    self.assertLess(next_in_y, next_in_z)
 
   def test_split_coord_region_accounts_for_non_origin_allocated_start(self):
     region = mesh.CoordRegion((0, 0, 0), (16, 16, 16))
@@ -367,12 +410,12 @@ class MeshUtilsTest(absltest.TestCase):
     self.assertEqual(
         mesh._split_coord_region(region, (4, 4, 4), (4, 4, 8)),
         (
-            mesh.CoordRegion((4, 4, 0), (4, 4, 4)),
-            mesh.CoordRegion((4, 4, 12), (4, 4, 4)),
-            mesh.CoordRegion((4, 0, 0), (4, 4, 16)),
-            mesh.CoordRegion((4, 8, 0), (4, 8, 16)),
             mesh.CoordRegion((0, 0, 0), (4, 16, 16)),
             mesh.CoordRegion((8, 0, 0), (8, 16, 16)),
+        mesh.CoordRegion((4, 0, 0), (4, 4, 16)),
+        mesh.CoordRegion((4, 8, 0), (4, 8, 16)),
+        mesh.CoordRegion((4, 4, 0), (4, 4, 4)),
+        mesh.CoordRegion((4, 4, 12), (4, 4, 4)),
         ),
     )
 
@@ -709,9 +752,9 @@ class MeshUtilsTest(absltest.TestCase):
         next_state.remaining_coord_regions_by_slice,
         {
             None: (
-                mesh.CoordRegion((0, 0, 8), (4, 4, 8)),
-                mesh.CoordRegion((0, 4, 0), (4, 12, 16)),
                 mesh.CoordRegion((4, 0, 0), (12, 16, 16)),
+          mesh.CoordRegion((0, 4, 0), (4, 12, 16)),
+          mesh.CoordRegion((0, 0, 8), (4, 4, 8)),
             )
         },
     )
@@ -721,6 +764,55 @@ class MeshUtilsTest(absltest.TestCase):
             tuple(max(coords[dim] for coords in allocated_coords) for dim in range(3)),
         ),
         ((0, 0, 0), (3, 3, 7)),
+    )
+
+  def test_allocate_devices_small_tpu7_request_stays_within_one_host(self):
+    class FakeDevice:
+
+      def __init__(self, device_id, coords, core_on_chip, task_id):
+        self.id = device_id
+        self.coords = coords
+        self.core_on_chip = core_on_chip
+        self.task_id = task_id
+        self.slice_index = 0
+        self.device_kind = "TPU v7"
+
+    fake_devices = []
+    device_id = 0
+    for z in range(4):
+      for y in range(4):
+        for x in range(4):
+          task_id = x // 2 + 2 * (y // 2) + 4 * z
+          for core_on_chip in (0, 1):
+            fake_devices.append(
+                FakeDevice(device_id, (x, y, z), core_on_chip, task_id)
+            )
+            device_id += 1
+
+    actor_devices, next_state = mesh.allocate_devices(
+        4,
+        devices=fake_devices,
+        mesh_name="actor_model_config",
+        return_state=True,
+    )
+
+    self.assertEqual([device.id for device in actor_devices], [0, 1, 2, 3])
+    self.assertEqual(
+      next_state.remaining_coord_regions_by_slice[0][0],
+      mesh.CoordRegion((0, 1, 0, 0), (2, 1, 1, 2)),
+    )
+
+    rollout_devices, next_state = mesh.allocate_devices(
+        4,
+        allocation_state=next_state,
+        mesh_name="rollout_model_config",
+        return_state=True,
+    )
+
+    self.assertEqual([device.id for device in rollout_devices], [8, 9, 10, 11])
+    self.assertNotIn(
+      mesh.CoordRegion((0, 1, 0, 0), (2, 1, 1, 2)),
+      next_state.remaining_coord_regions_by_slice[0],
     )
 
   def test_allocate_devices_prefers_smallest_remaining_coord_region_first(self):

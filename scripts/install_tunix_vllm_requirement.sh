@@ -26,10 +26,10 @@ SPECIAL_REQ_FILE=${SPECIAL_REQ_FILE:-"${ROOT_DIR}/requirements/special_requireme
 python3 -m ensurepip --default-pip
 python3 -m pip install --upgrade pip setuptools wheel
 
-pip install aiohttp==3.12.15
+uv pip install aiohttp==3.12.15
 
 # Install Python packages that enable pip to authenticate with Google Artifact Registry automatically.
-pip install keyring keyrings.google-artifactregistry-auth
+uv pip install keyring keyrings.google-artifactregistry-auth
 
-VLLM_TARGET_DEVICE="tpu" python3 -m pip install -r "${REQ_FILE}"
-python3 -m pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall
+VLLM_TARGET_DEVICE="tpu" uv pip install -r "${REQ_FILE}"
+uv pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall

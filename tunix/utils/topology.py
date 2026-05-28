@@ -40,8 +40,11 @@ Source references:
 - v7x: https://docs.cloud.google.com/tpu/docs/v7x
 """
 
+import ast
 import collections
+import functools
 import math
+import re
 from typing import Any, Sequence
 
 _SINGLE_HOST_BOUNDS = (1, 1, 1)
@@ -72,6 +75,37 @@ _EDGE_SUPPORTED_SHAPES = (
 )
 
 
+def _enumerate_single_host_fish_shapes(
+    required_chips: int,
+    available_chip_shape: Sequence[int] | None,
+) -> list[tuple[int, int, int]]:
+  """Returns compact fish-family subslice shapes that fit within one host."""
+  host_shape = _MULTI_HOST_BOUNDS
+  if available_chip_shape is not None:
+    if len(available_chip_shape) != 3:
+      return []
+    host_shape = tuple(
+        min(int(limit), host_limit)
+        for limit, host_limit in zip(available_chip_shape, _MULTI_HOST_BOUNDS)
+    )
+
+  shapes = []
+  for x in range(1, host_shape[0] + 1):
+    for y in range(1, host_shape[1] + 1):
+      for z in range(1, host_shape[2] + 1):
+        shape = (x, y, z)
+        if math.prod(shape) == required_chips:
+          shapes.append(shape)
+  return sorted(
+      shapes,
+      key=lambda shape: (
+        max(shape),
+        tuple(sorted(shape, reverse=True)),
+          tuple(-dim for dim in shape),
+        shape,
+      ),
+  )
+
 def _topology_shape_sort_key(shape: tuple[int, ...]) -> tuple[int, tuple[int, ...], tuple[int, ...]]:
   """Ranks valid shapes from more cubical to less cubical."""
   return (
@@ -81,9 +115,34 @@ def _topology_shape_sort_key(shape: tuple[int, ...]) -> tuple[int, tuple[int, ..
   )
 
 
-def _device_attr(device: Any, attr_name: str) -> Any:
+@functools.cache
+def _is_pathways_backend_used() -> bool:
+  """Returns whether the current process is attached to a Pathways backend."""
+  try:
+    import pathwaysutils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+
+    return bool(pathwaysutils.is_pathways_backend_used())
+  except ImportError:
+    return False
+
+
+def _pathways_device_host_attr(device: Any, attr_name: str) -> Any:
+  match = re.search(
+      rf"(?:^|[,(]){re.escape(attr_name)}=(\[[^\]]*\]|[^,)]+)",
+      repr(device),
+  )
+  if match is None:
+    return None
+
+  raw_value = match.group(1).strip()
+  try:
+    return ast.literal_eval(raw_value)
+  except (SyntaxError, ValueError):
+    return raw_value
+
+def _device_attr(device: Any, attr_name: str, default: Any = None) -> Any:
   """Returns a raw device attribute, calling it first when exposed lazily."""
-  value = getattr(device, attr_name, None)
+  value = getattr(device, attr_name, default)
   return value() if callable(value) else value
 
 
@@ -116,14 +175,19 @@ def _resolve_family(device_kind_or_family: str) -> str | None:
 def _device_host_key(device: Any) -> tuple[Any, ...] | None:
   """Returns a stable per-host key when runtime metadata exposes one."""
   task_id = None
-  for attr_name in ("task_id", "process_index"):
-    task_id = _device_attr(device, attr_name)
-    if task_id is not None:
-      break
+  if _is_pathways_backend_used():
+    task_id = _pathways_device_host_attr(device, "logical_task")
+  else:
+    for attr_name in ("task_id", "process_index"):
+      task_id = _device_attr(device, attr_name)
+      if task_id is not None:
+        break
   if task_id is None:
-    return None
+    task_id = 0
 
-  slice_id = _device_attr(device, "slice_index")
+  slice_id = _device_attr(device, "slice_index", None)
+  if slice_id is None:
+    slice_id = 0
   return (slice_id, task_id)
 
 
@@ -261,6 +325,14 @@ def best_topology_shapes_for_chip_count(
     best_shape = shape
     best_shape_key = _topology_shape_sort_key(shape)
     break
+
+  if best_shape is None:
+    for shape in _enumerate_single_host_fish_shapes(
+        required_chips,
+        parsed_available_shape,
+    ):
+      consider_shape(shape)
+      break
 
   if required_chips >= _FISH_CUBE_GRANULARITY**3:
     cube_units, remainder = divmod(required_chips, _FISH_CUBE_GRANULARITY**3)

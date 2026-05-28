@@ -322,14 +322,14 @@ def summarize_devices_for_debug_logging(
     devices: Sequence[Any],
     limit: int = 16,
 ) -> list[dict[str, Any]]:
-  """Builds richer device summaries for topology debugging.
+  """Builds compact device summaries for topology debugging.
 
   Args:
     devices: Devices to summarize.
     limit: Maximum number of devices to include.
 
   Returns:
-    A list of dictionaries with raw device topology metadata.
+    A list of dictionaries with concise topology metadata.
   """
   summaries = []
   for device in devices[:limit]:
@@ -337,10 +337,6 @@ def summarize_devices_for_debug_logging(
         "id": device_attr(device, "id"),
         "coords": device_attr(device, "coords"),
         "core_on_chip": device_attr(device, "core_on_chip"),
-        "process_index": device_attr(device, "process_index"),
-        "task_id": device_attr(device, "task_id"),
-        "slice_index": device_attr(device, "slice_index"),
-        "slice": device_attr(device, "slice"),
         "host": device_host_key(device),
     })
   return summaries
@@ -432,6 +428,34 @@ def group_devices_by_slice(devices: Sequence[Any]) -> list[list[Any]] | None:
   return list(slice_to_devices.values())
 
 
+def _device_has_host_metadata(device: Any) -> bool:
+  """Returns whether a device exposes concrete host-grouping metadata."""
+  if topology._is_pathways_backend_used():
+    return topology._pathways_device_host_attr(device, "logical_task") is not None
+  return any(
+      device_attr(device, attr_name) is not None
+      for attr_name in ("task_id", "process_index")
+  )
+
+
+def _partition_devices_by_host(devices: Sequence[Any]) -> list[list[Any]] | None:
+  """Partitions devices by host/task when that metadata is available."""
+  host_to_devices = {}
+  for device in devices:
+    if not _device_has_host_metadata(device):
+      return None
+    host_key = device_host_key(device)
+    if host_key is None:
+      return None
+    host_to_devices.setdefault(host_key, []).append(device)
+
+  ordered_host_keys = sorted(host_to_devices, key=_host_sort_key)
+  return [
+      sorted(host_to_devices[host_key], key=allocation_device_sort_key)
+      for host_key in ordered_host_keys
+  ]
+
+
 def group_devices_by_host(devices: Sequence[Any]) -> list[list[Any]] | None:
   """Groups devices by host/task when that metadata is available.
 
@@ -448,25 +472,18 @@ def group_devices_by_host(devices: Sequence[Any]) -> list[list[Any]] | None:
     grouping remains reproducible for callers and validations that still use
     this helper.
   """
-  host_to_devices = {}
-  for device in devices:
-    host_key = device_host_key(device)
-    if host_key is None:
-      return None
-    host_to_devices.setdefault(host_key, []).append(device)
+  host_groups = _partition_devices_by_host(devices)
+  if host_groups is None:
+    return None
 
-  host_sizes = {len(host_devices) for host_devices in host_to_devices.values()}
+  host_sizes = {len(host_devices) for host_devices in host_groups}
   if len(host_sizes) != 1:
     logging.warning(
         "Falling back to flat device allocation because host sizes differ: %s",
         sorted(host_sizes),
     )
     return None
-  ordered_host_keys = sorted(host_to_devices, key=_host_sort_key)
-  return [
-      sorted(host_to_devices[host_key], key=allocation_device_sort_key)
-      for host_key in ordered_host_keys
-  ]
+  return host_groups
 
 
 def get_coord_topology(devices: Sequence[Any]) -> CoordTopology | None:
@@ -748,7 +765,18 @@ def _create_coord_regions_by_slice(
   for slice_devices in slice_groups:
     if not slice_devices:
       continue
-    coord_regions = _create_coord_regions(slice_devices)
+    host_groups = _partition_devices_by_host(slice_devices)
+    coord_regions = None
+    if host_groups is not None:
+      host_coord_regions = tuple(
+          region
+          for host_devices in host_groups
+          for region in (_create_coord_regions(host_devices) or ())
+      )
+      if host_coord_regions:
+        coord_regions = host_coord_regions
+    if coord_regions is None:
+      coord_regions = _create_coord_regions(slice_devices)
     if coord_regions is None:
       continue
     coord_regions_by_slice[device_slice_id(slice_devices[0])] = coord_regions
@@ -760,7 +788,7 @@ def _split_coord_region(
     allocated_start: tuple[int, ...],
     allocated_shape: tuple[int, ...],
 ) -> tuple[CoordRegion, ...]:
-  """Splits a consumed region into remaining z/y/x-style guillotine regions.
+  """Splits a consumed region into remaining x/y/z-style guillotine regions.
 
   Args:
     region: Region being carved up.
@@ -800,7 +828,7 @@ def _split_coord_region(
 
   remaining_regions = []
   num_dims = len(region.shape)
-  for dim in range(num_dims - 1, -1, -1):
+  for dim in range(num_dims):
     before_dim = allocated_start[dim] - region.start[dim]
     after_dim = region_end[dim] - allocated_end[dim]
 
@@ -879,7 +907,7 @@ def _coord_box_score(
       max(shape),
       tuple(sorted(shape, reverse=True)),
       tuple(-dim for dim in shape),
-      start,
+      tuple(reversed(start)),
   )
 
 
@@ -1131,7 +1159,7 @@ def _create_device_allocation_state(
   )
   if log_summary:
     logging.info(
-        "Mesh allocator raw device sample: %s",
+        "Mesh allocator device sample: %s",
         summarize_devices_for_debug_logging(all_devices),
     )
     logging.info(

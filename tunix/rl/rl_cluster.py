@@ -62,6 +62,24 @@ MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
 
 
+def _get_nnx_state_if_model(model_or_path: ModelOrPath):
+  """Returns model state when the input behaves like an NNX module."""
+  if isinstance(model_or_path, str):
+    return None
+
+  try:
+    return nnx.state(model_or_path)
+  except (AttributeError, TypeError, ValueError):
+    return None
+
+
+def _get_logical_axis_rules(model_or_path: ModelOrPath):
+  """Returns logical axis rules when the model exposes them."""
+  base_model = getattr(model_or_path, "base", None)
+  model_config = getattr(base_model, "config", None)
+  return getattr(model_config, "logical_axis_rules", None)
+
+
 class Mode(enum.Enum):
   """Mode of RolloutConfig."""
 
@@ -287,9 +305,9 @@ class RLCluster:
 
     # TODO(linchai): support loadding model from path and backbone sharing for
     # such case.
-    if not isinstance(actor, nnx.Module) or (
-        reference and not isinstance(reference, nnx.Module)
-    ):
+    actor_state = _get_nnx_state_if_model(actor)
+    reference_state = _get_nnx_state_if_model(reference) if reference else None
+    if actor_state is None or (reference and reference_state is None):
       return
     if sft_utils.is_lora_enabled(actor):
       if reference and self.r2m[Role.ACTOR] == self.r2m[Role.REFERENCE]:
@@ -318,10 +336,11 @@ class RLCluster:
     Returns:
       The model loaded on the given mesh.
     """
-    if isinstance(model_or_path, nnx.Module):
-      model_mesh = rl_utils.get_pytree_mesh_info(nnx.state(model_or_path))
+    model_state = _get_nnx_state_if_model(model_or_path)
+    if model_state is not None:
+      model_mesh = rl_utils.get_pytree_mesh_info(model_state)
       original_shardings = jax.tree_util.tree_map(
-          lambda x: x.sharding, nnx.state(model_or_path)
+          lambda x: x.sharding, model_state
       )
       is_on_device = jax.tree_util.tree_reduce(
           operator.or_,
@@ -333,16 +352,32 @@ class RLCluster:
       if not mesh.empty and model_mesh != mesh:
         logging.warning("Resharding model from %s to %s", model_mesh, mesh)
         graph, state = nnx.split(model_or_path)
-        dst_shardings = jax.tree_util.tree_map(
-            lambda x: jax.sharding.NamedSharding(
+        logical_axis_rules = _get_logical_axis_rules(model_or_path)
+        if logical_axis_rules is not None:
+          try:
+            from maxtext.utils import sharding as maxtext_sharding  # pylint: disable=import-outside-toplevel
+
+            dst_shardings = maxtext_sharding.logical_to_mesh_sharding(
+                nnx.get_partition_spec(state),
                 mesh,
-                x if x is not None else jax.sharding.PartitionSpec(),
-                memory_kind=self._default_memory_kind
-                if is_on_device
-                else "pinned_host",
-            ),
-            nnx.get_partition_spec(state),
-        )
+                rules=logical_axis_rules,
+            )
+          except ImportError:
+            dst_shardings = None
+        else:
+          dst_shardings = None
+
+        if dst_shardings is None:
+          dst_shardings = jax.tree_util.tree_map(
+              lambda x: jax.sharding.NamedSharding(
+                  mesh,
+                  x if x is not None else jax.sharding.PartitionSpec(),
+                  memory_kind=self._default_memory_kind
+                  if is_on_device
+                  else "pinned_host",
+              ),
+              nnx.get_partition_spec(state),
+          )
         if data_type and data_type != jax.tree.leaves(state)[0].dtype:
           tmp_state = jax.tree.map(lambda x: x.astype(data_type), state)
         else:

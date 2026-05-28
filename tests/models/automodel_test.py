@@ -169,6 +169,8 @@ class AutoModelTest(parameterized.TestCase):
         model_fields = {
             "skip_jax_distributed_system": True,
             "hf_access_token": "mock",
+                        "convert_checkpoint_if_possible": True,
+                        "base_output_directory": "/tmp/models",
         }
 
       m_maxtext_configs_types.MaxTextConfig = MockMaxTextConfig
@@ -194,6 +196,7 @@ class AutoModelTest(parameterized.TestCase):
       )
       self.assertFalse(has_load_params)
       self.assertIn("hf_access_token=mock_token", called_argv)
+    self.assertIn("convert_checkpoint_if_possible=true", called_argv)
 
       self.assertIn("skip_jax_distributed_system=false", called_argv)
 
@@ -203,7 +206,7 @@ class AutoModelTest(parameterized.TestCase):
         self.assertNotIn("tunix_fake_arg_that_should_be_dropped", arg)
 
       m_maxtext_utils_model_creation_utils.from_pretrained.assert_called_once_with(
-          mock_config, mesh=mock_mesh, wrap_with_tunix_adapter=True
+                    mock_config, mesh=None, wrap_with_tunix_adapter=True
       )
 
   @parameterized.named_parameters(*_get_all_models_test_parameters())

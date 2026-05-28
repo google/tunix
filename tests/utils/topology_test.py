@@ -132,6 +132,16 @@ class TopologyTest(absltest.TestCase):
         [(4, 8, 8)],
     )
 
+  def test_best_topology_shapes_for_chip_count_supports_single_host_fish_subslice(self):
+    self.assertEqual(
+        topology.best_topology_shapes_for_chip_count(
+            "TPU v7",
+            2,
+            available_chip_shape=(4, 4, 4),
+        ),
+        [(2, 1, 1)],
+    )
+
   def test_best_topology_shapes_for_chip_count_filters_by_available_shape(self):
     self.assertEqual(
         topology.best_topology_shapes_for_chip_count(
