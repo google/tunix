@@ -281,6 +281,7 @@ class TrajectoryCollectEngine:
         env_tokens = getattr(step, "env_tokens", None)
         step_logprobs = getattr(step, "logprobs", None)
         if assistant_tokens is not None:
+          print(f"step {step} has assistant_tokens =  {assistant_tokens}")
           conversation_tokens.append(assistant_tokens)
           conversation_masks.append(step.assistant_masks)
           if step_logprobs is not None:
@@ -292,6 +293,7 @@ class TrajectoryCollectEngine:
           else:
             logprobs.append(np.zeros(len(assistant_tokens)))
         if env_tokens is not None:
+          print(f"step {step} has env_tokens =  {env_tokens}")
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
           logprobs.append(np.zeros(len(env_tokens)))
@@ -324,6 +326,9 @@ class TrajectoryCollectEngine:
           if masked_out
           else conversation_masks
       )
+      print(f"collected one traj {conversation_tokens = }")
+      print(f"collected one traj {conversation_masks = }")
+      print(f"collected one traj {prompt_tokens = }")
 
       return {
           "conversation_text": self.agent.chat_completions,
@@ -439,6 +444,7 @@ class TrajectoryCollectEngine:
           contains_generation_msg=True,
       )
       self.agent.trajectory.prompt_tokens = prompt_tokens
+      print(f"{self.agent.trajectory.prompt_tokens = }")
 
     self._start_ts = time.perf_counter()
     self._response_token_count = 0
