@@ -379,7 +379,7 @@ show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
 
 
-config = model_lib.ModelConfig.gemma4_e2b()
+config = model_lib.ModelConfig.gemma4_26b_a4b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
 if ENABLE_FLASH_ATTENTION:
@@ -477,8 +477,8 @@ vllm_rollout_dict = {
     # train step starts.
     "rollout_vllm_async_scheduling": False,
     "rollout_vllm_init_with_random_weights": True,
-    "tensor_parallel_size": ROLLOUT_MESH_SHAPE[1],
-    "data_parallel_size": ROLLOUT_MESH_SHAPE[0],
+    "rollout_vllm_delete_dst_buffers": True,
+    "rollout_vllm_reshard_chunk_size": 32,
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
