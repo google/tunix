@@ -37,7 +37,8 @@ Dataset = datasets_lib.Dataset
 # 0. Argument Parsing
 # ==========================================
 parser = argparse.ArgumentParser(
-    description="DeepSWE Training with Multi-turn Agentic Framework"
+    description="DeepSWE Training with Multi-turn Agentic Framework",
+    conflict_handler="resolve",
 )
 
 # General Config
@@ -119,9 +120,9 @@ parser.add_argument("--max_concurrency", type=int, default=200)
 
 parser.add_argument(
     "--overlong_filter",
-    type=bool,
+    action=argparse.BooleanOptionalAction,
     default=True,
-    help="Whether to filter out trajectories that exceed length limits",
+    help="Whether to filter out trajectories that exceed length limits.",
 )
 
 # Mesh / Topology Config Override
