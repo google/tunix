@@ -14,6 +14,7 @@
 """Common RL helper classes and functions."""
 
 from functools import partial  # pylint: disable=g-importing-member
+import inspect
 from typing import Any, Iterable
 
 import flax
@@ -26,6 +27,34 @@ from tunix.sft import utils
 
 make_causal_attn_mask = utils.make_causal_attn_mask
 build_positions_from_mask = utils.build_positions_from_mask
+
+
+def _model_accepts_segment_ids(model: Any) -> bool:
+  """Returns True if ``model.__call__`` declares a ``segment_ids`` parameter.
+
+  Some models (e.g. Qwen3) thread ``segment_ids`` into a pallas splash-attention
+  kernel to suppress attention across packed-document or padding boundaries;
+  others (Gemma 2/3/4, Llama) don't accept the keyword at all. Passing it to a
+  model that doesn't accept it raises a TypeError, so callers should gate the
+  pass-through on this helper.
+
+  Args:
+    model: A live nnx.Module instance (typically from ``nnx.merge``).
+
+  Returns:
+    True if the model's ``__call__`` accepts ``segment_ids`` as a named
+    parameter, or declares a ``**kwargs`` catch-all; False otherwise (including
+    if introspection raises for any reason).
+  """
+  try:
+    sig = inspect.signature(model.__call__)
+  except (ValueError, TypeError):
+    return False
+  if 'segment_ids' in sig.parameters:
+    return True
+  return any(
+      p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+  )
 
 
 class RepeatIterable(Iterable[Any]):
@@ -347,20 +376,11 @@ def compute_per_token_logps(
       "attention_mask": attn_mask,
   }
   # Pass through any segment ids so the model's attention kernel can respect
-  # them only if the model signature accepts it: caller-provided packing ids take
-  # precedence; otherwise we pass the per-position non-pad mask derived in
-  # ``process_ids`` so flash-attention variants that lack a separate
-  # padding-mask input still skip pad positions.
-  import inspect  # pylint: disable=g-import-not-at-top
-  try:
-    sig = inspect.signature(model.__call__)
-    has_segment_ids = ("segment_ids" in sig.parameters) or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
-  except Exception:
-    has_segment_ids = False
-
-  if has_segment_ids:
+  # them, but only if the model signature accepts the keyword. Caller-provided
+  # packing ids take precedence; otherwise we pass the per-position non-pad
+  # mask derived in ``process_ids`` so flash-attention variants that lack a
+  # separate padding-mask input still skip pad positions.
+  if _model_accepts_segment_ids(model):
     if segment_ids is not None:
       model_kwargs["segment_ids"] = segment_ids
     elif input_seg_ids is not None:
@@ -434,10 +454,17 @@ def compute_score(
 
   model_kwargs = {"positions": calculated_positions, "cache": None}
   if segment_ids is not None:
+    # Caller explicitly asked for packed mode; pass segment_ids through. If the
+    # model doesn't accept it the resulting TypeError points at user code, not
+    # at a hidden auto-derived value.
     model_kwargs["segment_ids"] = segment_ids
   else:
     model_kwargs["attention_mask"] = attn_mask
-    if input_seg_ids is not None:
+    # Only forward the auto-derived per-position non-pad mask to models that
+    # actually accept ``segment_ids`` (e.g. Qwen3). Without this gate, Gemma
+    # 2/3/4 / Llama would crash with ``TypeError: __call__() got an unexpected
+    # keyword argument 'segment_ids'``. See google/tunix#1539.
+    if input_seg_ids is not None and _model_accepts_segment_ids(model):
       model_kwargs["segment_ids"] = input_seg_ids
 
   out = model(prompt_completion_ids, **model_kwargs)
