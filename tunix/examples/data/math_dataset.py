@@ -15,8 +15,11 @@
 import logging
 import os
 
+import datasets as hf_datasets
 import grain
 import tensorflow_datasets as tfds
+from tunix.utils import token_sanitization
+
 # For OSS usage
 import tensorflow_datasets.text.gsm8k
 
@@ -76,9 +79,10 @@ def apply_template(
       if isinstance(value, bytes):
         item[key] = value.decode("utf-8")
 
+    question = token_sanitization.sanitize_control_tokens(item["question"])
     return {
-        "prompts": _apply_template(item["question"]),
-        "question": item["question"],
+        "prompts": _apply_template(question),
+        "question": question,
         "answer": extract_hash_answer(item["answer"]),
     }
 
@@ -119,27 +123,64 @@ def get_tfds_dataset(
   return dataset
 
 
+def _parse_huggingface_dataset_name(
+    dataset_name: str,
+) -> tuple[str, str | None]:
+  """Parses a Hugging Face dataset name into dataset/config components."""
+  if ":" in dataset_name:
+    name, config_name = dataset_name.split(":", maxsplit=1)
+    return name, config_name or None
+
+  if "/" in dataset_name:
+    return dataset_name, "default"
+
+  return dataset_name, None
+
+
+def get_huggingface_dataset(
+    dataset_name: str,
+    split: str,
+    shuffle_seed: int = 42,
+) -> grain.MapDataset:
+  """Gets a dataset from Hugging Face Datasets."""
+  hf_dataset_name, config_name = _parse_huggingface_dataset_name(dataset_name)
+  data = hf_datasets.load_dataset(
+      hf_dataset_name,
+      config_name,
+      split=split,
+  )
+  data = data.shuffle(seed=shuffle_seed)
+  return grain.MapDataset.source(data)
+
+
 def create_dataset(
     data_source: str,
     dataset: str,
     tokenizer=None,
     tfds_download: bool = True,
     split: str = "train",
+    apply_chat_template_to_dataset: bool = False,
 ):
   """Creates a dataset based on the given name.
 
   Args:
     data_source: The source of dataset. The currently supported options are
-      'tfds' (load from tensorflow_datasets) and 'local' (load local from
-      parquet file).
+      'tfds' (load from tensorflow_datasets), 'huggingface' (load from
+      Hugging Face Datasets), and 'local' (load local from parquet file).
     dataset: The name of the dataset to create. For 'tfds' data_source, the
-      supported options are ['gsm8k']. For 'local' data_source, this is the path
-      to a parquet file or directory.
+      supported options are ['gsm8k']. For 'huggingface', this can be a dataset
+      repo id like 'openai/gsm8k' or 'repo_id:config_name'. For 'local'
+      data_source, this is the path to a parquet file or directory.
     tokenizer: The tokenizer to use for processing prompts. If no tokenizer is
       provided, the fixed template is used.
     tfds_download: the download flag when using TFDS datasets. If false, the
       data_dir used will be set to `None` and chosen by default by tfds.
     split: The dataset split to use (e.g., "train", "test").
+    apply_chat_template_to_dataset: Whether to apply chat template to dataset.
+      If true, the dataset is expected to have a "question" field and an
+      "answer" field, and the output will have a "prompts" field with the
+      applied template. If false, the dataset is returned as is without
+      applying the template.
 
   Returns:
     A batched grain.MapDataset or grain.experimental.ParquetIterDataset.
@@ -150,6 +191,8 @@ def create_dataset(
   # parquet dataset
   if data_source == "local" and dataset.endswith(".parquet"):
     ds = grain.experimental.ParquetIterDataset(dataset)
+  elif data_source == "huggingface":
+    ds = get_huggingface_dataset(dataset_name=dataset, split=split)
   # tfds dataset
   elif data_source == "tfds" and dataset in ["gsm8k"]:
     data_dir = os.path.join("./data", split) if tfds_download else None
@@ -166,6 +209,7 @@ def create_dataset(
     )
 
   # Apply template
-  ds = apply_template(ds, tokenizer, tokenize=False)
+  if apply_chat_template_to_dataset:
+    ds = apply_template(ds, tokenizer, tokenize=False)
 
   return ds

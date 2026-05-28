@@ -4,9 +4,11 @@
 
 # %%
 import argparse
+import faulthandler
 import json
 import logging
 import os
+import signal
 import sys
 from absl import logging as absl_logging
 import datasets as datasets_lib
@@ -25,33 +27,15 @@ import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
 from tunix.utils import compat
+from tunix.rl.agentic.agents import agent_types
 import vllm  # pytype: disable=import-error
 import faulthandler
 import signal
 faulthandler.register(signal.SIGINT, all_threads=True)
 
+faulthandler.register(signal.SIGINT, all_threads=True)
+
 Dataset = datasets_lib.Dataset
-# ====== Logging Configuration ======
-# 1. Force absl to use python logging
-absl_logging.use_python_logging()
-
-# 2. Configure the root logger
-logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    force=True,
-)
-
-# 3. Explicitly set levels for relevant loggers
-logging.getLogger().setLevel(logging.INFO)
-logging.getLogger("absl").setLevel(logging.INFO)
-
-# 4. Set absl verbosity to INFO so they actually print
-absl_logging.set_verbosity(absl_logging.INFO)
-absl_logging.set_stderrthreshold("info")
-
 # ==========================================
 # 0. Argument Parsing
 # ==========================================
@@ -73,8 +57,16 @@ parser.add_argument("--max_steps", type=int, default=50)
 parser.add_argument("--eval_every_n_steps", type=int, default=10)
 parser.add_argument("--num_epochs", type=int, default=1)
 parser.add_argument("--enable_remat", type=bool, default=True)
-parser.add_argument("--remat_policy", type=str, default="decoder", choices=["block", "decoder"],
-                    help="Remat policy when enable_remat is True: 'block' remats the attention block, 'decoder' remats the full decoder layer.")
+parser.add_argument(
+    "--remat_policy",
+    type=str,
+    default="decoder",
+    choices=["block", "decoder"],
+    help=(
+        "Remat policy when enable_remat is True: 'block' remats the attention"
+        " block, 'decoder' remats the full decoder layer."
+    ),
+)
 
 # LoRA
 # LoRA Config
@@ -88,6 +80,7 @@ parser.add_argument("--num_iterations", type=int, default=1)
 parser.add_argument("--beta", type=float, default=0.0)
 parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
+parser.add_argument("--off_policy_steps", type=int, default=0)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=4096)
@@ -104,9 +97,13 @@ parser.add_argument("--b1", type=float, default=0.9)
 parser.add_argument("--b2", type=float, default=0.99)
 parser.add_argument("--weight_decay", type=float, default=0.01)
 parser.add_argument("--max_grad_norm", type=float, default=1)
-parser.add_argument("--optimizer_offload", type=bool, default=False,
-                    help="Whether to offload optimizer states to CPU (pinned host memory).")
-# parser.add_argument("--warmup_ratio", type=float, default=0.1)
+parser.add_argument(
+    "--optimizer_offload",
+    type=bool,
+    default=False,
+    help="Whether to offload optimizer states to CPU (pinned host memory).",
+)  # not supported yet
+
 
 # Checkpointing
 parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
@@ -122,6 +119,94 @@ parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
 parser.add_argument("--max_concurrency", type=int, default=200)
+
+parser.add_argument(
+    "--overlong_filter",
+    type=bool,
+    default=True,
+    help="Whether to filter out trajectories that exceed length limits",
+)
+
+# Mesh / Topology Config Override
+parser.add_argument(
+    "--rollout_mesh_fsdp",
+    type=int,
+    default=None,
+    help="Optional override for rollout mesh FSDP dimension.",
+)
+parser.add_argument(
+    "--rollout_mesh_tp",
+    type=int,
+    default=None,
+    help="Optional override for rollout mesh TP dimension.",
+)
+parser.add_argument(
+    "--train_mesh_fsdp",
+    type=int,
+    default=None,
+    help="Optional override for train mesh FSDP dimension.",
+)
+parser.add_argument(
+    "--train_mesh_tp",
+    type=int,
+    default=None,
+    help="Optional override for train mesh TP dimension.",
+)
+parser.add_argument(
+    "--train_mesh_sp",
+    type=int,
+    default=None,
+    help="Optional override for train mesh SP dimension.",
+)
+
+parser.add_argument(
+    "--rollout_split_fraction",
+    type=float,
+    default=0.5,
+    help=(
+        "Fraction of total devices to allocate to the rollout mesh. Default is"
+        " 0.5 (1:1 ratio)."
+    ),
+)
+
+
+VALID_STATUS_NAMES = [status.name for status in agent_types.TrajectoryStatus]
+
+parser.add_argument(
+    "--filter_statuses",
+    type=str,
+    nargs="+",
+    default=None,  # Set default to None
+    choices=VALID_STATUS_NAMES,
+    help=(
+        "List of trajectory statuses to filter out. Valid statuses:"
+        f" {VALID_STATUS_NAMES}. Defaults to None."
+    ),
+)
+
+parser.add_argument(
+    "--loss_agg_mode", type=str, default="sequence-mean-token-scale"
+)
+parser.add_argument("--advantage_estimator", type=str, default="rloo")
+parser.add_argument(
+    "--use_rollout_logps",
+    type=bool,
+    default=False,
+    help=(
+        "Whether to use rollout-cached logprobs as old policy logps. "
+        "Default is False to recompute old logps on the actor side. "
+    ),
+)
+
+parser.add_argument(
+    "--degenerate_group_masking",
+    type=bool,
+    default=False,
+    help=(
+        "Whether to mask out groups whose advantages are all zero. "
+        "Default is False to align with rLLM DeepSWE."
+    ),
+)
 
 parser.add_argument("--overlong_filter", type=bool, default=True, 
                         help="Whether to filter out trajectories that exceed length limits")
@@ -181,8 +266,33 @@ parser.add_argument(
 
 # Other
 parser.add_argument("--do_mem_profiling", type=bool, default=False)
-parser.add_argument("--dtype", type=str, default="bfloat16",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
-    help="Data type for the model (e.g., bfloat16, float32)")
+
+parser.add_argument(
+    "--dtype",
+    type=str,
+    default="bfloat16",
+    choices=["bfloat16", "float16", "float32"],  # Restrict to valid inputs
+    help="Data type for the model activations(e.g., bfloat16, float32)",
+)
+parser.add_argument(
+    "--param_dtype",
+    type=str,
+    default="float32",
+    choices=["bfloat16", "float16", "float32"],  # Restrict to valid inputs
+    help="Data type for the model weights (e.g., bfloat16, float32)",
+)
+
+
+parser.add_argument("--use_flash_attention", type=bool, default=True)
+parser.add_argument("--flash_attention_block_size", type=int, default=1024)
+parser.add_argument("--metric_logger_dir", type=str, default=None)
+parser.add_argument(
+    "--logging_level",
+    type=str,
+    default="INFO",
+    choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    help="Logging level for the script and relevant libraries.",
+)
 
 parser.add_argument("--param_dtype", type=str, default="float32",choices=["bfloat16", "float16", "float32"], # Restrict to valid inputs
     help="Data type for the model (e.g., bfloat16, float32)")
@@ -195,6 +305,28 @@ parser.add_argument("--flash_attention_block_size", type=int, default=1024)
 args, _ = parser.parse_known_args()
 MODEL_VERSION = args.model_version
 NODE_SELECTOR_VAL = args.node_selector_val
+
+# ====== Logging Configuration ======
+# 1. Force absl to use python logging
+absl_logging.use_python_logging()
+
+# 2. Configure the root logger
+log_level = getattr(logging, args.logging_level.upper())
+logging.basicConfig(
+    stream=sys.stdout,
+    level=log_level,
+    format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+
+# 3. Explicitly set levels for relevant loggers
+logging.getLogger().setLevel(log_level)
+logging.getLogger("absl").setLevel(log_level)
+
+# 4. Set absl verbosity so they actually print
+absl_logging.set_verbosity(getattr(absl_logging, args.logging_level.upper()))
+absl_logging.set_stderrthreshold(args.logging_level.lower())
 
 # %%
 # ==========================================
@@ -223,6 +355,7 @@ except ImportError as e:
 
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
+
 
 # %%
 # ==========================================
@@ -334,6 +467,7 @@ NUM_ITERATIONS = args.num_iterations
 BETA = args.beta
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
+OFF_POLICY_STEPS = args.off_policy_steps
 
 # ====== Training ======
 DTYPE_MAP = {
@@ -344,7 +478,6 @@ DTYPE_MAP = {
 }
 DTYPE = DTYPE_MAP[args.dtype]
 PARAM_DTYPE = DTYPE_MAP[args.param_dtype]
-ENABLE_MIXED_PRECISION = args.enable_mixed_precision
 USE_FLASH_ATTENTION = args.use_flash_attention
 FLASH_ATTENTION_BLOCK_SIZE = args.flash_attention_block_size
 ENABLE_REMAT = args.enable_remat
@@ -369,7 +502,6 @@ PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
-
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -391,9 +523,6 @@ CKPT_DIR = args.ckpt_dir
 
 VLLM_UTILIZATION = args.vllm_utilization
 
-
-# 2. Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 256
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
 
@@ -402,14 +531,14 @@ print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
 OVERLONG_FILTER = args.overlong_filter
 FILTER_STATUSES = (
-    {TrajectoryStatus[name] for name in args.filter_statuses}
+    {agent_types.TrajectoryStatus[name] for name in args.filter_statuses}
     if args.filter_statuses is not None
     else None
 )
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
-DEGENERATE_GROUP_MASKING = args.degenerate_group_masking
 USE_ROLLOUT_LOGPS = args.use_rollout_logps
+DEGENERATE_GROUP_MASKING = args.degenerate_group_masking
 
 
 # %%
@@ -429,7 +558,7 @@ if ENABLE_REMAT:
   }
   config.remat_config = _REMAT_POLICY_MAP[REMAT_POLICY]
 
-if ENABLE_MIXED_PRECISION:
+if DTYPE is not None:
   config.dtype = DTYPE
 
 if USE_FLASH_ATTENTION:
@@ -446,16 +575,16 @@ total_devices = len(devices)
 rollout_fsdp = args.rollout_mesh_fsdp
 rollout_tp = args.rollout_mesh_tp
 if rollout_fsdp is not None or rollout_tp is not None:
-    rollout_dims = []
-    if rollout_fsdp is not None:
-        rollout_dims.append(("fsdp", rollout_fsdp))
-    if rollout_tp is not None:
-        rollout_dims.append(("tp", rollout_tp))
+  rollout_dims = []
+  if rollout_fsdp is not None:
+    rollout_dims.append(("fsdp", rollout_fsdp))
+  if rollout_tp is not None:
+    rollout_dims.append(("tp", rollout_tp))
 else:
-    num_rollout_devices = int(total_devices * args.rollout_split_fraction)
-    rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
-    rollout_fsdp = num_rollout_devices // rollout_tp
-    rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
+  num_rollout_devices = int(total_devices * args.rollout_split_fraction)
+  rollout_tp = int(np.gcd(num_rollout_devices, config.num_kv_heads))
+  rollout_fsdp = num_rollout_devices // rollout_tp
+  rollout_dims = [("fsdp", rollout_fsdp), ("tp", rollout_tp)]
 num_rollout_devices = int(np.prod([d for _, d in rollout_dims]))
 
 # 2. Resolve Train Mesh Dimensions
@@ -466,24 +595,26 @@ train_fsdp = args.train_mesh_fsdp
 train_sp = args.train_mesh_sp
 train_tp = args.train_mesh_tp
 if any(v is not None for v in (train_fsdp, train_sp, train_tp)):
-    train_dims = []
-    train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
-    if train_sp is not None:
-        train_dims.append(("sp", train_sp))
-    train_dims.append(("tp", train_tp if train_tp is not None else 1))
+  train_dims = []
+  train_dims.append(("fsdp", train_fsdp if train_fsdp is not None else 1))
+  if train_sp is not None:
+    train_dims.append(("sp", train_sp))
+  train_dims.append(("tp", train_tp if train_tp is not None else 1))
 else:
-    num_train_devices = total_devices - num_rollout_devices
-    train_fsdp = int(np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS))
-    train_tp = num_train_devices // train_fsdp
-    train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
+  num_train_devices = total_devices - num_rollout_devices
+  train_fsdp = int(
+      np.gcd(num_train_devices, TRAIN_MICRO_BATCH_SIZE * NUM_GENERATIONS)
+  )
+  train_tp = num_train_devices // train_fsdp
+  train_dims = [("fsdp", train_fsdp), ("tp", train_tp)]
 num_train_devices = int(np.prod([d for _, d in train_dims]))
 
 # 3. Sanity Check
 if num_rollout_devices + num_train_devices > total_devices:
-    raise ValueError(
-        f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
-        f"train devices, but cluster only has {total_devices} available."
-    )
+  raise ValueError(
+      f"Requested {num_rollout_devices} rollout devices + {num_train_devices} "
+      f"train devices, but cluster only has {total_devices} available."
+  )
 
 # 4. Route to Meshes
 rollout_axis_names = tuple(name for name, _ in rollout_dims)
@@ -493,18 +624,22 @@ train_shape = tuple(d for _, d in train_dims)
 
 rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
 train_devices = np.array(
-    devices[num_rollout_devices:num_rollout_devices + num_train_devices]
+    devices[num_rollout_devices : num_rollout_devices + num_train_devices]
 ).reshape(train_shape)
 
 rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
 train_mesh = Mesh(train_devices, axis_names=train_axis_names)
 
 
-print(f"*** Rollout Mesh *** | dims: {rollout_dims} | Shape: {rollout_mesh.shape}")
+print(
+    f"*** Rollout Mesh *** | dims: {rollout_dims} | Shape: {rollout_mesh.shape}"
+)
 print(f"*** Train Mesh *** | dims: {train_dims} | Shape: {train_mesh.shape}")
 
 if train_sp is not None:
-    config.shd_config = model_lib.ShardingConfig.get_default_sharding(enable_sp=True)
+  config.shd_config = model_lib.ShardingConfig.get_default_sharding(
+      enable_sp=True
+  )
 
 # %%
 # ==========================================
@@ -513,7 +648,7 @@ if train_sp is not None:
 
 print("[STEP 6] Creating qwen_reference model from safe tensors..."); sys.stdout.flush()
 qwen_reference = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, mesh=train_mesh, dtype=DTYPE
+    MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
 )
 print("[STEP 6] qwen_reference created."); sys.stdout.flush()
 
@@ -582,6 +717,7 @@ dataset = load_dataset(
 )
 print(f"[STEP 8] Dataset loaded: {len(dataset)} examples."); sys.stdout.flush()
 
+
 def transform(entry):
   for k, v in entry.items():
     if isinstance(v, list):
@@ -589,7 +725,6 @@ def transform(entry):
   return entry
 
 
-print("[STEP 8b] Applying transform to dataset..."); sys.stdout.flush()
 dataset = dataset.map(
     transform,
     keep_in_memory=True,
@@ -605,14 +740,11 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 )
 
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/deepswe_logs", flush_every_n_steps=2
+    log_dir=args.metrics_logger_dir, flush_every_n_steps=2
 )
 
 optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
-  learning_rate=LEARNING_RATE,
-  b1=B1,
-  b2=B2,
-  weight_decay=WEIGHT_DECAY
+    learning_rate=LEARNING_RATE, b1=B1, b2=B2, weight_decay=WEIGHT_DECAY
 )
 
 if MAX_GRAD_NORM is not None:
@@ -634,7 +766,7 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],
-    "return_logprobs": True,
+    "return_logprobs": USE_ROLLOUT_LOGPS,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -651,8 +783,7 @@ sglang_jax_rollout_dict = {
 
 vllm_rollout_dict = {
     "rollout_vllm_model_version": MODEL_PATH,  # Uses local absolute path
-    "rollout_vllm_hbm_utilization": 0.6,
-    "rollout_vllm_init_with_random_weights": True,
+    "rollout_vllm_hbm_utilization": VLLM_UTILIZATION,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     "rollout_vllm_async_scheduling": True,
@@ -707,7 +838,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=None,
         checkpointing_options=None,
-        optimizer_offload=OPTIMIZER_OFFLOAD,
+        # optimizer_offload=OPTIMIZER_OFFLOAD,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -727,6 +858,27 @@ print("[STEP 10] RLCluster created."); sys.stdout.flush()
 # ==========================================
 # 11. Learner & Agent Setup
 # ==========================================
+
+config_kwargs = {
+    "num_generations": NUM_GENERATIONS,
+    "num_iterations": NUM_ITERATIONS,
+    "max_response_length": MAX_RESPONSE_LENGTH,
+    "beta": BETA,
+    "epsilon": EPSILON,
+    "system_prompt": SWE_SYSTEM_PROMPT,
+    "max_concurrency": MAX_CONCURRENCY,
+    "epsilon_high": EPSILON_HIGH,
+    "off_policy_steps": OFF_POLICY_STEPS,
+    "episode_timeout": PER_TURN_TIMEOUT_SECS * MAX_TURNS,
+    "overlong_filter": OVERLONG_FILTER,
+    "filter_statuses": FILTER_STATUSES,
+    "loss_agg_mode": LOSS_AGG_MODE,
+    "advantage_estimator": ADVANTAGE_ESTIMATOR,
+    "use_rollout_logps": USE_ROLLOUT_LOGPS,
+    "degenerate_group_masking": DEGENERATE_GROUP_MASKING,
+}
+
+grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
 config_kwargs = {
     "num_generations": NUM_GENERATIONS,
@@ -772,7 +924,6 @@ print("[STEP 11] GRPOLearner created."); sys.stdout.flush()
 print("[STEP 12] Shuffling dataset and building grain dataset..."); sys.stdout.flush()
 dataset = dataset.shuffle(seed=SEED)
 grain_dataset = grain.MapDataset.source(dataset)
-print("[STEP 12] grain_dataset ready."); sys.stdout.flush()
 
 def mixed_type_batch_fn(elements):
   """elements: A list of dicts."""
@@ -813,8 +964,9 @@ def mixed_type_batch_fn(elements):
 
 try:
   import datetime
-  import wandb
-  settings=wandb.Settings(console="off")
+  import wandb # pytype: disable=import-error
+
+  settings = wandb.Settings(console="off")
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   wandb_config = {
       **vars(args),
@@ -836,13 +988,11 @@ try:
       "train_mesh_tp": train_tp,
   }
   wandb.init(
-    project="tunix",
-    name=run_name,
-    config=wandb_config,
-    settings=settings)
-  # wandb.init(project="tunix", id="fbj9evwt", resume="must",)
+      project="tunix", name=run_name, config=wandb_config, settings=settings
+  )
 except Exception as e:
-  print(f"sizhi: W&B initialization failed with error: {e}")
+  print(f"W&B initialization failed with error: {e}")
+
 
 
 print("[STEP 12b] Calling post_init_dataset..."); sys.stdout.flush()

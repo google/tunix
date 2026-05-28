@@ -23,41 +23,41 @@ MappingEntry = Tuple[str, Sharding]
 
 
 TO_HF_MAPPINGS: Dict[str, MappingEntry] = {
-    'embedder.input_embedding': ('model.embed.embedding', ('model', None)),
+    'embedder.input_embedding': ('model.embed_tokens.weight', ('model', None)),
     'layers.*.input_layernorm.w': (
-        'model.layers.*.input_layernorm.scale',
+        'model.layers.*.input_layernorm.weight',
         (None,),
     ),
     'layers.*.mlp.down_proj.kernel': (
-        'model.layers.*.mlp.down_proj.kernel',
+        'model.layers.*.mlp.down_proj.weight',
         ('model', None),
     ),
     'layers.*.mlp.gate_proj.kernel': (
-        'model.layers.*.mlp.gate_proj.kernel',
+        'model.layers.*.mlp.gate_proj.weight',
         (None, 'model'),
     ),
     'layers.*.mlp.up_proj.kernel': (
-        'model.layers.*.mlp.up_proj.kernel',
+        'model.layers.*.mlp.up_proj.weight',
         (None, 'model'),
     ),
     'layers.*.post_attention_layernorm.w': (
-        'model.layers.*.post_attention_layernorm.scale',
+        'model.layers.*.post_attention_layernorm.weight',
         (None,),
     ),
     'layers.*.attn.k_proj.w': (
-        'model.layers.*.self_attn.k_proj.kernel',
+        'model.layers.*.self_attn.k_proj.weight',
         (None, 'model', None),
     ),
     'layers.*.attn.o_proj.w': (
-        'model.layers.*.self_attn.o_proj.kernel',
+        'model.layers.*.self_attn.o_proj.weight',
         ('model', None, None),
     ),
     'layers.*.attn.q_proj.w': (
-        'model.layers.*.self_attn.q_proj.kernel',
+        'model.layers.*.self_attn.q_proj.weight',
         (None, 'model', None),
     ),
     'layers.*.attn.v_proj.w': (
-        'model.layers.*.self_attn.v_proj.kernel',
+        'model.layers.*.self_attn.v_proj.weight',
         (None, 'model', None),
     ),
     'layers.*.attn.q_bias': (
@@ -72,66 +72,66 @@ TO_HF_MAPPINGS: Dict[str, MappingEntry] = {
         'model.layers.*.self_attn.v_proj.bias',
         ('model', None),
     ),
-    'final_norm.w': ('model.norm.scale', (None,)),
-    'lm_head.w': ('model.lm_head', (None, 'model')),
+    'final_norm.w': ('model.norm.weight', (None,)),
+    'lm_head.w': ('lm_head.weight', (None, 'model')),
 }
 
 
 LORA_TO_HF_MAPPINGS: Dict[str, MappingEntry] = {
     'layers.*.mlp.gate_proj.kernel_lora_a': (
-        'model.layers.*.mlp.gate_proj.kernel_lora_a',
+        'model.layers.*.mlp.gate_proj.weight_lora_a',
         (None, None),
     ),
     'layers.*.mlp.gate_proj.kernel_lora_b': (
-        'model.layers.*.mlp.gate_proj.kernel_lora_b',
+        'model.layers.*.mlp.gate_proj.weight_lora_b',
         (None, 'model'),
     ),
     'layers.*.mlp.up_proj.kernel_lora_a': (
-        'model.layers.*.mlp.up_proj.kernel_lora_a',
+        'model.layers.*.mlp.up_proj.weight_lora_a',
         (None, None),
     ),
     'layers.*.mlp.up_proj.kernel_lora_b': (
-        'model.layers.*.mlp.up_proj.kernel_lora_b',
+        'model.layers.*.mlp.up_proj.weight_lora_b',
         (None, 'model'),
     ),
     'layers.*.mlp.down_proj.kernel_lora_a': (
-        'model.layers.*.mlp.down_proj.kernel_lora_a',
+        'model.layers.*.mlp.down_proj.weight_lora_a',
         ('model', None),
     ),
     'layers.*.mlp.down_proj.kernel_lora_b': (
-        'model.layers.*.mlp.down_proj.kernel_lora_b',
+        'model.layers.*.mlp.down_proj.weight_lora_b',
         (None, None),
     ),
     'layers.*.attn.q_proj.w_lora_a': (
-        'layers.*.self_attn.q_proj.kernel_lora_a',
+        'layers.*.self_attn.q_proj.weight_lora_a',
         ('model', None),
     ),
     'layers.*.attn.q_proj.w_lora_b': (
-        'layers.*.self_attn.q_proj.kernel_lora_b',
+        'layers.*.self_attn.q_proj.weight_lora_b',
         (None, None),
     ),
     'layers.*.attn.k_proj.w_lora_a': (
-        'layers.*.self_attn.k_proj.kernel_lora_a',
+        'layers.*.self_attn.k_proj.weight_lora_a',
         ('model', None),
     ),
     'layers.*.attn.k_proj.w_lora_b': (
-        'layers.*.self_attn.k_proj.kernel_lora_b',
+        'layers.*.self_attn.k_proj.weight_lora_b',
         (None, None),
     ),
     'layers.*.attn.v_proj.w_lora_a': (
-        'layers.*.self_attn.v_proj.kernel_lora_a',
+        'layers.*.self_attn.v_proj.weight_lora_a',
         ('model', None),
     ),
     'layers.*.attn.v_proj.w_lora_b': (
-        'layers.*.self_attn.v_proj.kernel_lora_b',
+        'layers.*.self_attn.v_proj.weight_lora_b',
         (None, None),
     ),
     'layers.*.attn.o_proj.w_lora_a': (
-        'layers.*.self_attn.o_proj.kernel_lora_a',
+        'layers.*.self_attn.o_proj.weight_lora_a',
         ('model', None),
     ),
     'layers.*.attn.o_proj.w_lora_b': (
-        'layers.*.self_attn.o_proj.kernel_lora_b',
+        'layers.*.self_attn.o_proj.weight_lora_b',
         (None, None),
     ),
     'layers.*.attn.q_bias_lora_a': (

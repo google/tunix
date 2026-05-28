@@ -147,7 +147,7 @@ class ConversationAgentBase(LLMBaseAgent):
     Args:
       system_prompt: The system prompt to use.
     """
-    self._messages = [{"role": "system", "content": system_prompt}]
+    self._messages = [{"role": "system", "content": system_prompt or ""}]
 
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: Dict[str, Any]
@@ -172,11 +172,11 @@ class ConversationAgentBase(LLMBaseAgent):
     # templating.
     if isinstance(observation, dict) and "prompts" in observation:
       self._messages.append(
-          {"role": "user", "content": observation["prompts"]}
+          {"role": "user", "content": observation["prompts"] or ""}
       )
     elif isinstance(observation, dict) and "question" in observation:
       self._messages.append(
-          {"role": "user", "content": observation["question"]}
+          {"role": "user", "content": observation["question"] or ""}
       )
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})

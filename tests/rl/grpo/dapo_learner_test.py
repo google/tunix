@@ -59,11 +59,16 @@ class DAPOlearnerTest(parameterized.TestCase):
     example.advantages = self.advantages
     example.ref_per_token_logps = self.ref_per_token_logps
     example.old_per_token_logps = self.old_per_token_logps
+    example.segment_ids = None
+    example.segment_positions = None
+    example.sampler_is_weights = None
     return example
 
   def test_diff_loss(self):
     dapo_config = dapo_lib.DAPOConfig()
     grpo_config = grpo_lib.GRPOConfig()
+    dapo_config.temperature = 1.0
+    grpo_config.temperature = 1.0
 
     dapo_loss_fn_impl = fr.default_registry.get(
         "policy_loss_fn", dapo_config.policy_loss_fn
@@ -85,9 +90,11 @@ class DAPOlearnerTest(parameterized.TestCase):
         rngs=nnx.Rngs(0),
     )
 
-    # Call DAPO loss function
+    # Call DAPO loss function (DAPO sets ref_per_token_logps to None as it doesn't fetch it)
+    dapo_train_example = self.create_train_example()
+    dapo_train_example.ref_per_token_logps = None
     dapo_loss, dapo_aux = dapo_loss_fn_impl(
-        model, train_example, dapo_config, pad_id, eos_id
+        model, dapo_train_example, dapo_config, pad_id, eos_id
     )
 
     # Call GRPO loss function

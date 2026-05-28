@@ -89,6 +89,9 @@ class TrainingConfig:
   # Progress bar description.
   pbar_description: str | None = "Training"
 
+  # Sequence packing configuration.
+  max_seq_token_per_tpu: int | None = None
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -179,6 +182,8 @@ class PeftTrainer:
     data_hooks: The data hooks to use.
   """
 
+  supports_sequence_packing = False
+
   def __init__(
       self,
       model: nnx.Module,
@@ -188,6 +193,15 @@ class PeftTrainer:
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
   ):
+    # TODO(noghabi): Implement sequence packing for SFT and remove this check.
+    if (
+        training_config.max_seq_token_per_tpu is not None
+        and not self.supports_sequence_packing
+    ):
+      raise ValueError(
+          "Sequence packing is not supported in SFT PeftTrainer yet."
+      )
+
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
@@ -594,7 +608,7 @@ class PeftTrainer:
 
   @property
   def _tqdm_train_metrics(self) -> list[str]:
-    return ["loss", "perplexity", "steps_per_sec", "learning_rate"]
+    return ["loss", "perplexity", "learning_rate"]
 
   def _may_update_pbar(
       self,
@@ -608,7 +622,7 @@ class PeftTrainer:
       self._pbar.update()
 
     if self.training_hooks and self._mode == sft_metrics_logger.Mode.TRAIN:
-      self.training_hooks.on_train_step_end(self, step, loss, 0.0)
+      self.training_hooks.on_train_step_end(self, step, loss)
 
   def train(
       self,
@@ -679,7 +693,8 @@ class PeftTrainer:
 
         # Stop training if max_steps is reached.
         if (
-            self.config.max_steps is not None
+            not self.is_managed_externally
+            and self.config.max_steps is not None
             and self._train_steps >= self.config.max_steps
         ):
           break

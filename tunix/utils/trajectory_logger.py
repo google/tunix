@@ -122,11 +122,30 @@ def log_item(
   )
   if str(file_path).startswith('gs://'):
     if file_path.exists():
-      with file_path.open('r') as f:
-        old_df = pd.read_csv(f)
-      df = pd.concat([old_df, df], ignore_index=True)
-    with file_path.open('w') as f:
-      df.to_csv(f, header=True, index=False)
+      old_df = None
+      try:
+        with file_path.open('r') as f:
+          old_df = pd.read_csv(f, engine='python')
+      except Exception as e:  # pylint: disable=broad-except
+        logging.warning(
+            'Could not read existing GCS file (possibly partial write): %s', e
+        )
+      if old_df is not None:
+        df = pd.concat([old_df, df], ignore_index=True)
+
+    tmp_file_path = (
+        file_path.parent
+        / f'{file_path.name}.{pd.Timestamp.now().nanosecond}.tmp'
+    )
+    try:
+      with tmp_file_path.open('w') as f:
+        df.to_csv(f, header=True, index=False)
+      # epath.Path.replace() handles the GCS 'rename' (copy + delete)
+      tmp_file_path.replace(file_path)
+    except Exception as e:  # pylint: disable=broad-except
+      logging.error('Failed to finalize write to %s: %s', file_path, e)
+      if tmp_file_path.exists():
+        tmp_file_path.unlink()  # Cleanup
   else:
     with file_path.open('a') as f:
       df.to_csv(f, header=write_header, index=False)

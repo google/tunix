@@ -15,22 +15,44 @@
 
 set -x # Enable xtrace
 
-python3 -m tunix.cli.peft_main \
-  base_config.yaml \
-  model_config.model_name="gemma-3-4b-pt" \
-  model_config.model_id="google/gemma-3-4b-pt" \
-  model_config.model_path="gs://gemma-data/checkpoints/gemma3-4b-pt" \
-  model_config.model_source="gcs" \
-  model_config.lora_config={} \
-  model_config.mesh.shape="(4,2)" \
-  model_config.mesh.axis_names="('fsdp','tp')" \
+batch_size=${batch_size:-1}
+num_batches=${num_batches:-3738}
+num_train_epochs=${num_train_epochs:-1}
+warmup_ratio=${warmup_ratio:-0.1}
+train_fraction=${train_fraction:-1.0}
+
+echo "Using parameters:"
+echo "  Batch Size: $batch_size"
+echo "  Num Batches: $num_batches"
+echo "  Num Epochs: $num_train_epochs"
+echo "  Warmup Ratio: $warmup_ratio"
+echo "  Train Fraction: $train_fraction"
+
+max_steps_float=$(awk "BEGIN {print $batch_size * $num_batches * $num_train_epochs * $train_fraction}")
+
+max_steps=$(printf "%.0f" "$max_steps_float")
+
+
+warmup_steps=$(awk "BEGIN {printf \"%.0f\", $warmup_ratio * $max_steps}")
+
+echo "Max steps: $max_steps"
+echo "Rounded warmup steps: $warmup_steps"
+
+python3 -m tunix.cli.grpo_main \
+  tunix/cli/base_config.yaml \
+  override_config_file=examples/rl/grpo/gsm8k/configs/gemma3_4b.yaml \
+  model_config.model_path="gs://gemma-data/checkpoints/gemma3-4b-it" \
+  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/gemma3_4b" \
+  model_config.model_download_path="/tmp/models/gemma-3-4b-it" \
   tokenizer_config.tokenizer_path="gs://gemma-data/tokenizers/tokenizer_gemma3.model" \
-  tokenizer_config.tokenizer_type="sentencepiece" \
-  dataset_name="mtnt/en-fr" \
-  optimizer_config.opt_type="adamw" \
-  optimizer_config.learning_rate=1e-5 \
-  training_config.eval_every_n_steps=20 \
-  training_config.max_steps=100 \
-  training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full" \
-  training_config.metrics_logging_options.flush_every_n_steps=20
+  batch_size=$batch_size \
+  num_batches=$num_batches \
+  num_train_epochs=$num_train_epochs \
+  train_fraction=$train_fraction \
+  rl_training_config.actor_optimizer_config.warmup_ratio=$warmup_ratio \
+  rl_training_config.actor_optimizer_config.warmup_steps=$warmup_steps \
+  rl_training_config.actor_optimizer_config.decay_steps=$max_steps \
+  rl_training_config.max_steps=$max_steps \
+  rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/grpo_gemma3_4b" \
+  "$@"
 

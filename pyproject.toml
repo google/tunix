@@ -25,6 +25,7 @@ dependencies = [
   "grain",
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
+  "importlib_resources",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -34,7 +35,7 @@ dependencies = [
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
-  "qwix",
+  "qwix>=0.1.6",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
@@ -66,6 +67,9 @@ test = [
   "pytest-xdist",
   "gcsfs",
   "chex",
+]
+cli = [
+  "tensorflow",
 ]
 
 [project.urls]
@@ -103,3 +107,6 @@ pyink-ipynb-indentation = 2
 [tool.isort]
 profile = "google"       # or "black", etc.
 known_third_party = ["tunix"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

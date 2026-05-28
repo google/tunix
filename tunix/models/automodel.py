@@ -18,6 +18,7 @@ import enum
 import gc
 import importlib
 import os
+import shutil
 from typing import Any
 from absl import logging
 from flax import nnx
@@ -45,6 +46,7 @@ class ModelSource(enum.Enum):
   GCS = 'gcs'  # Load model from GCS.
   HUGGINGFACE = 'huggingface'  # Load model from HuggingFace.
   INTERNAL = 'internal'  # Load model from Internal.
+  MAXTEXT = 'maxtext'  # Load model from Maxtext.
 
 
 def get_model_module(model_name: str, module_type: ModelModule) -> Any:
@@ -77,7 +79,7 @@ def call_model_config(model_name: str) -> Any:
 
   Args:
       model_name: The string indicating which model config function to call
-        (e.g., "gemma-2b", "llama3.1-8b", "qwen2.5-0.5b").
+        (e.g., "gemma-2b", "llama-3.1-8b", "qwen2.5-0.5b").
 
   Returns:
       The result from calling the dynamically determined function.
@@ -185,12 +187,14 @@ def create_gemma_model_with_nnx_conversion(
           ' model name.', model_name
       )
       naming_info = naming.ModelNaming(model_name=model_name)
-      version_dashed = naming_info.model_version.replace('_', '-')
+      version_dashed = None
+      if naming_info.model_version is not None:
+        version_dashed = naming_info.model_version.replace('_', '-')
 
       if naming_info.model_family == 'gemma2':
-        dir_name = f'gemma2-{version_dashed}'
+        dir_name = f'gemma-2-{version_dashed}'
       elif naming_info.model_family == 'gemma1p1':
-        dir_name = f'1.1-{version_dashed}'
+        dir_name = f'gemma-1.1-{version_dashed}'
       else:  # gemma
         dir_name = version_dashed
 
@@ -219,13 +223,16 @@ def create_gemma_model_with_nnx_conversion(
       return _get_gemma_base_model(
           model_name, intermediate_ckpt_dir, rng_seed, mesh
       )
-    except (FileNotFoundError, ValueError, RuntimeError):
+    except Exception as e:  # pylint: disable=broad-exception-caught
+
       logging.warning(
-          'Failed to load from intermediate_ckpt_dir %s. '
-          'Falling back to NNX conversion.',
+          'Failed to load from intermediate_ckpt_dir %s: %s. '
+          'Purging directory and falling back to fresh NNX conversion.',
           intermediate_ckpt_dir,
+          e,
           exc_info=True,
       )
+      shutil.rmtree(intermediate_ckpt_dir, ignore_errors=True)
   return _nnx_convert_and_reload()
 
 
@@ -257,7 +264,7 @@ def create_gemma3_model_from_checkpoint(
 
   Args:
       ckpt_path: The path to the checkpoint.
-      model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama3.2-3b").
+      model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama-3.2-3b").
       mesh: Mesh object for device layout.
 
   Returns:
@@ -301,7 +308,7 @@ def download_model(
     from tunix.oss import utils as oss_utils  # pylint: disable=g-import-not-at-top
 
     return oss_utils.hf_pipeline(model_id_or_path, model_download_path)
-  elif model_source == ModelSource.GCS:
+  elif model_source in (ModelSource.GCS, ModelSource.MAXTEXT):
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
     raise ValueError('INTERNAL model source is not supported in OSS.')
@@ -323,7 +330,7 @@ def create_model_from_safe_tensors(
   """Dynamically imports the correct module and calls `create_model_from_safe_tensors` based on the model_name.
 
   Args:
-      model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama3.2-3b").
+      model_name: The name of the model (e.g., "qwen2.5-0.5b", "llama-3.2-3b").
       file_dir: Directory containing the safe tensors.
       model_config: Model configuration object.
       mesh: Mesh object for device layout.
@@ -340,7 +347,9 @@ def create_model_from_safe_tensors(
       AttributeError: If create_model_from_safe_tensors is not in the module.
   """
   naming_info = naming.ModelNaming(model_name=model_name)
-  if naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2', 'gemma3'):
+  if naming_info.model_family in (
+      'gemma', 'gemma1p1', 'gemma2', 'gemma3', 'gemma4'
+  ):
     params_module = get_model_module(model_name, ModelModule.PARAMS_SAFETENSORS)
   else:
     params_module = get_model_module(model_name, ModelModule.PARAMS)
@@ -434,8 +443,52 @@ class AutoModel:
         model_id_or_path, model_download_path, model_source
     )
 
-    # Case 1: Special handling cases for Gemma models
-    if naming_info.model_family == 'gemma3':
+    # Case 1: MaxText models
+    if model_source == ModelSource.MAXTEXT:
+      try:
+        import maxtext.configs.pyconfig as pyconfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+        from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+        from maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+      except ImportError:
+        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
+        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
+        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
+
+      # We provide load_parameters_path instead of model_path since that's what maxtext expects.
+      argv = [
+          '',
+          'base.yml',
+          f'model_name={naming_info.model_name}',
+      ]
+
+      if model_path is not None:
+        argv.append(f'load_parameters_path={resolved_model_path}')
+
+      # We handle jax distribution outside or it's not needed by default.
+      if 'skip_jax_distributed_system' not in kwargs:
+        kwargs['skip_jax_distributed_system'] = True
+
+      if 'hf_access_token' not in kwargs and 'HF_TOKEN' in os.environ:
+        kwargs['hf_access_token'] = os.environ['HF_TOKEN']
+
+      valid_keys = set()
+      if hasattr(MaxTextConfig, 'model_fields'):
+        valid_keys = set(MaxTextConfig.model_fields.keys())
+      elif hasattr(MaxTextConfig, '__annotations__'):
+        valid_keys = set(MaxTextConfig.__annotations__.keys())
+
+      for k, v in kwargs.items():
+        if v is not None and k in valid_keys:
+          val_str = str(v).lower() if isinstance(v, bool) else str(v)
+          argv.append(f'{k}={val_str}')
+
+      maxtext_config = pyconfig.initialize(argv)
+      model = maxtext_model_creation_utils.from_pretrained(
+          maxtext_config, mesh=mesh, wrap_with_tunix_adapter=True
+      )
+      return model, resolved_model_path
+    # For other native Tunix models with special handling cases for Gemma3 models
+    elif naming_info.model_family == 'gemma3':
       if model_source in (ModelSource.GCS, ModelSource.INTERNAL):
         model, model_params = create_gemma3_model_from_checkpoint(
             ckpt_path=resolved_model_path,
@@ -447,6 +500,7 @@ class AutoModel:
             'Gemma 3 models are only supported from GCS or INTERNAL.'
             f' Specified model source: {model_source}'
         )
+    # For other native Tunix models with special handling cases for Gemma2 models
     elif naming_info.model_family in ('gemma', 'gemma1p1', 'gemma2'):
       if model_source == ModelSource.KAGGLE:
         # Download model from Kaggle requires NNX conversion and can takes long.
@@ -483,7 +537,7 @@ class AutoModel:
           f' {model_source} and model name: {naming_info.model_name}'
       )
 
-    # Case 2: Common path for all models -- create model from safe tensors
+    # Common path for all other native Tunix models -- create model from safe tensors
     if not model_params:
       # pick corresponding config based on model version
       model_params = call_model_config(naming_info.model_name)

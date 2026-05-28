@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Common utilities for loading OSS model weights from safetensors files. Not compatible with GOOGLE_INTERNAL_PACKAGE_PATH."""
+"""Common utilities for loading OSS model weights from safetensors files.
+
+Not compatible with GOOGLE_INTERNAL_PACKAGE_PATH.
+"""
 
 import concurrent.futures
 import contextlib
@@ -32,8 +35,8 @@ import numpy as np
 import safetensors.flax as safetensors
 from tunix.oss import utils
 from tunix.utils import compat
-from tunix.utils import torch_utils
 from tunix.utils import env_utils
+from tunix.utils import torch_utils
 
 load_file_from_gcs = utils.load_file_from_gcs
 
@@ -255,17 +258,23 @@ def load_and_create_model_orig(
     def make_update_tensor_fn(current_file_tensors):
       def update_tensor(path, param, shard=None):
         current_path_key = path_to_key(path)
-        if current_path_key in current_file_tensors:
-          loaded_arr = current_file_tensors[current_path_key]
-          if loaded_arr.shape != param.shape:
-            raise ValueError(
-                f'Shape mismatch for {current_path_key}: got'
-                f' {loaded_arr.shape}, expected {param.shape}'
-            )
-          if shard is not None:
-            return jax.device_put(loaded_arr, shard)
-          else:
-            return jax.device_put(loaded_arr, jax.devices()[0])
+
+        # nnx.Param adds a .value suffix to the key
+        possible_keys = [current_path_key, f'{current_path_key}.value']
+
+        for k in possible_keys:
+          if k in current_file_tensors:
+            loaded_arr = current_file_tensors[k]
+            if loaded_arr.shape != param.shape:
+              raise ValueError(
+                  f'Shape mismatch for {k}: got'
+                  f' {loaded_arr.shape}, expected {param.shape}'
+              )
+            if shard is not None:
+              return jax.device_put(loaded_arr, shard)
+            else:
+              return jax.device_put(loaded_arr, jax.devices()[0])
+
         return param
 
       return update_tensor
@@ -331,13 +340,13 @@ def load_and_create_model_opt(
     model = nnx.eval_shape(lambda: model_class(config, rngs=nnx.Rngs(params=0)))
 
   graph_def, abs_state = nnx.split(model)
-  state_dict = abs_state.to_pure_dict()
+  nnx_state_dict = abs_state.to_pure_dict()
 
   if mesh is not None:
     sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
   else:
     device = jax.devices()[0]
-    sharding_dict = jax.tree.map(lambda _: device, state_dict)
+    sharding_dict = jax.tree.map(lambda _: device, nnx_state_dict)
 
   key_map = key_mapping(config)
 
@@ -388,8 +397,16 @@ def load_and_create_model_opt(
   def shard_state(state_dict):
     def _shard_state(path, sharding):
       key = path_to_key(path)
-      tensor = state_dict[key]
-      if dtype is not None:
+      possible_keys = [
+          key,
+          f'{key}.value',
+      ]  # for nnx.Param where a value suffix will be there
+      tensor = None
+      for k in possible_keys:
+        if k in state_dict:
+          tensor = state_dict[k]
+          break
+      if tensor is not None and dtype is not None:
         np_dtype = to_np_dtype(dtype)
         tensor = tensor.astype(np_dtype)
       return jax.device_put(tensor, sharding)
@@ -398,6 +415,14 @@ def load_and_create_model_opt(
 
   shard_function = shard_state(state_dict)
   state_dict = jax.tree.map_with_path(shard_function, sharding_dict)
+
+  def _assert_shapes_match(path, x, y):
+    assert (
+        x.shape == y.shape
+    ), f'Shape mismatch for {path}: expected {y.shape}, got {x.shape}'
+    return x
+
+  jax.tree.map_with_path(_assert_shapes_match, state_dict, nnx_state_dict)
 
   for fh in file_handles:
     fh.close()
@@ -413,7 +438,7 @@ def load_and_create_model(
     mesh=None,
     preprocess_fn=None,
     dtype: jnp.dtype | None = None,
-    mode: str = "auto",
+    mode: str = 'auto',
 ):
   """Loads safetensors files and creates an NNX model.
 

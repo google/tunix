@@ -46,7 +46,7 @@ class SowedModule(nnx.Module):
 
 def pop_sowed_intermediate_outputs(
     model: nnx.Module,
-) -> nnx.graph.GraphState:
+) -> nnx.State:
   """Returns the intermediate output from a model."""
   return nnx.pop(model, nnx.Intermediate)
 

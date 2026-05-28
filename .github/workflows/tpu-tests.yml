@@ -88,7 +88,9 @@ jobs:
 
     - name: Run tunix model tests
       run: |
-        python -m pytest tests/models/ -v --tb=short -m "not cpu_only and not gpu_only"
+        python -m pytest tests/models/ -v --tb=short -m "not cpu_only and not gpu_only" \
+          --ignore=tests/models/naming_test.py \
+          --ignore=tests/models/registry_test.py
 
     - name: Run tunix generation tests (PASSED only)
       run: |
@@ -113,7 +115,7 @@ jobs:
       run: |
         # RL common tests that passed
         # b/448133814: test_grpo_with_lora_model fails
-        python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/experimental/agentic
+        python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/agentic
 
     - name: Run tunix tests not covered by the above categories
       run: |
@@ -131,7 +133,7 @@ jobs:
     runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly-a9f13e53dc3511599e873225f0e5adbda07f3993
+      image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -155,14 +157,18 @@ jobs:
         run: |
           echo "Current directory:"
           pwd
-          pip install --upgrade pip setuptools wheel
+          python3 -m pip install --upgrade pip setuptools wheel kagglehub kagglesdk
 
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-          pip install -e .[dev,test]
-          pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
+          python3 -m pip install -e .[dev,test]
+          python3 -m pip install transformers==4.57.1 --force-reinstall # Issue: https://github.com/google/tunix/pull/795
           # tpu-inference/Numba needs NumPy 2.3 or less.
-          pip install numpy==2.3.5 --force-reinstall
-
+          python3 -m pip install numpy==2.3.5 --force-reinstall
+      - name: Run tunix model tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python3 -m pytest tests/models/naming_test.py -v --tb=short
       - name: GRPO Integration Test
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -181,11 +187,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           unset JAX_PLATFORMS
-          pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
-          pytest tests/generate/vllm_driver_test.py -v --tb=short
-          pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
+          python3 -m pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
+          python3 -m pytest tests/generate/vllm_driver_test.py -v --tb=short
+          python3 -m pytest tests/generate/vllm_sampler_test.py   --collect-only -q   --no-header --no-summary --disable-warnings | grep '::' > test_collections.txt
           while read -r test; do
-            pytest -s "$test" -v --tb=short
+            python3 -m pytest -s "$test" -v --tb=short
           done < test_collections.txt
 
       - name: Run install sglang-jax && test
@@ -195,14 +201,13 @@ jobs:
           ## because sglang-jax has codes like jax.local_devices('cpu')
           # TODO(lancewang): Re-enable this test once the bug is fixed.
           unset JAX_PLATFORMS
-          pip list | egrep 'jax|flax|libtpu'
+          python3 -m pip list | egrep 'jax|flax|libtpu'
           cd ..
-          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . --force-reinstall && cd ../..
+          git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && python3 -m pip install -e . --force-reinstall && cd ../..
           # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
-          pip install qwix --force-reinstall
+          python3 -m pip install qwix --force-reinstall
           # TODO(b/470113586): Remove this test once the bug is fixed.
-          pip install jax[tpu]==0.8.1 flax==0.12.4 --force-reinstall
-          pip list | egrep 'jax|flax|libtpu'
+          python3 -m pip list | egrep 'jax|flax|libtpu'
 
           # Install bookworm, vllm container defaults to bullseye causes segfault for sglang-jax.
           cat >/etc/apt/sources.list <<'EOF'
@@ -212,16 +217,18 @@ jobs:
           EOF
           apt-get update; apt-get install -y less
 
-          cd tunix && python tests/generate/sglang_jax_sampler_test.py && python tests/generate/sglang_jax_lora_test.py
+          cd tunix && python3 tests/generate/sglang_jax_sampler_test.py && python3 tests/generate/sglang_jax_lora_test.py
+          python3 tests/rl/rl_cluster_test.py
       - name: Run tunix SFT integration tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           # Reinstall Tunix with prod dependencies
-          pip install -e .[prod] --force-reinstall
+          python3 -m pip install -e .[prod] --force-reinstall
+          python3 -m pip install --upgrade kagglehub kagglesdk
 
           # Loading tfds requires tensorflow.
-          pip install tensorflow
+          python3 -m pip install tensorflow
 
           export JAX_PLATFORMS=tpu,cpu
           ./tests/sft/sft_tpu_smoke_test.sh
@@ -231,8 +238,9 @@ jobs:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
+          python3 -m pip install --upgrade kagglehub kagglesdk
           echo "Running Smoke tests..."
-          python -m pytest tests/smoke_tests/model_creation_test.py -v --tb=short
+          python3 -m pytest tests/smoke_tests/model_creation_test.py -v --tb=short
       - name: Run tunix cli tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -240,12 +248,12 @@ jobs:
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
           # Config tests that passed
-          python -m pytest tests/cli/ -v --tb=short \
+          python3 -m pytest tests/cli/ -v --tb=short \
             --ignore=tests/cli/utils/model_test.py
       - name: Run model alignment tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python -m pip install torch
-          JAX_PLATFORMS=cpu python -m pytest tests/model_alignment/ -v --tb=short
+          python3 -m pip install torch
+          JAX_PLATFORMS=cpu python3 -m pytest tests/model_alignment/ -v --tb=short
           unset JAX_PLATFORMS

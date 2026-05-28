@@ -44,31 +44,38 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     self.mock_tokenizer.eos_token = '<eos>'
 
   def test_parse_with_system_message(self):
+    # ``is_first_msg=False`` (default) renders a continuation chunk: leading
+    # separator, no trailing separator. eot_token is ``<|im_end|>`` (no
+    # trailing ``\n``); the inter-message ``\n`` is emitted by joining the
+    # separator between parts.
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [
         {'role': 'system', 'content': 'You are Qwen.'},
         {'role': 'user', 'content': 'Hello'},
     ]
     result = p.parse(messages)
-    expected = ('<|im_start|>system\nYou are Qwen.<|im_end|>\n'
-                '<|im_start|>user\nHello<|im_end|>\n')
+    expected = ('\n<|im_start|>system\nYou are Qwen.<|im_end|>\n'
+                '<|im_start|>user\nHello<|im_end|>')
     self.assertEqual(result, expected)
 
   def test_parse_without_system_message_and_is_first_msg(self):
+    # ``is_first_msg=True`` is the opening of a conversation: no leading
+    # separator. Default system prompt is prepended because the first
+    # message is not a system message.
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, is_first_msg=True)
     expected = ('<|im_start|>system\n'
                 'You are Qwen, created by Alibaba Cloud. You are a helpful'
                 ' assistant.<|im_end|>\n'
-                '<|im_start|>user\nHello<|im_end|>\n')
+                '<|im_start|>user\nHello<|im_end|>')
     self.assertEqual(result, expected)
 
   def test_parse_with_add_generation_prompt(self):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'user', 'content': 'Hello'}]
     result = p.parse(messages, add_generation_prompt=True)
-    expected = ('<|im_start|>user\nHello<|im_end|>\n'
+    expected = ('\n<|im_start|>user\nHello<|im_end|>\n'
                 '<|im_start|>assistant\n')
     self.assertEqual(result, expected)
 
@@ -76,20 +83,20 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     p = parser.QwenChatTemplateParser(self.mock_tokenizer)
     messages = [{'role': 'tool', 'content': 'Tool output'}]
     result = p.parse(messages)
-    expected = ('<|im_start|>user\n'
+    expected = ('\n<|im_start|>user\n'
                 '<tool_response>\nTool output\n</tool_response>'
-                '<|im_end|>\n')
+                '<|im_end|>')
     self.assertEqual(result, expected)
 
   def test_parse_with_disable_thinking(self):
     p = parser.QwenChatTemplateParser(
-        self.mock_tokenizer, disable_thinking=True
+        self.mock_tokenizer, enable_thinking=False
     )
     messages = [{'role': 'assistant', 'content': 'Thinking...'}]
     result = p.parse(messages, add_generation_prompt=True)
     expected = (
-        '<|im_start|>assistant\n<think>\\n\\n</think>\\n\\nThinking...<|im_end|>\n'
-        '<|im_start|>assistant\n<think>\\n\\n</think>\\n\\n'
+        '\n<|im_start|>assistant\n<think>\n\n</think>\n\nThinking...<|im_end|>\n'
+        '<|im_start|>assistant\n<think>\n\n</think>\n\n'
     )
     self.assertEqual(result, expected)
 

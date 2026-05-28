@@ -19,6 +19,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable, Mapping
 import dataclasses
+import itertools
 import time
 from typing import Any
 
@@ -65,6 +66,10 @@ def _create_span_name(name: str, tags: Mapping[str, Any]) -> str:
   if name in [perf_constants.ROLLOUT, perf_constants.ENVIRONMENT]:
     if perf_constants.PAIR_INDEX in tags:
       parts.append(f"pair_index={tags[perf_constants.PAIR_INDEX]}")
+
+  if name == perf_constants.QUEUE:
+    if perf_constants.NAME in tags:
+      parts.append(f"name={tags[perf_constants.NAME]}")
 
   if parts:
     return f"{name} ({', '.join(parts)})"
@@ -193,12 +198,25 @@ class PerfettoTraceWriter(TraceWriter):
     if timeline_utils.is_host_timeline(tl_id):
       return None
 
+    base_tl_id = (
+        tl_id[:-6] if timeline_utils.is_queued_timeline(tl_id) else tl_id
+    )
+
+    cluster_roles = []
+
     for role, devices in self._role_to_devices.items():
       for device in devices:
         device_str = timeline_utils.generate_device_timeline_id(device)
-        if device_str == tl_id:
-          camel_role = "".join(word.capitalize() for word in role.split("_"))
-          return f"{camel_role} Cluster"
+        if device_str == base_tl_id and role not in cluster_roles:
+
+          cluster_roles.append(role)
+
+    if cluster_roles:
+      camel_roles = [
+          "".join(word.capitalize() for word in role.split("_"))
+          for role in cluster_roles
+      ]
+      return f"{', '.join(camel_roles)} Cluster"
     return None
 
   def write(self, builder: TraceProtoBuilder) -> None:
@@ -232,13 +250,13 @@ class PerfettoTraceWriter(TraceWriter):
         continue
 
       tl = timelines[tl_id]
-      if not tl.spans:
+      if not any(tl.committed_steps):
         continue
 
       if timeline_utils.is_host_timeline(tl_id):
         # Rollout only timelines threads.
         if timeline_utils.is_timeline_only_of_allowed_type(
-            tl, [perf_constants.ROLLOUT]
+            tl, [perf_constants.ROLLOUT], include_cur_step=False
         ):
           self._track_info["host_rollout"] = TrackInfo(
               name="Host - Rollout threads",
@@ -269,6 +287,9 @@ class PerfettoTraceWriter(TraceWriter):
     if not timelines:
       return
 
+    if not any(any(tl.committed_steps) for tl in timelines.values()):
+      return
+
     builder = TraceProtoBuilder()
 
     self._init_tracks(timelines)
@@ -287,7 +308,7 @@ class PerfettoTraceWriter(TraceWriter):
     for tl_id in sorted_ids:
       tl = timelines[tl_id]
 
-      if not tl.spans:
+      if not any(tl.committed_steps):
         continue
 
       # Assign a UUID to the timeline if it hasn't been assigned one yet. Offset
@@ -306,7 +327,14 @@ class PerfettoTraceWriter(TraceWriter):
         track_info = self._track_info[self._timeline_tracks[tl_id]]
         packet.track_descriptor.parent_uuid = track_info.uuid
 
-      lane_by_span_id, num_lanes = _assign_lanes(tl.spans.values())
+      # TODO: noghabi -  limit processing to last steps. we don't need to start
+      # from the beginning every time.
+      all_spans = list(
+          itertools.chain.from_iterable(
+              step.values() for step in tl.committed_steps
+          )
+      )
+      lane_by_span_id, num_lanes = _assign_lanes(all_spans)
 
       if num_lanes > 1:
         # Emit track descriptors for each lane so they group under the timeline
@@ -317,7 +345,7 @@ class PerfettoTraceWriter(TraceWriter):
           packet.track_descriptor.parent_uuid = tl_uuid
           packet.track_descriptor.name = ""  # empty name for lanes
 
-      for s in tl.spans.values():
+      for s in all_spans:
         lane_idx = lane_by_span_id[s.id]
         lane_uuid = tl_uuid if num_lanes <= 1 else (tl_uuid + lane_idx + 1)
 

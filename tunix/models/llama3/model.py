@@ -41,6 +41,7 @@ env_utils.setup_sharding_environment()
 class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
+  DECODER = enum.auto()  # Remat the entire decoder layer.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -412,7 +413,10 @@ class Attention(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array | None,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.config.remat_config == RematConfig.BLOCK:
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
       return nnx.remat(self.block.__func__)(
@@ -485,7 +489,10 @@ class MLP(nnx.Module):
 
   @jax.named_scope('feed_forward')
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    if self.config.remat_config == RematConfig.BLOCK:
+    if (
+        self.config.remat_config == RematConfig.BLOCK
+        or self.config.remat_config == RematConfig.BLOCK.value
+    ):
       return nnx.remat(self.block.__func__)(self, x)
     else:
       return self.block(x)
@@ -500,6 +507,7 @@ class DecoderLayer(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
     self.input_layernorm = RMSNorm(
         config.embed_dim,
         norm_eps=config.norm_eps,
@@ -521,7 +529,7 @@ class DecoderLayer(nnx.Module):
         shd_config=config.shd_config,
     )
 
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -541,8 +549,25 @@ class DecoderLayer(nnx.Module):
     outputs = residual + self.mlp(attn_output)
     return cache, outputs
 
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if (
+        self.config.remat_config == RematConfig.DECODER
+        or self.config.remat_config == RematConfig.DECODER.value
+    ):
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
 
-class Llama3(BackendMappingMixin, nnx.Module, pytree=False):
+
+class Llama3(BackendMappingMixin, nnx.Module):
   """Llama3 model."""
 
   BACKEND_PACKAGE_PATH = __name__

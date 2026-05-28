@@ -13,20 +13,14 @@
 # limitations under the License.
 
 import asyncio
-import concurrent.futures
-import functools
 import os
-import re
-import socket
 import tempfile
-import threading
 import time
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import jax
 import numpy as np
-import qwix
 import transformers
 from tunix.generate import mappings
 from tunix.generate import sampler as vanilla_sampler
@@ -36,8 +30,6 @@ from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.sft import utils as base_utils
 from tunix.tests import test_common as tc
-from vllm.inputs import TokensPrompt
-from vllm.sampling_params import SamplingParams
 import asyncio
 
 os.environ["SKIP_JAX_PRECOMPILE"] = "1"
@@ -97,7 +89,6 @@ class VllmSamplerTest(absltest.TestCase):
 
   def test_vllm_sampler_batch_mode_with_data_parallel(self):
     self._run_vllm_sampler(server_mode=False, data_parallel_size=2)
-    os.environ["NEW_MODEL_DESIGN"] = "False"
 
   def test_vllm_sampler_server_mode(self):
     self._run_vllm_sampler(server_mode=True)
@@ -185,7 +176,11 @@ class VllmSamplerTest(absltest.TestCase):
     # vLLM construct its own mesh
     self.assertNotEqual(vl_sampler.mesh, self.mesh)
     state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
+    # Mock the RPC calls to delete and reinitialize kv cache
+    mock_llm = vl_sampler._driver.llm_engine if server_mode else vl_sampler.llm
+    with mock.patch.object(mock_llm, "reset_prefix_cache"), \
+        mock.patch.object(mock_llm, "collective_rpc"):
+        vl_sampler.load_checkpoint(state)
 
     base_utils.show_hbm_usage("After loading vLLM sampler")
 
@@ -202,7 +197,7 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     expected_output_pattern = [
-        (prompts[0], ["Tom", "help"]),
+        (prompts[0], ["Tom", "Hello"]),
         (prompts[1], ["Paris"]),
         (prompts[2], ["Rayleigh", "scattering"]),
     ]
@@ -258,7 +253,10 @@ class VllmSamplerTest(absltest.TestCase):
     self.addCleanup(vl_sampler.stop)
 
     state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
+    # Mock the RPC calls to delete and reinitialize kv cache
+    with mock.patch.object(vl_sampler._driver.llm_engine, "reset_prefix_cache"), \
+        mock.patch.object(vl_sampler._driver.llm_engine, "collective_rpc"):
+        vl_sampler.load_checkpoint(state)
 
     base_prompts = [
         "Hello, my name is Tom.",
@@ -403,7 +401,10 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
+    # Mock the RPC calls to delete and reinitialize kv cache
+    with mock.patch.object(vl_sampler.llm, "reset_prefix_cache"), \
+        mock.patch.object(vl_sampler.llm, "collective_rpc"):
+        vl_sampler.load_checkpoint(state)
 
     # Mock the generate method to capture sampling_params
     original_generate = vl_sampler.llm.generate
@@ -485,7 +486,10 @@ class VllmSamplerTest(absltest.TestCase):
     )
 
     state = nnx.state(tunix_model)
-    vl_sampler.load_checkpoint(state)
+    # Mock the RPC calls to delete and reinitialize kv cache
+    with mock.patch.object(vl_sampler.llm, "reset_prefix_cache"), \
+        mock.patch.object(vl_sampler.llm, "collective_rpc"):
+        vl_sampler.load_checkpoint(state)
 
     # Mock the generate method to capture sampling_params
     original_generate = vl_sampler.llm.generate

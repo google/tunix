@@ -87,6 +87,12 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
           {},
           "simple_span",
       ),
+      (
+          "queue_with_name",
+          perf_constants.QUEUE,
+          {perf_constants.NAME: "data_loading"},
+          "queue (name=data_loading)",
+      ),
   )
   def test_create_span_name(self, name, tags, expected):
     actual_name = trace_writer_lib._create_span_name(name, tags)
@@ -121,6 +127,7 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
           },
       )
       t.stop_span(1002.0)
+      t.commit_step()
 
       writer.write_timelines({"timeline_test": t})
 
@@ -181,17 +188,19 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       # Create mock spans manually to simulate overlaps
       span1 = tracer.Span(name="span_1", begin=1001.0, id=1)
       span1.end = 1005.0
-      t.spans[1] = span1
+      t._cur_step[1] = span1
 
       # Overlaps with span 1
       span2 = tracer.Span(name="span_2", begin=1002.0, id=2)
       span2.end = 1006.0
-      t.spans[2] = span2
+      t._cur_step[2] = span2
 
       # Starts exactly when span 2 ends, testing tie-breaker logic
       span3 = tracer.Span(name="span_3", begin=1006.0, id=3)
       span3.end = 1010.0
-      t.spans[3] = span3
+      t._cur_step[3] = span3
+
+      t.commit_step()
 
       writer.write_timelines({"overlap_timeline": t})
 
@@ -298,30 +307,53 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
     with tempfile.TemporaryDirectory() as tmp_dir:
       writer = trace_writer_lib.PerfettoTraceWriter(
-          trace_dir=tmp_dir, role_to_devices={"actor": ["tpu0", "tpu1"]}
+          trace_dir=tmp_dir,
+          role_to_devices={
+              "actor": ["tpu0", "tpu1"],
+              "rollout": ["tpu0"],
+          },
       )
 
       t_main = tracer.Timeline("host-1", 1000.0)
       t_main.start_span("main_span", 1001.0)
+      t_main.stop_span(1002.0)
 
       t_rollout = tracer.Timeline("host-2", 1000.0)
       t_rollout.start_span("rollout", 1002.0)
+      t_rollout.stop_span(1003.0)
 
       t_tpu = tracer.Timeline("tpu0", 1000.0)
       t_tpu.start_span("compute", 1003.0)
+      t_tpu.stop_span(1004.0)
 
-      writer.write_timelines({
+      t_tpu1 = tracer.Timeline("tpu1", 1000.0)
+      t_tpu1.start_span("compute2", 1004.0)
+      t_tpu1.stop_span(1005.0)
+
+      t_tpu0_queue = tracer.Timeline("tpu0_queue", 1000.0)
+      t_tpu0_queue.start_span("queue_span", 1002.0)
+      t_tpu0_queue.stop_span(1003.0)
+
+      timelines = {
           "host-1": t_main,
           "host-2": t_rollout,
           "tpu0": t_tpu,
-      })
+          "tpu0_queue": t_tpu0_queue,
+          "tpu1": t_tpu1,
+      }
+      for tl in timelines.values():
+        tl.commit_step()
+      writer.write_timelines(timelines)
 
     main_group = captured_packets[0].track_descriptor
     rollout_group = captured_packets[1].track_descriptor
-    tpu_group = captured_packets[2].track_descriptor
-    host_1 = captured_packets[3].track_descriptor
-    host_2 = captured_packets[4].track_descriptor
-    tpu0 = captured_packets[5].track_descriptor
+    tpu0_group = captured_packets[2].track_descriptor
+    tpu1_group = captured_packets[3].track_descriptor
+    host_1 = captured_packets[4].track_descriptor
+    host_2 = captured_packets[5].track_descriptor
+    tpu0 = captured_packets[6].track_descriptor
+    tpu0_queue = captured_packets[7].track_descriptor
+    tpu1 = captured_packets[8].track_descriptor
 
     with self.subTest("host_main_threads_group"):
       self.assertEqual(main_group.name, "Host - Main threads")
@@ -331,8 +363,11 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       self.assertEqual(rollout_group.name, "Host - Rollout threads")
       self.assertEqual(rollout_group.uuid, 100001)
 
+    with self.subTest("actor_rollout_cluster"):
+      self.assertEqual(tpu0_group.name, "Actor, Rollout Cluster")
+
     with self.subTest("actor_cluster"):
-      self.assertEqual(tpu_group.name, "Actor Cluster")
+      self.assertEqual(tpu1_group.name, "Actor Cluster")
 
     with self.subTest("host_1"):
       self.assertEqual(host_1.name, "host-1")
@@ -344,7 +379,15 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
 
     with self.subTest("tpu0"):
       self.assertEqual(tpu0.name, "tpu0")
-      self.assertEqual(tpu0.parent_uuid, tpu_group.uuid)
+      self.assertEqual(tpu0.parent_uuid, tpu0_group.uuid)
+
+    with self.subTest("tpu0_queue"):
+      self.assertEqual(tpu0_queue.name, "tpu0_queue")
+      self.assertEqual(tpu0_queue.parent_uuid, tpu0_group.uuid)
+
+    with self.subTest("tpu1"):
+      self.assertEqual(tpu1.name, "tpu1")
+      self.assertEqual(tpu1.parent_uuid, tpu1_group.uuid)
 
   def test_perfetto_trace_writer_integration(self):
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -364,6 +407,9 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       t2.stop_span(2002.0)
 
       timelines = {"timeline1": t1, "timeline_tags": t2}
+
+      for tl in timelines.values():
+        tl.commit_step()
 
       writer.write_timelines(timelines)
 
@@ -408,6 +454,14 @@ class PerfettoTraceWriterTest(parameterized.TestCase):
       # No content should be written.
       self.assertEmpty(files)
 
+  def test_perfetto_trace_writer_timeline_with_empty_committed_steps(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      writer = trace_writer_lib.PerfettoTraceWriter(trace_dir=tmp_dir)
+      t = tracer.Timeline("timeline_test", 1000.0)
+      writer.write_timelines({"timeline_test": t})
+      files = os.listdir(tmp_dir)
+      self.assertEmpty(files)
+
 
 class NoopTraceWriterTest(absltest.TestCase):
 
@@ -415,6 +469,8 @@ class NoopTraceWriterTest(absltest.TestCase):
     writer = trace_writer_lib.NoopTraceWriter()
     t = tracer.Timeline("timeline", 1000.0)
     t.start_span("span1", 1001.0)
+    t.stop_span(1002.0)
+    t.commit_step()
     # Should not crash and do nothing.
     writer.write_timelines({"timeline": t})
 

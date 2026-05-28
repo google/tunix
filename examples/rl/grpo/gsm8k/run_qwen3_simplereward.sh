@@ -16,7 +16,7 @@
 set -x # Enable xtrace
 
 # specify at cmd line to override defaults, e.g.
-model_name=${model_name:-"Qwen3-1.7B-base"}
+model_name=${model_name:-"qwen3-1.7b-base"}
 batch_size=${batch_size:-1}
 num_batches=${num_batches:-3738}
 num_train_epochs=${num_train_epochs:-1}
@@ -42,7 +42,10 @@ python3 -m tunix.cli.grpo_main \
   model_config.model_name=${model_name} \
   model_config.model_id=Qwen/${model_name} \
   model_config.model_source=huggingface \
+  model_config.use_flash_attention=true \
+  model_config.flash_attention_block_size=256 \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}" \
+  model_config.model_download_path="/tmp/models/${model_name}" \
   model_config.mesh.shape="(2,4)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=42 \
@@ -50,11 +53,13 @@ python3 -m tunix.cli.grpo_main \
   model_config.flash_attention_block_size=256 \
   actor_model_config.lora_config.rank=64 \
   actor_model_config.lora_config.alpha=64.0 \
-  actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \
+  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj" \
   actor_model_config.mesh.shape="(2,4)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  rollout_model_config.mesh.shape="(2,4)" \
-  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
+  reference_model_config.mesh=null \
+  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh=null \
+  rollout_model_config.same_mesh_as="actor" \
   tokenizer_config.tokenizer_path=Qwen/${model_name} \
   tokenizer_config.tokenizer_type=huggingface \
   tokenizer_config.add_bos=false \
@@ -63,6 +68,7 @@ python3 -m tunix.cli.grpo_main \
   num_batches=$num_batches \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
+  train_fraction=$train_fraction \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
@@ -93,4 +99,6 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.num_iterations=1 \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
-  reward_functions="['tunix/cli/reward_fn/simple_math.py']"
+  reward_functions="['tunix/cli/reward_fn/simple_math.py']" \
+  "$@"
+

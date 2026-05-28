@@ -14,18 +14,26 @@
 
 ################################## LOAD MODEL ##################################
 model_config: &base_model_config
-  # The unique full name identifier of the model, matching exactly with the name used in Huggingface
-  # e.g., "gemma-2b","llama-3.1-8b", or Kaggle, e.g., "gemma2-2b-it".
-  model_name: "llama3.1-8b"
+  # The unique full name identifier of the model.
+  # Can be the Huggingface model name, e.g., "gemma-2b", "llama-3.1-8b", or
+  # Tunix standard format, e.g., "gemma2_2b_it", "llama3p1_8b".
+  model_name: "llama-3.1-8b"
 
-  # Chagne model source to your downloading model workflow. Example: "kaggle" | "huggingface" | "gcs" | ""
+  # Change model source to your downloading model workflow. Example: "kaggle" | "huggingface" | "gcs" | ""
   model_source: "huggingface"
 
-  # Full model name identifier (case sensitive), as it appears on Huggingface, or Kaggle, e.g.,
-  # "meta-llama/Llama-3.1-8B" or "google/gemma-2/flax/gemma2-2b-it".
+  # Model identifier used by Tunix to determine model architecture and configuration.
+  # Can be a HuggingFace Hub model ID (e.g., "google/gemma-2-2b-it", "meta-llama/Llama-3.1-8B")
+  # or a Tunix native model config ID (e.g., "gemma2_2b_it", "llama3p1_8b").
+  # If model_source is "huggingface", this ID is used to download model from HuggingFace Hub.
   model_id: "meta-llama/Llama-3.1-8B"
 
-  # For models from GCS or internal sources, specify the path to the model files.
+  # Path or identifier for model source.
+  # If model_source is Kaggle, this is Kaggle Hub model identifier (e.g. "google/gemma-2/flax/gemma2-2b-it").
+  # If model_source is GCS or internal, this is the GCS/CNS path to model files.
+  # If model_source is Maxtext, this is the checkpoint path.
+  # If model_source is huggingface, this field is ignored. Model files are downloaded from Hugging Face Hub
+  # using model_id and stored in model_download_path.
   model_path: ""
 
   ################################## Checkpoint ##################################
@@ -33,24 +41,41 @@ model_config: &base_model_config
   model_download_path: "/tmp/models"
 
   ################################## KAGGLE ##################################
-  # If download checkpoint from kaggle, specify your kaggle credentials `KAGGLE_USERNAME` and `KAGGLE_KEY ` in envrionment variable.
+  # If download checkpoint from kaggle, specify your kaggle credentials `KAGGLE_USERNAME` and `KAGGLE_KEY ` in environment variable.
 
   ################################## HF ##################################
-  # If download checkpoint from huggingface, specifcy your hf credentials `HF_TOKEN` in environnebt variable. 
+  # If download checkpoint from huggingface, specify your hf credentials `HF_TOKEN` in environment variable.
 
   ################################## NNX ##################################
-  # Integer seed to create `nnx.Rngs` to mangage the random state.
+  # Integer seed to create `nnx.Rngs` to manage the random state.
+
+  ################################## MAXTEXT ##################################
+  # Optional keyword arguments passed to the underlying model architecture.
+  # When using `model_source: "maxtext"`, you can safely pass MaxText-specific
+  # configuration overrides under `kwargs`. Tunix will automatically forward valid
+  # configuration fields (e.g., `base_emb_dim`, `sparse_matmul`, etc.) to the
+  # MaxText initializer without conflicts.
+  #
+  # Note on Hugging Face token: Maxtext can download models automatically from
+  # Hugging Face if no `model_path` is given. By default, it uses the `HF_TOKEN`
+  # environment variable. You can also explicitly specify it here:
+  # kwargs:
+  #   hf_access_token: "your_token"
+  #   base_emb_dim: 4096
+  #   sparse_matmul: true
+  #   remat_policy: "minimal"
+
   rng_seed: 0
 
   # Display model
   model_display: false
 
-  # Directory used for NNX conversion if downloaded Gemma/Gemma2 from Kaggle source. 
+  # Directory used for NNX conversion if downloaded Gemma/Gemma2 from Kaggle source.
   intermediate_ckpt_dir: "/tmp/intermediate_ckpt/"
-  ################################## Flash Attention ##################################
+
+  # Flash Attention configuration
   use_flash_attention: false
   flash_attention_block_size: 1024
-
   ################################# LoRa #################################
   # If you want to use LoRa, specify the module_path, rank, and alpha. You can also optionally specify the weight_qtype and tile_size, e.g.:
   #lora_config:
@@ -92,10 +117,12 @@ tokenizer_config:
 
 ################################## DATASET ##################################
 # Translation_dataset  "Helsinki-NLP/opus-100" or "mtnt/en-fr" for SFT
-# Math_dataset "gsm8k" for grpo 
-data_source: ""
+# Math_dataset "gsm8k" for grpo
+data_source: "tfds"
 data_directory: ""
 data_module: ""
+# For non agentic grpo cli, we apply chat template to dataset by default.
+apply_chat_template_to_dataset: true
 dataset_name: "Helsinki-NLP/opus-100"
 batch_size: 16
 max_target_length: 256
@@ -110,6 +137,11 @@ num_test_batches: 100
 # data_dir used will be set to `None` and chosen by default by tfds.
 tfds_download: True
 
+# You could leave this as 0, and the num_batches will be auto calculated as
+# floor(dataset_length / batch_size). Set to a positive integer to cap the
+# number of batches used per epoch.
+num_batches: 0
+
 ############################### Optimizer ###############################
 # Optimizer config
 optimizer_config: &base_optimizer_config
@@ -117,7 +149,7 @@ optimizer_config: &base_optimizer_config
   opt_type: "adamw"
 
   # == Optax Optimizer Scheduler ==
-  # Belows are function parameters for optax optimizer scheduler. Make sure you specified the corresponding parameters for your schedule_type. 
+  # Belows are function parameters for optax optimizer scheduler. Make sure you specified the corresponding parameters for your schedule_type.
 
   schedule_type: "warmup_cosine_decay_schedule"
   value: 1e-5
@@ -157,7 +189,7 @@ training_config: &base_training_config
     # custom_export_fn_path = the path to the custom export function for the v1 perf metrics.
     # custom_export_fn_path_v2 = the path to the custom export function for the v2 perf metrics (experimental).
     # enable_trace_writer = whether to enable writing out the trace for visualization (enabled by default).
-    # log_dir = the directory to save the trace files.
+    # trace_dir = the directory to save the trace files.
   perf_metrics_options: {}
   profiler_options:
     log_dir: "/tmp/profiling"
@@ -166,12 +198,12 @@ training_config: &base_training_config
   data_sharding_axis: ["fsdp"]
   max_inflight_computations: 2
 
-rl_training_config: 
+rl_training_config:
   <<: *base_training_config
   actor_optimizer_config:
     <<: *base_optimizer_config
 
-  critic_optimizer_config: null 
+  critic_optimizer_config: null
 ############################### GRPO Config ###############################
 grpo_config:
   # The number of times the policy generates multiple responses for a given prompt
@@ -196,7 +228,7 @@ grpo_config:
 rollout_config:
   total_generation_steps: 768
 
-  max_prompt_length: 256 
+  max_prompt_length: 256
 
   # Important to keep a high-ish temperature for varied, diverse responses during
   # training.
@@ -210,11 +242,13 @@ rollout_config:
 ############################### Other RL  Config ###############################
 
 rollout_engine: "vanilla"
+vllm_config: {}
+sglang_jax_config: {}
 
-offload_to_cpu: false 
+offload_to_cpu: false
 
  ############################# Reward Fns #############################
 
-verl_compatible: false 
-reward_functions: 
+verl_compatible: false
+reward_functions:
  - tunix/cli/reward_fn/gsm8k.py

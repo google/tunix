@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 class BackendMappingMixin:
@@ -62,6 +62,10 @@ class BackendMappingMixin:
   def to_hf_hook_fns(cls, backend: str | None = None):
     return cls.mapping_for(backend).get('to_hf_hook_fns')
 
+  @classmethod
+  def preprocess_src_state(cls, backend: str | None = None):
+    return cls.mapping_for(backend).get('preprocess_src_state')
+
 
 @dataclass
 class MappingConfig:
@@ -78,6 +82,7 @@ class MappingConfig:
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
   lora_to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
+  preprocess_src_state: Optional[Callable[[Any], Any]] = None
 
   @classmethod
   def build(
@@ -103,6 +108,7 @@ class MappingConfig:
         'to_hf_hook_fns',
         'to_hf_transpose_keys',
         'lora_to_hf_transpose_keys',
+        'preprocess_src_state',
     )
 
     values: Dict[str, Any] = {}
@@ -130,6 +136,7 @@ class MappingConfig:
         to_hf_hook_fns=resolved.get('to_hf_hook_fns'),
         to_hf_transpose_keys=resolved.get('to_hf_transpose_keys'),
         lora_to_hf_transpose_keys=resolved.get('lora_to_hf_transpose_keys'),
+        preprocess_src_state=resolved.get('preprocess_src_state'),
     )
 
   @classmethod
@@ -158,6 +165,7 @@ class MappingConfig:
         to_hf_hook_fns=maybe_call('to_hf_hook_fns'),
         to_hf_transpose_keys=maybe_call('to_hf_transpose_keys'),
         lora_to_hf_transpose_keys=maybe_call('lora_to_hf_transpose_keys'),
+        preprocess_src_state=maybe_call('preprocess_src_state'),
     )
 
     for key, value in overrides.items():

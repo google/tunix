@@ -38,9 +38,9 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
-from tunix.generate import tokenizer_adapter
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -167,11 +167,6 @@ class ClusterConfig:
       random weights instead of loading from the given path.
     rollout_vllm_tpu_backend_type: The TPU Jax backend type for vllm rollout
       engine, E.g. "jax", "torchax" or "pytorch_xla".
-    rollout_vllm_swap_space_size_gb: The swap space size (in GiB) for vllm
-      rollout engine. This is the amount of CPU memory (RAM) to allocate for
-      swapping KV cache blocks from the TPU/GPU memory (HBM). A larger value
-      allows for larger batch sizes and longer sequences, potentially at the
-      cost of increased latency if swapping occurs.
   """
 
   role_to_mesh: dict[Role, Mesh]
@@ -203,9 +198,20 @@ class RLCluster:
     self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
     self._init_backbone_sharing_map(actor, reference)
+    self._anchor_policy_state = None
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
+
+    if self.cluster_config.rollout_config is None:
+      raise ValueError("`cluster_config.rollout_config` cannot be None.")
+    if isinstance(
+        self.cluster_config.rollout_config, dict
+    ) and not self.cluster_config.rollout_config.get(Mode.TRAIN):
+      raise ValueError(
+          "Rollout config is a dict but missing a train config. Provided"
+          f" config: {self.cluster_config.rollout_config}"
+      )
 
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
@@ -330,7 +336,7 @@ class RLCluster:
         dst_shardings = jax.tree_util.tree_map(
             lambda x: jax.sharding.NamedSharding(
                 mesh,
-                x,
+                x if x is not None else jax.sharding.PartitionSpec(),
                 memory_kind=self._default_memory_kind
                 if is_on_device
                 else "pinned_host",
@@ -365,14 +371,18 @@ class RLCluster:
         "sglang_jax",
     ]:
       raise ValueError(
-          "`cluster_config.rollout_engine` should be one of `'vanilla'` or"
-          " `'vllm'` or `'sglang_jax'`. Received:"
+          "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
+          "`'vllm'`, or `'sglang_jax'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
+
     if isinstance(self.cluster_config.rollout_config, dict):
+      # train_cfg should always be provided.
+      train_cfg = self.cluster_config.rollout_config[Mode.TRAIN]
+      eval_cfg = self.cluster_config.rollout_config.get(Mode.EVAL)
       max_kv_cache_size = max(
-          self.cluster_config.rollout_config[Mode.TRAIN].kv_cache_size,
-          self.cluster_config.rollout_config[Mode.EVAL].kv_cache_size,
+          train_cfg.kv_cache_size,
+          eval_cfg.kv_cache_size if eval_cfg is not None else 0,
       )
     else:
       max_kv_cache_size = self.cluster_config.rollout_config.kv_cache_size
@@ -397,16 +407,10 @@ class RLCluster:
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
 
-      loaded_vllm_config = None
-      if isinstance(
-          self.cluster_config.rollout_config, base_rollout.RolloutConfig
-      ):
-        loaded_vllm_config = self.cluster_config.rollout_config
-      elif isinstance(self.cluster_config.rollout_config, dict):
+      if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
-
-      if loaded_vllm_config is None:
-        raise ValueError("Rollout vllm model config is missing!")
+      else:
+        loaded_vllm_config = self.cluster_config.rollout_config
 
       if loaded_vllm_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
@@ -431,16 +435,12 @@ class RLCluster:
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
-      if isinstance(
-          self.cluster_config.rollout_config, base_rollout.RolloutConfig
-      ):
-        loaded_sglang_jax_config = self.cluster_config.rollout_config
-      elif isinstance(self.cluster_config.rollout_config, dict):
+      if isinstance(self.cluster_config.rollout_config, dict):
         loaded_sglang_jax_config = self.cluster_config.rollout_config[
             Mode.TRAIN
         ]
       else:
-        raise ValueError("Rollout sglang jax model config is missing!")
+        loaded_sglang_jax_config = self.cluster_config.rollout_config
 
       if (
           sft_utils.is_lora_enabled(self.rollout_actor)
@@ -472,11 +472,16 @@ class RLCluster:
             base_rollout.BaseRollout,
         )
     ):
+      if isinstance(self.cluster_config.rollout_config, dict):
+        loaded_config = self.cluster_config.rollout_config[Mode.TRAIN]
+      else:
+        loaded_config = self.cluster_config.rollout_config
+
       self._rollout = self.cluster_config.rollout_engine(
           rollout_actor=self.rollout_actor,
           tokenizer=self.tokenizer,
           mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=self.cluster_config.rollout_config,
+          rollout_config=loaded_config,
       )
     else:
       raise NotImplementedError(
@@ -510,7 +515,12 @@ class RLCluster:
 
         if export_fn_v2:
           self._perf_v2 = perf_tracer_v2.PerfTracer(
-              devices, export_fn=export_fn_v2
+              devices,
+              export_fn=export_fn_v2,
+              concurrent_device_spans=[
+                  perf_constants.ROLLOUT,
+                  perf_constants.ENVIRONMENT,
+              ],
           )
 
     # 2. Initialize inference worker.
@@ -581,6 +591,9 @@ class RLCluster:
     del self.train_actor
     print("[_init_cluster] Actor trainer created. _init_cluster complete."); sys.stdout.flush()
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+        nnx.state(self.actor_trainer.model), "pinned_host"
+    )
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
@@ -629,6 +642,20 @@ class RLCluster:
             else self.actor_trainer.model
         )
         nnx.update(actor_model, params)
+
+  def _is_state_on_device(self, state: jaxtyping.PyTree) -> bool:
+    shardings = jax.tree.map(
+        lambda x: x.sharding if hasattr(x, "sharding") else None, state
+    )
+    return jax.tree_util.tree_reduce(
+        operator.or_,
+        jax.tree.map(
+            lambda x: x is not None
+            and x.memory_kind == self._default_memory_kind,
+            shardings,
+        ),
+        initializer=False,
+    )
 
   def _maybe_load_model_from_cpu(self, model: nnx.Module, role: Role):
     """Loads model from CPU if needed."""
@@ -903,16 +930,16 @@ class RLCluster:
             max_tokens_to_generate=max_generation_steps,
         )
 
-      base_tags = {
+      perf_tags = {
           perf_constants.ROLE: Role.ROLLOUT.value,
       }
       if trace_tags:
-        base_tags.update(trace_tags)
+        perf_tags.update(trace_tags)
 
       with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
           perf_constants.ROLLOUT,
           mesh.devices,
-          tags=base_tags,
+          tags=perf_tags,
       ) as span_v2:
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
@@ -980,9 +1007,17 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
+      if completion_mask is not None:
+        dest_completion_mask = sharding_utils.shard_input(
+            completion_mask,
+            self.cluster_config.training_config.data_sharding_axis,
+        )
+      else:
+        dest_completion_mask = None
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
@@ -994,8 +1029,9 @@ class RLCluster:
                 pad_id,
                 eos_id,
                 completion_mask=None
-                if completion_mask is None
-                else completion_mask[batch_slice],
+                if dest_completion_mask is None
+                else dest_completion_mask[batch_slice],
+                temperature=temperature,
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -1050,14 +1086,29 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       completion_mask: jax.Array | None = None,
+      temperature: float | None = None,
   ) -> jax.Array:
-    """Gets per-token logps from the actor model on the trainer side."""
+    """Gets per-token logps from the actor model on the trainer side.
+
+    Mirrors `get_ref_per_token_logps` — must pass through the rollout temperature
+    so the actor's recomputed logps match the temperature scaling used at
+    sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
+    yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
+    """
+    if temperature is None:
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
     batch_size = prompt_tokens.shape[0]
     if batch_size == 0:
-      raise ValueError("Cannot get actor log probabilities from an empty batch.")
+      raise ValueError(
+          "Cannot get actor log probabilities from an empty batch."
+      )
+    if self._anchor_policy_state is None:
+      raise ValueError(
+          "Anchor policy state is not initialized. Please run `sync_weights`"
+          " first."
+      )
     micro_batch_size = micro_batch_size or batch_size
-
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
       dest_prompt_tokens = sharding_utils.shard_input(
           prompt_tokens,
           self.cluster_config.training_config.data_sharding_axis,
@@ -1066,8 +1117,38 @@ class RLCluster:
           completion_tokens,
           self.cluster_config.training_config.data_sharding_axis,
       )
-      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      graphdef, state = nnx.split(self.actor_trainer.model)
+      if completion_mask is not None:
+        dest_completion_mask = sharding_utils.shard_input(
+            completion_mask,
+            self.cluster_config.training_config.data_sharding_axis,
+        )
+      else:
+        dest_completion_mask = None
+
+      # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
+      # reference the same policy vllm sampled with even when mini_batch_size <
+      # full_batch_size or num_iterations > 1. Only offload the live actor when
+      # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
+      # was both unnecessary and risked leaving stray weights pinned to host.
+      actor_trainer_state_on_device = self._is_state_on_device(
+          nnx.state(self.actor_trainer.model)
+      )
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
+        gc.collect()
+      graphdef, actor_state = nnx.split(self.actor_trainer.model)
+      actor_pspecs = nnx.get_partition_spec(actor_state)
+      actor_model_sharding = jax.tree.map(
+          lambda x: jax.sharding.NamedSharding(
+              mesh,
+              x if x is not None else jax.sharding.PartitionSpec(),
+              memory_kind=self._default_memory_kind,
+          ),
+          actor_pspecs,
+      )
+      state = reshard.reshard_pytree(
+          self._anchor_policy_state, actor_model_sharding
+      )
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
@@ -1081,14 +1162,20 @@ class RLCluster:
                 pad_id=pad_id,
                 eos_id=eos_id,
                 completion_mask=None
-                if completion_mask is None
-                else completion_mask[batch_slice],
+                if dest_completion_mask is None
+                else dest_completion_mask[batch_slice],
                 stop_gradient=True,
                 return_logits=False,
+                temperature=temperature,
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)
-      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+      del state
+      gc.collect()
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(
+            self.actor_trainer.model, self._default_memory_kind
+        )
       return actor_per_token_logps
 
   def sync_weights(self):
@@ -1107,6 +1194,10 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
+      # The anchor policy state is snapshotted from actor_trainer.model.
+      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+          nnx.state(self.actor_trainer.model), "pinned_host"
+      )
 
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1
@@ -1142,6 +1233,13 @@ class RLCluster:
           pad_id,
           eos_id,
       )
+
+  def get_rollout_config(self, mode: Mode) -> base_rollout.RolloutConfig:
+    """Returns the rollout config for the given mode."""
+    if isinstance(self.cluster_config.rollout_config, dict):
+      return self.cluster_config.rollout_config[mode]
+    else:
+      return self.cluster_config.rollout_config
 
   @contextlib.contextmanager
   def _get_mesh_and_logical_axis_rules_cm(self, role: Role):

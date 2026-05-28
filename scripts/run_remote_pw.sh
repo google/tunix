@@ -9,16 +9,18 @@ set -euo pipefail
 #     ./run_remote_pw.sh
 
 CLUSTER_NAME=${CLUSTER_NAME:-tunix-v5p-16}
-
+REMOTE_PW_PORT=${REMOTE_PW_PORT:-8890}
 JOB_NAME=${JOB_NAME:-tunix-${USER}-${TPU_TYPE}-${TOPOLOGY}-pw-0}
 
 # cpu-np or cpu-np-large-mem-disk
 CPU_POOL_NAME=${CPU_POOL_NAME:-cpu-np}
 
+
 # https://docs.cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus
-TPU_TYPE=${TPU_TYPE:-v5p}
+TPU_ARG=${TPU_TYPE:-v5p}
+
 TOPOLOGY=${TOPOLOGY:-2x2x2}
-TPU_SLICE="tpu-${TPU_TYPE}-slice"
+TPU_SLICE="tpu-${TPU_ARG}-slice"
 
 # Number of TPU chips per worker pod (`google.com/tpu: 4` below).
 CHIPS_PER_WORKER=${CHIPS_PER_WORKER:-4}
@@ -55,6 +57,13 @@ PROXY_CPU_LIMIT=${PROXY_CPU_LIMIT:-50}
 PROXY_MEMORY_LIMIT=${PROXY_MEMORY_LIMIT:-320G}
 JAX_CPU_LIMIT=${JAX_CPU_LIMIT:-50}
 JAX_MEMORY_LIMIT=${JAX_MEMORY_LIMIT:-300G}
+# TPU worker ephemeral storage knobs (to reduce disk-pressure evictions).
+# Note: some Kueue ClusterQueues do not expose ephemeral-storage flavors.
+# In that case, setting container ephemeral-storage resources causes admission failure:
+#   "resource ephemeral-storage unavailable in ClusterQueue"
+# Keep this empty by default (disabled) and rely on WORKER_TMP_SIZE_LIMIT.
+# Choose a conservative /tmp cap to leave headroom for image layers, logs and system daemons.
+WORKER_TMP_SIZE_LIMIT=${WORKER_TMP_SIZE_LIMIT:-25Gi}
 
 if [ ! -d "${GITHUB_PATH}/experimental/.git" ]; then
   git clone sso://user/abhinavsing/experimental "${GITHUB_PATH}/experimental"
@@ -216,9 +225,8 @@ spec:
                 cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
               volumes:
                 - name: shared-tmp
-                  hostPath:
-                    path: /tmp
-                    type: DirectoryOrCreate
+                  emptyDir:
+                    sizeLimit: ${WORKER_TMP_SIZE_LIMIT}
               containers:
                 - name: pathways-worker
                   image: ${PATHWAYS_SERVER_IMAGE}
@@ -275,6 +283,8 @@ spec:
                       name: shared-tmp
 EOF
 
+# export JOB_NAME=lancewang-v5p-pw-4; export GITHUB_PATH=/Users/lancewang/github; export TEMP_BUCKET=lancewang-dev-supercomputer-testing/tunix/pw
+
 # 1) Kill anything listening on local 8888
 # lsof -tiTCP:8888 -sTCP:LISTEN | xargs -r kill
 
@@ -285,7 +295,9 @@ gcloud config set project ${PROJECT}
 gcloud config set compute/zone ${ZONE}
 gcloud container clusters get-credentials $CLUSTER_NAME --zone $REGION
 
-kubectl get pods; kubectl delete pathwaysjob "$JOB_NAME" --ignore-not-found; until ! kubectl get pathwaysjob "$JOB_NAME" >/dev/null 2>&1; do      echo "waiting for pathwaysjob $JOB_NAME to be removed...";     sleep 5; done; kubectl delete jobset "$JOB_NAME" --ignore-not-found; until ! kubectl get jobset "$JOB_NAME" >/dev/null 2>&1; do      echo "waiting for jobset $JOB_NAME to be removed...";     sleep 5; done; kubectl apply -f jobset.yaml; until kubectl get pod | grep "$JOB_NAME-pathways-head-0-0" | grep -q Running; do     echo "waiting for head pod...";        sleep 5; done; python3 $GITHUB_PATH/experimental/pathways_dev/remote-ide.py -w "$JOB_NAME" -m "vscode" -b "$TEMP_BUCKET" --check-active-session
+kubectl get pods; kubectl delete pathwaysjob "$JOB_NAME" --ignore-not-found; until ! kubectl get pathwaysjob "$JOB_NAME" >/dev/null 2>&1; do      echo "waiting for pathwaysjob $JOB_NAME to be removed...";     sleep 5; done; kubectl delete jobset "$JOB_NAME" --ignore-not-found; until ! kubectl get jobset "$JOB_NAME" >/dev/null 2>&1; do      echo "waiting for jobset $JOB_NAME to be removed...";     sleep 5; done; kubectl apply -f jobset.yaml; until kubectl get pod | grep "$JOB_NAME-pathways-head-0-0" | grep -q Running; do     echo "waiting for head pod...";        sleep 5; done;
+
+python3 $GITHUB_PATH/experimental/pathways_dev/remote-ide.py -w "$JOB_NAME" -m "vscode" -b "$TEMP_BUCKET" -P $REMOTE_PW_PORT --check-active-session
 
 
 #

@@ -103,6 +103,11 @@ class ConvertMessagesToStringTest(parameterized.TestCase):
     expected_output = {'role': 'user', 'content': 'hello'}
     self.assertEqual(utils.convert_messages_to_string(message), expected_output)
 
+  def test_convert_messages_to_string_with_none_content(self):
+    message = {'role': 'system', 'content': None}
+    expected_output = {'role': 'system', 'content': ''}
+    self.assertEqual(utils.convert_messages_to_string(message), expected_output)
+
   def test_convert_messages_to_string_with_numpy_array_int_fails(self):
     message = {'role': 'user', 'content': np.array([1])}
     with self.assertRaisesRegex(

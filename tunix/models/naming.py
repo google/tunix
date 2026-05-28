@@ -70,10 +70,10 @@ class ModelNaming:
   # and then remove str support.
   model_id: HFModelId | ConfigId | str | None = None
   model_name: str | None = None
-  model_family: str = dataclasses.field(init=False)
-  model_version: str = dataclasses.field(init=False)
-  model_config_category: str = dataclasses.field(init=False)
-  model_config_id: str = dataclasses.field(init=False)
+  model_family: str | None = None
+  model_version: str | None = None
+  model_config_category: str | None = None
+  model_config_id: str | None = None
 
   def __post_init__(self):
     if self.model_id:
@@ -94,13 +94,35 @@ class ModelNaming:
     object.__setattr__(self, 'model_name', model_name)
 
     family, version = get_model_family_and_version(model_name)
+    if self.model_family is not None and self.model_family != family:
+      raise ValueError(
+          f'model_family mismatch: {self.model_family} != {family}'
+      )
     object.__setattr__(self, 'model_family', family)
+
+    if self.model_version is not None and self.model_version != version:
+      raise ValueError(
+          f'model_version mismatch: {self.model_version} != {version}'
+      )
     object.__setattr__(self, 'model_version', version)
 
-    object.__setattr__(
-        self, 'model_config_category', get_model_config_category(model_name)
-    )
-    object.__setattr__(self, 'model_config_id', get_model_config_id(model_name))
+    category = get_model_config_category(model_name)
+    if (
+        self.model_config_category is not None
+        and self.model_config_category != category
+    ):
+      raise ValueError(
+          f'model_config_category mismatch: {self.model_config_category} !='
+          f' {category}'
+      )
+    object.__setattr__(self, 'model_config_category', category)
+
+    config_id = get_model_config_id(model_name)
+    if self.model_config_id is not None and self.model_config_id != config_id:
+      raise ValueError(
+          f'model_config_id mismatch: {self.model_config_id} != {config_id}'
+      )
+    object.__setattr__(self, 'model_config_id', config_id)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,17 +136,12 @@ class _ModelFamilyInfo:
 # HF model family info mapping.
 _HF_MODEL_FAMILY_INFO_MAPPING = immutabledict.immutabledict({
     'gemma-': _ModelFamilyInfo(family='gemma', config_category='gemma'),
-    'gemma1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
     'gemma-1.1-': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
-    'gemma2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
     'gemma-2-': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
-    'gemma3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
     'gemma-3-': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
-    'llama3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
+    'gemma-4-': _ModelFamilyInfo(family='gemma4', config_category='gemma4'),
     'llama-3-': _ModelFamilyInfo(family='llama3', config_category='llama3'),
-    'llama3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
     'llama-3.1-': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
-    'llama3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'llama-3.2-': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
     'qwen2.5-': _ModelFamilyInfo(family='qwen2p5', config_category='qwen2'),
     'qwen3-': _ModelFamilyInfo(family='qwen3', config_category='qwen3'),
@@ -139,6 +156,7 @@ _CONFIG_ID_MODEL_FAMILY_INFO_MAPPING = immutabledict.immutabledict({
     'gemma1p1_': _ModelFamilyInfo(family='gemma1p1', config_category='gemma'),
     'gemma2_': _ModelFamilyInfo(family='gemma2', config_category='gemma'),
     'gemma3_': _ModelFamilyInfo(family='gemma3', config_category='gemma3'),
+    'gemma4_': _ModelFamilyInfo(family='gemma4', config_category='gemma4'),
     'llama3_': _ModelFamilyInfo(family='llama3', config_category='llama3'),
     'llama3p1_': _ModelFamilyInfo(family='llama3p1', config_category='llama3'),
     'llama3p2_': _ModelFamilyInfo(family='llama3p2', config_category='llama3'),
@@ -173,7 +191,7 @@ def split(model_name: str) -> tuple[str, str]:
   stripping leading hyphens.
 
   Args:
-    model_name: The model name, e.g., llama3.1-8b.
+    model_name: The model name, e.g., llama-3.1-8b.
 
   Returns:
     A tuple containing the un-standardized model_family and model_version.
@@ -264,7 +282,7 @@ def get_model_name_from_model_id(model_id: HFModelId | ConfigId | str) -> str:
           f'Invalid model ID format: {model_id!r}. Model name cannot be empty.'
       )
     if model_name.startswith('meta-llama-'):
-      return model_name.replace('meta-llama-', 'llama-', 1)
+      model_name = model_name.replace('meta-llama-', 'llama-', 1)
     return model_name
   elif _is_config_id_type(model_id):
     return model_id.lower()

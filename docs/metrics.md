@@ -88,7 +88,6 @@ on the backend, which typically defaults based on the execution environment. See
 [Logging Backends Supported](#logging-backends-supported) for details on
 backend-specific configurations.
 
-
 ```python
 from tunix.sft import metrics_logger
 
@@ -99,6 +98,10 @@ options = metrics_logger.MetricsLoggerOptions(
 )
 logger = metrics_logger.MetricsLogger(metrics_logger_options=options)
 ```
+
+With the above, agentic_grpo_learner will by default start an async trajectory
+logger which logs the trajectories including prompts, responses, etc. to the
+specified `log_dir`.
 
 ### Enabling Metrics in Jobs
 

@@ -136,11 +136,11 @@ class RolloutConfig:
   # TPU backend type for vLLM rollout engine, "jax" or "torchax", default to "jax".
   rollout_vllm_tpu_backend_type: str | None = None
 
-  # Swap space size for vLLM rollout engine, in GiB.
-  rollout_vllm_swap_space_size_gb: float = 4.0
-
   # Whether to enable asynchronous scheduling for vLLM rollout engine.
   rollout_vllm_async_scheduling: bool = False
+
+  # Mode for processing logprobs from vLLM.
+  rollout_vllm_logprobs_mode: str = "processed_logprobs"
 
   # Configs for MaxText/Custom Model support in vLLM rollout engine.
   rollout_vllm_hf_config_path: str | None = None
@@ -153,6 +153,11 @@ class RolloutConfig:
   # axes, which can help reduce memory usage for large models with few KV heads.
   rollout_vllm_enable_dp_attention: bool = False
 
+  # Whether to delete destination buffers when synchronizing weights between
+  # trainer and vLLM model. Default to True to ensure old weights are deleted
+  # to free up HBM memory.
+  rollout_vllm_delete_dst_buffers: bool = True
+
   # Maximum number of batched tokens allowed in vLLM. This allows for pending prefill requests
   # to be batched along with decode requests if enough tokens are available. Only used when
   # chunked prefill is enabled.
@@ -160,6 +165,11 @@ class RolloutConfig:
 
   # Maximum number of concurrent sequences allowed to be processed in vLLM.
   rollout_vllm_max_num_seqs: Optional[int] = None
+
+  # Number of flat keys to reshard at a time when synchronizing weights between
+  # trainer and vLLM model. None (default) reshards the whole model in one call.
+  # Set to a smaller value to reduce peak HBM pressure on large models.
+  rollout_vllm_reshard_chunk_size: Optional[int] = None
 
   # Additional keyword arguments forwarded directly to the vLLM engine constructor.
   rollout_vllm_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)

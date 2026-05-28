@@ -103,6 +103,14 @@ class TrainExample:
   advantages: jax.Array
   ref_per_token_logps: jax.Array | None
   old_per_token_logps: jax.Array | None
+  segment_ids: jax.Array | None = None
+  segment_positions: jax.Array | None = None
+  # Truncated importance-sampling correction weights for off-policy
+  # correction between the rollout sampler and the trainer. Per-token,
+  # detached, multiplied into the policy-gradient loss BEFORE aggregation
+  # to dampen positions where the trainer's recomputed log-probability
+  # diverges from the rollout sampler's. ``None`` disables the correction.
+  sampler_is_weights: jax.Array | None = None
 
 
 def compute_kl_divergence(
@@ -156,9 +164,13 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   Returns:
     Selected log probabilities.
   """
-  logps = jax.nn.log_softmax(logits, axis=-1)
-  per_token_logps = jnp.take_along_axis(logps, input_ids[..., None], axis=-1)
-  return per_token_logps[..., 0]
+  target_logits = (
+      jnp.take_along_axis(logits, input_ids[..., None], axis=-1)
+      .squeeze(-1)
+      .astype(jnp.float32)
+  )
+  normalizer = jax.nn.logsumexp(logits.astype(jnp.float32), axis=-1)
+  return target_logits - normalizer
 
 
 # TODO(tsbao): remove this once old callsite is cleaned up.
@@ -178,7 +190,7 @@ def get_per_token_logps(
       positions=positions,
       attention_mask=attn_mask,
       cache=None,
-      **kwargs
+      **kwargs,
   )
   logits = logits[:, -logits_to_keep - 1 : -1, :]
   input_tokens = input_tokens[:, -logits_to_keep:]
@@ -195,27 +207,81 @@ def process_ids(
     pad_id: int,
     eos_id: int,
     completion_mask: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    segment_positions: jax.Array | None = None,
 ):
-  """Processes prompt and completion ids."""
+  """Processes prompt and completion ids.
 
+  Args:
+    prompt_tokens: jax.Array token IDs for prompt. If sequence packing is
+      enabled, prompt_tokens will be empty (shape [B, 0]), because prompts and
+      completions are already concatenated into completion_tokens.
+    completion_tokens: jax.Array token IDs for completion. If sequence packing
+      is enabled, completion_tokens functions as a unified 1D buffer holding
+      pre-concatenated mixed prompt and completion boundaries padded
+      sequentially.
+    pad_id: pad token identifier.
+    eos_id: end of sequence identifier.
+    completion_mask: optional attention weights mapping completion sequences.
+    segment_ids: optional 1D sequential document identifiers used for packing.
+    segment_positions: optional 1D local position indices used for packing.
+  """
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
+
+  if segment_ids is not None:
+    # Positions are either provided or must be computed correctly (assumed
+    # provided for packed).
+    if segment_positions is None:
+      raise ValueError(
+          "segment_positions must be explicitly provided for packed sequences. "
+      )
+    attn_mask = None  # Relies on segment_ids inside the model
+    # Packed callers supply their own segment_ids that already separate
+    # distinct documents in the buffer; no need for an additional padding
+    # mask here.
+    return prompt_completion_ids, segment_positions, attn_mask, None
+
   prompt_mask = prompt_tokens != pad_id
 
-  if completion_mask is None:
-    completion_mask = make_completion_mask(completion_tokens, eos_tok=eos_id)
+  # Attention/RoPE-position mask MUST include every real token in the sequence.
+  # The caller-provided `completion_mask` (in multi-turn agentic learners) is
+  # the assistant-vs-env loss mask, with 0s on env tokens — using that for
+  # attention causes env-observation tokens to be masked out of context AND
+  # positions don't advance through them, so the trainer's logits for the
+  # first assistant token of turn k+1 are computed without seeing the env
+  # observation that triggered turn k+1, producing 30-50 nat sampler-trainer
+  # diffs at every turn boundary. Ignore the passed-in completion_mask for
+  # attention purposes; loss aggregation is the caller's responsibility.
+  del completion_mask
+  attn_completion_mask = completion_tokens != pad_id
 
   prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, completion_mask], axis=-1
+      [prompt_mask, attn_completion_mask], axis=-1
   )
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
 
-  return prompt_completion_ids, positions, attn_mask
+  # 1-D per-position non-pad mask for the full prompt+completion sequence.
+  # Used as ``segment_ids`` by attention kernels that cannot consume the 2-D
+  # ``attn_mask`` directly (e.g. pallas splash attention takes only a causal
+  # mask kernel-side and respects per-position segment ids to suppress
+  # cross-segment attention). With pad=0 and real=1, a real position never
+  # attends to a pad position regardless of where padding lives in the
+  # sequence (typically left-padded for prompt-side alignment).
+  input_seg_ids = prompt_completion_mask.astype(jnp.int32)
+
+  return prompt_completion_ids, positions, attn_mask, input_seg_ids
 
 
 @partial(
     jax.jit,
-    static_argnames=("pad_id", "eos_id", "stop_gradient", "return_logits"),
+    static_argnames=(
+        "pad_id",
+        "eos_id",
+        "stop_gradient",
+        "return_logits",
+        "temperature",
+    ),
 )
 def compute_per_token_logps(
     graphdef,
@@ -228,24 +294,105 @@ def compute_per_token_logps(
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     return_logits: bool = False,
+    segment_ids: jax.Array | None = None,
+    segment_positions: jax.Array | None = None,
+    temperature: float = 1.0,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
-  """Computes the per-token log probabilities."""
+  """Computes the per-token log probabilities.
+
+  Args:
+    graphdef: Flax NNX GraphDef.
+    state: Flax NNX State.
+    prompt_tokens: jax.Array token IDs for prompt. If sequence packing is
+      enabled, prompt_tokens will be empty (shape [B, 0]), because prompts and
+      completions are already concatenated into completion_tokens.
+    completion_tokens: jax.Array token IDs for completion. If sequence packing
+      is enabled, completion_tokens functions as a unified 1D buffer holding
+      pre-concatenated mixed prompt and completion boundaries padded
+      sequentially.
+    pad_id: pad token identifier.
+    eos_id: end of sequence identifier.
+    images: optional images array.
+    completion_mask: optional completion mask array.
+    stop_gradient: whether to stop gradient.
+    return_logits: whether to return logits.
+    segment_ids: optional 1D sequential document identifiers used for packing.
+    segment_positions: optional 1D local position indices used for packing.
+    temperature: temperature used for rollout.
+
+  Returns:
+    per_token_logps: jax.Array token-level logarithmic values.
+      Without sequence packing, returns log probs for completion tokens only,
+      with shape `[B, completion_len]`. With sequence packing, returns log
+      probs for the full packed sequence padded out (since prompts and
+      completions of multiple sequences are concatenated), with shape `[B,
+      FullSeqLen]`.
+    logits: optional output tensor associated directly when tracking
+    derivatives.
+  """
   model = nnx.merge(graphdef, state)
-  input_tokens, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
+  input_tokens, calculated_positions, attn_mask, input_seg_ids = process_ids(
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      completion_mask,
+      segment_ids,
+      segment_positions,
   )
-  kwargs = {} if images is None else {"images": images}
-  logits, _ = model(
-      input_tokens,
-      positions=positions,
-      attention_mask=attn_mask,
-      cache=None,
-      **kwargs,
-  )
-  logits_to_keep = completion_tokens.shape[1]
+
+  model_kwargs = {
+      "positions": calculated_positions,
+      "cache": None,
+      "attention_mask": attn_mask,
+  }
+  # Pass through any segment ids so the model's attention kernel can respect
+  # them only if the model signature accepts it: caller-provided packing ids take
+  # precedence; otherwise we pass the per-position non-pad mask derived in
+  # ``process_ids`` so flash-attention variants that lack a separate
+  # padding-mask input still skip pad positions.
+  import inspect  # pylint: disable=g-import-not-at-top
+  try:
+    sig = inspect.signature(model.__call__)
+    has_segment_ids = ("segment_ids" in sig.parameters) or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+  except Exception:
+    has_segment_ids = False
+
+  if has_segment_ids:
+    if segment_ids is not None:
+      model_kwargs["segment_ids"] = segment_ids
+    elif input_seg_ids is not None:
+      model_kwargs["segment_ids"] = input_seg_ids
+  if images is not None:
+    model_kwargs["images"] = images
+
+  logits, _ = model(input_tokens, **model_kwargs)
+
+  if segment_ids is not None:
+    # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
+    # Since predicting token[i] requires logit[i-1], we skip the first token.
+    # This shrinks the output shape to [Batch, FullSeqLen - 1]
+    logits_to_keep = input_tokens.shape[1] - 1
+  else:
+    logits_to_keep = completion_tokens.shape[1]
+
   logits = logits[:, -logits_to_keep - 1 : -1, :]
-  input_tokens = input_tokens[:, -logits_to_keep:]
-  per_token_logps = selective_log_softmax(logits, input_tokens)
+  if temperature != 0.0 and temperature != 1.0:
+    logits /= temperature
+
+  input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
+  per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
+
+  if segment_ids is not None:
+    # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
+    # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
+    per_token_logps = jnp.pad(
+        per_token_logps, ((0, 0), (1, 0)), constant_values=0.0
+    )
+    if return_logits:
+      logits = jnp.pad(logits, ((0, 0), (1, 0), (0, 0)), constant_values=0.0)
 
   if stop_gradient:
     per_token_logps = jax.lax.stop_gradient(per_token_logps)
@@ -266,18 +413,34 @@ def compute_score(
     eos_id: int,
     completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
+    segment_ids: jax.Array | None = None,
+    segment_positions: jax.Array | None = None,
 ):
   """Computes reward using the provided model."""
-  prompt_completion_ids, positions, attn_mask = process_ids(
-      prompt_tokens, completion_tokens, pad_id, eos_id, completion_mask
+  (
+      prompt_completion_ids,
+      calculated_positions,
+      attn_mask,
+      input_seg_ids,
+  ) = process_ids(
+      prompt_tokens,
+      completion_tokens,
+      pad_id,
+      eos_id,
+      completion_mask,
+      segment_ids,
+      segment_positions,
   )
 
-  out = model(
-      prompt_completion_ids,
-      positions=positions,
-      cache=None,
-      attention_mask=attn_mask,
-  )
+  model_kwargs = {"positions": calculated_positions, "cache": None}
+  if segment_ids is not None:
+    model_kwargs["segment_ids"] = segment_ids
+  else:
+    model_kwargs["attention_mask"] = attn_mask
+    if input_seg_ids is not None:
+      model_kwargs["segment_ids"] = input_seg_ids
+
+  out = model(prompt_completion_ids, **model_kwargs)
   per_token_scores = out[0] if isinstance(out, tuple) else out
   # The model returns a tensor of shape [B, T, 1]. We squeeze the last
   # dimension to get a tensor of shape [B, T].
@@ -390,6 +553,8 @@ def aggregate_loss(
   """
 
   per_token_loss = per_token_loss.astype(jnp.float32)
+  seq_mask = completion_mask.sum(axis=-1)
+  non_zero_rows = jnp.clip((seq_mask > 0).sum(), min=1)
 
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
@@ -402,7 +567,7 @@ def aggregate_loss(
     seq_loss = ((per_token_loss * completion_mask).sum(axis=-1)) / jnp.clip(
         seq_mask, min=1
     )
-    loss = seq_loss.mean()  # sequence_mean
+    loss = seq_loss.sum() / non_zero_rows
   elif loss_agg_mode == "sequence-mean-token-scale":
     # Look up custom normalization factor, default to max response length.
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
@@ -411,17 +576,17 @@ def aggregate_loss(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    loss = seq_loss.mean()
+    loss = seq_loss.sum() / non_zero_rows
   elif loss_agg_mode == "seq-mean-token-sum":
-    # Match VERL's seq-mean-token-sum behavior:
     # 1) sum token losses within each sequence
     # 2) average only across sequences that have at least one valid token
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
     seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
     loss = (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
-    # Get custom normalization factor from kwargs, default to batch size.
-    norm = _check_get_norm(kwargs, per_token_loss.shape[0])
+    # Get custom normalization factor from kwargs, default to number of
+    # non-empty rows.
+    norm = _check_get_norm(kwargs, non_zero_rows)
 
     # Sum the per-sequence sums and normalize
     # TODO(sizhi): Experiment with loss in precision if loss is fp16.
@@ -436,7 +601,9 @@ def aggregate_loss(
   return loss
 
 
-def _check_get_norm(arguments: dict[str, Any], default: float | int) -> float:
+def _check_get_norm(
+    arguments: dict[str, Any], default: float | int | jax.Array
+) -> float | jax.Array:
   """Get custom normalization factor from kwargs with a default value.
 
   Args:
@@ -449,9 +616,16 @@ def _check_get_norm(arguments: dict[str, Any], default: float | int) -> float:
   Raises:
       ValueError: If the 'norm' key is present but has an invalid value or type.
   """
-  norm = arguments.get("norm", float(default))
-  if not isinstance(norm, (int, float)) or norm <= 0:
-    raise ValueError(
-        f"Invalid 'norm' value: {norm}. Must be a positive number."
-    )
-  return norm
+  norm = arguments.get("norm", default)
+  if isinstance(norm, (int, float, jax.Array, np.ndarray)):
+    if isinstance(norm, (int, float)):
+      if norm <= 0:
+        raise ValueError(
+            f"Invalid 'norm' value: {norm}. Must be a positive number."
+        )
+    return norm
+
+  raise ValueError(
+      f"Invalid 'norm' value: {norm}. Must be a positive number (int, float,"
+      " or jax.Array)."
+  )

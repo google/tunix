@@ -1,0 +1,1 @@
+vllm @ git+https://github.com/vllm-project/vllm.git@5e584ce9ecb3cce63f1caab86177aef5c831690f

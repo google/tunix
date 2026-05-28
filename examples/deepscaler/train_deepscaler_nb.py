@@ -98,6 +98,7 @@ arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
 arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
+arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
 arg_parser.add_argument("--max_response_length", type=int, default=8192)
 arg_parser.add_argument("--temperature", type=float, default=0.8)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
@@ -105,6 +106,12 @@ arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
 arg_parser.add_argument("--shuffle_data", type=bool, default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
+arg_parser.add_argument(
+    "--loss_agg_mode", type=str, default="token-mean"
+)
+arg_parser.add_argument(
+    "--kl_loss_mode", type=str, default="low_var_kl"
+)
 args, _ = arg_parser.parse_known_args()
 
 # ====== Data ======
@@ -125,7 +132,7 @@ TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
 # === Generation during GRPO training ===
-MAX_PROMPT_LENGTH = 2048
+MAX_PROMPT_LENGTH = args.max_prompt_length
 MAX_RESPONSE_LENGTH = args.max_response_length
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
@@ -444,8 +451,16 @@ checkpointing_options = ocp.CheckpointManagerOptions(
 )
 
 # Metrics logger
+wandb_config = vars(args)
+wandb_config.update({
+    "WARMUP_STEPS": WARMUP_STEPS,
+    "num_steps": MAX_STEPS,
+    "rollout_engine": ROLLOUT_ENGINE,
+})
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo", flush_every_n_steps=20
+    log_dir="/tmp/tensorboard/grpo",
+    flush_every_n_steps=20,
+    backend_kwargs={"wandb": {"config": wandb_config}},
 )
 
 # %%
@@ -503,6 +518,7 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_chunked_prefill_size": 2048,
     "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
     "rollout_sglang_jax_page_size": 128,
+    "rollout_sglang_jax_use_sort_for_toppk_minp": False,
 }
 
 vllm_rollout_dict = {
@@ -574,6 +590,8 @@ grpo_config = GRPOConfig(
     system_prompt="",
     max_concurrency=MAX_CONCURRENCY,
     off_policy_steps=OFF_POLICY_STEPS,
+    loss_agg_mode=args.loss_agg_mode,
+    kl_loss_mode=args.kl_loss_mode,
 )
 
 # Perf Metrics logging

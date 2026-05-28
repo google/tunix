@@ -98,6 +98,24 @@ class PerfettoTraceWriterTest(absltest.TestCase):
     self.assertIn("Permission denied", cm.output[0])
 
   @mock.patch.object(os, "makedirs", autospec=True)
+  def test_init_with_gcs_path_logs_error(self, mock_makedirs):
+    with self.assertLogs(level="ERROR") as cm:
+      writer = perfetto.PerfettoTraceWriter("gs://my-bucket/test_dir")
+    self.assertIsNone(writer._trace_file_path)
+    self.assertLen(cm.output, 1)
+    self.assertIn(
+        "Failed to initialize perfetto trace writer. Skipping trace dumping"
+        " for this run.",
+        cm.output[0],
+    )
+    self.assertIn(
+        "GCS paths are not supported for perfetto trace dumping in"
+        " PerfettoTraceWriter v1: gs://my-bucket/test_dir",
+        cm.output[0],
+    )
+    mock_makedirs.assert_not_called()
+
+  @mock.patch.object(os, "makedirs", autospec=True)
   @mock.patch.object(builtins, "open", autospec=True)
   def test_write(self, mock_open, mock_makedirs):
     mock_file = mock_open.return_value

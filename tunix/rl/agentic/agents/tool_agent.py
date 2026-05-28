@@ -68,7 +68,7 @@ class ToolAgent(base_agent.ConversationAgentBase):
   def _init_messages(self, system_prompt: str) -> None:
     """Initialize conversation history with system prompt + tools prompt."""
     # Build a single string with tools prompt appended to system prompt.
-    content = system_prompt + (self.tools_prompt or "")
+    content = (system_prompt or "") + (self.tools_prompt or "")
     self._messages = [{"role": "system", "content": content}]
 
   def _observation_to_messages(
@@ -87,12 +87,12 @@ class ToolAgent(base_agent.ConversationAgentBase):
           self._messages.append({
               "role": "tool",
               "tool_call_id": call_id,
-              "content": "Tool returned result: " + output,
+              "content": "Tool returned result: " + (output or ""),
           })
       elif "question" in observation:
         self._messages.append({
             "role": "user",
-            "content": observation["question"],
+            "content": observation["question"] or "",
         })
       else:
         logging.warning("Unknown dict observation format: %s", observation)

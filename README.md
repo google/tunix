@@ -62,6 +62,7 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
 
 ## News
 
+-   [2026/04] Gemma4 models are supported in Tunix! Stay tuned for upcoming training recipes.
 -   [2026/01] Tunix model now supports efficient kernel execution ([splash attn](https://github.com/google/tunix/blob/main/tunix/models/qwen3/model.py#L150-L151), [GMM MoE](https://github.com/google/tunix/blob/main/tunix/models/qwen3/model.py#L638)).
 -   [2025/12] [Agentic RL Training](https://github.com/google/tunix/tree/main/tunix/rl/agentic) has been released, with efficient support of multi-turn agent-env interaction, tool usage, async rollout, etc.
 
@@ -85,6 +86,19 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
 ## Getting Started
 **Installation:** Jump to [Installation](https://tunix.readthedocs.io/en/latest/quickstart.html#installation) to install Tunix and run your first training
 job.
+
+For TPU users integrating `vllm` and `tpu-inference`, there are two supported
+setup paths:
+
+- Docker image builds use [Dockerfile](/usr/local/google/home/lancewang/github/tunix/Dockerfile) and install
+    the pinned dependencies directly from `requirements/requirements.txt` and
+    `requirements/special_requirements.txt`.
+- Local TPU VM or developer-machine installs can use
+    [scripts/install_tunix_vllm_requirement.sh](/usr/local/google/home/lancewang/github/tunix/scripts/install_tunix_vllm_requirement.sh),
+    which installs the same requirement files outside Docker.
+
+These are separate entry points. If you are building the Docker image, you do
+not need to run the install script inside the container build.
 
 **Examples:** To get started, we have a number of detailed examples and tutorials. You can see [Quick Start](https://tunix.readthedocs.io/en/latest/quickstart.html) for a great set of starting examples and [Examples and Guides](https://tunix.readthedocs.io/en/latest/examples.html) for a comprehensive list of all the notebooks and examples we have.
 

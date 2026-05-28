@@ -20,6 +20,7 @@ from typing import Any
 
 from etils import epath
 import numpy as np
+from tunix.utils import token_sanitization
 
 import sentencepiece as spm
 
@@ -135,6 +136,15 @@ class TokenizerAdapter:
   def tokenizer(self) -> Any:
     return self._tokenizer
 
+  def __getattr__(self, name: str) -> Any:
+    """Delegate unknown attributes to the wrapped tokenizer.
+
+    This keeps the adapter compatible with callers that expect Hugging Face
+    tokenizer attributes such as bos_token/eos_token while still using the
+    normalized adapter interface for encode/decode/id helpers.
+    """
+    return getattr(self._tokenizer, name)
+
   def apply_chat_template(
       self,
       messages: list[dict[str, str]],
@@ -159,6 +169,13 @@ class TokenizerAdapter:
     Raises:
       NotImplementedError: If chat templating is not supported by the tokenizer.
     """
+    messages = [
+        {
+            **m,
+            'content': token_sanitization.sanitize_control_tokens(m['content']),
+        }
+        for m in messages
+    ]
     if self._tokenizer_type == TokenizerType.HF:
       return self._tokenizer.apply_chat_template(
           messages,
@@ -267,6 +284,7 @@ class Tokenizer(TokenizerAdapter):
     Returns:
       Tokens corresponding to the input string.
     """
+    example = token_sanitization.sanitize_control_tokens(example)
     int_list = []
     if self.bos_id():
       int_list.append(self.bos_id())

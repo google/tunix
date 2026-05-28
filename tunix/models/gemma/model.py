@@ -47,6 +47,7 @@ class AttentionType(enum.Enum):
 class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
+  DECODER = enum.auto()  # Remat the entire decoder layer.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -501,7 +502,10 @@ class Attention(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.remat_config == RematConfig.BLOCK:
+    if (
+        self.remat_config == RematConfig.BLOCK
+        or self.remat_config == RematConfig.BLOCK.value
+    ):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
       return nnx.remat(self.block.__func__)(
@@ -579,7 +583,7 @@ class FeedForward(nnx.Module):
     )
 
   @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def block(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
@@ -590,8 +594,14 @@ class FeedForward(nnx.Module):
     outputs = self.down_proj(activations)
     return outputs
 
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.config.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block.__func__)(self, x)
+    else:
+      return self.block(x)
 
-class Block(nnx.Module):
+
+class DecoderLayer(nnx.Module):
   """Transformer block."""
 
   def __init__(
@@ -634,7 +644,7 @@ class Block(nnx.Module):
           config.embed_dim, rngs=rngs, shd_config=config.shd_config
       )
 
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -662,6 +672,20 @@ class Block(nnx.Module):
 
     outputs += attn_output
     return cache, outputs
+
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.config.remat_config == RematConfig.DECODER:
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
 
 
 class RMSNorm(nnx.Module):
@@ -851,7 +875,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
         shd_config=config.shd_config,
     )
     self.layers = compat.ModuleList([
-        Block(
+        DecoderLayer(
             config=config,
             attn_type=attn_type,
             rngs=rngs,

@@ -59,10 +59,11 @@ class VllmRollout(base_rollout.BaseRollout):
             tensor_parallel_size=rollout_config.tensor_parallel_size,
             data_parallel_size=rollout_config.data_parallel_size,
             expert_parallel_size=rollout_config.expert_parallel_size,
+            delete_dst_buffers=rollout_config.rollout_vllm_delete_dst_buffers,
+            reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
             engine_kwargs={
                 "model": rollout_config.rollout_vllm_model_version,
                 "max_model_len": cache_config_or_size,
-                "swap_space": rollout_config.rollout_vllm_swap_space_size_gb,
                 "async_scheduling": (
                     rollout_config.rollout_vllm_async_scheduling
                 ),
@@ -74,6 +75,7 @@ class VllmRollout(base_rollout.BaseRollout):
                 "max_logprobs": (
                     1
                 ),  # We only need the logprobs of the sampled tokens
+                "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
                 **rollout_config.rollout_vllm_kwargs,
             },
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,

@@ -54,6 +54,16 @@ def shard_input(
   if all(jax.tree.leaves(is_sharded)):
     return input_data
 
+  # Skip sharding if the input contains globally distributed arrays that are
+  # not fully addressable by the local process. Attempting to recreate them via
+  # `jax.make_array_from_process_local_data` would fail with a ValueError.
+  is_global = jax.tree.map(
+      lambda x: isinstance(x, jax.Array) and not x.is_fully_addressable,
+      input_data,
+  )
+  if any(jax.tree.leaves(is_global)):
+    return input_data
+
   with jax.transfer_guard("allow"):
     return jax.tree.map(
         lambda x: jax.make_array_from_process_local_data(

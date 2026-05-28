@@ -16,36 +16,48 @@
 set -x # Enable xtrace
 
 # specify at cmd line to override defaults, e.g.
-model_name=${model_name:-"Qwen3-1.7B-base"}
+model_name=${model_name:-"qwen3-1.7b-base"}
 batch_size=${batch_size:-8}
+train_micro_batch_size=${train_micro_batch_size:-4}
+total_generation_steps=${total_generation_steps:-512}
+max_prompt_length=${max_prompt_length:-128}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
 train_fraction=${train_fraction:-0.8}
+checkpoint_dir=${checkpoint_dir:-"/tmp/grpo_checkpoints/${model_name}_$RANDOM"}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
+echo "  Train Micro Batch Size: $train_micro_batch_size"
+echo "  Total Generation Steps: $total_generation_steps"
+echo "  Max Prompt Length: $max_prompt_length"
 echo "  Num Epochs: $num_train_epochs"
 echo "  Warmup Ratio: $warmup_ratio"
 echo "  Train Fraction: $train_fraction"
+echo "  Checkpoint Directory: $checkpoint_dir"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
   model_config.model_name=${model_name} \
   model_config.model_id=Qwen/${model_name} \
   model_config.model_source=huggingface \
+  model_config.use_flash_attention=true \
+  model_config.flash_attention_block_size=256 \
   model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/${model_name}" \
+  model_config.model_download_path="/tmp/models/${model_name}" \
   model_config.mesh.shape="(2,4)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=42 \
-  model_config.use_flash_attention=true \
-  model_config.flash_attention_block_size=256 \
+  model_config.remat_config=3 \
   actor_model_config.lora_config.rank=64 \
   actor_model_config.lora_config.alpha=64.0 \
-  actor_model_config.lora_config.module_path=".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|.*attn_vec_einsum" \
+  actor_model_config.lora_config.module_path=".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*down_proj|.*up_proj" \
   actor_model_config.mesh.shape="(2,4)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
-  rollout_model_config.mesh.shape="(2,4)" \
-  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
+  reference_model_config.mesh=null \
+  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh=null \
+  rollout_model_config.same_mesh_as="actor" \
   tokenizer_config.tokenizer_path=Qwen/${model_name} \
   tokenizer_config.tokenizer_type=huggingface \
   tokenizer_config.add_bos=false \
@@ -53,6 +65,7 @@ python3 -m tunix.cli.grpo_main \
   batch_size=$batch_size \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
+  train_fraction=$train_fraction \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \
@@ -66,11 +79,14 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.eval_every_n_steps=10 \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/${model_name}" \
   rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
+  rl_training_config.checkpoint_root_directory="$checkpoint_dir" \
   rl_training_config.checkpointing_options.save_interval_steps=500 \
   rl_training_config.checkpointing_options.max_to_keep=4 \
   rl_training_config.profiler_options={} \
-  rollout_config.total_generation_steps=768 \
-  rollout_config.max_prompt_length=256 \
+  rl_training_config.mini_batch_size=$batch_size \
+  rl_training_config.train_micro_batch_size=$train_micro_batch_size \
+  rollout_config.total_generation_steps=$total_generation_steps \
+  rollout_config.max_prompt_length=$max_prompt_length \
   rollout_config.temperature=0.9 \
   rollout_config.top_p=1.0 \
   rollout_config.top_k=50 \
@@ -80,4 +96,6 @@ python3 -m tunix.cli.grpo_main \
   grpo_config.num_iterations=1 \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
-  reward_functions="['tunix/cli/reward_fn/gsm8k.py']"
+  reward_functions="['tunix/cli/reward_fn/gsm8k.py']" \
+  "$@"
+

@@ -82,8 +82,9 @@ class SafetensorsLoaderTest(parameterized.TestCase):
       cls.tensors[f'layers.{i}.w2.kernel'] = np.array(
           layer_state['w2']['kernel'].value
       )
-      cls.tensors[f'layers.{i}.w2.bias'] = np.array(
-          layer_state['w2']['bias'].value
+      # Test that nnx.Param are correctly handled.
+      cls.tensors[f'layers.{i}.w2.bias'] = nnx.Param(
+          np.array(layer_state['w2']['bias'].value),
       )
 
   @parameterized.named_parameters(
@@ -96,7 +97,7 @@ class SafetensorsLoaderTest(parameterized.TestCase):
       ])
   )
   def test_load_and_create_model(
-      self, path_type='abs', mode='optimized'
+      self, path_type='abs', mode='auto'
   ):
     try:
       st_dir_abs = self.create_tempdir().full_path

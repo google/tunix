@@ -117,11 +117,9 @@ class SWEEnv(BaseTaskEnv):
           reward_timeout=self.reward_timeout,
           verbose=self.verbose,
       )
-      print(f"[DEBUG] {tag} _initial_observation: RepoEnv() done", flush=True)
     else:
       print(f"[DEBUG] {tag} _initial_observation: calling self.env.reset() ...", flush=True)
       self.env.reset()
-      print(f"[DEBUG] {tag} _initial_observation: self.env.reset() done", flush=True)
     self.final_reward_fn = self.env.compute_reward
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)

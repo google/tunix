@@ -32,6 +32,8 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from tunix.perf import trace as trace_lib
+from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import algo_core as grpo_core
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
@@ -110,6 +112,7 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
           gradient_accumulation_steps=kwargs.get(
               'gradient_accumulation_steps', None
           ),
+          max_seq_token_per_tpu=kwargs.get('max_seq_token_per_tpu', None),
       ),
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=10,
@@ -146,6 +149,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         self.algo_config = grpo_config
         self._data_shuffle_seed = None
         self.rl_cluster = types.SimpleNamespace(
+            global_steps=0,
             cluster_config=types.SimpleNamespace(
                 training_config=types.SimpleNamespace(
                     rollout_micro_batch_size=1,
@@ -154,6 +158,7 @@ class GRPOLearnerTest(parameterized.TestCase):
             ),
             buffer_metrics=lambda x, mode: None,
             perf=trace_lib.NoopTracer(),
+            perf_v2=perf_tracer_v2.NoopTracer(),
         )
         self._rollout_micro_batch_size = 1
         self._compute_logps_micro_batch_size = 1
@@ -628,6 +633,79 @@ class GRPOLearnerTest(parameterized.TestCase):
         tc.assert_equal, lora_params_from_sampler, lora_params
     )
     jax.tree.map_with_path(tc.assert_equal, original_base_params, base_params)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='single_sequence',
+          max_token_len=266,  # exactly 256 (max_prompt_length) + 10 (max_tokens_to_generate)
+      ),
+      dict(
+          testcase_name='single_sequence_with_padding',
+          max_token_len=300,  # fits 1 sequence, pads to 300
+      ),
+      dict(
+          testcase_name='multiple_sequences',
+          max_token_len=532,  # exactly (256+10) * 2
+      ),
+      dict(
+          testcase_name='large_budget',
+          max_token_len=1000,  # fits multiple sequences, pads to 1000
+      ),
+  )
+  def test_sequence_packing(self, max_token_len):
+    kwargs = {'eval_every_n_steps': 2}
+
+    # Train without sequence packing
+    rl_cluster_unpacked, model_unpacked, original_variables = setup(kwargs)
+    grpo_config_unpacked = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+    )
+    learner_unpacked = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster_unpacked,
+        reward_fns=reward_1,
+        algo_config=grpo_config_unpacked,
+    )
+    # the algorithm config use_sequence_packing is False by default
+    train_ds_1 = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    learner_unpacked.train(train_ds_1, None)
+    params_unpacked = nnx.state(model_unpacked, nnx.Param)
+
+    # Train with sequence packing
+    kwargs_packed = {
+        'eval_every_n_steps': 2,
+        'max_seq_token_per_tpu': max_token_len,
+    }
+    rl_cluster_packed, model_packed, _ = setup(kwargs_packed)
+    grpo_config_packed = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+    )
+    learner_packed = grpo_lib.GRPOLearner(
+        rl_cluster=rl_cluster_packed,
+        reward_fns=reward_1,
+        algo_config=grpo_config_packed,
+    )
+    train_ds_2 = _dummy_dataset(MySource(repeat=4), batch_size=2)
+    learner_packed.train(train_ds_2, None)
+    params_packed = nnx.state(model_packed, nnx.Param)
+
+    jax.tree.map_with_path(
+        tc.assert_not_equal, original_variables, params_packed
+    )
+
+    # Check params are almost equal
+    # TODO(noghabi): Reduce the tolerance. Currently, the toy model does not use
+    # the segment IDs in the attention mask, which causes numerical
+    # inaccuracies.
+    jax.tree.map_with_path(
+        lambda path, x, y: tc.assert_close(path, x, y, atol=5e-2, rtol=1e-1),
+        params_unpacked,
+        params_packed,
+    )
+
+    # Verify that both learners processed the same number of examples
+    self.assertEqual(learner_unpacked._iter_steps, learner_packed._iter_steps)
 
   def test_exception_from_data_preparation(self):
     class _TrainerWithException(grpo_lib.GRPOLearner):
@@ -1148,37 +1226,6 @@ class GRPOLearnerTest(parameterized.TestCase):
         mode=rl_cluster_lib.Mode.TRAIN,
     )
     self.assertLen(rewards, len(prompts))
-
-  def test_compute_advantages(self):
-    prev_val = jax.config.jax_threefry_partitionable
-    self.addCleanup(jax.config.update, 'jax_threefry_partitionable', prev_val)
-    jax.config.update('jax_threefry_partitionable', False)
-    self.assertFalse(jax.config.jax_threefry_partitionable)
-
-    rng = jax.random.PRNGKey(0)
-    rewards = jax.random.uniform(rng, shape=(1, 6))
-    advantages = grpo_lib.compute_advantages(rewards, num_generations=3)
-    expected_value = jnp.array(
-        [[0.307407, -1.117304, 0.809897, 1.094044, -0.22857, -0.865474]]
-    )
-    np.testing.assert_allclose(advantages, expected_value, rtol=1e-5, atol=1e-5)
-
-  def test_compute_rloo_advantages(self):
-    rewards = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-    # Group 1: [1, 2, 3], total=6.
-    # Loo sum: [5, 4, 3], Loo mean: [2.5, 2, 1.5]
-    # Advantages: [1-2.5, 2-2, 3-1.5] = [-1.5, 0, 1.5]
-    # Group 2: [4, 5, 6], total=15
-    # Loo sum: [11, 10, 9], Loo mean: [5.5, 5, 4.5]
-    # Advantages: [4-5.5, 5-5, 6-4.5] = [-1.5, 0, 1.5]
-    advantages = grpo_lib.compute_rloo_advantages(rewards, num_generations=3)
-    expected_value = np.array([-1.5, 0.0, 1.5, -1.5, 0.0, 1.5])
-    np.testing.assert_allclose(advantages, expected_value)
-
-  def test_compute_rloo_advantages_low_generations(self):
-    rewards = np.array([1.0, 2.0])
-    advantages = grpo_lib.compute_rloo_advantages(rewards, num_generations=1)
-    np.testing.assert_allclose(advantages, np.zeros_like(rewards))
 
 
 if __name__ == '__main__':

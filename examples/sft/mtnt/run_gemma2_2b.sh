@@ -16,19 +16,26 @@
 
 set -x # Enable xtrace
 
+model_name=${model_name:-"gemma2_2b"}
 batch_size=${batch_size:-16}
 max_steps=${max_steps:-10}
 
 echo "Using parameters:"
+echo "  Model Name: $model_name"
 echo "  Batch Size: $batch_size"
 echo "  Max Steps: $max_steps"
+
+intermediate_ckpt_dir=${intermediate_ckpt_dir:-"/tmp/intermediate_ckpt/${model_name}"}
+
 
 python3 -m tunix.cli.peft_main \
   tunix/cli/base_config.yaml \
   override_config_file=examples/sft/mtnt/configs/gemma2_2b.yaml \
   model_config.model_download_path="/tmp/models/gemma-2b" \
-  model_config.intermediate_ckpt_dir="/tmp/intermediate_ckpt/" \
+  model_config.intermediate_ckpt_dir="$intermediate_ckpt_dir" \
   tokenizer_config.tokenizer_path="/tmp/models/gemma-2b/models/google/gemma-2/flax/gemma2-2b-it/1/tokenizer.model" \
   batch_size=$batch_size \
   training_config.max_steps=$max_steps \
-  training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full"
+  training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full" \
+  "$@"
+
