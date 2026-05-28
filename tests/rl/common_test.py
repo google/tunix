@@ -292,6 +292,101 @@ class CommonTest(parameterized.TestCase):
         logits.shape, (expected_logps.shape[0], expected_logps.shape[1], 256)
     )
 
+  def test_model_accepts_segment_ids_helper(self):
+    # ToyTransformer.__call__ accepts segment_ids explicitly.
+    model_with = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    self.assertTrue(common._model_accepts_segment_ids(model_with))
+
+    class _NoSegIdsModel(nnx.Module):
+
+      def __call__(self, tokens, positions=None, cache=None,
+                   attention_mask=None):
+        del tokens, positions, cache, attention_mask
+        return None, None
+
+    self.assertFalse(common._model_accepts_segment_ids(_NoSegIdsModel()))
+
+    class _VarKwargsModel(nnx.Module):
+
+      def __call__(self, tokens, **kwargs):
+        del tokens, kwargs
+        return None, None
+
+    # **kwargs catch-all should be treated as accepting segment_ids.
+    self.assertTrue(common._model_accepts_segment_ids(_VarKwargsModel()))
+
+  def test_compute_per_token_logps_model_without_segment_ids(self):
+    # Reproduces google/tunix#1539: when the model's __call__ does NOT accept
+    # segment_ids, compute_per_token_logps must not pass it through (it would
+    # raise TypeError on Gemma3 etc.).
+    class _NoSegIdsTransformer(nnx.Module):
+
+      def __init__(self, vocab_size: int, rngs: nnx.Rngs):
+        self.vocab_size = vocab_size
+        self.emb = nnx.Embed(vocab_size, 8, rngs=rngs)
+        self.head = nnx.Linear(8, vocab_size, rngs=rngs)
+
+      def __call__(
+          self,
+          tokens,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        del positions, cache, attention_mask
+        x = self.emb(tokens)
+        return self.head(x), None
+
+    model = _NoSegIdsTransformer(vocab_size=8, rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(model)
+
+    prompt_tokens = jnp.array([[1, 2, 3, 4], [0, 0, 1, 2]], dtype=jnp.int32)
+    completion_tokens = jnp.array(
+        [[5, 6, 7, 0], [3, 4, 5, 6]], dtype=jnp.int32
+    )
+
+    # Should not raise even though input_seg_ids would be derived from
+    # process_ids — the gating helper must suppress passing segment_ids.
+    per_token_logps = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+        return_logits=False,
+    )
+    self.assertEqual(per_token_logps.shape, (2, 4))
+
+  def test_compute_score_model_without_segment_ids(self):
+    # Same regression but for compute_score, which also unconditionally passed
+    # the derived segment_ids before this fix.
+    class _NoSegIdsScorer(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.emb = nnx.Embed(8, 8, rngs=rngs)
+        self.head = nnx.Linear(8, 1, rngs=rngs)
+
+      def __call__(self, tokens, positions=None, cache=None,
+                   attention_mask=None):
+        del positions, cache, attention_mask
+        return self.head(self.emb(tokens))
+
+    model = _NoSegIdsScorer(rngs=nnx.Rngs(0))
+
+    prompt_tokens = jnp.array([[1, 2, 3, 4]], dtype=jnp.int32)
+    completion_tokens = jnp.array([[5, 6, 7, 0]], dtype=jnp.int32)
+
+    scores = common.compute_score(
+        model,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+    )
+    # [B, T] after the squeeze inside compute_score.
+    self.assertEqual(scores.shape, (1, 8))
+
   def test_np_make_completion_mask(self):
     completion_ids = np.array(
         [
