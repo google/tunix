@@ -206,14 +206,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
     )
 
-    # Enable async rollout if trainer and rollout are not on the same mesh.
-    # If they do, then doesn't make sense for the interleave because they will
-    # have resource contention.
+    # Colocate mode serializes rollout and training on the same device pool, so
+    # actor/rollout overlap is always disabled there. Outside colocate mode we
+    # preserve the existing mesh-based policy through RLCluster.
     self.can_enable_async_rollout = (
-        self.rl_cluster.cluster_config.role_to_mesh[rl_cluster_lib.Role.ACTOR]
-        != self.rl_cluster.cluster_config.role_to_mesh[
-            rl_cluster_lib.Role.ROLLOUT
-        ]
+        self.rl_cluster.can_overlap_actor_and_rollout()
     )
 
     self._rollout_micro_batch_size = (
@@ -258,6 +255,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
+    if (
+        self.rl_cluster.cluster_config.colocate_mode
+        and self.algo_config.off_policy_steps != 0
+    ):
+      raise ValueError(
+          "Agentic colocate_mode requires off_policy_steps to be 0 because "
+          "rollout and training are serialized by global batch."
+      )
+
     rollout_config = self.rl_cluster.cluster_config.rollout_config
     if not isinstance(rollout_config, dict):
       configs_to_check = {"train": rollout_config}
@@ -638,37 +644,81 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue: queue.Queue[TrainingInputT | None],
       train_data_queue,
   ):
-    """Produces training examples from prompts in the dataset_iterator."""
+    """Produces training examples from prompts in the dataset iterator.
+
+    In the default asynchronous path the producer streams per-prompt results as
+    soon as each generation group completes. In colocate mode the producer
+    switches to a phased global-batch flow: it opens a rollout window before the
+    batch starts, waits until all prompt groups in that batch finish, closes the
+    rollout window, and only then publishes data to the consumer.
+    """
     loop = asyncio.get_running_loop()
     async_queue_iter = self._AsyncQueueIterator(prompt_queue, loop)
+    colocate_mode = self.rl_cluster.is_colocate_mode_enabled()
 
     async def _iterate_micro_batches():
       async for item in async_queue_iter:
         for prompt in self._create_micro_batch_iterator(iter([item]), 1):
           yield prompt
 
-    prompt_iterator = _iterate_micro_batches()
+    async def _iterate_rollout_segments():
+      if colocate_mode:
+        async for full_batch in async_queue_iter:
+          yield (
+              self._create_micro_batch_iterator(iter([full_batch]), 1),
+              len(next(iter(full_batch.values()))),
+          )
+      else:
+        yield _iterate_micro_batches(), None
+
+    def _publish_batch(batch):
+      if self._process_in_consumer:
+        train_data_queue.put(batch)
+        return
+
+      train_examples = self._batch_to_train_example(
+          batch_results=batch,
+          mode=rl_cluster_lib.Mode.TRAIN,
+      )
+      for _ in range(self._num_iterations()):
+        for train_example in train_examples:
+          train_data_queue.put(train_example)
+
     try:
-      async for batch in self._orchestrator_producer(
-          orchestrator=orchestrator,
-          prompt_iterator=prompt_iterator,
-          num_generations=self.algo_config.num_generations,
-          collect_mode="Token",
-      ):
+      async for prompt_iterator, expected_groups in _iterate_rollout_segments():
+        rollout_window_open = False
+        grouped_batches = []
         try:
-          if self._process_in_consumer:
-            # Put raw batch (list of trajectories) into queue.
-            # We put it once, and consumer will handle iterations.
-            train_data_queue.put(batch)
-          else:
-            train_examples = self._batch_to_train_example(
-                batch_results=batch,
-                mode=rl_cluster_lib.Mode.TRAIN,
-            )
-            for _ in range(self._num_iterations()):
-              for train_example in train_examples:
-                train_data_queue.put(train_example)
+          if colocate_mode:
+            self.rl_cluster.enter_colocate_rollout_window()
+            rollout_window_open = True
+
+          async for batch in self._orchestrator_producer(
+              orchestrator=orchestrator,
+              prompt_iterator=prompt_iterator,
+              num_generations=self.algo_config.num_generations,
+              collect_mode="Token",
+          ):
+            if expected_groups is None:
+              _publish_batch(batch)
+            else:
+              grouped_batches.append(batch)
+
+          if expected_groups is not None:
+            if len(grouped_batches) != expected_groups:
+              raise RuntimeError(
+                  "Expected %d rollout groups for a colocated global batch, "
+                  "but received %d." % (expected_groups, len(grouped_batches))
+              )
+            self.rl_cluster.exit_colocate_rollout_window()
+            rollout_window_open = False
+            for batch in grouped_batches:
+              _publish_batch(batch)
+
         except Exception as e:
+          if rollout_window_open:
+            with contextlib.suppress(Exception):
+              self.rl_cluster.exit_colocate_rollout_window()
           if not isinstance(e, RuntimeError):
             logging.exception(
                 "Exception in _producer while processing batch: %s", e
@@ -734,7 +784,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # Rollout micro batch size has to be 1 since we only process individual
     # prompts.
     self._rollout_micro_batch_size = 1
-    self._process_in_consumer = False
+    self._process_in_consumer = self.rl_cluster.is_colocate_mode_enabled()
 
     if self._compute_logps_micro_batch_size > 1:
       if self._compute_logps_micro_batch_size != train_micro_batch_size:

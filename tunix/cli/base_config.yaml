@@ -241,6 +241,7 @@ rollout_engine: "vanilla"
 vllm_config: {}
 sglang_jax_config: {}
 
+colocate_mode: false
 offload_to_cpu: false
 
  ############################# Reward Fns #############################

@@ -143,6 +143,25 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
+class OffloadConfig:
+  """Fine-grained offload controls for colocated execution.
+
+  All fields are optional. ``None`` means "use the built-in policy default for
+  the current topology and rollout engine". This preserves the current behavior
+  when the config is omitted, while still allowing users to override specific
+  offload decisions. The coarse ``offload_to_cpu`` knob still takes precedence
+  and forces all supported offloads on.
+  """
+
+  offload_actor_weights: bool | None = None
+  offload_critic_weights: bool | None = None
+  offload_actor_optimizer_states: bool | None = None
+  offload_critic_optimizer_states: bool | None = None
+  offload_rollout_kv_cache: bool | None = None
+  offload_rollout_weights: bool | None = None
+
+
+@dataclasses.dataclass(kw_only=True, frozen=True)
 class ClusterConfig:
   """Cluster config.
 
@@ -155,6 +174,10 @@ class ClusterConfig:
     rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
       Alternatively, if a subclass of `base_rollout.BaseRollout` is provided, it
       will be used as the rollout engine.
+    colocate_mode: Whether to run rollout and training in serialized windows on
+      the same device set even if the meshes use different layouts.
+    offload_config: Fine-grained offload controls. ``None`` values defer to the
+      built-in policy for the current engine and topology.
     offload_to_cpu: Whether to offload models to CPU at each step..
     training_config: RL training config.
     rollout_config: Rollout config. It may be different for different modes,
@@ -172,6 +195,8 @@ class ClusterConfig:
   role_to_mesh: dict[Role, Mesh]
   role_to_logical_axis_rule: dict[Role, flax.typing.LogicalRules] | None = None
   rollout_engine: str | type[base_rollout.BaseRollout] = "vanilla"
+  colocate_mode: bool = False
+  offload_config: OffloadConfig = dataclasses.field(default_factory=OffloadConfig)
   offload_to_cpu: bool = False
 
   training_config: RLTrainingConfig
@@ -197,6 +222,7 @@ class RLCluster:
     self.cluster_config = cluster_config
     self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
+    self._validate_colocate_mode()
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
 
@@ -637,32 +663,206 @@ class RLCluster:
         nnx.update(actor_model, params)
 
   def _is_state_on_device(self, state: jaxtyping.PyTree) -> bool:
+    """Returns whether any array leaf in ``state`` currently resides on device."""
     shardings = jax.tree.map(
         lambda x: x.sharding if hasattr(x, "sharding") else None, state
     )
     return jax.tree_util.tree_reduce(
-        operator.or_,
-        jax.tree.map(
-            lambda x: x is not None
-            and x.memory_kind == self._default_memory_kind,
-            shardings,
-        ),
-        initializer=False,
+      operator.or_,
+      jax.tree.map(
+        lambda x: x is not None
+        and x.memory_kind == self._default_memory_kind,
+        shardings,
+      ),
+      initializer=False,
+    )
+
+  def _active_meshes(self) -> list[Mesh]:
+    """Returns the non-empty meshes participating in the cluster."""
+    return [mesh for mesh in self.r2m.values() if not mesh.empty]
+
+  def _mesh_device_ids(self, mesh: Mesh) -> tuple[int, ...]:
+    """Returns a stable device-id tuple for topology comparisons."""
+    return tuple(device.id for device in mesh.devices.flatten().tolist())
+
+  def _validate_colocate_mode(self) -> None:
+    """Validates colocate mode topology at cluster construction time.
+
+    Colocate mode is intentionally fail-fast. If enabled, every active mesh must
+    be built from the same device set so the learner can safely serialize
+    rollout and training windows on one physical resource pool.
+    """
+    if not self.cluster_config.colocate_mode:
+      return
+
+    active_meshes = self._active_meshes()
+    if not active_meshes:
+      return
+
+    reference_devices = self._mesh_device_ids(active_meshes[0])
+    for mesh in active_meshes[1:]:
+      if self._mesh_device_ids(mesh) != reference_devices:
+        raise ValueError(
+            "colocate_mode requires all active role meshes to use the same "
+            "device set."
+        )
+
+  def is_colocate_mode_enabled(self) -> bool:
+    """Returns whether colocate-mode execution is enabled for this cluster."""
+    return self.cluster_config.colocate_mode
+
+  def can_overlap_actor_and_rollout(self) -> bool:
+    """Returns whether actor training and rollout may safely overlap.
+
+    In colocate mode overlap is always disabled because rollout and training are
+    serialized explicitly on the same physical device pool. Outside colocate
+    mode we preserve the existing mesh-based behavior.
+    """
+    if self.cluster_config.colocate_mode:
+      return False
+    return self.r2m[Role.ACTOR] != self.r2m[Role.ROLLOUT]
+
+  def _keep_actor_model_resident_in_colocate_window(self) -> bool:
+    """Returns whether actor weights stay resident during a rollout window.
+
+    Vanilla rollout can share the same live actor model object when actor and
+    rollout truly share weights. In that case colocate mode should only evict
+    training-owned runtime state and keep the shared model in HBM.
+    """
+    return (
+        self.cluster_config.colocate_mode
+        and self.cluster_config.rollout_engine == "vanilla"
+        and Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]
+    )
+
+  def _should_offload_reference_in_colocate_window(self) -> bool:
+    """Returns whether the reference model should be offloaded for rollout.
+
+    The reference model is optional. When present, it can be offloaded in the
+    non-LoRA colocated path because it is structurally separate from the actor.
+    If LoRA backbone sharing is active, the reference shares actor backbone and
+    must remain resident.
+    """
+    if not getattr(self.inference_worker, "_models", None):
+      return False
+    if "reference" not in self.inference_worker._models:
+      return False
+    return Role.REFERENCE not in self._backbone_sharing_map[Role.ACTOR]
+
+  def _resolve_offload_flag(
+      self,
+      override: bool | None,
+      *,
+      default: bool,
+  ) -> bool:
+    """Returns the effective value of an offload flag.
+
+    ``offload_to_cpu`` is the legacy coarse knob and takes precedence over all
+    fine-grained settings for backward compatibility.
+    """
+    if self.cluster_config.offload_to_cpu:
+      return True
+    if override is not None:
+      return override
+    return default
+
+  def _should_offload_actor_weights(self) -> bool:
+    return self._resolve_offload_flag(
+        self.cluster_config.offload_config.offload_actor_weights,
+        default=self.cluster_config.colocate_mode
+        and not self._keep_actor_model_resident_in_colocate_window(),
+    )
+
+  def _should_offload_critic_weights(self) -> bool:
+    return self._resolve_offload_flag(
+        self.cluster_config.offload_config.offload_critic_weights,
+        default=self.cluster_config.colocate_mode,
+    )
+
+  def _should_offload_actor_optimizer_states(self) -> bool:
+    return self._resolve_offload_flag(
+        self.cluster_config.offload_config.offload_actor_optimizer_states,
+        default=self.cluster_config.colocate_mode,
+    )
+
+  def _should_offload_critic_optimizer_states(self) -> bool:
+    return self._resolve_offload_flag(
+        self.cluster_config.offload_config.offload_critic_optimizer_states,
+        default=self.cluster_config.colocate_mode,
+    )
+
+  def _should_offload_rollout_kv_cache(self) -> bool:
+    return self._resolve_offload_flag(
+        self.cluster_config.offload_config.offload_rollout_kv_cache,
+        default=self.cluster_config.colocate_mode,
+    )
+
+  def _should_offload_rollout_weights(self) -> bool:
+    return self._resolve_offload_flag(
+        self.cluster_config.offload_config.offload_rollout_weights,
+        default=self.cluster_config.colocate_mode
+        and self.cluster_config.rollout_engine in ("vllm", "sglang_jax"),
     )
 
   def _maybe_load_model_from_cpu(self, model: nnx.Module, role: Role):
     """Loads model from CPU if needed."""
-    if not self.cluster_config.offload_to_cpu:
+    if model is None:
+      return
+    if not self.cluster_config.offload_to_cpu and self._is_state_on_device(
+        nnx.state(model)
+    ):
       return
     self._put_model_on_memory_kind(model, "device")
     self._update_models_sharing_weights(nnx.state(model), role)
 
   def _maybe_offload_model_to_cpu(self, model: nnx.Module, role: Role):
     """Offloads model to CPU if needed."""
+    if model is None:
+      return
     if not self.cluster_config.offload_to_cpu:
       return
     self._put_model_on_memory_kind(model, "pinned_host")
     self._update_models_sharing_weights(nnx.state(model), role)
+
+  def enter_colocate_rollout_window(self) -> None:
+    """Prepares the cluster for a serialized colocated rollout window.
+
+    In colocate mode rollout and training intentionally do not overlap. This
+    method is the explicit phase boundary that frees trainer-only state, handles
+    optional reference offload, and lets the rollout engine reclaim any runtime
+    resources it needs before sampling begins.
+    """
+    if not self.cluster_config.colocate_mode:
+      return
+
+    self.actor_trainer.maybe_offload_runtime_to_cpu(
+        include_model=self._should_offload_actor_weights(),
+        include_optimizer_state=self._should_offload_actor_optimizer_states(),
+    )
+    if getattr(self, "critic_trainer", None):
+      self.critic_trainer.maybe_offload_runtime_to_cpu(
+          include_model=self._should_offload_critic_weights(),
+          include_optimizer_state=self._should_offload_critic_optimizer_states(),
+      )
+
+    if self._should_offload_reference_in_colocate_window():
+      reference_model = self.inference_worker.get_model("reference")
+      if reference_model is not None:
+        self._put_model_on_memory_kind(reference_model, "pinned_host")
+
+    self.rollout.maybe_regain_resource(
+        restore_weights=self._should_offload_rollout_weights(),
+        restore_kv_cache=self._should_offload_rollout_kv_cache(),
+    )
+
+  def exit_colocate_rollout_window(self) -> None:
+    """Releases rollout-side resources after a colocated rollout window."""
+    if not self.cluster_config.colocate_mode:
+      return
+    self.rollout.maybe_release_resources(
+        offload_weights=self._should_offload_rollout_weights(),
+        offload_kv_cache=self._should_offload_rollout_kv_cache(),
+    )
 
   @property
   def rollout(self) -> base_rollout.BaseRollout:
@@ -850,17 +1050,29 @@ class RLCluster:
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      if self.cluster_config.colocate_mode:
+        self.actor_trainer.maybe_load_runtime_from_cpu(
+            include_model=self._should_offload_actor_weights(),
+            include_optimizer_state=self._should_offload_actor_optimizer_states(),
+        )
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+      if not self.cluster_config.colocate_mode:
+        self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
+      if self.cluster_config.colocate_mode:
+        self.critic_trainer.maybe_load_runtime_from_cpu(
+            include_model=self._should_offload_critic_weights(),
+            include_optimizer_state=self._should_offload_critic_optimizer_states(),
+        )
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
       with self._perf.span_group("critic_training"):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
+      if not self.cluster_config.colocate_mode:
+        self._maybe_offload_model_to_cpu(self.critic_trainer.model, Role.CRITIC)
 
   def generate(
       self,

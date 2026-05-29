@@ -243,6 +243,7 @@ rollout_engine: "vanilla"
 sglang_jax_config: {}
 vllm_config: {}
 
+colocate_mode: false
 offload_to_cpu: false
 
 training_mode: "grpo"

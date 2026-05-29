@@ -15,10 +15,10 @@
 """Tests for agentic_rl_learner."""
 
 import asyncio
+import queue
 from typing import Any
 from unittest import mock
 
-from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -145,6 +145,32 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           algo_config=algo_config,
       )
 
+  def test_validate_rollout_config_rejects_offpolicy_in_colocate_mode(self):
+    rl_cluster = mock.Mock()
+    rl_cluster.cluster_config = mock.Mock()
+    rl_cluster.cluster_config.rollout_engine = 'generic'
+    rl_cluster.cluster_config.colocate_mode = True
+    rl_cluster.cluster_config.rollout_config = base_rollout.RolloutConfig(
+        max_prompt_length=32,
+        max_tokens_to_generate=10,
+        return_logprobs=True,
+    )
+
+    algo_config = agentic_rl_learner.AgenticRLConfig(
+        max_response_length=10,
+        use_rollout_logps=True,
+        off_policy_steps=1,
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, r'colocate_mode requires off_policy_steps to be 0'
+    ):
+      DummyLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=mock.Mock(),
+          algo_config=algo_config,
+      )
+
   def test_train_batch_size_mismatch_raises_error(self):
     with mock.patch.object(
         rl_utils, "is_sharing_weights", return_value=False
@@ -182,6 +208,139 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           r' train_micro_batch_size \(1\)',
       ):
         learner.train(train_dataset)
+
+  def test_colocate_producer_waits_until_rollout_window_closes(self):
+    with mock.patch.object(
+        rl_utils, 'is_sharing_weights', return_value=False
+    ):
+      rl_cluster = mock.Mock()
+      rl_cluster.cluster_config = mock.Mock()
+      rl_cluster.cluster_config.role_to_mesh = {
+          rl_cluster_lib.Role.ACTOR: mock.Mock(),
+          rl_cluster_lib.Role.ROLLOUT: mock.Mock(),
+      }
+      rl_cluster.cluster_config.training_config = mock.Mock(
+          compute_logps_micro_batch_size=1,
+          train_micro_batch_size=1,
+          mini_batch_size=None,
+      )
+      rl_cluster.cluster_config.rollout_config = base_rollout.RolloutConfig(
+          max_tokens_to_generate=10, return_logprobs=True
+      )
+      rl_cluster.cluster_config.rollout_engine = 'generic'
+      rl_cluster.cluster_config.colocate_mode = True
+      rl_cluster.can_overlap_actor_and_rollout.return_value = False
+      rl_cluster.is_colocate_mode_enabled.return_value = True
+      rl_cluster.enter_colocate_rollout_window.side_effect = lambda: events.append('enter')
+      rl_cluster.exit_colocate_rollout_window.side_effect = lambda: events.append('exit')
+      rl_cluster.actor_trainer = mock.Mock()
+      rl_cluster.actor_trainer.restored_global_step.return_value = 0
+      rl_cluster.actor_trainer.iter_steps = 0
+      rl_cluster.actor_trainer.model = mock.Mock()
+      rl_cluster.rollout = mock.Mock()
+      rl_cluster.rollout.model.return_value = mock.Mock()
+      rl_cluster.tokenizer = mock.Mock()
+
+      learner = DummyLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=mock.Mock(),
+          algo_config=agentic_rl_learner.AgenticRLConfig(
+              max_response_length=10,
+              off_policy_steps=0,
+          ),
+      )
+
+      async def fake_orchestrator_producer(**kwargs):
+        del kwargs
+        yield ['group-1']
+        yield ['group-2']
+
+      events = []
+      learner._orchestrator_producer = fake_orchestrator_producer
+      learner._batch_to_train_example = lambda batch_results, mode: [
+          f'{mode}-{batch_results[0]}'
+      ]
+
+      prompt_queue = queue.Queue()
+      prompt_queue.put({'prompt': ['p1', 'p2']})
+      prompt_queue.put(None)
+      train_data_queue = mock.Mock()
+      train_data_queue.put.side_effect = lambda item: events.append(f'put:{item}')
+
+      asyncio.run(learner._producer(mock.Mock(), prompt_queue, train_data_queue))
+
+      self.assertEqual(
+          events,
+          [
+              'enter',
+              'exit',
+              f'put:{rl_cluster_lib.Mode.TRAIN}-group-1',
+              f'put:{rl_cluster_lib.Mode.TRAIN}-group-2',
+              'put:None',
+          ],
+      )
+
+  def test_train_sets_process_in_consumer_in_colocate_mode(self):
+    with (
+        mock.patch.object(
+            rl_utils, 'is_sharing_weights', return_value=False
+        ),
+        mock.patch.object(agentic_rl_learner.sft_utils, 'show_hbm_usage'),
+    ):
+      rl_cluster = mock.Mock()
+      rl_cluster.cluster_config = mock.Mock()
+      rl_cluster.cluster_config.role_to_mesh = {
+          rl_cluster_lib.Role.ACTOR: mock.Mock(),
+          rl_cluster_lib.Role.ROLLOUT: mock.Mock(),
+      }
+      rl_cluster.cluster_config.training_config = mock.Mock(
+          compute_logps_micro_batch_size=1,
+          train_micro_batch_size=1,
+          mini_batch_size=None,
+          max_seq_token_per_tpu=None,
+          max_steps=1,
+      )
+      rl_cluster.cluster_config.rollout_config = base_rollout.RolloutConfig(
+          max_tokens_to_generate=10, return_logprobs=True
+      )
+      rl_cluster.cluster_config.rollout_engine = 'generic'
+      rl_cluster.cluster_config.colocate_mode = True
+      rl_cluster.can_overlap_actor_and_rollout.return_value = False
+      rl_cluster.is_colocate_mode_enabled.return_value = True
+      rl_cluster.actor_trainer = mock.Mock()
+      rl_cluster.actor_trainer.restored_global_step.return_value = 0
+      rl_cluster.actor_trainer.iter_steps = 0
+      rl_cluster.actor_trainer.model = mock.Mock()
+      rl_cluster.actor_trainer.train_steps = 1
+      rl_cluster.rollout = mock.Mock()
+      rl_cluster.rollout.model.return_value = mock.Mock()
+      rl_cluster.tokenizer = mock.Mock()
+      rl_cluster.perf_v2 = mock.Mock()
+      rl_cluster.perf_v2.export.return_value = {}
+      rl_cluster.buffer_metrics.return_value = None
+      rl_cluster.close.return_value = None
+
+      learner = DummyLearner(
+          rl_cluster=rl_cluster,
+          reward_fns=mock.Mock(),
+          algo_config=agentic_rl_learner.AgenticRLConfig(
+              max_response_length=10,
+              off_policy_steps=0,
+          ),
+      )
+
+      seen_flags = []
+
+      async def fake_producer(orchestrator, prompt_queue, train_data_queue):
+        del orchestrator, prompt_queue
+        seen_flags.append(learner._process_in_consumer)
+        train_data_queue.put(None)
+
+      learner._producer = fake_producer
+
+      learner.train([{'prompt': ['p1']}])
+
+      self.assertEqual(seen_flags, [True])
 
 
 if __name__ == "__main__":

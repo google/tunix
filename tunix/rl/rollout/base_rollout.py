@@ -274,6 +274,36 @@ class BaseRollout(ABC):
   ) -> None:
     """Updates the rollout model parameters."""
 
+  def maybe_regain_resource(
+      self,
+      *,
+      restore_weights: bool = False,
+      restore_kv_cache: bool = True,
+  ) -> None:
+    """Reclaims rollout-side runtime resources before a rollout window.
+
+    Most rollout engines do not need an explicit phase transition API and can
+    simply rely on the default no-op implementation. Engines that maintain a
+    separate runtime, such as in-process serving backends, can override this to
+    recreate caches or move weights back to accelerator memory.
+    """
+    del restore_weights, restore_kv_cache
+
+  def maybe_release_resources(
+      self,
+      *,
+      offload_weights: bool = False,
+      offload_kv_cache: bool = True,
+  ) -> None:
+    """Releases rollout-side runtime resources after a rollout window.
+
+    This hook exists for colocated execution modes where rollout and training
+    intentionally serialize on the same device set. Engines with dedicated
+    runtime state can override it to drop KV cache or offload weights; engines
+    without extra runtime state can keep the default no-op behavior.
+    """
+    del offload_weights, offload_kv_cache
+
   @abstractmethod
   def pad_id(self) -> int:
     """Returns the pad id."""

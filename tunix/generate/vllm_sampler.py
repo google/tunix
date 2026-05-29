@@ -179,6 +179,27 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           " jax.sharding.Mesh."
       )
 
+  def _reset_prefix_cache(self) -> None:
+    """Clears the vLLM prefix cache on the active engine instance."""
+    if self.llm is not None:
+      self.llm.reset_prefix_cache()
+    elif self._driver is not None:
+      self._driver.llm_engine.reset_prefix_cache()
+
+  def _delete_kv_cache(self) -> None:
+    """Deletes the vLLM KV cache on the active engine instance."""
+    if self.llm is not None:
+      self.llm.collective_rpc("delete_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+
+  def _reinitialize_kv_cache(self) -> None:
+    """Reinitializes the vLLM KV cache on the active engine instance."""
+    if self.llm is not None:
+      self.llm.collective_rpc("reinitialize_kv_cache")
+    elif self._driver is not None:
+      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
       self,
@@ -187,12 +208,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   ):
     del filter_types
 
-    if self.llm is not None:
-      self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache") # will free hbm
-    elif self._driver is not None:
-      self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    self._reset_prefix_cache()
+    self._delete_kv_cache()
 
     # Synchronization point before weight sync
     jax.effects_barrier()
@@ -255,10 +272,47 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       else:
         self._model_runner.state_leaves = self._model_runner.state
 
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    self._reinitialize_kv_cache()
+
+  def maybe_regain_resource(
+      self,
+      *,
+      restore_weights: bool = False,
+      restore_kv_cache: bool = True,
+  ):
+    """Reclaims vLLM runtime resources for the next rollout window.
+
+    In colocated execution the training side may release vLLM resources between
+    global batches to keep peak HBM usage bounded. Regaining resources restores
+    the runtime to a serving-ready state.
+
+    ``restore_weights`` is currently a WIP control surface. vLLM rollout weight
+    restoration has not been implemented yet, so this flag is accepted for API
+    compatibility but ignored for now. Only KV-cache reinitialization is active
+    today.
+    """
+    del restore_weights
+    if not restore_kv_cache:
+      return
+    self._reinitialize_kv_cache()
+
+  def maybe_release_resources(
+      self,
+      *,
+      offload_weights: bool = False,
+      offload_kv_cache: bool = True,
+  ):
+    """Releases rollout-only resources after a colocated rollout window.
+
+    Today this drops the KV cache, which is the main rollout-specific HBM
+    allocation that can be reclaimed safely without disturbing the weight sync
+    contract. The method is intentionally broad so model offload can be added
+    later without forcing another public API change.
+    """
+    del offload_weights
+    if not offload_kv_cache:
+      return
+    self._delete_kv_cache()
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading

@@ -131,6 +131,30 @@ class VllmRollout(base_rollout.BaseRollout):
   ) -> None:
     self._sampler.update_params(params, filter_types)
 
+  def maybe_regain_resource(
+      self,
+      *,
+      restore_weights: bool = False,
+      restore_kv_cache: bool = True,
+  ) -> None:
+    """Regains vLLM runtime resources before a colocated rollout window."""
+    self._sampler.maybe_regain_resource(
+        restore_weights=restore_weights,
+        restore_kv_cache=restore_kv_cache,
+    )
+
+  def maybe_release_resources(
+      self,
+      *,
+      offload_weights: bool = False,
+      offload_kv_cache: bool = True,
+  ) -> None:
+    """Releases vLLM runtime resources after a colocated rollout window."""
+    self._sampler.maybe_release_resources(
+        offload_weights=offload_weights,
+        offload_kv_cache=offload_kv_cache,
+    )
+
   def pad_id(self) -> int:
     return self._sampler.tokenizer.pad_id()
 

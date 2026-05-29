@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import importlib.util
 import os
 import os
 import unittest
@@ -37,6 +38,7 @@ from tunix.tests import test_common as tc
 
 # Some tests relying on SGLang and vLLM cannot run in run_prod environment.
 is_run_prod = os.environ.get('GITHUB_JOB') == 'run_prod'
+is_sglang_available = importlib.util.find_spec('sgl_jax') is not None
 
 PreTrainedTokenizerBase = tokenization_utils_base.PreTrainedTokenizerBase
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
@@ -133,6 +135,211 @@ class RlClusterTest(parameterized.TestCase):
         nnx.state(rl_cluster.inference_worker._models['reference'])
     )
     self.assertEqual(ref_model_mesh, actor_mesh)
+
+  def test_colocate_mode_requires_same_device_set(self):
+    split_index = self.device_count // 2
+    actor_mesh = Mesh(
+        np.array(jax.devices()[:split_index]).reshape(split_index, 1),
+        ('fsdp', 'tp'),
+    )
+    rollout_mesh = Mesh(
+        np.array(jax.devices()[split_index:]).reshape(split_index, 1),
+        ('fsdp', 'tp'),
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: actor_mesh,
+            rl_cluster_lib.Role.REFERENCE: actor_mesh,
+            rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        },
+        rollout_engine='vanilla',
+        colocate_mode=True,
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, 'colocate_mode requires all active role meshes'
+    ):
+      rl_cluster_lib.RLCluster(
+          actor=tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0)),
+          tokenizer=tc.MockVocab(),
+          cluster_config=cluster_config,
+      )
+
+  def test_colocate_window_keeps_shared_actor_model_and_offloads_reference(self):
+    mesh = Mesh(np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        colocate_mode=True,
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    actor = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    reference = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(1)
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=actor,
+        reference=reference,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    with mock.patch.object(rl_cluster.actor_trainer, 'maybe_offload_runtime_to_cpu') as offload_actor, mock.patch.object(
+        rl_cluster.rollout, 'maybe_regain_resource'
+    ) as regain_rollout, mock.patch.object(
+        rl_cluster.rollout, 'maybe_release_resources'
+    ) as release_rollout, mock.patch.object(
+        rl_cluster, '_put_model_on_memory_kind'
+    ) as put_model:
+      rl_cluster.enter_colocate_rollout_window()
+      offload_actor.assert_called_once_with(
+          include_model=False, include_optimizer_state=True
+      )
+      put_model.assert_called_once_with(
+          rl_cluster.inference_worker.get_model('reference'), 'pinned_host'
+      )
+      regain_rollout.assert_called_once_with(
+          restore_weights=False, restore_kv_cache=True
+      )
+
+      rl_cluster.exit_colocate_rollout_window()
+      release_rollout.assert_called_once_with(
+          offload_weights=False, offload_kv_cache=True
+      )
+
+  @mock.patch.object(rl_cluster_lib.sft_utils, 'is_lora_enabled', autospec=True)
+  def test_colocate_window_keeps_shared_lora_reference_resident(self, mock_is_lora):
+    mock_is_lora.return_value = True
+    mesh = Mesh(np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        colocate_mode=True,
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+        ),
+        reference=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(1)
+        ),
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    with mock.patch.object(rl_cluster.actor_trainer, 'maybe_offload_runtime_to_cpu') as offload_actor, mock.patch.object(
+        rl_cluster.rollout, 'maybe_regain_resource'
+    ), mock.patch.object(rl_cluster, '_put_model_on_memory_kind') as put_model:
+      rl_cluster.enter_colocate_rollout_window()
+      offload_actor.assert_called_once_with(
+          include_model=False, include_optimizer_state=True
+      )
+      put_model.assert_not_called()
+
+  def test_colocate_window_honors_fine_grained_offload_overrides(self):
+    mesh = Mesh(np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        colocate_mode=True,
+        offload_to_cpu=False,
+        offload_config=rl_cluster_lib.OffloadConfig(
+            offload_actor_optimizer_states=False,
+            offload_rollout_kv_cache=False,
+            offload_rollout_weights=True,
+        ),
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+        ),
+        reference=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(1)
+        ),
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    with mock.patch.object(rl_cluster.actor_trainer, 'maybe_offload_runtime_to_cpu') as offload_actor, mock.patch.object(
+        rl_cluster.rollout, 'maybe_regain_resource'
+    ) as regain_rollout, mock.patch.object(
+        rl_cluster.rollout, 'maybe_release_resources'
+    ) as release_rollout:
+      rl_cluster.enter_colocate_rollout_window()
+      offload_actor.assert_called_once_with(
+          include_model=False, include_optimizer_state=False
+      )
+      regain_rollout.assert_called_once_with(
+          restore_weights=True, restore_kv_cache=False
+      )
+
+      rl_cluster.exit_colocate_rollout_window()
+      release_rollout.assert_called_once_with(
+          offload_weights=True, offload_kv_cache=False
+      )
 
   @parameterized.named_parameters(
       dict(
@@ -607,7 +814,10 @@ class RlClusterTest(parameterized.TestCase):
           ),
       ),
   )
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(
+      is_run_prod or not is_sglang_available,
+      'Skipping when sglang-jax is unavailable',
+  )
   def test_init_sglang_jax_rollout_engine(
       self, rollout_config, expected_train_config
   ):
@@ -625,7 +835,10 @@ class RlClusterTest(parameterized.TestCase):
       self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
       self.assertIn('mesh', called_kwargs)
 
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(
+      is_run_prod or not is_sglang_available,
+      'Skipping when sglang-jax is unavailable',
+  )
   @mock.patch.object(rl_cluster_lib.sft_utils, 'is_lora_enabled', autospec=True)
   def test_init_sglang_jax_rollout_engine_lora_error(self, mock_is_lora):
     mock_is_lora.return_value = True

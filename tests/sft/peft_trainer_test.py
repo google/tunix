@@ -126,6 +126,75 @@ class PeftTrainerTest(parameterized.TestCase):
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
 
+  def test_runtime_offload_keeps_shared_model_resident(self):
+    """Offloading trainer runtime without model leaves shared weights on device."""
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=1, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    model_leaf = jax.tree_util.tree_leaves(nnx.state(trainer.model, nnx.Param))[0]
+    opt_leaves = [
+        leaf
+        for leaf in jax.tree_util.tree_leaves(
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+        )
+        if hasattr(leaf, "sharding")
+    ]
+
+    self.assertEqual(model_leaf.sharding.memory_kind, "device")
+    self.assertTrue(opt_leaves)
+    self.assertTrue(all(leaf.sharding.memory_kind == "device" for leaf in opt_leaves))
+
+    trainer.maybe_offload_runtime_to_cpu(include_model=False)
+
+    offloaded_model_leaf = jax.tree_util.tree_leaves(
+        nnx.state(trainer.model, nnx.Param)
+    )[0]
+    offloaded_opt_leaves = [
+        leaf
+        for leaf in jax.tree_util.tree_leaves(
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+        )
+        if hasattr(leaf, "sharding")
+    ]
+    self.assertEqual(offloaded_model_leaf.sharding.memory_kind, "device")
+    self.assertTrue(
+        all(leaf.sharding.memory_kind == "pinned_host" for leaf in offloaded_opt_leaves)
+    )
+
+    trainer.maybe_load_runtime_from_cpu(include_model=False)
+
+    restored_opt_leaves = [
+        leaf
+        for leaf in jax.tree_util.tree_leaves(
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+        )
+        if hasattr(leaf, "sharding")
+    ]
+    self.assertTrue(
+        all(leaf.sharding.memory_kind == "device" for leaf in restored_opt_leaves)
+    )
+
+  def test_runtime_offload_can_skip_optimizer_state(self):
+    """Explicitly disabling optimizer offload leaves trainer runtime on device."""
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=1, max_steps=1)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    trainer.maybe_offload_runtime_to_cpu(
+        include_model=False, include_optimizer_state=False
+    )
+
+    opt_leaves = [
+        leaf
+        for leaf in jax.tree_util.tree_leaves(
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState)
+        )
+        if hasattr(leaf, "sharding")
+    ]
+    self.assertTrue(opt_leaves)
+    self.assertTrue(all(leaf.sharding.memory_kind == "device" for leaf in opt_leaves))
+
   @parameterized.named_parameters(
       ('cache_nnx_graph', True),
       ('no_cache_nnx_graph', False),
