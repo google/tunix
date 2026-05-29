@@ -41,8 +41,17 @@ _OPTIONAL_PER_TOKEN_KEYS = (
 
 
 def is_positive_integer(value: int | None, name: str):
-  """Checks if the value is positive."""
-  if value is not None and (not isinstance(value, int) or value <= 0):
+  """Checks if the value is a positive integer.
+
+  Accepts Python ``int`` and numpy integer scalars (e.g. ``np.int64``).
+  Explicitly rejects ``bool``, which is a subclass of ``int`` in Python but
+  is not semantically an integer in this context.
+  """
+  if value is None:
+    return
+  if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+    raise ValueError(f"{name} must be a positive integer. Got: {value}")
+  if value <= 0:
     raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 
