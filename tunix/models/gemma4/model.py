@@ -171,7 +171,6 @@ class ModelConfig:
   use_bidirectional_attention: str | None = None
 
   def __post_init__(self):
-    # TODO(tunix-dev): support flash attention with sliding window KV cache
     if self.use_sliding_window_kv_cache and self.use_flash_attention:
       raise ValueError(
           'Flash attention and sliding window KV cache are mutually exclusive.'
@@ -863,8 +862,8 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.act_btnh_kv)
-      value_proj = shard(value_proj, self.act_btnh_kv)
+      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
+      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -935,16 +934,7 @@ class Attention(nnx.Module):
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
 
-      mesh = None
-      if hasattr(jax.sharding, 'get_abstract_mesh'):
-        try:
-          m = jax.sharding.get_abstract_mesh()
-          if m is not None and not getattr(m, 'empty', False):
-            mesh = m
-        except Exception:
-          pass
-      if mesh is None:
-        mesh = pxla.thread_resources.env.physical_mesh
+      mesh = pxla.thread_resources.env.physical_mesh
       if self.attn_type == AttentionType.LOCAL_SLIDING:
         mask = mask_lib.LocalMask(
             (seq_len, seq_len),
@@ -1143,20 +1133,7 @@ class Attention(nnx.Module):
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
-
-    if cache is not None:
-      new_cache = {
-          'v': cache_value_proj,
-          'k': cache_key_proj,
-          'end_index': cache['end_index'] + seq_len,
-      }
-    else:
-      new_cache = {
-          'v': cache_value_proj,
-          'k': cache_key_proj,
-      }
-
-    return new_cache, attn_output
+    return new_cache, attn_output, (key_proj, value_proj)
 
   @property
   def use_gqa(self):
@@ -1278,7 +1255,7 @@ class FeedForward(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__)(self, x)
+      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
       return self.block(x)
 
@@ -1449,7 +1426,7 @@ class DecoderLayer(nnx.Module):
         remat_config == RematConfig.DECODER
         or remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self,
           x,
           segment_pos,
@@ -1598,8 +1575,16 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         assert shared_idx in self.shared_layer_origins
         layer_cache = None
         shared_layer_name = f'layer_{shared_idx}'
-        kv_shared_cache = new_cache.get(shared_layer_name)
+        if is_prefill:
+          # During prefill, use full KV projections from the shared layer.
+          shared_k, shared_v = transient_kvs[shared_layer_name]
+          kv_shared_cache = {'k': shared_k, 'v': shared_v}
+        else:
+          # During decoding, use the shared layer's cache (which may be
+          # an optimized sliding window ring cache).
+          kv_shared_cache = new_cache.get(shared_layer_name)
       else:
+        layer_cache = cache[layer_name] if cache else None
         kv_shared_cache = None
 
       layer_attn_mask = attention_mask
@@ -1620,8 +1605,10 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           kv_shared_cache=kv_shared_cache,
           segment_ids=segment_ids,
       )
-
-      new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+      if is_prefill and i in self.shared_layer_origins:
+        transient_kvs[layer_name] = layers_kvs
+      if not is_shared:
+        new_cache[layer_name] = layer_cache
 
     x = self.final_norm(x)
     if skip_lm_head:

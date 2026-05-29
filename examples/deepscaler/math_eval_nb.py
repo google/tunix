@@ -241,9 +241,8 @@ class Qwen25MathEvaluator:
     if mesh_config is None:
       # Default: 4-way tensor parallelism
       mesh_config = [[1, 4], ["fsdp", "tp"]]
-    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()[2:3]).reshape(1, 1), axis_names=["fsdp", "tp"])
-    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape(1, 1), axis_names=["fsdp", "tp"])
-    # self.rollout_mesh_backup = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(1, 4), axis_names=["fsdp", "tp"])
+    self.trainer_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(1, 4), axis_names=["fsdp", "tp"])
+    self.rollout_mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(1, 4), axis_names=["fsdp", "tp"])
     self.tokenizer = None
     self.model = None
     self.sampler = None
@@ -375,13 +374,13 @@ class Qwen25MathEvaluator:
               enable_dp_attention=False,
               init_with_random_weights=True,
               mapping_config=mapping_config,
-              # delete_dst_buffers=True,
-              # reshard_chunk_size=128,
+              delete_dst_buffers=True,
+              reshard_chunk_size=128,
               engine_kwargs={
                   "model": self.model_version,
                   "max_model_len": 1024,
-                  "max_num_seqs": 8,
-                  "max_num_batched_tokens": 8 * 1024,
+                  "max_num_seqs": 2,
+                  "max_num_batched_tokens": 3192,
               },
           ),
       )
@@ -404,19 +403,17 @@ class Qwen25MathEvaluator:
       print("\n" + "=" * 80)
       print("Loading raw safetensors weights into standalone vLLM JAX PyTree...")
 
-      # Extract the underlying vllm_config object from the active sampler runner
+      # Extract the underlying vllm_config object and real JAX mesh from the active sampler runner
       if hasattr(self.sampler_vllm, "_driver") and self.sampler_vllm._driver:
-        vllm_config_obj = (
-            self.sampler_vllm._driver.llm_engine.model_executor.driver_worker.model_runner.vllm_config
-        )
+        model_runner = self.sampler_vllm._driver.llm_engine.model_executor.driver_worker.model_runner
       elif hasattr(self.sampler_vllm, "llm") and self.sampler_vllm.llm:
-        vllm_config_obj = (
-            self.sampler_vllm.llm.llm_engine.model_executor.driver_worker.model_runner.vllm_config
-        )
+        model_runner = self.sampler_vllm.llm.llm_engine.model_executor.driver_worker.model_runner
       else:
         raise RuntimeError(
             "Could not locate active vllm_config from sampler_vllm."
         )
+      vllm_config_obj = model_runner.vllm_config
+      real_mesh = model_runner.mesh
 
       # Temporarily ensure load_format is set to 'hf' so the loader reads real safetensors
       # instead of generating dummy weights
@@ -430,9 +427,9 @@ class Qwen25MathEvaluator:
       vllm_config_obj.quant_config = get_tpu_quantization_config(vllm_config_obj)
 
       # 1. Create bare nnx model matching vLLM JAX structural definitions
-      with self.sampler_vllm.mesh, set_current_vllm_config(vllm_config_obj):
+      with jax.set_mesh(real_mesh), set_current_vllm_config(vllm_config_obj):
         raw_model = Gemma4ForCausalLM(
-            vllm_config_obj, jax.random.PRNGKey(0), self.sampler_vllm.mesh
+            vllm_config_obj, jax.random.PRNGKey(0), real_mesh
         )
 
         # Monkeypatch raw_model.load_weights to filter out audio tower weights
@@ -441,7 +438,8 @@ class Qwen25MathEvaluator:
           filtered_weights = (
               (name, tensor) for name, tensor in weights if "audio" not in name
           )
-          return orig_load_weights(filtered_weights)
+          with jax.set_mesh(real_mesh):
+            return orig_load_weights(filtered_weights)
         raw_model.load_weights = patched_load_weights
 
         # 2. Load raw weights directly from safetensors into raw_model's nnx.Params
@@ -458,11 +456,11 @@ class Qwen25MathEvaluator:
       # ========================================================================
       print("Comparing state pytrees between raw safetensors and sampler_vllm:")
       bak_state_flat = {
-          ".".join(str(k) for k in keys): p.value if hasattr(p, "value") else p
+          ".".join(str(k) for k in keys): p.get_value() if hasattr(p, "value") else p
           for keys, p in nnx.state(raw_model).flat_state()
       }
       vllm_state_flat = {
-          ".".join(str(k) for k in keys): p.value if hasattr(p, "value") else p
+          ".".join(str(k) for k in keys): p.get_value() if hasattr(p, "value") else p
           for keys, p in self.sampler_vllm.transformer_state.flat_state()
       }
 
@@ -814,7 +812,10 @@ MODEL_MAPPING = {
       gemma4_lib.ModelConfig.gemma4_e2b(),
       "/home/linchai_google_com/.cache/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db/",
     ),
-    
+    "google/gemma-4-26B-A4B-it": (
+      gemma4_lib.ModelConfig.gemma4_26b_a4b(),
+      "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/6e6f6edea8c52db2094dca3086e4b963a0034dfc",
+    ),   
 }
 
 mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
@@ -825,9 +826,9 @@ num_batches = int(num_batches_env) if num_batches_env and int(num_batches_env) >
 
 # model_version = "Qwen/Qwen2.5-1.5B-Instruct"
 # model_version = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-# model_version = "google/gemma-4-26B-A4B-it"
+model_version = "google/gemma-4-26B-A4B-it"
 # model_version = "google/gemma-4-31B-it"
-model_version = "google/gemma-4-E2B-it"
+# model_version = "google/gemma-4-E2B-it"
 dataset = MATH_500_DATA_PATH
 model_config, model_path = MODEL_MAPPING[model_version]
 
@@ -847,7 +848,7 @@ evaluator.load_model()
 print("\nStarting evaluation...")
 results = evaluator.evaluate(
     batch_size=8,
-    num_batches=5,
+    num_batches=2,
     temperature=0.6,
     top_k=50,
     top_p=0.95,
