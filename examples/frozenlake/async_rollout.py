@@ -42,17 +42,18 @@ TEMPERATURE = 0.7
 TOP_P = 1.0
 TOP_K = None
 
-MODEL_VERSION = "google/gemma-4-E2B-it"
+MODEL_VERSION = "google/gemma-4-26B-A4B-it"
 
 mesh = jax.sharding.Mesh(
     np.asarray(jax.local_devices()).reshape(1, 4), ("fsdp", "tp")
 )
 
-config = model_lib.ModelConfig.gemma4_e2b()
+config = model_lib.ModelConfig.gemma4_26b_a4b()
 
 from huggingface_hub import snapshot_download
 
-MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
+# MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/6e6f6edea8c52db2094dca3086e4b963a0034dfc"
 print(f"{MODEL_PATH=}")
 gemma4 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh)
 
