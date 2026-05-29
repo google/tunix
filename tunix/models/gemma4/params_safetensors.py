@@ -246,6 +246,104 @@ def _get_key_and_transform_mapping(cfg: model_lib.ModelConfig):
       ),
   }
 
+  # Vision Tower (SigLIP) and multi-modal projector.
+  if cfg.vision_config is not None:
+    mapping.update({
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.weight": (
+            "vision_encoder.siglip_encoder.embedding.kernel",
+            ((2, 3, 1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.embeddings\.patch_embedding\.bias": (
+            "vision_encoder.siglip_encoder.embedding.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.embeddings\.position_embedding\.weight": (
+            "vision_encoder.siglip_encoder.pos_embedding",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.q_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.query_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.k_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.key_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.v_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.value_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.attn.out_proj.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.layer_norm2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.ln2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.weight": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.kernel",
+            ((1, 0), None),
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc1\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc1.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.encoder\.layers\.([0-9]+)\.mlp\.fc2\.bias": (
+            r"vision_encoder.siglip_encoder.transformer.blocks.\1.mlp.fc2.bias",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.weight": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.scale",
+            None,
+        ),
+        r"vision_tower\.vision_model\.post_layernorm\.bias": (
+            "vision_encoder.siglip_encoder.transformer.encoder_norm.bias",
+            None,
+        ),
+        # Multi-modal Projector
+        r"multi_modal_projector\.mm_input_projection_weight": (
+            "embedder.mm_input_projection.w",
+            None,
+        ),
+        r"multi_modal_projector\.mm_soft_emb_norm\.weight": (
+            "embedder.mm_soft_embedding_norm.scale",
+            None,
+        ),
+    })
+
   return mapping
 
 
