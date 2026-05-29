@@ -454,6 +454,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
         )
+        for i in range(len(trainer_per_token_logps)):
+            print(f"length of trainer logprobs for item {i}: {len(trainer_per_token_logps[i]) if trainer_per_token_logps is not None else 'None'}")
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
       # ``exp(current_logp - trainer_logp)`` rather than against the rollout

@@ -313,6 +313,7 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
       enable_thinking: bool = True,
   ):
     super().__init__(tokenizer, enable_thinking=enable_thinking)
+    self._strip_past_thinking = strip_past_thinking
     # Also sanitize the base <turn|> token (without trailing newline) to guard
     # against model-generated control tokens trailing in message contents.
     self._tokens_to_sanitize.add("<turn|>")
