@@ -22,14 +22,31 @@ unchanged on any spot VM:
                         the in-process sampler under REMAT and offers higher
                         throughput at full concurrency).
 """
+import sys
+import kagglesdk.kaggle_env
+
+# Manually alias the missing function so kagglehub can find it
+if not hasattr(kagglesdk.kaggle_env, 'get_web_endpoint'):
+    kagglesdk.kaggle_env.get_web_endpoint = getattr(kagglesdk.kaggle_env, 'get_endpoint', lambda: "https://www.kaggle.com")
+
 
 import contextlib
 import datetime
+import faulthandler
 import logging
 import math
 import os
+import signal
 import sys
 from typing import List
+
+# Enable faulthandler and register it to dump stack traces on SIGTERM
+faulthandler.enable()
+try:
+  faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
+  print("Registered faulthandler SIGTERM stack trace dump.")
+except Exception as e:
+  print(f"Failed to register faulthandler SIGTERM: {e}")
 
 from absl import logging as absl_logging
 from flax import nnx
@@ -95,6 +112,7 @@ if not _DISTRIBUTED_INITIALIZED:
     print(f"jax.distributed.initialize() skipped: {exc}")
 
 print("jax devices: ", jax.devices())
+
 
 # %%
 import argparse
@@ -169,7 +187,7 @@ SEED = args.seed
 
 # ====== Sharding ======
 ROLLOUT_MESH = [(1, 8), ("fsdp", "tp")]
-TRAINER_MESH = [(8, 2), ("fsdp", "tp")]
+TRAINER_MESH = [(8, 4), ("fsdp", "tp")]
 REFERENCE_MESH = [(4, 2), ("fsdp", "tp")]
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length

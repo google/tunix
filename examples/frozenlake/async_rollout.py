@@ -218,7 +218,7 @@ def make_pair(
 async def main():
   """Runs the rollout orchestrator."""
   train_ds, _ = create_datasets()
-  train_ds = train_ds.shuffle(seed=42)[:2]
+  train_ds = train_ds.shuffle(seed=123)[:2]
   pairs = [make_pair(input, pair_index=i) for i, input in enumerate(train_ds)]
 
   rollout_sync_lock = utils.RolloutSyncLock()

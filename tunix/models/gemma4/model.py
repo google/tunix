@@ -787,9 +787,9 @@ class Attention(nnx.Module):
     _, _, kh, _ = key_proj.shape
 
     if self.config.use_flash_attention and seq_len > 1:
-      query_proj = query_proj.transpose(0, 2, 1, 3)
-      key_proj = key_proj.transpose(0, 2, 1, 3)
-      value_proj = value_proj.transpose(0, 2, 1, 3)
+      query_proj_splash = query_proj.transpose(0, 2, 1, 3)
+      key_proj_splash = key_proj.transpose(0, 2, 1, 3)
+      value_proj_splash = value_proj.transpose(0, 2, 1, 3)
 
       mesh = pxla.thread_resources.env.physical_mesh
       if self.attn_type == AttentionType.LOCAL_SLIDING:
@@ -872,9 +872,9 @@ class Attention(nnx.Module):
 
         qkv: jaxtyping.Array = sharded_splash_attn(
             splash_attn_kernel,
-            query_proj,
-            key_proj,
-            value_proj,
+            query_proj_splash,
+            key_proj_splash,
+            value_proj_splash,
             segment_ids,
             segment_ids,
         )
@@ -1008,7 +1008,7 @@ class Attention(nnx.Module):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument. graph_updates=False prevents TraceContextError
       # when mutating params across jax transformation trace levels.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
+      return nnx.remat(self.block.__func__)(
           self, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
       )
     else:
@@ -1111,7 +1111,7 @@ class FeedForward(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+      return nnx.remat(self.block.__func__)(self, x)
     else:
       return self.block(x)
 
@@ -1282,7 +1282,7 @@ class DecoderLayer(nnx.Module):
         remat_config == RematConfig.DECODER
         or remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
+      return nnx.remat(self.block.__func__)(
           self,
           x,
           segment_pos,
