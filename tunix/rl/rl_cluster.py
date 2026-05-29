@@ -594,7 +594,8 @@ class RLCluster:
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
     self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-        nnx.state(self.actor_trainer.model), "pinned_host"
+        nnx.state(self.actor_trainer.model),
+        self._default_memory_kind if not self.cluster_config.offload_to_cpu else "pinned_host"
     )
 
   def _propagate_backbone_sharing_map(self):
@@ -1169,7 +1170,8 @@ class RLCluster:
       self.rollout.update_params(src_filtered_params, filter_types)
       # The anchor policy state is snapshotted from actor_trainer.model.
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-          nnx.state(self.actor_trainer.model), "pinned_host"
+          nnx.state(self.actor_trainer.model),
+          self._default_memory_kind if not self.cluster_config.offload_to_cpu else "pinned_host"
       )
 
     # sync weights marks the end of a full batch, so increment the global steps.

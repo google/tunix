@@ -740,10 +740,40 @@ class Attention(nnx.Module):
         param_dtype=config.param_dtype,
     )
 
+    # Retrieve TP size from the active JAX mesh
+    tp_size = 1
+    mesh = None
+    if hasattr(jax.sharding, 'get_abstract_mesh'):
+      try:
+        m = jax.sharding.get_abstract_mesh()
+        if m is not None and not getattr(m, 'empty', False):
+          mesh = m
+      except Exception:
+        pass
+    if mesh is None:
+      mesh = pxla.thread_resources.env.physical_mesh
+    if mesh is not None and 'tp' in mesh.axis_names:
+      tp_size = mesh.shape['tp']
+
+    self.act_btnh_kv = config.shd_config.act_btnh
+    if self.num_kv_heads % tp_size != 0:
+      import logging as python_logging
+      python_logging.info(
+          f"num_kv_heads={self.num_kv_heads} is not divisible by TP size {tp_size}, "
+          f"sharding k/v projections on head_dim instead of kv-heads."
+      )
+      fsdp = config.shd_config.act_btnh[0]
+      self.act_btnh_kv = (fsdp, None, None, 'tp')
+
     k_eq_v = (
         config.k_eq_v_global if attn_type == AttentionType.GLOBAL else False
     )
     if k_eq_v:
+      k_sharding = config.shd_config.q_weight_ndh
+      if self.num_kv_heads % tp_size != 0:
+        fsdp = config.shd_config.q_weight_ndh[1]
+        k_sharding = (None, fsdp, 'tp')
+
       self.k_einsum = Einsum(
           einsum_str='BSD,KDH->BSKH',
           shape=(
@@ -752,7 +782,7 @@ class Attention(nnx.Module):
               self.head_dim,
           ),
           rngs=rngs,
-          sharding=config.shd_config.q_weight_ndh,
+          sharding=k_sharding,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
@@ -761,6 +791,12 @@ class Attention(nnx.Module):
         kv_sharding = (None, None, 'fsdp', None)
       else:
         kv_sharding = config.shd_config.kv_weight_cndh
+<<<<<<< HEAD
+=======
+        if self.num_kv_heads % tp_size != 0:
+          fsdp = config.shd_config.kv_weight_cndh[2]
+          kv_sharding = (None, None, fsdp, 'tp')
+>>>>>>> e18a1738 (snapshot)
 
       self.kv_einsum = Einsum(
           einsum_str='BSD,CKDH->CBSKH',
@@ -827,8 +863,8 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
-      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
+      key_proj = shard(key_proj, self.act_btnh_kv)
+      value_proj = shard(value_proj, self.act_btnh_kv)
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -899,7 +935,16 @@ class Attention(nnx.Module):
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
 
-      mesh = pxla.thread_resources.env.physical_mesh
+      mesh = None
+      if hasattr(jax.sharding, 'get_abstract_mesh'):
+        try:
+          m = jax.sharding.get_abstract_mesh()
+          if m is not None and not getattr(m, 'empty', False):
+            mesh = m
+        except Exception:
+          pass
+      if mesh is None:
+        mesh = pxla.thread_resources.env.physical_mesh
       if self.attn_type == AttentionType.LOCAL_SLIDING:
         mask = mask_lib.LocalMask(
             (seq_len, seq_len),
