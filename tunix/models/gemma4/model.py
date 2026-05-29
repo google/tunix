@@ -139,6 +139,7 @@ class ModelConfig:
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
   use_sliding_window_kv_cache: bool = True
+  use_sliding_window_kv_cache: bool = True
 
   # MoE config
   enable_moe: bool = False
@@ -148,7 +149,6 @@ class ModelConfig:
   moe_dense_hidden_dim: int | None = None
 
   def __post_init__(self):
-    # TODO(tunix-dev): support flash attention with sliding window KV cache
     if self.use_sliding_window_kv_cache and self.use_flash_attention:
       raise ValueError(
           'Flash attention and sliding window KV cache are mutually exclusive.'
@@ -687,7 +687,11 @@ class Attention(nnx.Module):
       attn_mask: jaxtyping.Array,
       kv_shared_cache: LayerCache | None = None,
       segment_ids: jaxtyping.Array | None = None,
-  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[jaxtyping.Array, jaxtyping.Array],
+  ]:
     x = x.astype(self.config.dtype)
     seq_len = x.shape[1]
     query_proj = self.q_einsum(x)
@@ -712,8 +716,8 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.act_btnh_kv)
-      value_proj = shard(value_proj, self.act_btnh_kv)
+      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
+      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -783,16 +787,7 @@ class Attention(nnx.Module):
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
 
-      mesh = None
-      if hasattr(jax.sharding, 'get_abstract_mesh'):
-        try:
-          m = jax.sharding.get_abstract_mesh()
-          if m is not None and not getattr(m, 'empty', False):
-            mesh = m
-        except Exception:
-          pass
-      if mesh is None:
-        mesh = pxla.thread_resources.env.physical_mesh
+      mesh = pxla.thread_resources.env.physical_mesh
       if self.attn_type == AttentionType.LOCAL_SLIDING:
         mask = mask_lib.LocalMask(
             (seq_len, seq_len),
@@ -980,20 +975,7 @@ class Attention(nnx.Module):
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
-
-    if cache is not None:
-      new_cache = {
-          'v': cache_value_proj,
-          'k': cache_key_proj,
-          'end_index': cache['end_index'] + seq_len,
-      }
-    else:
-      new_cache = {
-          'v': cache_value_proj,
-          'k': cache_key_proj,
-      }
-
-    return new_cache, attn_output
+    return new_cache, attn_output, (key_proj, value_proj)
 
   @property
   def use_gqa(self):
@@ -1016,7 +998,7 @@ class Attention(nnx.Module):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument. graph_updates=False prevents TraceContextError
       # when mutating params across jax transformation trace levels.
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self, x, segment_pos, cache, attn_mask, kv_shared_cache, segment_ids
       )
     else:
@@ -1038,23 +1020,27 @@ class Attention(nnx.Module):
     ):
       cache_len = min(max_seq_len, self.config.sliding_window_size)
 
-    cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
-    k = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
-        eager=True
-    )
-    v = shard(
-        np.zeros(cache_shape, dtype),
-        self.config.shd_config.act_btnh,
-        eager=True,
-    )
-    end_index = shard(
-        np.zeros((batch_size,), np.int32),
-        self.config.shd_config.act_btnh[:1],
-        eager=True,
-    )
-    return {'k': k, 'v': v, 'end_index': end_index}
+    return {
+        'k': jnp.zeros(
+            (
+                batch_size,
+                cache_len,
+                self.num_kv_heads,
+                self.head_dim,
+            ),
+            dtype,
+        ),
+        'v': jnp.zeros(
+            (
+                batch_size,
+                cache_len,
+                self.num_kv_heads,
+                self.head_dim,
+            ),
+            dtype,
+        ),
+        'end_index': jnp.zeros((batch_size,), jnp.int32),
+    }
 
 
 class FeedForward(nnx.Module):
@@ -1115,7 +1101,7 @@ class FeedForward(nnx.Module):
         remat_config == RematConfig.BLOCK
         or remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__)(self, x)
+      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
     else:
       return self.block(x)
 
@@ -1237,7 +1223,7 @@ class DecoderLayer(nnx.Module):
       segment_ids=None,
   ):
     norm = self.pre_attention_norm(x)
-    cache, attn = self.attn(
+    cache, attn, kv = self.attn(
         norm,
         segment_pos,
         cache,
@@ -1253,7 +1239,7 @@ class DecoderLayer(nnx.Module):
     if self.config.enable_moe:
       ffw = self.dense_post_ffw_norm(ffw)
       moe_norm_ffw = self.moe_pre_ffw_norm(attn)
-      moe_out = self.moe(moe_norm_ffw)
+      moe_out = self.moe(moe_norm_ffw, router_input=attn)
       moe_out = self.moe_post_ffw_norm(moe_out)
       ffw += moe_out
     ffw = self.post_ffw_norm(ffw)
@@ -1286,7 +1272,7 @@ class DecoderLayer(nnx.Module):
         remat_config == RematConfig.DECODER
         or remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__)(
+      return nnx.remat(self.block.__func__, graph_updates=False)(
           self,
           x,
           segment_pos,
@@ -1371,6 +1357,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       cache=None,
       attention_mask=None,
       segment_ids=None,
+      decode_only_last_token=False,
   ):
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
@@ -1398,8 +1385,16 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         assert shared_idx in self.shared_layer_origins
         layer_cache = None
         shared_layer_name = f'layer_{shared_idx}'
-        kv_shared_cache = new_cache.get(shared_layer_name)
+        if is_prefill:
+          # During prefill, use full KV projections from the shared layer.
+          shared_k, shared_v = transient_kvs[shared_layer_name]
+          kv_shared_cache = {'k': shared_k, 'v': shared_v}
+        else:
+          # During decoding, use the shared layer's cache (which may be
+          # an optimized sliding window ring cache).
+          kv_shared_cache = new_cache.get(shared_layer_name)
       else:
+        layer_cache = cache[layer_name] if cache else None
         kv_shared_cache = None
 
       layer_cache, x, layers_kvs = layer(
@@ -1413,8 +1408,10 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           kv_shared_cache=kv_shared_cache,
           segment_ids=segment_ids,
       )
-
-      new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+      if is_prefill and i in self.shared_layer_origins:
+        transient_kvs[layer_name] = layers_kvs
+      if not is_shared:
+        new_cache[layer_name] = layer_cache
 
     x = self.final_norm(x)
     if decode_only_last_token:

@@ -119,7 +119,7 @@ class MoERagged(nnx.Module):
   def _router(self, router_logits: jax.Array):
     router_logits = router_logits.astype(jnp.float32)
     router_probs = jax.nn.softmax(router_logits, axis=-1)
-    _, choices = jax.lax.approx_max_k(
+    weights, choices = jax.lax.top_k(
         router_logits,
         k=self.num_experts_per_datapoint,
     )
@@ -184,9 +184,11 @@ class MoERagged(nnx.Module):
     )
     return out
 
-  def __call__(self, x):
-    var = jnp.mean(jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True)
-    router_input = x * jax.lax.rsqrt(var + 1e-06).astype(x.dtype)
+  def __call__(self, x, router_input=None):
+    if router_input is None:
+      router_input = x
+    var = jnp.mean(jnp.square(router_input.astype(jnp.float32)), axis=-1, keepdims=True)
+    router_input = router_input * jax.lax.rsqrt(var + 1e-06).astype(router_input.dtype)
 
     root_size = jax.lax.rsqrt(
         jnp.array(self.features, dtype=router_input.dtype)
