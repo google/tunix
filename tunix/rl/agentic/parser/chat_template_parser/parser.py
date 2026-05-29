@@ -16,7 +16,9 @@
 
 import abc
 import dataclasses
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 from tunix.utils import token_sanitization
 
 
@@ -148,6 +150,14 @@ class BaseChatTemplateParser(ABC):
         + self.tokens.tool_response_end_token
         + self.tokens.eot_token
     )
+
+  def filter_thinking_tokens(
+      self,
+      tokens: np.ndarray,
+      logprobs: Optional[np.ndarray] = None,
+  ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Default implementation: returns tokens and logprobs unchanged."""
+    return tokens, logprobs
 
 
 class DefaultChatTemplateParser(BaseChatTemplateParser):
@@ -293,9 +303,14 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
 
 class Gemma4ChatTemplateParser(BaseChatTemplateParser):
   """Parser for Gemma 4 models."""
-
-  def __init__(self, tokenizer, enable_thinking: bool = True):
+  def __init__(
+      self,
+      tokenizer,
+      enable_thinking: bool = True,
+      strip_past_thinking: bool = True,
+  ):
     super().__init__(tokenizer, enable_thinking=enable_thinking)
+    self._strip_past_thinking = strip_past_thinking
     # Also sanitize the base <turn|> token (without trailing newline) to guard
     # against model-generated control tokens trailing in message contents.
     self._tokens_to_sanitize.add("<turn|>")
@@ -366,10 +381,81 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     return "".join(result)
 
   def _parse_assistant(self, content: str) -> str:
-    cleaned_content = self._strip_thinking(content).strip()
+    """Parses an assistant message, optionally stripping thinking blocks.
+
+    In multi-turn conversations, historical thinking tokens are typically
+    stripped per official Gemma 4 guidelines to match inference-time prompt
+    formatting. For RL training using concatenated trajectories, this may
+    cause logprob mismatches if the rollout context differs from the training
+    context. Use `strip_past_thinking=False` if consistency across turns
+    in a single sequence is required.
+    """
+    if self._strip_past_thinking:
+      content = self._strip_thinking(content)
+    cleaned_content = content.strip()
     if cleaned_content.endswith("<turn|>"):
       return "<|turn>model\n" + cleaned_content + "\n"
     return "<|turn>model\n" + cleaned_content + self.tokens.eot_token
 
+  def filter_thinking_tokens(
+      self,
+      tokens: np.ndarray,
+      logprobs: Optional[np.ndarray] = None,
+  ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Strip thinking tokens and corresponding logprobs from arrays.
+
+    Only strips if `strip_past_thinking` was set to True during initialization.
+    Matches the logic in `_strip_thinking` but operates on token arrays.
+    """
+    if not self._strip_past_thinking:
+      return tokens, logprobs
+
+    start_seq = self.tokenizer.encode(
+        "<|channel>thought\n", add_special_tokens=False
+    )
+    end_seq = self.tokenizer.encode("<channel|>", add_special_tokens=False)
+
+    if not start_seq or not end_seq:
+      return tokens, logprobs
+
+    start_seq = np.array(start_seq)
+    end_seq = np.array(end_seq)
+
+    result_tokens = []
+    result_logprobs = []
+
+    i = 0
+    n = len(tokens)
+    while i < n:
+      # Check for start of thinking block
+      if i + len(start_seq) <= n and np.array_equal(
+          tokens[i : i + len(start_seq)], start_seq
+      ):
+        # Found start, look for end
+        i += len(start_seq)
+        found_end = False
+        while i < n:
+          if i + len(end_seq) <= n and np.array_equal(
+              tokens[i : i + len(end_seq)], end_seq
+          ):
+            i += len(end_seq)
+            found_end = True
+            break
+          i += 1
+        if not found_end:
+          # If no end found, we might have a partial block at the end?
+          # For now, let's just stop stripping.
+          break
+      else:
+        result_tokens.append(tokens[i])
+        if logprobs is not None:
+          result_logprobs.append(logprobs[i])
+        i += 1
+
+    return np.array(result_tokens, dtype=getattr(tokens, "dtype", np.int32)), (
+        np.array(result_logprobs, dtype=getattr(logprobs, "dtype", np.float32))
+        if logprobs is not None
+        else None
+    )
 
 

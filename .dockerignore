@@ -1,0 +1,16 @@
+# Ignore local python environments
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Ignore local model weights and data
+*.bin
+*.safetensors
+*.ckpt
+checkpoint*/
+*.whl
+
+# Ignore git history
+.git/
