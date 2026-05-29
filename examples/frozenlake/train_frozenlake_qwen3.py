@@ -74,7 +74,7 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(
-    description="Train FrozenLake on Qwen3-8B (single-host TPU)."
+    description="Train FrozenLake on Qwen3-1.7B (single-host TPU)."
 )
 # Effective on-policy batch is `batch_size * num_generations` per global step.
 # Tuned together with `num_generations=8` to keep per-step rollout latency
@@ -226,31 +226,57 @@ MAX_TO_KEEP = 1
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 
 # ====== Paths ======
-MODEL_VERSION = "Qwen/Qwen3-8B"
-MODEL_DOWNLOAD_DIR = "/tmp/models/Qwen3-8B"
-DATA_DIR = "/tmp/data/frozenlake"
+MODEL_VERSION = "Qwen/Qwen3-1.7B"
+MODEL_DOWNLOAD_DIR = "/scratch/tmp/models/Qwen3-1.7B"
+# DATA_DIR = "/tmp/data/frozenlake"
+DATA_DIR = "/mnt/disks/external_disk/git/tunix/data/frozenlake"
 
 # Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
 CKPT_DIR = None
-TB_LOG_DIR = "/tmp/tunix-tb/frozenlake"
+TB_LOG_DIR = "/scratch/tmp/tunix-tb/frozenlake"
 
 
 # ====== Build the single shared mesh ======
-if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
-  raise ValueError(
-      f"Expected at least {math.prod(SHARED_MESH_SHAPE)} devices for mesh "
-      f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
-  )
+# if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
+#   raise ValueError(
+#       f"Expected at least {math.prod(SHARED_MESH_SHAPE)} devices for mesh "
+#       f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
+#   )
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+# shared_device_list = jax._src.mesh_utils.create_device_mesh(
+#     SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+# )
+# shared_mesh = jax.sharding.Mesh(
+#     shared_device_list,
+#     axis_names=SHARED_MESH_AXIS_NAMES,
+#     axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+# )
+# print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
+
+ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
+TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
+trainer_devices = math.prod(TRAINER_MESH[0])
+rollout_devices = math.prod(ROLLOUT_MESH[0])
+
+rollout_device_list = jax._src.mesh_utils.create_device_mesh(
+    ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
 )
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+
+rollout_mesh = jax.sharding.Mesh(
+    rollout_device_list,
+    axis_names=ROLLOUT_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
 )
-print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
+print(f"{rollout_device_list=} {rollout_mesh.devices=}")
+trainer_device_list = jax._src.mesh_utils.create_device_mesh(
+    TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+)
+trainer_mesh = jax.sharding.Mesh(
+    trainer_device_list,
+    axis_names=TRAINER_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
+)
+print(f"{trainer_device_list=} {trainer_mesh.devices=}")
 
 # ====== Data ======
 import pandas as pd
@@ -331,7 +357,7 @@ if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
   os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
   oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
 
-config = model_lib.ModelConfig.qwen3_8b()
+config = model_lib.ModelConfig.qwen3_1p7b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
@@ -340,18 +366,18 @@ if ENABLE_FLASH_ATTENTION:
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
-# Reference: keep bf16 storage (frozen, never updated -> HBM savings safe).
-qwen_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_DOWNLOAD_DIR, config, shared_mesh, dtype=MODEL_DTYPE
-)
-show_hbm_usage("after loading qwen_ref")
+# # Reference: keep bf16 storage (frozen, never updated -> HBM savings safe).
+# qwen_ref = params_lib.create_model_from_safe_tensors(
+#     MODEL_DOWNLOAD_DIR, config, trainer_mesh, dtype=MODEL_DTYPE
+# )
+# show_hbm_usage("after loading qwen_ref")
 
 # Actor: storage MUST be fp32. At LR=1e-6 with typical weight magnitudes
 # ~1e-2, Adam updates are ~1e-6, well below bf16 ULP (~7.8e-5). bf16 storage
 # silently rounds every update to zero in optax.apply_updates, so the policy
 # never moves. Forward compute can still be bf16 via config.dtype.
 qwen_actor = params_lib.create_model_from_safe_tensors(
-    MODEL_DOWNLOAD_DIR, config, shared_mesh, dtype=jnp.float32
+    MODEL_DOWNLOAD_DIR, config, trainer_mesh, dtype=jnp.float32
 )
 show_hbm_usage("after loading qwen_actor")
 
@@ -391,7 +417,7 @@ if MAX_GRAD_NORM is not None:
   )
 
 # ====== Rollout + RL cluster ======
-print("Shared mesh:", shared_mesh)
+# print("Shared mesh:", shared_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -412,7 +438,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.20,
+    "rollout_vllm_hbm_utilization": 0.50,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -420,8 +446,8 @@ vllm_rollout_dict = {
     # train step starts.
     "rollout_vllm_async_scheduling": False,
     "rollout_vllm_init_with_random_weights": True,
-    "tensor_parallel_size": SHARED_MESH_SHAPE[1],
-    "data_parallel_size": SHARED_MESH_SHAPE[0],
+    "tensor_parallel_size": ROLLOUT_MESH[0][1],
+    "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
@@ -443,9 +469,9 @@ else:
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
-        rl_cluster_lib.Role.ACTOR: shared_mesh,
-        rl_cluster_lib.Role.REFERENCE: shared_mesh,
-        rl_cluster_lib.Role.ROLLOUT: shared_mesh,
+        rl_cluster_lib.Role.ACTOR: trainer_mesh,
+        rl_cluster_lib.Role.REFERENCE: trainer_mesh,
+        rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     # Keep actor weights resident on device. With ``delete_dst_buffers=True``
@@ -504,7 +530,7 @@ grpo_config = GRPOConfig(
 
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen_actor,
-    reference=qwen_ref,
+    # reference=qwen_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
