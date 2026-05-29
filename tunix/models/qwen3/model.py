@@ -1179,12 +1179,13 @@ class Qwen3(BackendMappingMixin, nnx.Module):
     """Initializes the cache for the model."""
     config = self.config
     shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
-    k = jnp.zeros(shape, dtype=config.dtype)
-    v = jnp.zeros(shape, dtype=config.dtype)
-    end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
     # Jax array is immutable, so updates to each layer creates new arrays.
     return {
-        f'layer_{i}': {'k': k, 'v': v, 'end_index': end_index}
+        f'layer_{i}': {
+            'k': jnp.zeros(shape, dtype=config.dtype),
+            'v': jnp.zeros(shape, dtype=config.dtype),
+            'end_index': jnp.zeros((batch_size,), dtype=jnp.int32)
+        }
         for i in range(config.num_layers)
     }
 

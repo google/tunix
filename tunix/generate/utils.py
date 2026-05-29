@@ -149,6 +149,24 @@ def find_first_eos_idx(ids, eos_id: int | jax.Array):
   return jnp.where(is_eos_present, first_idx, ids.shape[0])
 
 
+def np_find_first_non_pad_idx(ids: np.ndarray, pad_id: int) -> int:
+  """Numpy version of find_first_non_pad_idx. Works on CPU arrays."""
+  assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
+  mask = ids != pad_id
+  return int(np.argmax(mask)) if mask.any() else 0
+
+
+def np_find_first_eos_idx(
+    ids: np.ndarray, eos_id: int | jax.Array,
+) -> int:
+  """Numpy version of find_first_eos_idx. Works on CPU arrays."""
+  assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'
+  if isinstance(eos_id, int):
+    eos_id = np.array([eos_id])
+  mask = np.isin(ids, eos_id)
+  return int(np.argmax(mask)) if mask.any() else len(ids)
+
+
 def find_last_non_pad_idx(ids, pad_id):
   """Finds the index of the last non-pad token."""
   assert ids.ndim == 1, f'ids should be a 1d array. Got: {ids.shape}'

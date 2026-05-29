@@ -235,7 +235,6 @@ def process_ids(
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
-    completion_mask: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
 ):
@@ -271,21 +270,10 @@ def process_ids(
     return prompt_completion_ids, segment_positions, attn_mask, None
 
   prompt_mask = prompt_tokens != pad_id
-
-  # Attention/RoPE-position mask MUST include every real token in the sequence.
-  # The caller-provided `completion_mask` (in multi-turn agentic learners) is
-  # the assistant-vs-env loss mask, with 0s on env tokens — using that for
-  # attention causes env-observation tokens to be masked out of context AND
-  # positions don't advance through them, so the trainer's logits for the
-  # first assistant token of turn k+1 are computed without seeing the env
-  # observation that triggered turn k+1, producing 30-50 nat sampler-trainer
-  # diffs at every turn boundary. Ignore the passed-in completion_mask for
-  # attention purposes; loss aggregation is the caller's responsibility.
-  del completion_mask
-  attn_completion_mask = completion_tokens != pad_id
+  completion_mask = completion_tokens != pad_id
 
   prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, attn_completion_mask], axis=-1
+      [prompt_mask, completion_mask], axis=-1
   )
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
@@ -320,7 +308,6 @@ def compute_per_token_logps(
     pad_id: int,
     eos_id: int,
     images: jax.Array | None = None,
-    completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     return_logits: bool = False,
     segment_ids: jax.Array | None = None,
@@ -342,7 +329,6 @@ def compute_per_token_logps(
     pad_id: pad token identifier.
     eos_id: end of sequence identifier.
     images: optional images array.
-    completion_mask: optional completion mask array.
     stop_gradient: whether to stop gradient.
     return_logits: whether to return logits.
     segment_ids: optional 1D sequential document identifiers used for packing.
@@ -365,7 +351,6 @@ def compute_per_token_logps(
       completion_tokens,
       pad_id,
       eos_id,
-      completion_mask,
       segment_ids,
       segment_positions,
   )
@@ -431,7 +416,6 @@ def compute_score(
     completion_tokens: jax.Array,
     pad_id: int,
     eos_id: int,
-    completion_mask: jax.Array | None = None,
     stop_gradient: bool = True,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
@@ -447,7 +431,6 @@ def compute_score(
       completion_tokens,
       pad_id,
       eos_id,
-      completion_mask,
       segment_ids,
       segment_positions,
   )

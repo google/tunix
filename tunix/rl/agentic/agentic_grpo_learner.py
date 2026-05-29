@@ -51,7 +51,6 @@ from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.utils import trajectory_logger
 
-
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
 MetricFn = agentic_rl_learner.MetricFn
@@ -74,8 +73,8 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
     kl_loss_mode: Method for computing the KL loss.
-    force_compute_kl: Whether to force compute KL divergence for logging
-      even when it would normally be skipped (e.g., when beta is 0.0).
+    force_compute_kl: Whether to force compute KL divergence for logging even
+      when it would normally be skipped (e.g., when beta is 0.0).
     epsilon: PPO-style clipping epsilon.
     epsilon_high: PPO-style clipping epsilon upper bound.
     loss_algo: "grpo" or "gspo-token".
@@ -279,8 +278,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     })
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl"
-        if self.algo_config.force_compute_kl
-        or self.algo_config.beta != 0.0
+        if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
     ])
 
@@ -374,7 +372,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
     for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
-        prompt_tokens_list, completion_tokens_list, completion_masks_list, old_logprobs_list
+        prompt_tokens_list,
+        completion_tokens_list,
+        completion_masks_list,
+        old_logprobs_list,
     ):
       if (
           len(completion_tokens) >= max_response_length
@@ -445,25 +446,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           have_actor_mesh or self.algo_config.sampler_is == "token"
       )
       if need_trainer_logps:
-        # NOTE: pass a NON-PADDING mask (1 for both assistant AND env tokens)
-        # for attention/position construction inside compute_per_token_logps,
-        # not the assistant-vs-env mask. process_ids uses ``completion_mask``
-        # to build the causal attention pattern AND to drive
-        # ``build_positions_from_mask``. If we pass the asst-vs-env mask, env
-        # tokens get masked OUT of attention AND positions don't advance
-        # through them — so when predicting the first assistant token of turn
-        # k+1, the trainer's model has no memory of the env observation that
-        # triggered turn k+1. That makes the trainer's logp at multi-turn
-        # boundaries diverge from the rollout sampler's (which always sees the
-        # full conversation in attention) by 30-50 nat.
-        attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
         trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-            completion_mask=attn_completion_mask,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -478,24 +466,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     elif self.algo_config.use_rollout_logps:
       old_per_token_logps = None
     else:
-      # NOTE: pass a NON-PADDING mask (1 for both assistant AND env tokens) for
-      # attention/position construction inside compute_per_token_logps, not the
-      # assistant-vs-env mask. process_ids uses `completion_mask` to build the
-      # causal attention pattern AND to drive `build_positions_from_mask`. If
-      # we pass the asst-vs-env mask, env tokens get masked OUT of attention
-      # AND positions don't advance through them — so when predicting the
-      # first assistant token of turn k+1, the trainer's model has no memory
-      # of the env observation that triggered turn k+1. That makes the
-      # trainer's logp at multi-turn boundaries diverge from vllm's (which
-      # always sees the full conversation in attention) by 30-50 nat.
-      attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
       trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-          completion_mask=attn_completion_mask,
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -530,7 +506,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             pad_id=pad_value,
             eos_id=eos_value,
             micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-            completion_mask=completion_mask,
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
@@ -539,7 +514,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # Rewards & advantages
     # Prepare arguments for reward computation by forwarding all training inputs
     # except for prompts, which is passed explicitly.
-    original_inputs_list = [item.traj["original_input"] for item in trajectories]
+    original_inputs_list = [
+        item.traj["original_input"] for item in trajectories
+    ]
     original_inputs = rl_utils.merge_micro_batches(original_inputs_list)
 
     prompt_token_len = len(prompt_tokens_list[0])
@@ -667,7 +644,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       logging.info(
           "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
           " pearson=%.5f",
-          diff_mean, diff_max, prob_diff_mean, prob_diff_max, pearson,
+          diff_mean,
+          diff_max,
+          prob_diff_mean,
+          prob_diff_max,
+          pearson,
       )
     # Truncated importance-sampling (TIS) correction weights.
     # Compute per-token TIS weights from the trainer-vs-sampler log-ratio,
@@ -711,7 +692,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       logging.info(
           "sampler_is: weight_mean=%.4f weight_max=%.4f frac_clipped=%.4f"
           " (threshold=%.2f)",
-          is_mean, is_max, frac_clipped,
+          is_mean,
+          is_max,
+          frac_clipped,
           self.algo_config.sampler_is_threshold,
       )
 

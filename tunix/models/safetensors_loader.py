@@ -271,6 +271,10 @@ def load_and_create_model_orig(
                   f' {loaded_arr.shape}, expected {param.shape}'
               )
             if shard is not None:
+              # Ensure loaded_arr is a numpy array on host. device_put on a
+              # device array will compile an expensive device-to-device
+              # broadcast program instead of a simple host-to-device copy.
+              loaded_arr = jax.device_get(loaded_arr)
               return jax.device_put(loaded_arr, shard)
             else:
               return jax.device_put(loaded_arr, jax.devices()[0])

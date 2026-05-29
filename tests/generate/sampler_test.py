@@ -27,6 +27,7 @@ from tunix.generate import utils
 from tunix.models.gemma4 import model as gemma4_model_lib
 from tunix.tests import test_common as tc
 
+
 @dataclasses.dataclass(kw_only=True, frozen=True)
 class ModelConfigWithDtype(tc.ModelConfig):
   dtype: jax.numpy.dtype = jax.numpy.bfloat16
@@ -654,6 +655,76 @@ class SamplerTest(parameterized.TestCase):
         max_generation_steps=10,
         max_prompt_length=10,
     )
+
+  def test_gemma4_decode_only_last_token_consistency(self):
+    """Verifies that decode_only_last_token yields identical generated tokens and logits."""
+    config = gemma4_model_lib.ModelConfig(
+        num_layers=2,
+        num_embed=32,
+        embed_dim=16,
+        hidden_dim=16,
+        num_heads=4,
+        head_dim=16,
+        num_kv_heads=1,
+        per_layer_input_dim=16,
+        sliding_window_size=4,
+        param_dtype=jnp.bfloat16,
+        attention_pattern=(
+            gemma4_model_lib.AttentionType.LOCAL_SLIDING,
+            gemma4_model_lib.AttentionType.GLOBAL,
+        ),
+        final_logit_softcap=30.0,
+        local_rope_proportion=1.0,
+        global_rope_proportion=0.25,
+        global_key_size=16,
+        k_eq_v_global=False,
+        local_base_frequency=10000,
+        global_base_frequency=1000000,
+        local_scale_factor=1.0,
+        global_scale_factor=1.0,
+    )
+    rngs = nnx.Rngs(42)
+    model = gemma4_model_lib.Gemma4(config, rngs=rngs)
+    cache_config = sampler_lib.CacheConfig(
+        cache_size=32,
+        num_layers=config.num_layers,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+    )
+    mock_tokenizer = tc.MockVocab()
+    mock_tokenizer.DecodeIds = mock.MagicMock()
+    mock_tokenizer.DecodeIds.return_value = 'decoded_string'
+
+    # Run 1: Optimized (decode_only_last_token = True)
+    sampler_opt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    self.assertTrue(sampler_opt._supports_decode_only_last_token)
+    res_opt = sampler_opt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Run 2: Unoptimized (force decode_only_last_token = False)
+    sampler_unopt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    sampler_unopt._supports_decode_only_last_token = False
+    res_unopt = sampler_unopt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Verify tokens and generated logits are identical
+    self.assertEqual(len(res_opt.tokens), len(res_unopt.tokens))
+    for t_opt, t_unopt in zip(res_opt.tokens, res_unopt.tokens):
+      np.testing.assert_array_equal(t_opt, t_unopt)
+    self.assertEqual(len(res_opt.logits), len(res_unopt.logits))
+    for l_opt, l_unopt in zip(res_opt.logits, res_unopt.logits):
+      self.assertEqual(l_opt.shape, l_unopt.shape)
+      np.testing.assert_allclose(l_opt, l_unopt, atol=1e-5, rtol=1e-5)
 
 
 if __name__ == '__main__':

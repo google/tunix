@@ -262,7 +262,6 @@ class BaseRollout(ABC):
       self,
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Returns per-token log probabilities from the model."""
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import dataclasses
+import inspect
 from typing import Any, Optional
 import warnings
 
@@ -189,12 +190,13 @@ def _init_cache(
   """
 
   shape = (batch_size, cache_size, num_kv_heads, head_dim)
-  k = jnp.zeros(shape, dtype=dtype)
-  v = jnp.zeros(shape, dtype=dtype)
-  end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
   # Jax array is immutable, so updates to each layer creates new arrays.
   return {
-      f'layer_{i}': {'k': k, 'v': v, 'end_index': end_index}
+      f'layer_{i}': {
+          'k': jnp.zeros(shape, dtype=dtype),
+          'v': jnp.zeros(shape, dtype=dtype),
+          'end_index': jnp.zeros((batch_size,), dtype=jnp.int32)
+      }
       for i in range(n_layers)
   }
 
@@ -228,11 +230,28 @@ class Sampler(base_sampler.BaseSampler):
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
-    # we separate out state and graph def so that the state can be passed as an
+    # We separate out state and graph def so that the state can be passed as an
     # argument to _decode_fn, resulting in it not being treated as a static
-    # arg. This greatly reduces the size of the HLO and reduces compile time
-    self._compiled_decode_fn = jax.jit(self._decode_fn)
-    self._compiled_prefill_fn = jax.jit(self._prefill_fn)
+    # arg. This greatly reduces the size of the HLO and reduces compile time.
+    #
+    # We donate the sampling_state (argnum 1) containing the KV cache arrays.
+    # JAX arrays are immutable, so updating the cache at each decoding step
+    # would normally force JAX to allocate a new memory buffer and copy old
+    # contents. Since the KV cache memory footprint scales with batch size and
+    # prompt+decoding length (reaching gigabytes), this continuous reallocation
+    # and copying triggers massive memory overhead and OOMs. Donating the input
+    # state allows the XLA compiler to reuse the memory buffer in-place,
+    # completely avoiding allocation/copy overhead.
+    self._compiled_decode_fn = jax.jit(self._decode_fn, donate_argnums=(1,))
+    self._compiled_prefill_fn = jax.jit(
+        self._prefill_fn,
+        donate_argnums=(1,),
+        static_argnames=('echo',),
+    )
+    self._supports_decode_only_last_token = (
+        'decode_only_last_token'
+        in inspect.signature(transformer.__call__).parameters
+    )
 
   def model_def_and_state(self) -> tuple[graph.NodeDef, statelib.State]:
     """Returns the transformer graphdef and state."""
@@ -543,6 +562,7 @@ class Sampler(base_sampler.BaseSampler):
       params: statelib.State,
       sampler_state: _SamplingState,
       images: jnp.ndarray | None = None,
+      echo: bool = True,
   ) -> _SamplingState:
     """Performs prefill."""
     batch_size = sampler_state.token_buffer.shape[0]
@@ -581,6 +601,12 @@ class Sampler(base_sampler.BaseSampler):
 
     transformer = nnx.merge(self._transformer_graphdef, params)
     kwargs = {} if images is None else {'images': images}
+    decode_only_last_token = (
+        self._supports_decode_only_last_token
+        and not echo
+    )
+    if decode_only_last_token:
+      kwargs['decode_only_last_token'] = True
     logits, cache = transformer(
         tokens,
         step_positions,
@@ -593,10 +619,13 @@ class Sampler(base_sampler.BaseSampler):
     positions = sampler_state.positions
     beam_search_sampling_state = None
     if sampler_state.logits_buffer is not None:
+      start_idx = (
+          sampler_state.num_input_tokens if decode_only_last_token else 1
+      )
       logits_buffer = jax.lax.dynamic_update_slice(
           sampler_state.logits_buffer,
           logits.astype(sampler_state.logits_buffer.dtype),
-          (0, 1, 0),
+          (0, start_idx, 0),
       )
     else:
       logits_buffer = sampler_state.logits_buffer
@@ -823,6 +852,7 @@ class Sampler(base_sampler.BaseSampler):
         self._flattened_transformer_state,
         sampling_state,
         processed_images,
+        echo=echo,
     )
 
     sampling_state = self._compiled_decode_fn(
@@ -864,27 +894,27 @@ class Sampler(base_sampler.BaseSampler):
           self.tokenizer.decode(tokens[:length].tolist())
           for tokens, length in zip(out_tokens, lengths)
       ]
+      out_logprobs = []
       if return_logprobs:
-        out_logprobs = []
+        token_buffers = jax.device_get(token_buffers)
+        final_logprobs_buffer = jax.device_get(final_logprobs_buffer)
         for i in range(len(token_buffers)):
           start_idx = (
-              utils.find_first_non_pad_idx(
+              utils.np_find_first_non_pad_idx(
                   token_buffers[i], self.tokenizer.pad_id()
               )
               if echo
               else max_prompt_length
           )
           end_idx = (
-              utils.find_first_eos_idx(
+              utils.np_find_first_eos_idx(
                   token_buffers[i][max_prompt_length:], self.eos_ids
               )
               + max_prompt_length
           )
           length = end_idx - start_idx
           # Slice logprobs and pad to max_len
-          sliced_logprobs = jax.device_get(
-              final_logprobs_buffer[i][start_idx:end_idx]
-          )
+          sliced_logprobs = final_logprobs_buffer[i][start_idx:end_idx]
           padded_logprobs = np.pad(
               sliced_logprobs,
               (0, max_len - length),
@@ -897,28 +927,33 @@ class Sampler(base_sampler.BaseSampler):
       out_tokens = []
       out_logits = []
       out_logprobs = []
+      token_buffers = jax.device_get(token_buffers)
+      if return_logprobs:
+        final_logprobs_buffer = jax.device_get(final_logprobs_buffer)
+      if return_logits:
+        logits_buffers = jax.device_get(logits_buffers)
       for i in range(len(token_buffers)):
         token_buffer = token_buffers[i]
         start_idx = (
-            utils.find_first_non_pad_idx(token_buffer, self.tokenizer.pad_id())
+            utils.np_find_first_non_pad_idx(
+                token_buffer, self.tokenizer.pad_id()
+            )
             if echo
             else max_prompt_length
         )
         end_idx = (
-            utils.find_first_eos_idx(
+            utils.np_find_first_eos_idx(
                 token_buffer[max_prompt_length:], self.eos_ids
             )
             + max_prompt_length
         )
-        out_tokens.append(jax.device_get(token_buffer[start_idx:end_idx]))
+        out_tokens.append(token_buffer[start_idx:end_idx])
         if return_logits:
           out_logits.append(logits_buffers[i][start_idx:end_idx])
         if return_logprobs:
           # Extract logprobs for the generated tokens
           out_logprobs.append(
-              jax.device_get(
-                  final_logprobs_buffer[i][start_idx:end_idx]
-              ).tolist()
+              final_logprobs_buffer[i][start_idx:end_idx].tolist()
           )
 
       decoded_outputs = [
