@@ -649,9 +649,20 @@ def main():
       save_interval_steps=MAX_STEPS,
       max_to_keep=1,
   )
+  wandb_config = {
+      "model": MODEL_NAME,
+      "batch_size": NUM_PROMPTS_PER_STEP,
+      "num_generations": NUM_GENERATIONS,
+      "max_steps": MAX_STEPS,
+      "beta": BETA,
+      "lr": LEARNING_RATE,
+      "branch": "test-reward-fix",
+  }
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=LOG_DIR,
-      flush_every_n_steps=10,
+      flush_every_n_steps=1,
+      project_name="tunix-gsm8k-vtc",
+      wandb_config=wandb_config,
   )
 
   rollout_config_base = dict(
