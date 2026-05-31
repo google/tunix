@@ -118,13 +118,6 @@ parser.add_argument("--max_turns", type=int, default=50)
 parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
 parser.add_argument("--max_concurrency", type=int, default=200)
 
-parser.add_argument(
-    "--overlong_filter",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-    help="Whether to filter out trajectories that exceed length limits.",
-)
-
 # Mesh / Topology Config Override
 parser.add_argument(
     "--rollout_mesh_fsdp",
@@ -269,12 +262,13 @@ absl_logging.set_stderrthreshold(args.logging_level.lower())
 # ==========================================
 
 # Use the current working directory as ROOT folder
+script_dir = os.path.dirname(os.path.abspath(__file__))
 workdir = os.getcwd()
 tunix_root = os.path.join(workdir, "tunix")
 pathways_root = os.path.join(workdir, "pathways-utils")
 r2egym_root = os.path.join(workdir, "r2egym")
 
-for root in [workdir, tunix_root, pathways_root, r2egym_root]:
+for root in [script_dir, workdir, tunix_root, pathways_root, r2egym_root]:
   if root not in sys.path:
     sys.path.insert(0, root)
 
@@ -307,7 +301,7 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as template_pars
 from tunix import PerfMetricsConfig
 from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from examples.deepswe.swe_agent import (
+from swe_agent import (
     SWE_SYSTEM_PROMPT,
     SWE_SYSTEM_PROMPT_FN_CALL,
     SWE_USER_PROMPT,
@@ -317,8 +311,8 @@ from examples.deepswe.swe_agent import (
 )
 
 # Assumed custom imports based on usage
-from examples.deepswe.swe_agent import SWEAgent
-from examples.deepswe.swe_env import SWEEnv
+from swe_agent import SWEAgent
+from swe_env import SWEEnv
 
 # %%
 # ==========================================
@@ -467,7 +461,7 @@ VLLM_UTILIZATION = args.vllm_utilization
 VLLM_MAX_BATCHED_TOKENS = (VLLM_MAX_NUM_SEQS * KV_CACHE_SIZE) // 8
 print(f"vllm_max_batched_tokens: {VLLM_MAX_BATCHED_TOKENS}")
 
-OVERLONG_FILTER = args.overlong_filter
+OVERLONG_FILTER = True
 FILTER_STATUSES = (
     {agent_types.TrajectoryStatus[name] for name in args.filter_statuses}
     if args.filter_statuses is not None
