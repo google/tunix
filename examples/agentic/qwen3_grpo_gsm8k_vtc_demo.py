@@ -296,25 +296,23 @@ def normalize_single_example(example: dict[str, Any]) -> dict[str, Any]:
   return {key: _normalize_example_value(value) for key, value in example.items()}
 
 
-def vtc_reward(prompts, completions, answer, **kwargs):
-  del prompts, kwargs
-  scores = []
-  for completion, gold in zip(completions, answer):
-    format_ok = is_vtc_format_correct(completion)
-    pred = normalize_answer(extract_boxed_answer(completion))
-    true = normalize_answer(gold)
-    answer_ok = pred is not None and true is not None and pred == true
+def vtc_env_reward(task, action):
+  """TaskEnvironment-compatible VTC reward for trajectory rewards."""
+  gold = task.get("answer")
+  completion = action.action if hasattr(action, "action") else action
+  format_ok = is_vtc_format_correct(completion)
+  pred = normalize_answer(extract_boxed_answer(completion))
+  true = normalize_answer(gold)
+  answer_ok = pred is not None and true is not None and pred == true
 
-    if format_ok and answer_ok:
-      score = 1.0
-    elif format_ok and not answer_ok:
-      score = 0.1
-    elif not format_ok and answer_ok:
-      score = 0.5
-    else:
-      score = 0.0
-    scores.append(score)
-  return scores
+  if format_ok and answer_ok:
+    return 1.0
+  elif format_ok and not answer_ok:
+    return 0.1
+  elif not format_ok and answer_ok:
+    return 0.5
+  else:
+    return 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -765,9 +763,9 @@ def main():
 
   trainer = VTCGRPOLearner(
       rl_cluster=rl_cluster,
-      reward_fns=[vtc_reward],
       algo_config=grpo_config,
       chat_parser=chat_parser,
+      env_kwargs={"reward_fn": vtc_env_reward},
   )
 
   print(f"Devices: {jax.device_count()}")
