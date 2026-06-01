@@ -124,6 +124,29 @@ from tunix.sft import utils as sft_utils
 arg_parser = argparse.ArgumentParser(
     description="Train Qwen3-1.7B on GSM8K with the VTC GRPO recipe."
 )
+arg_parser.add_argument(
+    "--ablation_preset",
+    type=str,
+    default="final",
+    choices=[
+        "final",
+        "oldish_full",
+        "revert_prompt_reward",
+        "revert_parser_only",
+        "revert_reward_only",
+        "revert_rollout_runtime",
+        "revert_runtime_async_only",
+        "revert_runtime_prefix_only",
+        "revert_runtime_concurrency_only",
+        "revert_runtime_inflight_only",
+        "revert_model_bundle",
+        "revert_actor_dtype_only",
+        "revert_flash_only",
+        "revert_old_logps_to_rollout",
+        "revert_kl",
+    ],
+)
+arg_parser.add_argument("--experiment_tag", type=str, default="")
 arg_parser.add_argument("--batch_size", type=int, default=4)
 arg_parser.add_argument("--mini_batch_size", type=int, default=2)
 arg_parser.add_argument("--train_micro_batch_size", type=int, default=1)
@@ -131,6 +154,11 @@ arg_parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 arg_parser.add_argument("--max_steps", type=int, default=200)
 arg_parser.add_argument("--max_response_length", type=int, default=1024)
 arg_parser.add_argument("--max_concurrency", type=int, default=None)
+arg_parser.add_argument(
+    "--use_rollout_logps",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
 arg_parser.add_argument("--mesh_fsdp", type=int, default=None)
 arg_parser.add_argument("--mesh_tp", type=int, default=None)
 arg_parser.add_argument(
@@ -140,7 +168,183 @@ arg_parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
 arg_parser.add_argument(
     "--rollout_vllm_max_num_batched_tokens", type=int, default=None
 )
+arg_parser.add_argument(
+    "--rollout_vllm_async_scheduling",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
+arg_parser.add_argument(
+    "--enable_prefix_caching",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
+arg_parser.add_argument("--max_inflight_computations", type=int, default=1)
+arg_parser.add_argument(
+    "--parser_mode",
+    type=str,
+    default="raw_vtc",
+    choices=["raw_vtc", "qwen_chat"],
+)
+arg_parser.add_argument(
+    "--reward_mode",
+    type=str,
+    default="env",
+    choices=["env", "posthoc"],
+)
+arg_parser.add_argument(
+    "--qwen_enable_thinking",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+arg_parser.add_argument(
+    "--model_variant",
+    type=str,
+    default="final_split_dtype",
+    choices=["final_split_dtype", "legacy_copy"],
+)
+arg_parser.add_argument(
+    "--reference_model_dtype",
+    type=str,
+    default="bf16",
+    choices=["bf16", "fp32"],
+)
+arg_parser.add_argument(
+    "--actor_model_dtype",
+    type=str,
+    default="fp32",
+    choices=["bf16", "fp32"],
+)
+arg_parser.add_argument(
+    "--enable_flash_attention",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+arg_parser.add_argument(
+    "--enable_remat",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
+arg_parser.add_argument(
+    "--kl_loss_mode",
+    type=str,
+    default="mse_kl",
+    choices=["mse_kl", "kl"],
+)
 args, _ = arg_parser.parse_known_args()
+
+
+def _apply_overrides(namespace: argparse.Namespace, **overrides) -> None:
+  for key, value in overrides.items():
+    setattr(namespace, key, value)
+
+
+def apply_ablation_preset(namespace: argparse.Namespace) -> None:
+  """Mutates args in-place to a named ablation preset.
+
+  Presets intentionally override the current default recipe so runs are
+  reproducible from a single flag. If you need finer control, use
+  ``--ablation_preset=final`` and pass explicit flags instead.
+  """
+  preset = namespace.ablation_preset
+  if preset == "final":
+    return
+
+  if preset == "oldish_full":
+    _apply_overrides(
+        namespace,
+        batch_size=4,
+        mini_batch_size=2,
+        train_micro_batch_size=1,
+        compute_logps_micro_batch_size=1,
+        max_concurrency=1024,
+        parser_mode="qwen_chat",
+        reward_mode="posthoc",
+        qwen_enable_thinking=True,
+        model_variant="legacy_copy",
+        enable_flash_attention=False,
+        enable_remat=False,
+        rollout_vllm_async_scheduling=True,
+        enable_prefix_caching=True,
+        max_inflight_computations=2,
+        kl_loss_mode="kl",
+    )
+    return
+
+  if preset == "revert_prompt_reward":
+    _apply_overrides(
+        namespace,
+        parser_mode="qwen_chat",
+        reward_mode="posthoc",
+        qwen_enable_thinking=True,
+    )
+    return
+
+  if preset == "revert_parser_only":
+    _apply_overrides(
+        namespace,
+        parser_mode="qwen_chat",
+        qwen_enable_thinking=True,
+    )
+    return
+
+  if preset == "revert_reward_only":
+    _apply_overrides(namespace, reward_mode="posthoc")
+    return
+
+  if preset == "revert_rollout_runtime":
+    _apply_overrides(
+        namespace,
+        max_concurrency=1024,
+        rollout_vllm_async_scheduling=True,
+        enable_prefix_caching=True,
+        max_inflight_computations=2,
+    )
+    return
+
+  if preset == "revert_runtime_async_only":
+    _apply_overrides(namespace, rollout_vllm_async_scheduling=True)
+    return
+
+  if preset == "revert_runtime_prefix_only":
+    _apply_overrides(namespace, enable_prefix_caching=True)
+    return
+
+  if preset == "revert_runtime_concurrency_only":
+    _apply_overrides(namespace, max_concurrency=1024)
+    return
+
+  if preset == "revert_runtime_inflight_only":
+    _apply_overrides(namespace, max_inflight_computations=2)
+    return
+
+  if preset == "revert_model_bundle":
+    _apply_overrides(
+        namespace,
+        model_variant="legacy_copy",
+        enable_flash_attention=False,
+    )
+    return
+
+  if preset == "revert_actor_dtype_only":
+    _apply_overrides(namespace, actor_model_dtype="bf16")
+    return
+
+  if preset == "revert_flash_only":
+    _apply_overrides(namespace, enable_flash_attention=False)
+    return
+
+  if preset == "revert_old_logps_to_rollout":
+    _apply_overrides(namespace, use_rollout_logps=True)
+    return
+
+  if preset == "revert_kl":
+    _apply_overrides(namespace, kl_loss_mode="kl")
+    return
+
+  raise ValueError(f"Unknown ablation preset: {preset}")
+
+
+apply_ablation_preset(args)
 
 
 # ====== Recipe Defaults ======
@@ -165,7 +369,7 @@ BETA = 0.04
 EPSILON = 0.2
 # NeMo's reference_policy_kl_type="k2" is exactly 0.5 * (logp-ref_logp)^2,
 # which matches Tunix's "mse_kl" implementation.
-KL_LOSS_MODE = "mse_kl"
+KL_LOSS_MODE = args.kl_loss_mode
 LEARNING_RATE = 2.0e-7
 WEIGHT_DECAY = 0.01
 ADAM_B1 = 0.9
@@ -193,8 +397,8 @@ USE_LORA = False
 LORA_RANK = 64
 LORA_ALPHA = 64.0
 ENABLE_CHECKPOINTING = False
-ENABLE_REMAT = False
-ENABLE_FLASH_ATTENTION = True
+ENABLE_REMAT = args.enable_remat
+ENABLE_FLASH_ATTENTION = args.enable_flash_attention
 MODEL_DTYPE = jnp.bfloat16
 
 ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "qwen3_grpo_gsm8k_vtc")
@@ -222,27 +426,34 @@ Problem: {}
 _metric_call_idx = 0
 
 
-# ====== Shared Mesh ======
-MESH_FSDP = args.mesh_fsdp or 1
-MESH_TP = args.mesh_tp or (jax.device_count() // MESH_FSDP)
-SHARED_MESH_SHAPE = (MESH_FSDP, MESH_TP)
-SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
-
-if math.prod(SHARED_MESH_SHAPE) != jax.device_count():
-  raise ValueError(
-      "Shared mesh dimensions must multiply to device_count. "
-      f"Got mesh={SHARED_MESH_SHAPE}, devices={jax.device_count()}."
+def build_meshes() -> tuple[Mesh, Mesh, dict[str, Any]]:
+  """Builds the shared mesh used by all ablation runs."""
+  devices = jax.devices()
+  total_devices = len(devices)
+  mesh_fsdp = args.mesh_fsdp or 1
+  mesh_tp = args.mesh_tp or (total_devices // mesh_fsdp)
+  mesh_shape = (mesh_fsdp, mesh_tp)
+  if math.prod(mesh_shape) != total_devices:
+    raise ValueError(
+        "Shared mesh dimensions must multiply to device_count. "
+        f"Got mesh={mesh_shape}, devices={total_devices}."
+    )
+  device_list = jax._src.mesh_utils.create_device_mesh(
+      mesh_shape, devices[: math.prod(mesh_shape)]
   )
+  shared_mesh = jax.sharding.Mesh(
+      device_list,
+      axis_names=("fsdp", "tp"),
+      axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_shape),
+  )
+  return shared_mesh, shared_mesh, {
+      "mesh_mode": "shared",
+      "train_mesh_shape": mesh_shape,
+      "rollout_mesh_shape": mesh_shape,
+  }
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
-)
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
-)
-print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
+
+train_mesh, rollout_mesh, mesh_metadata = build_meshes()
 
 
 # ====== Data ======
@@ -399,6 +610,14 @@ def vtc_env_reward(task, action):
   return score
 
 
+def vtc_reward(prompts, completions, answer, **kwargs):
+  del prompts, kwargs
+  return [
+      _vtc_completion_outcome(completion, gold)[0]
+      for completion, gold in zip(completions, answer)
+  ]
+
+
 def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
   del prompts, completions, advantages, answer, kwargs
   global _metric_call_idx
@@ -428,6 +647,8 @@ def vtc_metric_fn(prompts, completions, rewards, advantages, answer, **kwargs):
       "rewards/solve_none": (1 if solve_none else 0, np.mean),
       "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
       "rewards/solve_ratio": (solve_ratio, np.mean),
+      "rewards/reward_mean": (reward_mean, np.mean),
+      "rewards/reward_max": (reward_max, np.max),
   }
 
 
@@ -453,6 +674,19 @@ class VTCRawTextParser:
       elif role == "assistant" and content:
         parts.append(content)
     return "\n".join(parts)
+
+
+class VTCQwenChatTemplateParser(chat_parser_lib.QwenChatTemplateParser):
+  """Old VTC parser variant using Qwen chat formatting."""
+
+  def _handle_first_message(self, messages):
+    del messages
+    return ""
+
+  def _parse_system(self, content: str) -> str:
+    if not content:
+      return ""
+    return super()._parse_system(content)
 
 
 class VTCGRPOLearner(GRPOLearner):
@@ -495,6 +729,44 @@ def put_model_on_device(model: nnx.Module) -> nnx.Module:
 def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
   ensure_model_downloaded()
 
+  dtype_map = {
+      "bf16": jnp.bfloat16,
+      "fp32": jnp.float32,
+  }
+  reference_model_dtype = dtype_map[args.reference_model_dtype]
+  actor_model_dtype = dtype_map[args.actor_model_dtype]
+
+  if args.model_variant == "legacy_copy":
+    model_config = {
+        "model_name": MODEL_NAME,
+        "model_source": "huggingface",
+        "model_id": MODEL_ID,
+        "model_download_path": MODEL_DOWNLOAD_DIR,
+        "intermediate_ckpt_dir": INTERMEDIATE_CKPT_DIR,
+        "model_display": False,
+        "use_flash_attention": args.enable_flash_attention,
+        "flash_attention_block_size": 1024,
+        "dtype": reference_model_dtype,
+    }
+    tokenizer_config = {
+        "tokenizer_path": MODEL_ID,
+        "tokenizer_type": "hf",
+        "add_bos": False,
+        "add_eos": False,
+    }
+    reference, _ = model_utils.create_model(model_config, tokenizer_config, mesh)
+    reference = put_model_on_device(reference)
+    if USE_LORA:
+      actor = maybe_apply_lora(reference, mesh)
+    else:
+      graph_def, params = nnx.split(reference)
+      actor = nnx.merge(graph_def, jax.tree.map(jnp.copy, params))
+    actor = put_model_on_device(actor)
+    return reference, actor
+
+  if args.model_variant != "final_split_dtype":
+    raise ValueError(f"Unsupported model_variant: {args.model_variant}")
+
   config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
   if ENABLE_REMAT:
     config.remat_config = qwen3_model_lib.RematConfig.DECODER
@@ -507,10 +779,10 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
   config.param_dtype = jnp.float32
 
   reference = qwen3_params_lib.create_model_from_safe_tensors(
-      MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE
+      MODEL_DOWNLOAD_DIR, config, mesh, dtype=reference_model_dtype
   )
   actor_base = qwen3_params_lib.create_model_from_safe_tensors(
-      MODEL_DOWNLOAD_DIR, config, mesh, dtype=jnp.float32
+      MODEL_DOWNLOAD_DIR, config, mesh, dtype=actor_model_dtype
   )
 
   reference = put_model_on_device(reference)
@@ -531,11 +803,24 @@ else:
 wandb_config = vars(args).copy()
 wandb_config.update({
     "model_id": MODEL_ID,
-    "mesh_shape": SHARED_MESH_SHAPE,
+    "ablation_preset": args.ablation_preset,
+    "experiment_tag": args.experiment_tag,
+    "mesh_mode": mesh_metadata["mesh_mode"],
+    "train_mesh_shape": mesh_metadata["train_mesh_shape"],
+    "rollout_mesh_shape": mesh_metadata["rollout_mesh_shape"],
     "num_steps": MAX_STEPS,
     "num_generations": NUM_GENERATIONS,
     "kl_loss_mode": KL_LOSS_MODE,
     "train_temperature": TRAIN_TEMPERATURE,
+    "parser_mode": args.parser_mode,
+    "reward_mode": args.reward_mode,
+    "model_variant": args.model_variant,
+    "reference_model_dtype": args.reference_model_dtype,
+    "actor_model_dtype": args.actor_model_dtype,
+    "rollout_vllm_async_scheduling": args.rollout_vllm_async_scheduling,
+    "enable_prefix_caching": args.enable_prefix_caching,
+    "max_inflight_computations": args.max_inflight_computations,
+    "use_rollout_logps": args.use_rollout_logps,
 })
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=TB_LOG_DIR,
@@ -594,10 +879,18 @@ def main() -> None:
       token=os.getenv("HF_TOKEN"),
       trust_remote_code=True,
   )
-  chat_parser = VTCRawTextParser()
+  if args.parser_mode == "raw_vtc":
+    chat_parser = VTCRawTextParser()
+  elif args.parser_mode == "qwen_chat":
+    chat_parser = VTCQwenChatTemplateParser(
+        tokenizer,
+        enable_thinking=args.qwen_enable_thinking,
+    )
+  else:
+    raise ValueError(f"Unsupported parser_mode: {args.parser_mode}")
   qwen_eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)
 
-  reference, actor = create_reference_and_actor(shared_mesh)
+  reference, actor = create_reference_and_actor(train_mesh)
   show_hbm_usage("after loading qwen_ref / qwen_actor")
 
   # ====== Rollout + RL cluster ======
@@ -633,15 +926,15 @@ def main() -> None:
       "rollout_vllm_model_version": MODEL_ID,
       "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
       "rollout_vllm_server_mode": True,
-      "rollout_vllm_async_scheduling": False,
-      "tensor_parallel_size": SHARED_MESH_SHAPE[1],
-      "data_parallel_size": SHARED_MESH_SHAPE[0],
+      "rollout_vllm_async_scheduling": args.rollout_vllm_async_scheduling,
+      "tensor_parallel_size": rollout_mesh.shape.get("tp", 1),
+      "data_parallel_size": rollout_mesh.shape.get("fsdp", 1),
       "rollout_vllm_max_num_seqs": vllm_max_num_seqs,
       "rollout_vllm_max_num_batched_tokens": vllm_max_batched_tokens,
       "rollout_vllm_kwargs": {
           "kv_cache_metrics": True,
           "disable_log_stats": False,
-          "enable_prefix_caching": False,
+          "enable_prefix_caching": args.enable_prefix_caching,
           "dtype": "bfloat16",
       },
   }
@@ -667,9 +960,9 @@ def main() -> None:
 
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: shared_mesh,
-          rl_cluster_lib.Role.REFERENCE: shared_mesh,
-          rl_cluster_lib.Role.ROLLOUT: shared_mesh,
+          rl_cluster_lib.Role.ACTOR: train_mesh,
+          rl_cluster_lib.Role.REFERENCE: train_mesh,
+          rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
       rollout_engine=ROLLOUT_ENGINE,
       offload_to_cpu=False,
@@ -677,7 +970,7 @@ def main() -> None:
           actor_optimizer=create_optimizer(),
           eval_every_n_steps=EVAL_EVERY_N_STEPS,
           max_steps=MAX_STEPS,
-          max_inflight_computations=1,
+          max_inflight_computations=args.max_inflight_computations,
           mini_batch_size=MINI_BATCH_SIZE,
           train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
@@ -703,7 +996,7 @@ def main() -> None:
       epsilon_high=EPSILON,
       advantage_estimator="grpo",
       degenerate_group_masking=False,
-      use_rollout_logps=False,
+      use_rollout_logps=args.use_rollout_logps,
       system_prompt="",
       max_response_length=MAX_RESPONSE_LENGTH,
       max_concurrency=MAX_CONCURRENCY,
@@ -726,16 +1019,24 @@ def main() -> None:
       algo_config=grpo_config,
       chat_parser=chat_parser,
       metric_fns=[vtc_metric_fn],
-      env_kwargs={"reward_fn": vtc_env_reward},
+      reward_fns=[vtc_reward] if args.reward_mode == "posthoc" else None,
+      env_kwargs=(
+          {"reward_fn": vtc_env_reward} if args.reward_mode == "env" else {}
+      ),
   )
   show_hbm_usage("after GRPOLearner creation")
 
-  print("Shared mesh:", shared_mesh)
+  print("Train mesh:", train_mesh)
+  print("Rollout mesh:", rollout_mesh)
   print(
       "Config summary:",
       {
           "model_id": MODEL_ID,
-          "mesh_shape": SHARED_MESH_SHAPE,
+          "ablation_preset": args.ablation_preset,
+          "experiment_tag": args.experiment_tag,
+          "mesh_mode": mesh_metadata["mesh_mode"],
+          "train_mesh_shape": mesh_metadata["train_mesh_shape"],
+          "rollout_mesh_shape": mesh_metadata["rollout_mesh_shape"],
           "rollout_engine": ROLLOUT_ENGINE,
           "prompts_per_step": NUM_PROMPTS_PER_STEP,
           "num_generations": NUM_GENERATIONS,
@@ -745,6 +1046,13 @@ def main() -> None:
           "max_steps": MAX_STEPS,
           "max_response_length": MAX_RESPONSE_LENGTH,
           "max_concurrency": MAX_CONCURRENCY,
+          "parser_mode": args.parser_mode,
+          "reward_mode": args.reward_mode,
+          "model_variant": args.model_variant,
+          "rollout_vllm_async_scheduling": args.rollout_vllm_async_scheduling,
+          "enable_prefix_caching": args.enable_prefix_caching,
+          "max_inflight_computations": args.max_inflight_computations,
+          "use_rollout_logps": args.use_rollout_logps,
           "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
           "rollout_vllm_max_num_seqs": vllm_max_num_seqs,
           "rollout_vllm_max_num_batched_tokens": vllm_max_batched_tokens,

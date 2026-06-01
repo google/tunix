@@ -1111,6 +1111,7 @@ class RLCluster:
       micro_batch_size: int | None = None,
       completion_mask: jax.Array | None = None,
       temperature: float | None = None,
+      use_anchor_state: bool = True,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1126,7 +1127,7 @@ class RLCluster:
       raise ValueError(
           "Cannot get actor log probabilities from an empty batch."
       )
-    if self._anchor_policy_state is None:
+    if use_anchor_state and self._anchor_policy_state is None:
       raise ValueError(
           "Anchor policy state is not initialized. Please run `sync_weights`"
           " first."
@@ -1149,11 +1150,11 @@ class RLCluster:
       else:
         dest_completion_mask = None
 
-      # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
-      # reference the same policy vllm sampled with even when mini_batch_size <
-      # full_batch_size or num_iterations > 1. Only offload the live actor when
-      # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
-      # was both unnecessary and risked leaving stray weights pinned to host.
+      # By default use the anchor (start-of-global-step) actor weights so
+      # old_per_token_logps reference the same policy vllm sampled with even
+      # when mini_batch_size < full_batch_size or num_iterations > 1. Ablation
+      # experiments can opt into the live actor state to reproduce the older
+      # behavior.
       actor_trainer_state_on_device = self._is_state_on_device(
           nnx.state(self.actor_trainer.model)
       )
@@ -1175,13 +1176,14 @@ class RLCluster:
           jax.sharding.PartitionSpec(),
           memory_kind=self._default_memory_kind,
       )
-      anchor_policy_state_on_device = jax.tree.map(
-          lambda x: jax.device_put(x, state_sharding),
-          self._anchor_policy_state,
-      )
-      state = reshard.reshard_pytree(
-          anchor_policy_state_on_device, actor_model_sharding
-      )
+      if use_anchor_state:
+        source_state = jax.tree.map(
+            lambda x: jax.device_put(x, state_sharding),
+            self._anchor_policy_state,
+        )
+      else:
+        source_state = actor_state
+      state = reshard.reshard_pytree(source_state, actor_model_sharding)
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size

@@ -111,6 +111,12 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
       True  # Whether to mask out degenerate groups with all-0 advantages.
   )
   use_rollout_logps: bool = True
+  # When old policy log-probs are recomputed on the trainer side
+  # (use_rollout_logps=False), choose whether to use the anchor/start-of-step
+  # actor snapshot or the live actor weights. For mini_batch_size <
+  # full_batch_size, using the live actor causes later mini-batches in the same
+  # outer step to compute "old" logps from already-updated weights.
+  recompute_use_anchor_state: bool = True
   # Truncated importance-sampling (TIS) correction for the residual mismatch
   # between the rollout sampler and the trainer's recomputed log-probabilities.
   # Set to ``"token"`` to enable per-token TIS weights. When enabled, the loss
@@ -467,6 +473,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                 * self.algo_config.num_generations
             ),
             completion_mask=attn_completion_mask,
+            use_anchor_state=True,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -502,6 +509,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               * self.algo_config.num_generations
           ),
           completion_mask=attn_completion_mask,
+          use_anchor_state=self.algo_config.recompute_use_anchor_state,
       )
       old_per_token_logps = trainer_per_token_logps
 
