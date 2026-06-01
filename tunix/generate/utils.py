@@ -815,6 +815,28 @@ def _sync_tied_lm_head_if_needed(
   lm_head_param.value = embed_param.value
 
 
+def _get_array_format(arr):
+  """Return Format(layout, sharding) for arr, including the physical layout.
+
+  jax.Array.format reads layout from _pjrt_layout, which raises UNIMPLEMENTED
+  for sharded arrays. For those, extract the layout from the first shard (a
+  single-device array that does expose _pjrt_layout) and combine it with the
+  global sharding.
+  """
+  from jax.experimental.layout import Format as JaxFormat  # pylint: disable=g-import-not-at-top
+  sharding = getattr(arr, 'sharding', None)
+  if sharding is None:
+    return None
+  fmt = getattr(arr, 'format', None)
+  if fmt is not None and fmt.layout is not None:
+    return fmt
+  for shard in getattr(arr, '_arrays', ()):
+    shard_fmt = getattr(shard, 'format', None)
+    if shard_fmt is not None and shard_fmt.layout is not None:
+      return JaxFormat(shard_fmt.layout, sharding)
+  return None
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
@@ -854,7 +876,7 @@ def transfer_state_with_mappings(
   if reshard_fn:
     sharding_dict = {
         key: (
-            tgt_params.value.sharding
+            _get_array_format(tgt_params.value) or tgt_params.value.sharding
             if hasattr(tgt_params, 'value')
             else tgt_params.sharding
         )
@@ -892,9 +914,6 @@ def transfer_state_with_mappings(
     tgt_param.value = val
     transferred_target_keys.add(flat_tgt_key)
 
-  # Target rollout engine might have different implementation and have materialized lm_head
-  _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
-
   # Clean up memory
   del unscanned_src_to_tgt_flat
   gc.collect()
@@ -926,6 +945,10 @@ def transfer_state_with_mappings(
         tgt_param.value = resharded_values_flat_dict[tgt_key]
       else:
         tgt_param = resharded_values_flat_dict[tgt_key]
+
+  # Sync tied lm_head after reshard so it reads from properly-placed embeddings.
+  # Target rollout engine might have different implementation and have materialized lm_head.
+  _sync_tied_lm_head_if_needed(tgt_flat_list, transferred_target_keys)
 
   return dst_state.from_flat_path(tgt_flat_list)
 
