@@ -10,6 +10,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from absl import logging as absl_logging
 import datasets as datasets_lib
 from datasets import load_dataset
@@ -801,7 +802,77 @@ config_kwargs = {
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
 
-agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
+class DebugGRPOLearner(agentic_grpo_learner.GRPOLearner):
+
+  def _create_agent_env_pair(self, single_example, group_id: int, pair_index: int):
+    problem = single_example.get("problem_statement", "")
+    problem_preview = str(problem).replace("\n", " ")[:120]
+    logging.info(
+        "[DeepSWE Debug] create_pair start group=%s pair=%s problem=%r",
+        group_id,
+        pair_index,
+        problem_preview,
+    )
+    t0 = time.perf_counter()
+    agent, env = super()._create_agent_env_pair(
+        single_example, group_id=group_id, pair_index=pair_index
+    )
+    logging.info(
+        "[DeepSWE Debug] create_pair done group=%s pair=%s in %.2fs"
+        " env=%s agent=%s",
+        group_id,
+        pair_index,
+        time.perf_counter() - t0,
+        type(env).__name__,
+        type(agent).__name__,
+    )
+    return agent, env
+
+  def _model_call(
+      self,
+      chat_lists,
+      env: Any = None,
+      max_generation_steps: int | None = None,
+  ):
+    group_id = None
+    pair_index = None
+    if env is not None and hasattr(env, "extra_kwargs"):
+      group_id = env.extra_kwargs.get("group_id")
+      pair_index = env.extra_kwargs.get("pair_index")
+    prompt_len = len(chat_lists) if isinstance(chat_lists, str) else len(chat_lists)
+    logging.info(
+        "[DeepSWE Debug] model_call start group=%s pair=%s"
+        " prompt_len=%s max_generation_steps=%s",
+        group_id,
+        pair_index,
+        prompt_len,
+        max_generation_steps,
+    )
+    t0 = time.perf_counter()
+    try:
+      result = super()._model_call(
+          chat_lists, env=env, max_generation_steps=max_generation_steps
+      )
+    except Exception:
+      logging.exception(
+          "[DeepSWE Debug] model_call failed group=%s pair=%s after %.2fs",
+          group_id,
+          pair_index,
+          time.perf_counter() - t0,
+      )
+      raise
+    logging.info(
+        "[DeepSWE Debug] model_call done group=%s pair=%s in %.2fs"
+        " outputs=%d",
+        group_id,
+        pair_index,
+        time.perf_counter() - t0,
+        len(getattr(result, "text", []) or []),
+    )
+    return result
+
+
+agentic_grpo_learner = DebugGRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=None,
     agent_class=SWEAgent,
