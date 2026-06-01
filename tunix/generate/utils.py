@@ -837,6 +837,35 @@ def _get_array_format(arr):
   return None
 
 
+def _relayout_to_match_target(
+    src_val: jax.Array,
+    tgt_arr: jax.Array,
+) -> jax.Array:
+  """Place src_val into tgt_arr's physical memory layout.
+
+  jit__device_put_reshard is compiled against the first input layout it sees.
+  If the target has an explicit TPU layout (e.g. {1,2,0:T(8,128)(2,1)}) but
+  the source was produced by a transform (e.g. jnp.transpose) that left it
+  with a different concrete layout (e.g. {2,1,0:T(8,128)(2,1)}) and
+  layout=<null>, XLA raises INVALID_ARGUMENT rather than recompiling. This
+  function re-places the source onto the target's layout (keeping the source's
+  original sharding) so every call to reshard_fn sees a consistent input layout.
+  """
+  if not isinstance(src_val, jax.Array):
+    return src_val
+  tgt_fmt = _get_array_format(tgt_arr)
+  if tgt_fmt is None or tgt_fmt.layout is None:
+    return src_val
+  src_sharding = getattr(src_val, 'sharding', None)
+  if src_sharding is None:
+    return src_val
+  try:
+    from jax.experimental.layout import Format as JaxFormat  # pylint: disable=g-import-not-at-top
+    return jax.device_put(src_val, JaxFormat(tgt_fmt.layout, src_sharding))
+  except Exception:  # pylint: disable=broad-except
+    return src_val
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
@@ -873,10 +902,11 @@ def transfer_state_with_mappings(
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
 
+  print("NEW UPDATED LOGIC: transfer_state_with_mappings called......")
   if reshard_fn:
     sharding_dict = {
         key: (
-            _get_array_format(tgt_params.value) or tgt_params.value.sharding
+            tgt_params.value.sharding
             if hasattr(tgt_params, 'value')
             else tgt_params.sharding
         )
@@ -889,8 +919,16 @@ def transfer_state_with_mappings(
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
   transferred_target_keys = set()
+  # Accumulate transformed values separately so reshard_fn receives the source
+  # values directly (preserving the destination buffer's physical layout until
+  # after reshard). Previously, tgt_param.value = val was called inside the loop,
+  # which overwrote the destination's {1,2,0} buffer with the {2,1,0} checkpoint
+  # value before reshard_fn ran — causing jit__device_put_reshard to receive a
+  # concrete layout that mismatched what it was compiled for during model init.
+  # Maps flat_tgt_key -> (transformed_val, tgt_param_ref)
+  transformed_vals = {}
 
-  # Transfer values with transformations
+  # Transform values from source
   for (flat_src_key, flat_tgt_key), (
       val,
       tgt_param,
@@ -910,8 +948,7 @@ def transfer_state_with_mappings(
     # Cast to target dtype
     val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
 
-    # Assign transformed value
-    tgt_param.value = val
+    transformed_vals[flat_tgt_key] = (val, tgt_param)
     transferred_target_keys.add(flat_tgt_key)
 
   # Clean up memory
@@ -920,10 +957,22 @@ def transfer_state_with_mappings(
 
   # Batch reshard and assign if resharding is configured
   if reshard_fn:
-    tgt_flat_dict = {
-        key: tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
-        for key, tgt_params in tgt_flat_list
-    }
+    # Pass transformed source values directly to reshard_fn, normalizing each
+    # source value's physical layout to match the destination's layout.
+    # Without this, jit__device_put_reshard—compiled the first time it is
+    # called with an array that has an explicit TPU layout such as
+    # {1,2,0:T(8,128)(2,1)}—raises INVALID_ARGUMENT when subsequent weight
+    # syncs pass source arrays that have a different concrete layout (e.g.
+    # {2,1,0:T(8,128)(2,1)}, produced by jnp.transpose) but layout=<null>.
+    # Keys not in transformed_vals fall back to the current target value.
+    tgt_flat_dict = {}
+    for key, tgt_params in tgt_flat_list:
+      tgt_arr = tgt_params.value if hasattr(tgt_params, 'value') else tgt_params
+      if key in transformed_vals:
+        src_val = _relayout_to_match_target(transformed_vals[key][0], tgt_arr)
+        tgt_flat_dict[key] = src_val
+      else:
+        tgt_flat_dict[key] = tgt_arr
     if kwargs.get('reshard_chunk_size', None) is not None:
       resharded_values_flat_dict = _reshard_in_chunks(
           src_flat=tgt_flat_dict,
@@ -945,6 +994,11 @@ def transfer_state_with_mappings(
         tgt_param.value = resharded_values_flat_dict[tgt_key]
       else:
         tgt_param = resharded_values_flat_dict[tgt_key]
+  else:
+    # No reshard — assign transformed values directly to destination params.
+    for flat_tgt_key, (val, tgt_param) in transformed_vals.items():
+      if hasattr(tgt_param, 'value'):
+        tgt_param.value = val
 
   # Sync tied lm_head after reshard so it reads from properly-placed embeddings.
   # Target rollout engine might have different implementation and have materialized lm_head.
