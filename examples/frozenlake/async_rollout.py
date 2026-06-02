@@ -243,7 +243,7 @@ def unbatch_inputs(batched_dataset):
 async def main():
   """Runs the rollout orchestrator."""
   BATCH_SIZE = 8
-  NUM_BATCHES = 16
+  NUM_BATCHES = 10
   MAX_PROMPT_LENGTH = 2048
   train_ds, _ = create_datasets()
   train_ds, _ = data_lib.post_init_dataset(
@@ -286,6 +286,10 @@ async def main():
 
   # Yield control to allow producer initialization
   await asyncio.sleep(0)
+
+  all_rollout_logps = []
+  all_trainer_logps = []
+  all_completion_masks = []
 
   try:
     async for batch in orchestrator.yield_batches(batch_size=BATCH_SIZE):
@@ -372,6 +376,10 @@ async def main():
       print("Trajectory Conversation:")
       pprint(first_item.traj.get("conversation_text"), width=120)
 
+      all_rollout_logps.append(np.array(rollout_per_token_logps))
+      all_trainer_logps.append(np.array(trainer_per_token_logps))
+      all_completion_masks.append(np.array(completion_mask_arr))
+
       rp_flat = rp.reshape(-1)
       tp_flat = tp.reshape(-1)
       mf = mask_f.reshape(-1)
@@ -451,6 +459,55 @@ async def main():
         print("=" * 151 + "\n")
       else:
         print("No active (assistant) tokens in the first trajectory of the batch.\n")
+
+    # After the loop completes, compute global stats over all accumulated batches
+    if all_rollout_logps:
+      print("\n" + "X" * 50 + " GLOBAL SAMPLER-VS-TRAINER ANALYSIS (ALL BATCHES) " + "X" * 50)
+      global_rp_logps = np.concatenate(all_rollout_logps, axis=0)
+      global_tp_logps = np.concatenate(all_trainer_logps, axis=0)
+      global_masks = np.concatenate(all_completion_masks, axis=0)
+
+      global_mask = global_masks.astype(bool)
+      global_mask_f = global_mask.astype(np.float32)
+      global_mask_sum = np.maximum(global_mask_f.sum(), 1.0)
+
+      global_diff = np.abs(global_rp_logps - global_tp_logps)
+      global_diff_mean = float((global_diff * global_mask_f).sum() / global_mask_sum)
+      global_diff_max = float(np.where(global_mask, global_diff, 0.0).max())
+
+      global_rp = np.exp(global_rp_logps)
+      global_tp = np.exp(global_tp_logps)
+      global_prob_diff = np.abs(global_rp - global_tp)
+      global_prob_diff_mean = float((global_prob_diff * global_mask_f).sum() / global_mask_sum)
+      global_prob_diff_max = float(np.where(global_mask, global_prob_diff, 0.0).max())
+
+      # Global Pearson correlation computation
+      global_rp_flat = global_rp.flatten()
+      global_tp_flat = global_tp.flatten()
+      global_mf = global_mask_f.flatten()
+
+      g_rp_mean = (global_rp_flat * global_mf).sum() / global_mask_sum
+      g_tp_mean = (global_tp_flat * global_mf).sum() / global_mask_sum
+
+      g_rp_d = (global_rp_flat - g_rp_mean) * global_mf
+      g_tp_d = (global_tp_flat - g_tp_mean) * global_mf
+
+      global_cov = (g_rp_d * g_tp_d).sum() / global_mask_sum
+      global_rp_var = (g_rp_d * g_rp_d).sum() / global_mask_sum
+      global_tp_var = (g_tp_d * g_tp_d).sum() / global_mask_sum
+      global_pearson = float(global_cov / np.sqrt(np.maximum(global_rp_var * global_tp_var, 1e-12)))
+
+      print(
+          f"GLOBAL COMPARISON SUMMARY:\n"
+          f"  Total Sequences Analyzed: {global_rp_logps.shape[0]}\n"
+          f"  Total Unmasked Tokens:    {int(global_mask_sum)}\n"
+          f"  Global logp_diff_mean:    {global_diff_mean:.6f}\n"
+          f"  Global logp_diff_max:     {global_diff_max:.6f}\n"
+          f"  Global prob_diff_mean:    {global_prob_diff_mean:.6f}\n"
+          f"  Global prob_diff_max:     {global_prob_diff_max:.6f}\n"
+          f"  Global Pearson Correlation: {global_pearson:.6f}"
+      )
+      print("X" * 149 + "\n")
 
   finally:
     await producer_task
