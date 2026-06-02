@@ -600,6 +600,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         rollout_per_token_logps is not None
         and trainer_per_token_logps is not None
     ):
+      # Temporary side-by-side token logprob print for the first item in the batch
+      print("=== TEMPORARY SAMPLER-VS-TRAINER DEBUG PRINT ===")
+      batch_idx = 0
+      attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
+      print(f"first batch of attn_completion_mask: {attn_completion_mask[batch_idx]}")
+      print(f"completion ids shape: {completion_ids.shape}")
+      print(f"first completion_ids length: {completion_ids.shape[1]}")
+      for t_idx in range(completion_ids.shape[1]):
+        if attn_completion_mask[batch_idx][t_idx] > 0:
+          tok_id = int(completion_ids[batch_idx][t_idx])
+          tok_str = self.rl_cluster.tokenizer.decode([tok_id])
+          s_logp = rollout_per_token_logps[batch_idx][t_idx]
+          t_logp = trainer_per_token_logps[batch_idx][t_idx]
+          print(f"t={t_idx:03d} | Token: {tok_str!r:<15} | Sampler Logp: {s_logp:.4f} | Trainer Logp: {t_logp:.4f} | Diff: {t_logp - s_logp:.4f}")
+        else:
+          print("Completion mask 0????", flush=True)
+      print("=================================================", flush=True)
+      
       # ``completion_mask`` is the assistant-vs-env mask built upstream
       # (1 for assistant-generated tokens, 0 for env-injected tokens), and
       # already correctly scopes the comparison to model-emitted positions.
