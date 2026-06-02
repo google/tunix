@@ -310,7 +310,8 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
       strip_past_thinking: bool = True,
   ):
     super().__init__(tokenizer, enable_thinking=enable_thinking)
-    self._strip_past_thinking = strip_past_thinking
+    # no strip with disable thinking lowers the  difference between initial rollout and trainer logps from 0.4  to 0.3.
+    self._strip_past_thinking = strip_past_thinking and enable_thinking
     # Also sanitize the base <turn|> token (without trailing newline) to guard
     # against model-generated control tokens trailing in message contents.
     self._tokens_to_sanitize.add("<turn|>")
@@ -393,6 +394,8 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if self._strip_past_thinking:
       content = self._strip_thinking(content)
     cleaned_content = content.strip()
+    print(f"Original assistant content: '{content}'")  # Debug print to verify original content
+    print(f"Cleaned assistant content: '{cleaned_content}'")  # Debug print to verify cleaning
     if cleaned_content.endswith("<turn|>"):
       return "<|turn>model\n" + cleaned_content + "\n"
     return "<|turn>model\n" + cleaned_content + self.tokens.eot_token

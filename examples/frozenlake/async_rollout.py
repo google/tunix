@@ -42,18 +42,26 @@ TEMPERATURE = 0.7
 TOP_P = 1.0
 TOP_K = None
 
-MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+# MODEL_VERSION = "google/gemma-4-26B-A4B-it"
+MODEL_VERSION = "google/gemma-4-e2b-it"
 
 mesh = jax.sharding.Mesh(
     np.asarray(jax.local_devices()).reshape(1, 4), ("fsdp", "tp")
 )
 
-config = model_lib.ModelConfig.gemma4_26b_a4b()
+# config = model_lib.ModelConfig.gemma4_26b_a4b()
+config = model_lib.ModelConfig.gemma4_e2b()
+
+config.dtype = jnp.bfloat16
+config.param_dtype = jnp.bfloat16
+config.use_flash_attention = True
+config.flash_attention_block_size = 256
 
 from huggingface_hub import snapshot_download
 
 # MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/6e6f6edea8c52db2094dca3086e4b963a0034dfc"
+# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/6e6f6edea8c52db2094dca3086e4b963a0034dfc"
+MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
 print(f"{MODEL_PATH=}")
 gemma4 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh)
 
@@ -123,7 +131,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 
-CHAT_PARSER = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
+CHAT_PARSER = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=True)
 
 # Constants for tools
 TOOL_AGENT_CLS = tool_agent.ToolAgent
@@ -300,7 +308,7 @@ async def main():
             eos_id=eos_value,
             micro_batch_size=rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
             completion_mask=attn_completion_mask,
-            temperature=1.0,
+            temperature=TEMPERATURE,
         )
 
         mask = completion_mask_arr.astype(jnp.bool_)
@@ -332,6 +340,66 @@ async def main():
             f"sampler-trainer comparison: logp_diff_mean={diff_mean:.5f}, logp_diff_max={diff_max:.5f}, "
             f"prob_diff_mean={prob_diff_mean:.5f}, prob_diff_max={prob_diff_max:.5f}, pearson={pearson:.5f}"
         )
+        
+        print("\n" + "=" * 60 + " Token Alignment Debug Info " + "=" * 60)
+        print(f"Prompt Tokens Length: {len(prompt_tokens)}")
+        print(f"Completion Tokens Length: {len(completion_tokens)}")
+        print(f"Completion Mask Length: {len(completion_mask)}")
+        if old_logprobs is not None:
+          print(f"Old Logprobs Length: {len(old_logprobs)}")
+
+        active_indices = [i for i, m in enumerate(completion_mask) if m > 0]
+        print(f"Total Active (Assistant) Tokens in Trajectory: {len(active_indices)}")
+        print("Sample Active Tokens (Index, TokenID, Decoded, Rollout Logp, Trainer Logp, Diff):")
+
+        idx_to_print = active_indices[:20] + active_indices[-5:] if len(active_indices) > 25 else active_indices
+
+        rp_np = np.array(rollout_per_token_logps[0])
+        tp_np = np.array(trainer_per_token_logps[0])
+
+        for idx in idx_to_print:
+          tok_id = completion_tokens[idx]
+          try:
+            decoded_tok = repr(tokenizer.decode([tok_id]))
+          except Exception:
+            decoded_tok = "<unknown>"
+          r_logp = rp_np[idx]
+          t_logp = tp_np[idx]
+          diff_val = abs(r_logp - t_logp)
+          print(f"  Pos {idx:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {diff_val:8.4f}")
+        print("=" * 148)
+
+        print("\n" + "=" * 60 + " Deep Token & Logit Debug Info " + "=" * 60)
+        p_toks = prompt_tokens[-20:] if len(prompt_tokens) > 20 else prompt_tokens
+        c_toks = completion_tokens[:20] if len(completion_tokens) > 20 else completion_tokens
+        print("Last 20 Prompt Tokens (ID -> Decoded):")
+        for pt in p_toks:
+          print(f"  {pt:6d} -> {repr(tokenizer.decode([pt]))}")
+        print("First 20 Completion Tokens (ID -> Decoded):")
+        for ct in c_toks:
+          print(f"  {ct:6d} -> {repr(tokenizer.decode([ct]))}")
+
+
+        rp_active = rp_np[active_indices]
+        tp_active = tp_np[active_indices]
+        print(f"Rollout Active Logps stats: min={rp_active.min():.4f}, max={rp_active.max():.4f}, mean={rp_active.mean():.4f}")
+        print(f"Trainer Active Logps stats: min={tp_active.min():.4f}, max={tp_active.max():.4f}, mean={tp_active.mean():.4f}")
+
+        print("\nTop 20 Largest Logprob Discrepancies:")
+        diff_active = np.abs(rp_active - tp_active)
+        top_diff_idx = np.argsort(diff_active)[::-1][:20]
+        for rank, idx_in_active in enumerate(top_diff_idx):
+          orig_pos = active_indices[idx_in_active]
+          tok_id = completion_tokens[orig_pos]
+          try:
+            decoded_tok = repr(tokenizer.decode([tok_id]))
+          except Exception:
+            decoded_tok = "<unknown>"
+          r_logp = rp_active[idx_in_active]
+          t_logp = tp_active[idx_in_active]
+          d_val = diff_active[idx_in_active]
+          print(f"  Rank {rank+1:2d} | Pos {orig_pos:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {d_val:8.4f}")
+        print("=" * 151 + "\n")
 
   finally:
     await producer_task
