@@ -161,6 +161,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self.to_hf_key_mappings = dict(config.mapping_config.to_hf_mappings or {})
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
+    # vLLM initializes KV cache during engine construction. Track whether the
+    # cache is currently live so colocated rollout windows do not accidentally
+    # reinitialize on top of an already-allocated cache.
+    self._kv_cache_allocated = True
 
     # TODO(b/434959964) It's not taking effect until vLLM Jax backend support
     # lora.
@@ -192,6 +196,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.llm.collective_rpc("delete_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
+    self._kv_cache_allocated = False
 
   def _reinitialize_kv_cache(self) -> None:
     """Reinitializes the vLLM KV cache on the active engine instance."""
@@ -199,6 +204,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    self._kv_cache_allocated = True
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
@@ -272,7 +278,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       else:
         self._model_runner.state_leaves = self._model_runner.state
 
+    logging.info(
+      "VLLMSampler.update_params: weight sync complete, reinitializing kv-cache"
+    )
     self._reinitialize_kv_cache()
+    logging.info(
+      "VLLMSampler.update_params: kv-cache reinitialized after weight sync"
+    )
 
   def maybe_regain_resource(
       self,
@@ -293,8 +305,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     """
     del restore_weights
     if not restore_kv_cache:
+      logging.info(
+          "VLLMSampler.maybe_regain_resource: skipping kv-cache restore"
+      )
       return
+    if self._kv_cache_allocated:
+      logging.info(
+          "VLLMSampler.maybe_regain_resource: kv-cache already live; skipping reinitialize"
+      )
+      return
+    logging.info(
+        "VLLMSampler.maybe_regain_resource: reinitializing kv-cache for rollout window"
+    )
     self._reinitialize_kv_cache()
+    logging.info(
+        "VLLMSampler.maybe_regain_resource: kv-cache reinitialized for rollout window"
+    )
 
   def maybe_release_resources(
       self,
@@ -311,8 +337,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     """
     del offload_weights
     if not offload_kv_cache:
+      logging.info(
+          "VLLMSampler.maybe_release_resources: skipping kv-cache delete"
+      )
       return
+    if not self._kv_cache_allocated:
+      logging.info(
+          "VLLMSampler.maybe_release_resources: kv-cache already absent; skipping delete"
+      )
+      return
+    logging.info(
+        "VLLMSampler.maybe_release_resources: deleting kv-cache after rollout window"
+    )
     self._delete_kv_cache()
+    logging.info(
+        "VLLMSampler.maybe_release_resources: kv-cache delete finished"
+    )
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading

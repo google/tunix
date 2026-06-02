@@ -241,6 +241,43 @@ class RolloutOrchestratorTest(parameterized.TestCase):
         pass
       await producer_task
 
+  def test_orchestrator_can_be_reused_after_cleanup(self):
+    asyncio.run(self._test_orchestrator_can_be_reused_after_cleanup())
+
+  async def _test_orchestrator_can_be_reused_after_cleanup(self):
+    orchestrator = rollout_orchestrator.RolloutOrchestrator(
+        max_concurrency=2,
+        rollout_sync_lock=utils.RolloutSyncLock(),
+    )
+    self.mock_collect.return_value = {'trajectory': ['mock_traj']}
+
+    async def run_once(offset):
+      def pair_generator():
+        for i in range(2):
+          yield MockAgent(), MockEnv(
+              env_id=offset + i, group_id=0, pair_index=offset + i
+          )
+
+      producer_task = asyncio.create_task(
+          orchestrator.run_producers_from_stream(
+              pairs_stream=pair_generator(),
+              group_size=1,
+              group_key_fn=lambda i, *_: i,
+          )
+      )
+      await asyncio.sleep(0)
+      items = []
+      async for batch in orchestrator.yield_batches(batch_size=2):
+        items.extend(batch)
+      await producer_task
+      return items
+
+    first_items = await run_once(0)
+    second_items = await run_once(10)
+
+    self.assertEqual([item.pair_index for item in first_items], [0, 1])
+    self.assertEqual([item.pair_index for item in second_items], [10, 11])
+
 
 if __name__ == '__main__':
   absltest.main()

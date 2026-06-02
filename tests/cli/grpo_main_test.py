@@ -210,7 +210,9 @@ class DispatchTest(absltest.TestCase):
 
   def test_create_cluster_config_propagates_top_level_fields(self):
     pipeline = _make_pipeline(
-      "\ncolocate_mode: true\noffload_config:\n"
+      "\nagentic_grpo_config: {}\n"
+        "offload_to_cpu: true\n"
+        "colocate_mode: true\noffload_config:\n"
         "  offload_actor_optimizer_states: false\n"
         "  offload_rollout_kv_cache: false\n"
     )
@@ -219,7 +221,7 @@ class DispatchTest(absltest.TestCase):
         pipeline,
         'create_rl_training_config',
         return_value=mock.sentinel.training_config,
-    ):
+    ), mock.patch.object(grpo_main.logging, 'warning') as mock_warning:
       cluster_config = pipeline.create_cluster_config(
           role_to_mesh={}, rollout_config=mock.sentinel.rollout_config
       )
@@ -230,6 +232,21 @@ class DispatchTest(absltest.TestCase):
     self.assertFalse(cluster_config.offload_config.offload_rollout_kv_cache)
     self.assertIs(cluster_config.rollout_config, mock.sentinel.rollout_config)
     self.assertIs(cluster_config.training_config, mock.sentinel.training_config)
+    mock_warning.assert_called_once()
+
+  def test_create_cluster_config_rejects_offload_config_outside_agentic_mode(self):
+    pipeline = _make_pipeline(
+      "\noffload_config:\n"
+        "  offload_actor_optimizer_states: false\n"
+    )
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "offload_config is only supported when agentic_grpo_config is present",
+    ):
+      pipeline.create_cluster_config(
+          role_to_mesh={}, rollout_config=mock.sentinel.rollout_config
+      )
 
   def test_agentic_data_module_receives_data_config_for_raw_dataset(self):
     extra = """

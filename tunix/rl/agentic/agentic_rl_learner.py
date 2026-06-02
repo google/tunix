@@ -487,6 +487,48 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         rollout_sync_lock=self._rollout_sync_lock,
     )
 
+  async def _pairs_stream_generator(
+      self,
+      prompt_iterator: Iterable[TrainingInputT] | AsyncIterator[TrainingInputT],
+      num_generations: int = 1,
+  ):
+    """Yields agent-environment pairs with monotonically increasing group ids."""
+    is_async_iterator = hasattr(prompt_iterator, "__aiter__")
+
+    # TODO (tsbao): fix the group id when we can resume from mid global step
+    # with mini-batch.
+    group_id = self.rl_cluster.global_steps * self._full_batch_size
+    if is_async_iterator:
+      async for single_example in prompt_iterator:
+        agent_env_pairs = await asyncio.gather(*[
+            self.loop.run_in_executor(
+                None,
+                self._create_agent_env_pair,
+                copy.deepcopy(single_example),
+                group_id,
+                pair_index,
+            )
+            for pair_index in range(num_generations)
+        ])
+        for agent, env in agent_env_pairs:
+          yield agent, env
+        group_id += 1
+    else:
+      for single_example in prompt_iterator:
+        agent_env_pairs = await asyncio.gather(*[
+            self.loop.run_in_executor(
+                None,
+                self._create_agent_env_pair,
+                copy.deepcopy(single_example),
+                group_id,
+                pair_index,
+            )
+            for pair_index in range(num_generations)
+        ])
+        for agent, env in agent_env_pairs:
+          yield agent, env
+        group_id += 1
+
   async def _orchestrator_producer(
       self,
       orchestrator: rollout_orchestrator.RolloutOrchestrator,
@@ -505,50 +547,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     Yields:
       A list of trajectories for a group.
     """
-    is_async_iterator = hasattr(prompt_iterator, "__aiter__")
-
-    async def pairs_stream_generator():
-      """Yield (agent, env) pairs with unique group_id per original prompt."""
-      # TODO (tsbao): fix the group id when we can resume from mid global step
-      # with mini-batch.
-      group_id = self.rl_cluster.global_steps * self._full_batch_size
-      if is_async_iterator:
-        async for single_example in prompt_iterator:
-          # Create agent-env pairs in parallel for a group to handle potential
-          # cold start latency on env creation.
-          agent_env_pairs = await asyncio.gather(*[
-              self.loop.run_in_executor(
-                  None,
-                  self._create_agent_env_pair,
-                  copy.deepcopy(single_example),
-                  group_id,
-                  pair_index,
-              )
-              for pair_index in range(num_generations)
-          ])
-          for agent, env in agent_env_pairs:
-            yield agent, env
-          group_id += 1
-      else:
-        for single_example in prompt_iterator:
-          agent_env_pairs = await asyncio.gather(*[
-              self.loop.run_in_executor(
-                  None,
-                  self._create_agent_env_pair,
-                  copy.deepcopy(single_example),
-                  group_id,
-                  pair_index,
-              )
-              for pair_index in range(num_generations)
-          ])
-          for agent, env in agent_env_pairs:
-            yield agent, env
-          group_id += 1
-
     # Start producers in the background.
     producer_task = asyncio.create_task(
         orchestrator.run_producers_from_stream(
-            pairs_stream=pairs_stream_generator(),
+            pairs_stream=self._pairs_stream_generator(
+                prompt_iterator=prompt_iterator,
+                num_generations=num_generations,
+            ),
             group_size=self.algo_config.num_generations,
             group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
             collect_mode=collect_mode,
@@ -685,11 +690,94 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           train_data_queue.put(train_example)
 
     try:
+      if colocate_mode:
+        rollout_prompt_queue = asyncio.Queue()
+
+        async def _rollout_prompt_iterator():
+          while True:
+            prompt = await rollout_prompt_queue.get()
+            if prompt is None:
+              return
+            yield prompt
+
+        producer_task = asyncio.create_task(
+            orchestrator.run_producers_from_stream(
+                pairs_stream=self._pairs_stream_generator(
+                    prompt_iterator=_rollout_prompt_iterator(),
+                    num_generations=self.algo_config.num_generations,
+                ),
+                group_size=self.algo_config.num_generations,
+                group_key_fn=lambda i, env, traj: env.extra_kwargs["group_id"],
+                collect_mode="Token",
+            )
+        )
+
+        await asyncio.sleep(0)
+        async_generator = orchestrator.yield_batches(
+            batch_size=self.algo_config.num_generations
+        )
+        try:
+          async with contextlib.aclosing(async_generator) as stream:
+            async for full_batch in async_queue_iter:
+              expected_groups = len(next(iter(full_batch.values())))
+              rollout_window_open = False
+              trainer_window_closed = False
+              grouped_batches = []
+              try:
+                self.rl_cluster.exit_trainer_window()
+                trainer_window_closed = True
+                self.rl_cluster.enter_colocate_rollout_window()
+                rollout_window_open = True
+
+                for prompt in self._create_micro_batch_iterator(
+                    iter([full_batch]), 1
+                ):
+                  await rollout_prompt_queue.put(prompt)
+
+                while len(grouped_batches) < expected_groups:
+                  try:
+                    batch = await anext(stream)
+                  except StopAsyncIteration as e:
+                    raise RuntimeError(
+                        "Expected %d rollout groups for a colocated global batch, "
+                        "but received %d."
+                        % (expected_groups, len(grouped_batches))
+                    ) from e
+                  if batch:
+                    grouped_batches.append(batch)
+
+                self.rl_cluster.exit_colocate_rollout_window()
+                rollout_window_open = False
+                self.rl_cluster.enter_trainer_window()
+                trainer_window_closed = False
+                for batch in grouped_batches:
+                  _publish_batch(batch)
+
+              except Exception as e:
+                if rollout_window_open:
+                  with contextlib.suppress(Exception):
+                    self.rl_cluster.exit_colocate_rollout_window()
+                if trainer_window_closed:
+                  with contextlib.suppress(Exception):
+                    self.rl_cluster.enter_trainer_window()
+                if not isinstance(e, RuntimeError):
+                  logging.exception(
+                      "Exception in _producer while processing batch: %s", e
+                  )
+                raise
+        finally:
+          await rollout_prompt_queue.put(None)
+          await producer_task
+        return
+
       async for prompt_iterator, expected_groups in _iterate_rollout_segments():
         rollout_window_open = False
+        trainer_window_closed = False
         grouped_batches = []
         try:
           if colocate_mode:
+            self.rl_cluster.exit_trainer_window()
+            trainer_window_closed = True
             self.rl_cluster.enter_colocate_rollout_window()
             rollout_window_open = True
 
@@ -712,6 +800,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               )
             self.rl_cluster.exit_colocate_rollout_window()
             rollout_window_open = False
+            self.rl_cluster.enter_trainer_window()
+            trainer_window_closed = False
             for batch in grouped_batches:
               _publish_batch(batch)
 
@@ -719,6 +809,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           if rollout_window_open:
             with contextlib.suppress(Exception):
               self.rl_cluster.exit_colocate_rollout_window()
+          if trainer_window_closed:
+            with contextlib.suppress(Exception):
+              self.rl_cluster.enter_trainer_window()
           if not isinstance(e, RuntimeError):
             logging.exception(
                 "Exception in _producer while processing batch: %s", e

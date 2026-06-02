@@ -37,6 +37,32 @@ os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
 class VllmSamplerTest(absltest.TestCase):
 
+  def test_maybe_regain_resource_skips_reinitialize_when_kv_cache_live(self):
+      sampler = vllm_sampler.VllmSampler.__new__(vllm_sampler.VllmSampler)
+      sampler._kv_cache_allocated = True
+
+      with mock.patch.object(sampler, "_reinitialize_kv_cache") as reinit:
+          sampler.maybe_regain_resource(restore_kv_cache=True)
+
+      reinit.assert_not_called()
+
+  def test_maybe_regain_resource_reinitializes_after_release(self):
+      sampler = vllm_sampler.VllmSampler.__new__(vllm_sampler.VllmSampler)
+      sampler._kv_cache_allocated = True
+
+      with mock.patch.object(sampler, "_delete_kv_cache") as delete_cache:
+          delete_cache.side_effect = lambda: setattr(sampler, "_kv_cache_allocated", False)
+          sampler.maybe_release_resources(offload_kv_cache=True)
+
+      self.assertFalse(sampler._kv_cache_allocated)
+
+      with mock.patch.object(sampler, "_reinitialize_kv_cache") as reinit:
+          reinit.side_effect = lambda: setattr(sampler, "_kv_cache_allocated", True)
+          sampler.maybe_regain_resource(restore_kv_cache=True)
+
+      reinit.assert_called_once_with()
+      self.assertTrue(sampler._kv_cache_allocated)
+
   @classmethod
   def setUpClass(cls) -> None:
     super().setUpClass()

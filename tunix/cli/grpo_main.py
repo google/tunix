@@ -191,10 +191,11 @@ class GrpoPipeline(config.HyperParameters):
 
   def _create_role_to_mesh(self):
     role_to_owner = self._resolve_mesh_owners()
-    if self.config.get("colocate_mode", False):
-      return self._create_role_to_mesh_colocate_mode(role_to_owner)
-
     devices = list(jax.devices())
+    colocate_mode = self.config.get("colocate_mode", False)
+    if colocate_mode:
+      self._validate_colocate_devices(role_to_owner, devices)
+
     owner_order = []
     for role in self._ROLE_TO_MODEL_KEY:
       if role not in role_to_owner:
@@ -221,7 +222,7 @@ class GrpoPipeline(config.HyperParameters):
       owner_to_mesh[owner] = self.create_mesh(
           model_key, devices=assigned_devices
       )
-      device_offset = next_offset
+      device_offset = 0 if colocate_mode else next_offset
 
     if device_offset < len(devices):
       logging.warning(
@@ -239,24 +240,12 @@ class GrpoPipeline(config.HyperParameters):
     )
     return {role: owner_to_mesh[owner] for role, owner in role_to_owner.items()}
 
-  def _create_role_to_mesh_colocate_mode(
-      self,
-      role_to_owner: dict[rl_cluster_lib.Role, rl_cluster_lib.Role],
-  ):
+  def _validate_colocate_devices(
+      self, role_to_owner, devices
+  ) -> int:
     if not role_to_owner:
-      return {}
+      return 0
 
-    devices = list(jax.devices())
-    actor_model_key = self._ROLE_TO_MODEL_KEY[rl_cluster_lib.Role.ACTOR]
-    actor_axis_shapes, _ = self._parse_mesh_config(actor_model_key)
-    required_devices = int(np.prod(actor_axis_shapes))
-    if required_devices > len(devices):
-      raise ValueError(
-          f"Mesh allocation requires {required_devices} devices for"
-          f" {actor_model_key}, but only {len(devices)} are available."
-      )
-
-    shared_devices = devices[:required_devices]
     owner_order = []
     for role in self._ROLE_TO_MODEL_KEY:
       if role not in role_to_owner:
@@ -265,44 +254,29 @@ class GrpoPipeline(config.HyperParameters):
       if owner not in owner_order:
         owner_order.append(owner)
 
-    owner_to_mesh = {}
+    required_devices = None
+    required_model_key = None
     for owner in owner_order:
       model_key = self._ROLE_TO_MODEL_KEY[owner]
-      mesh_config = self.config.get(model_key, {}).get("mesh")
-      if mesh_config:
-        axis_shapes, _ = self._parse_mesh_config(model_key)
-      else:
-        axis_shapes = actor_axis_shapes
+      axis_shapes, _ = self._parse_mesh_config(model_key)
       owner_required_devices = int(np.prod(axis_shapes))
+      if owner_required_devices > len(devices):
+        raise ValueError(
+            f"Mesh allocation requires {owner_required_devices} devices for"
+            f" {model_key}, but only {len(devices)} are available."
+        )
+      if required_devices is None:
+        required_devices = owner_required_devices
+        required_model_key = model_key
+        continue
       if owner_required_devices != required_devices:
         raise ValueError(
             "colocate_mode requires all active role meshes to use the same "
             f"number of devices, but {model_key} requires "
-            f"{owner_required_devices} while actor_model_config requires "
+            f"{owner_required_devices} while {required_model_key} requires "
             f"{required_devices}."
         )
-      if mesh_config:
-        owner_to_mesh[owner] = self.create_mesh(model_key, devices=shared_devices)
-      else:
-        owner_to_mesh[owner] = self.create_mesh(
-            actor_model_key, devices=shared_devices
-        )
-
-    logging.info(
-        "Colocate mesh device allocation: %s",
-        {
-            self._ROLE_TO_MODEL_KEY[owner]: len(shared_devices)
-            for owner in owner_order
-        },
-    )
-    if required_devices < len(devices):
-      logging.warning(
-          "Mesh allocation used %d of %d devices; %d devices remain unused.",
-          required_devices,
-          len(devices),
-          len(devices) - required_devices,
-      )
-    return {role: owner_to_mesh[owner] for role, owner in role_to_owner.items()}
+    return required_devices or 0
 
   def create_role_to_mesh(self):
     """Build role→mesh mapping.
@@ -473,15 +447,29 @@ class GrpoPipeline(config.HyperParameters):
   ):
     if rollout_config is None:
       rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
-    offload_config = rl_cluster_lib.OffloadConfig(
-      **self._config_mapping("offload_config")
-    )
+    offload_config_mapping = self._config_mapping("offload_config")
+    has_agentic_grpo_config = "agentic_grpo_config" in self.config
+    if offload_config_mapping and not has_agentic_grpo_config:
+      raise ValueError(
+          "offload_config is only supported when agentic_grpo_config is "
+          "present."
+      )
+    if offload_config_mapping and self._config_bool("offload_to_cpu"):
+      logging.warning(
+          "Ignoring offload_to_cpu because offload_config provides explicit "
+          "windowed offload controls when agentic_grpo_config is present."
+      )
+    offload_config = rl_cluster_lib.OffloadConfig(**offload_config_mapping)
     return rl_cluster_lib.ClusterConfig(
         role_to_mesh=role_to_mesh,
         rollout_engine=self._config_string("rollout_engine"),
         colocate_mode=self._config_bool("colocate_mode"),
         offload_config=offload_config,
-        offload_to_cpu=self._config_bool("offload_to_cpu"),
+        offload_to_cpu=(
+            False
+            if offload_config_mapping
+            else self._config_bool("offload_to_cpu")
+        ),
         training_config=self.create_rl_training_config(),
         rollout_config=rollout_config,
     )

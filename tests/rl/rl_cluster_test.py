@@ -177,7 +177,7 @@ class RlClusterTest(parameterized.TestCase):
           cluster_config=cluster_config,
       )
 
-  def test_colocate_window_keeps_shared_actor_model_and_offloads_reference(self):
+  def test_window_transitions_keep_shared_actor_model_and_offload_reference(self):
     mesh = Mesh(np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp'))
     cluster_config = rl_cluster_lib.ClusterConfig(
         role_to_mesh={
@@ -220,14 +220,15 @@ class RlClusterTest(parameterized.TestCase):
         rl_cluster.rollout, 'maybe_release_resources'
     ) as release_rollout, mock.patch.object(
         rl_cluster, '_put_model_on_memory_kind'
-    ) as put_model:
-      rl_cluster.enter_colocate_rollout_window()
+    ) as put_model, mock.patch.object(
+        rl_cluster, '_is_state_on_device', side_effect=[True, False]
+    ):
+      rl_cluster.exit_trainer_window()
       offload_actor.assert_called_once_with(
           include_model=False, include_optimizer_state=True
       )
-      put_model.assert_called_once_with(
-          rl_cluster.inference_worker.get_model('reference'), 'pinned_host'
-      )
+
+      rl_cluster.enter_colocate_rollout_window()
       regain_rollout.assert_called_once_with(
           restore_weights=False, restore_kv_cache=True
       )
@@ -235,6 +236,22 @@ class RlClusterTest(parameterized.TestCase):
       rl_cluster.exit_colocate_rollout_window()
       release_rollout.assert_called_once_with(
           offload_weights=False, offload_kv_cache=True
+      )
+
+      rl_cluster.exit_ref_window()
+      rl_cluster.enter_ref_window()
+      self.assertEqual(
+          put_model.call_args_list,
+          [
+              mock.call(
+                  rl_cluster.inference_worker.get_model('reference'),
+                  'pinned_host',
+              ),
+              mock.call(
+                  rl_cluster.inference_worker.get_model('reference'),
+                  rl_cluster._default_memory_kind,
+              ),
+          ],
       )
 
   @mock.patch.object(rl_cluster_lib.sft_utils, 'is_lora_enabled', autospec=True)
@@ -275,12 +292,14 @@ class RlClusterTest(parameterized.TestCase):
     )
 
     with mock.patch.object(rl_cluster.actor_trainer, 'maybe_offload_runtime_to_cpu') as offload_actor, mock.patch.object(
-        rl_cluster.rollout, 'maybe_regain_resource'
-    ), mock.patch.object(rl_cluster, '_put_model_on_memory_kind') as put_model:
-      rl_cluster.enter_colocate_rollout_window()
+        rl_cluster, '_put_model_on_memory_kind'
+    ) as put_model:
+      rl_cluster.exit_trainer_window()
       offload_actor.assert_called_once_with(
           include_model=False, include_optimizer_state=True
       )
+      self.assertFalse(rl_cluster.cluster_config.offload_config.offload_ref_weights)
+      rl_cluster.exit_ref_window()
       put_model.assert_not_called()
 
   def test_colocate_window_honors_fine_grained_offload_overrides(self):
@@ -295,6 +314,7 @@ class RlClusterTest(parameterized.TestCase):
         colocate_mode=True,
         offload_to_cpu=False,
         offload_config=rl_cluster_lib.OffloadConfig(
+            offload_ref_weights=False,
             offload_actor_optimizer_states=False,
             offload_rollout_kv_cache=False,
             offload_rollout_weights=True,
@@ -327,11 +347,15 @@ class RlClusterTest(parameterized.TestCase):
         rl_cluster.rollout, 'maybe_regain_resource'
     ) as regain_rollout, mock.patch.object(
         rl_cluster.rollout, 'maybe_release_resources'
-    ) as release_rollout:
-      rl_cluster.enter_colocate_rollout_window()
+    ) as release_rollout, mock.patch.object(
+        rl_cluster, '_put_model_on_memory_kind'
+    ) as put_model:
+      rl_cluster.exit_trainer_window()
       offload_actor.assert_called_once_with(
           include_model=False, include_optimizer_state=False
       )
+
+      rl_cluster.enter_colocate_rollout_window()
       regain_rollout.assert_called_once_with(
           restore_weights=True, restore_kv_cache=False
       )
@@ -340,6 +364,213 @@ class RlClusterTest(parameterized.TestCase):
       release_rollout.assert_called_once_with(
           offload_weights=True, offload_kv_cache=False
       )
+
+      rl_cluster.exit_ref_window()
+      put_model.assert_not_called()
+
+  def test_exit_and_enter_trainer_window_move_optimizer_runtime_memory_kind(self):
+    mesh = Mesh(np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        colocate_mode=True,
+        offload_to_cpu=False,
+        offload_config=rl_cluster_lib.OffloadConfig(
+            offload_actor_weights=False,
+            offload_actor_optimizer_states=True,
+        ),
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+        ),
+        reference=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(1)
+        ),
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    def _optimizer_memory_kinds():
+      return {
+          leaf.sharding.memory_kind
+          for leaf in jax.tree_util.tree_leaves(
+              nnx.state(rl_cluster.actor_trainer.optimizer, nnx.optimizer.OptState)
+          )
+          if hasattr(leaf, 'sharding')
+      }
+
+    def _model_memory_kinds():
+      return {
+          leaf.sharding.memory_kind
+          for leaf in jax.tree_util.tree_leaves(
+              nnx.state(rl_cluster.actor_trainer.model, nnx.Param)
+          )
+          if hasattr(leaf, 'sharding')
+      }
+
+    with mock.patch.object(rl_cluster_lib.sft_utils, 'show_hbm_usage'):
+      self.assertEqual(_optimizer_memory_kinds(), {'device'})
+      self.assertEqual(_model_memory_kinds(), {'device'})
+
+      rl_cluster.exit_trainer_window()
+      self.assertEqual(_optimizer_memory_kinds(), {'pinned_host'})
+      self.assertEqual(_model_memory_kinds(), {'device'})
+
+      rl_cluster.enter_trainer_window()
+      self.assertEqual(_optimizer_memory_kinds(), {'device'})
+      self.assertEqual(_model_memory_kinds(), {'device'})
+
+  def test_exit_trainer_window_offloads_actor_model_when_configured(self):
+    mesh = Mesh(np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vllm',
+        colocate_mode=True,
+        offload_to_cpu=False,
+        offload_config=rl_cluster_lib.OffloadConfig(
+            offload_actor_weights=True,
+            offload_actor_optimizer_states=True,
+            offload_rollout_kv_cache=True,
+            offload_rollout_weights=False,
+        ),
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+        ),
+        reference=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(1)
+        ),
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    def _optimizer_memory_kinds():
+      return {
+          leaf.sharding.memory_kind
+          for leaf in jax.tree_util.tree_leaves(
+              nnx.state(rl_cluster.actor_trainer.optimizer, nnx.optimizer.OptState)
+          )
+          if hasattr(leaf, 'sharding')
+      }
+
+    def _model_memory_kinds():
+      return {
+          leaf.sharding.memory_kind
+          for leaf in jax.tree_util.tree_leaves(
+              nnx.state(rl_cluster.actor_trainer.model, nnx.Param)
+          )
+          if hasattr(leaf, 'sharding')
+      }
+
+    with mock.patch.object(rl_cluster_lib.sft_utils, 'show_hbm_usage'):
+      self.assertEqual(_optimizer_memory_kinds(), {'device'})
+      self.assertEqual(_model_memory_kinds(), {'device'})
+
+      rl_cluster.exit_trainer_window()
+      self.assertEqual(_optimizer_memory_kinds(), {'pinned_host'})
+      self.assertEqual(_model_memory_kinds(), {'pinned_host'})
+
+  @mock.patch.object(rl_cluster_lib.sft_utils, 'is_lora_enabled', autospec=True)
+  def test_shared_lora_reference_forces_ref_offload_config_off(
+          self, mock_is_lora
+  ):
+    mock_is_lora.return_value = True
+    mesh = Mesh(np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp'))
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        colocate_mode=True,
+        offload_to_cpu=False,
+        offload_config=rl_cluster_lib.OffloadConfig(
+            offload_ref_weights=True,
+        ),
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+            rngs=nnx.Rngs(0),
+        ),
+        reference=tc.ToyTransformer(
+            config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+            rngs=nnx.Rngs(1),
+        ),
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
+    self.assertFalse(rl_cluster.cluster_config.offload_config.offload_ref_weights)
+
+  def test_cluster_config_disables_legacy_offload_when_fine_grained_is_set(self):
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={},
+        offload_to_cpu=True,
+        offload_config=rl_cluster_lib.OffloadConfig(
+            offload_actor_weights=True,
+        ),
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+
+    self.assertFalse(cluster_config.offload_to_cpu)
 
   @parameterized.named_parameters(
       dict(
@@ -780,6 +1011,70 @@ class RlClusterTest(parameterized.TestCase):
       self.assertIn('mesh', called_kwargs)
 
   @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  def test_init_vllm_rollout_engine_keeps_actor_on_device_before_bootstrap(self):
+    rollout_config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=10,
+        kv_cache_size=1024,
+        rollout_vllm_model_version='dummy_version',
+    )
+    split_index = self.device_count // 2
+    actor_mesh = Mesh(
+        np.array(jax.devices()[:split_index]).reshape(split_index, 1),
+        ('fsdp', 'tp'),
+    )
+    rollout_mesh = Mesh(
+        np.array(jax.devices()[split_index:]).reshape(1, split_index),
+        ('fsdp', 'tp'),
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: actor_mesh,
+            rl_cluster_lib.Role.REFERENCE: actor_mesh,
+            rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
+        },
+        rollout_engine='vllm',
+        offload_to_cpu=True,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=10,
+            gradient_accumulation_steps=None,
+        ),
+        rollout_config=rollout_config,
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    call_order = []
+
+    # Internal placeholder for vllm rollout worker stub, don't change this line.
+    from tunix.rl.rollout import vllm_rollout
+
+    with mock.patch.object(
+        vllm_rollout, 'VllmRollout', autospec=True
+    ) as mock_vllm_cls, mock.patch.object(
+        rl_cluster_lib.rl_utils,
+        'put_params_on_memory_kind',
+        side_effect=lambda params, memory_kind: (
+            call_order.append(f'offload:{memory_kind}'),
+            params,
+        )[1],
+    ):
+      mock_vllm_cls.side_effect = lambda *args, **kwargs: call_order.append(
+          'rollout_init'
+      ) or mock.DEFAULT
+      rl_cluster_lib.RLCluster(
+          actor=model,
+          tokenizer=vocab,
+          cluster_config=cluster_config,
+      )
+
+      self.assertIn('rollout_init', call_order)
+      self.assertEqual(call_order[0], 'rollout_init')
+
+
+  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
   def test_init_vllm_rollout_engine_missing_version_raises(self):
     rollout_config = base_rollout.RolloutConfig(
         rollout_vllm_model_version=None,
@@ -788,6 +1083,53 @@ class RlClusterTest(parameterized.TestCase):
         ValueError, 'Rollout vllm model version or path is missing!'
     ):
       self._create_test_rl_cluster('vllm', rollout_config)
+
+  def test_get_actor_per_token_logps_materializes_anchor_on_device(self):
+    rl_cluster = self._create_test_rl_cluster(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=4,
+            max_prompt_length=8,
+            kv_cache_size=16,
+        ),
+    )
+    prompt_tokens = np.array([[1, 2]], dtype=np.int32)
+    completion_tokens = np.array([[3, 4]], dtype=np.int32)
+    completion_mask = np.array([[1, 1]], dtype=np.int32)
+    anchor_memory_transitions = []
+
+    with mock.patch.object(
+        rl_cluster_lib.sharding_utils,
+        'shard_input',
+        side_effect=lambda x, *_: x,
+    ), mock.patch.object(
+        rl_cluster_lib.reshard,
+        'reshard_pytree',
+        return_value=nnx.state(rl_cluster.actor_trainer.model),
+    ), mock.patch.object(
+        rl_cluster_lib.common,
+        'compute_per_token_logps',
+        return_value=jnp.ones((1, completion_tokens.shape[1]), dtype=jnp.float32),
+    ), mock.patch.object(
+        rl_cluster_lib.rl_utils,
+        'put_params_on_memory_kind',
+        side_effect=lambda params, memory_kind: (
+            anchor_memory_transitions.append(memory_kind),
+            params,
+        )[1],
+    ):
+      rl_cluster.get_actor_per_token_logps(
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
+          pad_id=0,
+          eos_id=1,
+          completion_mask=completion_mask,
+      )
+
+    self.assertEqual(
+        anchor_memory_transitions,
+        [rl_cluster._default_memory_kind, 'pinned_host'],
+    )
 
   @parameterized.named_parameters(
       dict(

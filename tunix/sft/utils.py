@@ -19,7 +19,7 @@ import contextlib
 import functools
 import gc
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from absl import logging
 from flax import nnx
@@ -88,20 +88,14 @@ def time_measure(context: str = "", suppress_logging: bool = False):
       )
 
 
-def _pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
-  """Returns the HBM usage for each device when using Pathways.
-
-  Args:
-    devices: The devices to get the HBM usage for.
-
-  Returns:
-    A list of tuples, where each tuple contains the HBM usage and limit for a
-    device.
-  """
+def _live_array_usage_by_memory_kind(
+    devices: Any,
+) -> Dict[str, List[Tuple[float, Optional[float]]]]:
+  """Returns deduplicated live-array usage grouped by memory kind."""
   live_arrays = jax.live_arrays()
-  hbm_used = collections.defaultdict(int)
+  usage_by_kind = collections.defaultdict(lambda: collections.defaultdict(int))
   # TODO(lancewang): Find a way to get the accurate hbm limit on Pathways.
-  hbm_limit = None
+  memory_limit = None
   # Track unique buffers to avoid double-counting when multiple Python
   # variables reference the same underlying JAX array (e.g., a = jnp.ones(10);
   # b = a)
@@ -118,6 +112,7 @@ def _pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
     if array.is_deleted():
       continue
 
+    memory_kind = getattr(array.sharding, "memory_kind", "device")
     for buffer in array.addressable_shards:
       # Using id() on the shard data is a good way to get a unique identifier
       # for the underlying buffer. This ensures that even if multiple
@@ -125,8 +120,28 @@ def _pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
       buffer_id = id(buffer.data)
       if buffer_id not in seen_buffers:
         seen_buffers.add(buffer_id)
-        hbm_used[buffer.data.device] += buffer.data.nbytes
-  return [(hbm_used[device], hbm_limit) for device in devices]
+        usage_by_kind[memory_kind][buffer.data.device] += buffer.data.nbytes
+  return {
+      memory_kind: [
+          (device_usage[device], memory_limit) for device in devices
+      ]
+      for memory_kind, device_usage in usage_by_kind.items()
+  }
+
+
+def _pathways_hbm_usage_gb(devices: Any) -> List[Tuple[float, Optional[float]]]:
+  """Returns the HBM usage for each device when using Pathways.
+
+  Args:
+    devices: The devices to get the HBM usage for.
+
+  Returns:
+    A list of tuples, where each tuple contains the HBM usage and limit for a
+    device.
+  """
+  return _live_array_usage_by_memory_kind(devices).get(
+      "device", [(0, None) for _ in devices]
+  )
 
 
 def _jax_hbm_usage_gb(devices: Any) -> List[Tuple[float, float]]:
@@ -160,9 +175,20 @@ def show_hbm_usage(title=""):
   if google_utils.pathways_available():
     logging.info("%s - Using Pathways compatible HBM stats collector", title)
     devices = jax.devices()
-    hbm_stats = _pathways_hbm_usage_gb(devices)
+    usage_by_kind = _live_array_usage_by_memory_kind(devices)
+    hbm_stats = usage_by_kind.get("device", [(0, None) for _ in devices])
     for i, (used, _) in enumerate(hbm_stats):
-      logging.info("Using %s on %s", fmt_size(used), devices[i])
+      if not used:
+        continue
+      logging.info("Device HBM: using %s on %s", fmt_size(used), devices[i])
+
+    pinned_host_stats = usage_by_kind.get(
+        "pinned_host", [(0, None) for _ in devices]
+    )
+    for i, (used, _) in enumerate(pinned_host_stats):
+      if not used:
+        continue
+      logging.info("Pinned host: using %s on %s", fmt_size(used), devices[i])
   else:
     logging.info(
         "%s - Pathways not available. Using default HBM stats collector", title
@@ -171,10 +197,21 @@ def show_hbm_usage(title=""):
     hbm_stats = _jax_hbm_usage_gb(devices)
 
     for i, (used, limit) in enumerate(hbm_stats):
+      if not used:
+        continue
+
       logging.info(
-          "Using %s / %s (%s) on %s",
+          "Device HBM: using %s / %s (%s) on %s",
           fmt_size(used),
           fmt_size(limit),
           used / limit,
           devices[i],
       )
+
+    pinned_host_stats = _live_array_usage_by_memory_kind(devices).get(
+        "pinned_host", [(0, None) for _ in devices]
+    )
+    for i, (used, _) in enumerate(pinned_host_stats):
+      if not used:
+        continue
+      logging.info("Pinned host: using %s on %s", fmt_size(used), devices[i])

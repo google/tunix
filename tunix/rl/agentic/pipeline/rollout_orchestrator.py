@@ -332,6 +332,7 @@ class RolloutOrchestrator:
       # inconsistent state.
       if self._group_queue_manager:
         await asyncio.shield(self._group_queue_manager.prepare_clear())
+        self._group_queue_manager = None
 
   async def yield_batches(self, batch_size: int):
     """Yields batches of trajectories from the internal queue.

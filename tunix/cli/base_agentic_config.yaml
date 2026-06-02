@@ -245,6 +245,7 @@ vllm_config: {}
 
 colocate_mode: false
 offload_to_cpu: false
+offload_config: null
 
 training_mode: "grpo"
 

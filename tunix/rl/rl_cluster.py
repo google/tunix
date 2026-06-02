@@ -149,16 +149,24 @@ class OffloadConfig:
   All fields are optional. ``None`` means "use the built-in policy default for
   the current topology and rollout engine". This preserves the current behavior
   when the config is omitted, while still allowing users to override specific
-  offload decisions. The coarse ``offload_to_cpu`` knob still takes precedence
-  and forces all supported offloads on.
+  offload decisions. When any field is explicitly configured, the cluster
+  disables the non-agentic ``offload_to_cpu`` path and relies on the explicit
+  window transition helpers instead. Shared actor/reference LoRA backbones always
+  force ``offload_ref_weights`` off because the reference reuses trainer-owned
+  weights.
   """
 
   offload_actor_weights: bool | None = None
   offload_critic_weights: bool | None = None
+  offload_ref_weights: bool | None = None
   offload_actor_optimizer_states: bool | None = None
   offload_critic_optimizer_states: bool | None = None
   offload_rollout_kv_cache: bool | None = None
   offload_rollout_weights: bool | None = None
+
+  def has_explicit_overrides(self) -> bool:
+    """Returns whether any fine-grained offload knob was configured."""
+    return any(getattr(self, field.name) is not None for field in dataclasses.fields(type(self)))
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -178,7 +186,9 @@ class ClusterConfig:
       the same device set even if the meshes use different layouts.
     offload_config: Fine-grained offload controls. ``None`` values defer to the
       built-in policy for the current engine and topology.
-    offload_to_cpu: Whether to offload models to CPU at each step..
+    offload_to_cpu: Coarse host-offload mode used by the non-agentic runtime
+      path. Automatically disabled when ``offload_config`` contains explicit
+      overrides so colocated window transitions are the only offload authority.
     training_config: RL training config.
     rollout_config: Rollout config. It may be different for different modes,
       e.g. TRAIN vs EVAL.
@@ -204,6 +214,14 @@ class ClusterConfig:
       dict[Mode, base_rollout.RolloutConfig] | base_rollout.RolloutConfig
   )
 
+  def __post_init__(self):
+    if self.offload_config.has_explicit_overrides() and self.offload_to_cpu:
+      logging.info(
+          'Disabling non-agentic offload_to_cpu because offload_config '
+          'provides explicit windowed offload controls.'
+      )
+      object.__setattr__(self, 'offload_to_cpu', False)
+
 
 class RLCluster:
   """RLCluster."""
@@ -224,6 +242,8 @@ class RLCluster:
     self.r2m = cluster_config.role_to_mesh
     self._validate_colocate_mode()
     self._init_backbone_sharing_map(actor, reference)
+    self._validate_reference_backbone_sharing(actor)
+    self._resolve_reference_offload_config()
     self._anchor_policy_state = None
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
@@ -303,7 +323,7 @@ class RLCluster:
         collections.defaultdict(list)
     )
 
-    if self.r2m[Role.ACTOR] == self.r2m[Role.ROLLOUT]:
+    if self.r2m[Role.ACTOR] == self.r2m[Role.ROLLOUT] and self.cluster_config.rollout_engine == "vanilla":
       # Given that we load both actor trainer and rollout from `actor`,
       # if the meshes are the same, they are able to share the same model.
       # TODO(linchai): We may want to enable different shardings for actor
@@ -324,6 +344,41 @@ class RLCluster:
       # TODO(linchai): maybe support critic backbone sharing.
 
     self._propagate_backbone_sharing_map()
+
+  def _validate_reference_backbone_sharing(
+      self, actor: ModelOrPath
+  ) -> None:
+    """Ensures trainer/reference backbone sharing only happens in LoRA mode.
+
+    The cluster only supports actor/reference backbone sharing for the LoRA
+    setup where the reference reuses the frozen base weights while the trainer
+    owns the LoRA adapters. Any future non-LoRA sharing path should be modeled
+    explicitly instead of silently reusing this assumption.
+    """
+    if Role.REFERENCE not in self._backbone_sharing_map[Role.ACTOR]:
+      return
+    if not isinstance(actor, nnx.Module) or not sft_utils.is_lora_enabled(actor):
+      raise ValueError(
+          'Reference should only share trainer backbone weights when LoRA is '
+          'enabled on the actor.'
+      )
+
+  def _resolve_reference_offload_config(self) -> None:
+    """Resolves reference offload policy after backbone sharing is known.
+
+    A shared LoRA reference reads trainer-owned weights, so reference weight
+    offload must stay disabled even if the user requested it explicitly.
+    """
+    if Role.REFERENCE not in self._backbone_sharing_map[Role.ACTOR]:
+      return
+    offload_config = self.cluster_config.offload_config
+    if offload_config.offload_ref_weights is False:
+      return
+    object.__setattr__(
+        self.cluster_config,
+        'offload_config',
+        dataclasses.replace(offload_config, offload_ref_weights=False),
+    )
 
   def _load_model(
       self,
@@ -735,8 +790,8 @@ class RLCluster:
         and Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]
     )
 
-  def _should_offload_reference_in_colocate_window(self) -> bool:
-    """Returns whether the reference model should be offloaded for rollout.
+  def _should_offload_reference_weights(self) -> bool:
+    """Returns whether the reference model should be window-offloaded.
 
     The reference model is optional. When present, it can be offloaded in the
     non-LoRA colocated path because it is structurally separate from the actor.
@@ -747,7 +802,11 @@ class RLCluster:
       return False
     if "reference" not in self.inference_worker._models:
       return False
-    return Role.REFERENCE not in self._backbone_sharing_map[Role.ACTOR]
+    return self._resolve_offload_flag(
+        self.cluster_config.offload_config.offload_ref_weights,
+        default=self.cluster_config.colocate_mode
+        and Role.REFERENCE not in self._backbone_sharing_map[Role.ACTOR],
+    )
 
   def _resolve_offload_flag(
       self,
@@ -757,8 +816,8 @@ class RLCluster:
   ) -> bool:
     """Returns the effective value of an offload flag.
 
-    ``offload_to_cpu`` is the legacy coarse knob and takes precedence over all
-    fine-grained settings for backward compatibility.
+    ``offload_to_cpu`` is the coarse non-agentic path. When fine-grained
+    overrides are present, colocated window helpers own the offload policy.
     """
     if self.cluster_config.offload_to_cpu:
       return True
@@ -768,33 +827,32 @@ class RLCluster:
 
   def _should_offload_actor_weights(self) -> bool:
     return self._resolve_offload_flag(
-        self.cluster_config.offload_config.offload_actor_weights,
-        default=self.cluster_config.colocate_mode
-        and not self._keep_actor_model_resident_in_colocate_window(),
+        self.cluster_config.colocate_mode and self.cluster_config.offload_config.offload_actor_weights and not self._keep_actor_model_resident_in_colocate_window(),
+        default=False,
     )
 
   def _should_offload_critic_weights(self) -> bool:
     return self._resolve_offload_flag(
-        self.cluster_config.offload_config.offload_critic_weights,
-        default=self.cluster_config.colocate_mode,
+        self.cluster_config.colocate_mode and self.cluster_config.offload_config.offload_critic_weights,
+        default=False,
     )
 
   def _should_offload_actor_optimizer_states(self) -> bool:
     return self._resolve_offload_flag(
-        self.cluster_config.offload_config.offload_actor_optimizer_states,
-        default=self.cluster_config.colocate_mode,
+        self.cluster_config.colocate_mode and self.cluster_config.offload_config.offload_actor_optimizer_states,
+        default=False,
     )
 
   def _should_offload_critic_optimizer_states(self) -> bool:
     return self._resolve_offload_flag(
-        self.cluster_config.offload_config.offload_critic_optimizer_states,
-        default=self.cluster_config.colocate_mode,
+        self.cluster_config.colocate_mode and self.cluster_config.offload_config.offload_critic_optimizer_states,
+        default=False,
     )
 
   def _should_offload_rollout_kv_cache(self) -> bool:
     return self._resolve_offload_flag(
-        self.cluster_config.offload_config.offload_rollout_kv_cache,
-        default=self.cluster_config.colocate_mode,
+        self.cluster_config.colocate_mode and self.cluster_config.offload_config.offload_rollout_kv_cache,
+        default=False,
     )
 
   def _should_offload_rollout_weights(self) -> bool:
@@ -824,31 +882,110 @@ class RLCluster:
     self._put_model_on_memory_kind(model, "pinned_host")
     self._update_models_sharing_weights(nnx.state(model), role)
 
+  def enter_trainer_window(self) -> None:
+    """Restores trainer-owned runtime state for a colocated training phase.
+
+    This is the training-side counterpart to ``exit_trainer_window``. Call it
+    after rollout has finished and before any trainer-side forward/backward
+    work, so actor and critic runtime state is brought back according to the
+    resolved fine-grained offload policy.
+    """
+    sft_utils.show_hbm_usage("before enter_trainer_window")
+    actor_needs_restore = (
+        self._should_offload_actor_weights()
+        or self._should_offload_actor_optimizer_states()
+    )
+    if actor_needs_restore:
+      self.actor_trainer.maybe_load_runtime_from_cpu(
+          include_model=self._should_offload_actor_weights(),
+          include_optimizer_state=self._should_offload_actor_optimizer_states(),
+      )
+
+    critic_trainer = getattr(self, 'critic_trainer', None)
+    critic_needs_restore = critic_trainer is not None and (
+        self._should_offload_critic_weights()
+        or self._should_offload_critic_optimizer_states()
+    )
+    if critic_needs_restore:
+      critic_trainer.maybe_load_runtime_from_cpu(
+          include_model=self._should_offload_critic_weights(),
+          include_optimizer_state=self._should_offload_critic_optimizer_states(),
+      )
+    sft_utils.show_hbm_usage("after enter_trainer_window")
+
+  def exit_trainer_window(self) -> None:
+    """Offloads trainer-owned runtime state at a colocated phase boundary.
+
+    This is typically called immediately before entering a serialized rollout
+    window. It only touches trainer-owned runtime state; rollout resources are
+    handled separately by ``enter_colocate_rollout_window``.
+    """
+    sft_utils.show_hbm_usage("before exit_trainer_window")
+    actor_needs_offload = (
+        self._should_offload_actor_weights()
+        or self._should_offload_actor_optimizer_states()
+    )
+    if actor_needs_offload:
+      self.actor_trainer.maybe_offload_runtime_to_cpu(
+          include_model=self._should_offload_actor_weights(),
+          include_optimizer_state=self._should_offload_actor_optimizer_states(),
+      )
+
+    critic_trainer = getattr(self, 'critic_trainer', None)
+    critic_needs_offload = critic_trainer is not None and (
+        self._should_offload_critic_weights()
+        or self._should_offload_critic_optimizer_states()
+    )
+    if critic_needs_offload:
+      critic_trainer.maybe_offload_runtime_to_cpu(
+          include_model=self._should_offload_critic_weights(),
+          include_optimizer_state=self._should_offload_critic_optimizer_states(),
+      )
+    sft_utils.show_hbm_usage("after exit_trainer_window")
+  def enter_ref_window(self) -> None:
+    """Restores the reference model for a reference-inference phase.
+
+    Reference log-prob computation happens after rollout and before or during
+    training-side processing. This helper makes that phase boundary explicit
+    when the reference weights themselves are configured to be offloaded.
+    """
+    if not self._should_offload_reference_weights():
+      return
+    reference_model = self.inference_worker.get_model('reference')
+    if reference_model is None:
+      return
+    if not self._is_state_on_device(nnx.state(reference_model)):
+      sft_utils.show_hbm_usage("before enter_ref_window")
+      self._put_model_on_memory_kind(reference_model, self._default_memory_kind)
+      sft_utils.show_hbm_usage("after enter_ref_window")
+
+  def exit_ref_window(self) -> None:
+    """Offloads the reference model after a reference-inference phase.
+
+    This is the cleanup half of ``enter_ref_window`` and should bracket any
+    reference-only inference region that materializes the reference weights on
+    device.
+    """
+    if not self._should_offload_reference_weights():
+      return
+    reference_model = self.inference_worker.get_model('reference')
+    if reference_model is None:
+      return
+    if self._is_state_on_device(nnx.state(reference_model)):
+      self._put_model_on_memory_kind(reference_model, 'pinned_host')
+
   def enter_colocate_rollout_window(self) -> None:
     """Prepares the cluster for a serialized colocated rollout window.
 
     In colocate mode rollout and training intentionally do not overlap. This
-    method is the explicit phase boundary that frees trainer-only state, handles
-    optional reference offload, and lets the rollout engine reclaim any runtime
-    resources it needs before sampling begins.
+    method now only manages rollout-owned runtime resources. Trainer and
+    reference transitions are handled by ``exit_trainer_window`` /
+    ``enter_trainer_window`` and ``exit_ref_window`` / ``enter_ref_window``.
+    Typical ordering is ``exit_trainer_window()``, then this method, then
+    ``exit_colocate_rollout_window()``, then ``enter_trainer_window()``.
     """
     if not self.cluster_config.colocate_mode:
       return
-
-    self.actor_trainer.maybe_offload_runtime_to_cpu(
-        include_model=self._should_offload_actor_weights(),
-        include_optimizer_state=self._should_offload_actor_optimizer_states(),
-    )
-    if getattr(self, "critic_trainer", None):
-      self.critic_trainer.maybe_offload_runtime_to_cpu(
-          include_model=self._should_offload_critic_weights(),
-          include_optimizer_state=self._should_offload_critic_optimizer_states(),
-      )
-
-    if self._should_offload_reference_in_colocate_window():
-      reference_model = self.inference_worker.get_model("reference")
-      if reference_model is not None:
-        self._put_model_on_memory_kind(reference_model, "pinned_host")
 
     self.rollout.maybe_regain_resource(
         restore_weights=self._should_offload_rollout_weights(),
@@ -856,7 +993,12 @@ class RLCluster:
     )
 
   def exit_colocate_rollout_window(self) -> None:
-    """Releases rollout-side resources after a colocated rollout window."""
+    """Releases rollout-side resources after a colocated rollout window.
+
+    This closes the rollout half of the serialized colocate schedule. Caller
+    code is expected to reopen trainer resources separately via
+    ``enter_trainer_window()`` when training resumes.
+    """
     if not self.cluster_config.colocate_mode:
       return
     self.rollout.maybe_release_resources(
@@ -1050,16 +1192,29 @@ class RLCluster:
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      # logging.info(
+      #     "RLCluster.update_actor: start step=%s colocate_mode=%s offload_actor_weights=%s offload_actor_optimizer_states=%s",
+      #     self.global_steps,
+      #     self.cluster_config.offload_to_cpu,
+      # )
+      sft_utils.show_hbm_usage("before update_actor")
       if self.cluster_config.colocate_mode:
         self.actor_trainer.maybe_load_runtime_from_cpu(
             include_model=self._should_offload_actor_weights(),
             include_optimizer_state=self._should_offload_actor_optimizer_states(),
         )
+        logging.info("RLCluster.update_actor: actor runtime restored from CPU")
+        sft_utils.show_hbm_usage("after update_actor runtime restore")
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
+        logging.info("RLCluster.update_actor: entering actor_trainer.train")
+        sft_utils.show_hbm_usage("before actor_trainer.train")
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+        logging.info("RLCluster.update_actor: actor_trainer.train finished")
+        sft_utils.show_hbm_usage("after actor_trainer.train")
       if not self.cluster_config.colocate_mode:
         self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+      logging.info("RLCluster.update_actor: end step=%s", self.global_steps)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
@@ -1117,12 +1272,26 @@ class RLCluster:
     if len(string_prompts) == 0:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
+    logging.info(
+        "RLCluster.generate: start step=%s prompts=%s micro_batch_size=%s mode=%s colocate_mode=%s offload_to_cpu=%s",
+        self.global_steps,
+        len(string_prompts),
+        micro_batch_size,
+        mode,
+        self.cluster_config.colocate_mode,
+        self.cluster_config.offload_to_cpu,
+    )
+    # sft_utils.show_hbm_usage("before RLCluster.generate")
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        logging.info(
+            "RLCluster.generate: rollout.update_params called before rollout due to offload_to_cpu"
+        )
+        sft_utils.show_hbm_usage("after pre-rollout update_params")
 
       if isinstance(self.cluster_config.rollout_config, dict):
         rollout_config = self.cluster_config.rollout_config[mode]
@@ -1146,6 +1315,7 @@ class RLCluster:
           mesh.devices,
           tags=perf_tags,
       ) as span_v2:
+        logging.info("RLCluster.generate: entering rollout.generate loop")
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
             for s in rl_utils.chunk_slices_by_size(
@@ -1154,9 +1324,17 @@ class RLCluster:
         ]
         span.device_end([o.tokens for o in outputs])
         span_v2.async_end([o.tokens for o in outputs])
+        logging.info("RLCluster.generate: rollout.generate loop finished")
+        # sft_utils.show_hbm_usage("after rollout.generate loop")
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
+        logging.info(
+          "RLCluster.generate: rollout.update_params called after rollout due to offload_to_cpu"
+        )
+        sft_utils.show_hbm_usage("after post-rollout update_params")
+      logging.info("RLCluster.generate: end step=%s", self.global_steps)
+      # sft_utils.show_hbm_usage("after RLCluster.generate")
 
     texts = list(itertools.chain.from_iterable(out.text for out in outputs))
 
@@ -1219,31 +1397,29 @@ class RLCluster:
         )
       else:
         dest_completion_mask = None
-      self._maybe_load_model_from_cpu(
-          self.inference_worker.get_model("reference"), Role.REFERENCE
-      )
-      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
-      outs = []
-      for batch_slice in rl_utils.chunk_slices_by_size(
-          stop=batch_size, step=micro_batch_size
-      ):
-        outs.append(
-            self.inference_worker.get_ref_per_token_logps(
-                dest_prompt_tokens[batch_slice],
-                dest_completion_tokens[batch_slice],
-                pad_id,
-                eos_id,
-                completion_mask=None
-                if dest_completion_mask is None
-                else dest_completion_mask[batch_slice],
-                temperature=temperature,
+        self.enter_ref_window()
+        try:
+          temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+          outs = []
+          for batch_slice in rl_utils.chunk_slices_by_size(
+              stop=batch_size, step=micro_batch_size
+          ):
+            outs.append(
+                self.inference_worker.get_ref_per_token_logps(
+                    dest_prompt_tokens[batch_slice],
+                    dest_completion_tokens[batch_slice],
+                    pad_id,
+                    eos_id,
+                    completion_mask=None
+                    if dest_completion_mask is None
+                    else dest_completion_mask[batch_slice],
+                    temperature=temperature,
+                )
             )
-        )
-      ref_per_token_logps = jnp.concatenate(outs, axis=0)
-      self._maybe_offload_model_to_cpu(
-          self.inference_worker.get_model("reference"), Role.REFERENCE
-      )
-      return ref_per_token_logps
+          ref_per_token_logps = jnp.concatenate(outs, axis=0)
+          return ref_per_token_logps
+        finally:
+          self.exit_ref_window()
 
   def get_old_per_token_logps(
       self,
@@ -1332,13 +1508,19 @@ class RLCluster:
 
       # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
       # reference the same policy vllm sampled with even when mini_batch_size <
-      # full_batch_size or num_iterations > 1. Only offload the live actor when
-      # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
-      # was both unnecessary and risked leaving stray weights pinned to host.
+      # full_batch_size or num_iterations > 1. Temporarily offload the live
+      # actor weights only when the resolved actor-weight offload policy says
+      # they should not remain resident during this recomputation.
       actor_trainer_state_on_device = self._is_state_on_device(
           nnx.state(self.actor_trainer.model)
       )
-      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+      # _should_offload_actor_weights() already folds in the coarse
+      # offload_to_cpu path via _resolve_offload_flag().
+      actor_weights_should_offload = self._should_offload_actor_weights()
+      should_transfer_actor_state = (
+          actor_trainer_state_on_device and actor_weights_should_offload
+      )
+      if should_transfer_actor_state:
         self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
         gc.collect()
       graphdef, actor_state = nnx.split(self.actor_trainer.model)
@@ -1351,37 +1533,53 @@ class RLCluster:
           ),
           actor_pspecs,
       )
-      state = reshard.reshard_pytree(
-          self._anchor_policy_state, actor_model_sharding
+      anchor_state_was_on_device = self._is_state_on_device(
+          self._anchor_policy_state
       )
-      outs = []
-      for batch_slice in rl_utils.chunk_slices_by_size(
-          stop=batch_size, step=micro_batch_size
-      ):
-        outs.append(
-            common.compute_per_token_logps(
-                graphdef,
-                state,
-                prompt_tokens=dest_prompt_tokens[batch_slice],
-                completion_tokens=dest_completion_tokens[batch_slice],
-                pad_id=pad_id,
-                eos_id=eos_id,
-                completion_mask=None
-                if dest_completion_mask is None
-                else dest_completion_mask[batch_slice],
-                stop_gradient=True,
-                return_logits=False,
-                temperature=temperature,
-            )
+      if not anchor_state_was_on_device:
+        self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
         )
-      actor_per_token_logps = jnp.concatenate(outs, axis=0)
-      del state
-      gc.collect()
-      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
-        self._put_model_on_memory_kind(
+        gc.collect()
+      state = None
+      try:
+        state = reshard.reshard_pytree(
+            self._anchor_policy_state, actor_model_sharding
+        )
+        outs = []
+        for batch_slice in rl_utils.chunk_slices_by_size(
+            stop=batch_size, step=micro_batch_size
+        ):
+          outs.append(
+              common.compute_per_token_logps(
+                  graphdef,
+                  state,
+                  prompt_tokens=dest_prompt_tokens[batch_slice],
+                  completion_tokens=dest_completion_tokens[batch_slice],
+                  pad_id=pad_id,
+                  eos_id=eos_id,
+                  completion_mask=None
+                  if dest_completion_mask is None
+                  else dest_completion_mask[batch_slice],
+                  stop_gradient=True,
+                  return_logits=False,
+                  temperature=temperature,
+              )
+          )
+        actor_per_token_logps = jnp.concatenate(outs, axis=0)
+        return actor_per_token_logps
+      finally:
+        del state
+        gc.collect()
+        if not anchor_state_was_on_device:
+          self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+              self._anchor_policy_state, 'pinned_host'
+          )
+          gc.collect()
+        if should_transfer_actor_state:
+          self._put_model_on_memory_kind(
             self.actor_trainer.model, self._default_memory_kind
-        )
-      return actor_per_token_logps
+          )
 
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""

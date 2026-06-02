@@ -7,6 +7,7 @@ import os
 from typing import Any, Callable, Optional, Protocol, Union
 
 from tunix.generate import tokenizer_adapter
+from tunix.utils import token_sanitization
 
 Tokenizer = tokenizer_adapter.Tokenizer
 TokenizerAdapter = tokenizer_adapter.TokenizerAdapter
@@ -199,7 +200,12 @@ def post_init_dataset(
     source_prompt_key = prompt_key
 
     def normalize_prompt_key(x):
-      return {**x, "prompts": x[source_prompt_key]}
+      return {
+          **x,
+          "prompts": token_sanitization.sanitize_control_tokens(
+              x[source_prompt_key]
+          ),
+      }
 
     dataset = dataset.map(normalize_prompt_key)
     prompt_key = "prompts"

@@ -231,6 +231,8 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       rl_cluster.cluster_config.colocate_mode = True
       rl_cluster.can_overlap_actor_and_rollout.return_value = False
       rl_cluster.is_colocate_mode_enabled.return_value = True
+      rl_cluster.exit_trainer_window.side_effect = lambda: events.append('trainer-exit')
+      rl_cluster.enter_trainer_window.side_effect = lambda: events.append('trainer-enter')
       rl_cluster.enter_colocate_rollout_window.side_effect = lambda: events.append('enter')
       rl_cluster.exit_colocate_rollout_window.side_effect = lambda: events.append('exit')
       rl_cluster.actor_trainer = mock.Mock()
@@ -250,35 +252,64 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           ),
       )
 
-      async def fake_orchestrator_producer(**kwargs):
-        del kwargs
-        yield ['group-1']
-        yield ['group-2']
-
       events = []
-      learner._orchestrator_producer = fake_orchestrator_producer
       learner._batch_to_train_example = lambda batch_results, mode: [
           f'{mode}-{batch_results[0]}'
       ]
 
+            class FakeOrchestrator:
+
+                def __init__(self):
+                    self.queue = asyncio.Queue()
+                    self.run_calls = 0
+
+                async def run_producers_from_stream(
+                        self, pairs_stream, group_size, group_key_fn, collect_mode
+                ):
+                    del group_size, group_key_fn, collect_mode
+                    self.run_calls += 1
+                    async for _agent, env in pairs_stream:
+                        await self.queue.put([f'group-{env.extra_kwargs["group_id"] + 1}'])
+                    await self.queue.put(None)
+
+                async def yield_batches(self, batch_size):
+                    del batch_size
+                    while True:
+                        batch = await self.queue.get()
+                        if batch is None:
+                            return
+                        yield batch
+
       prompt_queue = queue.Queue()
-      prompt_queue.put({'prompt': ['p1', 'p2']})
+            prompt_queue.put({'prompt': ['p1']})
+            prompt_queue.put({'prompt': ['p2']})
       prompt_queue.put(None)
       train_data_queue = mock.Mock()
       train_data_queue.put.side_effect = lambda item: events.append(f'put:{item}')
 
-      asyncio.run(learner._producer(mock.Mock(), prompt_queue, train_data_queue))
+            fake_orchestrator = FakeOrchestrator()
+
+            asyncio.run(
+                    learner._producer(fake_orchestrator, prompt_queue, train_data_queue)
+            )
 
       self.assertEqual(
           events,
           [
+              'trainer-exit',
               'enter',
               'exit',
+              'trainer-enter',
               f'put:{rl_cluster_lib.Mode.TRAIN}-group-1',
+                            'trainer-exit',
+                            'enter',
+                            'exit',
+                            'trainer-enter',
               f'put:{rl_cluster_lib.Mode.TRAIN}-group-2',
               'put:None',
           ],
       )
+            self.assertEqual(fake_orchestrator.run_calls, 1)
 
   def test_train_sets_process_in_consumer_in_colocate_mode(self):
     with (

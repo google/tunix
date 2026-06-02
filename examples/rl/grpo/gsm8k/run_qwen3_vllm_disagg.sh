@@ -21,15 +21,11 @@ batch_size=${batch_size:-8}
 num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
 train_fraction=${train_fraction:-0.8}
-TPUS=$(python3 -c "import jax; print(len(jax.devices()))" 2>/dev/null || echo 16)
-if [ "$TPUS" -le 8 ]; then
-  actor_mesh_shape=${actor_mesh_shape:-"(2,2)"}
-  rollout_mesh_shape=${rollout_mesh_shape:-"(2,2)"}
-else
-  actor_mesh_shape=${actor_mesh_shape:-"(2,4)"}
-  rollout_mesh_shape=${rollout_mesh_shape:-"(2,4)"}
-fi
-checkpoint_dir=${checkpoint_dir:-"/tmp/grpo_checkpoints/${model_name}_$RANDOM"}
+
+actor_mesh_shape=${actor_mesh_shape:-"(8,1)"}
+rollout_mesh_shape=${rollout_mesh_shape:-"(8,1)"}
+
+checkpoint_dir=${checkpoint_dir-"/tmp/grpo_checkpoints/${model_name}_$RANDOM"}
 
 echo "Using parameters:"
 echo "  Batch Size: $batch_size"
@@ -41,7 +37,8 @@ echo "  Rollout Mesh Shape: $rollout_mesh_shape"
 echo "  Checkpoint Directory: $checkpoint_dir"
 
 python3 -m tunix.cli.grpo_main \
-  base_config.yaml \
+  tunix/cli/base_agentic_config.yaml \
+  training_mode="agentic_grpo" \
   model_config.model_name=${model_name} \
   model_config.model_id=Qwen/${model_name} \
   model_config.model_source=huggingface \
@@ -59,7 +56,9 @@ python3 -m tunix.cli.grpo_main \
   tokenizer_config.tokenizer_path=Qwen/${model_name} \
   tokenizer_config.tokenizer_type=huggingface \
   tokenizer_config.add_bos=false \
+  data_source="tfds" \
   dataset_name="gsm8k" \
+  prompt_key="question" \
   batch_size=$batch_size \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
@@ -82,16 +81,25 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.profiler_options={} \
   rollout_config.total_generation_steps=768 \
   rollout_config.max_prompt_length=256 \
-  rollout_config.temperature=0.9 \
+  rollout_config.temperature=0.8 \
   rollout_config.top_p=1.0 \
   rollout_config.top_k=50 \
   rollout_engine="vllm" \
+  rollout_config.return_logprobs=false \
+  agentic_grpo_config.use_rollout_logps=false \
   vllm_config.async_scheduling=false \
-  offload_to_cpu=false \
+  vllm_config.hbm_utilization=0.9 \
   grpo_config.num_generations=4 \
   grpo_config.num_iterations=1 \
   grpo_config.beta=0.08 \
   grpo_config.epsilon=0.2 \
   reward_functions="['tunix/cli/reward_fn/gsm8k.py']" \
+  offload_to_cpu=false \
+  colocate_mode=true \
+  offload_config.offload_actor_weights=true \
+  offload_config.offload_actor_optimizer_states=true \
+  offload_config.offload_rollout_kv_cache=true \
+  offload_config.offload_rollout_weights=false \
   "$@"
+
 

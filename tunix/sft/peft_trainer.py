@@ -310,6 +310,27 @@ class PeftTrainer:
         initializer=False,
     )
 
+  def _fix_optimizer_state_sharding(self, optimizer_state: Any) -> Any:
+    """Normalizes optimizer shardings so scalar leaves are mesh-compatible.
+
+    Optimizer scalars such as ``count`` may keep ``SingleDeviceSharding`` after
+    initialization or pinned-host round trips. That becomes invalid once the
+    trainer later constrains the optimizer state to the full training mesh.
+    Rebuild the sharding tree from any existing ``NamedSharding`` leaf so all
+    optimizer leaves, including scalars, target the training mesh.
+    """
+
+    shardings = jax.tree_util.tree_map(lambda x: x.sharding, optimizer_state)
+    try:
+      named_sharding = next(
+          sharding
+          for sharding in jax.tree_util.tree_leaves(shardings)
+          if isinstance(sharding, jax.sharding.NamedSharding)
+      )
+      return nnx.get_named_sharding(optimizer_state, named_sharding.mesh)
+    except StopIteration:
+      return shardings
+
   def set_runtime_memory_kind(
       self,
       memory_kind: str,
@@ -357,13 +378,18 @@ class PeftTrainer:
       if (optimizer_on_device and memory_kind != "device") or (
           not optimizer_on_device and memory_kind == "device"
       ):
+        optimizer_shardings = (
+            self._fix_optimizer_state_sharding(optimizer_state)
+            if memory_kind == "device"
+            else jax.tree.map(lambda x: x.sharding, optimizer_state)
+        )
         nnx.update(
             self.optimizer,
             jax.device_put(
                 optimizer_state,
                 jax.tree.map(
                     lambda x: x.with_memory_kind(memory_kind),
-                    jax.tree.map(lambda x: x.sharding, optimizer_state),
+                    optimizer_shardings,
                 ),
             ),
         )
