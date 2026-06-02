@@ -12,6 +12,7 @@ from orbax import checkpoint as ocp
 from transformers import AutoTokenizer
 
 
+from tunix.cli.utils import data as data_lib
 from tunix.generate import tokenizer_adapter
 from tunix.models.gemma4 import model as model_lib
 from tunix.models.gemma4 import params_safetensors as params_lib
@@ -131,7 +132,7 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
 )
 
-CHAT_PARSER = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=True)
+CHAT_PARSER = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False, strip_past_thinking=False)
 
 # Constants for tools
 TOOL_AGENT_CLS = tool_agent.ToolAgent
@@ -212,7 +213,7 @@ def make_pair(
       entry=input,
       group_id=group_id,
       pair_index=pair_index,
-      max_steps=2,
+      max_steps=8,
   )
   return agent, env
 
@@ -222,12 +223,42 @@ def make_pair(
 #
 # Run the `RolloutOrchestrator` to collect trajectories asynchronously.
 
+def unbatch_inputs(batched_dataset):
+  for batch in batched_dataset:
+    keys = list(batch.keys())
+    if not keys:
+      continue
+    batch_size = len(batch[keys[0]])
+    for i in range(batch_size):
+      single_input = {}
+      for k in keys:
+        val = batch[k]
+        if isinstance(val, (np.ndarray, list, tuple, jax.Array)):
+          single_input[k] = val[i]
+        else:
+          single_input[k] = val
+      yield single_input
+
 # %%
 async def main():
   """Runs the rollout orchestrator."""
+  BATCH_SIZE = 8
+  NUM_BATCHES = 16
+  MAX_PROMPT_LENGTH = 2048
   train_ds, _ = create_datasets()
-  train_ds = train_ds.shuffle(seed=123)[:2]
-  pairs = [make_pair(input, pair_index=i) for i, input in enumerate(train_ds)]
+  train_ds, _ = data_lib.post_init_dataset(
+    train_ds,
+    tokenizer,
+    batch_size=BATCH_SIZE,
+    num_batches=NUM_BATCHES,
+    max_prompt_length=MAX_PROMPT_LENGTH,
+    fraction=1.0,
+    num_epochs=1,
+  )
+  pairs = [
+      make_pair(input, pair_index=i)
+      for i, input in enumerate(unbatch_inputs(train_ds))
+  ]
 
   rollout_sync_lock = utils.RolloutSyncLock()
   orchestrator = rollout_orchestrator.RolloutOrchestrator(
@@ -257,13 +288,16 @@ async def main():
   await asyncio.sleep(0)
 
   try:
-    async for batch in orchestrator.yield_batches(batch_size=1):
+    async for batch in orchestrator.yield_batches(batch_size=BATCH_SIZE):
       print("=" * 120)
       print(f"Got batch of size {len(batch)}")
+
+      padded_prompts = []
+      padded_completions = []
+      padded_completion_masks = []
+      padded_old_logprobs_list = []
+
       for item in batch:
-        print("Trajectory Conversation:")
-        pprint(item.traj.get("conversation_text"), width=120)
-        # TODO: compare the old_logprobs with the logprobs from trainer
         prompt_tokens = item.traj.get("prompt_tokens")
         completion_tokens = item.traj.get("conversation_tokens")
         completion_mask = item.traj.get("conversation_masks")
@@ -295,91 +329,106 @@ async def main():
         else:
           padded_old_logprobs = np.zeros(TOTAL_GENERATION_STEPS, dtype=np.float32)
 
-        prompt_ids = jnp.asarray([padded_prompt])
-        completion_ids = jnp.asarray([padded_completion[:TOTAL_GENERATION_STEPS]])
-        completion_mask_arr = jnp.asarray([padded_completion_mask])
-        rollout_per_token_logps = jnp.asarray([padded_old_logprobs])
+        padded_prompts.append(padded_prompt)
+        padded_completions.append(padded_completion[:TOTAL_GENERATION_STEPS])
+        padded_completion_masks.append(padded_completion_mask)
+        padded_old_logprobs_list.append(padded_old_logprobs)
 
-        attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
-        trainer_per_token_logps = rl_cluster.get_actor_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
-            pad_id=pad_value,
-            eos_id=eos_value,
-            micro_batch_size=rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-            completion_mask=attn_completion_mask,
-            temperature=TEMPERATURE,
-        )
+      prompt_ids = jnp.asarray(padded_prompts)
+      completion_ids = jnp.asarray(padded_completions)
+      completion_mask_arr = jnp.asarray(padded_completion_masks)
+      rollout_per_token_logps = jnp.asarray(padded_old_logprobs_list)
 
-        mask = completion_mask_arr.astype(jnp.bool_)
-        mask_f = mask.astype(jnp.float32)
-        mask_sum = jnp.maximum(mask_f.sum(), 1.0)
-        diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
-        diff_mean = float((diff * mask_f).sum() / mask_sum)
-        diff_max = float(jnp.where(mask, diff, 0.0).max())
+      attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
+      trainer_per_token_logps = rl_cluster.get_actor_per_token_logps(
+          prompt_tokens=prompt_ids,
+          completion_tokens=completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+          completion_mask=attn_completion_mask,
+          temperature=TEMPERATURE,
+      )
 
-        rp = jnp.exp(rollout_per_token_logps)
-        tp = jnp.exp(trainer_per_token_logps)
-        prob_diff = jnp.abs(rp - tp)
-        prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
-        prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
+      mask = completion_mask_arr.astype(jnp.bool_)
+      mask_f = mask.astype(jnp.float32)
+      mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+      diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
+      diff_mean = float((diff * mask_f).sum() / mask_sum)
+      diff_max = float(jnp.where(mask, diff, 0.0).max())
 
-        rp_flat = rp.reshape(-1)
-        tp_flat = tp.reshape(-1)
-        mf = mask_f.reshape(-1)
-        rp_mean = (rp_flat * mf).sum() / mask_sum
-        tp_mean = (tp_flat * mf).sum() / mask_sum
-        rp_d = (rp_flat - rp_mean) * mf
-        tp_d = (tp_flat - tp_mean) * mf
-        cov = (rp_d * tp_d).sum() / mask_sum
-        rp_var = (rp_d * rp_d).sum() / mask_sum
-        tp_var = (tp_d * tp_d).sum() / mask_sum
-        pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+      rp = jnp.exp(rollout_per_token_logps)
+      tp = jnp.exp(trainer_per_token_logps)
+      prob_diff = jnp.abs(rp - tp)
+      prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+      prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
 
-        print(
-            f"sampler-trainer comparison: logp_diff_mean={diff_mean:.5f}, logp_diff_max={diff_max:.5f}, "
-            f"prob_diff_mean={prob_diff_mean:.5f}, prob_diff_max={prob_diff_max:.5f}, pearson={pearson:.5f}"
-        )
-        
-        print("\n" + "=" * 60 + " Token Alignment Debug Info " + "=" * 60)
-        print(f"Prompt Tokens Length: {len(prompt_tokens)}")
-        print(f"Completion Tokens Length: {len(completion_tokens)}")
-        print(f"Completion Mask Length: {len(completion_mask)}")
-        if old_logprobs is not None:
-          print(f"Old Logprobs Length: {len(old_logprobs)}")
+      # Extract first item details for token-level logging
+      first_item = batch[0]
+      prompt_tokens = first_item.traj.get("prompt_tokens")
+      completion_tokens = first_item.traj.get("conversation_tokens")
+      completion_mask = first_item.traj.get("conversation_masks")
+      old_logprobs = first_item.traj.get("old_logprobs")
+      print("Trajectory Conversation:")
+      pprint(first_item.traj.get("conversation_text"), width=120)
 
-        active_indices = [i for i, m in enumerate(completion_mask) if m > 0]
-        print(f"Total Active (Assistant) Tokens in Trajectory: {len(active_indices)}")
-        print("Sample Active Tokens (Index, TokenID, Decoded, Rollout Logp, Trainer Logp, Diff):")
+      rp_flat = rp.reshape(-1)
+      tp_flat = tp.reshape(-1)
+      mf = mask_f.reshape(-1)
+      rp_mean = (rp_flat * mf).sum() / mask_sum
+      tp_mean = (tp_flat * mf).sum() / mask_sum
+      rp_d = (rp_flat - rp_mean) * mf
+      tp_d = (tp_flat - tp_mean) * mf
+      cov = (rp_d * tp_d).sum() / mask_sum
+      rp_var = (rp_d * rp_d).sum() / mask_sum
+      tp_var = (tp_d * tp_d).sum() / mask_sum
+      pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
 
-        idx_to_print = active_indices[:20] + active_indices[-5:] if len(active_indices) > 25 else active_indices
+      print(
+          f"sampler-trainer comparison: logp_diff_mean={diff_mean:.5f}, logp_diff_max={diff_max:.5f}, "
+          f"prob_diff_mean={prob_diff_mean:.5f}, prob_diff_max={prob_diff_max:.5f}, pearson={pearson:.5f}"
+      )
+      
+      print("\n" + "=" * 60 + " Token Alignment Debug Info " + "=" * 60)
+      print(f"Prompt Tokens Length: {len(prompt_tokens)}")
+      print(f"Completion Tokens Length: {len(completion_tokens)}")
+      print(f"Completion Mask Length: {len(completion_mask)}")
+      if old_logprobs is not None:
+        print(f"Old Logprobs Length: {len(old_logprobs)}")
 
-        rp_np = np.array(rollout_per_token_logps[0])
-        tp_np = np.array(trainer_per_token_logps[0])
+      active_indices = [i for i, m in enumerate(completion_mask) if m > 0]
+      print(f"Total Active (Assistant) Tokens in Trajectory: {len(active_indices)}")
+      print("Sample Active Tokens (Index, TokenID, Decoded, Rollout Logp, Trainer Logp, Diff):")
 
-        for idx in idx_to_print:
-          tok_id = completion_tokens[idx]
-          try:
-            decoded_tok = repr(tokenizer.decode([tok_id]))
-          except Exception:
-            decoded_tok = "<unknown>"
-          r_logp = rp_np[idx]
-          t_logp = tp_np[idx]
-          diff_val = abs(r_logp - t_logp)
-          print(f"  Pos {idx:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {diff_val:8.4f}")
-        print("=" * 148)
+      idx_to_print = active_indices[:20] + active_indices[-5:] if len(active_indices) > 25 else active_indices
 
-        print("\n" + "=" * 60 + " Deep Token & Logit Debug Info " + "=" * 60)
-        p_toks = prompt_tokens[-20:] if len(prompt_tokens) > 20 else prompt_tokens
-        c_toks = completion_tokens[:20] if len(completion_tokens) > 20 else completion_tokens
-        print("Last 20 Prompt Tokens (ID -> Decoded):")
-        for pt in p_toks:
-          print(f"  {pt:6d} -> {repr(tokenizer.decode([pt]))}")
-        print("First 20 Completion Tokens (ID -> Decoded):")
-        for ct in c_toks:
-          print(f"  {ct:6d} -> {repr(tokenizer.decode([ct]))}")
+      rp_np = np.array(rollout_per_token_logps[0])
+      tp_np = np.array(trainer_per_token_logps[0])
+
+      for idx in idx_to_print:
+        tok_id = completion_tokens[idx]
+        try:
+          decoded_tok = repr(tokenizer.decode([tok_id]))
+        except Exception:
+          decoded_tok = "<unknown>"
+        r_logp = rp_np[idx]
+        t_logp = tp_np[idx]
+        diff_val = abs(r_logp - t_logp)
+        print(f"  Pos {idx:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {diff_val:8.4f}")
+      print("=" * 148)
+
+      print("\n" + "=" * 60 + " Deep Token & Logit Debug Info " + "=" * 60)
+      p_toks = prompt_tokens[-20:] if len(prompt_tokens) > 20 else prompt_tokens
+      c_toks = completion_tokens[:20] if len(completion_tokens) > 20 else completion_tokens
+      print("Last 20 Prompt Tokens (ID -> Decoded):")
+      for pt in p_toks:
+        print(f"  {pt:6d} -> {repr(tokenizer.decode([pt]))}")
+      print("First 20 Completion Tokens (ID -> Decoded):")
+      for ct in c_toks:
+        print(f"  {ct:6d} -> {repr(tokenizer.decode([ct]))}")
 
 
+      if len(active_indices) > 0:
         rp_active = rp_np[active_indices]
         tp_active = tp_np[active_indices]
         print(f"Rollout Active Logps stats: min={rp_active.min():.4f}, max={rp_active.max():.4f}, mean={rp_active.mean():.4f}")
@@ -400,6 +449,8 @@ async def main():
           d_val = diff_active[idx_in_active]
           print(f"  Rank {rank+1:2d} | Pos {orig_pos:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {d_val:8.4f}")
         print("=" * 151 + "\n")
+      else:
+        print("No active (assistant) tokens in the first trajectory of the batch.\n")
 
   finally:
     await producer_task
