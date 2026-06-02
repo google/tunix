@@ -617,6 +617,7 @@ class TrajectoryCollectEngine:
     asst_toks = (
         rollout_output.tokens[0] if rollout_output.tokens is not None else None
     )
+    print(f"length of original asst_toks length: {len(asst_toks) if asst_toks is not None else 'None'}")
     asst_logprobs = (
         rollout_output.logprobs[0]
         if rollout_output.logprobs is not None
@@ -625,18 +626,19 @@ class TrajectoryCollectEngine:
     original_logprobs_length = len(asst_logprobs) if asst_logprobs is not None else 'None'
     print(f"length of original logprobs: {original_logprobs_length}")
 
-    if cur_step is not None and asst_toks is not None:
-      asst_toks, asst_logprobs = self.chat_parser.filter_thinking_tokens(
-          asst_toks, asst_logprobs
-      )
-      filtered_logprobs_length = len(asst_logprobs) if asst_logprobs is not None else 'None'
-      print(f"length of filtered logprobs: {filtered_logprobs_length}")
-      if filtered_logprobs_length != original_logprobs_length:
-        logging.debug(
-            "%s Filtered out %d thinking tokens from logprobs",
-            self._debug_prefix,
-            original_logprobs_length - filtered_logprobs_length,
-        )
+    # if cur_step is not None and asst_toks is not None:
+    #   asst_toks, asst_logprobs = self.chat_parser.filter_thinking_tokens(
+    #       asst_toks, asst_logprobs
+    #   )
+    #   filtered_logprobs_length = len(asst_logprobs) if asst_logprobs is not None else 'None'
+    #   print(f"length of filtered logprobs: {filtered_logprobs_length}")
+    #   print(f"asst_toks length after filtering: {len(asst_toks)}")
+    #   if filtered_logprobs_length != original_logprobs_length:
+    #     logging.debug(
+    #         "%s Filtered out %d thinking tokens from logprobs",
+    #         self._debug_prefix,
+    #         original_logprobs_length - filtered_logprobs_length,
+    #     )
 
     if cur_step is not None and asst_logprobs is not None:
       cur_step.logprobs = asst_logprobs
@@ -648,6 +650,7 @@ class TrajectoryCollectEngine:
       )
 
       # Assistant tokens/masks
+<<<<<<< HEAD
       if assistant_message:
         cur_step.assistant_tokens, n_append = (
             self.chat_parser.update_assistant_end_tokens(
@@ -665,6 +668,11 @@ class TrajectoryCollectEngine:
           cur_step.logprobs = np.concatenate(
               [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
           )
+=======
+      if assistant_message and asst_toks is not None: 
+        cur_step.assistant_tokens = asst_toks
+        cur_step.assistant_masks = np.ones_like(asst_toks)
+>>>>>>> c6596c22 (snapshot)
 
       # Environment tokens/masks
       # Terminal-step environment messages are not appended to the response

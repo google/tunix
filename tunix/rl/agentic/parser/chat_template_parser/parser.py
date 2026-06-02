@@ -313,7 +313,8 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
       enable_thinking: bool = True,
   ):
     super().__init__(tokenizer, enable_thinking=enable_thinking)
-    self._strip_past_thinking = strip_past_thinking
+    # no strip with disable thinking lowers the  difference between initial rollout and trainer logps from 0.4  to 0.3.
+    self._strip_past_thinking = strip_past_thinking and enable_thinking
     # Also sanitize the base <turn|> token (without trailing newline) to guard
     # against model-generated control tokens trailing in message contents.
     self._tokens_to_sanitize.add("<turn|>")

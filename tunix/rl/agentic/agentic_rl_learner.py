@@ -442,7 +442,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
-      # print(f"Parsed chat_lists: {chat_lists}")  # Debug print to verify parsing
+      print(f"Parsed chat_lists: {chat_lists}")  # Debug print to verify parsing
     # else:
     #   print(f"No chat parser provided, using raw chat_lists: {chat_lists}")  # Debug print for raw input
     tags = {}
