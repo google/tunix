@@ -614,8 +614,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           s_logp = rollout_per_token_logps[batch_idx][t_idx]
           t_logp = trainer_per_token_logps[batch_idx][t_idx]
           print(f"t={t_idx:03d} | Token: {tok_str!r:<15} | Sampler Logp: {s_logp:.4f} | Trainer Logp: {t_logp:.4f} | Diff: {t_logp - s_logp:.4f}")
-        else:
-          print("Completion mask 0????", flush=True)
       print("=================================================", flush=True)
       
       # ``completion_mask`` is the assistant-vs-env mask built upstream
