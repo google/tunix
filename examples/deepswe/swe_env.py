@@ -110,6 +110,11 @@ class SWEEnv(BaseTaskEnv):
 
   def _initial_observation(self) -> Any:
     logging.info("%s _initial_observation: start", self._debug_prefix)
+    if EnvArgs is None or RepoEnv is None:
+      raise ImportError(
+          "r2egym RepoEnv imports are unavailable. Ensure the r2egym source"
+          " tree is on PYTHONPATH before constructing SWEEnv."
+      )
     if not self.env:
       # Initialize environment if not created yet.
       logging.info(

@@ -20,12 +20,21 @@ from datasets import load_dataset
 
 def _setup_paths() -> None:
   script_dir = os.path.dirname(os.path.abspath(__file__))
-  workdir = os.getcwd()
-  tunix_root = os.path.join(workdir, "tunix")
-  pathways_root = os.path.join(workdir, "pathways-utils")
-  r2egym_root = os.path.join(workdir, "r2egym")
+  repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+  workspace_root = os.path.dirname(repo_root)
+  candidate_roots = [
+      script_dir,
+      repo_root,
+      workspace_root,
+      os.path.join(repo_root, "tunix"),
+      os.path.join(repo_root, "pathways-utils"),
+      os.path.join(repo_root, "r2egym"),
+      os.path.join(workspace_root, "tunix"),
+      os.path.join(workspace_root, "pathways-utils"),
+      os.path.join(workspace_root, "r2egym"),
+  ]
 
-  for root in [script_dir, workdir, tunix_root, pathways_root, r2egym_root]:
+  for root in candidate_roots:
     if root not in sys.path:
       sys.path.insert(0, root)
 
@@ -36,6 +45,13 @@ try:
   import pathwaysutils  # pytype: disable=import-error
 except ImportError:
   pathwaysutils = None
+
+try:
+  import tunix  # pytype: disable=import-error  # noqa: F401
+  import r2egym  # pytype: disable=import-error  # noqa: F401
+  print("✅ tunix / r2egym import succeeded for debug_single_env")
+except ImportError as exc:
+  print(f"❌ debug_single_env import bootstrap failed: {exc}")
 
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
