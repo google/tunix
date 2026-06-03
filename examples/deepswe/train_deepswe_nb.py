@@ -314,6 +314,7 @@ from swe_agent import (
 
 # Assumed custom imports based on usage
 from swe_agent import SWEAgent
+from r2egym_runtime_patch import apply_repoenv_kubernetes_watch_patch
 from swe_env import SWEEnv
 
 # %%
@@ -343,6 +344,8 @@ try:
   # k8s_client.list_namespace(timeout_seconds=5)
 except Exception as e:
   print(f"Warning: Kubernetes config loading failed: {e}")
+
+apply_repoenv_kubernetes_watch_patch()
 
 
 # %%

@@ -58,6 +58,7 @@ except ImportError as exc:
 if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":
   pathwaysutils.initialize()
 
+from r2egym_runtime_patch import apply_repoenv_kubernetes_watch_patch
 from swe_env import SWEEnv
 
 
@@ -126,6 +127,8 @@ def main() -> None:
       datefmt="%Y-%m-%d %H:%M:%S",
       force=True,
   )
+
+  apply_repoenv_kubernetes_watch_patch()
 
   os.makedirs(args.cache_dir, exist_ok=True)
 
