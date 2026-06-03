@@ -48,9 +48,9 @@ def apply_repoenv_kubernetes_watch_patch() -> str | None:
     }
     env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
     node_selector_key = os.getenv(
-        "NODE_SELECTOR_KEY", "karpenter.sh/nodepool"
+        "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
     )
-    node_selector_val = os.getenv("NODE_SELECTOR_VAL", "bigcpu-standby")
+    node_selector_val = os.getenv("NODE_SELECTOR_VAL", "deepswe-cpu-pool")
     image_pull_secret = os.getenv("IMAGE_PULL_SECRET", "dockerhub-pro")
     self.logger.info(
         "Kubernetes scheduling config: nodeSelector=%s=%s imagePullSecret=%s",

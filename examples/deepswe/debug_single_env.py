@@ -96,6 +96,16 @@ def main() -> None:
   )
   parser.add_argument("--backend", type=str, default="kubernetes")
   parser.add_argument(
+      "--node_selector_key",
+      type=str,
+      default="cloud.google.com/gke-nodepool",
+  )
+  parser.add_argument(
+      "--node_selector_val",
+      type=str,
+      default="deepswe-cpu-pool",
+  )
+  parser.add_argument(
       "--scaffold",
       type=str,
       default="r2egym",
@@ -126,6 +136,14 @@ def main() -> None:
       format="%(asctime)s - %(levelname)s - [%(name)s] %(message)s",
       datefmt="%Y-%m-%d %H:%M:%S",
       force=True,
+  )
+
+  os.environ["NODE_SELECTOR_KEY"] = args.node_selector_key
+  os.environ["NODE_SELECTOR_VAL"] = args.node_selector_val
+  logging.info(
+      "Using Kubernetes node selector: %s=%s",
+      os.environ["NODE_SELECTOR_KEY"],
+      os.environ["NODE_SELECTOR_VAL"],
   )
 
   apply_repoenv_kubernetes_watch_patch()
