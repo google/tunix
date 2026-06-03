@@ -90,6 +90,15 @@ parser.add_argument("--top_p", type=float, default=None)
 parser.add_argument("--top_k", type=int, default=None)
 parser.add_argument("--rollout_engine", type=str, default="vllm")
 parser.add_argument("--vllm_utilization", type=float, default=0.4)
+parser.add_argument(
+    "--rollout_vllm_max_num_seqs",
+    type=int,
+    default=None,
+    help=(
+        "Optional override for vLLM max_num_seqs. Defaults to "
+        "rollout_micro_batch_size * num_generations when unset."
+    ),
+)
 
 # Optimizer Config
 parser.add_argument("--learning_rate", type=float, default=1e-6)
@@ -456,7 +465,11 @@ ROLLOUT_ENGINE = args.rollout_engine
 CKPT_DIR = args.ckpt_dir
 
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
+VLLM_MAX_NUM_SEQS = (
+    args.rollout_vllm_max_num_seqs
+    if args.rollout_vllm_max_num_seqs is not None
+    else ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
+)
 
 VLLM_UTILIZATION = args.vllm_utilization
 
