@@ -103,6 +103,27 @@ With the above, agentic_grpo_learner will by default start an async trajectory
 logger which logs the trajectories including prompts, responses, etc. to the
 specified `log_dir`.
 
+### Trackio Trajectory Backend
+
+RL algorithms can also log rollout prompt/completion pairs as Trackio traces
+through the trajectory logger. Set `trackio_project` and a positive
+`trackio_max_traces_per_step` on the algorithm config. Tunix logs standard
+PPO/GRPO rollouts under `rollout/traces` and agentic rollouts under
+`agentic/trajectories`.
+
+```python
+from tunix.rl.grpo import grpo_learner
+
+algo_config = grpo_learner.GRPOConfig(
+    trackio_project="my-rl-project",
+    trackio_run_name="experiment-1",
+    trackio_max_traces_per_step=16,
+)
+```
+
+Trackio is optional. Install it in the training environment before enabling
+trace logging.
+
 ### Enabling Metrics in Jobs
 
 Once you have your `MetricsLoggerOptions` configured, you can pass it to your

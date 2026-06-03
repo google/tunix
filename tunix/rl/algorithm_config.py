@@ -13,7 +13,10 @@
 # limitations under the License.
 
 import dataclasses
+from typing import Any
+
 from absl import logging
+
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class AlgorithmConfig:
@@ -23,12 +26,24 @@ class AlgorithmConfig:
     algo_variant: The core algorithm variant to use.
     advantage_estimator: The advantage estimator to use.
     policy_loss_fn: The policy loss function to use.
+    trackio_project: Trackio project name for rollout trace logging. If unset,
+      Trackio trace logging is disabled.
+    trackio_run_name: Optional Trackio run name for rollout trace logging.
+    trackio_trace_key: Metric key used for Trackio trace records.
+    trackio_max_traces_per_step: Maximum rollout traces to log per step. Set to
+      0 to disable trace logging.
+    trackio_init_kwargs: Extra keyword arguments forwarded to `trackio.init`.
   """
 
   algo_variant: str = "grpo"
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   reward_manager: str = "sequence-level"
+  trackio_project: str | None = None
+  trackio_run_name: str | None = None
+  trackio_trace_key: str = "rollout/traces"
+  trackio_max_traces_per_step: int = 0
+  trackio_init_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   def __post_init__(self):
     valid_algo_variants = [

@@ -361,6 +361,14 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       )
       self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
 
+    self._log_trackio_rollout_traces(
+        prompts=training_input["prompts"],
+        completions=rollout_output.text,
+        rewards=rewards,
+        advantages=advantages,
+        mode=mode,
+    )
+
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,

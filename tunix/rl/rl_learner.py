@@ -35,7 +35,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
-
+from tunix.utils import trajectory_logger
 
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
@@ -130,6 +130,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     )
     self.executor = futures.ThreadPoolExecutor(max_workers=1)
     self._last_iter_step = self.rl_cluster.actor_trainer.iter_steps
+    self._trajectory_logger = (
+        trajectory_logger.AsyncTrajectoryLogger.from_config(config=algo_config)
+    )
 
     self._rollout_micro_batch_size = (
         self._training_config.rollout_micro_batch_size
@@ -138,6 +141,28 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         self._training_config.compute_logps_micro_batch_size
     )
     sft_utils.show_hbm_usage(title="RLLearner init")
+
+  def _log_trackio_rollout_traces(
+      self,
+      *,
+      prompts: Sequence[str | list[dict[str, str]]],
+      completions: Sequence[str],
+      rewards: Any = None,
+      advantages: Any = None,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+  ) -> None:
+    self._trajectory_logger.log_rollouts(
+        prompts=prompts,
+        completions=completions,
+        rewards=rewards,
+        advantages=advantages,
+        mode=mode,
+        step=self.rl_cluster.global_steps,
+        metadata={
+            "algorithm": self.algo_config.algo_variant,
+            "num_generations": self._num_generations(),
+        },
+    )
 
   @abstractmethod
   def _generate_and_compute_advantage(
