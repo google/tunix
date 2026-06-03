@@ -7,11 +7,13 @@ to isolate whether ``RepoEnv(...)`` / ``get_task_instruction()`` can complete.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
 import os
 import signal
 import sys
+import threading
 import time
 from typing import Any
 
@@ -105,6 +107,12 @@ def main() -> None:
   parser.add_argument("--pair_index", type=int, default=0)
   parser.add_argument("--reset_timeout_secs", type=int, default=300)
   parser.add_argument(
+      "--stack_dump_secs",
+      type=int,
+      default=60,
+      help="Dump Python thread stacks every N seconds while blocked.",
+  )
+  parser.add_argument(
       "--verbose",
       action=argparse.BooleanOptionalAction,
       default=True,
@@ -158,6 +166,27 @@ def main() -> None:
       max_steps=args.max_steps,
   )
 
+  if args.stack_dump_secs > 0:
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(
+        args.stack_dump_secs, repeat=True, file=sys.stderr
+    )
+
+  stop_watchdog = threading.Event()
+
+  def _watchdog():
+    t0 = time.perf_counter()
+    while not stop_watchdog.wait(30):
+      logging.warning(
+          "env.reset() still blocked after %.1fs",
+          time.perf_counter() - t0,
+      )
+
+  watchdog_thread = threading.Thread(
+      target=_watchdog, name="env-reset-watchdog", daemon=True
+  )
+  watchdog_thread.start()
+
   previous_handler = signal.getsignal(signal.SIGALRM)
   signal.signal(
       signal.SIGALRM, _make_timeout_handler(args.reset_timeout_secs)
@@ -188,8 +217,11 @@ def main() -> None:
     logging.exception("env.reset() timed out")
     raise
   finally:
+    stop_watchdog.set()
     signal.alarm(0)
     signal.signal(signal.SIGALRM, previous_handler)
+    if args.stack_dump_secs > 0:
+      faulthandler.cancel_dump_traceback_later()
     try:
       env.close()
     except Exception:
