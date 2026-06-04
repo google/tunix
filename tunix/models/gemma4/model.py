@@ -18,7 +18,8 @@ import dataclasses
 import enum
 from functools import partial
 import itertools
-from typing import Tuple
+from typing import Tuple, Union
+import einops
 import flax
 from flax import nnx
 import jax
@@ -32,6 +33,9 @@ from jax.sharding import PartitionSpec as P
 import jaxtyping
 import numpy as np
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models.gemma3 import merge_embeddings as merge_embeddings_lib
+from tunix.models.gemma3 import utils as mm_utils
+from tunix.models.gemma3 import vision
 from tunix.models.gemma4 import moe
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -76,6 +80,8 @@ class ShardingConfig:
   per_layer_input_gate: Tuple[str | None, ...]
   per_layer_projection: Tuple[str | None, ...]
   per_layer_input_embedding: Tuple[str | None, ...]
+  # SigLIP vision encoder sharding.
+  siglip: vision.SigLIPShardingConfig | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
@@ -101,6 +107,7 @@ class ShardingConfig:
         per_layer_input_gate=(fsdp, 'tp'),
         per_layer_projection=('tp', fsdp),
         per_layer_input_embedding=('tp', None, fsdp),
+        siglip=vision.SigLIPShardingConfig.get_default_sharding(is_sampling),
     )
 
 
@@ -132,6 +139,10 @@ class ModelConfig:
   local_scale_factor: float = 1.0
   global_scale_factor: float = 1.0
 
+  # Vision config. If set, the model includes a SigLIP vision encoder and
+  # accepts `images` in the forward pass for multi-modal inputs.
+  vision_config: vision.SigLIPConfig | None = None
+
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
   param_dtype: jnp.dtype = jnp.float32
@@ -158,6 +169,7 @@ class ModelConfig:
   def gemma4_e2b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      text_only: bool = True,
   ) -> 'ModelConfig':
     return cls(
         num_layers=35,
@@ -172,6 +184,7 @@ class ModelConfig:
         per_layer_input_dim=256,
         frac_shared_layers=20.0 / 35,
         override_kv_shared_ffw_hidden=int(1536 * 4 * 2),
+        vision_config=None if text_only else vision.SigLIPConfig(),
         attention_pattern=(
             AttentionType.LOCAL_SLIDING,
             AttentionType.LOCAL_SLIDING,
@@ -185,6 +198,7 @@ class ModelConfig:
   def gemma4_e4b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      text_only: bool = True,
   ) -> 'ModelConfig':
     return cls(
         num_layers=42,
@@ -198,6 +212,7 @@ class ModelConfig:
         shd_config=sharding_config,
         per_layer_input_dim=256,
         frac_shared_layers=18.0 / 42,
+        vision_config=None if text_only else vision.SigLIPConfig(),
         attention_pattern=(
             AttentionType.LOCAL_SLIDING,
             AttentionType.LOCAL_SLIDING,
@@ -212,6 +227,7 @@ class ModelConfig:
   def gemma4_31b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      text_only: bool = True,
   ) -> 'ModelConfig':
     return cls(
         num_layers=60,
@@ -225,6 +241,7 @@ class ModelConfig:
         sliding_window_size=1024,
         shd_config=sharding_config,
         k_eq_v_global=True,
+        vision_config=None if text_only else vision.SigLIPConfig(),
         attention_pattern=(
             AttentionType.LOCAL_SLIDING,
             AttentionType.LOCAL_SLIDING,
@@ -239,6 +256,7 @@ class ModelConfig:
   def gemma4_26b_a4b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+      text_only: bool = True,
   ) -> 'ModelConfig':
     return cls(
         num_layers=30,
@@ -258,6 +276,7 @@ class ModelConfig:
         moe_dense_hidden_dim=2112,
         k_eq_v_global=True,
         global_rope_proportion=0.25,
+        vision_config=None if text_only else vision.SigLIPConfig(),
         attention_pattern=(
             AttentionType.LOCAL_SLIDING,
             AttentionType.LOCAL_SLIDING,
@@ -276,6 +295,7 @@ class Embedder(nnx.Module):
       self,
       config: ModelConfig,
       rngs: nnx.Rngs,
+      vision_proj_dim: int | None = None,
   ):
     self.config = config
     self.vocab_size = config.num_embed
@@ -315,6 +335,23 @@ class Embedder(nnx.Module):
           sharding=config.shd_config.per_layer_input_embedding,
       )
 
+    if vision_proj_dim:
+      self.mm_soft_embedding_norm = RMSNorm(
+          vision_proj_dim,
+          rngs=rngs,
+          sharding=config.shd_config.vision_soft_emb_norm_weight,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+      )
+      self.mm_input_projection = Einsum(
+          einsum_str='...TM,MD->...TD',
+          shape=(vision_proj_dim, self.embed_dim),
+          rngs=rngs,
+          sharding=config.shd_config.vision_proj,
+          dtype=self.config.dtype,
+          param_dtype=self.param_dtype,
+      )
+
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
@@ -333,6 +370,12 @@ class Embedder(nnx.Module):
     y = self.per_layer_input_embedding.value[t]
     y *= jnp.sqrt(self.config.per_layer_input_dim).astype(y.dtype)
     return (x + y) * jax.lax.rsqrt(2.0).astype(x.dtype)
+
+  def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    """Projects vision encoder outputs into the language model embedding space."""
+    x = self.mm_soft_embedding_norm(x)
+    x = self.mm_input_projection(x)
+    return x
 
   def decode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = jnp.astype(x, self.config.dtype)
@@ -429,13 +472,20 @@ class RMSNorm(nnx.Module):
       dim: int,
       *,
       rngs: nnx.Rngs,
-      sharding: ShardingConfig = ShardingConfig.get_default_sharding(),
+      sharding: Union[ShardingConfig, Tuple[str | None, ...]] = (
+          ShardingConfig.get_default_sharding()
+      ),
       dtype: jnp.dtype,
       param_dtype: jnp.dtype,
   ):
+    scale_sharding = (
+        sharding.rms_norm_weight
+        if isinstance(sharding, ShardingConfig)
+        else sharding
+    )
     self.scale = nnx.Param(
         nnx.initializers.ones_init()(rngs.params(), dim).astype(param_dtype),
-        sharding=sharding.rms_norm_weight,
+        sharding=scale_sharding,
     )
     self.dtype = dtype
 
@@ -1182,7 +1232,25 @@ class Gemma4(BackendMappingMixin, nnx.Module):
 
   def __init__(self, config: ModelConfig, *, rngs: nnx.Rngs):
     self.config = config
-    self.embedder = Embedder(config, rngs=rngs)
+
+    if config.vision_config is not None:
+      self.vision_encoder = vision.SigLiP(
+          config=config.vision_config,
+          shd_config=config.shd_config.siglip,
+          rngs=rngs,
+      )
+    else:
+      self.vision_encoder = None
+
+    self.embedder = Embedder(
+        config,
+        rngs=rngs,
+        vision_proj_dim=(
+            self.vision_encoder.siglip_encoder.width
+            if self.vision_encoder is not None
+            else None
+        ),
+    )
 
     pattern = (
         config.attention_pattern
@@ -1237,13 +1305,15 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       cache=None,
       attention_mask=None,
       decode_only_last_token=False,
+      *,
+      images: jaxtyping.Array | None = None,
   ):
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
       positions = jnp.tile(jnp.arange(T)[None, :], (B, 1))
 
     new_cache = {}
-    x = self.embedder.encode(tokens)
+    x = self._encode_and_get_inputs(tokens=tokens, images=images)
 
     per_layer_inputs = None
     if self.config.per_layer_input_dim > 0:
@@ -1312,6 +1382,113 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       cache[f'layer_{i}'] = layer.init_cache(batch_size, max_seq_len, dtype)
     return cache
 
+  def _encode_and_get_inputs(
+      self,
+      *,
+      tokens: jaxtyping.Array,  # (B, L)
+      images: jaxtyping.Array | None = None,  # (B, H, W, C) or (B, N, H, W, C)
+  ) -> jaxtyping.Array:
+    """Encode the text tokens, eventually including the vision embeddings."""
+    if self.config.vision_config is not None and images is not None:
+      self._assert_support_mm()
+      if len(images.shape) == 4:  # If num_images is 1, add an axis.
+        images = einops.rearrange(images, 'b h w c -> b 1 h w c')
+
+    x = self.embedder.encode(tokens)
+
+    if images is not None:
+      x = self._merge_mm_embeddings(tokens=tokens, embeddings=x, images=images)
+    return x
+
+  def _assert_support_mm(self) -> None:
+    if self.vision_encoder is None:
+      raise ValueError(
+          f'The model {type(self).__name__!r} does not have a vision encoder,'
+          ' yet images are provided. Construct the model with a `vision_config`'
+          ' (e.g. `ModelConfig.gemma4_e4b(text_only=False)`) to enable'
+          ' multi-modal inputs.'
+      )
+
+  def _merge_mm_embeddings(
+      self,
+      *,
+      tokens: jaxtyping.ArrayLike,  # (B, L)
+      embeddings: jaxtyping.ArrayLike,  # (B, L, D)
+      images: jaxtyping.ArrayLike,  # (B, N, H, W, C)
+  ) -> jaxtyping.ArrayLike:
+    """Update the text embeddings to include the vision soft tokens."""
+    soft_embeddings = self._encode_vision(images)
+    if self.config.vision_config is None:
+      raise ValueError(
+          '`vision_config` is required for `_merge_mm_embeddings`.'
+      )
+    return merge_embeddings_lib.merge_embeddings(
+        text_embeddings=embeddings,
+        vision_embeddings=soft_embeddings,
+        mask=tokens == self.config.vision_config.soft_token_placeholder,
+    )
+
+  def _encode_vision(
+      self, images: jaxtyping.ArrayLike  # (B, N, H, W, C)
+  ) -> jaxtyping.ArrayLike:  # (B, N, P, D)
+    """Encode the images into the same space as the text embeddings."""
+    if self.vision_encoder is None:
+      raise ValueError('`vision_encoder` is None, cannot encode images.')
+    soft_embeddings = self.vision_encoder(images=images)
+    soft_embeddings = self.embedder.encode_vision(soft_embeddings)
+    return soft_embeddings
+
+  def get_attention_mask(
+      self,
+      tokens: jaxtyping.ArrayLike,  # (B, L)
+      *,
+      inputs_mask: jaxtyping.ArrayLike | None = None,  # (B, L)
+  ):
+    """Returns the attention mask for the transformer.
+
+    For multi-modal inputs, the mask is bidirectional over image soft-token
+    spans (so all soft tokens of an image attend to each other) while remaining
+    causal over text tokens, matching the Gemma 3 behavior.
+    """
+    token_placeholder_id = (
+        None
+        if self.config.vision_config is None
+        else self.config.vision_config.soft_token_placeholder
+    )
+    return mm_utils.get_attention_mask(
+        tokens,
+        inputs_mask=inputs_mask,
+        token_placeholder_id=token_placeholder_id,
+    )
+
+  def get_model_input(self):
+    """Returns a dummy model input for the transformer.
+
+    Used to trace the graph for LoRA application and similar transforms.
+    """
+    dummy_batch_size = 2
+    dummy_seq_len = 1
+    inputs = {
+        'tokens': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'positions': jnp.ones(
+            (dummy_batch_size, dummy_seq_len), dtype=jnp.int32
+        ),
+        'cache': None,
+        'attention_mask': jnp.ones(
+            (dummy_batch_size, 1, dummy_seq_len), dtype=jnp.bool
+        ),
+    }
+
+    if self.vision_encoder is not None:
+      vc = self.config.vision_config
+      inputs['images'] = jnp.ones(
+          (dummy_batch_size, 1, vc.image_height, vc.image_width,
+           vc.image_channels),
+          dtype=jnp.float32,
+      )
+    return inputs
   @property
   def num_embed(self) -> int:
     return self.config.num_embed
