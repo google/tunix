@@ -26,6 +26,7 @@ from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.tools import calculator_tool
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.rollout import base_rollout
+from tunix.sft import sharding_utils
 from examples.frozenlake.agent import FrozenLakeAgent
 from examples.frozenlake.env import FrozenLakeEnv
 
@@ -39,7 +40,7 @@ from examples.frozenlake.env import FrozenLakeEnv
 # Generation Config
 MAX_PROMPT_LENGTH = 2048
 TOTAL_GENERATION_STEPS = 2048
-TEMPERATURE = 0.7
+TEMPERATURE = 0.0
 TOP_P = 1.0
 TOP_K = None
 
@@ -60,9 +61,9 @@ config.flash_attention_block_size = 256
 
 from huggingface_hub import snapshot_download
 
-# MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
+MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
 # MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-26B-A4B-it/snapshots/6e6f6edea8c52db2094dca3086e4b963a0034dfc"
-MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
+# MODEL_PATH = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
 print(f"{MODEL_PATH=}")
 gemma4 = params_lib.create_model_from_safe_tensors(MODEL_PATH, config, mesh)
 
@@ -131,6 +132,17 @@ rl_cluster = rl_cluster_lib.RLCluster(
     tokenizer=tokenizer,
     cluster_config=cluster_config,
 )
+
+original_model_fn = rl_cluster.rollout._sampler._model_runner.model_fn
+captured_arguments = None
+
+def patched_model_fn(*args, **kwargs):
+  global captured_arguments
+  if captured_arguments is None:
+    captured_arguments = args
+  return original_model_fn(*args, **kwargs)
+
+rl_cluster.rollout._sampler._model_runner.model_fn = patched_model_fn
 
 CHAT_PARSER = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False, strip_past_thinking=False)
 
@@ -239,11 +251,125 @@ def unbatch_inputs(batched_dataset):
           single_input[k] = val
       yield single_input
 
+def compare_layers(vllm_model, trainer_model, captured_args):
+  print("=" * 40 + " START LAYER-BY-LAYER COMPARISON " + "=" * 40)
+  
+  state_leaves = captured_args[0]
+  kv_caches = rl_cluster.rollout._sampler._model_runner.kv_caches
+  input_ids = captured_args[2]
+  attn_metadata = captured_args[3]
+  inputs_embeds = captured_args[4]
+  input_positions = captured_args[5]
+  layer_name_to_kvcache_index = dict(captured_args[6])
+
+  gemma4_model = vllm_model.model
+  if inputs_embeds is not None:
+    x_vllm = inputs_embeds
+  else:
+    x_vllm = gemma4_model.embed_tokens(input_ids) * gemma4_model.embedding_scale
+
+  per_layer_inputs_vllm = gemma4_model.compute_per_layer_inputs(
+      input_ids, x_vllm, is_multimodal=None
+  )
+
+  tokens_trainer = sharding_utils.shard_input(
+      input_ids[None, :], ("fsdp",)
+  )
+  positions_trainer = sharding_utils.shard_input(
+      input_positions[None, :], ("fsdp",)
+  )
+
+  x_trainer = trainer_model.embedder.encode(tokens_trainer)
+
+  if trainer_model.config.per_layer_input_dim > 0:
+    per_layer_inputs_trainer = trainer_model.embedder.encode_per_layer_input(
+        x_trainer, tokens_trainer
+    )
+  else:
+    per_layer_inputs_trainer = None
+
+  x_vllm_np = np.asarray(x_vllm)
+  x_trainer_np = np.asarray(x_trainer[0])
+  emb_diff = np.abs(x_vllm_np - x_trainer_np)
+  print(
+      f"Embedding Out | Mean Abs Diff: {float(emb_diff.mean()):.6e} | Max Abs"
+      f" Diff: {float(emb_diff.max()):.6e}"
+  )
+
+  @nnx.jit
+  def run_trainer_layer(layer, x, pos, cache, mask, pli):
+    return layer(x, pos, cache, mask, per_layer_input=pli)
+
+  for i in range(len(gemma4_model.layers)):
+    vllm_layer = gemma4_model.layers[i]
+    layer_name = f"layer.{i}"
+    cache_idx = layer_name_to_kvcache_index.get(layer_name, i)
+    kv_cache = kv_caches[cache_idx]
+    layer_per_input_vllm = (
+        per_layer_inputs_vllm[:, i, :]
+        if per_layer_inputs_vllm is not None
+        else None
+    )
+
+    _, x_vllm, _ = vllm_layer(
+        kv_cache,
+        x_vllm,
+        attn_metadata,
+        per_layer_input=layer_per_input_vllm,
+    )
+
+    trainer_layer = trainer_model.layers[i]
+    seq_len = tokens_trainer.shape[1]
+    attn_mask_trainer = (
+        jnp.tril(jnp.ones((seq_len, seq_len)))[None, None, :, :]
+    )
+
+    _, x_trainer, _ = run_trainer_layer(
+        trainer_layer,
+        x_trainer,
+        positions_trainer,
+        None,
+        attn_mask_trainer,
+        per_layer_inputs_trainer[:, :, i, :]
+        if per_layer_inputs_trainer is not None
+        else None,
+    )
+
+    x_vllm_np = np.asarray(x_vllm)
+    x_trainer_np = np.asarray(x_trainer[0])
+    diff = np.abs(x_vllm_np - x_trainer_np)
+    print(
+        f"Layer {i:2d} Out   | Mean Abs Diff: {float(diff.mean()):.6e} | Max"
+        f" Abs Diff: {float(diff.max()):.6e}"
+    )
+
+  vllm_logits = vllm_model.compute_logits(x_vllm)
+
+  trainer_normed = trainer_model.final_norm(x_trainer)
+  trainer_logits = (
+      trainer_model.embedder.decode(trainer_normed).astype(jnp.float32)
+  )
+  if trainer_model.config.final_logit_softcap is not None:
+    trainer_logits /= trainer_model.config.final_logit_softcap
+    trainer_logits = (
+        jnp.tanh(trainer_logits) * trainer_model.config.final_logit_softcap
+    )
+
+  vllm_logits_np = np.asarray(vllm_logits)
+  trainer_logits_np = np.asarray(trainer_logits[0])
+  logits_diff = np.abs(vllm_logits_np - trainer_logits_np)
+  print(
+      f"Final Logits  | Mean Abs Diff: {float(logits_diff.mean()):.6e} | Max"
+      f" Abs Diff: {float(logits_diff.max()):.6e}"
+  )
+  print("=" * 45 + " END LAYER COMPARISON " + "=" * 45)
+
+
 # %%
 async def main():
   """Runs the rollout orchestrator."""
   BATCH_SIZE = 8
-  NUM_BATCHES = 10
+  NUM_BATCHES = 1
   MAX_PROMPT_LENGTH = 2048
   train_ds, _ = create_datasets()
   train_ds, _ = data_lib.post_init_dataset(
@@ -287,6 +413,9 @@ async def main():
   # Yield control to allow producer initialization
   await asyncio.sleep(0)
 
+  # Ensure anchor policy state is initialized for trainer logp recomputation
+  rl_cluster.sync_weights()
+
   all_rollout_logps = []
   all_trainer_logps = []
   all_completion_masks = []
@@ -306,9 +435,26 @@ async def main():
         completion_tokens = item.traj.get("conversation_tokens")
         completion_mask = item.traj.get("conversation_masks")
         old_logprobs = item.traj.get("old_logprobs")
+        conversation_text = item.traj.get("conversation_text")
 
         pad_value = rl_cluster.rollout.pad_id()
         eos_value = rl_cluster.rollout.eos_id()
+
+        # 1. Compare initial turn prompt tokens in rollout vs trainer
+        init_messages = []
+        if conversation_text:
+          for msg in conversation_text:
+            if msg["role"] == "assistant":
+              break
+            init_messages.append(msg)
+
+        python_prompt_tokens, _ = utils.tokenize_and_generate_masks(
+            init_messages,
+            tokenizer=tokenizer_adapter.TokenizerAdapter(tokenizer),
+            parser=CHAT_PARSER,
+            contains_first_msg=True,
+            contains_generation_msg=True,
+        )
 
         padded_prompt, padded_completion, _ = (
             utils.pad_prompt_and_completion(
@@ -319,6 +465,96 @@ async def main():
                 pad_value,
             )
         )
+
+        print("\n--- 1. Initial Turn Prompt Tokens Comparison ---")
+        unpadded_rollout_prompt = prompt_tokens[prompt_tokens != pad_value]
+        print(
+            f"Python Initial Prompt Tokens (unpadded len={len(python_prompt_tokens)}):"
+            f" {python_prompt_tokens[:20]}..."
+        )
+        print(
+            f"Rollout Worker Prompt Tokens (unpadded len={len(unpadded_rollout_prompt)}):"
+            f" {unpadded_rollout_prompt[:20]}..."
+        )
+        print(
+            f"Trainer Padded Prompt (len={len(padded_prompt)}):"
+            f" {padded_prompt[:20]}..."
+        )
+        prompt_match = np.array_equal(
+            python_prompt_tokens, unpadded_rollout_prompt
+        )
+        print(
+            "Does Python C-parser match Rollout Worker exactly? "
+            f"{'YES' if prompt_match else 'NO (Mismatch!)'}"
+        )
+
+        if not prompt_match:
+          print(
+              "\n" + "-" * 40 + " DEEP PROMPT MISMATCH DIAGNOSTIC " + "-" * 40
+          )
+          print(f"Python Unpadded Length:  {len(python_prompt_tokens)}")
+          print(f"Rollout Unpadded Length: {len(unpadded_rollout_prompt)}")
+
+          min_len = min(len(python_prompt_tokens), len(unpadded_rollout_prompt))
+          mismatches = []
+          for i in range(min_len):
+            p_tok = python_prompt_tokens[i]
+            r_tok = unpadded_rollout_prompt[i]
+            if p_tok != r_tok:
+              mismatches.append((i, p_tok, r_tok))
+
+          print(
+              "Total mismatched tokens in overlapping range (0 to"
+              f" {min_len}): {len(mismatches)}"
+          )
+          if mismatches:
+            print(
+                "\nDetailed Mismatch Breakdown (showing up to first 20"
+                " mismatched positions):"
+            )
+            print(
+                f"{'Pos':<5} | {'Py ID':<7} | {'Py Decoded':<25} |"
+                f" {'Rollout ID':<10} | {'Rollout Decoded':<25}"
+            )
+            print("-" * 82)
+            for pos, p_tok, r_tok in mismatches[:20]:
+              try:
+                p_str = repr(tokenizer.decode([p_tok]))
+              except Exception:
+                p_str = "<error>"
+              try:
+                r_str = repr(tokenizer.decode([r_tok]))
+              except Exception:
+                r_str = "<error>"
+              print(
+                  f"{pos:<5} | {p_tok:<7} | {p_str:<25} | {r_tok:<10} |"
+                  f" {r_str:<25}"
+              )
+
+          if len(python_prompt_tokens) > min_len:
+            print(
+                f"\nPython prompt has {len(python_prompt_tokens) - min_len}"
+                " extra trailing tokens:"
+            )
+            extra_py = python_prompt_tokens[min_len : min_len + 10]
+            try:
+              extra_py_str = repr(tokenizer.decode(extra_py))
+            except Exception:
+              extra_py_str = "<error>"
+            print(f"  IDs: {extra_py} -> Decoded: {extra_py_str}")
+
+          if len(unpadded_rollout_prompt) > min_len:
+            print(
+                f"\nRollout worker prompt has {len(unpadded_rollout_prompt) - min_len}"
+                " extra trailing tokens:"
+            )
+            extra_r = unpadded_rollout_prompt[min_len : min_len + 10]
+            try:
+              extra_r_str = repr(tokenizer.decode(extra_r))
+            except Exception:
+              extra_r_str = "<error>"
+            print(f"  IDs: {extra_r} -> Decoded: {extra_r_str}")
+          print("-" * 113 + "\n")
         padded_completion_mask = utils.right_pad(
             completion_mask, TOTAL_GENERATION_STEPS, 0
         )[:TOTAL_GENERATION_STEPS]
@@ -442,9 +678,13 @@ async def main():
         print(f"Rollout Active Logps stats: min={rp_active.min():.4f}, max={rp_active.max():.4f}, mean={rp_active.mean():.4f}")
         print(f"Trainer Active Logps stats: min={tp_active.min():.4f}, max={tp_active.max():.4f}, mean={tp_active.mean():.4f}")
 
-        print("\nTop 20 Largest Logprob Discrepancies:")
+        print("\nTop 20 Largest Logprob Discrepancies (with Context Window):")
         diff_active = np.abs(rp_active - tp_active)
         top_diff_idx = np.argsort(diff_active)[::-1][:20]
+        unpadded_p = prompt_tokens[prompt_tokens != pad_value]
+        full_seq = np.concatenate([unpadded_p, completion_tokens], axis=0)
+        prompt_len = len(unpadded_p)
+
         for rank, idx_in_active in enumerate(top_diff_idx):
           orig_pos = active_indices[idx_in_active]
           tok_id = completion_tokens[orig_pos]
@@ -455,7 +695,31 @@ async def main():
           r_logp = rp_active[idx_in_active]
           t_logp = tp_active[idx_in_active]
           d_val = diff_active[idx_in_active]
-          print(f"  Rank {rank+1:2d} | Pos {orig_pos:4d} | ID {tok_id:6d} | {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer: {t_logp:8.4f} | Diff: {d_val:8.4f}")
+
+          global_pos = prompt_len + orig_pos
+          pre_ctx = full_seq[max(0, global_pos - 15) : global_pos]
+          post_ctx = full_seq[
+              global_pos + 1 : min(len(full_seq), global_pos + 10)
+          ]
+
+          try:
+            pre_str = tokenizer.decode(pre_ctx)
+          except Exception:
+            pre_str = "<error>"
+          try:
+            post_str = tokenizer.decode(post_ctx)
+          except Exception:
+            post_str = "<error>"
+
+          print(
+              f"  Rank {rank+1:2d} | Pos {orig_pos:4d} | ID {tok_id:6d} |"
+              f" {decoded_tok:15s} | Rollout: {r_logp:8.4f} | Trainer:"
+              f" {t_logp:8.4f} | Diff: {d_val:8.4f}"
+          )
+          print(
+              f"    Context: ...{repr(pre_str)} ---> [{decoded_tok}] <---"
+              f" {repr(post_str)}...\n"
+          )
         print("=" * 151 + "\n")
       else:
         print("No active (assistant) tokens in the first trajectory of the batch.\n")
@@ -508,6 +772,14 @@ async def main():
           f"  Global Pearson Correlation: {global_pearson:.6f}"
       )
       print("X" * 149 + "\n")
+
+    if captured_arguments is not None:
+      with rl_cluster._get_mesh_and_logical_axis_rules_cm(rl_cluster_lib.Role.ACTOR):
+        compare_layers(
+            vllm_model=rl_cluster.rollout._sampler._model_runner.model,
+            trainer_model=rl_cluster.actor_trainer.model,
+            captured_args=captured_arguments,
+        )
 
   finally:
     await producer_task
