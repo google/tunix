@@ -132,9 +132,29 @@ pins the nnx side of this table.
   Status: the architecture/math is proven correct against HF. The only thing the
   real-checkpoint run adds is confirming the real `.safetensors` files load and a
   real image captions — do that before Stage 4.
-* **Stage 4 — end-to-end.** TODO. Wire into `Gemma4.__call__` (replace the
-  SigLIP path), merge soft tokens at image-token positions, and generate a
-  caption from the real checkpoint.
+* **Stage 4 — end-to-end. WIRED + merge-validated; full-model parity + caption pending.**
+  * `tunix/models/gemma4/model.py` — `Gemma4.__call__` gains a non-breaking
+    `input_embeddings` override (legacy SigLIP path untouched).
+  * `tunix/models/gemma4/multimodal.py` — `Gemma4Multimodal` composes the text
+    `Gemma4` with `Gemma4VisionStack`: embed tokens, run the vision stack, scatter
+    soft tokens at `tokens == image_token_id` (HF `masked_scatter` equivalent via
+    `merge_embeddings`), run the transformer on merged embeddings. Plus
+    `create_multimodal_from_safe_tensors` (loads text + vision from one checkpoint).
+  * `examples/gemma4/multimodal_generate.py` — single-image, no-padding, eager
+    greedy caption demo.
+  * Tests (`multimodal_test.py`, sandbox dry-run): soft tokens land exactly at
+    image positions, text positions are untouched, the image changes downstream
+    logits, the mask is bidirectional over the image span, and the greedy loop
+    runs end-to-end. **26/26 gemma4 tests pass.**
+
+  Open items / honest limits:
+  * **No full-model numeric parity vs HF yet** — Stages 1-3 prove the vision
+    stack + merge in isolation, but the merged-embedding forward through the
+    text tower (esp. whether per-layer-input embeddings should derive from token
+    ids vs merged embeddings) is unverified against HF `Gemma4Model.forward`.
+  * **Single, non-padded image only** — the merge assumes #valid-soft-tokens ==
+    #placeholders; multi-image / padded batches need a valid-token gather first.
+  * **Real caption** needs the checkpoint (run `multimodal_generate.py`).
 
 ## Validation prerequisites (Stage 3)
 

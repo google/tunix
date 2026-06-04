@@ -1311,13 +1311,19 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       decode_only_last_token=False,
       *,
       images: jaxtyping.Array | None = None,
+      input_embeddings: jaxtyping.Array | None = None,
   ):
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
       positions = jnp.tile(jnp.arange(T)[None, :], (B, 1))
 
     new_cache = {}
-    x = self._encode_and_get_inputs(tokens=tokens, images=images)
+    # `input_embeddings` lets a multimodal wrapper inject already-merged
+    # (text + vision soft-token) embeddings; otherwise encode tokens here.
+    if input_embeddings is not None:
+      x = input_embeddings
+    else:
+      x = self._encode_and_get_inputs(tokens=tokens, images=images)
 
     per_layer_inputs = None
     if self.config.per_layer_input_dim > 0:
