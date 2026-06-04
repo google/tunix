@@ -194,7 +194,6 @@ def tokenize_and_generate_masks(
   Returns:
     A tuple containing (all_tokens, all_masks).
   """
-
   # For parsers that require preprocessing (e.g., merging system messages),
   # apply it before iterating message by message.
   if hasattr(parser, "preprocess_messages"):
