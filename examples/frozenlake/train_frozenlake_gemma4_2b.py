@@ -252,7 +252,11 @@ ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 
 # ====== Paths (env-driven so the same image runs anywhere) ======
 MODEL_VERSION = "google/gemma-4-E2B-it"
-MODEL_DOWNLOAD_DIR = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
+from huggingface_hub import snapshot_download
+
+MODEL_DOWNLOAD_DIR = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
+print("MODEL_PATH: ", MODEL_DOWNLOAD_DIR)
+# MODEL_DOWNLOAD_DIR = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
 DATA_DIR = "gs://tunix/data/Frozenlake"
 
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

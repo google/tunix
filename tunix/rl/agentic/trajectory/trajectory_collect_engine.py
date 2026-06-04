@@ -415,7 +415,7 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
-    logging.info("%s env.reset starting", self._debug_prefix)
+    # logging.info("%s env.reset starting", self._debug_prefix)
     (obs, _), wall_time, cpu_time = await self._run_with_timing(self.env.reset)
     logging.debug(
         "%s env.reset done in %.1fs",
