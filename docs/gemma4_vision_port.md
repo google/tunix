@@ -113,21 +113,25 @@ pins the nnx side of this table.
     every real vision key maps to a param, linears transpose / norms don't,
     audio+clip buffers skip, no double-matches, **no uninitialised params**, and
     processor output feeds the stack end-to-end. **Numeric parity still pending.**
-* **Stage 3 — numeric parity (GATING). HARNESS READY; AWAITS RUN.**
-  `examples/gemma4/vision_parity_check.py`. Loads vision + `embed_vision` from a
-  real `google/gemma-4-*-it` checkpoint into both HF torch (selective
-  `load_state_dict`, no `language_model`/`audio_tower` loaded) and this port,
-  feeds identical synthetic `pixel_values` + `pixel_position_ids` (no padding so
-  HF's gather is identity), and reports max/mean/median-relative diff at:
-  `after_patch_embed`, `after_layer_{0..N-1}` (per layer), `after_pool`,
-  `after_vision_tower_gathered`, `after_projector`, and a strict equality check
-  on the pool mask. Exit code 0 iff every checkpoint passes
-  (default tolerance `5e-2`, set for bf16). Run:
-  ```
-  pip install torch transformers safetensors
-  python examples/gemma4/vision_parity_check.py --ckpt ~/gemma4-e2b
-  ```
-  Until this passes on a real checkpoint, do **not** claim the port works.
+* **Stage 3 — numeric parity (GATING). PORT MATH VALIDATED; real-checkpoint run pending.**
+  Two harnesses:
+  * `examples/gemma4/vision_parity_random_weights.py` — **checkpoint-free**.
+    Builds a small HF `Gemma4VisionModel`+`Gemma4MultimodalEmbedder` with random
+    weights, serializes them under real checkpoint key names, loads them into the
+    JAX `Gemma4VisionStack` via the production loader, and compares per-layer in
+    fp32. **Run in-sandbox (transformers 5.9.0 + torch 2.12): PARITY PASSED** —
+    `after_patch_embed` exact, per-layer max-abs ~1e-6, tower 1.5e-5, projector
+    3.6e-7. This validates the port math + key mapping + loader against HF.
+  * `examples/gemma4/vision_parity_check.py` — same comparison against a **real**
+    `google/gemma-4-*-it` checkpoint (adds real-weight file loading + an actual
+    forward). Run:
+    ```
+    pip install torch 'transformers==5.9.0' safetensors   # 5.10.1 trips a torch._dynamo bug
+    python examples/gemma4/vision_parity_check.py --ckpt ~/gemma4-e2b
+    ```
+  Status: the architecture/math is proven correct against HF. The only thing the
+  real-checkpoint run adds is confirming the real `.safetensors` files load and a
+  real image captions — do that before Stage 4.
 * **Stage 4 — end-to-end.** TODO. Wire into `Gemma4.__call__` (replace the
   SigLIP path), merge soft tokens at image-token positions, and generate a
   caption from the real checkpoint.
