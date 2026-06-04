@@ -97,14 +97,7 @@ class TokenizerAdapter:
     elif self._tokenizer_type == TokenizerType.HF:
       # e.g. llama3 HF tokenizers do not have pad_id
       if self._tokenizer.pad_token_id is None:
-        # self._tokenizer.pad_token = self._tokenizer.eos_token
-        if (
-            hasattr(self._tokenizer, 'get_vocab')
-            and '<pad>' in self._tokenizer.get_vocab()
-        ):
-          self._tokenizer.pad_token = '<pad>'
-        else:
-          self._tokenizer.pad_token = self._tokenizer.eos_token
+        self._tokenizer.pad_token = self._tokenizer.eos_token
       return self._tokenizer.pad_token_id
     else:
       return self._tokenizer.pad_id()

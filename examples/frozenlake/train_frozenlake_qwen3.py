@@ -227,8 +227,15 @@ ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 
 # ====== Paths ======
 MODEL_VERSION = "Qwen/Qwen3-8B"
-MODEL_DOWNLOAD_DIR = "/tmp/models/Qwen3-8B"
-DATA_DIR = "/tmp/data/frozenlake"
+# MODEL_DOWNLOAD_DIR = "/tmp/models/Qwen3-8B"
+# DATA_DIR = "/tmp/data/frozenlake"
+from huggingface_hub import snapshot_download
+
+MODEL_DOWNLOAD_DIR = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
+print("MODEL_PATH: ", MODEL_DOWNLOAD_DIR)
+
+
+DATA_DIR = "gs://tunix/data/Frozenlake"
 
 # Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
 CKPT_DIR = None
@@ -500,6 +507,7 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     advantage_estimator=args.advantage_estimator,
+    degenerate_group_masking=True,
 )
 
 rl_cluster = rl_cluster_lib.RLCluster(
