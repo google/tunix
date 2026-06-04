@@ -1312,6 +1312,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       *,
       images: jaxtyping.Array | None = None,
       input_embeddings: jaxtyping.Array | None = None,
+      per_layer_inputs: jaxtyping.Array | None = None,
   ):
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
@@ -1325,8 +1326,11 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     else:
       x = self._encode_and_get_inputs(tokens=tokens, images=images)
 
-    per_layer_inputs = None
-    if self.config.per_layer_input_dim > 0:
+    # `per_layer_inputs` lets a multimodal wrapper precompute PLE from
+    # pad-substituted tokens/embeddings (matching HF Gemma4Model.forward),
+    # since the merged embeddings include vision soft tokens at image-token
+    # positions and shouldn't feed the per-layer projection there.
+    if per_layer_inputs is None and self.config.per_layer_input_dim > 0:
       per_layer_inputs = self.embedder.encode_per_layer_input(x, tokens)
 
     # Stores the raw KV projections for the current forward pass. Used for

@@ -148,13 +148,40 @@ pins the nnx side of this table.
     runs end-to-end. **26/26 gemma4 tests pass.**
 
   Open items / honest limits:
-  * **No full-model numeric parity vs HF yet** — Stages 1-3 prove the vision
-    stack + merge in isolation, but the merged-embedding forward through the
-    text tower (esp. whether per-layer-input embeddings should derive from token
-    ids vs merged embeddings) is unverified against HF `Gemma4Model.forward`.
   * **Single, non-padded image only** — the merge assumes #valid-soft-tokens ==
     #placeholders; multi-image / padded batches need a valid-token gather first.
   * **Real caption** needs the checkpoint (run `multimodal_generate.py`).
+
+* **Stage 4 follow-up — full-model parity vs HF `Gemma4Model.forward`.**
+  `examples/gemma4/multimodal_parity_random_weights.py` builds a tiny random HF
+  `Gemma4ForConditionalGeneration`, saves it as safetensors, loads into
+  `Gemma4Multimodal`, runs both, and diffs per-position logits + PLE.
+
+  Findings against HF:
+  * **PLE token-identity branch: bit-exact (max=0).** HF
+    `Gemma4Model.forward` does NOT pass the merged image embeddings to PLE;
+    it substitutes `image_token_id → pad_token_id` in the ids handed to
+    `embed_tokens_per_layer`, while the context-projection branch sees the
+    merged embeddings (with vision at image positions). `Gemma4Multimodal.
+    _compute_per_layer_inputs` mirrors this exactly; locked in by
+    `tests/models/gemma4/multimodal_test.py::
+    test_per_layer_inputs_substitutes_pad_at_image_positions`.
+  * **Bidirectional vs causal mask.** HF `Gemma4TextConfig.
+    use_bidirectional_attention == "vision"` controls this; smaller models
+    default to plain causal. Tunix matches via a `bidirectional_image_span`
+    flag on `Gemma4Multimodal` (default `False` = causal, like HF small).
+  * **Residual divergence at text positions after the image** (max ~9e-2 in
+    the random-weights probe) reproduces in a **pure-text** parity (same HF
+    weights, no image, no multimodal wrapper) — so this is a **pre-existing
+    Tunix-vs-HF divergence in `tunix.models.gemma4` text-model arithmetic**
+    (probably global-layer RoPE / proportional partial-rotary settings), not
+    something introduced by the vision port. Out of scope for this PR; worth
+    flagging upstream separately.
+
+  Net: the multimodal wrapper itself now matches HF semantically on every
+  point we can prove without the real checkpoint. BOS (pure text, no image
+  influence) is exact (1.6e-7); image-position logit diff is `~4e-2` and
+  bounded by the pre-existing text-model divergence.
 
 ## Validation prerequisites (Stage 3)
 

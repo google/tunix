@@ -113,14 +113,55 @@ class Gemma4MultimodalTest(absltest.TestCase):
                     rtol=1e-4, atol=1e-4)
     )
 
-  def test_attention_mask_bidirectional_over_image_span(self):
-    model, _ = _build()
+  def test_per_layer_inputs_substitutes_pad_at_image_positions(self):
+    """HF Gemma4Model treats image positions as `pad_token_id` for the PLE
+    token-identity lookup. This locks in the matching substitution."""
+    model, vcfg = _build()
+    px, pos = _image_inputs(vcfg, seed=3)
+    tokens = jnp.array([[2, 5, 5, 5, 5, 10, 11, 12]], dtype=jnp.int32)
+
+    merged = model.encode_multimodal_inputs(tokens, px, pos)
+    ple = model._compute_per_layer_inputs(tokens, merged)
+
+    # Reference: encode_per_layer_input applied with image_token_id->pad_id ids.
+    pad = model.pad_token_id
+    is_image = (tokens == model.image_token_id)
+    pad_tokens = jnp.where(is_image, pad, tokens)
+    expected = model.text_model.embedder.encode_per_layer_input(merged, pad_tokens)
+    np.testing.assert_allclose(np.asarray(ple), np.asarray(expected),
+                               rtol=1e-6, atol=1e-6)
+
+    # Sanity: image positions of `ple` must differ from a PLE computed without
+    # the substitution (so the fix is doing something).
+    without = model.text_model.embedder.encode_per_layer_input(merged, tokens)
+    self.assertFalse(np.allclose(np.asarray(ple[0, 1]), np.asarray(without[0, 1])))
+
+  def test_bidirectional_image_span_flag_changes_mask(self):
+    """Flag default (False) -> plain causal; True -> bidirectional over images."""
+    model_causal, _ = _build()  # default bidirectional_image_span=False
+    text_model, vision = model_causal.text_model, model_causal.vision
+    model_bidir = mm_lib.Gemma4Multimodal(
+        text_model, vision, image_token_id=_IMAGE_TOKEN_ID,
+        bidirectional_image_span=True,
+    )
+    tokens = jnp.array([[2, 5, 5, 5, 5, 10]], dtype=jnp.int32)
+    m_c = model_causal.get_attention_mask(tokens)[0]
+    m_b = model_bidir.get_attention_mask(tokens)[0]
+    # In bidirectional mode, the 1st image position should see the 4th (future).
+    self.assertFalse(bool(m_c[1, 4]))
+    self.assertTrue(bool(m_b[1, 4]))
+
+  def test_attention_mask_bidirectional_when_flag_enabled(self):
+    text_model, vision = _build()[0].text_model, _build()[0].vision
+    model = mm_lib.Gemma4Multimodal(
+        text_model, vision, image_token_id=_IMAGE_TOKEN_ID,
+        bidirectional_image_span=True,
+    )
     tokens = jnp.array([[2, 5, 5, 5, 5, 10]], dtype=jnp.int32)
     mask = model.get_attention_mask(tokens)[0]
     # First image soft-token (pos 1) should attend forward to the rest of the
     # image span (pos 2..4) -> bidirectional within the image.
     self.assertTrue(bool(mask[1, 4]))
-    # A text token after the image stays causal: pos 5 cannot see nothing beyond.
     self.assertTrue(bool(mask[5, 4]))
 
 
