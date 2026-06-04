@@ -158,6 +158,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     - https://arxiv.org/abs/2402.03300
   """
 
+  def _logps_sequence_micro_batch_size(self) -> int:
+    """Returns the flattened sequence micro-batch size for log-prob passes."""
+    return (
+        self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size
+        * self.algo_config.num_generations
+    )
+
   def __init__(
       self,
       rl_cluster: rl_cluster_lib.RLCluster,
@@ -451,7 +458,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=self._logps_sequence_micro_batch_size(),
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -471,7 +478,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
-          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+          micro_batch_size=self._logps_sequence_micro_batch_size(),
       )
       old_per_token_logps = trainer_per_token_logps
 
@@ -505,7 +512,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             completion_tokens=completion_ids,
             pad_id=pad_value,
             eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+            micro_batch_size=self._logps_sequence_micro_batch_size(),
         )
         interval_v2.async_end([ref_per_token_logps])
     else:
