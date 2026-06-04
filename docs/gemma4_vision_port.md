@@ -113,10 +113,21 @@ pins the nnx side of this table.
     every real vision key maps to a param, linears transpose / norms don't,
     audio+clip buffers skip, no double-matches, **no uninitialised params**, and
     processor output feeds the stack end-to-end. **Numeric parity still pending.**
-* **Stage 3 — numeric parity (GATING).** TODO. With torch + the real checkpoint,
-  load identical weights into HF `Gemma4VisionModel` and this module, feed the
-  same `pixel_values`/`pixel_position_ids`, and assert per-layer max-abs-diff is
-  within bf16 tolerance. Until this passes, do **not** claim the port works.
+* **Stage 3 — numeric parity (GATING). HARNESS READY; AWAITS RUN.**
+  `examples/gemma4/vision_parity_check.py`. Loads vision + `embed_vision` from a
+  real `google/gemma-4-*-it` checkpoint into both HF torch (selective
+  `load_state_dict`, no `language_model`/`audio_tower` loaded) and this port,
+  feeds identical synthetic `pixel_values` + `pixel_position_ids` (no padding so
+  HF's gather is identity), and reports max/mean/median-relative diff at:
+  `after_patch_embed`, `after_layer_{0..N-1}` (per layer), `after_pool`,
+  `after_vision_tower_gathered`, `after_projector`, and a strict equality check
+  on the pool mask. Exit code 0 iff every checkpoint passes
+  (default tolerance `5e-2`, set for bf16). Run:
+  ```
+  pip install torch transformers safetensors
+  python examples/gemma4/vision_parity_check.py --ckpt ~/gemma4-e2b
+  ```
+  Until this passes on a real checkpoint, do **not** claim the port works.
 * **Stage 4 — end-to-end.** TODO. Wire into `Gemma4.__call__` (replace the
   SigLIP path), merge soft tokens at image-token positions, and generate a
   caption from the real checkpoint.
