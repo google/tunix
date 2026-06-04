@@ -102,11 +102,17 @@ pins the nnx side of this table.
   `tunix/models/gemma4/vision_real.py` builds and forward-passes; module tree
   maps 1:1 to checkpoint keys. Tests:
   `tests/models/gemma4/vision_real_test.py` (4 passing). **Numerics unvalidated.**
-* **Stage 2 — image processor + loader.** TODO. Port
-  `image_processing_gemma4.py` (patchification to `[B,P,3*16²]` + `(x,y)`
-  `pixel_position_ids`, padding = -1), and add the vision/`embed_vision` mappings
-  above to `params_safetensors.py` (with the `model.` prefix fix). Add a loader
-  key-coverage check so no vision key is silently skipped.
+* **Stage 2 — image processor + loader. DONE (coverage-verified; resize + numerics pending).**
+  * `tunix/models/gemma4/image_processing.py` — NumPy port of the HF processor
+    (target-size, patchify, `(x,y)` position ids, padding = -1). Resize uses PIL
+    (not bit-exact with torchvision — see caveat).
+  * `tunix/models/gemma4/vision_params_safetensors.py` — `vision_key_mapping`
+    (`model.`-prefix-safe, `$`-anchored) + `create_vision_stack_from_safe_tensors`
+    loading a `Gemma4VisionStack`. Audio + clip buffers are skipped.
+  * Tests (`vision_params_safetensors_test.py`, `image_processing_test.py`):
+    every real vision key maps to a param, linears transpose / norms don't,
+    audio+clip buffers skip, no double-matches, **no uninitialised params**, and
+    processor output feeds the stack end-to-end. **Numeric parity still pending.**
 * **Stage 3 — numeric parity (GATING).** TODO. With torch + the real checkpoint,
   load identical weights into HF `Gemma4VisionModel` and this module, feed the
   same `pixel_values`/`pixel_position_ids`, and assert per-layer max-abs-diff is

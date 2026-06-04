@@ -201,16 +201,21 @@ class VisionRotaryEmbedding(nnx.Module):
   """
 
   def __init__(self, config: Gemma4VisionConfig):
-    self.config = config
-    spatial_dim = config.head_dim // 2
+    # Keep only Python scalars so nothing lands in the param tree: inv_freq is a
+    # derived constant (absent from the checkpoint) and is recomputed per call.
+    self.head_dim = config.head_dim
+    self.rope_theta = config.rope_theta
+
+  def _inv_freq(self) -> jaxtyping.Array:
+    spatial_dim = self.head_dim // 2
     # 1.0 / base ** (arange(0, spatial_dim, 2)/spatial_dim)
     exps = jnp.arange(0, spatial_dim, 2, dtype=jnp.float32) / spatial_dim
-    self.inv_freq = jnp.asarray(1.0 / (config.rope_theta**exps))  # [spatial_dim/2]
+    return jnp.asarray(1.0 / (self.rope_theta**exps))  # [spatial_dim/2]
 
   def __call__(self, position_ids: jaxtyping.Array):
     # position_ids: [B, L, 2] -> cos/sin: [B, L, head_dim]
     all_cos, all_sin = [], []
-    inv = self.inv_freq.astype(jnp.float32)  # [F]
+    inv = self._inv_freq().astype(jnp.float32)  # [F]
     for i in range(2):
       pos = position_ids[:, :, i].astype(jnp.float32)  # [B, L]
       # outer product -> [B, L, F]
@@ -494,3 +499,35 @@ class Gemma4MultimodalEmbedder(nnx.Module):
     return self.embedding_projection(
         self.embedding_pre_projection_norm(soft_tokens)
     )
+
+
+class Gemma4VisionStack(nnx.Module):
+  """Vision tower + ``embed_vision`` projector under the checkpoint's names.
+
+  The submodule names (``vision_tower``, ``embed_vision``) match the real
+  checkpoint prefixes, so loading is a plain ``model.`` strip + per-tensor
+  transpose. This is also the shape Stage 4 plugs into ``Gemma4``.
+  """
+
+  def __init__(
+      self,
+      config: Gemma4VisionConfig,
+      text_hidden_size: int,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.config = config
+    self.vision_tower = Gemma4VisionModel(config, rngs=rngs)
+    self.embed_vision = Gemma4MultimodalEmbedder(
+        config.hidden_size,
+        text_hidden_size,
+        eps=config.rms_norm_eps,
+        rngs=rngs,
+        param_dtype=config.param_dtype,
+        dtype=config.dtype,
+    )
+
+  def __call__(self, pixel_values, pixel_position_ids):
+    """Returns (soft_tokens_in_text_space [B, S, text_hidden], valid_mask)."""
+    soft, mask = self.vision_tower(pixel_values, pixel_position_ids)
+    return self.embed_vision(soft), mask
