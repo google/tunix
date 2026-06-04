@@ -107,7 +107,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   epsilon_high: float | None = None  # 0.28 from DAPO.
   off_policy_steps: int = 0
   degenerate_group_masking: bool = (
-      False  # Whether to mask out degenerate groups with all-0 advantages.
+      True  # Whether to mask out degenerate groups with all-0 advantages.
   )
   use_rollout_logps: bool = True
   # Truncated importance-sampling (TIS) correction for the residual mismatch

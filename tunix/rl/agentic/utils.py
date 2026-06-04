@@ -194,19 +194,6 @@ def tokenize_and_generate_masks(
   Returns:
     A tuple containing (all_tokens, all_masks).
   """
-  # if isinstance(tokenizer, tok_adapter.TokenizerAdapter):
-  #   full_text = parser.parse(
-  #       messages,
-  #       add_generation_prompt=contains_generation_msg,
-  #       is_first_msg=contains_first_msg,
-  #   )
-  #   try:
-  #     all_tokens = tokenizer.encode(full_text, add_special_tokens=False)
-  #   except TypeError:
-  #     all_tokens = tokenizer.encode(full_text)
-  #   all_tokens = tokenizer.dedup_bos_ids(all_tokens)
-  #   all_masks = [0] * len(all_tokens)
-  #   return all_tokens, all_masks
 
   # For parsers that require preprocessing (e.g., merging system messages),
   # apply it before iterating message by message.
