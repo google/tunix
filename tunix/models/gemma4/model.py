@@ -139,7 +139,6 @@ class ModelConfig:
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
   use_sliding_window_kv_cache: bool = True
-  use_sliding_window_kv_cache: bool = True
 
   # MoE config
   enable_moe: bool = False
