@@ -91,11 +91,18 @@ vllm_rollout_dict = {
     "rollout_vllm_init_with_random_weights": False,
     "rollout_vllm_max_num_seqs": 16,
     "rollout_vllm_max_num_batched_tokens": 4096,
+    "rollout_vllm_logprobs_mode": "raw_logprobs",
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
+        "hf_overrides": {
+            "final_logit_softcapping": 30.0,
+            "text_config": {
+                "final_logit_softcapping": 30.0,
+            },
+        },
     },
 }
 rollout_engine_config = base_rollout.RolloutConfig(
@@ -313,8 +320,9 @@ def compare_layers(vllm_model, trainer_model, captured_args):
 
     _, x_vllm, _ = vllm_layer(
         kv_cache,
+        positions_trainer,
         x_vllm,
-        attn_metadata,
+        None,
         per_layer_input=layer_per_input_vllm,
     )
 
@@ -343,7 +351,8 @@ def compare_layers(vllm_model, trainer_model, captured_args):
         f" Abs Diff: {float(diff.max()):.6e}"
     )
 
-  vllm_logits = vllm_model.compute_logits(x_vllm)
+  x_vllm_normed = gemma4_model.norm(x_vllm)
+  vllm_logits = vllm_model.compute_logits(x_vllm_normed)
 
   trainer_normed = trainer_model.final_norm(x_trainer)
   trainer_logits = (
@@ -587,7 +596,7 @@ async def main():
           eos_id=eos_value,
           micro_batch_size=rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
           completion_mask=attn_completion_mask,
-          temperature=TEMPERATURE,
+          temperature=1.0,
       )
 
       mask = completion_mask_arr.astype(jnp.bool_)
