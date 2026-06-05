@@ -48,38 +48,41 @@ from tunix.tests import test_common
 class GemmaParamsTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
-    dict(
-        testcase_name="gemma3",
-        model_type="gemma3",
-    ),
-    dict(
-        testcase_name="gemma2",
-        model_type="gemma2",
-    ),
+      dict(
+          testcase_name='gemma3',
+          model_type='gemma3',
+          text_only=True,
+      ),
+      dict(
+          testcase_name='gemma2',
+          model_type='gemma2',
+          text_only=True,
+      ),
+      dict(
+          testcase_name='gemma3-vision',
+          model_type='gemma3',
+          text_only=False,
+      ),
   )
-  def test_map_from_upstream_checkpoint(self, model_type):
+  def test_map_from_upstream_checkpoint(self, model_type, text_only):
     # Tiny shapes to demonstrate logic only
-    embed         = np.arange(5*3, dtype=np.float32).reshape(5, 3)        # (vocab=5, dim=3)
-    final_scale   = np.arange(3, dtype=np.float32)                        # (3,)
-    gate_up       = np.arange(2*6*3, dtype=np.float32).reshape(2, 6, 3)   # -> two (3,6) after .T
-    down          = np.arange(6*3, dtype=np.float32).reshape(6, 3)        # stays (6,3)
-    q_w           = np.arange(4*3*2, dtype=np.float32).reshape(4, 3, 2)   # (4,3,2)
-    kv_w          = np.arange(2*1*3*2, dtype=np.float32).reshape(2, 1, 3, 2)  # (2,1,3,2)
-    o_w           = np.arange(4*2*3, dtype=np.float32).reshape(4, 2, 3)   # (4,2,3)
-    pre_attn      = np.arange(3, dtype=np.float32)
-    post_attn     = np.arange(3, dtype=np.float32)
-    pre_ffw       = np.arange(3, dtype=np.float32)
-    post_ffw      = np.arange(3, dtype=np.float32)
-    siglip_dummy  = np.array([1.0], dtype=np.float32)
-    mm_dummy      = np.array([2.0], dtype=np.float32)
+    embed = np.arange(5*3, dtype=np.float32).reshape(5, 3)  # (vocab=5, dim=3)
+    final_scale = np.arange(3, dtype=np.float32)  # (3,)
+    gate_up = np.arange(2*6*3, dtype=np.float32).reshape(2, 6, 3)  # -> two (3,6) after .T
+    down = np.arange(6*3, dtype=np.float32).reshape(6, 3)  # stays (6,3)
+    q_w = np.arange(4*3*2, dtype=np.float32).reshape(4, 3, 2)  # (4,3,2)
+    kv_w = np.arange(2*1*3*2, dtype=np.float32).reshape(2, 1, 3, 2)  # (2,1,3,2)
+    o_w = np.arange(4*2*3, dtype=np.float32).reshape(4, 2, 3)  # (4,2,3)
+    pre_attn = np.arange(3, dtype=np.float32)
+    post_attn = np.arange(3, dtype=np.float32)
+    pre_ffw = np.arange(3, dtype=np.float32)
+    post_ffw = np.arange(3, dtype=np.float32)
+    siglip_dummy = np.array([1.0], dtype=np.float32)
+    mm_dummy = np.array([2.0], dtype=np.float32)
 
     upstream = {
       "transformer/embedder": {"input_embedding": embed},
       "transformer/final_norm": {"scale": final_scale},
-
-      # Should be skipped:
-      "transformer/siglip_encoder": {"whatever": siglip_dummy},
-      "transformer/embedder/mm_patch": {"kernel": mm_dummy},
 
       # Layer 0 (tiny shapes)
       "transformer/layer_0/attn/_key_norm":     {"scale": np.arange(2, dtype=np.float32)},
@@ -95,7 +98,64 @@ class GemmaParamsTest(parameterized.TestCase):
       "transformer/layer_0/pre_ffw_norm":         {"scale": pre_ffw},
     }
 
-    mapped = gemma3_params.map_from_upstream_checkpoint(upstream, model_type)
+    if not text_only:
+      upstream['transformer/embedder/mm_input_projection'] = {
+          'w': np.arange(7 * 3, dtype=np.float32).reshape(7, 3)
+      }
+      upstream['transformer/embedder/mm_soft_embedding_norm'] = {
+          'scale': np.arange(7, dtype=np.float32)
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder'] = {
+          'pos_embedding': (
+              np.arange(1 * 5 * 7, dtype=np.float32).reshape(1, 5, 7)
+          )
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/embedding'] = {
+          'kernel': (
+              np.arange(2 * 2 * 3 * 7, dtype=np.float32).reshape(2, 2, 3, 7)
+          ),
+          'bias': np.arange(7, dtype=np.float32),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoder_norm'] = {
+          'scale': np.arange(7, dtype=np.float32),
+          'bias': np.arange(7, dtype=np.float32),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/LayerNorm_0'] = {
+          'scale': np.arange(7, dtype=np.float32),
+          'bias': np.arange(7, dtype=np.float32),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/LayerNorm_1'] = {
+          'scale': np.arange(7, dtype=np.float32),
+          'bias': np.arange(7, dtype=np.float32),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MlpBlock_0/Dense_0'] = {
+          'kernel': np.arange(7 * 11, dtype=np.float32).reshape(7, 11),
+          'bias': np.arange(11, dtype=np.float32),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MlpBlock_0/Dense_1'] = {
+          'kernel': np.arange(11 * 7, dtype=np.float32).reshape(11, 7),
+          'bias': np.arange(7, dtype=np.float32),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/key'] = {
+          'kernel': np.arange(7 * 2 * 4, dtype=np.float32).reshape(7, 2, 4),
+          'bias': np.arange(2 * 4, dtype=np.float32).reshape(2, 4),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/query'] = {
+          'kernel': np.arange(7 * 2 * 4, dtype=np.float32).reshape(7, 2, 4),
+          'bias': np.arange(2 * 4, dtype=np.float32).reshape(2, 4),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/value'] = {
+          'kernel': np.arange(7 * 2 * 4, dtype=np.float32).reshape(7, 2, 4),
+          'bias': np.arange(2 * 4, dtype=np.float32).reshape(2, 4),
+      }
+      upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/out'] = {
+          'kernel': np.arange(2 * 4 * 7, dtype=np.float32).reshape(2, 4, 7),
+          'bias': np.arange(7, dtype=np.float32),
+      }
+
+    mapped = gemma3_params.map_from_upstream_checkpoint(
+        upstream, model_type, text_only=text_only
+    )
     flat_m = flatten_dict(mapped)  # tuple keys
 
     # --- Keys & shapes we expect after mapping (tiny) ---
@@ -118,6 +178,33 @@ class GemmaParamsTest(parameterized.TestCase):
       ('layers', 0, 'pre_attention_norm', 'scale'): (3,),
       ('layers', 0, 'pre_ffw_norm', 'scale'):       (3,),
     }
+
+    if not text_only:
+      expected.update({
+          ('embedder', 'mm_input_projection', 'w'): (7, 3),
+          ('embedder', 'mm_soft_embedding_norm', 'scale'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'pos_embedding'): (1, 5, 7),
+          ('vision_encoder', 'siglip_encoder', 'embedding', 'kernel'): (2, 2, 3, 7),
+          ('vision_encoder', 'siglip_encoder', 'embedding', 'bias'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'encoder_norm', 'scale'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'encoder_norm', 'bias'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln1', 'scale'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln1', 'bias'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln2', 'scale'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln2', 'bias'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc1', 'kernel'): (7, 11),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc1', 'bias'): (11,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc2', 'kernel'): (11, 7),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc2', 'bias'): (7,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'key_proj', 'kernel'): (7, 8),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'key_proj', 'bias'): (8,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'query_proj', 'kernel'): (7, 8),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'query_proj', 'bias'): (8,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'value_proj', 'kernel'): (7, 8),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'value_proj', 'bias'): (8,),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'out_proj', 'kernel'): (8, 7),
+          ('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'out_proj', 'bias'): (7,),
+      })
 
     # 1) keys and shapes
     for k, shp in expected.items():
@@ -175,9 +262,103 @@ class GemmaParamsTest(parameterized.TestCase):
       upstream["transformer/final_norm"]["scale"],
     )
 
+    if not text_only:
+      np.testing.assert_array_equal(
+          flat_m[('embedder', 'mm_input_projection', 'w')],
+          upstream['transformer/embedder/mm_input_projection']['w'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('embedder', 'mm_soft_embedding_norm', 'scale')],
+          upstream['transformer/embedder/mm_soft_embedding_norm']['scale'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'pos_embedding')],
+          upstream['SigLipFromPatches_0/siglip_encoder']['pos_embedding'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'embedding', 'kernel')],
+          upstream['SigLipFromPatches_0/siglip_encoder/embedding']['kernel'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'embedding', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/embedding']['bias'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'encoder_norm', 'scale')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoder_norm']['scale'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'encoder_norm', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoder_norm']['bias'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln1', 'scale')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/LayerNorm_0']['scale'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln1', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/LayerNorm_0']['bias'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln2', 'scale')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/LayerNorm_1']['scale'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'ln2', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/LayerNorm_1']['bias'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc1', 'kernel')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MlpBlock_0/Dense_0']['kernel'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc1', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MlpBlock_0/Dense_0']['bias'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc2', 'kernel')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MlpBlock_0/Dense_1']['kernel'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'mlp', 'fc2', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MlpBlock_0/Dense_1']['bias'],
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'key_proj', 'kernel')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/key']['kernel'].reshape(7, 8),
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'key_proj', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/key']['bias'].reshape(8),
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'query_proj', 'kernel')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/query']['kernel'].reshape(7, 8),
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'query_proj', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/query']['bias'].reshape(8),
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'value_proj', 'kernel')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/value']['kernel'].reshape(7, 8),
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'value_proj', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/value']['bias'].reshape(8),
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'out_proj', 'kernel')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/out']['kernel'].reshape(8, 7),
+      )
+      np.testing.assert_array_equal(
+          flat_m[('vision_encoder', 'siglip_encoder', 'transformer', 'blocks', 0, 'attn', 'out_proj', 'bias')],
+          upstream['SigLipFromPatches_0/siglip_encoder/Transformer/encoderblock_0/MultiHeadDotProductAttention_0/out']['bias'],
+      )
+
     # 3) ensure skipped subtrees absent
-    assert not any(k[0] == 'siglip_encoder' for k in flat_m.keys())
-    assert ('embedder', 'mm_patch') not in mapped.get('embedder', {})
+    if text_only:
+      assert not any('vision_encoder' in k for k in flat_m.keys())
 
 
 class Gemma3LoraParamsTest(lora_params_test_base.LoraParamsTestBase):

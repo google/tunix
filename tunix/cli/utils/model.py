@@ -126,6 +126,11 @@ def create_model(
       intermediate_ckpt_dir=model_config.get('intermediate_ckpt_dir'),
       rng_seed=model_config.get('rng_seed', 0),
       model_path=model_config.get('model_path'),
+      use_flash_attention=model_config.get('use_flash_attention', False),
+      flash_attention_block_size=model_config.get(
+          'flash_attention_block_size', 1024
+      ),
+      remat_config=model_config.get('remat_config', 1),
   )
 
   # Handle Tokenizer Path overrides

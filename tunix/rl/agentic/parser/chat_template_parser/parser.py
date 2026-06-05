@@ -17,6 +17,7 @@
 import abc
 import dataclasses
 from typing import Dict, List
+from tunix.utils import token_sanitization
 
 
 dataclass = dataclasses.dataclass
@@ -38,16 +39,28 @@ class TokenConfig:
   tool_end_token: str = ""
   tool_response_start_token: str = ""
   tool_response_end_token: str = ""
+  # Separator inserted between consecutive messages by `parse()`. Match what
+  # the model's `apply_chat_template` writes between successive messages so
+  # incremental per-message rendering can be concatenated without a fixup.
+  message_separator: str = ""
 
 
 class BaseChatTemplateParser(ABC):
   """Abstract base class for chat template parsers."""
 
-  def __init__(self, tokenizer, disable_thinking: bool = False):
+  def __init__(self, tokenizer, enable_thinking: bool = True):
     self.tokenizer = tokenizer
-    self.disable_thinking = disable_thinking
+    self.enable_thinking = enable_thinking
     self.tokens = self._init_tokens()
     self.generation_prompt = self._init_generation_prompt()
+    # message_separator is a per-turn formatting hint (e.g. "\n"), not a
+    # control token; including it would strip every newline from message
+    # content.
+    self._tokens_to_sanitize = {
+        v
+        for k, v in dataclasses.asdict(self.tokens).items()
+        if k != "message_separator" and isinstance(v, str) and v
+    }
 
   @abstractmethod
   def _init_tokens(self) -> TokenConfig:
@@ -65,18 +78,31 @@ class BaseChatTemplateParser(ABC):
       add_generation_prompt: bool = False,
       is_first_msg: bool = False,
   ) -> str:
-    """Parse messages into chat template format."""
-    result = ""
+    """Parse messages into chat template format.
+
+    When `is_first_msg=False` the call renders a continuation of an existing
+    conversation, so the result is prefixed with `message_separator` to
+    re-introduce the inter-message boundary that the previous turn's eot did
+    not emit. This lets per-message incremental rendering be concatenated
+    directly to prior tokens without external fixups.
+    """
+    parts = []
 
     if is_first_msg:
-      result += self._handle_first_message(messages)
+      first_chunk = self._handle_first_message(messages)
+      if first_chunk:
+        parts.append(first_chunk)
 
     for message in messages:
-      result += self._parse_message(message)
+      parts.append(self._parse_message(message))
 
     if add_generation_prompt:
-      result += self.generation_prompt
+      parts.append(self.generation_prompt)
 
+    sep = self.tokens.message_separator
+    result = sep.join(parts)
+    if not is_first_msg and result:
+      result = sep + result
     return result
 
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
@@ -87,6 +113,11 @@ class BaseChatTemplateParser(ABC):
   def _parse_message(self, message: Dict[str, str]) -> str:
     """Parse a single message based on its role."""
     role = message["role"]
+    content = token_sanitization.sanitize_control_tokens(
+        message["content"],
+        extra_tokens=self._tokens_to_sanitize,
+        include_default=not self._tokens_to_sanitize,
+    )
 
     parser_map = {
         "system": self._parse_system,
@@ -98,24 +129,22 @@ class BaseChatTemplateParser(ABC):
     if role not in parser_map:
       raise NotImplementedError(f"Unsupported message role: {role}")
 
-    return parser_map[role](message)
+    return parser_map[role](content)
 
-  def _parse_system(self, message: Dict[str, str]) -> str:
-    return self.tokens.system_token + message["content"] + self.tokens.eot_token
+  def _parse_system(self, content: str) -> str:
+    return self.tokens.system_token + content + self.tokens.eot_token
 
-  def _parse_user(self, message: Dict[str, str]) -> str:
-    return self.tokens.user_token + message["content"] + self.tokens.eot_token
+  def _parse_user(self, content: str) -> str:
+    return self.tokens.user_token + content + self.tokens.eot_token
 
-  def _parse_assistant(self, message: Dict[str, str]) -> str:
-    return (
-        self.tokens.assistant_token + message["content"] + self.tokens.eot_token
-    )
+  def _parse_assistant(self, content: str) -> str:
+    return self.tokens.assistant_token + content + self.tokens.eot_token
 
-  def _parse_tool(self, message: Dict[str, str]) -> str:
+  def _parse_tool(self, content: str) -> str:
     return (
         self.tokens.user_token
         + self.tokens.tool_response_start_token
-        + message["content"]
+        + content
         + self.tokens.tool_response_end_token
         + self.tokens.eot_token
     )
@@ -148,7 +177,7 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
     return TokenConfig(
         bos_token=self.tokenizer.bos_token,
         eos_token=self.tokenizer.eos_token,
-        eot_token="<|im_end|>\n",
+        eot_token="<|im_end|>",
         system_token="<|im_start|>system\n",
         user_token="<|im_start|>user\n",
         assistant_token=self._get_assistant_token(),
@@ -156,12 +185,13 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
         tool_end_token="\n</tool_call>",
         tool_response_start_token="<tool_response>\n",
         tool_response_end_token="\n</tool_response>",
+        message_separator="\n",
     )
 
   def _get_assistant_token(self) -> str:
     token = "<|im_start|>assistant\n"
-    if self.disable_thinking:
-      token += "<think>\\n\\n</think>\\n\\n"
+    if not self.enable_thinking:
+      token += "<think>\n\n</think>\n\n"
     return token
 
   def _init_generation_prompt(self) -> str:
@@ -170,13 +200,9 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
   def _handle_first_message(self, messages: List[Dict[str, str]]) -> str:
     """Add default system message if first message is not system."""
     if messages[0]["role"] != "system":
-      return self._parse_system({
-          "role": "system",
-          "content": (
-              "You are Qwen, created by Alibaba Cloud. You are a helpful"
-              " assistant."
-          ),
-      })
+      return self._parse_system(
+          "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+      )
     return ""
 
 
@@ -213,13 +239,12 @@ class GemmaChatTemplateParser(BaseChatTemplateParser):
         assistant_token="<start_of_turn>model\n",
     )
 
-  def _parse_assistant(self, message: Dict[str, str]) -> str:
-    return self.tokens.assistant_token + message["content"]
+  def _parse_assistant(self, content: str) -> str:
+    return self.tokens.assistant_token + content
 
-  def _parse_system(self, message: Dict[str, str]) -> str:
+  def _parse_system(self, content: str) -> str:
     # This should not be called if parse() is used, as it handles the system
     # prompt by merging it. Raise error for unexpected system messages.
-    del message  # Unused.
     raise ValueError(
         "Gemma models do not support system messages directly. The system"
         " prompt should be the first message and is handled by merging with"

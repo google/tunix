@@ -1,4 +1,4 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Rollout
 
@@ -21,7 +21,7 @@ Tunix supports multiple rollout engines (selected by `rollout_engine`):
 
 `vllm` and `sglang` provide better performance with large batch size and agentic RL.
 
-#### Sampling Knobs
+## Sampling Knobs
 
 These are used by all the rollout engines:
 
@@ -114,10 +114,6 @@ settings are specific to vLLM:
         need to estimate the rollout model weights and the KV cache budget and
         coordinate with the other models. For disaggregated setup, users can set
         it to a number close to 1 to make full utilization of the HBM.
-
--   `rollout_vllm_swap_space_size_gb`
-
-    -   CPU swap space (GiB) for KV cache spilling.
 
 -   `rollout_vllm_server_mode`
 
@@ -219,7 +215,6 @@ The CLI support for vLLM rollout engine is WIP.
 
 - Lower `rollout_vllm_hbm_utilization`.
 - Reduce `max_prompt_length` and/or `max_tokens_to_generate`.
-- Increase `rollout_vllm_swap_space_size_gb` (trade-off: may increase latency if swapping occurs).
 
 #### Data parallel issues
 
@@ -516,4 +511,83 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 - Reduce `kv_cache_size` (KV cache scales with batch size and `kv_cache_size`).
 - Reduce `max_prompt_length` and/or `max_tokens_to_generate`.
 
+## Mock
 
+This section explains how to use the `MockRollout` engine, which is useful for
+testing and performance benchmarking the RL pipeline infrastructure (especially
+the trainer side) without requiring heavy model weights or accelerator hardware.
+
+### How the integration works
+
+At a high level:
+
+- When `rollout_engine=mock_rollout.MockRollout` (or a `functools.partial` wrapping it), Tunix uses `MockRollout` instead of a real inference engine.
+- **Text Generation**: It generates random sequences of words from a dummy list.
+- **Latency Simulation**: It sleeps for a random duration between `min_generation_time`
+    and `max_generation_time` to simulate inference delay.
+- **Tensors**: It returns arrays of zeros for logits and log probabilities as NumPy
+    arrays. This keeps the data on the **host** (CPU) memory and avoids device
+    memory allocation, making the mock extremely lightweight.
+- **RNG Seeding**: If a seed is provided in `rollout_config`, it is used to
+    initialize the RNG in `__init__`, ensuring that successive calls to `generate`
+    advance the state but remain deterministic as a sequence.
+
+### Choosing mock as the Rollout
+
+Pass `mock_rollout.MockRollout` or `functools.partial(mock_rollout.MockRollout, **kwargs)` to `rollout_engine`.
+
+Rollout engine selection happens in `tunix/rl/rl_cluster.py`.
+
+### Configuration knobs
+
+In addition to common sampling parameters in `RolloutConfig`, you can pass these directly as `kwargs` to `MockRollout` (or via `functools.partial`):
+
+- `min_generation_time`: Minimum sleep time in seconds.
+- `max_generation_time`: Maximum sleep time in seconds.
+- `length_distribution`: The distribution type for mock generated sequence lengths. Supported modes:
+    - `"uniform"`: Random length. Defaults to full range `[1, max_tokens]`. **Best for**: Broad testing of load and handling varying lengths without specific distribution assumptions.
+    - `"normal"`: Bell curve. Defaults to `mean = max_tokens / 2`. **Best for**: Testing scenarios where lengths are expected to cluster around a typical response length.
+    - `"skewed"`: Right-skewed. Defaults to `mean = max_tokens / 4`. **Best for**: Simulating realistic LLM behavior where most responses are short but a few are very long.
+    - `"fixed"`: Exactly `mean` tokens. **Best for**: Deterministic testing or benchmarking specific fixed workloads.
+- `length_mean`: Optional float to override the default mean for the distribution.
+- `length_std`: Optional float to override the default standard deviation for the distribution.
+
+Note: While `MockRollout` itself can operate without a full `RolloutConfig`, the `RLCluster` requires a `rollout_config` to be present in `ClusterConfig`. Essential fields like `max_tokens_to_generate` and `max_prompt_length` from `RolloutConfig` are used by `MockRollout` to determine the size of generated outputs.
+
+### Example: using mock rollout in a Python entrypoint
+
+```python
+import functools
+from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout import mock_rollout
+
+# Optional: define mock-specific kwargs via partial
+mock_engine_cls = functools.partial(
+    mock_rollout.MockRollout,
+    min_generation_time=2,
+    max_generation_time=20,
+    length_distribution="normal",
+)
+
+rollout_config = base_rollout.RolloutConfig(
+    max_tokens_to_generate=768, # Specify to override default
+    max_prompt_length=256,  # Specify to override default
+    # Other common rollout config fields can be set here,
+    # but are not strictly used by MockRollout beyond length constraints.
+)
+
+cluster_config = rl_cluster_lib.ClusterConfig(
+    role_to_mesh=role_to_mesh,
+    rollout_engine=mock_engine_cls,
+    training_config=training_config,
+    rollout_config=rollout_config,
+)
+
+rl_cluster = rl_cluster_lib.RLCluster(
+    actor=actor_model,
+    reference=reference_model,
+    tokenizer=tokenizer,
+    cluster_config=cluster_config,
+)
+```

@@ -63,7 +63,7 @@ with adhoc_context:
   from tunix.models.gemma import model as gemma_lib
   from tunix.sft import utils
   from tunix.utils import script_utils
-  from tunix.rl.experimental.agentic_grpo_learner import GRPOConfig, GRPOLearner
+  from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
   from flax import nnx
   from tunix.cli.utils import model as model_utils
 
@@ -80,10 +80,10 @@ if ENV == 'g3':
   TRAIN_DATA_PATH = '/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_train.json'
   TEST_DATA_PATH = '/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/grpo/data/gsm8k_test.json'
   # ====== Base Model ======
-  NNX_CKPT_DIR = '/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/gemma2/nnx/'
+  NNX_CKPT_DIR = '/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/gemma-2/nnx/'
   # ====== Checkpoint saving ======
   run_name = f'grpo_demo_{int(time.time())}'
-  CKPT_DIR = f'/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/grpo/demo/experiments/gemma2/training_runs/{run_name}'
+  CKPT_DIR = f'/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/grpo/demo/experiments/gemma-2/training_runs/{run_name}'
 else:  # oss
   # ====== Data ======
   # Data will be downloaded to these local directories.

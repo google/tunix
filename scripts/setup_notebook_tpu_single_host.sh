@@ -37,6 +37,22 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
+# --- Validate inputs to prevent command injection ---
+validate_identifier() {
+    local val="$1"
+    local name="$2"
+    if [[ ! "$val" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+        echo "Error: Invalid character in $name: '$val'. Only alphanumeric, hyphens, underscores, and dots are allowed." >&2
+        exit 1
+    fi
+}
+
+validate_identifier "$TPU_NAME" "TPU_NAME"
+validate_identifier "$TPU_ZONE" "TPU_ZONE"
+validate_identifier "$TPU_PROJECT" "TPU_PROJECT"
+validate_identifier "$VM_USER" "VM_USER"
+
+
 # --- Conditional logic for IMAGE based on ACCELERATOR (if IMAGE was not explicitly set) ---
 if [ -z "$IMAGE" ]; then # Only apply default logic if IMAGE was not passed as an argument
   if [[ "$ACCELERATOR" == *"v5litepod"* || "$ACCELERATOR" == *"v5e"* ]]; then

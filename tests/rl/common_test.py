@@ -22,7 +22,7 @@ from tunix.rl import common
 from tunix.tests import test_common as tc
 
 jax.config.update("jax_threefry_partitionable", False)
-
+jax.config.update("jax_default_matmul_precision", "highest")
 
 class CommonTest(parameterized.TestCase):
 
@@ -117,39 +117,180 @@ class CommonTest(parameterized.TestCase):
         atol=1e-03,
     )
 
-  def test_compute_per_token_logps(self):
+  def test_process_ids_raises_value_error(self):
+    prompt_tokens = jnp.array([[1, 2], [3, 4]])
+    completion_tokens = jnp.array([[5, 6], [7, 8]])
+    segment_ids = jnp.array([[1, 1, 2, 2], [1, 1, 2, 2]])
+    with self.assertRaisesRegex(
+        ValueError,
+        "segment_positions must be explicitly provided for packed sequences.",
+    ):
+      common.process_ids(
+          prompt_tokens,
+          completion_tokens,
+          pad_id=0,
+          eos_id=-1,
+          segment_ids=segment_ids,
+          segment_positions=None,
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="normal",
+          prompt_tokens=np.array([[1, 2, 3, 4], [0, 0, 1, 2], [0, 1, 2, 3]]),
+          completion_tokens=np.array(
+              [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
+          ),
+          segment_ids=None,
+          segment_positions=None,
+          expected_logps=np.array([
+              [-5.876301, -8.700251, -5.046069, -5.788748],
+              [-6.071025, -7.5328417, -5.9712567, -4.653783],
+              [-6.039485, -8.264197, -6.2771187, -4.767109],
+          ]),
+      ),
+      dict(
+          testcase_name="seq-packed-single-item",
+          prompt_tokens=np.zeros((3, 0), dtype=np.int32),
+          completion_tokens=np.array([
+              [1, 2, 3, 4, 10, 11, -1, 12],
+              [0, 0, 1, 2, 10, 11, 12, 13],
+              [0, 1, 2, 3, 10, 11, 12, -1],
+          ]),
+          segment_ids=np.ones((3, 8), dtype=np.int32),
+          segment_positions=np.tile(np.arange(8), (3, 1)),
+          expected_logps=np.array([
+              [
+                  0.0,
+                  -7.3199797,
+                  -6.8320303,
+                  -5.6091313,
+                  -5.876301,
+                  -8.700251,
+                  -5.0460696,
+                  -5.788748,
+              ],
+              [
+                  0.0,
+                  -6.4536085,
+                  -5.5156517,
+                  -7.103587,
+                  -6.0710244,
+                  -7.5328417,
+                  -5.971257,
+                  -4.653783,
+              ],
+              [
+                  0.0,
+                  -5.789238,
+                  -7.7057056,
+                  -6.7916627,
+                  -6.0394855,
+                  -8.264197,
+                  -6.2771187,
+                  -4.7671094,
+              ],
+          ]),
+      ),
+      dict(
+          testcase_name="seq-packed-multi-item",
+          prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+          completion_tokens=np.array([
+              [1, 2, 3, 4, 10, 11, -1, 12, 0, 0, 1, 2, 10, 11, 12, 13],
+              [0, 1, 2, 3, 10, 11, 12, -1, 0, 0, 0, 0, 0, 0, 0, 0],
+          ]),
+          segment_ids=np.array([
+              [1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2],
+              [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+          ]),
+          segment_positions=np.array([
+              [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7],
+              [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7],
+          ]),
+          # NOTE: Expected logprobs diverge from single-item values because
+          # floating-point reductions in XLA compound differently when changing
+          # batch size from 3 to 2 and sequence length from 8 to 16.
+          expected_logps=np.array([
+              [
+                  0.0,
+                  -7.255163,
+                  -6.413455,
+                  -5.682157,
+                  -5.83097,
+                  -8.132578,
+                  -4.8891325,
+                  -5.7902822,
+                  -6.452383,
+                  -6.524351,
+                  -5.778284,
+                  -7.255163,
+                  -6.245493,
+                  -8.132578,
+                  -6.025977,
+                  -4.6675467,
+              ],
+              [
+                  0.0,
+                  -4.070095,
+                  -7.792082,
+                  -6.3780885,
+                  -6.312748,
+                  -6.536421,
+                  -6.0986547,
+                  -5.62961,
+                  -5.558264,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+                  -6.595858,
+              ],
+          ]),
+      ),
+  )
+  def test_compute_per_token_logps(
+      self,
+      prompt_tokens,
+      completion_tokens,
+      segment_ids,
+      segment_positions,
+      expected_logps,
+  ):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
-    prompt_tokens = jnp.array([[1, 2, 3, 4], [0, 0, 1, 2], [0, 1, 2, 3]])
-    completion_tokens = jnp.array(
-        [[10, 11, -1, 12], [10, 11, 12, 13], [10, 11, 12, -1]]
-    )
+    graphdef, state = nnx.split(model)
+
     per_token_logps = common.compute_per_token_logps(
-        model,
+        graphdef,
+        state,
         prompt_tokens,
         completion_tokens,
         pad_id=0,
         eos_id=-1,
         return_logits=False,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
     )
+
     np.testing.assert_allclose(
-        per_token_logps,
-        np.array([
-            [-5.876301, -8.700251, -5.046069, -5.788748],
-            [-6.071025, -7.5328417, -5.9712567, -4.653783],
-            [-6.039485, -8.264197, -6.2771187, -4.767109],
-        ]),
-        atol=1e-1,
-        rtol=1e-2,
+        per_token_logps, expected_logps, atol=1e-4, rtol=1e-4
     )
+
     _, logits = common.compute_per_token_logps(
-        model,
+        graphdef,
+        state,
         prompt_tokens,
         completion_tokens,
         pad_id=0,
         eos_id=-1,
         return_logits=True,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
     )
-    np.testing.assert_equal(logits.shape, (3, 4, 256))
+    np.testing.assert_equal(
+        logits.shape, (expected_logps.shape[0], expected_logps.shape[1], 256)
+    )
 
   def test_np_make_completion_mask(self):
     completion_ids = np.array(
@@ -280,6 +421,70 @@ class CommonTest(parameterized.TestCase):
           kwargs={"norm": 4.0},
           expected_loss=0.0,
       ),
+      dict(
+          testcase_name="sequence_mean_token_mean_partial_zero_mask",
+          loss_agg_mode="sequence-mean-token-mean",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[1, 1], [0, 0]],
+          kwargs={},
+          expected_loss=(0.1 + 0.2) / 2.0 / 1.0,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_scale_partial_zero_mask_default",
+          loss_agg_mode="sequence-mean-token-scale",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[1, 1], [0, 0]],
+          kwargs={},
+          expected_loss=(0.1 + 0.2) / 2.0 / 1.0,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_scale_partial_zero_mask",
+          loss_agg_mode="sequence-mean-token-scale",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[1, 1], [0, 0]],
+          kwargs={"norm": 4.0},
+          expected_loss=(0.1 + 0.2) / 4.0 / 1.0,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_sum_norm_partial_zero_mask_default",
+          loss_agg_mode="sequence-mean-token-sum-norm",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[1, 1], [0, 0]],
+          kwargs={},
+          expected_loss=(0.1 + 0.2) / 1.0,
+      ),
+      dict(
+          testcase_name="seq_mean_token_sum",
+          loss_agg_mode="seq-mean-token-sum",
+          per_token_loss_list=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+          completion_mask_list=[[1, 1, 0], [1, 1, 1]],
+          kwargs={},
+          expected_loss=0.9,
+      ),
+      dict(
+          testcase_name="seq_mean_token_sum_zero_mask",
+          loss_agg_mode="seq-mean-token-sum",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[0, 0], [0, 0]],
+          kwargs={},
+          expected_loss=0.0,
+      ),
+      dict(
+          testcase_name="seq_mean_token_sum_partial_zero_mask",
+          loss_agg_mode="seq-mean-token-sum",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[1, 1], [0, 0]],
+          kwargs={},
+          expected_loss=0.3,
+      ),
+      dict(
+          testcase_name="sequence_mean_token_sum_norm_partial_zero_mask",
+          loss_agg_mode="sequence-mean-token-sum-norm",
+          per_token_loss_list=[[0.1, 0.2], [0.3, 0.4]],
+          completion_mask_list=[[1, 1], [0, 0]],
+          kwargs={"norm": 4.0},
+          expected_loss=(0.1 + 0.2) / 4.0,
+      ),
   )
   def test_aggregate_loss_values(
       self,
@@ -342,6 +547,102 @@ class CommonTest(parameterized.TestCase):
           loss_agg_mode,
           norm=norm_val,
       )
+
+  def test_compute_kl_divergence_bf16(self):
+    per_token_logps = jnp.array([-10.0, -1.0, 0.0], dtype=jnp.bfloat16)
+    ref_per_token_logps = jnp.array([-1.0, -10.0, 0.0], dtype=jnp.bfloat16)
+
+    kl = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps, method="low_var_kl"
+    )
+    self.assertEqual(kl.dtype, jnp.float32)
+    expected_kl = common.compute_kl_divergence(
+        per_token_logps.astype(jnp.float32),
+        ref_per_token_logps.astype(jnp.float32),
+        method="low_var_kl",
+    )
+    np.testing.assert_allclose(kl, expected_kl, rtol=1e-3)
+
+  @parameterized.named_parameters(
+      ("kl", "kl"),
+      ("mse_kl", "mse_kl"),
+      ("low_var_kl", "low_var_kl"),
+  )
+  def test_compute_kl_divergence_output_clamp_default_is_no_op(self, method):
+    rng = jax.random.PRNGKey(0)
+    k1, k2 = jax.random.split(rng)
+    per_token_logps = jax.random.uniform(k1, shape=(2, 2, 4))
+    ref_per_token_logps = jax.random.uniform(k2, shape=(2, 2, 4))
+    baseline = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps, method=method
+    )
+    with_explicit_none = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method=method,
+        clamp_value=None,
+    )
+    np.testing.assert_array_equal(baseline, with_explicit_none)
+
+  @parameterized.named_parameters(
+      ("kl", "kl"),
+      ("mse_kl", "mse_kl"),
+      ("low_var_kl", "low_var_kl"),
+  )
+  def test_compute_kl_divergence_output_clamp_caps_outliers(self, method):
+    per_token_logps = jnp.array([-50.0, 0.0, 50.0], dtype=jnp.float32)
+    ref_per_token_logps = jnp.array([50.0, 0.0, -50.0], dtype=jnp.float32)
+    clamp = 10.0
+    kl = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method=method,
+        clamp_value=clamp,
+    )
+    self.assertTrue(bool(jnp.all(kl >= -clamp)))
+    self.assertTrue(bool(jnp.all(kl <= clamp)))
+
+  def test_compute_kl_divergence_output_clamp_passes_through_in_range(self):
+    per_token_logps = jnp.array([0.1, 0.2, 0.3], dtype=jnp.float32)
+    ref_per_token_logps = jnp.array([0.4, 0.5, 0.6], dtype=jnp.float32)
+    unclamped = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps, method="kl"
+    )
+    clamped = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method="kl",
+        clamp_value=10000.0,
+    )
+    np.testing.assert_array_equal(clamped, unclamped)
+
+  def test_compute_kl_divergence_output_clamp_symmetric(self):
+    per_token_logps = jnp.array([100.0], dtype=jnp.float32)
+    ref_per_token_logps = jnp.array([-100.0], dtype=jnp.float32)
+    pos = common.compute_kl_divergence(
+        per_token_logps,
+        ref_per_token_logps,
+        method="kl",
+        clamp_value=5.0,
+    )
+    neg = common.compute_kl_divergence(
+        ref_per_token_logps,
+        per_token_logps,
+        method="kl",
+        clamp_value=5.0,
+    )
+    np.testing.assert_array_equal(pos, jnp.array([5.0]))
+    np.testing.assert_array_equal(neg, jnp.array([-5.0]))
+
+  def test_aggregate_loss_bf16(self):
+    per_token_loss = jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16)
+    completion_mask = jnp.array([1, 1, 0], dtype=jnp.int32)
+
+    loss = common.aggregate_loss(
+        per_token_loss, completion_mask, loss_agg_mode="token-mean"
+    )
+    self.assertEqual(loss.dtype, jnp.float32)
+    self.assertAlmostEqual(loss, 1.5, places=5)
 
 
 if __name__ == "__main__":

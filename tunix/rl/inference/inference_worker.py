@@ -16,7 +16,6 @@
 
 from flax import nnx
 import jax
-import jaxtyping
 from tunix.rl import common
 
 
@@ -31,6 +30,9 @@ class InferenceWorker:
             " reference and reward."
         )
     self._models = models
+    self._model_states = {}
+    for k, m in models.items():
+      self._model_states[k] = nnx.split(m)
     # TODO(tsbao): support multiple reward models.
 
   def get_rewards(
@@ -53,20 +55,21 @@ class InferenceWorker:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
-      completion_mask: jax.Array | None = None,
+      temperature: float = 1.0,
   ) -> jax.Array:
-    ref_model = self._models.get("reference")
-    if ref_model is None:
+    graphdef, state = self._model_states.get("reference")
+    if graphdef is None:
       raise ValueError("Reference model is not available.")
     return common.compute_per_token_logps(
-        ref_model,
+        graphdef,
+        state,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         pad_id=pad_id,
         eos_id=eos_id,
-        completion_mask=completion_mask,
         stop_gradient=True,
         return_logits=False,
+        temperature=temperature,
     )
 
   def get_values(
@@ -75,9 +78,9 @@ class InferenceWorker:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    critic_model = self._models.get("critic")
+    graphdef, state = self._model_states.get("critic")
+    critic_model = nnx.merge(graphdef, state)
     if critic_model is None:
       raise ValueError("Critic model is not available.")
     return common.compute_score(
@@ -86,15 +89,9 @@ class InferenceWorker:
         completion_tokens,
         pad_id,
         eos_id,
-        completion_mask=completion_mask,
     )
 
   def get_model(self, role: str) -> nnx.Module:
     if role not in self._models:
       raise ValueError(f"Model role {role} is not available.")
     return self._models[role]
-
-  def update_model(self, role: str, params: jaxtyping.PyTree):
-    if role not in self._models:
-      raise ValueError(f"Model role {role} is not available.")
-    nnx.update(self._models[role], params)

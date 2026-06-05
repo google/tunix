@@ -63,9 +63,9 @@ def _dummy_dataset(
 
 def _dummy_string_dataset(
     source: MySource,
-    prompts: np.ndarray,
-    chosen_responses: np.ndarray,
-    rejected_responses: np.ndarray,
+    prompts: list[str],
+    chosen_responses: list[str],
+    rejected_responses: list[str],
     return_dict=False,
 ):
   ds = grain.MapDataset.source(source)

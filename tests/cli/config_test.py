@@ -118,15 +118,16 @@ class ConfigTest(parameterized.TestCase):
     self.run_test_peft_trainer(hp)
 
   def test_override_training_config_complex(self):
-    argv = [
-        "",
-        "base_config.yaml",
-        "training_config.profiler_options.log_dir=/tmp/profiler_log_dir",
-        "training_config.profiler_options.skip_first_n_steps=1",
-        "training_config.profiler_options.profiler_steps=5",
-        "training_config.eval_every_n_steps=10",
-    ]
-    self.run_test_peft_trainer(config.initialize(argv))
+    with tempfile.TemporaryDirectory() as log_dir:
+      argv = [
+          "",
+          "base_config.yaml",
+          f"training_config.profiler_options.log_dir={log_dir}",
+          "training_config.profiler_options.skip_first_n_steps=1",
+          "training_config.profiler_options.profiler_steps=5",
+          "training_config.eval_every_n_steps=10",
+      ]
+      self.run_test_peft_trainer(config.initialize(argv))
 
   @parameterized.named_parameters(
       dict(
@@ -146,7 +147,11 @@ class ConfigTest(parameterized.TestCase):
       ),
       dict(
           testcase_name="gcs_ckpt_source",
-          overrides=["model_name=gemma3-1b-pt", "model_source=gcs"],
+          overrides=["model_name=gemma-3-1b-pt", "model_source=gcs"],
+      ),
+      dict(
+          testcase_name="maxtext_source",
+          overrides=["model_name=qwen2.5-0.5b", "model_source=maxtext"],
       ),
   )
   def test_valid_configs(self, overrides):
@@ -315,6 +320,31 @@ class ConfigTest(parameterized.TestCase):
             axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
         ),
     )
+
+    def test_create_mesh_with_assigned_devices(self):
+      raw_keys = {
+          "model_config": {
+              "mesh": {"shape": "(2, 2)", "axis_names": "('x', 'y')"}
+          }
+      }
+      hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
+      assigned_devices = ["d0", "d1", "d2", "d3"]
+
+      class FakeMesh:
+
+        def __init__(self, devices, axis_names, axis_types=None):
+          self.devices = devices
+          self.axis_names = axis_names
+          self.axis_types = axis_types
+
+      with mock.patch.object(jax.sharding, "Mesh", side_effect=FakeMesh):
+        mesh = hp.create_mesh("model_config", devices=assigned_devices)
+
+      self.assertEqual(mesh.devices.shape, (2, 2))
+      self.assertSequenceEqual(
+          mesh.devices.flatten().tolist(), assigned_devices
+      )
+      self.assertEqual(mesh.axis_names, ("x", "y"))
 
   @parameterized.named_parameters(
       dict(
@@ -500,29 +530,29 @@ class ConfigTest(parameterized.TestCase):
     # Test that actor_model_config inherits from model_config
     # Scenario 1: Override model_config.model_name, actor should inherit
     hp = self.initialize_config([
-        "model_config.model_name=gemma2-2b-it",
+        "model_config.model_name=gemma-2-2b-it",
         "model_config.model_source=kaggle",
     ])
-    self.assertEqual(hp.config["model_config"]["model_name"], "gemma2-2b-it")
+    self.assertEqual(hp.config["model_config"]["model_name"], "gemma-2-2b-it")
     self.assertEqual(
-        hp.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+        hp.config["actor_model_config"]["model_name"], "gemma-2-2b-it"
     )
 
     # Scenario 2: Override actor, reference and rollout model name to different value, it should keep override
     hp2 = self.initialize_config([
-        "actor_model_config.model_name=gemma2-2b-it",
+        "actor_model_config.model_name=gemma-2-2b-it",
         "actor_model_config.model_source=kaggle",
-        "reference_model_config.model_name=gemma3-4b",
+        "reference_model_config.model_name=gemma-3-4b",
         "reference_model_config.model_source=gcs",
         "rollout_model_config.model_name=gemma-3-1b-it",
         "rollout_model_config.model_source=gcs",
     ])
-    self.assertEqual(hp2.config["model_config"]["model_name"], "llama3.1-8b")
+    self.assertEqual(hp2.config["model_config"]["model_name"], "llama-3.1-8b")
     self.assertEqual(
-        hp2.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+        hp2.config["actor_model_config"]["model_name"], "gemma-2-2b-it"
     )
     self.assertEqual(
-        hp2.config["reference_model_config"]["model_name"], "gemma3-4b"
+        hp2.config["reference_model_config"]["model_name"], "gemma-3-4b"
     )
     self.assertEqual(
         hp2.config["rollout_model_config"]["model_name"], "gemma-3-1b-it"
@@ -530,20 +560,87 @@ class ConfigTest(parameterized.TestCase):
 
     # Scenario 3: Override actor_model_config and reference_model_config have higher priority than model_config, it should keep override
     hp3 = self.initialize_config([
-        "model_config.model_name=gemma3-12b",
+        "model_config.model_name=gemma-3-12b",
         "model_config.model_source=gcs",
-        "actor_model_config.model_name=gemma2-2b-it",
+        "actor_model_config.model_name=gemma-2-2b-it",
         "actor_model_config.model_source=kaggle",
-        "reference_model_config.model_name=gemma3-4b",
+        "reference_model_config.model_name=gemma-3-4b",
         "reference_model_config.model_source=gcs",
     ])
-    self.assertEqual(hp3.config["model_config"]["model_name"], "gemma3-12b")
+    self.assertEqual(hp3.config["model_config"]["model_name"], "gemma-3-12b")
     self.assertEqual(
-        hp3.config["actor_model_config"]["model_name"], "gemma2-2b-it"
+        hp3.config["actor_model_config"]["model_name"], "gemma-2-2b-it"
     )
     self.assertEqual(
-        hp3.config["reference_model_config"]["model_name"], "gemma3-4b"
+        hp3.config["reference_model_config"]["model_name"], "gemma-3-4b"
     )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="grpo_enabled",
+          main_command="grpo_main",
+          overrides=[
+              "training_config.perf_metrics_options.log_dir={log_dir}",
+          ],
+      ),
+      dict(
+          testcase_name="peft_enabled_fails",
+          main_command="peft_main",
+          overrides=[
+              "training_config.perf_metrics_options.log_dir={log_dir}",
+          ],
+          expected_error=ValueError,
+          error_regex=(
+              "Perf metrics are currently only supported for GRPO training"
+          ),
+      ),
+      dict(
+          testcase_name="peft_disabled",
+          main_command="peft_main",
+          overrides=[],
+      ),
+      dict(
+          testcase_name="invalid_custom_export_fn_path",
+          main_command="grpo_main",
+          overrides=[
+              "training_config.perf_metrics_options.custom_export_fn_path=invalid.path",
+          ],
+          expected_error=ValueError,
+          error_regex="Could not load custom export function from invalid.path",
+      ),
+      dict(
+          testcase_name="invalid_custom_export_fn_path_v2",
+          main_command="grpo_main",
+          overrides=[
+              "training_config.perf_metrics_options.custom_export_fn_path_v2=invalid.path",
+          ],
+          expected_error=ValueError,
+          error_regex=(
+              "Could not load custom export function v2 from invalid.path"
+          ),
+      ),
+  )
+  def test_perf_metrics_validation(
+      self,
+      main_command,
+      overrides,
+      expected_error=None,
+      error_regex=None,
+  ):
+    with tempfile.TemporaryDirectory() as log_dir:
+      overrides = [o.format(log_dir=log_dir) for o in overrides]
+      argv = [main_command, "base_config.yaml"] + overrides
+      if expected_error:
+        with self.assertRaisesRegex(expected_error, error_regex):
+          config.initialize(argv)
+      else:
+        config.initialize(argv)
+
+  def test_dict_to_cli_args_with_none(self):
+    d = {"a": 1, "b": None, "c": {"d": None, "e": 2}}
+    expected = ["a=1", "b=null", "c.d=null", "c.e=2"]
+    got = list(config._dict_to_cli_args(d))
+    self.assertEqual(expected, got)
 
 
 if __name__ == "__main__":

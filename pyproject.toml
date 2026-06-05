@@ -1,6 +1,6 @@
 [project]
 name = "google-tunix"
-version = "0.1.6"
+version = "0.1.7"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
@@ -25,19 +25,24 @@ dependencies = [
   "grain",
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
+  "importlib_resources",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
   "numba",
   "omegaconf", # CLI config
+  "orbax-checkpoint>=0.12.0",
+  "pillow",  # Image processing
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
-  "qwix",
+  "perfetto",  # Perfetto trace writer for metrics export
+  "qwix>=0.1.6",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
   "tqdm",
   "transformers<=4.57.1", # Note: transformers==4.57.2 has a bug, see more information at https://github.com/google/tunix/issues/794
+  "tenacity",
 ]
 
 [project.optional-dependencies]
@@ -53,10 +58,19 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2, <=0.8.1", # Jax 0.7.2 has performance regression on OSS
+  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
+]
+test = [
+  "pytest",
+  "pytest-xdist",
+  "gcsfs",
+  "chex",
+]
+cli = [
+  "tensorflow",
 ]
 
 [project.urls]
@@ -94,3 +108,6 @@ pyink-ipynb-indentation = 2
 [tool.isort]
 profile = "google"       # or "black", etc.
 known_third_party = ["tunix"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

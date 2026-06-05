@@ -403,13 +403,14 @@ class PPOLearnerTest(parameterized.TestCase):
     )
 
     for metric_name in [
-        'score/mean',
-        'reward/mean',
-        'reward_kl_penalty',
+        'rewards/score/mean',
+        'rewards/reward/mean',
+        'rewards/reward_kl_penalty',
     ]:
+      prefix, metric_name = metric_name.split('/', maxsplit=1)
       self.assertLen(
           ppo_learner.rl_cluster._rl_metrics_logger.get_metric_history(
-              'global', metric_name, 'train'
+              prefix, metric_name, 'train'
           ),
           ppo_learner.rl_cluster.global_steps,
       )

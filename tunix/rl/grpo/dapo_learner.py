@@ -24,7 +24,7 @@ RewardFn = rl_learner.RewardFn
 MetricFn = rl_learner.MetricFn
 
 
-@dataclasses.dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(kw_only=True)
 class DAPOConfig(grpo_learner_lib.GRPOConfig):
   """Configuration for DAPO.
 
@@ -73,6 +73,10 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   )
 
   def __post_init__(self):
+    if self.beta is not None:
+      raise ValueError(
+          "DAPO does not support KL penalty, so beta must be None."
+      )
     if self.epsilon_high < self.epsilon:
       raise ValueError("epsilon_high must be greater than or equal to epsilon.")
 

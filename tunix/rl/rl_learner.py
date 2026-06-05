@@ -26,6 +26,7 @@ from absl import logging
 import jax
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
+from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.rl import function_registry
@@ -34,6 +35,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
+
 
 ABC = abc.ABC
 abstractmethod = abc.abstractmethod
@@ -382,7 +384,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        with self.rl_cluster.perf.span("data_loading"):
+        with self.rl_cluster.perf.span(
+            "data_loading"
+        ), self.rl_cluster.perf_v2.span(
+            perf_constants.DATA_LOADING,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+            },
+        ):
           # Fetch one training micro-batch
           example = next(iterator)
           cur_batch_size = len(example["prompts"])
@@ -587,6 +596,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             )
             with self.rl_cluster.perf.span(
                 "weight_sync", self.rl_cluster.perf.all_devices
+            ), self.rl_cluster.perf_v2.span(
+                perf_constants.WEIGHT_SYNC,
+                self.rl_cluster.perf_v2.all_devices,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                },
             ):
               with jax.profiler.StepTraceAnnotation(
                   "sync_sampler_weights", step_num=initial_steps
@@ -599,6 +614,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf.export(),
+            mode=rl_cluster_lib.Mode.TRAIN,
+        )
+        self.rl_cluster.buffer_metrics(
+            self.rl_cluster.perf_v2.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
 
@@ -691,14 +710,31 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         mode=rl_cluster_lib.Mode.TRAIN,
     )
 
+    def queue_iterator():
+      while True:
+        item = train_data_queue.get(block=True)
+        if item is None:
+          break
+        yield item
+
+    train_data_gen = queue_iterator()
+    if self._training_config.max_seq_token_per_tpu is not None:
+      logging.info(
+          "Using sequence packing with max_seq_token_per_tpu: %d",
+          self._training_config.max_seq_token_per_tpu,
+      )
+      train_data_gen = rl_utils.pack_sequences(
+          train_data_gen, self._training_config.max_seq_token_per_tpu
+      )
+
     curr_eval_ds = None
     with jax.profiler.StepTraceAnnotation("trainer", step_num=initial_steps):
       while True:
         with sft_utils.time_measure(suppress_logging=True) as timer:
-          curr_train_ds = train_data_queue.get(block=True)
-
-        if curr_train_ds is None:
-          break
+          try:
+            curr_train_ds = next(train_data_gen)
+          except StopIteration:
+            break
 
         if self.can_enable_async_rollout:
           self.rl_cluster.buffer_metrics(

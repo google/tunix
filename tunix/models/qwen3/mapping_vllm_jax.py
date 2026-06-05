@@ -1,0 +1,157 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""vLLM JAX backend mappings for Qwen2 models."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Tuple
+
+Sharding = Tuple[str | None, ...]
+MappingEntry = Tuple[str, Sharding]
+
+
+TO_HF_MAPPINGS: Dict[str, MappingEntry] = {
+    'embedder.input_embedding': ('model.embed_tokens.weight', ('model', None)),
+    'layers.*.input_layernorm.w': (
+        'model.layers.*.input_layernorm.weight',
+        (None,),
+    ),
+    'layers.*.mlp.down_proj.kernel': (
+        'model.layers.*.mlp.down_proj.weight',
+        ('model', None),
+    ),
+    'layers.*.mlp.gate_proj.kernel': (
+        'model.layers.*.mlp.gate_proj.weight',
+        (None, 'model'),
+    ),
+    'layers.*.mlp.up_proj.kernel': (
+        'model.layers.*.mlp.up_proj.weight',
+        (None, 'model'),
+    ),
+    'layers.*.post_attention_layernorm.w': (
+        'model.layers.*.post_attention_layernorm.weight',
+        (None,),
+    ),
+    'layers.*.attn.k_proj.w': (
+        'model.layers.*.self_attn.k_proj.weight',
+        (None, 'model', None),
+    ),
+    'layers.*.attn.k_norm.w': (
+        'model.layers.*.self_attn.k_norm.weight',
+        (None, 'model', None),
+    ),
+    'layers.*.attn.o_proj.w': (
+        'model.layers.*.self_attn.o_proj.weight',
+        ('model', None, None),
+    ),
+    'layers.*.attn.q_proj.w': (
+        'model.layers.*.self_attn.q_proj.weight',
+        (None, 'model', None),
+    ),
+    'layers.*.attn.q_norm.w': (
+        'model.layers.*.self_attn.q_norm.weight',
+        (None, 'model', None),
+    ),
+    'layers.*.attn.v_proj.w': (
+        'model.layers.*.self_attn.v_proj.weight',
+        (None, 'model', None),
+    ),
+    'layers.*.attn.q_bias': (
+        'model.layers.*.self_attn.q_proj.bias',
+        ('model', None),
+    ),
+    'layers.*.attn.k_bias': (
+        'model.layers.*.self_attn.k_proj.bias',
+        ('model', None),
+    ),
+    'layers.*.attn.v_bias': (
+        'model.layers.*.self_attn.v_proj.bias',
+        ('model', None),
+    ),
+    'final_norm.w': ('model.norm.weight', (None,)),
+    'lm_head.w': ('lm_head.weight', (None, 'model')),
+}
+
+
+LORA_TO_HF_MAPPINGS: Dict[str, MappingEntry] = {
+    'layers.*.mlp.gate_proj.kernel_lora_a': (
+        'model.layers.*.mlp.gate_proj.weight_lora_a',
+        (None, None),
+    ),
+    'layers.*.mlp.gate_proj.kernel_lora_b': (
+        'model.layers.*.mlp.gate_proj.weight_lora_b',
+        (None, 'model'),
+    ),
+    'layers.*.mlp.up_proj.kernel_lora_a': (
+        'model.layers.*.mlp.up_proj.weight_lora_a',
+        (None, None),
+    ),
+    'layers.*.mlp.up_proj.kernel_lora_b': (
+        'model.layers.*.mlp.up_proj.weight_lora_b',
+        (None, 'model'),
+    ),
+    'layers.*.mlp.down_proj.kernel_lora_a': (
+        'model.layers.*.mlp.down_proj.weight_lora_a',
+        ('model', None),
+    ),
+    'layers.*.mlp.down_proj.kernel_lora_b': (
+        'model.layers.*.mlp.down_proj.weight_lora_b',
+        (None, None),
+    ),
+    'layers.*.attn.q_proj.w_lora_a': (
+        'model.layers.*.self_attn.q_proj.weight_lora_a',
+        ('model', None),
+    ),
+    'layers.*.attn.q_proj.w_lora_b': (
+        'model.layers.*.self_attn.q_proj.weight_lora_b',
+        (None, None),
+    ),
+    'layers.*.attn.k_proj.w_lora_a': (
+        'model.layers.*.self_attn.k_proj.weight_lora_a',
+        ('model', None),
+    ),
+    'layers.*.attn.k_proj.w_lora_b': (
+        'model.layers.*.self_attn.k_proj.weight_lora_b',
+        (None, None),
+    ),
+    'layers.*.attn.v_proj.w_lora_a': (
+        'model.layers.*.self_attn.v_proj.weight_lora_a',
+        ('model', None),
+    ),
+    'layers.*.attn.v_proj.w_lora_b': (
+        'model.layers.*.self_attn.v_proj.weight_lora_b',
+        (None, None),
+    ),
+    'layers.*.attn.o_proj.w_lora_a': (
+        'model.layers.*.self_attn.o_proj.weight_lora_a',
+        ('model', None),
+    ),
+    'layers.*.attn.o_proj.w_lora_b': (
+        'model.layers.*.self_attn.o_proj.weight_lora_b',
+        (None, None),
+    ),
+}
+
+
+VLLM_JAX_MAPPING: Dict[str, Any] = {
+    'to_hf_mappings': TO_HF_MAPPINGS,
+    'lora_to_hf_mappings': LORA_TO_HF_MAPPINGS,
+    'to_hf_transpose_keys': {'embedding': (1, 0)},
+    'to_hf_hook_fns': None,
+}
+
+__all__ = [
+    'VLLM_JAX_MAPPING',
+]

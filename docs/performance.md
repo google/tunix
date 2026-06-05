@@ -1,4 +1,4 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Performance Considerations
 

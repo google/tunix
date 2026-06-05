@@ -13,6 +13,7 @@
 # limitations under the License.
 """Reward functions for the RLHF pipeline."""
 
+import os
 import re
 from typing import Callable, List
 from absl import logging
@@ -26,15 +27,14 @@ reasoning_end = "</reasoning>"
 solution_start = "<answer>"
 solution_end = "</answer>"
 match_format = re.compile(
-    rf"^[\s]{{0,}}"
-    rf"{reasoning_start}.+?{reasoning_end}.*?"
-    rf"{solution_start}(.+?){solution_end}"
-    rf"[\s]{{0,}}$",
+    rf"{re.escape(reasoning_start)}.+?{re.escape(reasoning_end)}.*?"
+    rf"{re.escape(solution_start)}(.+?)(?:{re.escape(solution_end)}|$)",
     flags=re.MULTILINE | re.DOTALL,
 )
 
 
 # All reward functions must have this signature.
+# range: [0, 3]
 def match_format_exactly(prompts, completions, **kwargs):
   return [
       0 if match_format.search(response) is None else 3.0
@@ -42,6 +42,7 @@ def match_format_exactly(prompts, completions, **kwargs):
   ]
 
 
+# range: [-2, 2]
 def match_format_approximately(prompts, completions, **kwargs):
   scores = []
 
@@ -58,72 +59,86 @@ def match_format_approximately(prompts, completions, **kwargs):
   return scores
 
 
+# range: [-1, 3]
 def check_answer(prompts, completions, answer, **kwargs):
-  responses = completions
+  """Checks if the extracted response matches the gold answer."""
+  # Clean formatting (e.g. stripping spaces and commas).
+  clean_answers = [str(a).strip().replace(",", "") for a in answer]
+
+  log_rollout = os.environ.get("LOG_GRPO_ROLLOUT", "0") == "1"
+  if log_rollout:
+    logging.info("GRPO Rollout Prompts: %r", prompts)
+    logging.info("GRPO Rollout Completions: %r", completions)
+    logging.info("GRPO Rollout Gold Answers (Raw): %r", answer)
+    logging.info("GRPO Rollout Gold Answers (Cleaned): %s", clean_answers)
 
   extracted_responses = [
-      guess.group(1) if (guess := match_format.search(r)) is not None else None
-      for r in responses
+      guess.group(1).strip().replace(",", "")
+      if (guess := match_format.search(r)) is not None
+      else None
+      for r in completions
   ]
 
   scores = []
-  for guess, true_answer in zip(extracted_responses, answer):
-    score = 0
+  for guess, true_answer in zip(extracted_responses, clean_answers):
     if guess is None:
       scores.append(0)
       continue
+
     # Correct answer gets 3 points!
     if guess == true_answer:
-      score += 3.0
-    # Match if spaces are seen
-    elif guess.strip() == true_answer.strip():
-      score += 1.5
-    else:
-      # Reward it if the answer is close via ratios!
-      # Ie if the answer is within some range, reward it!
-      try:
-        ratio = float(guess) / float(true_answer)
-        if ratio >= 0.9 and ratio <= 1.1:
-          score += 0.5
-        elif ratio >= 0.8 and ratio <= 1.2:
-          score += 0.25
+      scores.append(3.0)
+      continue
+
+    # If string comparison fails, try numerical equivalence.
+    try:
+      guess_float = float(guess)
+      true_answer_float = float(true_answer)
+
+      if guess_float == true_answer_float:
+        scores.append(3.0)
+      elif true_answer_float == 0:
+        # Cannot compute ratio. Penalize if guess is not also 0.
+        scores.append(-1.0 if guess_float != 0 else 0.0)
+      else:
+        ratio = guess_float / true_answer_float
+        if 0.9 <= ratio <= 1.1:
+          scores.append(0.5)
+        elif 0.8 <= ratio <= 1.2:
+          scores.append(0.25)
         else:
-          score -= 1.0  # Penalize wrong answers
-      except (ValueError, ZeroDivisionError):
-        score -= 0.5  # Penalize
-    scores.append(score)
+          scores.append(-1.0)  # Penalize wrong answers
+    except (ValueError, ZeroDivisionError):
+      # Penalize if float conversion or division fails.
+      scores.append(-0.5)
+
   return scores
 
 
+# range: [0, 1.5]
 def check_numbers(prompts, completions, answer, **kwargs):
   match_numbers = re.compile(
       rf"{solution_start}.*?([\d\.]{{1,}})", flags=re.MULTILINE | re.DOTALL
   )
-  match_numbers.findall(f"{solution_start}  0.34  {solution_end}")
-  question = kwargs["question"]
   responses = completions
-
   extracted_responses = [
       guess.group(1) if (guess := match_numbers.search(r)) is not None else None
       for r in responses
   ]
 
+  # Clean formatting (e.g. stripping spaces and commas).
+  clean_answers = [str(a).strip().replace(",", "") for a in answer]
+
   scores = []
-  logging.info("START ============================")
-  logging.info(f"Question: {question[0]}")
-  logging.info(f"Answer: {answer[0]}")
-  logging.info(f"Response: {responses[0]}")
-  logging.info(f"Extracted: {extracted_responses[0]}")
-  logging.info("END ==============================")
-  for guess, true_answer in zip(extracted_responses, answer):
+  for guess, true_answer in zip(extracted_responses, clean_answers):
     if guess is None:
       scores.append(0)
       continue
     # Convert to numbers
     try:
-      true_answer = float(true_answer.strip())
-      guess = float(guess.strip())
-      scores.append(1.5 if guess == true_answer else 0.0)
+      true_answer_val = float(true_answer.strip().replace(",", ""))
+      guess_val = float(guess.strip().replace(",", ""))
+      scores.append(1.5 if guess_val == true_answer_val else 0.0)
     except ValueError:
       scores.append(0)
       continue

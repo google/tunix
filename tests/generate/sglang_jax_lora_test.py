@@ -127,7 +127,7 @@ class SglangJaxLoRATest(absltest.TestCase):
 
       # Modify a specific LoRA parameter to test transfer
       # Find the gate_proj LoRA parameters
-      flatten_trainer_state = trainer_state.flat_state()
+      flatten_trainer_state = nnx.to_flat_state(trainer_state)
 
       test_param_src = None
       test_param_value = None

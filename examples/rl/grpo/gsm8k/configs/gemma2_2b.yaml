@@ -30,12 +30,15 @@ actor_model_config:
     shape: "(2,4)"
     axis_names: "('fsdp','tp')"
 rollout_model_config:
-  mesh:
-    shape: "(2,4)"
-    axis_names: "('fsdp','tp')"
+  mesh: null
+  same_mesh_as: "actor"
+reference_model_config:
+  mesh: null
+  same_mesh_as: "actor"
 tokenizer_config:
   tokenizer_type: "sentencepiece"
   add_bos: False
+data_source: "tfds"
 dataset_name: "gsm8k"
 batch_size: 1
 num_batches: 3738

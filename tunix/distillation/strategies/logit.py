@@ -39,6 +39,7 @@ class LogitStrategy(base_strategy.BaseStrategy):
       labels_fn: Callable[..., jax.Array],
       temperature: float = 2.0,
       alpha: float = 0.5,
+      distill_top_k: int = 0,
   ):
     """Initializes the Logit strategy.
 
@@ -48,6 +49,8 @@ class LogitStrategy(base_strategy.BaseStrategy):
         labels_fn: Function to compute labels from model inputs.
         temperature: Temperature for softening probabilities (> 0).
         alpha: Weight to balance distillation loss and task loss (0.0 to 1.0).
+        distill_top_k: If > 0, only the top k logits from the teacher are used
+          for KL divergence. This filters out the noisy "tail" of the distribution.
     """
     super().__init__(student_forward_fn, teacher_forward_fn, labels_fn)
     if temperature <= 0:
@@ -61,12 +64,13 @@ class LogitStrategy(base_strategy.BaseStrategy):
 
     self.temperature = float(temperature)
     self.alpha = alpha
+    self.distill_top_k = distill_top_k
 
   def compute_eval_loss(
       self,
       student_output: jax.Array,
       labels: jax.Array,
-  ) -> jax.Array:
+  ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Computes the task loss.
 
     Args:
@@ -74,20 +78,25 @@ class LogitStrategy(base_strategy.BaseStrategy):
         labels: The ground truth labels for the examples.
 
     Returns:
-        A JAX array representing the task loss, averaged over the batch.
+        A tuple containing:
+          - task_loss: A JAX array representing the task loss.
+          - metrics: An empty dictionary (required for interface consistency).
     """
+    # Explicit float32 casting for stability
+    s_logits = student_output.astype(jnp.float32)
+
     # Calculate Task Loss (Cross-Entropy on original student logits)
-    ce_loss = optax.softmax_cross_entropy(logits=student_output, labels=labels)
+    ce_loss = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
     task_loss = jnp.mean(ce_loss)
 
-    return task_loss
+    return task_loss, {}
 
   def compute_loss(
       self,
       student_output: jax.Array,
       teacher_output: jax.Array,
       labels: jax.Array,
-  ) -> jax.Array:
+  ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Computes the loss for logit distillation.
 
     Args:
@@ -96,29 +105,65 @@ class LogitStrategy(base_strategy.BaseStrategy):
         labels: The ground truth labels for the examples.
 
     Returns:
-        A JAX array representing the combined distillation and task loss,
-        averaged over the batch.
+        A tuple containing:
+          - combined_loss: The weighted sum of distillation and task loss.
+          - metrics: A dictionary of auxiliary metrics.
     """
+    # Explicit float32 casting for stability in loss calculation
+    s_logits = student_output.astype(jnp.float32)
+    t_logits = teacher_output.astype(jnp.float32)
+
+    # Top-K Distillation Logic
+    if self.distill_top_k > 0:
+      # 1. Identify the Top-K indices from the Teacher (the reference)
+      t_logits_k, top_k_indices = jax.lax.top_k(t_logits, self.distill_top_k)
+
+       # 2. Gather the specific student logits corresponding to those indices
+      s_logits_k = jnp.take_along_axis(s_logits, top_k_indices, axis=-1)
+
+      # 3. Compute Softmax/LogSoftmax on the *truncated* distribution
+      log_student_probs_temp = jax.nn.log_softmax(
+          s_logits_k / self.temperature, axis=-1
+      )
+      teacher_probs_temp = jax.nn.softmax(
+          t_logits_k / self.temperature, axis=-1
+      )
+
+    else:
+      # Standard Full-Vocab Logic
+      log_student_probs_temp = jax.nn.log_softmax(
+          s_logits / self.temperature, axis=-1
+      )
+      teacher_probs_temp = jax.nn.softmax(
+          t_logits / self.temperature, axis=-1
+      )
+
     # Calculate Distillation Loss (KL Divergence on softened targets)
-    log_student_probs_temp = jax.nn.log_softmax(
-        student_output / self.temperature, axis=-1
-    )
-    teacher_probs_temp = jax.nn.softmax(
-        teacher_output / self.temperature, axis=-1
-    )
     kl_loss = optax.kl_divergence(log_student_probs_temp, teacher_probs_temp)
+    
     # Applying temperature scaling to KL loss as per
     # (https://arxiv.org/pdf/1503.02531)
     scaled_kl_loss = kl_loss * (self.temperature**2)
     distillation_loss = jnp.mean(scaled_kl_loss)
 
     # Calculate Task Loss (Cross-Entropy on original student logits)
-    ce_loss = optax.softmax_cross_entropy(logits=student_output, labels=labels)
+    ce_loss = optax.softmax_cross_entropy(logits=s_logits, labels=labels)
     task_loss = jnp.mean(ce_loss)
+
+    # Calculate Teacher Loss (For monitoring/verification only)
+    ce_loss_teacher = optax.softmax_cross_entropy(logits=t_logits, labels=labels)
+    teacher_task_loss = jnp.mean(ce_loss_teacher)
 
     # Combine the losses
     combined_loss = (self.alpha * distillation_loss) + (
         (1.0 - self.alpha) * task_loss
     )
 
-    return combined_loss
+    metrics = {
+        "distill/soft_loss": distillation_loss,
+        "distill/hard_loss": task_loss,
+        "distill/kl_div": jnp.mean(kl_loss),
+        "distill/teacher_loss": teacher_task_loss,
+    }
+
+    return combined_loss, metrics

@@ -1,4 +1,4 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Quick Start
 
@@ -83,6 +83,7 @@ pip install "git+https://github.com/google/tunix#egg=google-tunix[prod]"
 # For GPU/CPU
 pip install git+https://github.com/google/tunix
 # Then install JAX for GPU or CPU as described above.
+
 ```
 
 ### Option 3: From Source
@@ -110,13 +111,39 @@ These need to be installed manually.
 
 **vLLM on TPU**
 
-The TPU-inference supported version of vLLM is not on PyPI yet. Please follow
-the instructions to install manually from
-[vLLM TPU docs](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/)
-or use the Docker image `vllm/vllm-tpu:v0.11.1` and then run:
+The TPU-inference supported version of `vllm` is not always available as a
+single PyPI release, and installing the TPU build sometimes requires extra pip flags
+so that `libtpu` wheels (hosted by the JAX project) can be resolved. You can
+install the pinned vLLM + TPU requirements from this repository using one of
+the raw requirement-file URLs below.
+
+Install from remote:
 
 ```sh
-pip install tpu-inference
+pip install -r https://github.com/google/tunix/raw/main/requirements/requirements.txt
+pip install -r https://github.com/google/tunix/raw/main/requirements/special_requirements.txt
+```
+
+Or (direct raw.githubusercontent URL):
+
+```sh
+pip install -r https://raw.githubusercontent.com/google/tunix/main/requirements/requirements.txt
+pip install -r https://raw.githubusercontent.com/google/tunix/main/requirements/special_requirements.txt
+```
+
+If you prefer a single-line install that directly overrides `tpu-inference`, you can also run:
+
+```sh
+pip install vllm @git+https://github.com/vllm-project/vllm.git@<commit>
+pip install --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ \\
+            --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html \\
+            --pre \\
+            tpu-inference@git+https://github.com/vllm-project/tpu-inference.git@<commit>
+```
+
+Or install from source:
+```sh
+bash scripts/install_tunix_vllm_requirements.sh
 ```
 
 **SGLang-Jax**
@@ -184,7 +211,7 @@ Next, we load the English-French translation dataset. Note you can use your own
 datasets too (PyGrain, Hugging Face dataset, TFDS, etc.).
 
 ```sh
-gsutil cp gs://gemma-data/tokenizers/tokenizer_gemma3.model .
+gcloud storage cp gs://gemma-data/tokenizers/tokenizer_gemma3.model .
 ```
 
 ```python
@@ -290,6 +317,149 @@ out_data = sampler(
     max_generation_steps=10,  # number of generated tokens
 )
 ```
+
+### Trajectory Logging
+
+During reinforcement learning (RL) training, it is often useful to analyze the
+generated trajectories (prompts, responses, rewards, etc.). Tunix provides an
+`AsyncTrajectoryLogger` to log this data asynchronously to CSV files without
+blocking the training loop. It's enabled in agentic_grpo_learner by default, if
+you provide a log directory in your cluster configuration training config.
+
+```python
+# In your cluster configuration setup
+cluster_config.training_config.metrics_logging_options.log_dir = "./logs"
+# GCS paths are also supported
+```
+
+When enabled, the learner will automatically log trajectories during the
+training process. Users can then consume the logged data by loading the CSV
+files into a pandas DataFrame or other query engine.
+
+## Quick Start: Multi-Node Training
+Tunix supports running on a multi-node setup using Pathways in GKE ([more details](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)). This is a
+transparent change that simply requires you to submit your job through Pathways
+instead of running directly on a VM. To run Tunix in a multi-node Pathways
+cluster basically requires 3 steps: 1. create a Pathways cluster, 2. Build a
+docker image, 3. launch a Tunix job. The following sections cover each step in
+further detail.
+
+### 1. Create a Pathways cluster in GKE
+
+#### Install xpx
+
+We will use XPK to create a Pathways cluster in GKE.
+
+```sh
+pip install xpk
+```
+
+#### Install gcloud cli
+
+For Debian or Ubuntu, install gcloud via apt. Make sure prerequisites are met:
+
+```sh
+sudo apt-get update
+sudo apt-get install apt-transport-https ca-certificates gnupg curl
+```
+
+Import the Google Cloud public key:
+
+```sh
+curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+```
+
+Add the Google Cloud CLI distribution URI as a package source:
+
+```sh
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+```
+
+Update and install:
+
+```sh
+sudo apt-get update && sudo apt-get install google-cloud-cli
+```
+
+#### Create a Pathways cluster
+Then we will create the Pathways cluster.
+
+```sh
+# install gcloud beta commands
+gcloud components install beta
+
+# create pathways cluster
+export CLUSTER_NAME='your-cluster-name'
+export ZONE='your-tpu-zones'
+export TPU_TYPE='your-tpu-type' # e.g. v5p-16
+export CLUSTER_CPU_MACHINE_TYPE=n2d-standard-32 # you can adjust this to use beefier CPU node
+export PROJECT='your-gke-projec'
+
+NETWORK_NAME=${CLUSTER_NAME}-mtu9k-wx
+NETWORK_FW_NAME=${NETWORK_NAME}-fw-wx
+
+export CLUSTER_ARGUMENTS="--network=${NETWORK_NAME} --subnetwork=${NETWORK_NAME}"
+
+# run `gcloud auth application-default login` and
+# `gcloud auth login --update-adc` if you encounter permission issue when creating the network.
+
+# Check if this is the service account you want to use.
+gcloud auth list
+
+gcloud compute networks create ${NETWORK_NAME} \
+    --mtu=8896 \
+    --project=${PROJECT} \
+    --subnet-mode=auto \
+    --bgp-routing-mode=regional
+
+gcloud compute firewall-rules create ${NETWORK_FW_NAME} \
+    --network ${NETWORK_NAME} \
+    --allow tcp,icmp,udp \
+    --project=${PROJECT}
+
+xpk cluster create-pathways \
+    --cluster $CLUSTER_NAME \
+    --cluster-cpu-machine-type=$CLUSTER_CPU_MACHINE_TYPE \
+    --num-slices=1 \
+    --tpu-type=$TPU_TYPE \
+    --zone $ZONE \
+    --project $PROJECT \
+    --custom-cluster-arguments="${CLUSTER_ARGUMENTS}"
+```
+
+### 2. Build a Tunix Docker Image
+
+Build local docker image. We will be using the `build_docker.sh` [script](https://github.com/google/tunix/blob/main/build_docker.sh).
+ in the `tunix` directory.
+
+
+```sh
+# cleanup unused docker images and caches if disk is not enough
+sudo docker system prune
+
+bash ./build_docker.sh
+# It will default to generate a local docker image
+export LOCAL_IMAGE_NAME=tunix_base_image
+
+# You can also optionally push to GKE's artifact registry for faster download in the future
+```
+
+### 3. Launch the job
+
+Now you are ready to submit your Tunix workload. You will use `xpk` to do this, 
+similar to the cmd below.
+
+```sh
+xpk workload create-pathways \
+    --cluster=$CLUSTER_NAME \
+    --workload=$WORKLOAD_NAME \
+    --command="TPU_MIN_LOG_LEVEL=0 TF_CPP_MIN_LOG_LEVEL=0 TPU_STDERR_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' source your-script-to-launch-job.sh" \
+    --num-slices=1 \
+    --tpu-type=$TPU_TYPE \
+    --base-docker-image docker.io/library/tunix_base_image \
+    --priority=medium
+```
+
 
 ## Next Steps
 

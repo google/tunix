@@ -14,11 +14,8 @@
 
 """Utilities for wrapping nnx.Modules to capture their outputs."""
 
-import logging
-
+from absl import logging
 from flax import nnx
-
-logger = logging.getLogger(__name__)
 
 
 class SowedModule(nnx.Module):
@@ -38,7 +35,7 @@ class SowedModule(nnx.Module):
     # Execute the wrapped model's forward pass
     output = self.wrapped_model(*args, **kwargs)
     # Sow the output into this wrapper's state
-    logger.debug(
+    logging.debug(
         "SowedModule sowing output for %s under tag '%s'",
         type(self.wrapped_model).__name__,
         self._SOW_TAG,
@@ -49,7 +46,7 @@ class SowedModule(nnx.Module):
 
 def pop_sowed_intermediate_outputs(
     model: nnx.Module,
-) -> nnx.graph.GraphState:
+) -> nnx.State:
   """Returns the intermediate output from a model."""
   return nnx.pop(model, nnx.Intermediate)
 

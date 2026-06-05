@@ -26,6 +26,7 @@ from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
 import jaxtyping
+from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -46,6 +47,7 @@ class AttentionType(enum.Enum):
 class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
+  DECODER = enum.auto()  # Remat the entire decoder layer.
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -500,7 +502,10 @@ class Attention(nnx.Module):
       cache: LayerCache | None,
       attn_mask: jaxtyping.Array,
   ) -> tuple[LayerCache | None, jaxtyping.Array]:
-    if self.remat_config == RematConfig.BLOCK:
+    if (
+        self.remat_config == RematConfig.BLOCK
+        or self.remat_config == RematConfig.BLOCK.value
+    ):
       # nnx.remat needs to be applied to the unbound function and take self
       # as the first argument.
       return nnx.remat(self.block.__func__)(
@@ -543,104 +548,103 @@ class FeedForward(nnx.Module):
 
   def __init__(
       self,
-      features: int,
-      hidden_dim: int,
+      config: ModelConfig,
       *,
       rngs: nnx.Rngs,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
   ):
-    self.shd_config = shd_config
+    self.config = config
     kernel_init_fn = nnx.initializers.zeros_init()
     self.gate_proj = nnx.Linear(
-        in_features=features,
-        out_features=hidden_dim,
+        in_features=config.embed_dim,
+        out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_df
+            kernel_init_fn, config.shd_config.ffw_weight_df
         ),
     )
     self.up_proj = nnx.Linear(
-        in_features=features,
-        out_features=hidden_dim,
+        in_features=config.embed_dim,
+        out_features=config.hidden_dim,
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_df
+            kernel_init_fn, config.shd_config.ffw_weight_df
         ),
     )
     self.down_proj = nnx.Linear(
-        in_features=hidden_dim,
-        out_features=features,
+        in_features=config.hidden_dim,
+        out_features=config.embed_dim,
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            kernel_init_fn, shd_config.ffw_weight_fd
+            kernel_init_fn, config.shd_config.ffw_weight_fd
         ),
     )
 
   @jax.named_scope('feed_forward')
-  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+  def block(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     ff_gate = self.gate_proj(x)
     gate_value = nnx.gelu(ff_gate)
 
     ff1 = self.up_proj(x)
     activations = gate_value * ff1
-    activations = shard(activations, self.shd_config.act_btf)
+    activations = shard(activations, self.config.shd_config.act_btf)
 
     outputs = self.down_proj(activations)
     return outputs
 
+  def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
+    if self.config.remat_config == RematConfig.BLOCK:
+      return nnx.remat(self.block.__func__)(self, x)
+    else:
+      return self.block(x)
 
-class Block(nnx.Module):
+
+class DecoderLayer(nnx.Module):
   """Transformer block."""
 
   def __init__(
       self,
-      num_heads: int,
-      num_kv_heads: int,
-      embed_dim: int,
-      head_dim: int,
-      hidden_dim: int,
-      use_post_attn_norm: bool,
-      use_post_ffw_norm: bool,
-      attn_type: AttentionType,
+      config: ModelConfig,
       *,
+      attn_type: AttentionType,
       rngs: nnx.Rngs,
-      attn_logits_soft_cap: float | None,
-      sliding_window_size: int | None = None,
-      shd_config: ShardingConfig = ShardingConfig.get_default_sharding(),
-      remat_config: RematConfig = RematConfig.BLOCK,
   ):
+    self.config = config
     self.pre_attention_norm = RMSNorm(
-        embed_dim, rngs=rngs, shd_config=shd_config
+        config.embed_dim, rngs=rngs, shd_config=config.shd_config
     )
     self.attn = Attention(
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        features=embed_dim,
-        head_dim=head_dim,
+        num_heads=config.num_heads,
+        num_kv_heads=config.num_kv_heads,
+        features=config.embed_dim,
+        head_dim=config.head_dim,
         attn_type=attn_type,
-        attn_logits_soft_cap=attn_logits_soft_cap,
-        sliding_window_size=sliding_window_size,
+        attn_logits_soft_cap=config.attn_logits_soft_cap,
+        sliding_window_size=config.sliding_window_size,
         rngs=rngs,
-        shd_config=shd_config,
-        remat_config=remat_config,
+        shd_config=config.shd_config,
+        remat_config=config.remat_config,
     )
-    if use_post_attn_norm:
-      self.post_attn_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
+    if config.use_post_attn_norm:
+      self.post_attn_norm = RMSNorm(
+          config.embed_dim, rngs=rngs, shd_config=config.shd_config
+      )
 
-    self.pre_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
+    self.pre_ffw_norm = RMSNorm(
+        config.embed_dim, rngs=rngs, shd_config=config.shd_config
+    )
     self.mlp = FeedForward(
-        features=embed_dim,
-        hidden_dim=hidden_dim,
+        config=config,
         rngs=rngs,
-        shd_config=shd_config,
     )
-    if use_post_ffw_norm:
-      self.post_ffw_norm = RMSNorm(embed_dim, rngs=rngs, shd_config=shd_config)
+    if config.use_post_ffw_norm:
+      self.post_ffw_norm = RMSNorm(
+          config.embed_dim, rngs=rngs, shd_config=config.shd_config
+      )
 
-  def __call__(
+  def block(
       self,
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
@@ -655,7 +659,7 @@ class Block(nnx.Module):
         attn_mask,
     )
 
-    if self.use_post_attn_norm:
+    if self.config.use_post_attn_norm:
       attn_output = self.post_attn_norm(attn_output)
 
     attn_output += x
@@ -663,19 +667,25 @@ class Block(nnx.Module):
     outputs = self.pre_ffw_norm(attn_output)
     outputs = self.mlp(outputs)
 
-    if self.use_post_ffw_norm:
+    if self.config.use_post_ffw_norm:
       outputs = self.post_ffw_norm(outputs)
 
     outputs += attn_output
     return cache, outputs
 
-  @property
-  def use_post_attn_norm(self):
-    return hasattr(self, 'post_attn_norm') and self.post_attn_norm is not None
-
-  @property
-  def use_post_ffw_norm(self):
-    return hasattr(self, 'post_ffw_norm') and self.post_ffw_norm is not None
+  def __call__(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+  ) -> tuple[LayerCache | None, jaxtyping.Array]:
+    if self.config.remat_config == RematConfig.DECODER:
+      return nnx.remat(self.block.__func__)(
+          self, x, segment_pos, cache, attn_mask
+      )
+    else:
+      return self.block(x, segment_pos, cache, attn_mask)
 
 
 class RMSNorm(nnx.Module):
@@ -824,8 +834,10 @@ def _assign_linen_params_to_nnx_state(
   return state
 
 
-class Gemma(nnx.Module):
+class Gemma(BackendMappingMixin, nnx.Module):
   """Gemma transformer."""
+
+  BACKEND_PACKAGE_PATH = __name__
 
   @classmethod
   def from_params(cls, params: params_lib.Params, version: str) -> 'Gemma':
@@ -863,20 +875,10 @@ class Gemma(nnx.Module):
         shd_config=config.shd_config,
     )
     self.layers = compat.ModuleList([
-        Block(
-            num_heads=config.num_heads,
-            num_kv_heads=config.num_kv_heads,
-            embed_dim=config.embed_dim,
-            head_dim=config.head_dim,
-            hidden_dim=config.hidden_dim,
-            sliding_window_size=config.sliding_window_size,
-            use_post_attn_norm=config.use_post_attn_norm,
-            use_post_ffw_norm=config.use_post_ffw_norm,
-            attn_logits_soft_cap=config.attn_logits_soft_cap,
+        DecoderLayer(
+            config=config,
             attn_type=attn_type,
             rngs=rngs,
-            shd_config=config.shd_config,
-            remat_config=config.remat_config,
         )
         for _, attn_type in zip(
             range(config.num_layers), config.attention_types
@@ -955,12 +957,13 @@ class Gemma(nnx.Module):
     """Initializes the cache for the model."""
     config = self.config
     shape = (batch_size, cache_size, config.num_kv_heads, config.head_dim)
-    k = jnp.zeros(shape, dtype=dtype)
-    v = jnp.zeros(shape, dtype=dtype)
-    end_index = jnp.zeros((batch_size,), dtype=jnp.int32)
     # Jax array is immutable, so updates to each layer creates new arrays.
     return {
-        f'layer_{i}': {'k': k, 'v': v, 'end_index': end_index}
+        f'layer_{i}': {
+            'k': jnp.zeros(shape, dtype=dtype),
+            'v': jnp.zeros(shape, dtype=dtype),
+            'end_index': jnp.zeros((batch_size,), dtype=jnp.int32)
+        }
         for i in range(config.num_layers)
     }
 

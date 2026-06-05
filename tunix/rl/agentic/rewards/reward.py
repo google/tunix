@@ -20,6 +20,9 @@ as input and return a `reward_types.RewardOutput` containing a scalar reward and
 metadata.
 """
 
+import ast
+import logging
+import operator
 from typing import Any, Callable, Dict
 
 from tunix.rl.agentic.rewards import reward_types
@@ -165,22 +168,51 @@ def dummy_reward(
   return reward_types.RewardOutput(0.0, {})
 
 
+_OP_MAP = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+    ast.Pow: operator.pow,
+}
+
+
+def _safe_eval(expr_str: str) -> float:
+  def _eval(node):
+    if isinstance(node, ast.Constant):
+      return node.value
+    elif isinstance(node, ast.BinOp):
+      op_type = type(node.op)
+      if op_type not in _OP_MAP:
+        raise ValueError(f"Unsupported operator: {op_type}")
+      return _OP_MAP[op_type](_eval(node.left), _eval(node.right))
+    elif isinstance(node, ast.UnaryOp):
+      op_type = type(node.op)
+      if op_type not in _OP_MAP:
+        raise ValueError(f"Unsupported operator: {op_type}")
+      return _OP_MAP[op_type](_eval(node.operand))
+    raise ValueError(f"Unsupported node: {type(node)}")
+
+  tree = ast.parse(expr_str, mode="eval")
+  return float(_eval(tree.body))
+
+
 @register("calculate")
 def calculate_reward(
     task: Dict[str, Any], action: str
 ) -> reward_types.RewardOutput:
   """Calculates the reward for a math expression based on answer correctness.
 
-  WARNING: Uses eval(), which is NOT SAFE for untrusted input. This is only for
-  feature testing.
+  Safely evaluates the expression using AST parsing.
 
   Args:
     task: The task context containing the 'question' field.
     action: The model's answer as a string.
 
   Returns:
-    RewardOutput: 1.0 if the model's answer matches the evaluated
-    expression
+    RewardOutput: 1.0 if the model's answer matches the evaluated expression
       within a tolerance, 0.0 otherwise.
   """
   question_str = task.get("question", "")
@@ -189,13 +221,19 @@ def calculate_reward(
   try:
     answer_str = action.replace("The answer is ", "").strip().rstrip(".")
     answer = float(answer_str)
-    correct_value = eval(expression)
+    correct_value = _safe_eval(expression)
     tolerance = 1e-6
     if abs(correct_value - answer) < tolerance:
       score = 1.0
     else:
       score = 0.0
 
-  except Exception:
+  except Exception as e:
+    logging.warning(
+        "Failed to calculate reward for task %s and action %s: %s",
+        task,
+        action,
+        e,
+    )
     score = 0.0
   return reward_types.RewardOutput(score, {"calculate_correct": score})

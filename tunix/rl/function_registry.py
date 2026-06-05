@@ -15,8 +15,10 @@
 
 import threading
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from absl import logging
 
 _POLICY_LOSS_FN_CATEGORY = "policy_loss_fn"
+_VALUE_LOSS_FN_CATEGORY = "value_loss_fn"
 _ADVANTAGE_ESTIMATOR_CATEGORY = "advantage_estimator"
 _REWARD_MANAGER_CATEGORY = "reward_manager"
 
@@ -26,6 +28,7 @@ class FunctionRegistry:
 
   DEFAULT_ALLOWED_CATEGORIES: FrozenSet[str] = frozenset({
       _POLICY_LOSS_FN_CATEGORY,
+      _VALUE_LOSS_FN_CATEGORY,
       _ADVANTAGE_ESTIMATOR_CATEGORY,
       _REWARD_MANAGER_CATEGORY,
   })
@@ -74,9 +77,11 @@ class FunctionRegistry:
           self._registry[category] = {}
 
         if name in self._registry[category]:
-          raise ValueError(
-              f"Function '{name}' is already registered in category"
-              f" '{category}'."
+          logging.warning(
+              "Function '%s' is already registered in category '%s'. "
+              "Overwriting with new function.",
+              name,
+              category,
           )
         self._registry[category][name] = func
       return func
@@ -149,3 +154,15 @@ def register_reward_manager(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
   """Returns a decorator to register a reward manager function by name."""
   return default_registry.register(_REWARD_MANAGER_CATEGORY, name)
+
+
+def get_value_loss_fn(name: str) -> Callable[..., Any]:
+  """Returns the value loss function by name."""
+  return default_registry.get(_VALUE_LOSS_FN_CATEGORY, name)
+
+
+def register_value_loss_fn(
+    name: str,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+  """Returns a decorator to register a value loss function by name."""
+  return default_registry.register(_VALUE_LOSS_FN_CATEGORY, name)

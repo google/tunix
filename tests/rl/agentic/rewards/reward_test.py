@@ -84,7 +84,6 @@ class RewardTest(parameterized.TestCase):
       ("correct", "2 + 2 = ?", "The answer is 4", 1.0),
       ("incorrect", "5 * 3 = ?", "14", 0.0),
       ("parsing_error", "10 / 2 = ?", "five", 0.0),
-      # eval() will raise ZeroDivisionError, which is caught by the try-except
       ("eval_error", "10 / 0 = ?", "1", 0.0),
   )
   def test_calculate_reward(self, question, action, expected_score):

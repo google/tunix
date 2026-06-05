@@ -24,7 +24,7 @@ import gc
 import itertools
 import operator
 import os
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from absl import logging
 import flax
@@ -38,10 +38,14 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.perf.experimental import constants as perf_constants
+from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -163,11 +167,6 @@ class ClusterConfig:
       random weights instead of loading from the given path.
     rollout_vllm_tpu_backend_type: The TPU Jax backend type for vllm rollout
       engine, E.g. "jax", "torchax" or "pytorch_xla".
-    rollout_vllm_swap_space_size_gb: The swap space size (in GiB) for vllm
-      rollout engine. This is the amount of CPU memory (RAM) to allocate for
-      swapping KV cache blocks from the TPU/GPU memory (HBM). A larger value
-      allows for larger batch sizes and longer sequences, potentially at the
-      cost of increased latency if swapping occurs.
   """
 
   role_to_mesh: dict[Role, Mesh]
@@ -196,11 +195,23 @@ class RLCluster:
       perf_config: perf_metrics.PerfMetricsConfig | None = None,
   ):
     self.cluster_config = cluster_config
+    self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
     self._init_backbone_sharing_map(actor, reference)
+    self._anchor_policy_state = None
 
     self._default_memory_kind = jax.devices()[0].default_memory().kind
     self.train_actor = self._load_model(actor, self.r2m[Role.ACTOR])
+
+    if self.cluster_config.rollout_config is None:
+      raise ValueError("`cluster_config.rollout_config` cannot be None.")
+    if isinstance(
+        self.cluster_config.rollout_config, dict
+    ) and not self.cluster_config.rollout_config.get(Mode.TRAIN):
+      raise ValueError(
+          "Rollout config is a dict but missing a train config. Provided"
+          f" config: {self.cluster_config.rollout_config}"
+      )
 
     if Role.ROLLOUT in self._backbone_sharing_map[Role.ACTOR]:
       self.rollout_actor = self.train_actor
@@ -240,20 +251,13 @@ class RLCluster:
         self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
     )
 
-    self.tokenizer = tokenizer
+    self.tokenizer = tokenizer_adapter.TokenizerAdapter(tokenizer)
     self._rl_metrics_logger = metrics_logger.MetricsLogger(
         self.cluster_config.training_config.metrics_logging_options
     )
     self._buffered_train_metrics: list[MetricsBuffer] = []
     self._buffered_eval_metrics: list[MetricsBuffer] = []
     self._external_metrics_logger = None
-    if perf_config is None:
-      self._perf = perf_trace.NoopTracer()
-    else:
-      devices = []
-      for mesh in cluster_config.role_to_mesh.values():
-        devices.extend(mesh.devices.flatten().tolist())
-      self._perf = perf_trace.PerfTracer(devices, perf_config.custom_export_fn)
 
     self._init_cluster()
     gc.collect()
@@ -332,7 +336,7 @@ class RLCluster:
         dst_shardings = jax.tree_util.tree_map(
             lambda x: jax.sharding.NamedSharding(
                 mesh,
-                x,
+                x if x is not None else jax.sharding.PartitionSpec(),
                 memory_kind=self._default_memory_kind
                 if is_on_device
                 else "pinned_host",
@@ -367,14 +371,18 @@ class RLCluster:
         "sglang_jax",
     ]:
       raise ValueError(
-          "`cluster_config.rollout_engine` should be one of `'vanilla'` or"
-          " `'vllm'` or `'sglang_jax'`. Received:"
+          "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
+          "`'vllm'`, or `'sglang_jax'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
+
     if isinstance(self.cluster_config.rollout_config, dict):
+      # train_cfg should always be provided.
+      train_cfg = self.cluster_config.rollout_config[Mode.TRAIN]
+      eval_cfg = self.cluster_config.rollout_config.get(Mode.EVAL)
       max_kv_cache_size = max(
-          self.cluster_config.rollout_config[Mode.TRAIN].kv_cache_size,
-          self.cluster_config.rollout_config[Mode.EVAL].kv_cache_size,
+          train_cfg.kv_cache_size,
+          eval_cfg.kv_cache_size if eval_cfg is not None else 0,
       )
     else:
       max_kv_cache_size = self.cluster_config.rollout_config.kv_cache_size
@@ -399,41 +407,49 @@ class RLCluster:
     elif self.cluster_config.rollout_engine == "vllm":
       from tunix.rl.rollout import vllm_rollout
 
-      loaded_vllm_config = None
-      if isinstance(
-          self.cluster_config.rollout_config, base_rollout.RolloutConfig
-      ):
-        loaded_vllm_config = self.cluster_config.rollout_config
-      elif isinstance(self.cluster_config.rollout_config, dict):
+      if isinstance(self.cluster_config.rollout_config, dict):
         loaded_vllm_config = self.cluster_config.rollout_config[Mode.TRAIN]
-
-      if loaded_vllm_config is None:
-        raise ValueError("Rollout vllm model config is missing!")
+      else:
+        loaded_vllm_config = self.cluster_config.rollout_config
 
       if loaded_vllm_config.rollout_vllm_model_version is None:
         raise ValueError("Rollout vllm model version or path is missing!")
 
       # TODO(linchai): maybe support offloading for vllm rollout.
-      self._rollout = vllm_rollout.VllmRollout(
-          self.rollout_actor,
-          self.tokenizer,
-          cache_config_or_size=max_kv_cache_size,
-          mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=loaded_vllm_config,
-      )
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
+        # vLLM handles model initialization and loading internally, so we need
+        # to provide logical axis rules for vLLM to correctly shard the model on
+        # the rollout mesh. This is important for out-of-tree models in vLLM
+        # that are implemented with custom logical axis rules, like is the case
+        # for MaxText models.
+        self._rollout = vllm_rollout.VllmRollout(
+            self.rollout_actor,
+            self.tokenizer,
+            cache_config_or_size=max_kv_cache_size,
+            mesh=self.r2m[Role.ROLLOUT],
+            rollout_config=loaded_vllm_config,
+        )
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
-      if isinstance(
-          self.cluster_config.rollout_config, base_rollout.RolloutConfig
-      ):
-        loaded_sglang_jax_config = self.cluster_config.rollout_config
-      elif isinstance(self.cluster_config.rollout_config, dict):
+      if isinstance(self.cluster_config.rollout_config, dict):
         loaded_sglang_jax_config = self.cluster_config.rollout_config[
             Mode.TRAIN
         ]
       else:
-        raise ValueError("Rollout sglang jax model config is missing!")
+        loaded_sglang_jax_config = self.cluster_config.rollout_config
+
+      if (
+          sft_utils.is_lora_enabled(self.rollout_actor)
+          and not loaded_sglang_jax_config.rollout_sglang_jax_enable_static_lora
+      ):
+        raise ValueError(
+            "Rollout sglang jax lora config is missing: must set"
+            " rollout_sglang_jax_lora_target_modules,"
+            " rollout_sglang_jax_enable_static_lora,"
+            " rollout_sglang_jax_max_lora_rank,"
+            " rollout_sglang_jax_lora_scaling."
+        )
 
       self._rollout = sglang_jax_rollout.SglangJaxRollout(
           self.rollout_actor,
@@ -453,16 +469,56 @@ class RLCluster:
             base_rollout.BaseRollout,
         )
     ):
+      if isinstance(self.cluster_config.rollout_config, dict):
+        loaded_config = self.cluster_config.rollout_config[Mode.TRAIN]
+      else:
+        loaded_config = self.cluster_config.rollout_config
+
       self._rollout = self.cluster_config.rollout_engine(
           rollout_actor=self.rollout_actor,
           tokenizer=self.tokenizer,
           mesh=self.r2m[Role.ROLLOUT],
-          rollout_config=self.cluster_config.rollout_config,
+          rollout_config=loaded_config,
       )
     else:
       raise NotImplementedError(
           f"Rollout engine {self.cluster_config.rollout_engine} not supported"
       )
+
+    # If the rollout engine constructs its own mesh, it could potentially
+    # rearanges the devices for better performance. Use that mesh instead of the
+    # one provided in the cluster config.
+    if hasattr(self._rollout, "mesh") and self._rollout.mesh is not None:
+      self.r2m[Role.ROLLOUT] = self._rollout.mesh
+
+    # Initialize the performance tracer after we have all the meshes
+    self._perf = perf_trace.NoopTracer()
+    self._perf_v2 = perf_tracer_v2.NoopTracer()
+
+    if self.perf_config:
+      export_fn_v1 = self.perf_config.custom_export_fn
+      export_fn_v2 = self.perf_config.custom_export_fn_v2
+
+      if export_fn_v1 or export_fn_v2:
+        devices = list(
+            itertools.chain.from_iterable(
+                mesh.devices.flatten().tolist()
+                for mesh in self.cluster_config.role_to_mesh.values()
+            )
+        )
+
+        if export_fn_v1:
+          self._perf = perf_trace.PerfTracer(devices, export_fn_v1)
+
+        if export_fn_v2:
+          self._perf_v2 = perf_tracer_v2.PerfTracer(
+              devices,
+              export_fn=export_fn_v2,
+              concurrent_device_spans=[
+                  perf_constants.ROLLOUT,
+                  perf_constants.ENVIRONMENT,
+              ],
+          )
 
     # 2. Initialize inference worker.
     inference_models = {}
@@ -488,16 +544,19 @@ class RLCluster:
         critic_config.checkpoint_root_directory = os.path.join(
             critic_config.checkpoint_root_directory, "critic"
         )
-      self._critic_trainer = rl_trainer.Trainer(
-          model=self.critic,
-          optimizer=self.cluster_config.training_config.critic_optimizer,
-          training_config=critic_config,
-          custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-          metrics_logger=self._rl_metrics_logger,
-          perf_tracer=self._perf,
-      )
+      with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
+        self._critic_trainer = rl_trainer.Trainer(
+            model=self.critic,
+            optimizer=self.cluster_config.training_config.critic_optimizer,
+            training_config=critic_config,
+            custom_checkpoint_metadata_fn=lambda: {
+                "global_step": self.global_steps + 1,
+                "role": Role.CRITIC.value,
+            },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+            metrics_logger=self._rl_metrics_logger,
+            perf_tracer=self._perf,
+            perf_tracer_v2=self._perf_v2,
+        )
       del self.critic
       self._maybe_offload_model_to_cpu(self._critic_trainer.model, Role.CRITIC)
 
@@ -509,19 +568,25 @@ class RLCluster:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
-    self._actor_trainer = rl_trainer.Trainer(
-        model=self.train_actor,
-        optimizer=self.cluster_config.training_config.actor_optimizer,
-        training_config=actor_config,
-        custom_checkpoint_metadata_fn=lambda: {
-            "global_step": self.global_steps + 1
-        },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
-        metrics_logger=self._rl_metrics_logger,
-        perf_tracer=self._perf,
-    )
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+      self._actor_trainer = rl_trainer.Trainer(
+          model=self.train_actor,
+          optimizer=self.cluster_config.training_config.actor_optimizer,
+          training_config=actor_config,
+          custom_checkpoint_metadata_fn=lambda: {
+              "global_step": self.global_steps + 1,
+              "role": Role.ACTOR.value,
+          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          metrics_logger=self._rl_metrics_logger,
+          perf_tracer=self._perf,
+          perf_tracer_v2=self._perf_v2,
+      )
     del self.rollout_actor
     del self.train_actor
     self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+        nnx.state(self.actor_trainer.model), "pinned_host"
+    )
 
   def _propagate_backbone_sharing_map(self):
     """Propagates backbone sharing map."""
@@ -571,6 +636,20 @@ class RLCluster:
         )
         nnx.update(actor_model, params)
 
+  def _is_state_on_device(self, state: jaxtyping.PyTree) -> bool:
+    shardings = jax.tree.map(
+        lambda x: x.sharding if hasattr(x, "sharding") else None, state
+    )
+    return jax.tree_util.tree_reduce(
+        operator.or_,
+        jax.tree.map(
+            lambda x: x is not None
+            and x.memory_kind == self._default_memory_kind,
+            shardings,
+        ),
+        initializer=False,
+    )
+
   def _maybe_load_model_from_cpu(self, model: nnx.Module, role: Role):
     """Loads model from CPU if needed."""
     if not self.cluster_config.offload_to_cpu:
@@ -603,7 +682,13 @@ class RLCluster:
 
   @property
   def perf(self) -> perf_trace.Tracer:
+    """The v1 performance tracer."""
     return self._perf
+
+  @property
+  def perf_v2(self) -> perf_tracer_v2.Tracer:
+    """The v2 performance tracer."""
+    return self._perf_v2
 
   def close(self):
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
@@ -627,9 +712,9 @@ class RLCluster:
 
       if agg_value.dtype.kind in {"U", "S"}:
         logging.info(
-            "Skipping logging metric %s (dtype: %s)",
+            "Rollout string metric %s: %s",
             metric_name,
-            agg_value.dtype,
+            agg_value,
         )
         continue
 
@@ -638,7 +723,7 @@ class RLCluster:
         if agg_value.size > 0 and isinstance(
             agg_value.ravel()[0], (str, np.str_)
         ):
-          logging.info("Skipping logging object metric %s", metric_name)
+          logging.info("Rollout string metric %s: %s", metric_name, agg_value)
           continue
 
       # Apply aggregation and Log
@@ -647,8 +732,12 @@ class RLCluster:
         if agg_value.size > 0:
           agg_value = op(agg_value)
 
+      if "/" in metric_name:
+        prefix, metric_name = metric_name.split("/", maxsplit=1)
+      else:
+        prefix = "global"
       self._rl_metrics_logger.log(
-          "global",
+          prefix,
           metric_name,
           agg_value,
           metrics_buffer.mode,
@@ -760,18 +849,14 @@ class RLCluster:
         self._log_metrics(m)
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[
-        Role.ACTOR
-    ] as _, self._get_logical_axis_rules_cm(Role.ACTOR):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
       self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
       with self._perf.span_group("actor_training"):
         self.actor_trainer.train(train_ds, eval_ds, skip_jit)
       self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
-    with self.cluster_config.role_to_mesh[
-        Role.CRITIC
-    ] as _, self._get_logical_axis_rules_cm(Role.CRITIC):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       self._maybe_load_model_from_cpu(self.critic_trainer.model, Role.CRITIC)
       with self._perf.span_group("critic_training"):
         self._critic_trainer.train(train_ds, eval_ds, skip_jit)
@@ -783,6 +868,8 @@ class RLCluster:
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
+      trace_tags: Mapping[str, Any] | None = None,
+      max_generation_steps: int | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -795,6 +882,7 @@ class RLCluster:
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
+      trace_tags: Optional tags to add to the performance tracer.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -818,9 +906,7 @@ class RLCluster:
       raise ValueError("Cannot generate from an empty list of prompts.")
     micro_batch_size = micro_batch_size or len(string_prompts)
 
-    with self.cluster_config.role_to_mesh[
-        Role.ROLLOUT
-    ] as mesh, self._get_logical_axis_rules_cm(Role.ROLLOUT):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -831,15 +917,31 @@ class RLCluster:
       else:
         rollout_config = self.cluster_config.rollout_config
 
-      with self._perf.span("rollout", mesh.devices) as span:
+      if max_generation_steps is not None:
+        rollout_config = dataclasses.replace(
+            rollout_config,
+            max_tokens_to_generate=max_generation_steps,
+        )
+
+      perf_tags = {
+          perf_constants.ROLE: Role.ROLLOUT.value,
+      }
+      if trace_tags:
+        perf_tags.update(trace_tags)
+
+      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
+          perf_constants.ROLLOUT,
+          mesh.devices,
+          tags=perf_tags,
+      ) as span_v2:
         outputs = [
             self.rollout.generate(string_prompts[s], rollout_config)
             for s in rl_utils.chunk_slices_by_size(
                 stop=len(string_prompts), step=micro_batch_size
             )
         ]
-        span.device_end([o.logits for o in outputs])
-
+        span.device_end([o.tokens for o in outputs])
+        span_v2.async_end([o.tokens for o in outputs])
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
@@ -853,13 +955,17 @@ class RLCluster:
       )
 
     logits = None
-    if isinstance(outputs[0].logits, jnp.ndarray):
-      logits = jnp.concatenate([out.logits for out in outputs], axis=0)
+    if outputs[0].logits is not None:
+      logits = list(
+          itertools.chain.from_iterable(out.logits for out in outputs)
+      )
 
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
-        tokens=np.concatenate([out.tokens for out in outputs], axis=0),
+        tokens=list(
+            itertools.chain.from_iterable(out.tokens for out in outputs)
+        ),
         left_padded_prompt_tokens=np.concatenate(
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
@@ -873,7 +979,6 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
       micro_batch_size: int | None = None,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     batch_size = prompt_tokens.shape[0]
@@ -883,9 +988,7 @@ class RLCluster:
       )
     micro_batch_size = micro_batch_size or batch_size
 
-    reference_mesh = self.cluster_config.role_to_mesh[Role.REFERENCE]
-
-    with reference_mesh, self._get_logical_axis_rules_cm(Role.REFERENCE):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REFERENCE):
       # This assumes reference model shards same data sharding as actor, which
       # should be true as ref model and policy model shares same architecture.
       dest_prompt_tokens = sharding_utils.shard_input(
@@ -899,6 +1002,7 @@ class RLCluster:
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
       outs = []
       for batch_slice in rl_utils.chunk_slices_by_size(
           stop=batch_size, step=micro_batch_size
@@ -909,9 +1013,7 @@ class RLCluster:
                 dest_completion_tokens[batch_slice],
                 pad_id,
                 eos_id,
-                completion_mask=None
-                if completion_mask is None
-                else completion_mask[batch_slice],
+                temperature=temperature,
             )
         )
       ref_per_token_logps = jnp.concatenate(outs, axis=0)
@@ -925,7 +1027,6 @@ class RLCluster:
       prompt_tokens: jax.Array,
       completion_tokens: jax.Array,
       micro_batch_size: int | None = None,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the current policy model."""
     batch_size = prompt_tokens.shape[0]
@@ -933,9 +1034,7 @@ class RLCluster:
       raise ValueError("Cannot get old log probabilities from an empty batch.")
     micro_batch_size = micro_batch_size or batch_size
 
-    with self.cluster_config.role_to_mesh[
-        Role.ROLLOUT
-    ], self._get_logical_axis_rules_cm(Role.ROLLOUT):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
       model = self.rollout.model()
       self._maybe_load_model_from_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
@@ -948,9 +1047,6 @@ class RLCluster:
             self.rollout.get_per_token_logps(
                 prompt_tokens[batch_slice],
                 completion_tokens[batch_slice],
-                completion_mask=None
-                if completion_mask is None
-                else completion_mask[batch_slice],
             )
         )
       per_token_logps = jnp.concatenate(outs, axis=0)
@@ -959,6 +1055,91 @@ class RLCluster:
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))
       return per_token_logps
+
+  def get_actor_per_token_logps(
+      self,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
+      pad_id: int,
+      eos_id: int,
+      micro_batch_size: int | None = None,
+      temperature: float | None = None,
+  ) -> jax.Array:
+    """Gets per-token logps from the actor model on the trainer side.
+
+    Mirrors `get_ref_per_token_logps` — must pass through the rollout temperature
+    so the actor's recomputed logps match the temperature scaling used at
+    sampling time (otherwise log_softmax(logits/T_sample) vs log_softmax(logits)
+    yields a multi-nat artifact diff vs vllm's `processed_logprobs`).
+    """
+    if temperature is None:
+      temperature = self.get_rollout_config(mode=Mode.TRAIN).temperature
+    batch_size = prompt_tokens.shape[0]
+    if batch_size == 0:
+      raise ValueError(
+          "Cannot get actor log probabilities from an empty batch."
+      )
+    if self._anchor_policy_state is None:
+      raise ValueError(
+          "Anchor policy state is not initialized. Please run `sync_weights`"
+          " first."
+      )
+    micro_batch_size = micro_batch_size or batch_size
+    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
+      dest_prompt_tokens = sharding_utils.shard_input(
+          prompt_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+      dest_completion_tokens = sharding_utils.shard_input(
+          completion_tokens,
+          self.cluster_config.training_config.data_sharding_axis,
+      )
+
+      # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
+      # reference the same policy vllm sampled with even when mini_batch_size <
+      # full_batch_size or num_iterations > 1. Only offload the live actor when
+      # `offload_to_cpu` is enabled cluster-wide; otherwise the host round-trip
+      # was both unnecessary and risked leaving stray weights pinned to host.
+      actor_trainer_state_on_device = self._is_state_on_device(
+          nnx.state(self.actor_trainer.model)
+      )
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(self.actor_trainer.model, "pinned_host")
+        gc.collect()
+      graphdef, _ = nnx.split(self.actor_trainer.model)
+      anchor_on_device = self._is_state_on_device(self._anchor_policy_state)
+      if anchor_on_device:
+        anchor_policy_state = self._anchor_policy_state
+      else:
+        anchor_policy_state = rl_utils.put_params_on_memory_kind(
+            self._anchor_policy_state, self._default_memory_kind
+        )
+      outs = []
+      for batch_slice in rl_utils.chunk_slices_by_size(
+          stop=batch_size, step=micro_batch_size
+      ):
+        outs.append(
+            common.compute_per_token_logps(
+                graphdef,
+                anchor_policy_state,
+                prompt_tokens=dest_prompt_tokens[batch_slice],
+                completion_tokens=dest_completion_tokens[batch_slice],
+                pad_id=pad_id,
+                eos_id=eos_id,
+                stop_gradient=True,
+                return_logits=False,
+                temperature=temperature,
+            )
+        )
+      actor_per_token_logps = jnp.concatenate(outs, axis=0)
+      if not anchor_on_device:
+        del anchor_policy_state
+      gc.collect()
+      if actor_trainer_state_on_device and self.cluster_config.offload_to_cpu:
+        self._put_model_on_memory_kind(
+            self.actor_trainer.model, self._default_memory_kind
+        )
+      return actor_per_token_logps
 
   def sync_weights(self):
     """Syncs the weights of between the sampler model and trainer model."""
@@ -976,6 +1157,10 @@ class RLCluster:
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
+      # The anchor policy state is snapshotted from actor_trainer.model.
+      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+          nnx.state(self.actor_trainer.model), "pinned_host"
+      )
 
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1
@@ -986,17 +1171,13 @@ class RLCluster:
       completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
-      completion_mask: jax.Array | None = None,
   ) -> jax.Array:
-    with self.cluster_config.role_to_mesh[
-        Role.CRITIC
-    ], self._get_logical_axis_rules_cm(Role.CRITIC):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
       return self.inference_worker.get_values(
           prompt_tokens,
           completion_tokens,
           pad_id,
           eos_id,
-          completion_mask=completion_mask,
       )
 
   def get_rewards(
@@ -1006,9 +1187,7 @@ class RLCluster:
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
-    with self.cluster_config.role_to_mesh[
-        Role.REWARD
-    ], self._get_logical_axis_rules_cm(Role.REWARD):
+    with self._get_mesh_and_logical_axis_rules_cm(Role.REWARD):
       return self.inference_worker.get_rewards(
           prompt_tokens,
           completion_tokens,
@@ -1016,8 +1195,16 @@ class RLCluster:
           eos_id,
       )
 
-  def _get_logical_axis_rules_cm(self, role: Role):
-    """Returns a context manager for the logical axis rules.
+  def get_rollout_config(self, mode: Mode) -> base_rollout.RolloutConfig:
+    """Returns the rollout config for the given mode."""
+    if isinstance(self.cluster_config.rollout_config, dict):
+      return self.cluster_config.rollout_config[mode]
+    else:
+      return self.cluster_config.rollout_config
+
+  @contextlib.contextmanager
+  def _get_mesh_and_logical_axis_rules_cm(self, role: Role):
+    """Returns a context manager for the mesh and logical axis rules.
 
     This is used for models that uses logical sharding, so XLA can generate the
     correct graph based on physical mesh.
@@ -1026,8 +1213,13 @@ class RLCluster:
       role: The role of the model (e.g., ACTOR, CRITIC, REFERENCE, etc.).
     """
     role_logical_axis_rule = self.cluster_config.role_to_logical_axis_rule
-    if role_logical_axis_rule is None or role not in role_logical_axis_rule:
-      return contextlib.nullcontext()
-    cm = contextlib.ExitStack()
-    cm.enter_context(nn_partitioning.axis_rules(role_logical_axis_rule[role]))
-    return cm
+    logical_axis_rule_ctx = contextlib.nullcontext()
+    if role_logical_axis_rule and role in role_logical_axis_rule:
+      logical_axis_rule_ctx = nn_partitioning.axis_rules(
+          role_logical_axis_rule[role]
+      )
+    with contextlib.ExitStack() as stack:
+      yield (
+          stack.enter_context(self.cluster_config.role_to_mesh[role]),
+          stack.enter_context(logical_axis_rule_ctx),
+      )

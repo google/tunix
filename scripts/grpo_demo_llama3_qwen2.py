@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@
 
 r"""Demo script for GRPO with Llama3 model.
 
-This script demonstrates how to run GRPO with a Llama3 model. It includes
-training, evaluation, and inference.
+This script demonstrates how to run GRPO with a Llama3 or Qwen2 model. It
+includes training, evaluation, and inference.
 
 Example usage:
 python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
@@ -26,13 +26,10 @@ python3 grpo_demo_llama3_qwen2.py --root-dir=/path/to/root_dir \
 import argparse
 import json
 import os
-import pprint
 import re
 
 from absl import logging
 from flax import nnx
-import fsspec
-import grain
 import jax
 from jax._src import mesh_utils
 import optax
@@ -47,6 +44,11 @@ from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.models.qwen2 import model as qwen2_lib
 from tunix.models.qwen2 import params as qwen2_params
+from tunix.models.qwen3 import model as qwen3_lib
+from tunix.models.qwen3 import params as qwen3_params
+from tunix.perf import export as perf_export
+from tunix.perf import metrics as perf_metrics
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
@@ -75,7 +77,7 @@ parser = argparse.ArgumentParser(description="Arguments for GRPO demo")
 parser.add_argument(
     "--root-dir",
     type=str,
-    required=False,
+    required=True,
     help="The root dir of model, data, etc.",
 )
 parser.add_argument(
@@ -102,8 +104,6 @@ parser.add_argument(
 parser.add_argument(
     "--model-version",
     type=str,
-    # default="meta-llama/Llama-3.1-8B-Instruct"
-    # default="meta-llama/Llama-3.2-3B-Instruct",
     default="meta-llama/Llama-3.2-1B-Instruct",
     required=False,
     help="The model version to use.",
@@ -272,6 +272,24 @@ parser.add_argument(
     type=str,
     default=None,
     help="List of target modules to apply LoRA",
+)
+parser.add_argument(
+    "--enable-perf-v1",
+    action="store_true",
+    default=False,
+    help="Enable PerfMetrics v1.",
+)
+parser.add_argument(
+    "--enable-perf-v2",
+    action="store_true",
+    default=False,
+    help="Enable PerfMetrics v2.",
+)
+parser.add_argument(
+    "--trace-dir",
+    type=str,
+    default="/tmp/perf_traces",
+    help="Directory to write Perfetto trace files to.",
 )
 
 
@@ -611,6 +629,7 @@ dataset = create_dataset(
     tokenizer=model_tokenizer,
     tfds_download=True,
     split="train",
+    apply_chat_template_to_dataset=True,
 )
 
 train_dataset, val_dataset = data_lib.post_init_dataset(
@@ -629,6 +648,7 @@ test_dataset = create_dataset(
     tokenizer=model_tokenizer,
     tfds_download=True,
     split="test",
+    apply_chat_template_to_dataset=True,
 )
 
 test_dataset, _ = data_lib.post_init_dataset(
@@ -645,6 +665,7 @@ MODEL_CONFIG = {
     "meta-llama/Llama-3.1-8B-Instruct": llama_lib.ModelConfig.llama3p1_8b,
     "Qwen/Qwen2.5-0.5B-Instruct": qwen2_lib.ModelConfig.qwen2p5_0p5b,
     "Qwen/Qwen2.5-7B-Instruct": qwen2_lib.ModelConfig.qwen2p5_7b,
+    "Qwen/Qwen3-4B-Instruct-2507": qwen3_lib.ModelConfig.qwen3_4b,
 }
 
 
@@ -655,6 +676,10 @@ def get_trainer_model(ckpt_path, model_mesh, ref_model_config):
     )
   elif "Qwen2.5" in HF_MODEL_VERSION:
     return qwen2_params.create_model_from_safe_tensors(
+        ckpt_path, ref_model_config, model_mesh
+    )
+  elif "Qwen3" in HF_MODEL_VERSION:
+    return qwen3_params.create_model_from_safe_tensors(
         ckpt_path, ref_model_config, model_mesh
     )
   raise NotImplementedError(
@@ -959,7 +984,7 @@ def evaluate(
     multiple_call_responses = [[] for _ in range(len(questions))]
     for p in range(num_passes):
       responses = generate(
-          questions, sampler, temperature, top_k, top_p, seed=p
+          questions, sampler, temperature, top_k, top_p, seed=None
       )
       for idx, response in enumerate(responses):
         multiple_call_responses[idx].append(response)
@@ -1152,12 +1177,30 @@ grpo_config = grpo_learner.GRPOConfig(
 )
 
 
+perf_config = (
+    perf_metrics.PerfMetricsConfig()
+    if (args.enable_perf_v1 or args.enable_perf_v2)
+    else None
+)
+if args.enable_perf_v1:
+  perf_config.custom_export_fn = (
+      perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+  )
+if args.enable_perf_v2:
+  perf_config.custom_export_fn_v2 = (
+      perf_export_v2.PerfMetricsExport.from_cluster_config(
+          cluster_config=cluster_config,
+          trace_dir=args.trace_dir,
+      ).export_metrics
+  )
+
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=training_model,
     reference=ref_model,
     tokenizer=model_tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_config,
 )
 
 # GRPO Trainer

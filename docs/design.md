@@ -1,4 +1,4 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Design Overview
 
@@ -123,9 +123,7 @@ training agents that can perform multi-turn reasoning and interact with external
 tools. The design follows a standard RL paradigm where an **Agent** interacts
 with an **Environment** over multiple steps to complete a task.
 
-<p align="center">
-  <img src="images/agentic_rollout_pipeline.png" alt="Agentic RL Flow" width="80%">
-</p>
+![Agentic RL Flow](images/agentic_rollout_pipeline.png)
 
 The core design supports agents that engage in **multi-turn conversations**,
 breaking down complex problems into sequential steps of reasoning, tool

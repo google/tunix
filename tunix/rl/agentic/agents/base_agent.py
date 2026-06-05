@@ -27,6 +27,7 @@ This module defines:
 
 import abc
 import asyncio
+import copy
 from typing import Any, Dict
 
 from tunix.rl.agentic.agents import agent_types
@@ -105,7 +106,7 @@ class LLMBaseAgent(abc.ABC):
   # Debugging and Introspection
   # ──────────────────────────────────────────────────────────────
 
-  def get_current_state(self) -> agent_types.Step | None:
+  def get_current_step(self) -> agent_types.Step | None:
     """Get the most recent step for debugging and introspection."""
     if not self.trajectory.steps:
       return None
@@ -133,6 +134,7 @@ class ConversationAgentBase(LLMBaseAgent):
     self._trajectory = agent_types.Trajectory()
     self._messages: list[dict[str, Any]] = []
     self._init_messages(system_prompt)
+    self.step = 0
 
   # ---------- Internal helpers ----------
 
@@ -145,9 +147,11 @@ class ConversationAgentBase(LLMBaseAgent):
     Args:
       system_prompt: The system prompt to use.
     """
-    self._messages = [{"role": "system", "content": system_prompt}]
+    self._messages = [{"role": "system", "content": system_prompt or ""}]
 
-  def _observation_to_messages(self, observation: Any) -> None:
+  def _observation_to_messages(
+      self, observation: Any, reward: float, done: bool, info: Dict[str, Any]
+  ) -> None:
     """Convert environment observation into chat messages.
 
     Default behavior:
@@ -159,10 +163,20 @@ class ConversationAgentBase(LLMBaseAgent):
 
     Args:
       observation: The observation from the environment.
+      reward: The reward from the environment.
+      done: Whether the episode is done.
+      info: Additional information from the environment.
     """
-    if isinstance(observation, dict) and "question" in observation:
+    del reward, done, info  # Unused in default implementation.
+    # prompts should not be applied with template beforehand to avoid double
+    # templating.
+    if isinstance(observation, dict) and "prompts" in observation:
       self._messages.append(
-          {"role": "user", "content": observation["question"]}
+          {"role": "user", "content": observation["prompts"] or ""}
+      )
+    elif isinstance(observation, dict) and "question" in observation:
+      self._messages.append(
+          {"role": "user", "content": observation["question"] or ""}
       )
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})
@@ -188,7 +202,14 @@ class ConversationAgentBase(LLMBaseAgent):
       **kwargs,
   ) -> None:
     """Update current step with environment feedback and extend conversation."""
-    step = self.get_current_state()
+    # First observation from env is the task specification.
+    if self._trajectory.task is None:
+      if isinstance(observation, str):
+        self._trajectory.task = {"prompts": [observation]}
+      else:
+        self._trajectory.task = copy.deepcopy(observation)
+
+    step = self.get_current_step()
     if step:
       step.observation = observation
       step.reward = reward
@@ -197,9 +218,10 @@ class ConversationAgentBase(LLMBaseAgent):
 
     # Let subclass / default handler convert observation into messages.
     if observation is not None:
-      self._observation_to_messages(observation)
+      self._observation_to_messages(observation, reward, done, info)
 
   def reset(self) -> None:
     """Reset trajectory, cache, and conversation history."""
     self._trajectory = agent_types.Trajectory()
     self._init_messages(self.system_prompt)
+    self.step = 0

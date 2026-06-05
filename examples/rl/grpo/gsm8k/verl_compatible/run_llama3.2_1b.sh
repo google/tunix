@@ -40,18 +40,21 @@ echo "Rounded warmup steps: $warmup_steps"
 
 python3 -m tunix.cli.grpo_main \
   base_config.yaml \
-  model_config.model_name="llama3.2-1b" \
+  model_config.model_name="llama-3.2-1b" \
   model_config.model_id="meta-llama/Llama-3.2-1B-Instruct" \
   model_config.model_source="huggingface" \
   model_config.intermediate_ckpt_dir="/tmp/tunix/experiments/grpo/llama3p2_1b_gsm8k" \
+  model_config.model_download_path="/tmp/models/llama3.2-1b" \
   model_config.mesh.shape="(4,1)" \
   model_config.mesh.axis_names="('fsdp','tp')" \
   model_config.rng_seed=42 \
   actor_model_config.mesh.shape="(4,1)" \
   actor_model_config.mesh.axis_names="('fsdp','tp')" \
   actor_model_config.lora_config={} \
-  rollout_model_config.mesh.shape="(4,1)" \
-  rollout_model_config.mesh.axis_names="('fsdp','tp')" \
+  reference_model_config.mesh=null \
+  reference_model_config.same_mesh_as="actor" \
+  rollout_model_config.mesh=null \
+  rollout_model_config.same_mesh_as="actor" \
   tokenizer_config.tokenizer_path="meta-llama/Llama-3.2-1B-Instruct" \
   tokenizer_config.tokenizer_type="huggingface" \
   tokenizer_config.add_bos=false \
@@ -61,6 +64,7 @@ python3 -m tunix.cli.grpo_main \
   num_batches=$num_batches \
   num_test_batches=100 \
   num_train_epochs=$num_train_epochs \
+  train_fraction=$train_fraction \
   rl_training_config.actor_optimizer_config.opt_type="adamw" \
   rl_training_config.actor_optimizer_config.peak_value=3e-6 \
   rl_training_config.actor_optimizer_config.schedule_type="warmup_cosine_decay_schedule" \

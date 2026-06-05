@@ -1,12 +1,10 @@
-
+<!-- DO NOT REMOVE! Placeholder for TOC. -->
 
 # Agentic RL
 
 ## Architecture
 
-<p align="center">
-  <img src="images/agentic_rollout_pipeline.png" alt="Trajectory Collect Engine Overview" width="100%">
-</p>
+![Trajectory Collect Engine Overview](images/agentic_rollout_pipeline.png)
 
 ## Core Components
 
@@ -65,9 +63,7 @@ calls in parallel for efficiency.
 
 ### Agent/Environment interaction
 
-<p align="center">
-  <img src="images/agentic_agent:env.png" alt="Batch vs Async Rollout" width="80%">
-</p>
+![Agent/Environment interaction](images/agentic_agent:env.png)
 
 --------------------------------------------------------------------------------
 
@@ -116,9 +112,7 @@ lock ensures that rollouts (`acquire_rollout`) are temporarily paused when a
 weight sync (`acquire_weight_sync`) is requested, preventing agents from
 generating trajectories with stale parameters.
 
-<p align="center">
-  <img src="images/batch_vs_async_rollout.png" alt="Batch vs Async Rollout" width="50%">
-</p>
+![Batch vs Async Rollout](images/batch_vs_async_rollout.png)
 
 ### Trajectory Batching and Grouping
 

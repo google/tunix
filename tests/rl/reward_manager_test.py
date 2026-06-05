@@ -98,7 +98,7 @@ class SequenceRewardManagerTest(parameterized.TestCase):
 
     expected_rewards = np.array([float(len("c1_long")), float(len("c2"))])
     np.testing.assert_array_equal(rewards_info["rewards"], expected_rewards)
-    self.assertLen(rewards_info["log_metrics"], 6)
+    self.assertLen(rewards_info["log_metrics"], 7)
 
   def test_multiple_reward_fns(self):
     manager = reward_manager.SequenceRewardManager(
@@ -237,6 +237,47 @@ class SequenceRewardManagerTest(parameterized.TestCase):
           reward_fns=[],
           algo_config=self.test_algo_config,
       )
+
+
+class AgenticSequenceRewardManagerTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.test_algo_config = TestAlgoConfig()
+    self.prompts = ["p1", "p22"]
+    self.completions = ["c1_long", "c2"]
+
+  def test_log_metrics_non_interference_with_reward_fns(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=[len_reward],
+        algo_config=self.test_algo_config,
+    )
+    traj_rewards = [10.0, 20.0]
+    rewards_info = manager(
+        self.prompts, self.completions, trajectory_rewards=traj_rewards
+    )
+    log_metrics = rewards_info["log_metrics"]
+    # Verify trajectory metrics exist and are correctly prefixed
+    self.assertIn("trajectory_rewards/sum", log_metrics)
+    self.assertIn("trajectory_rewards/mean", log_metrics)
+    # Verify general reward metrics exist and preserve their own prefix
+    self.assertIn("rewards/sum", log_metrics)
+    self.assertIn("rewards/len_reward", log_metrics)
+
+  def test_log_metrics_non_interference_no_reward_fns(self):
+    manager = reward_manager.AgenticSequenceRewardManager(
+        reward_fns=None,
+        algo_config=self.test_algo_config,
+    )
+    traj_rewards = [5.0, 5.0]
+    rewards_info = manager(
+        self.prompts, self.completions, trajectory_rewards=traj_rewards
+    )
+    log_metrics = rewards_info["log_metrics"]
+    # With no reward_fns, only trajectory log metrics should be populated
+    self.assertIn("trajectory_rewards/sum", log_metrics)
+    self.assertIn("trajectory_rewards/mean", log_metrics)
+    self.assertNotIn("rewards/sum", log_metrics)
 
 
 if __name__ == "__main__":
