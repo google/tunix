@@ -478,6 +478,17 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
+        "limit_mm_per_prompt": {
+            "image": 0,
+            "video": 0,
+            "audio": 0,
+        },
+        "hf_overrides": {
+            "final_logit_softcapping": 30.0,
+            "text_config": {
+                "final_logit_softcapping": 30.0,
+            },
+        },
     },
 }
 
