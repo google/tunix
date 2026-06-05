@@ -204,7 +204,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if preprocess_fn:
         updated_weights = preprocess_fn(updated_weights)
 
-      import copy
       utils.transfer_state_with_mappings(
           src_state=updated_weights,
           dst_state=self.transformer_state,

@@ -268,7 +268,6 @@ class TrajectoryCollectEngine:
         env_tokens = getattr(step, "env_tokens", None)
         step_logprobs = getattr(step, "logprobs", None)
         if assistant_tokens is not None:
-          # print(f"step {step} has assistant_tokens =  {assistant_tokens}")
           conversation_tokens.append(assistant_tokens)
           conversation_masks.append(step.assistant_masks)
           if step_logprobs is not None:
@@ -280,7 +279,6 @@ class TrajectoryCollectEngine:
           else:
             logprobs.append(np.zeros(len(assistant_tokens)))
         if env_tokens is not None:
-          # print(f"step {step} has env_tokens =  {env_tokens}")
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
           logprobs.append(np.zeros(len(env_tokens)))
@@ -313,9 +311,6 @@ class TrajectoryCollectEngine:
           if masked_out
           else conversation_masks
       )
-      # print(f"collected one traj {conversation_tokens = }")
-      # print(f"collected one traj {conversation_masks = }")
-      # print(f"collected one traj {prompt_tokens = }")
 
       return {
           "conversation_text": self.agent.chat_completions,
@@ -524,8 +519,6 @@ class TrajectoryCollectEngine:
         None,
         _safe_model_call,
     )
-    # print(f"rollout_output.text[0] = {rollout_output.text[0]}")
-    # print(f"rollout_output.tokens[0] = {rollout_output.tokens[0]}")
     logging.debug("%s model_call done", self._debug_prefix)
 
     # Align trajectory prompt tokens with the rollout worker's actual
@@ -614,34 +607,8 @@ class TrajectoryCollectEngine:
 
     cur_step = self.agent.get_current_step()
 
-    asst_toks = (
-        rollout_output.tokens[0] if rollout_output.tokens is not None else None
-    )
-    print(f"length of original asst_toks length: {len(asst_toks) if asst_toks is not None else 'None'}")
-    asst_logprobs = (
-        rollout_output.logprobs[0]
-        if rollout_output.logprobs is not None
-        else None
-    )
-    original_logprobs_length = len(asst_logprobs) if asst_logprobs is not None else 'None'
-    print(f"length of original logprobs: {original_logprobs_length}")
-
-    # if cur_step is not None and asst_toks is not None:
-    #   asst_toks, asst_logprobs = self.chat_parser.filter_thinking_tokens(
-    #       asst_toks, asst_logprobs
-    #   )
-    #   filtered_logprobs_length = len(asst_logprobs) if asst_logprobs is not None else 'None'
-    #   print(f"length of filtered logprobs: {filtered_logprobs_length}")
-    #   print(f"asst_toks length after filtering: {len(asst_toks)}")
-    #   if filtered_logprobs_length != original_logprobs_length:
-    #     logging.debug(
-    #         "%s Filtered out %d thinking tokens from logprobs",
-    #         self._debug_prefix,
-    #         original_logprobs_length - filtered_logprobs_length,
-    #     )
-
-    if cur_step is not None and asst_logprobs is not None:
-      cur_step.logprobs = asst_logprobs
+    if cur_step is not None and rollout_output.logprobs is not None:
+      cur_step.logprobs = rollout_output.logprobs[0]
 
     step_timed_out = time.perf_counter() - self._start_ts > self.timeout
     if cur_step is not None and self.tokenizer and self.chat_parser:
@@ -650,7 +617,6 @@ class TrajectoryCollectEngine:
       )
 
       # Assistant tokens/masks
-<<<<<<< HEAD
       if assistant_message:
         cur_step.assistant_tokens, n_append = (
             self.chat_parser.update_assistant_end_tokens(
@@ -668,11 +634,6 @@ class TrajectoryCollectEngine:
           cur_step.logprobs = np.concatenate(
               [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
           )
-=======
-      if assistant_message and asst_toks is not None: 
-        cur_step.assistant_tokens = asst_toks
-        cur_step.assistant_masks = np.ones_like(asst_toks)
->>>>>>> c6596c22 (snapshot)
 
       # Environment tokens/masks
       # Terminal-step environment messages are not appended to the response
