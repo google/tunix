@@ -179,11 +179,7 @@ class VLLMInProcessDriver:
       if not future.done():
         future.set_exception(RuntimeError("Driver shut down."))
     with self._engine_lock:
-      try:
-        self._llm_engine.engine_core.shutdown()
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.debug("Ignoring error during engine_core shutdown: %s", e)
-
+      self._llm_engine.engine_core.shutdown()
 
   def stop(self) -> None:
     self._stop_event.set()
