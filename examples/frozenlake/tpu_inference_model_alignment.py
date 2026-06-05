@@ -12,37 +12,197 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import contextmanager
 import inspect
+import logging
+import re
+import sys
+import threading
 from unittest.mock import MagicMock
 
+from flax.typing import PRNGKey
 import jax
 from jax import numpy as jnp
+from jax.sharding import Mesh
 import numpy as np
 import pytest
 import torch
 import transformers
-from vllm.config import set_current_vllm_config
-from vllm.model_executor.model_loader import get_model_loader
+from vllm.config import ModelConfig, set_current_vllm_config
+from vllm.model_executor.model_loader import (
+    LoadConfig,
+    get_model_loader,
+    register_model_loader,
+)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
 try:
   from transformers import Gemma4TextConfig
 except ImportError:
   Gemma4TextConfig = None
 
-from tpu_inference.distributed.jax_parallel_state import init_pp_distributed_environment
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import get_kv_cache_shape
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
-from tpu_inference.models.jax.gemma4 import (
-    Gemma4DecoderLayer,
-    Gemma4ForCausalLM,
+from tpu_inference.distributed.jax_parallel_state import (
+    init_pp_distributed_environment,
 )
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
+    get_kv_cache_shape,
+)
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
+# from tpu_inference.models.jax.gemma4 import (
+#     Gemma4DecoderLayer,
+#     Gemma4ForCausalLM,
+# )
 
+logger = logging.getLogger(__name__)
+GBYTES = 1024 * 1024 * 1024
 K_MASK = -2.3819763e38
 
 
+# ====================================================================
+# Local Pytest Fixtures (to make the test 100% self-contained)
+# ====================================================================
+
+
+@pytest.fixture
+def rng() -> PRNGKey:
+  """Provides a reusable JAX PRNGKey."""
+  return jax.random.PRNGKey(42)
+
+
+@pytest.fixture(scope="package")
+def mesh():
+  """Creates a mesh with 1 device."""
+  if not jax.devices():
+    pytest.skip("No JAX devices available for mesh creation.")
+
+  devices = np.array(jax.local_devices()[:1])
+  num_devices = len(devices)
+  assert num_devices == 1
+  device_mesh = devices.reshape((num_devices, 1, 1, 1))
+
+  with Mesh(
+      device_mesh, axis_names=("data", "attn_dp", "expert", "model")
+  ) as m:
+    yield m
+
+
+@pytest.fixture
+def mock_vllm_config():
+
+  class MockVllmConfig:
+
+    def __init__(self, model: str, kv_cache_dtype: str):
+      self.model_config = ModelConfig(model)
+      self.model_config.dtype = jnp.bfloat16
+      self.load_config = LoadConfig(load_format="auto")
+      self.load_config.download_dir = None
+      self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
+      self.quant_config = None
+      self.additional_config = {}
+      self.parallel_config = None
+
+  return MockVllmConfig
+
+
+def count_model_param_bytes(model: JaxModule) -> int:
+  total = 0
+  for _, param in model.named_parameters():
+    if hasattr(param.get_value(), "nbytes"):
+      total += param.get_value().nbytes
+  return total
+
+
+class _MemoryPoller:
+
+  def __init__(self, device, poll_interval_s: float = 0.001):
+    self._device = device
+    self._poll_interval = poll_interval_s
+    self._peak: int = 0
+    self._num_samples: int = 0
+    self._stop = threading.Event()
+    self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+
+  def start(self, initial_bytes: int):
+    self._peak = initial_bytes
+    self._num_samples = 0
+    self._stop.clear()
+    self._thread.start()
+
+  def stop(self) -> tuple[int, int]:
+    self._stop.set()
+    self._thread.join(timeout=5.0)
+    return self._peak, self._num_samples
+
+  def _poll_loop(self):
+    while not self._stop.is_set():
+      try:
+        stats = self._device.memory_stats()
+        if stats and "bytes_in_use" in stats:
+          current = stats["bytes_in_use"]
+          if current > self._peak:
+            self._peak = current
+          self._num_samples += 1
+      except Exception:
+        pass
+      self._stop.wait(timeout=self._poll_interval)
+
+
+def _get_bytes_in_use(device):
+  try:
+    stats = device.memory_stats()
+    return stats.get("bytes_in_use") if stats else None
+  except Exception:
+    return None
+
+
+@pytest.fixture
+def assert_weight_loading_memory_bounded():
+
+  @contextmanager
+  def _monitor(
+      model,
+      description="operation",
+      threshold_multiplier=0.3,
+      min_threshold_bytes=2 * GBYTES,
+  ):
+    model_param_bytes = count_model_param_bytes(model)
+    max_peak_delta = max(
+        int(model_param_bytes * threshold_multiplier), min_threshold_bytes
+    )
+
+    device = jax.local_devices()[0] if jax.local_devices() else None
+    if device is None:
+      yield
+      return
+
+    bytes_before = _get_bytes_in_use(device)
+    if bytes_before is None:
+      yield
+      return
+
+    poller = _MemoryPoller(device)
+    poller.start(initial_bytes=bytes_before)
+
+    yield
+
+    peak_observed, num_samples = poller.stop()
+    bytes_after = _get_bytes_in_use(device) or bytes_before
+    peak_observed = max(peak_observed, bytes_after)
+    peak_delta = peak_observed - bytes_before
+
+    assert peak_delta <= max_peak_delta
+
+  return _monitor
+
+
+# ====================================================================
+# Alignment Test Helpers
+# ====================================================================
+
+
 def create_pytorch_causal_mask(seq_len):
-  """Creates a causal attention mask for a sequence of a given length."""
   mask = torch.ones(seq_len, seq_len, dtype=torch.float).tril(diagonal=0)
   mask = mask.masked_fill(mask == 0, K_MASK)
   mask = mask.masked_fill(mask == 1, 0)
@@ -57,7 +217,6 @@ def get_hf_output(model, seq_len: int):
 
 
 def get_per_layer_hf_output(model, seq_len: int, num_layer_to_run: int = 1):
-  """Get the first decoder layer output from the HF model."""
   x = (torch.arange(seq_len) + 1).reshape(1, -1)
   position_ids = torch.arange(seq_len).reshape(1, -1)
   attn_mask = create_pytorch_causal_mask(seq_len).unsqueeze(0).unsqueeze(0)
@@ -86,7 +245,6 @@ def get_per_layer_hf_output(model, seq_len: int, num_layer_to_run: int = 1):
 
 
 def get_per_layer_jax_output(model, seq_len: int, num_layer_to_run: int = 1):
-  """Get the first N decoder layer output from the tpu_inference model."""
   input_ids = jnp.arange(seq_len) + 1
   input_ids = input_ids.reshape(1, -1)
 
@@ -139,7 +297,10 @@ def get_jax_output(model, seq_len: int):
   cache_shape = get_kv_cache_shape(
       num_blocks, block_size, num_key_value_heads, qk_head_dim, kv_dtype
   )
-  kv_caches = [jnp.zeros(cache_shape, dtype=kv_dtype) for _ in range(len(model.model.layers))]
+  kv_caches = [
+      jnp.zeros(cache_shape, dtype=kv_dtype)
+      for _ in range(len(model.model.layers))
+  ]
 
   attn_metadata = AttentionMetadata(
       input_positions=jnp.arange(seq_len),
@@ -224,7 +385,10 @@ class TestGemma4Alignment:
         .self_attn.q_proj.weight.detach()
         .numpy()
     )
-    jax_query_weight = jax_model.model.layers[jax_model.model.start_layer].self_attn.q_proj.weight.value
+    jax_query_weight = (
+        jax_model.model.layers[jax_model.model.start_layer]
+        .self_attn.q_proj.weight.value
+    )
     n, d, h = jax_query_weight.shape
     jax_query_weight = jax_query_weight.transpose(0, 2, 1).reshape(-1, d)
     np.testing.assert_equal(
@@ -260,3 +424,7 @@ class TestGemma4Alignment:
         rtol=tolerance,
     )
     print("Logits are close! Model alignment check passed :)")
+
+
+if __name__ == "__main__":
+  sys.exit(pytest.main([__file__]))
