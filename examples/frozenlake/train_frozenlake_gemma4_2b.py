@@ -566,6 +566,7 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     advantage_estimator=args.advantage_estimator,
+    degenerate_group_masking=False,
 )
 
 rl_cluster = rl_cluster_lib.RLCluster(

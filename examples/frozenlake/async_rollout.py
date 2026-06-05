@@ -59,6 +59,14 @@ config.param_dtype = jnp.bfloat16
 config.use_flash_attention = True
 config.flash_attention_block_size = 256
 
+import dataclasses
+new_shd = dataclasses.replace(
+    config.shd_config,
+    act_btd=("fsdp", None, None),
+    rms_norm_weight=(None,),
+)
+config.shd_config = new_shd
+
 from huggingface_hub import snapshot_download
 
 MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
@@ -585,6 +593,37 @@ def compare_layers(vllm_model, trainer_model, captured_args):
 
       diff_norm = np.abs(np.asarray(norm_vllm) - np.asarray(norm_trainer[0]))
       print(f"            | Step 1 (Input Norm) Max Diff: {float(diff_norm.max()):.6e}")
+
+      # Debug prints
+      print(f"            |   vLLM input max: {float(np.abs(np.asarray(x_vllm_input)).max()):.6e}")
+      print(f"            |   Trainer input max: {float(np.abs(np.asarray(x_trainer_input[0])).max()):.6e}")
+      print(f"            | DEBUG Step 1 values:")
+      print(f"            |   vLLM input norm shape: {norm_vllm.shape}, Trainer input norm shape: {norm_trainer[0].shape}")
+      print(f"            |   vLLM input norm max: {float(np.abs(np.asarray(norm_vllm)).max()):.6e}")
+      print(f"            |   Trainer input norm max: {float(np.abs(np.asarray(norm_trainer[0])).max()):.6e}")
+      print(f"            |   vLLM input norm mean: {float(np.asarray(norm_vllm).mean()):.6e}")
+      print(f"            |   Trainer input norm mean: {float(np.asarray(norm_trainer[0]).mean()):.6e}")
+      
+      max_diff_norm_idx = np.unravel_index(np.argmax(diff_norm), diff_norm.shape)
+      t_idx, d_idx = max_diff_norm_idx
+      vllm_val = float(np.asarray(norm_vllm)[t_idx, d_idx])
+      trainer_val = float(np.asarray(norm_trainer[0])[t_idx, d_idx])
+      print(f"            | Step 1 Max Diff at token idx={t_idx}, dim={d_idx}: vLLM={vllm_val.hex()}, Trainer={trainer_val.hex()}, diff={vllm_val - trainer_val:.6e}")
+      
+      vllm_x_val = float(np.asarray(x_vllm_input)[t_idx, d_idx])
+      trainer_x_val = float(np.asarray(x_trainer_input[0])[t_idx, d_idx])
+      print(f"            |   Input value x at idx={t_idx}, dim={d_idx}: vLLM={vllm_x_val.hex()}, Trainer={trainer_x_val.hex()}")
+      
+      vllm_x_row = np.asarray(x_vllm_input)[t_idx]
+      trainer_x_row = np.asarray(x_trainer_input[0])[t_idx]
+      vllm_var_calc = np.mean(np.square(vllm_x_row))
+      trainer_var_calc = np.mean(np.square(trainer_x_row))
+      print(f"            |   Calculated var (numpy): vLLM={float(vllm_var_calc):.10e}, Trainer={float(trainer_var_calc):.10e}")
+
+      w_vllm_norm = vllm_layer.input_layernorm.weight.value if hasattr(vllm_layer.input_layernorm.weight, 'value') else vllm_layer.input_layernorm.weight
+      w_trainer_norm = trainer_layer.pre_attention_norm.scale.value if hasattr(trainer_layer.pre_attention_norm.scale, 'value') else trainer_layer.pre_attention_norm.scale
+      diff_w_norm = np.abs(np.asarray(w_vllm_norm) - np.asarray(w_trainer_norm))
+      print(f"            | Input Norm Weight Max Diff: {float(diff_w_norm.max()):.6e}")
 
       diff_attn = np.abs(np.asarray(attn_vllm)[:num_active_tokens] - np.asarray(attn_trainer[0])[:num_active_tokens])
       print(f"            | Step 2 (Attn Output) Max Diff: {float(diff_attn.max()):.6e}")
