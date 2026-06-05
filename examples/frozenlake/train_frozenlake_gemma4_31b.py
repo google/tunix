@@ -373,7 +373,7 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 # step-by-step reasoning; with thinking enabled the model writes hundreds of
 # ``<|channel>..<channel|>`` tokens per turn and exhausts the response budget
 # before producing an action.
-chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
+chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False, strip_past_thinking=False)
 
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
@@ -504,6 +504,18 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
+        "limit_mm_per_prompt": {
+            "image": 0,
+            "video": 0,
+            "audio": 0,
+        },
+        "hf_overrides": {
+            "final_logit_softcapping": 30.0,
+            "text_config": {
+                "final_logit_softcapping": 30.0,
+            },
+        },
+
     },
 }
 
@@ -549,8 +561,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # invokes the trainer ``mini_batch_size // train_micro_batch_size``
         # times, so the optimizer still sees a ``mini_batch_size`` gradient
         # per update.
-        train_micro_batch_size=1,
-        compute_logps_micro_batch_size=1,
+        train_micro_batch_size=2,
+        compute_logps_micro_batch_size=2,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -581,6 +593,7 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     advantage_estimator=args.advantage_estimator,
+    degenerate_group_masking=False,
 )
 
 rl_cluster = rl_cluster_lib.RLCluster(

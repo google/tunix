@@ -57,7 +57,7 @@ WORKDIR /app/vllm_tpu_inference/vllm
 RUN apt-get update && apt-get install -y cmake && \
     pip uninstall torch torchvision torchaudio -y && \
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
-    pip install setuptools_rust setuptools_scm && \
+    pip install -U setuptools setuptools_rust setuptools_scm && \
     rm -rf build/ .eggs/ *.egg-info/ .deps/ && \
     VLLM_TARGET_DEVICE="tpu" python -m pip install --no-build-isolation -e .
 
