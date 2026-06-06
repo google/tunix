@@ -742,7 +742,12 @@ class GrpoPipeline(config.HyperParameters):
         "type", "default"
     )
     if parser_type == "qwen":
-      return chat_parser_lib.QwenChatTemplateParser(tokenizer)
+      enable_thinking = self._config_mapping("chat_parser_config").get(
+          "enable_thinking", True
+      )
+      return chat_parser_lib.QwenChatTemplateParser(
+          tokenizer, enable_thinking=enable_thinking
+      )
     return chat_parser_lib.DefaultChatTemplateParser(tokenizer)
 
   def _load_class_from_path(self, dotted_path: str) -> type:

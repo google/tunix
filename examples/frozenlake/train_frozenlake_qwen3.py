@@ -145,7 +145,8 @@ SEED = args.seed
 # Single shared mesh across actor / reference / rollout. Pure tensor-parallel
 # (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
 # fsdp axis.
-SHARED_MESH_SHAPE = (1, jax.device_count())
+device_count = 4
+SHARED_MESH_SHAPE = (device_count, 1)
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
 
 # ====== GRPO ======
@@ -236,10 +237,10 @@ TB_LOG_DIR = "/tmp/tunix-tb/frozenlake"
 
 
 # ====== Build the single shared mesh ======
-if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
+if device_count < math.prod(SHARED_MESH_SHAPE):
   raise ValueError(
       f"Expected at least {math.prod(SHARED_MESH_SHAPE)} devices for mesh "
-      f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
+      f"{SHARED_MESH_SHAPE}, got {device_count}."
   )
 
 shared_device_list = jax._src.mesh_utils.create_device_mesh(

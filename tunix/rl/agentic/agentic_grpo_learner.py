@@ -578,10 +578,28 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     logging.debug("Advantages computed: %s", advantages)
 
+    pre_mask_completion_lengths = np.asarray(completion_mask.sum(axis=-1))
+    rewards_np = np.asarray(rewards, dtype=np.float32)
+    advantages_np = np.asarray(advantages, dtype=np.float32)
+    completion_char_lengths = np.asarray(
+        [len(completion) for completion in completion_texts], dtype=np.int32
+    )
+
     if self.algo_config.degenerate_group_masking:
-      if jnp.all(jnp.isclose(advantages, 0.0)):
+      if np.all(np.isclose(advantages_np, 0.0)):
         logging.info(
-            "Filtering degenerate group %s with all-0 advantages.", group_id
+            "Filtering degenerate group %s with all-0 advantages: "
+            "rewards=%s reward_mean=%.3f reward_std=%.3f "
+            "completion_mask_len_before=%s completion_chars=%s "
+          "original_inputs=%r completions=%r",
+            group_id,
+            rewards_np.tolist(),
+            float(np.mean(rewards_np)) if rewards_np.size else 0.0,
+            float(np.std(rewards_np)) if rewards_np.size else 0.0,
+            pre_mask_completion_lengths.tolist(),
+            completion_char_lengths.tolist(),
+          original_inputs_list,
+          completion_texts,
         )
         completion_mask = jnp.zeros_like(completion_mask)
 

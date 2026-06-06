@@ -339,6 +339,54 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
 
     rewards_array = np.asarray(rewards_info["rewards"])
+    if rewards_array.size:
+      reward_metric_summaries = []
+      for key, value in rewards_info["log_metrics"].items():
+        if not key.startswith(("rewards/", "trajectory_rewards/")):
+          continue
+        metric_values, _ = value
+        try:
+          metric_array = np.asarray(metric_values, dtype=np.float32)
+        except (TypeError, ValueError):
+          continue
+        if not metric_array.size:
+          continue
+        reward_metric_summaries.append(
+            f"{key}=mean:{float(np.nanmean(metric_array)):.3f},"
+            f"min:{float(np.nanmin(metric_array)):.3f},"
+            f"max:{float(np.nanmax(metric_array)):.3f}"
+        )
+      if np.max(rewards_array) <= 0.0 or np.allclose(
+          rewards_array, rewards_array[0]
+      ):
+        completion_lengths = np.asarray(
+            [len(completion) for completion in completions], dtype=np.int32
+        )
+        sample_completion = next(
+            (completion for completion in completions if completion), ""
+        )
+        sample_prompt = prompts[0] if len(prompts) else ""
+        logging.info(
+            "Reward diagnostics: mode=%s step=%d n=%d reward_mean=%.3f "
+            "reward_min=%.3f reward_max=%.3f reward_std=%.3f "
+            "positive_frac=%.3f completion_chars_mean=%.1f "
+            "completion_chars_min=%d completion_chars_max=%d components=[%s] "
+          "sample_prompt=%r sample_completion=%r",
+            mode,
+            expected_step,
+            rewards_array.size,
+            float(np.mean(rewards_array)),
+            float(np.min(rewards_array)),
+            float(np.max(rewards_array)),
+            float(np.std(rewards_array)),
+            float(np.mean(rewards_array > 0.1)),
+            float(np.mean(completion_lengths)) if completion_lengths.size else 0.0,
+            int(np.min(completion_lengths)) if completion_lengths.size else 0,
+            int(np.max(completion_lengths)) if completion_lengths.size else 0,
+            "; ".join(reward_metric_summaries),
+            sample_prompt,
+            sample_completion,
+        )
     with self._rewards_window_lock:
       target = (
           self._train_rewards_window
@@ -441,12 +489,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if env:
       env.task["policy_version"] = self.policy_version
 
+    raw_chat_lists = copy.deepcopy(chat_lists)
     if self.chat_parser:
       chat_lists = self.chat_parser.parse(
           messages=chat_lists,
           add_generation_prompt=True,
           is_first_msg=True,  # no op if system msg is populated in reset
       )
+    # logging.log_first_n(
+    #     logging.INFO,
+    #     "Generation input diagnostics: raw_messages=%r rendered_prompt=%r",
+    #     5,
+    #     raw_chat_lists,
+    #     chat_lists,
+    # )
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
       if "group_id" in env.extra_kwargs:

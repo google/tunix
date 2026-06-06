@@ -149,6 +149,21 @@ class ConversationAgentBase(LLMBaseAgent):
     """
     self._messages = [{"role": "system", "content": system_prompt or ""}]
 
+  def _message_content_to_string(self, value: Any) -> str:
+    if isinstance(value, str):
+      return value
+    if isinstance(value, bytes):
+      return value.decode("utf-8", errors="replace")
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+      return self._message_content_to_string(value[0])
+    if (
+        hasattr(value, "size")
+        and getattr(value, "size") == 1
+        and hasattr(value, "item")
+    ):
+      return self._message_content_to_string(value.item())
+    return str(value)
+
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: Dict[str, Any]
   ) -> None:
@@ -172,11 +187,21 @@ class ConversationAgentBase(LLMBaseAgent):
     # templating.
     if isinstance(observation, dict) and "prompts" in observation:
       self._messages.append(
-          {"role": "user", "content": observation["prompts"] or ""}
+        {
+          "role": "user",
+          "content": self._message_content_to_string(
+            observation["prompts"]
+          ),
+        }
       )
     elif isinstance(observation, dict) and "question" in observation:
       self._messages.append(
-          {"role": "user", "content": observation["question"] or ""}
+        {
+          "role": "user",
+          "content": self._message_content_to_string(
+            observation["question"]
+          ),
+        }
       )
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})

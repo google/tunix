@@ -208,6 +208,37 @@ train_fraction: 1.0
 
 class DispatchTest(absltest.TestCase):
 
+  def test_create_chat_parser_qwen_honors_enable_thinking_false(self):
+    pipeline = _make_pipeline(
+        """
+chat_parser_config:
+  type: qwen
+  enable_thinking: false
+"""
+    )
+    tokenizer = mock.Mock()
+    tokenizer.bos_token = ""
+    tokenizer.eos_token = "<|endoftext|>"
+
+    chat_parser = pipeline._create_chat_parser(tokenizer)
+
+    self.assertFalse(chat_parser.enable_thinking)
+
+  def test_create_chat_parser_qwen_defaults_enable_thinking_true(self):
+    pipeline = _make_pipeline(
+        """
+chat_parser_config:
+  type: qwen
+"""
+    )
+    tokenizer = mock.Mock()
+    tokenizer.bos_token = ""
+    tokenizer.eos_token = "<|endoftext|>"
+
+    chat_parser = pipeline._create_chat_parser(tokenizer)
+
+    self.assertTrue(chat_parser.enable_thinking)
+
   def test_create_cluster_config_propagates_top_level_fields(self):
     pipeline = _make_pipeline(
       "\nagentic_grpo_config: {}\n"

@@ -190,7 +190,7 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
 
   def _get_assistant_token(self) -> str:
     token = "<|im_start|>assistant\n"
-    if not self.enable_thinking:
+    if self.enable_thinking:
       token += "<think>\n\n</think>\n\n"
     return token
 

@@ -526,6 +526,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
+    # print(f"YY {input_strings=}")
     if isinstance(input_strings, str):
       input_strings = [input_strings]
 
@@ -642,7 +643,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         for x in prompt_ids
     ]
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
-
+    # print(f"YY {decoded_outputs[0]=}")
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],

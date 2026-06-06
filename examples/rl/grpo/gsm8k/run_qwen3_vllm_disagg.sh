@@ -22,8 +22,8 @@ num_train_epochs=${num_train_epochs:-1}
 warmup_ratio=${warmup_ratio:-0.1}
 train_fraction=${train_fraction:-0.8}
 
-actor_mesh_shape=${actor_mesh_shape:-"(8,1)"}
-rollout_mesh_shape=${rollout_mesh_shape:-"(8,1)"}
+actor_mesh_shape=${actor_mesh_shape:-"(2,1)"}
+rollout_mesh_shape=${rollout_mesh_shape:-"(2,1)"}
 
 checkpoint_dir=${checkpoint_dir-"/tmp/grpo_checkpoints/${model_name}_$RANDOM"}
 
@@ -75,9 +75,8 @@ python3 -m tunix.cli.grpo_main \
   rl_training_config.eval_every_n_steps=10 \
   rl_training_config.metrics_logging_options.log_dir="/tmp/tensorboard/${model_name}" \
   rl_training_config.metrics_logging_options.flush_every_n_steps=20 \
-  rl_training_config.checkpoint_root_directory="$checkpoint_dir" \
-  rl_training_config.checkpointing_options.save_interval_steps=500 \
-  rl_training_config.checkpointing_options.max_to_keep=4 \
+  rl_training_config.checkpoint_root_directory="" \
+  rl_training_config.checkpointing_options=null \
   rl_training_config.profiler_options={} \
   rollout_config.total_generation_steps=768 \
   rollout_config.max_prompt_length=256 \
@@ -89,17 +88,20 @@ python3 -m tunix.cli.grpo_main \
   agentic_grpo_config.use_rollout_logps=false \
   vllm_config.async_scheduling=false \
   vllm_config.hbm_utilization=0.9 \
-  grpo_config.num_generations=4 \
-  grpo_config.num_iterations=1 \
-  grpo_config.beta=0.08 \
-  grpo_config.epsilon=0.2 \
+  agentic_grpo_config.num_generations=4 \
+  agentic_grpo_config.num_iterations=1 \
+  agentic_grpo_config.beta=0.08 \
+  agentic_grpo_config.epsilon=0.2 \
+  agentic_grpo_config.max_response_length=768 \
+  agentic_grpo_config.max_turns=1 \
+  agentic_grpo_config.system_prompt="You are given a grade school math problem. Think step by step and respond using <reasoning>...</reasoning> followed by <answer>...</answer> with only the final numeric answer inside <answer>." \
   reward_functions="['tunix/cli/reward_fn/gsm8k.py']" \
   offload_to_cpu=false \
-  colocate_mode=true \
-  offload_config.offload_actor_weights=true \
-  offload_config.offload_actor_optimizer_states=true \
-  offload_config.offload_rollout_kv_cache=true \
-  offload_config.offload_rollout_weights=false \
   "$@"
 
 
+  # colocate_mode=true \
+  # offload_config.offload_actor_weights=true \
+  # offload_config.offload_actor_optimizer_states=true \
+  # offload_config.offload_rollout_kv_cache=true \
+  # offload_config.offload_rollout_weights=false \
