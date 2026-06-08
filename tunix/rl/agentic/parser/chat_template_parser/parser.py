@@ -394,8 +394,6 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if self._strip_past_thinking:
       content = self._strip_thinking(content)
     cleaned_content = content.strip()
-    print(f"Original assistant content: '{content}'")  # Debug print to verify original content
-    print(f"Cleaned assistant content: '{cleaned_content}'")  # Debug print to verify cleaning
     if cleaned_content.endswith("<turn|>"):
       return "<|turn>model\n" + cleaned_content + "\n"
     return "<|turn>model\n" + cleaned_content + self.tokens.eot_token
