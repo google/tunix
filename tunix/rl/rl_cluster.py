@@ -410,7 +410,7 @@ class RLCluster:
       else:
         loaded_vllm_config = self.cluster_config.rollout_config
 
-      if loaded_vllm_config.rollout_vllm_model_version is None:
+      if not loaded_vllm_config.rollout_vllm_model_version:
         raise ValueError("Rollout vllm model version or path is missing!")
 
       # TODO(linchai): maybe support offloading for vllm rollout.
@@ -478,6 +478,8 @@ class RLCluster:
           mesh=self.r2m[Role.ROLLOUT],
           rollout_config=loaded_config,
       )
+    elif type(self.cluster_config.rollout_engine).__name__ == "RolloutEngineClient":
+      self._rollout = self.cluster_config.rollout_engine
     else:
       raise NotImplementedError(
           f"Rollout engine {self.cluster_config.rollout_engine} not supported"

@@ -42,7 +42,18 @@ warmup_steps=$(awk "BEGIN {
   printf \"%.0f\", value;
 }")
 
-python -m tunix.cli.grpo_main \
+
+if [[ "${1:-}" == "--debug" || "${1:-}" == "-d" ]]; then
+  PYTHON_EXEC="python3 -m debugpy --listen localhost:5678 --wait-for-client"
+else
+  PYTHON_EXEC="python3"
+fi
+
+# $PYTHON_EXEC /mnt/disks/github/ok-cli/mre/007_ide_deepscaler/007_01_grpo_main.py \
+# $PYTHON_EXEC /mnt/disks/github/ok-cli/mre/007_ide_deepscaler/007_02_multi_grpo_vanilla_main.py \
+# $PYTHON_EXEC /mnt/disks/github/ok-cli/mre/007_ide_deepscaler/007_03_multi_grpo_vllm_main.py \
+# $PYTHON_EXEC /mnt/disks/github/ok-cli/mre/007_ide_deepscaler/007_04_multi_grpo_vllm_opt_main.py \
+$PYTHON_EXEC -m tunix.cli.grpo_main \
   tunix/cli/base_agentic_config.yaml \
   \
   `# ── Model ────────────────────────────────────────────────────────────` \
@@ -61,8 +72,8 @@ python -m tunix.cli.grpo_main \
   \
   `# ── Data ─────────────────────────────────────────────────────────────` \
   data_module="tunix.cli.recipes.deepscaler_data" \
-  data_config.train_data_path="gs://tunix/data/DeepScaleR-Preview-Dataset/deepscaler.json" \
-  data_config.eval_data_path="gs://tunix/data/HuggingFaceH4/aime_2024/train-00000-of-00001.parquet" \
+  data_config.train_data_path="gs://yangmu/tunix/data/DeepScaleR-Preview-Dataset/deepscaler.json" \
+  data_config.eval_data_path="gs://yangmu/tunix/data/HuggingFaceH4/aime_2024/train-00000-of-00001.parquet" \
   data_config.shuffle=true \
   data_config.seed=42 \
   prompt_key="prompts" \

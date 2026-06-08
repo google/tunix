@@ -34,7 +34,12 @@ import collections
 import dataclasses
 import importlib
 import os
-from typing import Any
+import sys
+from typing import Any, Callable, Optional, Sequence, Tuple
+import threading
+import jaxtyping
+import multiprocess as mp
+
 
 from absl import app
 from absl import flags
@@ -53,6 +58,7 @@ from tunix.perf.experimental import export as perf_export_v2
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.grpo import grpo_learner
 from tunix.rl.rollout import base_rollout
+from tunix.rl.rollout import protocal as rollout_protocal
 
 GrpoConfig = grpo_learner.GrpoConfig
 
@@ -103,6 +109,20 @@ class GrpoPipeline(config.HyperParameters):
       "reward": rl_cluster_lib.Role.REWARD,
       "rollout": rl_cluster_lib.Role.ROLLOUT,
   }
+
+  def __init__(self, argv: list[str], **kwargs):
+    super().__init__(argv, **kwargs)
+    if "multi_rollout_client" in kwargs:
+      self.config["rollout_engine"] = kwargs["multi_rollout_client"]
+      self.config["rollout_engine"].post_init()
+      kwargs["multi_rollout_client"] = None
+      print(f"mode 1: enabled multi_rollout_client (workers={self.config["rollout_engine"].num_workers}) !!!")
+    elif "rollout_config_channel" in kwargs and "rollout_request_channels" in kwargs:
+      self.rollout_config_channel = kwargs["rollout_config_channel"]
+      self.rollout_request_channels = kwargs["rollout_request_channels"]
+      kwargs["rollout_config_channel"] = None
+      kwargs["rollout_request_channels"] = None
+      print(f"mode 2: received channels")
 
   def _resolve_split_role(self, role_name: str) -> rl_cluster_lib.Role:
     normalized = role_name.strip().lower()
@@ -188,7 +208,25 @@ class GrpoPipeline(config.HyperParameters):
     return role_to_owner
 
   def _create_role_to_mesh(self):
+    # from jax.experimental.topologies import get_topology_desc
+    # devices = get_topology_desc(platform="tpu", topology_name="").devices
+    # logging.info("============================================================")
+    # logging.info("============================================================")
+    # logging.info("============================================================")
+    # os.environ["LIBTPU_INIT_ARGS"] = (
+    #         " --xla_tpu_use_enhanced_launch_barrier=false"
+    #         " --deepsea_version=6acc60406"
+    #         " --deepsea_host_bounds=1,1,1"
+    #         " --deepsea_chips_per_host_bounds=2,2,1"
+    #     )
+    # logging.info(f"{os.environ["LIBTPU_INIT_ARGS"]=}")
+    # logging.info(f"{type(devices)=}, {devices=}")
+    # logging.info("============================================================")
+    # logging.info("============================================================")
+    # logging.info("============================================================")
+
     devices = list(jax.devices())
+
     role_to_owner = self._resolve_mesh_owners()
     owner_order = []
     for role in self._ROLE_TO_MODEL_KEY:
@@ -249,7 +287,7 @@ class GrpoPipeline(config.HyperParameters):
 
   def create_rollout_config(
       self,
-      role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
+      rollout_mesh: jax.sharding.Mesh | None = None,
   ) -> base_rollout.RolloutConfig:
     """Build RolloutConfig from YAML.
 
@@ -292,7 +330,7 @@ class GrpoPipeline(config.HyperParameters):
           engine,
           kv_cache_size,
           agentic_cfg,
-          role_to_mesh=role_to_mesh,
+          rollout_mesh,
       )
       filtered.update({k: v for k, v in extra.items() if k in valid_fields})
     else:
@@ -307,7 +345,7 @@ class GrpoPipeline(config.HyperParameters):
       engine: str,
       kv_cache_size: int,
       agentic_cfg: dict,
-      role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh] | None = None,
+      rollout_mesh: jax.sharding.Mesh | None,
   ) -> dict:
     """Return engine-specific RolloutConfig fields for agentic mode."""
     model_id = self.config.get("actor_model_config", {}).get("model_id", "")
@@ -343,11 +381,11 @@ class GrpoPipeline(config.HyperParameters):
 
     if engine == "vllm":
       vllm = self.config.get("vllm_config", {})
-      if role_to_mesh is None:
+      if rollout_mesh is None:
         raise ValueError(
-            "role_to_mesh must be provided for vllm rollout config."
+            "rollout_mesh must be provided for vllm rollout config."
         )
-      rollout_shape = role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.shape
+      rollout_shape = rollout_mesh.devices.shape
       max_num_seqs = self.config["rollout_config"].get(
           "rollout_vllm_max_num_seqs",
           vllm.get("max_num_seqs", 768),
@@ -394,8 +432,7 @@ class GrpoPipeline(config.HyperParameters):
       role_to_mesh: dict[rl_cluster_lib.Role, jax.sharding.Mesh],
       rollout_config: base_rollout.RolloutConfig | None = None,
   ):
-    if rollout_config is None:
-      rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
+    assert rollout_config is not None
     return rl_cluster_lib.ClusterConfig(
         role_to_mesh=role_to_mesh,
         rollout_engine=self.config["rollout_engine"],
@@ -466,7 +503,13 @@ class GrpoPipeline(config.HyperParameters):
 
   def create_rl_cluster(self, tokenizer):
     role_to_mesh = self.create_role_to_mesh()
-    rollout_config = self.create_rollout_config(role_to_mesh=role_to_mesh)
+    rollout_config = self.create_rollout_config(rollout_mesh=role_to_mesh[rl_cluster_lib.Role.ROLLOUT])
+
+    if hasattr(self, "rollout_config_channel"):
+      self.rollout_config_channel.put(rollout_config)
+      print("mode 2: sent rollout_config")
+      assert hasattr(self, "rollout_request_channels")
+
     # Should not use LoRA for reference model.
     if self.config["reference_model_config"].get("lora_config"):
       logging.warning(
@@ -491,6 +534,10 @@ class GrpoPipeline(config.HyperParameters):
           graph_def,
           jax.tree.map(jnp.copy, params),
       )
+
+    if hasattr(self, "rollout_request_channels"):
+      self.config["rollout_engine"] = rollout_protocal.RolloutEngineClient(self.rollout_request_channels)
+      print(f"mode 2: received client, enabled multi_rollout_client (workers={self.config["rollout_engine"].num_workers}) !!!")
 
     cluster_config = self.create_cluster_config(
         role_to_mesh=role_to_mesh,
@@ -573,7 +620,7 @@ class GrpoPipeline(config.HyperParameters):
   # Standard GRPO training
   # ------------------------------------------------------------------
 
-  def _run_standard_grpo(self):
+  def _run_standard_grpo(self) -> Callable[[], None]:
     """Execute standard (non-agentic) GRPO training."""
     tokenizer = model_lib.create_tokenizer(
         self.config["tokenizer_config"],
@@ -624,7 +671,11 @@ class GrpoPipeline(config.HyperParameters):
         reward_fns=self.obtain_reward_fn(),
         algo_config=GrpoConfig(**self.config["grpo_config"]),
     )
-    grpo_trainer.train(dataset)
+
+    def runner():
+      logging.info("Starting standard GRPO training...")
+      grpo_trainer.train(dataset)
+    return runner
 
   # ------------------------------------------------------------------
   # Agentic GRPO helpers
@@ -707,7 +758,7 @@ class GrpoPipeline(config.HyperParameters):
   # Agentic GRPO training
   # ------------------------------------------------------------------
 
-  def _run_agentic_grpo(self):
+  def _run_agentic_grpo(self) -> Callable[[], None]:
     """Execute agentic GRPO training (DeepScaleR, DeepSWE, etc.)."""
     from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner  # pylint: disable=g-import-not-at-top
 
@@ -764,20 +815,22 @@ class GrpoPipeline(config.HyperParameters):
       learner_kwargs["env_class"] = self._load_class_from_path(env_class_path)
       learner_kwargs["env_kwargs"] = dict(self.config.get("env_kwargs") or {})
 
-    logging.info("Starting agentic GRPO training...")
-    GRPOLearner(**learner_kwargs).train(dataset)
+    def runner():
+      logging.info("Starting agentic GRPO training...")
+      GRPOLearner(**learner_kwargs).train(dataset)
+    return runner
 
   # ------------------------------------------------------------------
   # Dispatcher
   # ------------------------------------------------------------------
 
-  def run_grpo_trainer(self):
+  def prepare_grpo_trainer(self) -> Callable[[], None]:
     """Dispatch to standard or agentic GRPO based on training_mode."""
     mode = self.config.get("training_mode", "grpo")
     if mode == "agentic_grpo":
-      self._run_agentic_grpo()
+      return self._run_agentic_grpo()
     elif mode == "grpo":
-      self._run_standard_grpo()
+      return self._run_standard_grpo()
     else:
       raise ValueError(
           f"Unknown training_mode: {mode!r}. Expected 'grpo' or 'agentic_grpo'."
@@ -810,7 +863,8 @@ def main(argv, **kwargs):
       "%r\n--------------------------",
       pipeline.config,
   )
-  pipeline.run_grpo_trainer()
+  runner = pipeline.prepare_grpo_trainer()
+  runner()
 
 
 if __name__ == "__main__":

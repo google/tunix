@@ -24,6 +24,7 @@ import mmap
 import os
 import struct
 import threading
+import time
 
 from absl import logging
 from etils import epath
@@ -193,13 +194,18 @@ def load_and_create_model_orig(
   skipped_keys = []
   for f in files:
     file_loaded_tensors = {}
+    # print(f"open files {f}...")
     with safetensors.safe_open(f, framework='numpy') as sf:
       keys = sf.keys()
 
       def process_key(k_name, f, sf_file, file_loaded_tensors):
         try:
+          # print(f"process: {k_name}...")
           with file_lock:
+            # print(f"get_tensor: {k_name} begin")
+            # start_time = time.perf_counter()
             v = sf_file.get_tensor(k_name)  # get_tensor is not thread-safe
+            # print(f"get_tensor: {k_name} end ({time.perf_counter() - start_time} secs)")
           try:
             jax_key_mapped, transform = torch_utils.torch_key_to_jax_key(
                 key_map, k_name
@@ -215,7 +221,12 @@ def load_and_create_model_orig(
             if reshape:
               v = v.reshape(reshape)
 
+          # print(f"jnp.array: {k_name} begin ({type(v)=}, {v.shape=})")
+          # start_time = time.perf_counter()
+          # DEBUG: may block here if trigger host <> remote-pw
           current_arr = jnp.array(v)
+          # current_arr.block_until_ready()
+          # print(f"jnp.array: {k_name} end ({time.perf_counter() - start_time} secs)")
           if dtype and current_arr.dtype != dtype:
             current_arr = current_arr.astype(dtype)
 
@@ -230,6 +241,7 @@ def load_and_create_model_orig(
               f'Failed to load tensor {k_name} from file {f.name}: {e}'
           ) from e
 
+      # load_begin = time.perf_counter()
       with concurrent.futures.ThreadPoolExecutor(
           max_workers=os.cpu_count()
       ) as executor:
@@ -241,6 +253,8 @@ def load_and_create_model_orig(
       for future in concurrent.futures.as_completed(futures):
         if future.exception():
           raise future.exception()
+      # load_end = time.perf_counter()
+      # print(f"model loading time: {load_end - load_begin} secs")
 
     # Apply preprocessing if provided (e.g., for MoE expert stacking)
     if preprocess_fn is not None:
