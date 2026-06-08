@@ -73,6 +73,7 @@ absl_logging.set_verbosity(absl_logging.INFO)
 absl_logging.set_stderrthreshold("info")
 print("Logging configured at INFO level.")
 
+os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
 from tunix.models.gemma4 import params_safetensors as params_lib
 from tunix.models.gemma4 import model as model_lib
 from tunix.oss import utils as oss_utils
@@ -561,8 +562,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # invokes the trainer ``mini_batch_size // train_micro_batch_size``
         # times, so the optimizer still sees a ``mini_batch_size`` gradient
         # per update.
-        train_micro_batch_size=2,
-        compute_logps_micro_batch_size=2,
+        train_micro_batch_size=1,
+        compute_logps_micro_batch_size=1,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,

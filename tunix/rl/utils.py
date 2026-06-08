@@ -196,6 +196,7 @@ def merge_micro_batches(batches: List[dict[str, Any]]) -> dict[str, Any]:
 def put_params_on_memory_kind(
     params: jaxtyping.PyTree,
     memory_kind: str,
+    dtype: Optional[jnp.dtype] = None,
 ) -> jaxtyping.PyTree:
   """Puts params on the given memory kind."""
   if memory_kind not in ["device", "pinned_host", "unpinned_host"]:
@@ -234,6 +235,11 @@ def put_params_on_memory_kind(
       params,
       new_shardings,
   )
+  if dtype is not None:
+    params_on_memory_kind = jax.tree.map(
+        lambda x: x.astype(dtype) if isinstance(x, jax.Array) else x,
+        params_on_memory_kind,
+    )
   shardings = jax.tree.map(lambda x: x.sharding, params_on_memory_kind)
   logging.debug("params_on_memory_kind shardings: %s", shardings)
   return params_on_memory_kind
