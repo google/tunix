@@ -26,6 +26,7 @@ dependencies = [
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
   "importlib_resources",
+  "jax==0.9.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -35,7 +36,7 @@ dependencies = [
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
-  "qwix>=0.1.5",
+  "qwix>=0.1.2",
   "sentencepiece",
   "sympy",  # Eval result parsing
   "tensorflow_datasets",
@@ -57,10 +58,11 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
+  # "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
+  # "aiohttp==3.12.15", # deepscaler, TODO: relax tpu-inference requirements.
 ]
 test = [
   "pytest",
@@ -71,6 +73,26 @@ test = [
 
 [project.urls]
 Source = "https://github.com/google/tunix"
+
+[tool.poetry]
+name = "google-tunix"
+version = "0.1.7"
+description = "A lightweight JAX-native LLM post-training framework."
+authors = ["Tunix Developers <tunix-dev@google.com>"]
+packages = [{include = "tunix"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+
+[tool.poetry.group.dev.dependencies]
+tpu-inference = { path = "../tpu-inference", develop = true }
+vllm = { path = "../vllm", develop = true }
+pathwaysutils = { path = "../pathways-utils", develop = true }
+
+[[tool.poetry.source]]
+name = "libtpu-source"
+url = "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
+priority = "supplemental"
 
 [build-system]
 requires = ["setuptools >= 77.0.3"]

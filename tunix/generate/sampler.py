@@ -819,15 +819,20 @@ class Sampler(base_sampler.BaseSampler):
         beam_size=beam_size,
         include_logprobs=return_logprobs,
     )
+
+    # print("prefill...")
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state,
         sampling_state,
         processed_images,
     )
 
+    # print("decode...")
     sampling_state = self._compiled_decode_fn(
         self._flattened_transformer_state, sampling_state
     )
+
+    # print("prepare output...")
     token_buffers = sampling_state.token_buffer
     logits_buffers = sampling_state.logits_buffer
 
