@@ -138,7 +138,7 @@ arg_parser.add_argument("--top_k", type=int, default=0)
 # num_generations` trajectories can be in flight at once. A high cap also lets
 # every multi-turn agent step its env without waiting for a previous wave to
 # drain. Drop only if KV cache saturates or generation throughput regresses.
-arg_parser.add_argument("--max_concurrency", type=int, default=512)
+arg_parser.add_argument("--max_concurrency", type=int, default=256)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -215,7 +215,7 @@ NUM_BATCHES = args.num_batches
 # rollouts, so eval wall-time scales linearly. If you change BATCH_SIZE,
 # adjust this so that NUM_TEST_BATCHES * BATCH_SIZE >= test set size to
 # evaluate the full held-out set once per eval.
-NUM_TEST_BATCHES = 13
+NUM_TEST_BATCHES = 2
 
 EVAL_EVERY_N_STEPS = 10
 NUM_EPOCHS = 3
@@ -380,6 +380,7 @@ if ENABLE_REMAT:
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
+  config.use_sliding_window_kv_cache = False
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 

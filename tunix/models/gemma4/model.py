@@ -30,7 +30,6 @@ from jax.interpreters import pxla
 import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
-import numpy as np
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.models.gemma4 import moe
 from tunix.models.gemma4 import vision
@@ -171,7 +170,6 @@ class ModelConfig:
   use_bidirectional_attention: str | None = None
 
   def __post_init__(self):
-    # TODO(tunix-dev): support flash attention with sliding window KV cache
     if self.use_sliding_window_kv_cache and self.use_flash_attention:
       raise ValueError(
           'Flash attention and sliding window KV cache are mutually exclusive.'
@@ -740,6 +738,7 @@ class Attention(nnx.Module):
         param_dtype=config.param_dtype,
     )
 
+
     k_eq_v = (
         config.k_eq_v_global if attn_type == AttentionType.GLOBAL else False
     )
@@ -898,9 +897,9 @@ class Attention(nnx.Module):
     _, _, kh, _ = key_proj.shape
 
     if self.config.use_flash_attention and seq_len > 1:
-      query_proj = query_proj.transpose(0, 2, 1, 3)
-      key_proj = key_proj.transpose(0, 2, 1, 3)
-      value_proj = value_proj.transpose(0, 2, 1, 3)
+      query_proj_splash = query_proj.transpose(0, 2, 1, 3)
+      key_proj_splash = key_proj.transpose(0, 2, 1, 3)
+      value_proj_splash = value_proj.transpose(0, 2, 1, 3)
 
       mesh = pxla.thread_resources.env.physical_mesh
       if self.attn_type == AttentionType.LOCAL_SLIDING:
@@ -947,6 +946,7 @@ class Attention(nnx.Module):
       )
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
+      unsharded_seq = P(shd_b, shd_n, None, shd_h)
       shd_n_kv = (
           shd_n
           if mesh is not None
@@ -988,9 +988,9 @@ class Attention(nnx.Module):
 
         qkv: jaxtyping.Array = sharded_splash_attn(
             splash_attn_kernel,
-            query_proj,
-            key_proj,
-            value_proj,
+            query_proj_splash,
+            key_proj_splash,
+            value_proj_splash,
             segment_ids,
             segment_ids,
         )
