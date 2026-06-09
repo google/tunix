@@ -11,6 +11,7 @@ Tunix supports the following models:
 | Gemma | 2B, 7B, 9B |
 | Gemma 2 | 2B, 9B |
 | Gemma 3 | 270M, 1B, 4B, 12B, 27B |
+| Gemma 4 | E2B, E4B, 12B, 26B-A4B, 31B |
 | Llama 3 | 70B, 405B |
 | Llama 3.1 | 8B, 70B, 405B |
 | Llama 3.2 | 1B, 3B |

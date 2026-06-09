@@ -33,6 +33,12 @@ def _get_all_models_test_parameters():
       dict(testcase_name="gemma-3-12b-it", model_name="gemma-3-12b-it"),
       dict(testcase_name="gemma-3-27b-pt", model_name="gemma-3-27b-pt"),
       dict(testcase_name="gemma-3-27b-it", model_name="gemma-3-27b-it"),
+      dict(testcase_name="gemma-4-e2b", model_name="gemma-4-e2b"),
+      dict(testcase_name="gemma-4-e4b", model_name="gemma-4-e4b"),
+      dict(testcase_name="gemma-4-12b", model_name="gemma-4-12b"),
+      dict(testcase_name="gemma-4-12b-it", model_name="gemma-4-12b-it"),
+      dict(testcase_name="gemma-4-31b", model_name="gemma-4-31b"),
+      dict(testcase_name="gemma-4-26b-a4b", model_name="gemma-4-26b-a4b"),
       dict(testcase_name="llama-3-70b", model_name="llama-3-70b"),
       dict(testcase_name="llama-3.1-70b", model_name="llama-3.1-70b"),
       dict(testcase_name="llama-3.1-405b", model_name="llama-3.1-405b"),
@@ -260,7 +266,13 @@ class AutoModelTest(parameterized.TestCase):
         mode="mode",
     )
 
-    if naming_info.model_family in ("gemma", "gemma1p1", "gemma2", "gemma3"):
+    if naming_info.model_family in (
+        "gemma",
+        "gemma1p1",
+        "gemma2",
+        "gemma3",
+        "gemma4",
+    ):
       expected_module_type = automodel.ModelModule.PARAMS_SAFETENSORS
     else:
       expected_module_type = automodel.ModelModule.PARAMS
