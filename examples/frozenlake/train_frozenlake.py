@@ -65,6 +65,7 @@ with cm:
   from tunix.rl.rollout import base_rollout
   from tunix.sft import utils as sft_utils
   from tunix.utils import compat
+  import tunix.utils.mesh as mesh_lib
   from tunix.rl import reshard
   from tunix.cli.utils import data as data_lib
   from tunix import PerfMetricsConfig
@@ -232,35 +233,26 @@ if trainer_devices + rollout_devices + reference_devices > jax.device_count():
   )
 
 
-rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-    ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+assigned_devices = mesh_lib.allocate_named_mesh_device_slices([
+    ("rollout", rollout_devices),
+    ("reference", reference_devices),
+    ("trainer", trainer_devices),
+])
+rollout_assigned_devices = assigned_devices["rollout"]
+rollout_mesh = mesh_lib.create_mesh(
+    ROLLOUT_MESH[0], ROLLOUT_MESH[1], devices=rollout_assigned_devices
 )
-
-rollout_mesh = jax.sharding.Mesh(
-    rollout_device_list,
-    axis_names=ROLLOUT_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+print(f"{rollout_assigned_devices=} {rollout_mesh.devices=}")
+reference_assigned_devices = assigned_devices["reference"]
+reference_mesh = mesh_lib.create_mesh(
+    REFERENCE_MESH[0], REFERENCE_MESH[1], devices=reference_assigned_devices
 )
-print(f"{rollout_device_list=} {rollout_mesh.devices=}")
-reference_device_list = jax._src.mesh_utils.create_device_mesh(
-    REFERENCE_MESH[0],
-    jax.devices()[rollout_devices : rollout_devices + reference_devices],
+print(f"{reference_assigned_devices=} {reference_mesh.devices=}")
+trainer_assigned_devices = assigned_devices["trainer"]
+trainer_mesh = mesh_lib.create_mesh(
+    TRAINER_MESH[0], TRAINER_MESH[1], devices=trainer_assigned_devices
 )
-reference_mesh = jax.sharding.Mesh(
-    reference_device_list,
-    axis_names=REFERENCE_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(REFERENCE_MESH[0]),
-)
-print(f"{reference_device_list=} {reference_mesh.devices=}")
-trainer_device_list = jax._src.mesh_utils.create_device_mesh(
-    TRAINER_MESH[0], jax.devices()[-trainer_devices:]
-)
-trainer_mesh = jax.sharding.Mesh(
-    trainer_device_list,
-    axis_names=TRAINER_MESH[1],
-    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
-)
-print(f"{trainer_device_list=} {trainer_mesh.devices=}")
+print(f"{trainer_assigned_devices=} {trainer_mesh.devices=}")
 
 # %%
 try:

@@ -47,6 +47,7 @@ from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
+import tunix.utils.mesh as mesh_lib
 from tunix.cli.utils import data as data_lib
 from examples.frozenlake.agent import FrozenLakeAgent
 from examples.frozenlake.env import FrozenLakeEnv
@@ -242,13 +243,14 @@ if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
       f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
   )
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+shared_assigned_devices = mesh_lib.allocate_devices(
+    math.prod(SHARED_MESH_SHAPE),
+    mesh_name="shared",
 )
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+shared_mesh = mesh_lib.create_mesh(
+    SHARED_MESH_SHAPE,
+    SHARED_MESH_AXIS_NAMES,
+    devices=shared_assigned_devices,
 )
 print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 

@@ -180,6 +180,16 @@ parser.add_argument(
     help="Rollout engine asynchronous scheduling.",
 )
 parser.add_argument(
+  "--rollout-server-mode-submission-threshold",
+  type=int,
+  default=0,
+  required=False,
+  help=(
+    "Only drain the vLLM server-mode submission queue after at least this "
+    "many requests have accumulated. 0 disables the threshold."
+  ),
+)
+parser.add_argument(
     "--rollout-dp",
     type=int,
     default=-1,
@@ -1140,6 +1150,9 @@ def get_rollout_config(engine: str) -> base_rollout.RolloutConfig:
       rollout_vllm_hbm_utilization=0.2,
       rollout_vllm_tpu_backend_type="jax",
       rollout_vllm_server_mode=args.rollout_server_mode,
+        rollout_vllm_server_mode_submission_threshold=(
+          args.rollout_server_mode_submission_threshold
+        ),
       rollout_vllm_async_scheduling=args.async_scheduling,
   )
 

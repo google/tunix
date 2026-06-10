@@ -102,6 +102,60 @@ class _FakeLLMEngine:
 
 class VllmDriverAsyncTest(absltest.TestCase):
 
+  def test_requests_are_staged_until_loop_starts(self):
+    engine = _FakeLLMEngine(["req-0", "req-1"])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    self.assertEmpty(engine._pending)
+    self.assertFalse(future_0.done())
+    self.assertFalse(future_1.done())
+
+    driver.start()
+
+    self.assertEqual(future_0.result(timeout=5.0).request_id, "req-0")
+    self.assertEqual(future_1.result(timeout=5.0).request_id, "req-1")
+
+  def test_submission_threshold_delays_queue_drain(self):
+    engine = _FakeLLMEngine(["req-0", "req-1"])
+    driver = VLLMInProcessDriver(
+        llm_engine=engine,
+        submission_threshold=2,
+        poll_interval_s=0.001,
+        auto_start=True,
+    )
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    time.sleep(0.01)
+    self.assertEmpty(engine._pending)
+    self.assertFalse(future_0.done())
+
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    self.assertEqual(future_0.result(timeout=5.0).request_id, "req-0")
+    self.assertEqual(future_1.result(timeout=5.0).request_id, "req-1")
+
   def test_out_of_order_completions_preserved(self):
     request_ids = [f"req-{i}" for i in range(10)]
     completion_order = [

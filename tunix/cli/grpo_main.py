@@ -378,12 +378,17 @@ class GrpoPipeline(config.HyperParameters):
               (max_num_seqs * kv_cache_size) // 4,
           ),
       )
+      submission_threshold = rollout_cfg.get(
+          "rollout_vllm_server_mode_submission_threshold",
+          vllm.get("server_mode_submission_threshold", 0),
+      )
       os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
       return dict(
           rollout_vllm_model_version=vllm.get("model_version", model_id),
           rollout_vllm_hbm_utilization=vllm.get("hbm_utilization", 0.4),
           rollout_vllm_tpu_backend_type=vllm.get("tpu_backend_type", "jax"),
           rollout_vllm_server_mode=vllm.get("server_mode", True),
+          rollout_vllm_server_mode_submission_threshold=submission_threshold,
           rollout_vllm_async_scheduling=vllm.get("async_scheduling", True),
           tensor_parallel_size=(
               rollout_shape[1] if len(rollout_shape) > 1 else 1

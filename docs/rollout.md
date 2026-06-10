@@ -122,6 +122,14 @@ settings are specific to vLLM:
         for higher-throughput request scheduling leveraging the vLLM continuous
         batching capabilities.
 
+-   `rollout_vllm_server_mode_submission_threshold`
+
+    -   Only applies when `rollout_vllm_server_mode=True`.
+    -   `0`: drain the submission queue immediately when requests arrive.
+    -   `N > 0`: hold queued requests in the in-process driver until at least
+        `N` requests have accumulated, then release them to the vLLM engine in
+        one drain cycle.
+
 -   `rollout_vllm_async_scheduling`
 
     -   Enables vLLM async scheduling.
@@ -180,6 +188,7 @@ rollout_config = base_rollout.RolloutConfig(
     rollout_vllm_hbm_utilization=0.2,
     rollout_vllm_tpu_backend_type="jax",
     rollout_vllm_server_mode=False,
+    rollout_vllm_server_mode_submission_threshold=0,
 )
 
 cluster_config = rl_cluster_lib.ClusterConfig(

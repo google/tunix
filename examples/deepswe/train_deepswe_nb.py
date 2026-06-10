@@ -10,6 +10,7 @@ import logging
 import os
 import signal
 import sys
+
 from absl import logging as absl_logging
 import datasets as datasets_lib
 from datasets import load_dataset
@@ -18,7 +19,7 @@ import grain
 from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 from kubernetes import client, config as k8s_config
 import numpy as np
 import optax
@@ -27,6 +28,7 @@ import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
 from tunix.utils import compat
+import tunix.utils.mesh as mesh_lib
 from tunix.rl.agentic.agents import agent_types
 import vllm  # pytype: disable=import-error
 
@@ -559,13 +561,22 @@ rollout_shape = tuple(d for _, d in rollout_dims)
 train_axis_names = tuple(name for name, _ in train_dims)
 train_shape = tuple(d for _, d in train_dims)
 
-rollout_devices = np.array(devices[:num_rollout_devices]).reshape(rollout_shape)
-train_devices = np.array(
-    devices[num_rollout_devices : num_rollout_devices + num_train_devices]
-).reshape(train_shape)
+assigned_devices = mesh_lib.allocate_named_mesh_device_slices(
+  [
+    ("rollout", num_rollout_devices),
+    ("train", num_train_devices),
+  ],
+  devices=devices,
+)
+rollout_assigned_devices = assigned_devices["rollout"]
+train_assigned_devices = assigned_devices["train"]
 
-rollout_mesh = Mesh(rollout_devices, axis_names=rollout_axis_names)
-train_mesh = Mesh(train_devices, axis_names=train_axis_names)
+rollout_mesh = mesh_lib.create_mesh(
+  rollout_shape, rollout_axis_names, devices=rollout_assigned_devices
+)
+train_mesh = mesh_lib.create_mesh(
+  train_shape, train_axis_names, devices=train_assigned_devices
+)
 
 
 print(
