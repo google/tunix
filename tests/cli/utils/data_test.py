@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import os
 import tempfile
+from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from tunix.cli.utils import data as data_lib
 
 
@@ -32,7 +34,9 @@ class _FakeTokenizer:
 
 class _FakeChatTemplateTokenizer(_FakeTokenizer):
 
-  def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+  def apply_chat_template(
+      self, messages, tokenize=False, add_generation_prompt=True
+  ):
     del tokenize
     del add_generation_prompt
     return " | ".join(message["content"] for message in messages)
@@ -229,7 +233,9 @@ def create_dataset():
         {"prompts": "short", "answer": 1},
     ])
 
-    with self.assertRaisesRegex(ValueError, "empty after post_init_dataset split"):
+    with self.assertRaisesRegex(
+        ValueError, "empty after post_init_dataset split"
+    ):
       data_lib.post_init_dataset(
           dataset,
           tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
@@ -304,44 +310,52 @@ def create_dataset():
     self.assertEqual(
         batches[0],
         [
-            {"question": "short prompt", "answer": 1, "prompts": "short prompt"},
-            {"question": "another prompt", "answer": 2, "prompts": "another prompt"},
+            {
+                "question": "short prompt",
+                "answer": 1,
+                "prompts": "short prompt",
+            },
+            {
+                "question": "another prompt",
+                "answer": 2,
+                "prompts": "another prompt",
+            },
         ],
     )
 
   def test_normalizes_bytes_prompt_key_to_sanitized_prompts(self):
-      tokenizer = _FakeTokenizer()
-      dataset = _BaseDataset([
+    tokenizer = _FakeTokenizer()
+    dataset = _BaseDataset([
         {"question": b"<start_of_turn>short prompt", "answer": 1},
         {"question": memoryview(b"another prompt"), "answer": 2},
-      ])
+    ])
 
-      first, second = data_lib.post_init_dataset(
+    first, second = data_lib.post_init_dataset(
         dataset,
         tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=2,
         num_batches=None,
         max_prompt_length=None,
         prompt_key="question",
-      )
+    )
 
-      self.assertIsNone(second)
-      batches = list(first)
-      self.assertEqual(
+    self.assertIsNone(second)
+    batches = list(first)
+    self.assertEqual(
         batches[0],
         [
-          {
-            "question": b"<start_of_turn>short prompt",
-            "answer": 1,
-            "prompts": "short prompt",
-          },
-          {
-            "question": memoryview(b"another prompt"),
-            "answer": 2,
-            "prompts": "another prompt",
-          },
+            {
+                "question": b"<start_of_turn>short prompt",
+                "answer": 1,
+                "prompts": "short prompt",
+            },
+            {
+                "question": memoryview(b"another prompt"),
+                "answer": 2,
+                "prompts": "another prompt",
+            },
         ],
-      )
+    )
 
   def test_num_epochs_repeats_dataset(self):
     tokenizer = _FakeTokenizer()
@@ -365,6 +379,56 @@ def create_dataset():
     self.assertEqual(
         [b[0]["prompts"] for b in batches], ["p0", "p1", "p0", "p1", "p0", "p1"]
     )
+
+
+class ShardByProcessTest(parameterized.TestCase):
+
+  def test_single_process_is_identity(self):
+    # process_count == 1 -> whole dataset in original order, global batch size.
+    dataset = _BaseDataset([{"v": i} for i in range(8)])
+    with mock.patch.object(
+        data_lib.jax, "process_count", return_value=1
+    ), mock.patch.object(data_lib.jax, "process_index", return_value=0):
+      local, local_bs = data_lib.shard_by_process(dataset, global_batch_size=4)
+    self.assertIs(local, dataset)
+    self.assertEqual(local_bs, 4)
+    self.assertEqual([r["v"] for r in local], list(range(8)))
+
+  @parameterized.parameters((0,), (1,))
+  def test_two_processes_get_disjoint_strided_shards(self, proc_index):
+    dataset = _BaseDataset([{"v": i} for i in range(8)])
+    with mock.patch.object(
+        data_lib.jax, "process_count", return_value=2
+    ), mock.patch.object(
+        data_lib.jax, "process_index", return_value=proc_index
+    ):
+      local, local_bs = data_lib.shard_by_process(dataset, global_batch_size=4)
+    # Local batch is global // process_count.
+    self.assertEqual(local_bs, 2)
+    # Each process reads a disjoint strided shard: proc 0 -> evens, 1 -> odds.
+    self.assertEqual([r["v"] for r in local], list(range(proc_index, 8, 2)))
+
+  def test_two_process_shards_are_disjoint_and_cover_all(self):
+    dataset = _BaseDataset([{"v": i} for i in range(8)])
+    shards = {}
+    for proc_index in (0, 1):
+      with mock.patch.object(
+          data_lib.jax, "process_count", return_value=2
+      ), mock.patch.object(
+          data_lib.jax, "process_index", return_value=proc_index
+      ):
+        local, _ = data_lib.shard_by_process(dataset, global_batch_size=4)
+        shards[proc_index] = {r["v"] for r in local}
+    self.assertEqual(shards[0] & shards[1], set())
+    self.assertEqual(shards[0] | shards[1], set(range(8)))
+
+  def test_rejects_indivisible_global_batch(self):
+    dataset = _BaseDataset([{"v": i} for i in range(8)])
+    with mock.patch.object(
+        data_lib.jax, "process_count", return_value=3
+    ), mock.patch.object(data_lib.jax, "process_index", return_value=0):
+      with self.assertRaisesRegex(ValueError, "divisible"):
+        data_lib.shard_by_process(dataset, global_batch_size=4)
 
 
 if __name__ == "__main__":

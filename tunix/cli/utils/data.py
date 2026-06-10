@@ -4,13 +4,66 @@ import ast
 import functools
 import importlib
 import os
-from typing import Any, Callable, Optional, Protocol, Union
+from typing import Any, Callable, Optional, Protocol, Tuple, Union
 
+import jax
 from tunix.generate import tokenizer_adapter
 from tunix.utils import token_sanitization
 
 Tokenizer = tokenizer_adapter.Tokenizer
 TokenizerAdapter = tokenizer_adapter.TokenizerAdapter
+
+
+def shard_by_process(dataset, global_batch_size: int) -> Tuple[Any, int]:
+  """Shards a ``grain.MapDataset`` across JAX processes by a strided slice.
+
+  Under multi-controller JAX every host runs the same program, and
+  ``tunix.sft.sharding_utils.shard_input`` assembles the global batch by calling
+  ``jax.make_array_from_process_local_data`` on each process's local sub-batch.
+  That contract requires each process to feed only ``global_batch_size //
+  process_count`` rows, drawn from a DISJOINT shard of the data so the assembled
+  global batch covers every record exactly once.
+
+  This helper realizes that with a single, generic idiom shared by SFT and RL:
+  it slices the dataset with ``dataset[process_index::process_count]`` (disjoint
+  by construction, with no shuffling/determinism caveat) and returns the
+  per-process local batch size ``global_batch_size // process_count``. Callers
+  then batch the sliced dataset at the returned local size.
+
+  On a single host ``process_count == 1``, the slice is ``dataset[0::1]`` (the
+  whole dataset in original order) and the local batch size equals
+  ``global_batch_size``, so single-host behavior is byte-for-byte unchanged.
+
+  Example (2 processes, global batch 4):
+    process 0 -> dataset[0::2] (records 0, 2, 4, ...), local batch size 2
+    process 1 -> dataset[1::2] (records 1, 3, 5, ...), local batch size 2
+
+  Args:
+    dataset: A ``grain.MapDataset`` (or any sliceable, ``len``-able dataset)
+      whose records should be split across processes.
+    global_batch_size: The global batch size summed across all processes.
+
+  Returns:
+    A tuple ``(local_dataset, local_batch_size)`` where ``local_dataset`` is the
+    per-process strided shard and ``local_batch_size`` is the batch size each
+    process should use so the per-process batches reassemble into the global
+    batch.
+
+  Raises:
+    ValueError: If ``global_batch_size`` is not divisible by the number of JAX
+      processes, since each process must contribute an equal per-process shard.
+  """
+  process_count = jax.process_count()
+  if global_batch_size % process_count != 0:
+    raise ValueError(
+        f"global_batch_size ({global_batch_size}) must be divisible by the "
+        f"number of JAX processes ({process_count}) so each process can "
+        "contribute an equal per-process shard of the global batch."
+    )
+  if process_count == 1:
+    return dataset, global_batch_size
+  local_dataset = dataset[jax.process_index() :: process_count]
+  return local_dataset, global_batch_size // process_count
 
 
 class ChatTemplateTokenizer(Protocol):
@@ -24,9 +77,7 @@ class ChatTemplateTokenizer(Protocol):
     ...
 
 
-def apply_chat_template(
-    x, tokenizer: ChatTemplateTokenizer
-) -> dict[str, Any]:
+def apply_chat_template(x, tokenizer: ChatTemplateTokenizer) -> dict[str, Any]:
   return {
       "prompts": tokenizer.apply_chat_template(
           x["prompt"], tokenize=False, add_generation_prompt=True
@@ -221,10 +272,11 @@ def post_init_dataset(
   filtered_size = len(dataset)
   if filtered_size == 0:
     raise ValueError(
-        "Training dataset is empty after post_init_dataset filtering. "
-        f"original_size={original_size}, max_prompt_length={max_prompt_length}, "
-        f"prompt_key={prompt_key!r}. Consider increasing max_prompt_length "
-        "or adjusting the prompt template/filter settings."
+        "Training dataset is empty after post_init_dataset filtering."
+        f" original_size={original_size},"
+        f" max_prompt_length={max_prompt_length}, prompt_key={prompt_key!r}."
+        " Consider increasing max_prompt_length or adjusting the prompt"
+        " template/filter settings."
     )
 
   if num_batches is not None:
