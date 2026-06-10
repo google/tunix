@@ -98,8 +98,8 @@ arg_parser = argparse.ArgumentParser(
 # Tuned together with `num_generations=8` to keep per-step rollout latency
 # manageable on a single host while preserving enough samples per prompt for
 # the GRPO group-mean baseline.
-arg_parser.add_argument("--batch_size", type=int, default=8)
-arg_parser.add_argument("--mini_batch_size", type=int, default=8)
+arg_parser.add_argument("--batch_size", type=int, default=64)
+arg_parser.add_argument("--mini_batch_size", type=int, default=64)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 # AdamW second-moment decay (β2). Lower than the AdamW default (0.999) so the
@@ -108,7 +108,7 @@ arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.95)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=150)
-arg_parser.add_argument("--num_generations", type=int, default=2)
+arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 # GSPO-token defaults: tight clip ratios because the importance ratio is
 # sequence-mean (much lower variance than per-token PPO), so a wider clip would
