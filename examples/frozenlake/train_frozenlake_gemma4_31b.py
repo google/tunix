@@ -404,6 +404,7 @@ if ENABLE_REMAT:
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
+  config.use_sliding_window_kv_cache = False
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
@@ -516,7 +517,9 @@ vllm_rollout_dict = {
                 "final_logit_softcapping": 30.0,
             },
         },
-
+    },
+    "rollout_vllm_sampling_kwargs": {
+        "skip_special_tokens": False,
     },
 }
 
