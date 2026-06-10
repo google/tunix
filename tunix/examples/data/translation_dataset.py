@@ -19,9 +19,9 @@ from typing import Any
 
 import datasets
 from grain import python as grain
-import jax
 import numpy as np
 import tensorflow_datasets as tfds
+from tunix.cli.utils import data as data_lib
 from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.sft.peft_trainer import TrainingInput  # pylint: disable=g-importing-member
 
@@ -69,13 +69,8 @@ def create_datasets(
       equal-sized per-process shard of the global batch, so the global batch
       size must split evenly across processes.
   """
-  process_count = jax.process_count()
-  if global_batch_size % process_count != 0:
-    raise ValueError(
-        f"global_batch_size ({global_batch_size}) must be divisible by the "
-        f"number of JAX processes ({process_count}) so each process can "
-        "contribute an equal per-process shard of the global batch."
-    )
+  # Fail fast on an unshardable global batch before any expensive data loading.
+  data_lib.validate_global_batch_divisible(global_batch_size)
 
   if dataset_name == "mtnt/en-fr":
     import tensorflow_datasets.translate.mtnt
@@ -119,46 +114,39 @@ def _build_data_loader(
     max_seq_len: int,
     tokenizer: tokenizer_lib.Tokenizer,
     input_template: dict[str, str],
-) -> grain.DataLoader:
-  """Builds a data loader for the given data source.
+) -> grain.IterDataset:
+  """Builds a data iterator for the given data source.
 
-  ``batch_size`` is the GLOBAL batch size. Under multi-controller JAX each host
-  runs this same program, so the sampler is sharded by JAX process and each
-  process batches only its local shard of ``batch_size // jax.process_count()``
-  examples. ``tunix.sft.sharding_utils.shard_input`` then assembles those
-  per-process local batches into the global batch via
-  ``jax.make_array_from_process_local_data`` (which expects each process to
-  supply exactly its local sub-batch).
+  ``batch_size`` is the GLOBAL batch size. The pipeline is a ``grain.MapDataset``
+  chain (``map(tokenize) -> map(build_input) -> filter(overlength)``) that is
+  sharded across JAX processes by ``shard_by_process``: under multi-controller
+  JAX each host slices a disjoint strided shard of the records and batches only
+  its local ``batch_size // jax.process_count()`` examples.
+  ``tunix.sft.sharding_utils.shard_input`` then assembles those per-process local
+  batches into the global batch via ``jax.make_array_from_process_local_data``
+  (which expects each process to supply exactly its local sub-batch).
 
-  On a single host ``jax.process_count() == 1``, the per-process batch equals
-  the global batch and ``grain.ShardByJaxProcess`` selects the single shard, so
-  behavior is identical to the previous ``grain.NoSharding()`` configuration.
+  On a single host ``jax.process_count() == 1``, ``shard_by_process`` is the
+  identity (whole dataset, original order) and the per-process batch equals the
+  global batch, so the produced records, their order, and the batching are
+  byte-for-byte identical to the previous ``grain.NoSharding()`` configuration.
+  ``MapDataset.batch`` cannot follow a ``filter`` (which may drop elements), so
+  the filtered ``MapDataset`` is converted to an ``IterDataset`` before batching,
+  exactly as the RL ``post_init_dataset`` path does.
   """
-  process_count = jax.process_count()
-  # create_datasets validates divisibility; guard here too so this helper is
-  # safe to call directly.
-  if batch_size % process_count != 0:
-    raise ValueError(
-        f"batch_size ({batch_size}) must be divisible by the number of JAX "
-        f"processes ({process_count})."
-    )
-  per_process_batch_size = batch_size // process_count
-  return grain.DataLoader(
-      data_source=data_source,
-      sampler=grain.IndexSampler(
-          num_records=len(data_source),
-          num_epochs=num_epochs,
-          # Each JAX process reads a disjoint shard of the records. drop_remainder
-          # keeps every process's shard the same length so the per-process
-          # batches stay aligned across hosts.
-          shard_options=grain.ShardByJaxProcess(drop_remainder=True),
-      ),
-      operations=[
-          _Tokenize(tokenizer, input_template),
-          _BuildTrainInput(max_seq_len, tokenizer.pad_id()),
-          _FilterOverlength(max_seq_len),
-          grain.Batch(batch_size=per_process_batch_size, drop_remainder=True),
-      ],
+  local_source, per_process_batch_size = data_lib.shard_by_process(
+      grain.MapDataset.source(data_source), batch_size
+  )
+  # ``repeat(None)`` is an infinite repeat and ``repeat(N)`` is N epochs, which
+  # matches the previous ``IndexSampler(num_epochs=...)`` semantics exactly.
+  dataset = (
+      local_source.map(_Tokenize(tokenizer, input_template))
+      .map(_BuildTrainInput(max_seq_len, tokenizer.pad_id()))
+      .filter(_FilterOverlength(max_seq_len))
+      .repeat(num_epochs)
+  )
+  return dataset.to_iter_dataset().batch(
+      per_process_batch_size, drop_remainder=True
   )
 
 

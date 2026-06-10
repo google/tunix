@@ -18,14 +18,18 @@ These tests pin down the multi-controller data-loading contract: each JAX
 process must read a disjoint shard of the records and batch only its local
 ``global_batch_size // process_count`` slice, so that
 ``sharding_utils.shard_input`` can reassemble the global batch via
-``jax.make_array_from_process_local_data``.
+``jax.make_array_from_process_local_data``. The loader is a ``grain.MapDataset``
+chain sharded by ``cli.utils.data.shard_by_process`` (a strided slice), so the
+process-count/index are mocked on that module.
 """
 
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from grain import python as grain
 import numpy as np
+from tunix.cli.utils import data as data_lib
 from tunix.examples.data import translation_dataset
 
 
@@ -92,10 +96,8 @@ class BuildDataLoaderShardingTest(parameterized.TestCase):
     # process_count == 1 -> per-process batch == global batch, identical to the
     # old grain.NoSharding() behavior.
     with mock.patch.object(
-        translation_dataset.jax, "process_count", return_value=1
-    ), mock.patch.object(
-        translation_dataset.jax, "process_index", return_value=0
-    ):
+        data_lib.jax, "process_count", return_value=1
+    ), mock.patch.object(data_lib.jax, "process_index", return_value=0):
       loader = _build_loader(num_records=8, batch_size=4)
       batches = list(loader)
 
@@ -119,9 +121,9 @@ class BuildDataLoaderShardingTest(parameterized.TestCase):
     per_process_batch_shapes = {}
     for proc_index in (0, 1):
       with mock.patch.object(
-          translation_dataset.jax, "process_count", return_value=2
+          data_lib.jax, "process_count", return_value=2
       ), mock.patch.object(
-          translation_dataset.jax, "process_index", return_value=proc_index
+          data_lib.jax, "process_index", return_value=proc_index
       ):
         loader = _build_loader(
             num_records=num_records, batch_size=global_batch_size
@@ -156,20 +158,77 @@ class BuildDataLoaderShardingTest(parameterized.TestCase):
 
   def test_build_loader_rejects_indivisible_batch(self):
     with mock.patch.object(
-        translation_dataset.jax, "process_count", return_value=3
-    ), mock.patch.object(
-        translation_dataset.jax, "process_index", return_value=0
-    ):
+        data_lib.jax, "process_count", return_value=3
+    ), mock.patch.object(data_lib.jax, "process_index", return_value=0):
       with self.assertRaisesRegex(ValueError, "divisible"):
         _build_loader(num_records=8, batch_size=4)
+
+
+class SingleHostByteIdenticalTest(parameterized.TestCase):
+  """Proves the MapDataset loader matches the legacy DataLoader on one host.
+
+  Acceptance criterion: on a single host (process_count == 1) the new
+  ``grain.MapDataset`` pipeline must produce byte-identical batches (same
+  records, same order, same batching) as the original ``grain.DataLoader``
+  (``IndexSampler`` + ``grain.Batch``) implementation it replaced.
+  """
+
+  def _legacy_loader(
+      self, num_records, batch_size, num_epochs=1, max_seq_len=8
+  ):
+    # Faithful reconstruction of the previous DataLoader implementation.
+    return grain.DataLoader(
+        data_source=_ListDataSource(num_records),
+        sampler=grain.IndexSampler(
+            num_records=num_records,
+            num_epochs=num_epochs,
+            shard_options=grain.NoSharding(),
+        ),
+        operations=[
+            translation_dataset._Tokenize(
+                _FakeTokenizer(), translation_dataset.INPUT_TEMPLATE
+            ),
+            translation_dataset._BuildTrainInput(
+                max_seq_len, _FakeTokenizer().pad_id()
+            ),
+            translation_dataset._FilterOverlength(max_seq_len),
+            grain.Batch(batch_size=batch_size, drop_remainder=True),
+        ],
+    )
+
+  @parameterized.parameters((8, 4, 1), (10, 2, 1), (6, 3, 2))
+  def test_mapdataset_matches_legacy_dataloader_single_host(
+      self, num_records, batch_size, num_epochs
+  ):
+    with mock.patch.object(
+        data_lib.jax, "process_count", return_value=1
+    ), mock.patch.object(data_lib.jax, "process_index", return_value=0):
+      new_batches = list(
+          _build_loader(
+              num_records=num_records,
+              batch_size=batch_size,
+              num_epochs=num_epochs,
+          )
+      )
+    legacy_batches = list(
+        self._legacy_loader(
+            num_records=num_records,
+            batch_size=batch_size,
+            num_epochs=num_epochs,
+        )
+    )
+
+    self.assertEqual(len(new_batches), len(legacy_batches))
+    self.assertNotEmpty(new_batches)
+    for new_b, legacy_b in zip(new_batches, legacy_batches):
+      np.testing.assert_array_equal(new_b.input_tokens, legacy_b.input_tokens)
+      np.testing.assert_array_equal(new_b.input_mask, legacy_b.input_mask)
 
 
 class CreateDatasetsValidationTest(parameterized.TestCase):
 
   def test_create_datasets_rejects_indivisible_global_batch(self):
-    with mock.patch.object(
-        translation_dataset.jax, "process_count", return_value=4
-    ):
+    with mock.patch.object(data_lib.jax, "process_count", return_value=4):
       with self.assertRaisesRegex(ValueError, "divisible"):
         translation_dataset.create_datasets(
             dataset_name="mtnt/en-fr",

@@ -14,6 +14,33 @@ Tokenizer = tokenizer_adapter.Tokenizer
 TokenizerAdapter = tokenizer_adapter.TokenizerAdapter
 
 
+def validate_global_batch_divisible(global_batch_size: int) -> int:
+  """Validates that the global batch splits evenly across JAX processes.
+
+  Under multi-controller JAX each process must contribute an equal-sized
+  per-process shard of the global batch, so ``global_batch_size`` must be
+  divisible by ``jax.process_count()``. Call this early (before expensive data
+  loading) to fail fast with a clear message.
+
+  Args:
+    global_batch_size: The global batch size summed across all processes.
+
+  Returns:
+    The number of JAX processes (``jax.process_count()``).
+
+  Raises:
+    ValueError: If ``global_batch_size`` is not divisible by the process count.
+  """
+  process_count = jax.process_count()
+  if global_batch_size % process_count != 0:
+    raise ValueError(
+        f"global_batch_size ({global_batch_size}) must be divisible by the "
+        f"number of JAX processes ({process_count}) so each process can "
+        "contribute an equal per-process shard of the global batch."
+    )
+  return process_count
+
+
 def shard_by_process(dataset, global_batch_size: int) -> Tuple[Any, int]:
   """Shards a ``grain.MapDataset`` across JAX processes by a strided slice.
 
@@ -53,13 +80,7 @@ def shard_by_process(dataset, global_batch_size: int) -> Tuple[Any, int]:
     ValueError: If ``global_batch_size`` is not divisible by the number of JAX
       processes, since each process must contribute an equal per-process shard.
   """
-  process_count = jax.process_count()
-  if global_batch_size % process_count != 0:
-    raise ValueError(
-        f"global_batch_size ({global_batch_size}) must be divisible by the "
-        f"number of JAX processes ({process_count}) so each process can "
-        "contribute an equal per-process shard of the global batch."
-    )
+  process_count = validate_global_batch_divisible(global_batch_size)
   if process_count == 1:
     return dataset, global_batch_size
   local_dataset = dataset[jax.process_index() :: process_count]
