@@ -108,19 +108,23 @@ def _init_multi_controller_jax():
 
   With no arguments `jax.distributed.initialize()` auto-detects the cluster from
   the environment (e.g. GKE / Cloud TPU pod env vars). On a single host with no
-  such environment it raises ``RuntimeError`` because no coordinator is present;
-  we treat that as "nothing to initialize" and proceed with the local devices.
+  such environment, auto-detection finds no coordinator and `jax` raises
+  ``ValueError('coordinator_address should be defined.')``. We treat ONLY that
+  specific case as "nothing to initialize" and proceed with the local devices.
+  Any other failure (e.g. an unreachable coordinator on a real multi-host pod)
+  is a genuine error and is allowed to propagate.
   """
   try:
     jax.distributed.initialize()
-  except (RuntimeError, ValueError) as e:
-    # No multi-host cluster was detected (typical single-host run). Continue
-    # with the local devices instead of failing. We deliberately do not swallow
-    # other exception types.
+  except ValueError as e:
+    # On a single host with no cluster env vars, auto-detection cannot find a
+    # coordinator and raises this exact ValueError. That is the legitimate
+    # single-controller no-op case. Anything else (including a real multi-host
+    # coordinator connection failure) must NOT be swallowed.
+    if 'coordinator_address should be defined' not in str(e):
+      raise
     logging.info(
-        'Skipping jax.distributed.initialize(); running single-controller. '
-        '(%s)',
-        e,
+        'No multi-host cluster detected; running single-controller. (%s)', e
     )
 
   logging.info(

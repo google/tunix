@@ -43,17 +43,33 @@ class InitMultiControllerJaxTest(absltest.TestCase):
       peft_main._init_multi_controller_jax()
     mock_init.assert_called_once_with()
 
-  def test_runtime_error_is_swallowed(self):
+  def test_real_multi_host_failure_propagates(self):
+    # On a true multi-host pod, an unreachable coordinator surfaces as a
+    # RuntimeError from the distributed runtime client. That is a genuine
+    # failure and must NOT be swallowed.
     with mock.patch.object(
         peft_main.jax.distributed,
         'initialize',
-        side_effect=RuntimeError('no cluster'),
+        side_effect=RuntimeError('failed to connect to coordinator'),
     ):
-      peft_main._init_multi_controller_jax()  # must not raise
+      with self.assertRaises(RuntimeError):
+        peft_main._init_multi_controller_jax()
+
+  def test_non_single_host_value_error_propagates(self):
+    # Only the exact "coordinator_address should be defined" ValueError is the
+    # single-host no-op. Any other ValueError (e.g. a misconfigured process_id)
+    # is a real failure and must propagate.
+    with mock.patch.object(
+        peft_main.jax.distributed,
+        'initialize',
+        side_effect=ValueError('process_id and num_processes must be ...'),
+    ):
+      with self.assertRaises(ValueError):
+        peft_main._init_multi_controller_jax()
 
   def test_unexpected_error_propagates(self):
-    # Only RuntimeError/ValueError are treated as "no cluster"; anything else is
-    # a real failure and must not be hidden.
+    # Anything other than the single-host coordinator ValueError is a real
+    # failure and must not be hidden.
     with mock.patch.object(
         peft_main.jax.distributed,
         'initialize',
