@@ -427,7 +427,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   def _model_call(
       self,
-      chat_lists: List[Dict[str, str]],
+      chat_lists: List[Dict[str, str]] | List[int] | np.ndarray,
       env: Any = None,
       max_generation_steps: int | None = None,
   ) -> base_rollout.RolloutOutput:
@@ -435,12 +435,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if env:
       env.task["policy_version"] = self.policy_version
 
-    if self.chat_parser:
-      chat_lists = self.chat_parser.parse(
-          messages=chat_lists,
-          add_generation_prompt=True,
-          is_first_msg=True,  # no op if system msg is populated in reset
-      )
+    is_token_input = False
+    if len(chat_lists) > 0 and isinstance(chat_lists[0], (int, np.integer)):
+      is_token_input = True
+
+    if is_token_input:
+      prompts = [chat_lists]
+      apply_chat_template = False
+    else:
+      if self.chat_parser:
+        chat_lists = self.chat_parser.parse(
+            messages=chat_lists,
+            add_generation_prompt=True,
+            is_first_msg=True,  # no op if system msg is populated in reset
+        )
+      prompts = chat_lists
+      apply_chat_template = False if self.chat_parser else True
+
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
       if "group_id" in env.extra_kwargs:
@@ -453,8 +464,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
     result = self.rl_cluster.generate(
-        prompts=chat_lists,
-        apply_chat_template=False if self.chat_parser else True,
+        prompts=prompts,
+        apply_chat_template=apply_chat_template,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,

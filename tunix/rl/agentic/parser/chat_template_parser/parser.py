@@ -159,6 +159,26 @@ class BaseChatTemplateParser(ABC):
     """Default implementation: returns tokens and logprobs unchanged."""
     return tokens, logprobs
 
+  @property
+  def thought_suffix_tokens(self) -> list[int]:
+    """Returns the tokenized suffix (if any) indicating a thought block."""
+    return []
+
+  @property
+  def eot_tokens(self) -> list[int]:
+    """Returns the tokenized end-of-turn boundary "<turn|>\n"."""
+    return []
+
+  @property
+  def turn_only_tokens(self) -> list[int]:
+    """Returns the tokenized "<turn|>" control token."""
+    return []
+
+  @property
+  def newline_tokens(self) -> list[int]:
+    """Returns the tokenized newline "\n"."""
+    return []
+
 
 class DefaultChatTemplateParser(BaseChatTemplateParser):
   """Default parser using tokenizer's built-in chat template."""
@@ -458,5 +478,69 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
         if logprobs is not None
         else None
     )
+
+  @property
+  def thought_suffix_tokens(self) -> list[int]:
+    """Returns the tokenized suffix "<|channel>thought\n<channel|>" without BOS/EOS."""
+    suffix_str = "<|channel>thought\n<channel|>"
+    try:
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(suffix_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+  @property
+  def eot_tokens(self) -> list[int]:
+    """Returns the tokenized end-of-turn boundary "<turn|>\n"."""
+    suffix_str = "<turn|>\n"
+    try:
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(suffix_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+  @property
+  def turn_only_tokens(self) -> list[int]:
+    """Returns the tokenized "<turn|>" control token."""
+    suffix_str = "<turn|>"
+    try:
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(suffix_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+  @property
+  def newline_tokens(self) -> list[int]:
+    """Returns the tokenized newline "\n"."""
+    suffix_str = "\n"
+    try:
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(suffix_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
 
 
