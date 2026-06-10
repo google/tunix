@@ -33,31 +33,33 @@ echo "  Mesh Axis Names: $mesh_axis_names"
 # The python invocation is identical for single-host and multi-host runs; under
 # multi-controller JAX every host runs this exact command and
 # jax.distributed.initialize() (in peft_main) stitches the hosts into one mesh.
-read -r -d '' PYTHON_CMD <<EOF
-python3 -m tunix.cli.peft_main \
-  base_config.yaml \
-  model_config.model_name="qwen2.5-0.5b" \
-  model_config.model_id="Qwen/Qwen2.5-0.5B" \
-  model_config.model_source="huggingface" \
-  model_config.lora_config={} \
-  model_config.mesh.shape="${mesh_shape}" \
-  model_config.mesh.axis_names="${mesh_axis_names}" \
-  model_config.rng_seed=0 \
-  model_config.use_flash_attn=true \
-  model_config.model_download_path="/tmp/models/qwen2.5-0.5b" \
-  tokenizer_config.tokenizer_path="Qwen/Qwen2.5-0.5B" \
-  tokenizer_config.tokenizer_type="huggingface" \
-  dataset_name="mtnt/en-fr" \
-  batch_size=${batch_size} \
-  optimizer_config.opt_type="adamw" \
-  optimizer_config.learning_rate=1e-5 \
-  max_target_length=1024 \
-  training_config.eval_every_n_steps=20 \
-  training_config.max_steps=${max_steps} \
-  training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full" \
-  training_config.metrics_logging_options.flush_every_n_steps=20 \
-  $@
-EOF
+# Build the command as an array so each extra arg in "$@" stays a single token
+# even when it contains spaces (e.g. 'foo bar=baz qux').
+PYTHON_CMD=(
+  python3 -m tunix.cli.peft_main
+  base_config.yaml
+  model_config.model_name="qwen2.5-0.5b"
+  model_config.model_id="Qwen/Qwen2.5-0.5B"
+  model_config.model_source="huggingface"
+  model_config.lora_config={}
+  model_config.mesh.shape="${mesh_shape}"
+  model_config.mesh.axis_names="${mesh_axis_names}"
+  model_config.rng_seed=0
+  model_config.use_flash_attn=true
+  model_config.model_download_path="/tmp/models/qwen2.5-0.5b"
+  tokenizer_config.tokenizer_path="Qwen/Qwen2.5-0.5B"
+  tokenizer_config.tokenizer_type="huggingface"
+  dataset_name="mtnt/en-fr"
+  batch_size="${batch_size}"
+  optimizer_config.opt_type="adamw"
+  optimizer_config.learning_rate=1e-5
+  max_target_length=1024
+  training_config.eval_every_n_steps=20
+  training_config.max_steps="${max_steps}"
+  training_config.metrics_logging_options.log_dir="/tmp/tensorboard/full"
+  training_config.metrics_logging_options.flush_every_n_steps=20
+  "$@"
+)
 
 if [[ -n "${TPU_NAME}" ]]; then
   # Multi-host fan-out: run the SAME command on every worker of the TPU pod via
@@ -67,12 +69,15 @@ if [[ -n "${TPU_NAME}" ]]; then
     exit 1
   fi
   REPO_DIR=${REPO_DIR:-$(pwd)}
+  # The remote --command runs through a shell, so shell-quote every token
+  # (printf %q) to preserve args containing spaces across the SSH boundary.
+  remote_cmd=$(printf '%q ' "${PYTHON_CMD[@]}")
   gcloud compute tpus tpu-vm ssh "${TPU_NAME}" \
     --zone="${ZONE}" \
     --worker=all \
-    --command="cd ${REPO_DIR} && mesh_shape='${mesh_shape}' batch_size=${batch_size} max_steps=${max_steps} ${PYTHON_CMD}"
+    --command="cd $(printf '%q' "${REPO_DIR}") && mesh_shape='${mesh_shape}' batch_size=${batch_size} max_steps=${max_steps} ${remote_cmd}"
 else
   # Single-host: run locally exactly as before.
-  eval "${PYTHON_CMD}"
+  "${PYTHON_CMD[@]}"
 fi
 
