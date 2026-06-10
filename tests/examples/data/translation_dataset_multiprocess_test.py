@@ -12,34 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Real 2-process ``jax.distributed`` simulation of multi-controller SFT data.
+"""Real 2-process ``jax.distributed`` simulation of multi-controller data flow.
 
-This is the load-bearing proof that the per-process data sharding in
-``translation_dataset`` is correct under genuine multi-controller JAX. It does
-NOT mock ``jax.process_count``: it spawns two OS processes that each call
+This is the load-bearing proof that Plan C's per-process data sharding -- one
+generic ``cli.utils.data.shard_by_process`` strided slice -- is correct under
+genuine multi-controller JAX for BOTH the SFT and the GRPO/RL paths. It does NOT
+mock ``jax.process_count``: it spawns two OS processes that each call
 ``jax.distributed.initialize()`` against a shared coordinator (the exact same
-mechanism a 2-host TPU job uses), builds the per-process data loader, and then
-runs the real ``sharding_utils.shard_input`` to assemble the global batch from
-the two process-local sub-batches.
+mechanism a 2-host TPU job uses), builds the per-process dataset, and then runs
+the real ``sharding_utils.shard_input`` to assemble the global batch from the
+two process-local sub-batches.
 
-It asserts:
+Two workers exercise the two batching sites:
+
+  ``--worker-sft``: the SFT translation ``grain.MapDataset`` loader
+  (``translation_dataset._build_data_loader``).
+  ``--worker-grpo``: the RL ``post_init_dataset`` ``grain.MapDataset`` pipeline
+  (``cli.utils.data.post_init_dataset``) that feeds the GRPO learner.
+
+For each path it asserts:
 
   * Each process initializes with ``process_count == 2`` and a disjoint
     ``process_index``.
-  * Each process's loader yields a LOCAL batch of ``global_batch // 2`` rows.
-  * The two processes read DISJOINT record shards.
+  * Each process's pipeline yields a LOCAL batch of ``global_batch // 2`` rows
+    drawn from a DISJOINT strided shard (proc 0 -> even records, proc 1 -> odd),
+    and the two shards together cover every record.
   * ``shard_input`` -> ``jax.make_array_from_process_local_data`` assembles a
     global array of shape ``(global_batch, seq_len)`` that is NOT fully
     addressable (it spans both processes), and each process's addressable slice
     equals the local batch it fed in. This is the precise
-    ``make_array_from_process_local_data`` contract the SFT trainer relies on.
-  * A loss-style token-weighted ``sum(value)/sum(weight)`` reduction, computed
-    inside a ``jax.jit`` on the GLOBAL mesh over the process-local shards,
-    produces a REPLICATED scalar that equals the reduction over the FULL global
-    batch and is NOT equal to either process's local-shard-only value. This is
-    the load-bearing proof that the loss / grad_norm scalars the SFT trainer
-    feeds to ``metrics_logger`` (which only reads them on ``process_index == 0``)
-    are the true GLOBAL reductions, not process-0's local-shard value.
+    ``make_array_from_process_local_data`` contract the trainers rely on.
+  * A token-weighted ``sum(value)/sum(weight)`` reduction computed inside a
+    ``jax.jit`` on the GLOBAL mesh over the process-local shards produces a
+    REPLICATED scalar that equals the reduction over the FULL global batch and
+    is NOT equal to either process's local-shard-only value -- the proof that
+    the assembled global array is the true global batch, not a per-host shard.
 
 Run directly (it self-spawns the workers):
 
@@ -67,22 +74,15 @@ def _pick_free_port() -> int:
     return s.getsockname()[1]
 
 
-def _worker_main(process_id: int, coordinator_address: str) -> None:
-  """Body run inside each spawned process.
-
-  Prints ``RESULT <process_id> <json>`` on success or raises (non-zero exit) on
-  failure so the parent test can assert per-process outcomes.
-  """
+def _init_worker(process_id: int, coordinator_address: str):
+  """Sets up CPU devices + ``jax.distributed`` and returns the global mesh."""
   # Must be set before jax initializes its backend.
   os.environ["XLA_FLAGS"] = (
       f"--xla_force_host_platform_device_count={_DEVICES_PER_PROCESS}"
   )
   os.environ["JAX_PLATFORMS"] = "cpu"
 
-  import json
-
   import jax
-  import jax.numpy as jnp
   import jax.sharding as shd
   import numpy as np
 
@@ -91,15 +91,102 @@ def _worker_main(process_id: int, coordinator_address: str) -> None:
       num_processes=_NUM_PROCESSES,
       process_id=process_id,
   )
-
-  # Import after distributed init so jax.process_count() is already correct
-  # wherever module-level code might read it.
-  from tunix.examples.data import translation_dataset
-  from tunix.sft import sharding_utils
-
   assert jax.process_count() == _NUM_PROCESSES, jax.process_count()
   assert jax.process_index() == process_id, jax.process_index()
   assert jax.device_count() == _NUM_PROCESSES * _DEVICES_PER_PROCESS
+
+  mesh = shd.Mesh(
+      np.array(jax.devices()).reshape(jax.device_count(), 1),
+      axis_names=("fsdp", "tp"),
+  )
+  return mesh
+
+
+def _assemble_and_check(local_tokens, mesh, record_ids_of_local_batch):
+  """Runs ``shard_input`` on a local batch and proves the global assembly.
+
+  Returns a JSON-serializable dict of results for the parent test, including the
+  replicated global token-weighted metric and its references.
+  """
+  import jax
+  import jax.numpy as jnp
+  import jax.sharding as shd
+  import numpy as np
+
+  from tunix.sft import sharding_utils
+
+  with mesh:
+    global_arr = sharding_utils.shard_input(local_tokens, ("fsdp",))
+
+  assert global_arr.shape == (_GLOBAL_BATCH, _SEQ_LEN), global_arr.shape
+  # The assembled global array spans both processes -> not fully addressable.
+  assert not global_arr.is_fully_addressable
+
+  # This process's addressable slice must equal the local batch it fed in.
+  addressable = np.concatenate(
+      [np.asarray(shard.data) for shard in global_arr.addressable_shards],
+      axis=0,
+  )
+  addressable = addressable[np.argsort(addressable[:, 0])]
+  expected = np.asarray(local_tokens)[
+      np.argsort(np.asarray(local_tokens)[:, 0])
+  ]
+  assert np.array_equal(addressable, expected), (addressable, expected)
+
+  # GLOBAL-metric proof: a sum/sum reduction over the sharded global array,
+  # computed inside a jit on the global mesh, is a REPLICATED scalar equal to
+  # the reduction over the full global batch and unequal to either local shard.
+  def _value(tokens):
+    rec = tokens[:, 0].astype(jnp.float32)  # == record_id + 1
+    return jnp.sum(rec * rec), jnp.sum(rec)
+
+  @jax.jit
+  def _global_mean(global_tokens):
+    total_value, total_weight = _value(global_tokens)
+    return total_value / total_weight
+
+  with mesh:
+    global_mean_arr = _global_mean(global_arr)
+  metric_replicated = bool(global_mean_arr.sharding.spec == shd.PartitionSpec())
+  assert metric_replicated, global_mean_arr.sharding.spec
+  global_mean = float(jax.device_get(global_mean_arr))
+
+  def _np_mean(record_ids):
+    rec = np.array([rid + 1 for rid in record_ids], dtype=np.float64)
+    return float(np.sum(rec * rec) / np.sum(rec))
+
+  # The full global batch is the union of both processes' strided first-batch
+  # shards: proc p contributes records p, p+2, ... so the first local batch of
+  # size 2 is {0, 2} for p0 and {1, 3} for p1 -> global {0, 1, 2, 3}.
+  local_bs = _GLOBAL_BATCH // _NUM_PROCESSES
+  full_global_ids = sorted(
+      p + _NUM_PROCESSES * j
+      for p in range(_NUM_PROCESSES)
+      for j in range(local_bs)
+  )
+  global_ref = _np_mean(full_global_ids)
+  local_only_ref = _np_mean(sorted(record_ids_of_local_batch))
+
+  assert abs(global_mean - global_ref) < 1e-4, (global_mean, global_ref)
+  assert abs(global_mean - local_only_ref) > 1e-4, (global_mean, local_only_ref)
+
+  return {
+      "global_shape": list(global_arr.shape),
+      "fully_addressable": bool(global_arr.is_fully_addressable),
+      "global_metric_replicated": metric_replicated,
+      "global_metric": global_mean,
+      "global_metric_ref": global_ref,
+      "local_only_metric_ref": local_only_ref,
+  }
+
+
+def _sft_worker(process_id: int, coordinator_address: str) -> None:
+  """Exercises the SFT translation MapDataset loader end to end."""
+  mesh = _init_worker(process_id, coordinator_address)
+
+  import numpy as np
+
+  from tunix.examples.data import translation_dataset
 
   class _FakeTokenizer:
 
@@ -135,135 +222,94 @@ def _worker_main(process_id: int, coordinator_address: str) -> None:
   local_bs = _GLOBAL_BATCH // _NUM_PROCESSES
   all_batches = list(loader)
   assert all_batches, "loader produced no batches"
-  # Record ids this process consumed across ALL of its batches (token0 ==
-  # record_id + 1). This is what proves the shards are disjoint and cover every
-  # record.
   local_record_ids = []
   for batch in all_batches:
     tokens = np.asarray(batch.input_tokens)
-    # Every batch this process produces is exactly the LOCAL batch size.
     assert tokens.shape == (local_bs, _SEQ_LEN), tokens.shape
     local_record_ids.extend(int(row[0]) - 1 for row in tokens)
   local_record_ids = sorted(local_record_ids)
 
-  # Use the first batch to exercise shard_input below.
-  local_batch = all_batches[0]
-  local_tokens = np.asarray(local_batch.input_tokens)
+  local_tokens = np.asarray(all_batches[0].input_tokens)
+  first_batch_ids = [int(row[0]) - 1 for row in local_tokens]
+  metrics = _assemble_and_check(local_tokens, mesh, first_batch_ids)
 
-  # Build the GLOBAL mesh spanning both processes and shard the local batch via
-  # the real production code path.
-  mesh = shd.Mesh(
-      np.array(jax.devices()).reshape(jax.device_count(), 1),
-      axis_names=("fsdp", "tp"),
+  _emit_result(process_id, local_tokens, local_record_ids, metrics)
+
+
+def _grpo_worker(process_id: int, coordinator_address: str) -> None:
+  """Exercises the RL post_init_dataset MapDataset pipeline end to end."""
+  mesh = _init_worker(process_id, coordinator_address)
+
+  import grain
+  import numpy as np
+
+  from tunix.cli.utils import data as data_lib
+
+  class _FakeTokenizer:
+
+    def encode(self, text):
+      return text.split()
+
+  # A GRPO-style MapDataset: each record carries a "prompts" string and an
+  # integer record id. post_init_dataset will shard it across processes.
+  dataset = grain.MapDataset.source(
+      [{"prompts": f"r{i}", "rid": i} for i in range(_NUM_RECORDS)]
   )
-  with mesh:
-    global_arr = sharding_utils.shard_input(local_batch.input_tokens, ("fsdp",))
-
-  assert global_arr.shape == (_GLOBAL_BATCH, _SEQ_LEN), global_arr.shape
-  # The assembled global array spans both processes, so it is not fully
-  # addressable from a single process.
-  assert not global_arr.is_fully_addressable
-
-  # This process's addressable slice must equal the local batch it fed in.
-  addressable = np.concatenate(
-      [np.asarray(shard.data) for shard in global_arr.addressable_shards],
-      axis=0,
+  first_segment, second_segment = data_lib.post_init_dataset(
+      dataset,
+      tokenizer=_FakeTokenizer(),
+      batch_size=_GLOBAL_BATCH,
+      num_batches=None,
+      max_prompt_length=None,
   )
-  addressable = addressable[np.argsort(addressable[:, 0])]
-  expected = local_tokens[np.argsort(local_tokens[:, 0])]
-  assert np.array_equal(addressable, expected), (addressable, expected)
+  assert second_segment is None
 
-  # ---------------------------------------------------------------------------
-  # Load-bearing GLOBAL-metric proof.
-  #
-  # The SFT trainer computes loss as sum(per-token NLL) / sum(target_mask) and
-  # grad_norm via optax.global_norm INSIDE a jit on the global mesh. Both are
-  # full-array reductions over a process-sharded array, so XLA inserts an
-  # all-reduce and the resulting scalar is REPLICATED (identical on every
-  # process). metrics_logger then reads that scalar only on process 0. We prove
-  # that contract here with a representative loss-style sum/sum reduction over
-  # the global array assembled from the per-process LOCAL shards.
-  #
-  # Define a per-example weight/value from the row's record token so the two
-  # processes contribute DIFFERENT quantities; this guarantees the global mean
-  # cannot accidentally equal a single process's local-only mean.
-  def _value(tokens):  # token-weighted "loss-like" quantity, jnp or np.
-    rec = tokens[:, 0].astype(jnp.float32)  # == record_id + 1
-    weight = rec  # per-example token weight (analogous to target_mask sum)
-    value = rec * rec  # per-example weighted contribution
-    return jnp.sum(value), jnp.sum(weight)
+  local_bs = _GLOBAL_BATCH // _NUM_PROCESSES
+  all_batches = list(first_segment)
+  assert all_batches, "post_init_dataset produced no batches"
+  local_record_ids = []
+  for batch in all_batches:
+    rids = np.asarray(batch["rid"])
+    assert rids.shape == (local_bs,), rids.shape
+    local_record_ids.extend(int(r) for r in rids)
+  local_record_ids = sorted(local_record_ids)
 
-  @jax.jit
-  def _global_token_weighted_mean(global_tokens):
-    total_value, total_weight = _value(global_tokens)
-    return total_value / total_weight  # global sum / global sum
-
-  with mesh:
-    global_mean_arr = _global_token_weighted_mean(global_arr)
-  # A scalar produced by reductions over a sharded array is REPLICATED: its
-  # sharding carries an empty PartitionSpec (no dimension is sharded), so every
-  # process holds the identical value. (`is_fully_addressable` can still be
-  # False because the replicated sharding nominally spans all processes'
-  # devices; replication is the property that matters, and the parent test
-  # additionally cross-checks the value is identical across processes.)
-  metric_replicated = bool(global_mean_arr.sharding.spec == shd.PartitionSpec())
-  assert metric_replicated, (
-      "global metric must be replicated",
-      global_mean_arr.sharding.spec,
+  # Build a token tensor analogous to the rollout's prompt_ids: each row encodes
+  # its record id (+1 so token != pad id 0), shaped (local_bs, seq_len). This is
+  # exactly the fully-addressable per-process array grpo_learner feeds to
+  # rl_cluster.shard_input.
+  first_rids = [int(r) for r in np.asarray(all_batches[0]["rid"])]
+  local_tokens = np.stack(
+      [np.full((_SEQ_LEN,), rid + 1, dtype=np.int32) for rid in first_rids]
   )
-  global_mean = float(jax.device_get(global_mean_arr))
+  metrics = _assemble_and_check(local_tokens, mesh, first_rids)
 
-  # numpy reference over the FULL global batch (both processes' records). The
-  # fake tokenizer maps record i -> token value (i+1).
-  def _np_mean(record_ids):
-    rec = np.array([rid + 1 for rid in record_ids], dtype=np.float64)
-    return float(np.sum(rec * rec) / np.sum(rec))
+  _emit_result(process_id, local_tokens, local_record_ids, metrics)
 
-  # Records in THIS process's local first batch (the one fed to shard_input).
-  local_first_ids = sorted(int(row[0]) - 1 for row in local_tokens)
-  # The full global batch is the union of every process's first-batch shard.
-  # ShardByJaxProcess assigns process p the contiguous record block starting at
-  # p * (_NUM_RECORDS // _NUM_PROCESSES), and grain.Batch takes the first
-  # local_bs of those for the first batch. With _NUM_RECORDS=8,
-  # _NUM_PROCESSES=2, local_bs=2 that is {0,1} for p0 and {4,5} for p1.
-  full_global_ids = sorted(
-      p * (_NUM_RECORDS // _NUM_PROCESSES) + j
-      for p in range(_NUM_PROCESSES)
-      for j in range(local_bs)
-  )
 
-  global_ref = _np_mean(full_global_ids)
-  local_only_ref = _np_mean(local_first_ids)
+def _emit_result(process_id, local_tokens, local_record_ids, metrics) -> None:
+  import json
 
-  assert abs(global_mean - global_ref) < 1e-4, (global_mean, global_ref)
-  # The proof: the jitted global reduction is NOT process p's local-only value.
-  assert abs(global_mean - local_only_ref) > 1e-4, (
-      global_mean,
-      local_only_ref,
-  )
+  import jax
+  import numpy as np
 
-  print(
-      "RESULT "
-      + json.dumps({
-          "process_id": process_id,
-          "process_count": jax.process_count(),
-          "local_batch_shape": list(local_tokens.shape),
-          "global_shape": list(global_arr.shape),
-          "local_record_ids": local_record_ids,
-          "fully_addressable": bool(global_arr.is_fully_addressable),
-          "global_metric_replicated": metric_replicated,
-          "global_metric": global_mean,
-          "global_metric_ref": global_ref,
-          "local_only_metric_ref": local_only_ref,
-      }),
-      flush=True,
-  )
+  result = {
+      "process_id": process_id,
+      "process_count": jax.process_count(),
+      "local_batch_shape": list(np.asarray(local_tokens).shape),
+      "local_record_ids": local_record_ids,
+      **metrics,
+  }
+  print("RESULT " + json.dumps(result), flush=True)
   jax.distributed.shutdown()
 
 
-class TranslationDatasetMultiProcessTest(absltest.TestCase):
+class _MultiProcessShardingTest(absltest.TestCase):
+  """Shared 2-process assertions parameterized by which worker flag to spawn."""
 
-  def test_two_process_sharding_assembles_global_batch(self):
+  WORKER_FLAG = None
+
+  def _run(self):
     import json
     import subprocess
 
@@ -275,7 +321,7 @@ class TranslationDatasetMultiProcessTest(absltest.TestCase):
               [
                   sys.executable,
                   __file__,
-                  "--worker",
+                  self.WORKER_FLAG,
                   str(process_id),
                   coordinator_address,
               ],
@@ -291,9 +337,7 @@ class TranslationDatasetMultiProcessTest(absltest.TestCase):
       out, _ = proc.communicate(timeout=300)
       outputs[process_id] = out
       self.assertEqual(
-          proc.returncode,
-          0,
-          msg=f"worker {process_id} failed:\n{out}",
+          proc.returncode, 0, msg=f"worker {process_id} failed:\n{out}"
       )
       for line in out.splitlines():
         if line.startswith("RESULT "):
@@ -311,15 +355,8 @@ class TranslationDatasetMultiProcessTest(absltest.TestCase):
       self.assertEqual(res["global_shape"], [_GLOBAL_BATCH, _SEQ_LEN])
       self.assertFalse(res["fully_addressable"])
 
-      # GLOBAL-metric proof (mirrors the loss / grad_norm reduction path):
-      #   * the jitted sum/sum reduction over the sharded global array yields a
-      #     REPLICATED scalar (fully addressable on every process),
-      #   * it equals the reduction over the FULL global batch, and
-      #   * it does NOT equal this process's local-shard-only value.
-      self.assertTrue(
-          res["global_metric_replicated"],
-          msg="global loss-style metric must be a replicated scalar",
-      )
+      # GLOBAL-metric proof: replicated, equals full-global, != local-only.
+      self.assertTrue(res["global_metric_replicated"])
       self.assertAlmostEqual(
           res["global_metric"], res["global_metric_ref"], places=4
       )
@@ -327,27 +364,45 @@ class TranslationDatasetMultiProcessTest(absltest.TestCase):
           res["global_metric"], res["local_only_metric_ref"], places=4
       )
 
-    # Both processes must observe the SAME global metric value (replicated).
+    # Both processes observe the SAME replicated global metric...
     self.assertAlmostEqual(
         results[0]["global_metric"], results[1]["global_metric"], places=6
     )
-    # And the two processes' local-only values genuinely differ, so "equals the
-    # global, differs from local-only" is a real (non-degenerate) discriminator.
+    # ...while their local-only values genuinely differ (non-degenerate proof).
     self.assertNotAlmostEqual(
         results[0]["local_only_metric_ref"],
         results[1]["local_only_metric_ref"],
         places=4,
     )
 
-    # The two processes read disjoint record shards covering all records.
+    # The two processes read disjoint strided shards covering all records:
+    # proc 0 -> even record ids, proc 1 -> odd record ids.
     ids0 = set(results[0]["local_record_ids"])
     ids1 = set(results[1]["local_record_ids"])
+    self.assertEqual(ids0, set(range(0, _NUM_RECORDS, 2)))
+    self.assertEqual(ids1, set(range(1, _NUM_RECORDS, 2)))
     self.assertEqual(ids0 & ids1, set(), msg="record shards must be disjoint")
     self.assertEqual(ids0 | ids1, set(range(_NUM_RECORDS)))
 
 
+class SftTranslationMultiProcessTest(_MultiProcessShardingTest):
+  WORKER_FLAG = "--worker-sft"
+
+  def test_two_process_sharding_assembles_global_batch(self):
+    self._run()
+
+
+class GrpoPostInitMultiProcessTest(_MultiProcessShardingTest):
+  WORKER_FLAG = "--worker-grpo"
+
+  def test_two_process_sharding_assembles_global_batch(self):
+    self._run()
+
+
 if __name__ == "__main__":
-  if len(sys.argv) >= 4 and sys.argv[1] == "--worker":
-    _worker_main(int(sys.argv[2]), sys.argv[3])
+  if len(sys.argv) >= 4 and sys.argv[1] == "--worker-sft":
+    _sft_worker(int(sys.argv[2]), sys.argv[3])
+  elif len(sys.argv) >= 4 and sys.argv[1] == "--worker-grpo":
+    _grpo_worker(int(sys.argv[2]), sys.argv[3])
   else:
     absltest.main()
