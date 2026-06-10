@@ -593,12 +593,41 @@ class Attention(nnx.Module):
         dtype=config.dtype,
         param_dtype=config.param_dtype,
     )
+    # Retrieve TP size from the active JAX mesh
+    tp_size = 1
+    mesh = None
+    if hasattr(jax.sharding, 'get_abstract_mesh'):
+      try:
+        m = jax.sharding.get_abstract_mesh()
+        if m is not None and not getattr(m, 'empty', False):
+          mesh = m
+      except Exception:
+        pass
+    if mesh is None:
+      mesh = pxla.thread_resources.env.physical_mesh
+    if mesh is not None and 'tp' in mesh.axis_names:
+      tp_size = mesh.shape['tp']
+
+    self.act_btnh_kv = config.shd_config.act_btnh
+    if self.num_kv_heads % tp_size != 0:
+      import logging as python_logging
+      python_logging.info(
+          f"num_kv_heads={self.num_kv_heads} is not divisible by TP size {tp_size}, "
+          f"sharding k/v projections on head_dim instead of kv-heads."
+      )
+      fsdp = config.shd_config.act_btnh[0]
+      self.act_btnh_kv = (fsdp, None, None, 'tp')
 
 
     k_eq_v = (
         config.k_eq_v_global if attn_type == AttentionType.GLOBAL else False
     )
     if k_eq_v:
+      k_sharding = config.shd_config.q_weight_ndh
+      if self.num_kv_heads % tp_size != 0:
+        fsdp = config.shd_config.q_weight_ndh[1]
+        k_sharding = (None, fsdp, 'tp')
+
 
       self.k_einsum = Einsum(
           einsum_str='BSD,KDH->BSKH',
@@ -608,7 +637,7 @@ class Attention(nnx.Module):
               self.head_dim,
           ),
           rngs=rngs,
-          sharding=config.shd_config.q_weight_ndh,
+          sharding=k_sharding,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
@@ -627,9 +656,7 @@ class Attention(nnx.Module):
               self.head_dim,
           ),
           rngs=rngs,
-          sharding=(None, None, 'fsdp', None)
-          if self.num_kv_heads == 1
-          else config.shd_config.kv_weight_cndh,
+          sharding=kv_sharding,
           dtype=config.dtype,
           param_dtype=config.param_dtype,
       )
@@ -753,9 +780,10 @@ class Attention(nnx.Module):
     _, _, kh, _ = key_proj.shape
 
     if self.config.use_flash_attention and seq_len > 1:
-      query_proj_splash = query_proj.transpose(0, 2, 1, 3)
-      key_proj_splash = key_proj.transpose(0, 2, 1, 3)
-      value_proj_splash = value_proj.transpose(0, 2, 1, 3)
+      query_proj = query_proj.transpose(0, 2, 1, 3)
+      key_proj = key_proj.transpose(0, 2, 1, 3)
+      value_proj = value_proj.transpose(0, 2, 1, 3)
+
 
       mesh = pxla.thread_resources.env.physical_mesh
       if self.attn_type == AttentionType.LOCAL_SLIDING:
@@ -797,7 +825,6 @@ class Attention(nnx.Module):
       )
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      unsharded_seq = P(shd_b, shd_n, None, shd_h)
       shd_n_kv = (
           shd_n
           if mesh is not None
@@ -839,9 +866,9 @@ class Attention(nnx.Module):
 
         qkv: jaxtyping.Array = sharded_splash_attn(
             splash_attn_kernel,
-            query_proj_splash,
-            key_proj_splash,
-            value_proj_splash,
+            query_proj,
+            key_proj,
+            value_proj,
             segment_ids,
             segment_ids,
         )
@@ -997,27 +1024,24 @@ class Attention(nnx.Module):
     ):
       cache_len = min(max_seq_len, self.config.sliding_window_size)
 
-    return {
-        'k': jnp.zeros(
-            (
-                batch_size,
-                cache_len,
-                self.num_kv_heads,
-                self.head_dim,
-            ),
-            dtype,
-        ),
-        'v': jnp.zeros(
-            (
-                batch_size,
-                cache_len,
-                self.num_kv_heads,
-                self.head_dim,
-            ),
-            dtype,
-        ),
-        'end_index': jnp.zeros((batch_size,), jnp.int32),
-    }
+    cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
+    k = shard(
+        np.zeros(cache_shape, dtype),
+        self.config.shd_config.act_btnh,
+        eager=True
+    )
+    v = shard(
+        np.zeros(cache_shape, dtype),
+        self.config.shd_config.act_btnh,
+        eager=True,
+    )
+    end_index = shard(
+        np.zeros((batch_size,), np.int32),
+        self.config.shd_config.act_btnh[:1],
+        eager=True,
+    )
+    return {'k': k, 'v': v, 'end_index': end_index}
+
 
 
 class FeedForward(nnx.Module):

@@ -73,6 +73,7 @@ absl_logging.set_verbosity(absl_logging.INFO)
 absl_logging.set_stderrthreshold("info")
 print("Logging configured at INFO level.")
 
+os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
 from tunix.models.gemma4 import params_safetensors as params_lib
 from tunix.models.gemma4 import model as model_lib
 from tunix.oss import utils as oss_utils
@@ -373,7 +374,7 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 # step-by-step reasoning; with thinking enabled the model writes hundreds of
 # ``<|channel>..<channel|>`` tokens per turn and exhausts the response budget
 # before producing an action.
-chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False)
+chat_parser = parser.Gemma4ChatTemplateParser(tokenizer, enable_thinking=False, strip_past_thinking=False)
 
 train_dataset, test_dataset = create_datasets()
 train_dataset, val_dataset = data_lib.post_init_dataset(
@@ -504,7 +505,22 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
+        "limit_mm_per_prompt": {
+            "image": 0,
+            "video": 0,
+            "audio": 0,
+        },
+        "hf_overrides": {
+            "final_logit_softcapping": 30.0,
+            "text_config": {
+                "final_logit_softcapping": 30.0,
+            },
+        },
     },
+    "rollout_vllm_sampling_kwargs": {
+        "skip_special_tokens": False,
+    },
+
 }
 
 if ROLLOUT_ENGINE == "vllm":
@@ -581,6 +597,7 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     advantage_estimator=args.advantage_estimator,
+    degenerate_group_masking=False,
 )
 
 rl_cluster = rl_cluster_lib.RLCluster(
