@@ -287,6 +287,92 @@ def _grpo_worker(process_id: int, coordinator_address: str) -> None:
   _emit_result(process_id, local_tokens, local_record_ids, metrics)
 
 
+_ODD_NUM_RECORDS = 7
+_ODD_GLOBAL_BATCH = 2  # local batch size 1 -> one record per batch per host
+
+
+def _odd_count_worker(process_id: int, coordinator_address: str) -> None:
+  """Regression for B1: odd record count must yield equal per-host batch counts.
+
+  With ``_ODD_NUM_RECORDS`` not a multiple of ``process_count``,
+  ``shard_by_process`` must truncate to an even length so both hosts produce the
+  SAME number of batches; otherwise the cross-host
+  ``make_array_from_process_local_data`` collective (run every training step)
+  hangs because the host with fewer batches exhausts first. Each step here runs
+  the real ``shard_input`` -> that collective, so an unequal-shard regression
+  surfaces as a hang (300s timeout) rather than a silent wrong number. The
+  global batch (``_ODD_GLOBAL_BATCH``) is sized to the number of processes so the
+  per-step global array shards one row per host across the fsdp sub-axis. The
+  worker reports its batch count and consumed record ids for the parent test.
+  """
+  mesh = _init_worker(process_id, coordinator_address)
+
+  import json
+
+  import grain
+  import jax
+  import jax.sharding as shd
+  import numpy as np
+
+  from tunix.cli.utils import data as data_lib
+  from tunix.sft import sharding_utils
+
+  class _FakeTokenizer:
+
+    def encode(self, text):
+      return text.split()
+
+  dataset = grain.MapDataset.source(
+      [{"prompts": f"r{i}", "rid": i} for i in range(_ODD_NUM_RECORDS)]
+  )
+  first_segment, _ = data_lib.post_init_dataset(
+      dataset,
+      tokenizer=_FakeTokenizer(),
+      batch_size=_ODD_GLOBAL_BATCH,
+      num_batches=None,
+      max_prompt_length=None,
+  )
+
+  # Use an fsdp axis sized to the process count so the global batch of
+  # _ODD_GLOBAL_BATCH (== _NUM_PROCESSES) shards exactly one row per host. The
+  # default _init_worker mesh has fsdp == device_count (4), which would not
+  # divide a global batch of 2; build a (process_count, _) mesh instead.
+  odd_mesh = shd.Mesh(
+      np.array(jax.devices()).reshape(_NUM_PROCESSES, -1),
+      axis_names=("fsdp", "tp"),
+  )
+  del mesh
+
+  local_bs = _ODD_GLOBAL_BATCH // _NUM_PROCESSES
+  consumed_ids = []
+  num_batches = 0
+  for batch in first_segment:
+    rids = np.asarray(batch["rid"])
+    assert rids.shape == (local_bs,), rids.shape
+    consumed_ids.extend(int(r) for r in rids)
+    # Assemble the global batch for this step, exercising the cross-host
+    # collective. With unequal shards this is exactly where a host would block.
+    tokens = np.stack(
+        [np.full((_SEQ_LEN,), rid + 1, dtype=np.int32) for rid in rids]
+    )
+    with odd_mesh:
+      global_arr = sharding_utils.shard_input(tokens, ("fsdp",))
+    assert global_arr.shape == (_ODD_GLOBAL_BATCH, _SEQ_LEN), global_arr.shape
+    num_batches += 1
+
+  print(
+      "RESULT "
+      + json.dumps({
+          "process_id": process_id,
+          "process_count": jax.process_count(),
+          "num_batches": num_batches,
+          "consumed_ids": sorted(consumed_ids),
+      }),
+      flush=True,
+  )
+  jax.distributed.shutdown()
+
+
 def _emit_result(process_id, local_tokens, local_record_ids, metrics) -> None:
   import json
 
@@ -399,10 +485,77 @@ class GrpoPostInitMultiProcessTest(_MultiProcessShardingTest):
     self._run()
 
 
+class OddCountMultiProcessTest(absltest.TestCase):
+  """Regression for B1: an odd record count must not hang multi-host training.
+
+  Spawns the two real ``jax.distributed`` processes against
+  ``post_init_dataset`` with ``_ODD_NUM_RECORDS`` (7) records, which is NOT a
+  multiple of ``_NUM_PROCESSES`` (2). Each step runs the real cross-host
+  ``shard_input``; if ``shard_by_process`` failed to equalize the shard lengths
+  the host with fewer batches would exhaust first and the collective would block
+  until the 300s timeout. The test asserts both hosts emit the SAME number of
+  batches, read disjoint strided shards, and drop only the tail record (6).
+  """
+
+  def test_odd_record_count_yields_equal_batch_counts(self):
+    import json
+    import subprocess
+
+    coordinator_address = f"localhost:{_pick_free_port()}"
+    procs = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                __file__,
+                "--worker-oddcount",
+                str(process_id),
+                coordinator_address,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for process_id in range(_NUM_PROCESSES)
+    ]
+
+    results = {}
+    outputs = {}
+    for process_id, proc in enumerate(procs):
+      out, _ = proc.communicate(timeout=300)
+      outputs[process_id] = out
+      self.assertEqual(
+          proc.returncode, 0, msg=f"worker {process_id} failed:\n{out}"
+      )
+      for line in out.splitlines():
+        if line.startswith("RESULT "):
+          results[process_id] = json.loads(line[len("RESULT ") :])
+
+    self.assertLen(results, _NUM_PROCESSES, msg=outputs)
+
+    # The load-bearing assertion: equal batch counts -> no host blocks forever.
+    self.assertEqual(
+        results[0]["num_batches"],
+        results[1]["num_batches"],
+        msg="hosts must emit equal batch counts or the collective hangs",
+    )
+    # 7 records / 2 procs -> truncate to 6 -> 3 records each -> local_bs 1 -> 3.
+    self.assertEqual(results[0]["num_batches"], 3)
+
+    ids0 = set(results[0]["consumed_ids"])
+    ids1 = set(results[1]["consumed_ids"])
+    self.assertEqual(ids0, {0, 2, 4})
+    self.assertEqual(ids1, {1, 3, 5})
+    self.assertEqual(ids0 & ids1, set(), msg="record shards must be disjoint")
+    # The tail record beyond the even-length truncation is dropped on every host.
+    self.assertNotIn(_ODD_NUM_RECORDS - 1, ids0 | ids1)
+
+
 if __name__ == "__main__":
   if len(sys.argv) >= 4 and sys.argv[1] == "--worker-sft":
     _sft_worker(int(sys.argv[2]), sys.argv[3])
   elif len(sys.argv) >= 4 and sys.argv[1] == "--worker-grpo":
     _grpo_worker(int(sys.argv[2]), sys.argv[3])
+  elif len(sys.argv) >= 4 and sys.argv[1] == "--worker-oddcount":
+    _odd_count_worker(int(sys.argv[2]), sys.argv[3])
   else:
     absltest.main()

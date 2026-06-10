@@ -52,18 +52,33 @@ def shard_by_process(dataset, global_batch_size: int) -> Tuple[Any, int]:
   global batch covers every record exactly once.
 
   This helper realizes that with a single, generic idiom shared by SFT and RL:
-  it slices the dataset with ``dataset[process_index::process_count]`` (disjoint
-  by construction, with no shuffling/determinism caveat) and returns the
-  per-process local batch size ``global_batch_size // process_count``. Callers
-  then batch the sliced dataset at the returned local size.
+  it first truncates the dataset to a multiple of ``process_count`` so every
+  process's strided shard has the SAME length, then slices it with
+  ``dataset[process_index::process_count]`` (disjoint by construction, with no
+  shuffling/determinism caveat) and returns the per-process local batch size
+  ``global_batch_size // process_count``. Callers then batch the sliced dataset
+  at the returned local size.
 
-  On a single host ``process_count == 1``, the slice is ``dataset[0::1]`` (the
-  whole dataset in original order) and the local batch size equals
-  ``global_batch_size``, so single-host behavior is byte-for-byte unchanged.
+  The truncation is load-bearing under multi-controller JAX: every training step
+  calls ``jax.make_array_from_process_local_data``, a cross-host collective. If
+  the shards differed in length (which happens whenever ``len(dataset)`` is not a
+  multiple of ``process_count``), the hosts would produce a different number of
+  batches and the one with fewer would exhaust first, leaving the others blocked
+  forever in the collective. Equal-length shards restore the guarantee the
+  reverted ``grain.ShardByJaxProcess(drop_remainder=True)`` used to provide; the
+  dropped records come only from the tail.
+
+  On a single host ``process_count == 1``, the truncation is to the full length
+  (a no-op), the slice is ``dataset[0::1]`` (the whole dataset in original
+  order), and the local batch size equals ``global_batch_size``, so single-host
+  behavior is byte-for-byte unchanged.
 
   Example (2 processes, global batch 4):
     process 0 -> dataset[0::2] (records 0, 2, 4, ...), local batch size 2
     process 1 -> dataset[1::2] (records 1, 3, 5, ...), local batch size 2
+  With an odd length (e.g. 7 records, 2 processes) the dataset is first
+  truncated to 6, so process 0 gets {0, 2, 4} and process 1 gets {1, 3, 5}
+  (both length 3) and record 6 is dropped from the tail.
 
   Args:
     dataset: A ``grain.MapDataset`` (or any sliceable, ``len``-able dataset)
@@ -83,7 +98,11 @@ def shard_by_process(dataset, global_batch_size: int) -> Tuple[Any, int]:
   process_count = validate_global_batch_divisible(global_batch_size)
   if process_count == 1:
     return dataset, global_batch_size
-  local_dataset = dataset[jax.process_index() :: process_count]
+  # Truncate to a multiple of process_count so every process's strided shard has
+  # the same length (see docstring: unequal shards hang the cross-host
+  # make_array_from_process_local_data collective).
+  even_len = (len(dataset) // process_count) * process_count
+  local_dataset = dataset[:even_len][jax.process_index() :: process_count]
   return local_dataset, global_batch_size // process_count
 
 
@@ -326,12 +345,12 @@ def post_init_dataset(
   # Under multi-controller JAX every host runs this same program. Shard each
   # segment across processes by a disjoint strided slice and batch at the
   # per-process local size, so the per-process batches reassemble into the
-  # global batch via sharding_utils.shard_input -> make_array_from_process_local
-  # _data in the RL cluster (identical contract to the SFT data loaders). The
-  # slice is applied AFTER the train/val split so every process computes the
-  # same split boundary, and BEFORE to_iter_dataset, the way grain's
-  # MapDataset API is meant to be sharded. On a single host this is the
-  # identity and the per-process batch equals batch_size, so the produced
+  # global batch via sharding_utils.shard_input ->
+  # make_array_from_process_local_data in the RL cluster (identical contract to
+  # the SFT data loaders). The slice is applied AFTER the train/val split so
+  # every process computes the same split boundary, and BEFORE to_iter_dataset,
+  # the way grain's MapDataset API is meant to be sharded. On a single host this
+  # is the identity and the per-process batch equals batch_size, so the produced
   # batches are byte-for-byte unchanged.
   def _shard_repeat_batch(segment):
     local_segment, local_batch_size = shard_by_process(segment, batch_size)

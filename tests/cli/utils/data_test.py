@@ -452,6 +452,46 @@ class PostInitDatasetShardingTest(parameterized.TestCase):
     self.assertEqual(per_process_answers[1], set(range(1, num_records, 2)))
     self.assertEqual(per_process_answers[0] & per_process_answers[1], set())
 
+  def test_odd_record_count_yields_equal_batch_counts_across_processes(self):
+    # Regression for B1: with a record count that is not a multiple of
+    # process_count, both processes must still emit the SAME number of batches,
+    # otherwise the cross-host make_array_from_process_local_data collective
+    # hangs. 7 records / 2 processes -> truncate to 6 -> 3 records each ->
+    # local batch size 1 -> 3 batches each; record 6 is dropped from the tail.
+    global_batch_size = 2
+    num_records = 7
+
+    per_process_answers = {}
+    per_process_num_batches = {}
+    for proc_index in (0, 1):
+      with mock.patch.object(
+          data_lib.jax, "process_count", return_value=2
+      ), mock.patch.object(
+          data_lib.jax, "process_index", return_value=proc_index
+      ):
+        first, _ = data_lib.post_init_dataset(
+            self._records(num_records),
+            tokenizer=_FakeTokenizer(),  # pytype: disable=wrong-arg-types
+            batch_size=global_batch_size,
+            num_batches=None,
+            max_prompt_length=None,
+        )
+        batches = list(first)
+      per_process_num_batches[proc_index] = len(batches)
+      per_process_answers[proc_index] = {
+          a for b in batches for a in b["answer"]
+      }
+
+    # Equal batch counts across hosts is the property that prevents the hang.
+    self.assertEqual(per_process_num_batches[0], per_process_num_batches[1])
+    self.assertEqual(per_process_num_batches[0], 3)  # floor(7/2) / local_bs 1
+
+    # Disjoint strided shards; the tail record (6) is dropped, the rest covered.
+    self.assertEqual(per_process_answers[0], {0, 2, 4})
+    self.assertEqual(per_process_answers[1], {1, 3, 5})
+    self.assertEqual(per_process_answers[0] & per_process_answers[1], set())
+    self.assertNotIn(6, per_process_answers[0] | per_process_answers[1])
+
   def test_rejects_indivisible_global_batch(self):
     with mock.patch.object(
         data_lib.jax, "process_count", return_value=3
@@ -492,6 +532,37 @@ class ShardByProcessTest(parameterized.TestCase):
     self.assertEqual(local_bs, 2)
     # Each process reads a disjoint strided shard: proc 0 -> evens, 1 -> odds.
     self.assertEqual([r["v"] for r in local], list(range(proc_index, 8, 2)))
+
+  @parameterized.parameters((0,), (1,))
+  def test_odd_length_yields_equal_shards_dropping_tail(self, proc_index):
+    # Regression for B1: an odd record count must not produce unequal shards
+    # (which would hang the cross-host collective). 7 records / 2 processes
+    # truncates to 6 -> proc 0 {0,2,4}, proc 1 {1,3,5}; record 6 is tail-dropped.
+    dataset = _BaseDataset([{"v": i} for i in range(7)])
+    with mock.patch.object(
+        data_lib.jax, "process_count", return_value=2
+    ), mock.patch.object(
+        data_lib.jax, "process_index", return_value=proc_index
+    ):
+      local, local_bs = data_lib.shard_by_process(dataset, global_batch_size=4)
+    self.assertEqual(local_bs, 2)
+    self.assertEqual([r["v"] for r in local], list(range(proc_index, 6, 2)))
+
+  def test_odd_length_shards_have_equal_length_across_processes(self):
+    # The two processes' shards must be the SAME length so they emit the same
+    # number of batches (the property whose absence hangs multi-host training).
+    dataset = _BaseDataset([{"v": i} for i in range(7)])
+    lengths = []
+    for proc_index in (0, 1):
+      with mock.patch.object(
+          data_lib.jax, "process_count", return_value=2
+      ), mock.patch.object(
+          data_lib.jax, "process_index", return_value=proc_index
+      ):
+        local, _ = data_lib.shard_by_process(dataset, global_batch_size=4)
+      lengths.append(len(list(local)))
+    self.assertEqual(lengths[0], lengths[1])
+    self.assertEqual(lengths[0], 3)  # floor(7 / 2)
 
   def test_two_process_shards_are_disjoint_and_cover_all(self):
     dataset = _BaseDataset([{"v": i} for i in range(8)])
