@@ -62,9 +62,6 @@ class RolloutOutput:
 
   # The log probs from sampler generations.
   logprobs: list[np.ndarray] | None
-  
-  # The prompt log probs from prompt prefill.
-  prompt_logprobs: list[np.ndarray] | None = None
 
 
 @dataclasses.dataclass
