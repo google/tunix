@@ -344,6 +344,29 @@ def get_logprobs_from_vllm_output(
   return extracted
 
 
+def get_prompt_logprobs_from_vllm_output(
+    token_ids: List[int],
+    prompt_logprobs: List[Optional[Dict[int, Any]]],
+) -> List[float]:
+  """Extracts prompt log probabilities from the vLLM output."""
+  if not prompt_logprobs:
+    logging.debug('Prompt logprobs are missing')
+    return []
+  assert len(prompt_logprobs) == len(token_ids), (
+      f'prompt log probs has {len(prompt_logprobs)} number of items !='
+      f' {len(token_ids)} token ids'
+  )
+  extracted = [0.0]  # The logprob of the first prompt token is None, default to 0.0
+  for tok_id, tok_logprobs in zip(token_ids[1:], prompt_logprobs[1:]):
+    if tok_logprobs is not None and tok_id in tok_logprobs:
+      extracted.append(tok_logprobs[tok_id].logprob)
+    else:
+      print(f'Logprobs for prompt token id {tok_id} is missing, default to 0.0.')
+      extracted.append(0.0)
+  # print(f'Extracted prompt logprobs length: {len(extracted)}')
+  return extracted
+
+
 def build_flat_dict(
     flat_state: Iterator[tuple[tuple[str, ...], nnx.State]],
     mappings: Dict[str, tuple[str, tuple[int, ...]]],

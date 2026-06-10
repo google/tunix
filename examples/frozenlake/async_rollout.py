@@ -1068,13 +1068,13 @@ async def main():
       )
       print("X" * 149 + "\n")
 
-    if captured_arguments is not None:
-      with rl_cluster._get_mesh_and_logical_axis_rules_cm(rl_cluster_lib.Role.ACTOR):
-        compare_layers(
-            vllm_model=rl_cluster.rollout._sampler._model_runner.model,
-            trainer_model=rl_cluster.actor_trainer.model,
-            captured_args=captured_arguments,
-        )
+    # if captured_arguments is not None:
+    #   with rl_cluster._get_mesh_and_logical_axis_rules_cm(rl_cluster_lib.Role.ACTOR):
+    #     compare_layers(
+    #         vllm_model=rl_cluster.rollout._sampler._model_runner.model,
+    #         trainer_model=rl_cluster.actor_trainer.model,
+    #         captured_args=captured_arguments,
+    #     )
 
   finally:
     await producer_task

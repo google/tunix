@@ -954,6 +954,12 @@ class RLCluster:
           itertools.chain.from_iterable(out.logprobs for out in outputs)
       )
 
+    prompt_logprobs = None
+    if outputs[0].prompt_logprobs is not None:
+      prompt_logprobs = list(
+          itertools.chain.from_iterable(out.prompt_logprobs for out in outputs)
+      )
+
     logits = None
     if outputs[0].logits is not None:
       logits = list(
@@ -970,6 +976,7 @@ class RLCluster:
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,
+        prompt_logprobs=prompt_logprobs,
     )
 
   def get_ref_per_token_logps(
@@ -1064,6 +1071,7 @@ class RLCluster:
       eos_id: int,
       micro_batch_size: int | None = None,
       temperature: float | None = None,
+      keep_all_logits: bool = False,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1129,6 +1137,7 @@ class RLCluster:
                 stop_gradient=True,
                 return_logits=False,
                 temperature=temperature,
+                keep_all_logits=keep_all_logits,
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)

@@ -280,6 +280,7 @@ def process_ids(
         "stop_gradient",
         "return_logits",
         "temperature",
+        "keep_all_logits",
     ),
 )
 def compute_per_token_logps(
@@ -295,6 +296,7 @@ def compute_per_token_logps(
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
     temperature: float = 1.0,
+    keep_all_logits: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -367,8 +369,8 @@ def compute_per_token_logps(
 
   logits, _ = model(input_tokens, **model_kwargs)
 
-  if segment_ids is not None:
-    # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
+  if segment_ids is not None or keep_all_logits:
+    # Packed Mode or keep_all_logits: Evaluate the full sequence (mixed prompts + completions).
     # Since predicting token[i] requires logit[i-1], we skip the first token.
     # This shrinks the output shape to [Batch, FullSeqLen - 1]
     logits_to_keep = input_tokens.shape[1] - 1
@@ -382,7 +384,7 @@ def compute_per_token_logps(
   input_tokens_to_keep = input_tokens[:, -logits_to_keep:]
   per_token_logps = selective_log_softmax(logits, input_tokens_to_keep)
 
-  if segment_ids is not None:
+  if segment_ids is not None or keep_all_logits:
     # Pad the front with 0.0 to make shape back to [Batch, FullSeqLen]. This
     # aligns indices (logp[i] matches token[i]) and avoids mask slicing downstream.
     per_token_logps = jnp.pad(

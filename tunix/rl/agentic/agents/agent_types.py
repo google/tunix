@@ -83,6 +83,8 @@ class Step:
   env_tokens: Optional[np.ndarray] = None
   env_masks: Optional[np.ndarray] = None
   logprobs: Optional[np.ndarray] = None
+  env_logprobs: Optional[np.ndarray] = None
+  prompt_logprobs: Optional[np.ndarray] = None
 
 
 class TrajectoryStatus(Enum):
@@ -125,6 +127,7 @@ class Trajectory:
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
   reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  prompt_logprobs: Optional[np.ndarray] = None
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -142,6 +145,7 @@ class Trajectory:
         "status": self.status.name,
         "env_time": self.env_time,
         "reward_time": self.reward_time,
+        "prompt_logprobs": self.prompt_logprobs,
     }
 
 

@@ -197,6 +197,19 @@ class UtilsTest(parameterized.TestCase):
         [],
     )
 
+  def test_prompt_logprobs_basic_extraction(self):
+    token_ids = [101, 271, 567]
+    prompt_logprobs = [
+        None,
+        {271: Logprob(-1.71)},
+        {567: Logprob(-0.37)},
+    ]
+    expected = [0.0, -1.71, -0.37]
+    self.assertEqual(
+        utils.get_prompt_logprobs_from_vllm_output(token_ids, prompt_logprobs),
+        expected,
+    )
+
   def test_transfer_state_with_mappings_tranpose_and_sharding_device(self):
     device_count = len(jax.devices())
     if device_count < 2 or device_count % 2 != 0:
