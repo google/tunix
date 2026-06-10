@@ -83,13 +83,24 @@ def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):
   if x.ndim < len(pspec):
     return shd.NamedSharding(mesh, shd.PartitionSpec())  # Replicated
 
+  # Under multi-controller JAX each process supplies only its process-local
+  # shard, and `jax.make_array_from_process_local_data` assembles the global
+  # array whose extent along a process-sharded axis is `local_extent *
+  # process_count`. The divisibility check below must therefore reason about the
+  # GLOBAL extent, not the local one: e.g. a local batch of 2 across 2 processes
+  # is a global batch of 4, which is evenly divisible by an fsdp axis of size 4.
+  # On a single host `process_count == 1`, so this is a no-op and single-host
+  # behavior is unchanged.
+  process_count = jax.process_count()
+
   # Check for divisibility for all sharded axes.
   for i, axis_name in enumerate(pspec):
     if axis_name is not None:
       axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
+      global_extent = x.shape[i] * process_count
       for name in axis_names:
         axis_size = mesh.shape[name]
-        if x.shape[i] % axis_size != 0:
+        if global_extent % axis_size != 0:
           # Replicate if not evenly divisible.
           return shd.NamedSharding(mesh, shd.PartitionSpec())
   return shd.NamedSharding(mesh, pspec)

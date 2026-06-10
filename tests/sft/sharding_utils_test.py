@@ -130,10 +130,33 @@ class ShardingUtilsTest(parameterized.TestCase):
       x_resharded = sharding_utils.shard_input(x_sharded, ('tp',))
     self.assertIsNot(x_sharded, x_resharded)
 
+  def test_get_sharding_uses_global_extent_for_divisibility(self):
+    # Under multi-controller JAX each process supplies a process-local shard.
+    # A local batch of 2 across process_count=2 is a global batch of 4, which is
+    # divisible by an fsdp axis of size 4 -> it must shard, not replicate.
+    device_cnt = jax.device_count()
+    mesh = shd.Mesh(
+        np.array(jax.devices()).reshape(device_cnt, 1),
+        axis_names=('fsdp', 'tp'),
+    )
+    pspec = shd.PartitionSpec('fsdp')
+    local = np.ones((device_cnt // 2, 4, 8))  # local extent = global // 2
+
+    # process_count == 1: local extent (4) not divisible by axis (8) -> replicate
+    with mock.patch.object(sharding_utils.jax, 'process_count', return_value=1):
+      single = sharding_utils.get_sharding(local, mesh, pspec)
+    self.assertEqual(single.spec, shd.PartitionSpec())
+
+    # process_count == 2: global extent (8) divisible by axis (8) -> shard
+    with mock.patch.object(sharding_utils.jax, 'process_count', return_value=2):
+      multi = sharding_utils.get_sharding(local, mesh, pspec)
+    self.assertEqual(multi.spec, pspec)
+
   @mock.patch('tunix.sft.sharding_utils.jax.make_array_from_process_local_data')
   def test_global_array_noop(self, mock_make_array):
     mock_make_array.side_effect = ValueError(
-        "device_put's first argument must be a fully addressable array, but got value with devices {TpuDevice(id=0..."
+        "device_put's first argument must be a fully addressable array, but got"
+        ' value with devices {TpuDevice(id=0...'
     )
     device_cnt = jax.device_count()
     mesh = shd.Mesh(
@@ -150,6 +173,7 @@ class ShardingUtilsTest(parameterized.TestCase):
 
     self.assertIs(x, x_resharded)
     mock_make_array.assert_not_called()
+
 
 if __name__ == '__main__':
   absltest.main()

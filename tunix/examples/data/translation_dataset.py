@@ -19,6 +19,7 @@ from typing import Any
 
 import datasets
 from grain import python as grain
+import jax
 import numpy as np
 import tensorflow_datasets as tfds
 from tunix.generate import tokenizer_adapter as tokenizer_lib
@@ -61,7 +62,21 @@ def create_datasets(
 
   Returns:
     A tuple of train and eval data iterators.
+
+  Raises:
+    ValueError: If ``global_batch_size`` is not divisible by the number of JAX
+      processes. Under multi-controller JAX each process must contribute an
+      equal-sized per-process shard of the global batch, so the global batch
+      size must split evenly across processes.
   """
+  process_count = jax.process_count()
+  if global_batch_size % process_count != 0:
+    raise ValueError(
+        f"global_batch_size ({global_batch_size}) must be divisible by the "
+        f"number of JAX processes ({process_count}) so each process can "
+        "contribute an equal per-process shard of the global batch."
+    )
+
   if dataset_name == "mtnt/en-fr":
     import tensorflow_datasets.translate.mtnt
 
@@ -105,19 +120,44 @@ def _build_data_loader(
     tokenizer: tokenizer_lib.Tokenizer,
     input_template: dict[str, str],
 ) -> grain.DataLoader:
-  """Builds a data loader for the given data source."""
+  """Builds a data loader for the given data source.
+
+  ``batch_size`` is the GLOBAL batch size. Under multi-controller JAX each host
+  runs this same program, so the sampler is sharded by JAX process and each
+  process batches only its local shard of ``batch_size // jax.process_count()``
+  examples. ``tunix.sft.sharding_utils.shard_input`` then assembles those
+  per-process local batches into the global batch via
+  ``jax.make_array_from_process_local_data`` (which expects each process to
+  supply exactly its local sub-batch).
+
+  On a single host ``jax.process_count() == 1``, the per-process batch equals
+  the global batch and ``grain.ShardByJaxProcess`` selects the single shard, so
+  behavior is identical to the previous ``grain.NoSharding()`` configuration.
+  """
+  process_count = jax.process_count()
+  # create_datasets validates divisibility; guard here too so this helper is
+  # safe to call directly.
+  if batch_size % process_count != 0:
+    raise ValueError(
+        f"batch_size ({batch_size}) must be divisible by the number of JAX "
+        f"processes ({process_count})."
+    )
+  per_process_batch_size = batch_size // process_count
   return grain.DataLoader(
       data_source=data_source,
       sampler=grain.IndexSampler(
           num_records=len(data_source),
           num_epochs=num_epochs,
-          shard_options=grain.NoSharding(),
+          # Each JAX process reads a disjoint shard of the records. drop_remainder
+          # keeps every process's shard the same length so the per-process
+          # batches stay aligned across hosts.
+          shard_options=grain.ShardByJaxProcess(drop_remainder=True),
       ),
       operations=[
           _Tokenize(tokenizer, input_template),
           _BuildTrainInput(max_seq_len, tokenizer.pad_id()),
           _FilterOverlength(max_seq_len),
-          grain.Batch(batch_size=batch_size, drop_remainder=True),
+          grain.Batch(batch_size=per_process_batch_size, drop_remainder=True),
       ],
   )
 
