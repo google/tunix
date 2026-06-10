@@ -244,7 +244,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         algo_config=self.algo_config,
         pad_id=self.rl_cluster.rollout.pad_id(),
         eos_id=self.rl_cluster.rollout.eos_id(),
-        compute_logps_chunk_size=self.rl_cluster.cluster_config.training_config.compute_logps_chunk_size,
     )
 
     self.rl_cluster.actor_trainer.with_loss_fn(
@@ -330,12 +329,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     old_logprobs_list: List[np.ndarray] = []
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
+    statuses_list: List[str] = []
     trajectories_to_log = []
-
-    last_turn_prompt_tokens_list: List[np.ndarray] = []
-    last_turn_tokens_list: List[np.ndarray] = []
+    
+    
+    last_turn_prompt_list: List[np.ndarray] = []
     last_turn_prompt_logprobs_list: List[np.ndarray] = []
+    last_turn_tokens_list: List[np.ndarray] = []
     last_turn_logprobs_list: List[np.ndarray] = []
+    last_turn_prompt_conversation_logprobs_list: List[np.ndarray] = []
+    last_turn_conversation_tokens_list: List[np.ndarray] = []
+    last_turn_conversation_masks_list: List[np.ndarray] = []
 
     for item in trajectories:
       trajectories_to_log.append(item.traj)
@@ -359,11 +363,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         raise ValueError("policy_version is missing from trajectory task.")
       policy_versions_list.append(policy_version)
       trajectory_rewards_list.append(item.traj.get("trajectory_reward"))
-
-      last_turn_prompt_tokens_list.append(item.traj.get("last_turn_prompt_tokens"))
+      statuses_list.append(item.traj.get("status") or "")
+      
+      last_turn_prompt_list.append(item.traj.get("last_turn_prompt_tokens"))
       last_turn_tokens_list.append(item.traj.get("last_turn_tokens"))
       last_turn_prompt_logprobs_list.append(item.traj.get("last_turn_prompt_logprobs"))
       last_turn_logprobs_list.append(item.traj.get("last_turn_logprobs"))
+      last_turn_prompt_conversation_logprobs_list.append(item.traj.get("last_turn_prompt_conversation_logprobs"))
+      last_turn_conversation_tokens_list.append(item.traj.get("last_turn_conversation_tokens"))
+      last_turn_conversation_masks_list.append(item.traj.get("last_turn_conversation_masks"))
 
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
@@ -379,14 +387,28 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     padded_completion_ids = []
     padded_completion_masks = []
     padded_old_logprobs = []
+    padded_stripped_last_turn_logprobs = []
+    padded_last_turn_conversation_tokens = []
+    padded_last_turn_conversation_masks = []
 
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
-    for prompt_tokens, completion_tokens, completion_mask, old_logprobs in zip(
+    for (
+        prompt_tokens,
+        completion_tokens,
+        completion_mask,
+        old_logprobs,
+        last_turn_prompt_conv_logprobs,
+        last_turn_conv_tokens,
+        last_turn_conv_masks,
+    ) in zip(
         prompt_tokens_list,
         completion_tokens_list,
         completion_masks_list,
         old_logprobs_list,
+        last_turn_prompt_conversation_logprobs_list,
+        last_turn_conversation_tokens_list,
+        last_turn_conversation_masks_list,
     ):
       if (
           len(completion_tokens) >= max_response_length
@@ -409,6 +431,35 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               :max_response_length
           ]
       )
+      
+      if last_turn_conv_tokens is not None and len(last_turn_conv_tokens) > 0:
+        padded_last_turn_conversation_tokens.append(
+            agentic_utils.right_pad(
+                last_turn_conv_tokens,
+                length=max_response_length,
+                pad=pad_value,
+                dtype=last_turn_conv_tokens.dtype,
+            )[:max_response_length]
+        )
+      else:
+        padded_last_turn_conversation_tokens.append(
+            np.full(max_response_length, pad_value, dtype=np.int32)
+        )
+        
+      if last_turn_conv_masks is not None and len(last_turn_conv_masks) > 0:
+        padded_last_turn_conversation_masks.append(
+            agentic_utils.right_pad(
+                last_turn_conv_masks,
+                length=max_response_length,
+                pad=0,
+                dtype=last_turn_conv_masks.dtype,
+            )[:max_response_length]
+        )
+      else:
+        padded_last_turn_conversation_masks.append(
+            np.zeros(max_response_length, dtype=np.int32)
+        )
+
       if self.algo_config.use_rollout_logps:
         if old_logprobs is not None:
           padded_old_logprobs.append(
@@ -424,15 +475,138 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               np.zeros(max_response_length, dtype=np.float32)
           )
 
+        if last_turn_prompt_conv_logprobs is not None:
+          stripped_logprobs = last_turn_prompt_conv_logprobs[len(prompt_tokens):]
+          padded_stripped_last_turn_logprobs.append(
+              agentic_utils.right_pad(
+                  stripped_logprobs,
+                  length=max_response_length,
+                  pad=0.0,
+                  dtype=stripped_logprobs.dtype,
+              )[:max_response_length]
+          )
+        else:
+          padded_stripped_last_turn_logprobs.append(
+              np.zeros(max_response_length, dtype=np.float32)
+          )
+
     prompt_ids = jnp.asarray(padded_prompt_ids)
     prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
+    last_turn_completion_ids = jnp.asarray(padded_last_turn_conversation_tokens)
+    last_turn_completion_mask = jnp.asarray(padded_last_turn_conversation_masks)
     logging.debug(
         "Token shapes: prompt_ids=%s, completion_ids=%s",
         prompt_ids.shape,
         completion_ids.shape,
     )
+
+    if self.rl_cluster.tokenizer is not None:
+      for i in range(len(prompt_ids)):
+        traj_dict = trajectories[i].traj
+        status = traj_dict.get("status")
+        steps_count = traj_dict.get("steps_count")
+
+        # Sampler (Rollout) final turn perspective
+        sampler_p_tokens = last_turn_prompt_list[i]
+        sampler_r_tokens = last_turn_tokens_list[i][:max_response_length]
+        if sampler_p_tokens is None:
+          sampler_p_tokens = np.array([], dtype=np.int32)
+        if sampler_r_tokens is None:
+          sampler_r_tokens = np.array([], dtype=np.int32)
+        sampler_concatenated_ids = list(sampler_p_tokens) + list(sampler_r_tokens)
+        sampler_concat_str = self.rl_cluster.tokenizer.decode(sampler_concatenated_ids)
+        
+        # Trainer final turn perspective
+        prompt_unpadded = [t for t in prompt_ids[i].tolist() if t != pad_value]
+        completion_unpadded = [t for t in completion_ids[i].tolist() if t != pad_value]
+        trainer_concatenated_ids = prompt_unpadded + completion_unpadded
+        trainer_concat_str = self.rl_cluster.tokenizer.decode(trainer_concatenated_ids)
+        
+        print(f"\n=================== FINAL TURN DEBUG FOR ITEM {i} ===================")
+        print(f"--- Trajectory Status: {status}")
+        print(f"--- Steps Count: {steps_count}")
+        print(f"--- Sampler Concatenated Tokens (len={len(sampler_concatenated_ids)}): {sampler_concatenated_ids}")
+        print(f"--- Sampler Concatenated String:\n{sampler_concat_str}\n")
+        print(f"--- Trainer Concatenated Tokens (len={len(trainer_concatenated_ids)}): {trainer_concatenated_ids}")
+        print(f"--- Trainer Concatenated String:\n{trainer_concat_str}\n")
+        
+        # Sampler reconstructed conversation comparison
+        sampler_conv_tokens = last_turn_conversation_tokens_list[i]
+        sampler_conv_masks = last_turn_conversation_masks_list[i]
+        if sampler_conv_tokens is None:
+          sampler_conv_tokens = np.array([], dtype=np.int32)
+        if sampler_conv_masks is None:
+          sampler_conv_masks = np.array([], dtype=np.int32)
+          
+        # Trainer conversation
+        trainer_conv_tokens = [t for t in completion_ids[i].tolist() if t != pad_value]
+        active_len = len(trainer_conv_tokens)
+        trainer_conv_masks = completion_mask[i][:active_len].tolist()
+        
+        sampler_conv_tokens_list = sampler_conv_tokens.tolist()
+        sampler_conv_masks_list = sampler_conv_masks.tolist()
+        
+        print(f"--- Sampler Reconstructed Conversation Tokens (len={len(sampler_conv_tokens_list)}): {sampler_conv_tokens_list}")
+        print(f"--- Trainer Conversation Tokens (len={len(trainer_conv_tokens)}): {trainer_conv_tokens}")
+        
+        if sampler_conv_tokens_list == trainer_conv_tokens:
+          print(">>> CONVERSATION TOKENS MATCH!")
+        else:
+          print(">>> CONVERSATION TOKENS MISMATCH!")
+          min_c_len = min(len(sampler_conv_tokens_list), len(trainer_conv_tokens))
+          first_c_diff = -1
+          for idx in range(min_c_len):
+            if sampler_conv_tokens_list[idx] != trainer_conv_tokens[idx]:
+              first_c_diff = idx
+              break
+          if first_c_diff != -1:
+            print(f"    First token mismatch at index {first_c_diff}: Sampler={sampler_conv_tokens_list[first_c_diff]} vs Trainer={trainer_conv_tokens[first_c_diff]}")
+            
+        print(f"--- Sampler Reconstructed Conversation Masks (len={len(sampler_conv_masks_list)}): {sampler_conv_masks_list}")
+        print(f"--- Trainer Conversation Masks (len={len(trainer_conv_masks)}): {trainer_conv_masks}")
+        if sampler_conv_masks_list == trainer_conv_masks:
+          print(">>> CONVERSATION MASKS MATCH!")
+        else:
+          print(">>> CONVERSATION MASKS MISMATCH!")
+          min_m_len = min(len(sampler_conv_masks_list), len(trainer_conv_masks))
+          first_m_diff = -1
+          for idx in range(min_m_len):
+            if sampler_conv_masks_list[idx] != trainer_conv_masks[idx]:
+              first_m_diff = idx
+              break
+          if first_m_diff != -1:
+            print(f"    First mask mismatch at index {first_m_diff}: Sampler={sampler_conv_masks_list[first_m_diff]} vs Trainer={trainer_conv_masks[first_m_diff]}")
+            
+        if status == "MAX_CONTEXT_LIMIT_REACHED" and len(sampler_r_tokens) == 0:
+          print(">>> STATUS: SKIPPED (MAX_CONTEXT_LIMIT_REACHED)")
+        else:
+          # Do a comparison element-wise
+          if sampler_concatenated_ids == trainer_concatenated_ids:
+            print(">>> STATUS: PERFECT MATCH (SAMPLER == TRAINER)")
+          else:
+            print(">>> STATUS: MISMATCH DETECTED!")
+            min_len = min(len(sampler_concatenated_ids), len(trainer_concatenated_ids))
+            first_diff = -1
+            for idx in range(min_len):
+              if sampler_concatenated_ids[idx] != trainer_concatenated_ids[idx]:
+                first_diff = idx
+                break
+            if first_diff != -1:
+              print(f"--- First mismatch at index {first_diff}:")
+              print(f"    Sampler token = {sampler_concatenated_ids[first_diff]} (decoded: {self.rl_cluster.tokenizer.decode([sampler_concatenated_ids[first_diff]])})")
+              print(f"    Trainer token = {trainer_concatenated_ids[first_diff]} (decoded: {self.rl_cluster.tokenizer.decode([trainer_concatenated_ids[first_diff]])})")
+              
+              # Print 20 tokens context around mismatch
+              sampler_context = sampler_concatenated_ids[max(0, first_diff - 10) : min(len(sampler_concatenated_ids), first_diff + 10)]
+              trainer_context = trainer_concatenated_ids[max(0, first_diff - 10) : min(len(trainer_concatenated_ids), first_diff + 10)]
+              print(f"    Decoded Context around mismatch (index {first_diff}):")
+              print(f"      Sampler: {[self.rl_cluster.tokenizer.decode([t]) for t in sampler_context]}")
+              print(f"      Trainer: {[self.rl_cluster.tokenizer.decode([t]) for t in trainer_context]}")
+            else:
+              print(f"--- Mismatch is in length only. Sampler len = {len(sampler_concatenated_ids)}, Trainer len = {len(trainer_concatenated_ids)}")
+        print("=====================================================================\n")
 
     # Sampler-trainer log-probability mismatch diagnostic. When rollout
     # logprobs are present we recompute the trainer's logprobs so the per-batch
@@ -446,26 +620,36 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     actor_mesh = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR]
     have_actor_mesh = actor_mesh is not None and not actor_mesh.empty
     rollout_per_token_logps = None
+    stripped_rollout_per_token_logps = None
     trainer_per_token_logps = None
+    if self.algo_config.use_rollout_logps and padded_stripped_last_turn_logprobs:
+      stripped_rollout_per_token_logps = jnp.asarray(padded_stripped_last_turn_logprobs)
     if self.algo_config.use_rollout_logps and padded_old_logprobs:
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
       old_per_token_logps = rollout_per_token_logps
-      # The diagnostic pass (and the sampler-IS ``token`` path, which needs the
-      # trainer's recomputed logp as ``old_per_token_logps``) requires a real
-      # actor mesh; skip when not available.
-      need_trainer_logps = (
-          have_actor_mesh or self.algo_config.sampler_is == "token"
+
+    # The diagnostic pass (and the sampler-IS ``token`` path, which needs the
+    # trainer's recomputed logp as ``old_per_token_logps``) requires a real
+    # actor mesh; skip when not available.
+    need_trainer_logps = (
+        have_actor_mesh or self.algo_config.sampler_is == "token"
+    )
+    last_turn_trainer_per_token_logps = None
+    if need_trainer_logps:
+      trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+          prompt_tokens=prompt_ids,
+          completion_tokens=completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
       )
-      if need_trainer_logps:
-        trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
-            prompt_tokens=prompt_ids,
-            completion_tokens=completion_ids,
-            pad_id=pad_value,
-            eos_id=eos_value,
-            micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-        )
-        for i in range(len(trainer_per_token_logps)):
-            print(f"length of trainer logprobs for item {i}: {len(trainer_per_token_logps[i]) if trainer_per_token_logps is not None else 'None'}")
+      last_turn_trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+          prompt_tokens=prompt_ids,
+          completion_tokens=last_turn_completion_ids,
+          pad_id=pad_value,
+          eos_id=eos_value,
+          micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
+      )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
       # ``exp(current_logp - trainer_logp)`` rather than against the rollout
@@ -611,21 +795,21 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         rollout_per_token_logps is not None
         and trainer_per_token_logps is not None
     ):
-    #   # Temporary side-by-side token logprob print for the first item in the batch
-    #   print("=== TEMPORARY SAMPLER-VS-TRAINER DEBUG PRINT ===")
-    #   batch_idx = 0
-    #   attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
-    #   print(f"first batch of attn_completion_mask: {attn_completion_mask[batch_idx]}")
-    #   print(f"completion ids shape: {completion_ids.shape}")
-    #   print(f"first completion_ids length: {completion_ids.shape[1]}")
-    #   for t_idx in range(completion_ids.shape[1]):
-    #     if attn_completion_mask[batch_idx][t_idx] > 0:
-    #       tok_id = int(completion_ids[batch_idx][t_idx])
-    #       tok_str = self.rl_cluster.tokenizer.decode([tok_id])
-    #       s_logp = rollout_per_token_logps[batch_idx][t_idx]
-    #       t_logp = trainer_per_token_logps[batch_idx][t_idx]
-    #       print(f"t={t_idx:03d} | Token: {tok_str!r:<15} | Sampler Logp: {s_logp:.4f} | Trainer Logp: {t_logp:.4f} | Diff: {t_logp - s_logp:.4f}")
-    #   print("=================================================", flush=True)
+      # # Temporary side-by-side token logprob print for the first item in the batch
+      # print("=== TEMPORARY SAMPLER-VS-TRAINER DEBUG PRINT ===")
+      # batch_idx = 0
+      # attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
+      # print(f"first batch of attn_completion_mask: {attn_completion_mask[batch_idx]}")
+      # print(f"completion ids shape: {completion_ids.shape}")
+      # print(f"first completion_ids length: {completion_ids.shape[1]}")
+      # for t_idx in range(completion_ids.shape[1]):
+      #   if attn_completion_mask[batch_idx][t_idx] > 0:
+      #     tok_id = int(completion_ids[batch_idx][t_idx])
+      #     tok_str = self.rl_cluster.tokenizer.decode([tok_id])
+      #     s_logp = rollout_per_token_logps[batch_idx][t_idx]
+      #     t_logp = trainer_per_token_logps[batch_idx][t_idx]
+      #     print(f"t={t_idx:03d} | Token: {tok_str!r:<15} | Sampler Logp: {s_logp:.4f} | Trainer Logp: {t_logp:.4f} | Diff: {t_logp - s_logp:.4f}")
+      # print("=================================================", flush=True)
       
       # ``completion_mask`` is the assistant-vs-env mask built upstream
       # (1 for assistant-generated tokens, 0 for env-injected tokens), and
@@ -638,195 +822,86 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       mask = completion_mask.astype(jnp.bool_)
       mask_f = mask.astype(jnp.float32)
       mask_sum = jnp.maximum(mask_f.sum(), 1.0)
-      diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
-      diff_mean = float((diff * mask_f).sum() / mask_sum)
-      diff_max = float(jnp.where(mask, diff, 0.0).max())
-      # Per-position probability-space diff |exp(rollout) - exp(trainer)|.
-      # More representative than logp_diff for confidence agreement: logp can
-      # diverge arbitrarily for very low-probability tokens while their
-      # contribution to the importance ratio is negligible. prob_diff weights
-      # each position by its actual probability mass.
-      rp = jnp.exp(rollout_per_token_logps)
-      tp = jnp.exp(trainer_per_token_logps)
-      prob_diff = jnp.abs(rp - tp)
-      prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
-      prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
-      # Pearson correlation between exp(logp) at masked positions.
-      rp_flat = rp.reshape(-1)
-      tp_flat = tp.reshape(-1)
-      mf = mask_f.reshape(-1)
-      rp_mean = (rp_flat * mf).sum() / mask_sum
-      tp_mean = (tp_flat * mf).sum() / mask_sum
-      rp_d = (rp_flat - rp_mean) * mf
-      tp_d = (tp_flat - tp_mean) * mf
-      cov = (rp_d * tp_d).sum() / mask_sum
-      rp_var = (rp_d * rp_d).sum() / mask_sum
-      tp_var = (tp_d * tp_d).sum() / mask_sum
-      pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+      # 1. Original (old) logprobs comparison metrics
+      diff_mean = 0.0
+      diff_max = 0.0
+      prob_diff_mean = 0.0
+      prob_diff_max = 0.0
+      pearson = 0.0
+      if rollout_per_token_logps is not None:
+        diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
+        diff_mean = float((diff * mask_f).sum() / mask_sum)
+        diff_max = float(jnp.where(mask, diff, 0.0).max())
+        rp = jnp.exp(rollout_per_token_logps)
+        tp = jnp.exp(trainer_per_token_logps)
+        prob_diff = jnp.abs(rp - tp)
+        prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+        prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
+        rp_flat = rp.reshape(-1)
+        tp_flat = tp.reshape(-1)
+        mf = mask_f.reshape(-1)
+        rp_mean = (rp_flat * mf).sum() / mask_sum
+        tp_mean = (tp_flat * mf).sum() / mask_sum
+        rp_d = (rp_flat - rp_mean) * mf
+        tp_d = (tp_flat - tp_mean) * mf
+        cov = (rp_d * tp_d).sum() / mask_sum
+        rp_var = (rp_d * rp_d).sum() / mask_sum
+        tp_var = (tp_d * tp_d).sum() / mask_sum
+        pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+
+      # 3. Last turn logprobs comparison using last_turn_trainer_per_token_logps
+      lt_mask = last_turn_completion_mask.astype(jnp.bool_)
+      lt_mask_f = lt_mask.astype(jnp.float32)
+      lt_mask_sum = jnp.maximum(lt_mask_f.sum(), 1.0)
+      diff_mean_lt = 0.0
+      diff_max_lt = 0.0
+      prob_diff_mean_lt = 0.0
+      prob_diff_max_lt = 0.0
+      pearson_lt = 0.0
+      if stripped_rollout_per_token_logps is not None and last_turn_trainer_per_token_logps is not None:
+        diff_lt = jnp.abs(stripped_rollout_per_token_logps - last_turn_trainer_per_token_logps)
+        diff_mean_lt = float((diff_lt * lt_mask_f).sum() / lt_mask_sum)
+        diff_max_lt = float(jnp.where(lt_mask, diff_lt, 0.0).max())
+        rp_lt = jnp.exp(stripped_rollout_per_token_logps)
+        tp_lt = jnp.exp(last_turn_trainer_per_token_logps)
+        prob_diff_lt = jnp.abs(rp_lt - tp_lt)
+        prob_diff_mean_lt = float((prob_diff_lt * lt_mask_f).sum() / lt_mask_sum)
+        prob_diff_max_lt = float(jnp.where(lt_mask, prob_diff_lt, 0.0).max())
+        rp_lt_flat = rp_lt.reshape(-1)
+        tp_lt_flat = tp_lt.reshape(-1)
+        lt_mf = lt_mask_f.reshape(-1)
+        rp_lt_mean = (rp_lt_flat * lt_mf).sum() / lt_mask_sum
+        tp_lt_mean = (tp_lt_flat * lt_mf).sum() / lt_mask_sum
+        rp_lt_d = (rp_lt_flat - rp_lt_mean) * lt_mf
+        tp_lt_d = (tp_lt_flat - tp_lt_mean) * lt_mf
+        cov_lt = (rp_lt_d * tp_lt_d).sum() / lt_mask_sum
+        rp_lt_var = (rp_lt_d * rp_lt_d).sum() / lt_mask_sum
+        tp_lt_var = (tp_lt_d * tp_lt_d).sum() / lt_mask_sum
+        pearson_lt = float(cov_lt / jnp.sqrt(jnp.maximum(rp_lt_var * tp_lt_var, 1e-12)))
+
       metrics_to_log.update({
           "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
+          "sampler_trainer/logp_diff_mean_lt": (diff_mean_lt, np.mean),
           "sampler_trainer/logp_diff_max": (diff_max, np.max),
+          "sampler_trainer/logp_diff_max_lt": (diff_max_lt, np.max),
           "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
+          "sampler_trainer/prob_diff_mean_lt": (prob_diff_mean_lt, np.mean),
           "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
+          "sampler_trainer/prob_diff_max_lt": (prob_diff_max_lt, np.max),
           "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
+          "sampler_trainer/probs_pearson_corr_lt": (pearson_lt, np.mean),
       })
       logging.info(
-          "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
-          " pearson=%.5f",
+          "sampler-trainer:  logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
+          " pearson=%.5f logp_diff_mean_lt=%.5f pearson_lt=%.5f",
           diff_mean,
           diff_max,
           prob_diff_mean,
           prob_diff_max,
           pearson,
+          diff_mean_lt,
+          pearson_lt,
       )
-
-    # # Sampler-trainer last-turn prompt and completion log-probability comparison.
-    # has_last_turn_data = (
-    #     all(x is not None and len(x) > 0 for x in last_turn_prompt_tokens_list)
-    #     and all(x is not None and len(x) > 0 for x in last_turn_tokens_list)
-    #     and all(x is not None and len(x) > 0 for x in last_turn_prompt_logprobs_list)
-    #     and all(x is not None and len(x) > 0 for x in last_turn_logprobs_list)
-    # )
-    # if has_last_turn_data and have_actor_mesh:
-    #   padded_lt_prompt_ids = []
-    #   padded_lt_completion_ids = []
-    #   padded_lt_rollout_logps = []
-    #   padded_lt_masks = []
-
-    #   for i in range(len(trajectories)):
-    #     lt_prompt_tokens = last_turn_prompt_tokens_list[i]
-    #     lt_tokens = last_turn_tokens_list[i]
-
-    #     lt_prompt_logps = last_turn_prompt_logprobs_list[i]
-    #     lt_completion_logps = last_turn_logprobs_list[i]
-
-    #     padded_lt_prompt, padded_lt_completion, _ = (
-    #         agentic_utils.pad_prompt_and_completion(
-    #             lt_prompt_tokens,
-    #             lt_tokens,
-    #             rollout_config.max_prompt_length,
-    #             max_response_length,
-    #             pad_value,
-    #         )
-    #     )
-
-    #     prompt_mask = (padded_lt_prompt != pad_value).astype(np.int32)
-    #     completion_mask_val = (padded_lt_completion != pad_value).astype(np.int32)
-    #     lt_mask = np.concatenate([prompt_mask, completion_mask_val], axis=0)
-
-    #     padded_lt_prompt_logps = agentic_utils.left_pad(
-    #         lt_prompt_logps, rollout_config.max_prompt_length, 0.0, dtype=np.float32
-    #     )
-    #     padded_lt_completion_logps = agentic_utils.right_pad(
-    #         lt_completion_logps, max_response_length, 0.0, dtype=np.float32
-    #     )
-    #     padded_logps = np.concatenate([padded_lt_prompt_logps, padded_lt_completion_logps], axis=0)
-
-    #     padded_lt_prompt_ids.append(padded_lt_prompt)
-    #     padded_lt_completion_ids.append(padded_lt_completion)
-    #     padded_lt_rollout_logps.append(padded_logps)
-    #     padded_lt_masks.append(lt_mask)
-
-    #   lt_prompt_ids_jax = jnp.asarray(padded_lt_prompt_ids)
-    #   lt_completion_ids_jax = jnp.asarray(padded_lt_completion_ids)
-    #   lt_rollout_logps_jax = jnp.asarray(padded_lt_rollout_logps)
-    #   lt_masks_jax = jnp.asarray(padded_lt_masks)
-
-    #   lt_trainer_logps = self.rl_cluster.get_actor_per_token_logps(
-    #       prompt_tokens=lt_prompt_ids_jax,
-    #       completion_tokens=lt_completion_ids_jax,
-    #       pad_id=pad_value,
-    #       eos_id=eos_value,
-    #       micro_batch_size=self.rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-    #       keep_all_logits=True,
-    #   )
-
-    #   try:
-    #     import os
-    #     dump_path = "/tmp/last_turn_debug.npz"
-    #     np.savez(
-    #         dump_path,
-    #         prompt_ids=np.asarray(lt_prompt_ids_jax),
-    #         completion_ids=np.asarray(lt_completion_ids_jax),
-    #         rollout_logps=np.asarray(lt_rollout_logps_jax),
-    #         trainer_logps=np.asarray(lt_trainer_logps),
-    #         masks=np.asarray(lt_masks_jax),
-    #         pad_value=pad_value,
-    #     )
-    #     logging.info("Successfully saved last-turn debug dump to %s", dump_path)
-    #   except Exception as e:
-    #     logging.warning("Failed to save last-turn debug dump: %s", e)
-
-    #   lt_mask_sum = jnp.maximum(lt_masks_jax.sum(), 1.0)
-    #   lt_diff = jnp.abs(lt_rollout_logps_jax - lt_trainer_logps)
-
-    #   lt_diff_mean = float((lt_diff * lt_masks_jax).sum() / lt_mask_sum)
-    #   lt_diff_max = float(jnp.where(lt_masks_jax > 0, lt_diff, 0.0).max())
-
-    #   lt_rp = jnp.exp(lt_rollout_logps_jax)
-    #   lt_tp = jnp.exp(lt_trainer_logps)
-    #   lt_prob_diff = jnp.abs(lt_rp - lt_tp)
-    #   lt_prob_diff_mean = float((lt_prob_diff * lt_masks_jax).sum() / lt_mask_sum)
-    #   lt_prob_diff_max = float(jnp.where(lt_masks_jax > 0, lt_prob_diff, 0.0).max())
-
-    #   metrics_to_log.update({
-    #       "sampler_trainer/last_turn/logp_diff_mean": (lt_diff_mean, np.mean),
-    #       "sampler_trainer/last_turn/logp_diff_max": (lt_diff_max, np.max),
-    #       "sampler_trainer/last_turn/prob_diff_mean": (lt_prob_diff_mean, np.mean),
-    #       "sampler_trainer/last_turn/prob_diff_max": (lt_prob_diff_max, np.max),
-    #   })
-    #   logging.info(
-    #       "last-turn sampler-trainer (all tokens, pad-masked): logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)",
-    #       lt_diff_mean,
-    #       lt_diff_max,
-    #       lt_prob_diff_mean,
-    #       lt_prob_diff_max,
-    #   )
-
-    #   if lt_diff_mean > 0.1:
-    #     logging.warning("Last-turn sampler-trainer logp agreement mismatch detected (batch lt_diff_mean=%.5f > 0.1)!", lt_diff_mean)
-
-    #     first_prompt_tokens = padded_lt_prompt_ids[0]
-    #     first_completion_tokens = padded_lt_completion_ids[0]
-    #     first_completion_masks = padded_lt_masks[0]
-    #     first_rollout_logps = padded_lt_rollout_logps[0]
-    #     first_trainer_logps = np.asarray(lt_trainer_logps[0])
-
-    #     first_diff = np.abs(first_rollout_logps - first_trainer_logps)
-    #     first_mask_sum = np.maximum(first_completion_masks.sum(), 1.0)
-    #     first_diff_mean = float((first_diff * first_completion_masks).sum() / first_mask_sum)
-    #     first_diff_max = float(first_diff[first_completion_masks > 0].max() if (first_completion_masks > 0).any() else 0.0)
-
-    #     logging.warning("Batch metrics: logp_diff_mean=%.5f, logp_diff_max=%.5f", lt_diff_mean, lt_diff_max)
-    #     logging.warning("First item metrics: logp_diff_mean=%.5f, logp_diff_max=%.5f", first_diff_mean, first_diff_max)
-    #     logging.warning("Dumping token-by-token comparison for the first batch item:")
-
-    #     if self.rl_cluster.tokenizer:
-    #       unpadded_prompt = [int(t) for t in first_prompt_tokens if t != pad_value]
-    #       prompt_text = self.rl_cluster.tokenizer.decode(unpadded_prompt)
-    #       unpadded_completion = [int(t) for t in first_completion_tokens if t != pad_value]
-    #       completion_text = self.rl_cluster.tokenizer.decode(unpadded_completion)
-    #       logging.warning("Prompt context text: %r", prompt_text)
-    #       logging.warning("Completion sequence text: %r", completion_text)
-
-    #       logging.warning("Raw first_prompt_tokens: %s", list(first_prompt_tokens))
-    #       logging.warning("Raw first_completion_tokens: %s", list(first_completion_tokens))
-    #       logging.warning("Raw first_completion_masks: %s", list(first_completion_masks))
-    #       logging.warning("Raw first_rollout_logps: %s", list(first_rollout_logps))
-    #       logging.warning("Raw first_trainer_logps: %s", list(first_trainer_logps))
-
-    #       first_full_tokens = np.concatenate([first_prompt_tokens, first_completion_tokens], axis=0)
-    #       logging.warning("=== Token-by-Token Logprob Mismatch (Full Prompt + Completion Sequence) ===")
-    #       for idx, tok_id in enumerate(first_full_tokens):
-    #         if tok_id == pad_value:
-    #           continue
-    #         tok_str = self.rl_cluster.tokenizer.decode([int(tok_id)])
-    #         r_logp = float(first_rollout_logps[idx])
-    #         t_logp = float(first_trainer_logps[idx])
-    #         diff = r_logp - t_logp
-    #         mask_val = int(first_completion_masks[idx])
-    #         logging.warning("idx=%03d | Token: %r | Rollout Logp: %.4f | Trainer Logp: %.4f | Diff: %.4f | Mask: %d",
-    #                         idx, tok_str, r_logp, t_logp, diff, mask_val)
     # Truncated importance-sampling (TIS) correction weights.
     # Compute per-token TIS weights from the trainer-vs-sampler log-ratio,
     # mask to assistant tokens only (we dampen offending model-emitted

@@ -93,7 +93,7 @@ class VllmRollout(base_rollout.BaseRollout):
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | list[list[int]] | list[jaxtyping.ArrayLike],
       rollout_config: base_rollout.RolloutConfig,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
@@ -117,6 +117,7 @@ class VllmRollout(base_rollout.BaseRollout):
         tokens=self.output.tokens,
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
         logprobs=self.output.logprobs,
+        prompt_logprobs=self.output.prompt_logprobs,
     )
 
   def get_per_token_logps(

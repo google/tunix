@@ -98,8 +98,8 @@ arg_parser = argparse.ArgumentParser(
 # Tuned together with `num_generations=8` to keep per-step rollout latency
 # manageable on a single host while preserving enough samples per prompt for
 # the GRPO group-mean baseline.
-arg_parser.add_argument("--batch_size", type=int, default=64)
-arg_parser.add_argument("--mini_batch_size", type=int, default=64)
+arg_parser.add_argument("--batch_size", type=int, default=8)
+arg_parser.add_argument("--mini_batch_size", type=int, default=8)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 # AdamW second-moment decay (β2). Lower than the AdamW default (0.999) so the
@@ -108,7 +108,7 @@ arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.95)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=150)
-arg_parser.add_argument("--num_generations", type=int, default=8)
+arg_parser.add_argument("--num_generations", type=int, default=2)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 # GSPO-token defaults: tight clip ratios because the importance ratio is
 # sequence-mean (much lower variance than per-token PPO), so a wider clip would
@@ -138,7 +138,7 @@ arg_parser.add_argument("--top_k", type=int, default=0)
 # num_generations` trajectories can be in flight at once. A high cap also lets
 # every multi-turn agent step its env without waiting for a previous wave to
 # drain. Drop only if KV cache saturates or generation throughput regresses.
-arg_parser.add_argument("--max_concurrency", type=int, default=256)
+arg_parser.add_argument("--max_concurrency", type=int, default=16)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -254,7 +254,7 @@ ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
 MODEL_VERSION = "google/gemma-4-E2B-it"
 from huggingface_hub import snapshot_download
 
-MODEL_DOWNLOAD_DIR = snapshot_download(repo_id=MODEL_VERSION, max_workers=16, force_download=True)
+MODEL_DOWNLOAD_DIR = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
 print("MODEL_PATH: ", MODEL_DOWNLOAD_DIR)
 # MODEL_DOWNLOAD_DIR = "/mnt/disks/linchai-data/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/905e84b50c4d2a365ebde34e685027578e6728db"
 DATA_DIR = "gs://tunix/data/Frozenlake"

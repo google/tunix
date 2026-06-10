@@ -383,8 +383,8 @@ def compute_per_token_logps(
 
   outputs, _ = model(input_tokens, **model_kwargs)
 
-  if segment_ids is not None:
-    # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
+  if segment_ids is not None or keep_all_logits:
+    # Packed Mode or keep_all_logits: Evaluate the full sequence (mixed prompts + completions).
     # Since predicting token[i] requires logit[i-1], we skip the first token.
     # This shrinks the output shape to [Batch, FullSeqLen - 1]
     logits_to_keep = input_tokens.shape[1] - 1

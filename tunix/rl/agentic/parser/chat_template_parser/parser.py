@@ -159,7 +159,7 @@ class BaseChatTemplateParser(ABC):
       self,
       tokens: np.ndarray,
   ) -> Tuple[np.ndarray, int]:
-    """Ensures the assistant response ends with the correct tokens."""
+    """Default implementation: returns tokens and logprobs unchanged."""
     return tokens, 0
 
 
