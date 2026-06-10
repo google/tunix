@@ -381,6 +381,91 @@ def create_dataset():
     )
 
 
+class PostInitDatasetShardingTest(parameterized.TestCase):
+  """post_init_dataset shards the RL MapDataset per process (Plan C).
+
+  Uses a real ``grain.MapDataset`` so the strided slice, repeat, and
+  ``to_iter_dataset().batch()`` chain are exercised end to end. Mocks
+  ``jax.process_count``/``process_index`` to simulate the two hosts in-process.
+  """
+
+  def _records(self, n):
+    import grain
+
+    return grain.MapDataset.source(
+        [{"prompts": f"p{i}", "answer": i} for i in range(n)]
+    )
+
+  def test_single_process_yields_full_global_batch_in_order(self):
+    # process_count == 1 -> identity sharding, byte-for-byte the legacy path.
+    with mock.patch.object(
+        data_lib.jax, "process_count", return_value=1
+    ), mock.patch.object(data_lib.jax, "process_index", return_value=0):
+      first, second = data_lib.post_init_dataset(
+          self._records(8),
+          tokenizer=_FakeTokenizer(),  # pytype: disable=wrong-arg-types
+          batch_size=4,
+          num_batches=None,
+          max_prompt_length=None,
+      )
+      batches = list(first)
+    self.assertIsNone(second)
+    self.assertLen(batches, 2)
+    for batch in batches:
+      self.assertLen(batch["answer"], 4)  # global batch size
+    answers = [a for batch in batches for a in batch["answer"]]
+    self.assertEqual(answers, list(range(8)))  # original order
+
+  def test_two_processes_get_disjoint_shards_at_local_batch_size(self):
+    global_batch_size = 4
+    num_records = 8
+
+    per_process_answers = {}
+    per_process_batch_sizes = {}
+    for proc_index in (0, 1):
+      with mock.patch.object(
+          data_lib.jax, "process_count", return_value=2
+      ), mock.patch.object(
+          data_lib.jax, "process_index", return_value=proc_index
+      ):
+        first, _ = data_lib.post_init_dataset(
+            self._records(num_records),
+            tokenizer=_FakeTokenizer(),  # pytype: disable=wrong-arg-types
+            batch_size=global_batch_size,
+            num_batches=None,
+            max_prompt_length=None,
+        )
+        batches = list(first)
+      sizes = [len(b["answer"]) for b in batches]
+      answers = {a for b in batches for a in b["answer"]}
+      per_process_batch_sizes[proc_index] = sizes
+      per_process_answers[proc_index] = answers
+
+    # Each process batches at the LOCAL size (global // process_count == 2).
+    for proc_index in (0, 1):
+      self.assertNotEmpty(per_process_batch_sizes[proc_index])
+      for size in per_process_batch_sizes[proc_index]:
+        self.assertEqual(size, global_batch_size // 2)
+
+    # Disjoint strided shards covering every record: proc 0 -> evens, 1 -> odds.
+    self.assertEqual(per_process_answers[0], set(range(0, num_records, 2)))
+    self.assertEqual(per_process_answers[1], set(range(1, num_records, 2)))
+    self.assertEqual(per_process_answers[0] & per_process_answers[1], set())
+
+  def test_rejects_indivisible_global_batch(self):
+    with mock.patch.object(
+        data_lib.jax, "process_count", return_value=3
+    ), mock.patch.object(data_lib.jax, "process_index", return_value=0):
+      with self.assertRaisesRegex(ValueError, "divisible"):
+        data_lib.post_init_dataset(
+            self._records(9),
+            tokenizer=_FakeTokenizer(),  # pytype: disable=wrong-arg-types
+            batch_size=4,
+            num_batches=None,
+            max_prompt_length=None,
+        )
+
+
 class ShardByProcessTest(parameterized.TestCase):
 
   def test_single_process_is_identity(self):

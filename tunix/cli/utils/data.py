@@ -265,6 +265,10 @@ def post_init_dataset(
     num_epochs: Number of times to repeat the dataset.
   Returns:
     The processed dataset.
+
+  Raises:
+    ValueError: If the dataset is empty after filtering/splitting, or if
+      ``batch_size`` is not divisible by the number of JAX processes.
   """
   original_size = len(dataset)
 
@@ -319,16 +323,26 @@ def post_init_dataset(
         f"num_batches={num_batches}, batch_size={batch_size}."
     )
 
-  first_segment_dataset = (
-      first_segment_dataset.repeat(num_epochs)
-      .to_iter_dataset()
-      .batch(batch_size, batch_fn=custom_batch_fn)
-  )
-  if second_segment_dataset is not None:
-    second_segment_dataset = (
-        second_segment_dataset.repeat(num_epochs)
+  # Under multi-controller JAX every host runs this same program. Shard each
+  # segment across processes by a disjoint strided slice and batch at the
+  # per-process local size, so the per-process batches reassemble into the
+  # global batch via sharding_utils.shard_input -> make_array_from_process_local
+  # _data in the RL cluster (identical contract to the SFT data loaders). The
+  # slice is applied AFTER the train/val split so every process computes the
+  # same split boundary, and BEFORE to_iter_dataset, the way grain's
+  # MapDataset API is meant to be sharded. On a single host this is the
+  # identity and the per-process batch equals batch_size, so the produced
+  # batches are byte-for-byte unchanged.
+  def _shard_repeat_batch(segment):
+    local_segment, local_batch_size = shard_by_process(segment, batch_size)
+    return (
+        local_segment.repeat(num_epochs)
         .to_iter_dataset()
-        .batch(batch_size, batch_fn=custom_batch_fn)
+        .batch(local_batch_size, batch_fn=custom_batch_fn)
     )
+
+  first_segment_dataset = _shard_repeat_batch(first_segment_dataset)
+  if second_segment_dataset is not None:
+    second_segment_dataset = _shard_repeat_batch(second_segment_dataset)
 
   return first_segment_dataset, second_segment_dataset
