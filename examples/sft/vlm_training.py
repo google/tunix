@@ -27,6 +27,7 @@ import numpy as np
 import optax
 from orbax import checkpoint as ocp
 import qwix
+from tunix.cli.utils import data as data_lib
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import tokenizer_adapter as tokenizer_lib
 from tunix.models.gemma3 import model as model_lib
@@ -204,34 +205,41 @@ def load_dataset(
 ):
   """Loads the dataset.
 
+  ``batch_size`` is the GLOBAL batch size. The pipeline is a ``grain.MapDataset``
+  chain (``map(preprocess) -> map(build_input) -> filter(overlength)``) sharded
+  across JAX processes by ``data.shard_by_process`` (a strided slice): under
+  multi-controller JAX each host reads a disjoint shard and batches only its
+  local ``batch_size // jax.process_count()`` examples, which
+  ``tunix.sft.sharding_utils.shard_input`` reassembles into the global batch.
+  On a single host this is the identity, so behavior is unchanged from the
+  previous ``grain.NoSharding()`` ``DataLoader``.
+
   Args:
     data_source: The loaded HF dataset.
     image_processor: Image processor.
     tokenizer: Tokenizer.
-    batch_size: Batch size.
+    batch_size: Global batch size.
     num_epochs: Number of epochs.
     max_seq_len: Maximum sequence length.
-    split: Dataset split to load.
 
   Returns:
-    A grain DataLoader.
+    A grain IterDataset yielding per-process local batches.
   """
-  return grain.DataLoader(
-      data_source=data_source,
-      sampler=grain.IndexSampler(
-          num_records=len(data_source),
-          num_epochs=num_epochs,
-          shard_options=grain.NoSharding(),
-      ),
-      operations=[
-          _Preprocess(image_processor, tokenizer),
-          _BuildTrainInput(max_seq_len, tokenizer.pad_id()),
-          _FilterOverlength(max_seq_len),
-          grain.Batch(batch_size=batch_size, drop_remainder=True),
-      ],
-      worker_count=8,
-      worker_buffer_size=4,
+  local_source, per_process_batch_size = data_lib.shard_by_process(
+      grain.MapDataset.source(data_source), batch_size
   )
+  dataset = (
+      local_source.map(_Preprocess(image_processor, tokenizer))
+      .map(_BuildTrainInput(max_seq_len, tokenizer.pad_id()))
+      .filter(_FilterOverlength(max_seq_len))
+      .repeat(num_epochs)
+  )
+  # MapDataset.batch cannot follow a filter that may drop elements, so batch on
+  # the IterDataset. Preserve the previous multi-worker read configuration
+  # (worker_count=8, worker_buffer_size=4) via ReadOptions.
+  return dataset.to_iter_dataset(
+      grain.ReadOptions(num_threads=8, prefetch_buffer_size=4)
+  ).batch(per_process_batch_size, drop_remainder=True)
 
 
 def load_model(
@@ -313,7 +321,7 @@ def train(
       log_dir=logging_dir, flush_every_n_steps=20
   )
   checkpointing_options = None
-  if full_ckpt_dir is not  None:
+  if full_ckpt_dir is not None:
     checkpointing_options = ocp.CheckpointManagerOptions(
         save_interval_steps=_SAVE_INTERVAL_STEPS.value, max_to_keep=1
     )
