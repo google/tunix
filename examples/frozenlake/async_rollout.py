@@ -58,6 +58,7 @@ config.dtype = jnp.bfloat16
 config.param_dtype = jnp.bfloat16
 config.use_flash_attention = True
 config.flash_attention_block_size = 256
+config.use_sliding_window_kv_cache = False
 
 import dataclasses
 new_shd = dataclasses.replace(
@@ -117,6 +118,9 @@ vllm_rollout_dict = {
             },
         },
     },
+    "rollout_vllm_sampling_kwargs": {
+        "skip_special_tokens": False,
+    },
 }
 rollout_engine_config = base_rollout.RolloutConfig(
     **base_rollout_dict, **vllm_rollout_dict
@@ -134,14 +138,6 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         eval_every_n_steps=5,
     ),
     rollout_config=rollout_engine_config,
-    # rollout_config=base_rollout.RolloutConfig(
-    #     max_tokens_to_generate=TOTAL_GENERATION_STEPS,
-    #     max_prompt_length=MAX_PROMPT_LENGTH,
-    #     kv_cache_size=MAX_PROMPT_LENGTH + TOTAL_GENERATION_STEPS + 256,
-    #     temperature=TEMPERATURE,
-    #     top_p=TOP_P,
-    #     top_k=TOP_K,
-    # ),
 )
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -874,14 +870,12 @@ async def main():
       completion_mask_arr = jnp.asarray(padded_completion_masks)
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs_list)
 
-      attn_completion_mask = (completion_ids != pad_value).astype(jnp.int32)
       trainer_per_token_logps = rl_cluster.get_actor_per_token_logps(
           prompt_tokens=prompt_ids,
           completion_tokens=completion_ids,
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=rl_cluster.cluster_config.training_config.compute_logps_micro_batch_size,
-          completion_mask=attn_completion_mask,
           temperature=1.0,
       )
 
