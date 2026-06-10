@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Main entry point for PEFT training."""
+
 from collections.abc import Callable
 from typing import Any
 from absl import app
@@ -96,9 +97,49 @@ def _setup_jax_pathways(pathways_bns: str):
   jax.config.update('jax_backend_target', pathways_bns)
 
 
+def _init_multi_controller_jax():
+  """Initializes multi-controller JAX before any device is accessed.
+
+  Under multi-controller JAX every host runs this same program and
+  `jax.distributed.initialize()` stitches the per-host devices into one global
+  device set / mesh. On a single host (and under Pathways, which uses a single
+  controller) this must be a no-op so single-host behavior stays byte-for-byte
+  identical.
+
+  With no arguments `jax.distributed.initialize()` auto-detects the cluster from
+  the environment (e.g. GKE / Cloud TPU pod env vars). On a single host with no
+  such environment it raises ``RuntimeError`` because no coordinator is present;
+  we treat that as "nothing to initialize" and proceed with the local devices.
+  """
+  try:
+    jax.distributed.initialize()
+  except (RuntimeError, ValueError) as e:
+    # No multi-host cluster was detected (typical single-host run). Continue
+    # with the local devices instead of failing. We deliberately do not swallow
+    # other exception types.
+    logging.info(
+        'Skipping jax.distributed.initialize(); running single-controller. '
+        '(%s)',
+        e,
+    )
+
+  logging.info(
+      'JAX runtime initialized: process_index=%d process_count=%d '
+      'local_device_count=%d global_device_count=%d',
+      jax.process_index(),
+      jax.process_count(),
+      jax.local_device_count(),
+      jax.device_count(),
+  )
+
+
 def main(argv, **kwargs):
   if _PATHWAYS_BNS.value:
     _setup_jax_pathways(_PATHWAYS_BNS.value)
+  else:
+    # Pathways is a single-controller backend, so multi-controller init only
+    # applies to the non-Pathways path.
+    _init_multi_controller_jax()
   pipeline = PeftPipeline(argv, **kwargs)
   logging.info(
       '--- Launching PEFT pipeline with following config ---\n'
