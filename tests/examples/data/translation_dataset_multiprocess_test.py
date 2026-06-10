@@ -33,6 +33,13 @@ It asserts:
     addressable (it spans both processes), and each process's addressable slice
     equals the local batch it fed in. This is the precise
     ``make_array_from_process_local_data`` contract the SFT trainer relies on.
+  * A loss-style token-weighted ``sum(value)/sum(weight)`` reduction, computed
+    inside a ``jax.jit`` on the GLOBAL mesh over the process-local shards,
+    produces a REPLICATED scalar that equals the reduction over the FULL global
+    batch and is NOT equal to either process's local-shard-only value. This is
+    the load-bearing proof that the loss / grad_norm scalars the SFT trainer
+    feeds to ``metrics_logger`` (which only reads them on ``process_index == 0``)
+    are the true GLOBAL reductions, not process-0's local-shard value.
 
 Run directly (it self-spawns the workers):
 
@@ -75,6 +82,7 @@ def _worker_main(process_id: int, coordinator_address: str) -> None:
   import json
 
   import jax
+  import jax.numpy as jnp
   import jax.sharding as shd
   import numpy as np
 
@@ -165,6 +173,75 @@ def _worker_main(process_id: int, coordinator_address: str) -> None:
   expected = local_tokens[np.argsort(local_tokens[:, 0])]
   assert np.array_equal(addressable, expected), (addressable, expected)
 
+  # ---------------------------------------------------------------------------
+  # Load-bearing GLOBAL-metric proof.
+  #
+  # The SFT trainer computes loss as sum(per-token NLL) / sum(target_mask) and
+  # grad_norm via optax.global_norm INSIDE a jit on the global mesh. Both are
+  # full-array reductions over a process-sharded array, so XLA inserts an
+  # all-reduce and the resulting scalar is REPLICATED (identical on every
+  # process). metrics_logger then reads that scalar only on process 0. We prove
+  # that contract here with a representative loss-style sum/sum reduction over
+  # the global array assembled from the per-process LOCAL shards.
+  #
+  # Define a per-example weight/value from the row's record token so the two
+  # processes contribute DIFFERENT quantities; this guarantees the global mean
+  # cannot accidentally equal a single process's local-only mean.
+  def _value(tokens):  # token-weighted "loss-like" quantity, jnp or np.
+    rec = tokens[:, 0].astype(jnp.float32)  # == record_id + 1
+    weight = rec  # per-example token weight (analogous to target_mask sum)
+    value = rec * rec  # per-example weighted contribution
+    return jnp.sum(value), jnp.sum(weight)
+
+  @jax.jit
+  def _global_token_weighted_mean(global_tokens):
+    total_value, total_weight = _value(global_tokens)
+    return total_value / total_weight  # global sum / global sum
+
+  with mesh:
+    global_mean_arr = _global_token_weighted_mean(global_arr)
+  # A scalar produced by reductions over a sharded array is REPLICATED: its
+  # sharding carries an empty PartitionSpec (no dimension is sharded), so every
+  # process holds the identical value. (`is_fully_addressable` can still be
+  # False because the replicated sharding nominally spans all processes'
+  # devices; replication is the property that matters, and the parent test
+  # additionally cross-checks the value is identical across processes.)
+  metric_replicated = bool(global_mean_arr.sharding.spec == shd.PartitionSpec())
+  assert metric_replicated, (
+      "global metric must be replicated",
+      global_mean_arr.sharding.spec,
+  )
+  global_mean = float(jax.device_get(global_mean_arr))
+
+  # numpy reference over the FULL global batch (both processes' records). The
+  # fake tokenizer maps record i -> token value (i+1).
+  def _np_mean(record_ids):
+    rec = np.array([rid + 1 for rid in record_ids], dtype=np.float64)
+    return float(np.sum(rec * rec) / np.sum(rec))
+
+  # Records in THIS process's local first batch (the one fed to shard_input).
+  local_first_ids = sorted(int(row[0]) - 1 for row in local_tokens)
+  # The full global batch is the union of every process's first-batch shard.
+  # ShardByJaxProcess assigns process p the contiguous record block starting at
+  # p * (_NUM_RECORDS // _NUM_PROCESSES), and grain.Batch takes the first
+  # local_bs of those for the first batch. With _NUM_RECORDS=8,
+  # _NUM_PROCESSES=2, local_bs=2 that is {0,1} for p0 and {4,5} for p1.
+  full_global_ids = sorted(
+      p * (_NUM_RECORDS // _NUM_PROCESSES) + j
+      for p in range(_NUM_PROCESSES)
+      for j in range(local_bs)
+  )
+
+  global_ref = _np_mean(full_global_ids)
+  local_only_ref = _np_mean(local_first_ids)
+
+  assert abs(global_mean - global_ref) < 1e-4, (global_mean, global_ref)
+  # The proof: the jitted global reduction is NOT process p's local-only value.
+  assert abs(global_mean - local_only_ref) > 1e-4, (
+      global_mean,
+      local_only_ref,
+  )
+
   print(
       "RESULT "
       + json.dumps({
@@ -174,6 +251,10 @@ def _worker_main(process_id: int, coordinator_address: str) -> None:
           "global_shape": list(global_arr.shape),
           "local_record_ids": local_record_ids,
           "fully_addressable": bool(global_arr.is_fully_addressable),
+          "global_metric_replicated": metric_replicated,
+          "global_metric": global_mean,
+          "global_metric_ref": global_ref,
+          "local_only_metric_ref": local_only_ref,
       }),
       flush=True,
   )
@@ -229,6 +310,34 @@ class TranslationDatasetMultiProcessTest(absltest.TestCase):
       # ...but shard_input assembled the full GLOBAL batch.
       self.assertEqual(res["global_shape"], [_GLOBAL_BATCH, _SEQ_LEN])
       self.assertFalse(res["fully_addressable"])
+
+      # GLOBAL-metric proof (mirrors the loss / grad_norm reduction path):
+      #   * the jitted sum/sum reduction over the sharded global array yields a
+      #     REPLICATED scalar (fully addressable on every process),
+      #   * it equals the reduction over the FULL global batch, and
+      #   * it does NOT equal this process's local-shard-only value.
+      self.assertTrue(
+          res["global_metric_replicated"],
+          msg="global loss-style metric must be a replicated scalar",
+      )
+      self.assertAlmostEqual(
+          res["global_metric"], res["global_metric_ref"], places=4
+      )
+      self.assertNotAlmostEqual(
+          res["global_metric"], res["local_only_metric_ref"], places=4
+      )
+
+    # Both processes must observe the SAME global metric value (replicated).
+    self.assertAlmostEqual(
+        results[0]["global_metric"], results[1]["global_metric"], places=6
+    )
+    # And the two processes' local-only values genuinely differ, so "equals the
+    # global, differs from local-only" is a real (non-degenerate) discriminator.
+    self.assertNotAlmostEqual(
+        results[0]["local_only_metric_ref"],
+        results[1]["local_only_metric_ref"],
+        places=4,
+    )
 
     # The two processes read disjoint record shards covering all records.
     ids0 = set(results[0]["local_record_ids"])
