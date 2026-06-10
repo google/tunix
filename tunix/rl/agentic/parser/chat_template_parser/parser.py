@@ -155,13 +155,6 @@ class BaseChatTemplateParser(ABC):
     """Returns the tokenized newline "\n"."""
     return []
 
-  def update_assistant_end_tokens(
-      self,
-      tokens: np.ndarray,
-  ) -> Tuple[np.ndarray, int]:
-    """Default implementation: returns tokens and logprobs unchanged."""
-    return tokens, 0
-
 
 class DefaultChatTemplateParser(BaseChatTemplateParser):
   """Default parser using tokenizer's built-in chat template."""
@@ -322,7 +315,7 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
   def _init_tokens(self) -> TokenConfig:
     return TokenConfig(
         bos_token="<bos>",
-        eot_token="<turn|>\n",
+        eot_token="<turn|>",
         system_token=self._get_system_token(),
         user_token="<|turn>user\n",
         assistant_token=self._get_assistant_token(),
@@ -364,7 +357,7 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     )
 
   def _parse_system(self, content: str) -> str:
-    return self.tokens.system_token + content.strip() + self.tokens.eot_token
+    return self.tokens.system_token + content.strip() + self.tokens.eot_token + "\n"
 
   def _parse_user(self, content: str) -> str:
     return self.tokens.user_token + content.strip() + self.tokens.eot_token

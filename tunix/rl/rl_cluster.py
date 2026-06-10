@@ -963,12 +963,6 @@ class RLCluster:
           itertools.chain.from_iterable(out.logprobs for out in outputs)
       )
 
-    prompt_logprobs = None
-    if outputs[0].prompt_logprobs is not None:
-      prompt_logprobs = list(
-          itertools.chain.from_iterable(out.prompt_logprobs for out in outputs)
-      )
-
     logits = None
     if outputs[0].logits is not None:
       logits = list(
@@ -985,7 +979,6 @@ class RLCluster:
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,
-        prompt_logprobs=prompt_logprobs,
     )
 
   def get_ref_per_token_logps(

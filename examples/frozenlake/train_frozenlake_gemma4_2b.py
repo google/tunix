@@ -491,6 +491,9 @@ vllm_rollout_dict = {
             },
         },
     },
+    "rollout_vllm_sampling_kwargs": {
+        "skip_special_tokens": False,
+    },
 }
 
 if ROLLOUT_ENGINE == "vllm":
