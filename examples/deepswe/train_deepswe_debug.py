@@ -597,9 +597,8 @@ def create_checkpointing_options(
 def create_metrics_logging_options(
     args: argparse.Namespace,
 ) -> metrics_logger.MetricsLoggerOptions | None:
-  if not args.metrics_logger_dir:
-    return None
-  os.makedirs(args.metrics_logger_dir, exist_ok=True)
+  if args.metrics_logger_dir:
+    os.makedirs(args.metrics_logger_dir, exist_ok=True)
   return metrics_logger.MetricsLoggerOptions(
       log_dir=args.metrics_logger_dir,
       project_name="tunix-deepswe",
