@@ -61,6 +61,8 @@ if os.path.exists(os.path.join(WORKDIR, "tunix")):
   WORKSPACE_ROOT = WORKDIR
 else:
   WORKSPACE_ROOT = REPO_ROOT
+ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "deepswe_debug")
+DEFAULT_METRICS_LOGGER_DIR = os.path.join(ARTIFACT_ROOT, "logs")
 
 for root in [
     os.path.dirname(__file__),
@@ -238,7 +240,9 @@ def create_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
   parser.add_argument("--max_to_keep", type=int, default=4)
   parser.add_argument("--save_interval_steps", type=int, default=10)
-  parser.add_argument("--metrics_logger_dir", type=str, default=None)
+  parser.add_argument(
+      "--metrics_logger_dir", type=str, default=DEFAULT_METRICS_LOGGER_DIR
+  )
 
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
@@ -601,8 +605,7 @@ def create_metrics_logging_options(
     rollout_dims: tuple[tuple[str, int], ...],
     train_dims: tuple[tuple[str, int], ...],
 ) -> metrics_logger.MetricsLoggerOptions | None:
-  if args.metrics_logger_dir:
-    os.makedirs(args.metrics_logger_dir, exist_ok=True)
+  os.makedirs(args.metrics_logger_dir, exist_ok=True)
   rollout_dim_map = dict(rollout_dims)
   train_dim_map = dict(train_dims)
   vllm_max_num_seqs, vllm_max_batched_tokens = resolve_vllm_rollout_limits(
