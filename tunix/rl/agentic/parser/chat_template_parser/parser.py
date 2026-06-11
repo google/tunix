@@ -136,7 +136,7 @@ class BaseChatTemplateParser(ABC):
   def _parse_system(self, content: str) -> str:
     return self.tokens.system_token + content + self.tokens.eot_token
 
-  def _parse_user(self, content: str) -> str:
+  def _parse_user(self, content: str,) -> str:
     return self.tokens.user_token + content + self.tokens.eot_token
 
   def _parse_assistant(self, content: str) -> str:
@@ -414,9 +414,10 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if self._strip_past_thinking:
       content = self._strip_thinking(content)
     cleaned_content = content.strip()
+    prefix = self.tokens.assistant_token if not self.enable_thinking else "<|turn>model\n"
     if cleaned_content.endswith("<turn|>"):
-      return "<|turn>model\n" + cleaned_content + "\n"
-    return "<|turn>model\n" + cleaned_content + self.tokens.eot_token
+      return prefix + cleaned_content + "\n"
+    return prefix + cleaned_content + self.tokens.eot_token
 
   def filter_thinking_tokens(
       self,

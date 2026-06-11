@@ -138,7 +138,7 @@ arg_parser.add_argument("--top_k", type=int, default=0)
 # num_generations` trajectories can be in flight at once. A high cap also lets
 # every multi-turn agent step its env without waiting for a previous wave to
 # drain. Drop only if KV cache saturates or generation throughput regresses.
-arg_parser.add_argument("--max_concurrency", type=int, default=16)
+arg_parser.add_argument("--max_concurrency", type=int, default=512)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
