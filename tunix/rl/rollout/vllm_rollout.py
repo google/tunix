@@ -111,6 +111,7 @@ class VllmRollout(base_rollout.BaseRollout):
         tokens=self.output.tokens,
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
         logprobs=self.output.logprobs,
+        prompt_logprobs=self.output.prompt_logprobs,
     )
 
   def get_per_token_logps(
