@@ -169,8 +169,22 @@ def create_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--num_epochs", type=int, default=1000)
 
   parser.add_argument("--train_with_lora", type=_str_to_bool, default=False)
-  parser.add_argument("--lora_rank", type=int, default=64)
-  parser.add_argument("--lora_alpha", type=float, default=64.0)
+  parser.add_argument("--rank", type=int, default=64)
+  parser.add_argument(
+      "--lora_rank",
+      dest="rank",
+      type=int,
+      default=argparse.SUPPRESS,
+      help=argparse.SUPPRESS,
+  )
+  parser.add_argument("--alpha", type=float, default=64.0)
+  parser.add_argument(
+      "--lora_alpha",
+      dest="alpha",
+      type=float,
+      default=argparse.SUPPRESS,
+      help=argparse.SUPPRESS,
+  )
 
   parser.add_argument("--num_generations", type=int, default=8)
   parser.add_argument("--num_iterations", type=int, default=1)
@@ -197,7 +211,18 @@ def create_arg_parser() -> argparse.ArgumentParser:
       default="vllm",
       choices=["vllm", "vanilla", "sglang_jax"],
   )
-  parser.add_argument("--rollout_vllm_hbm_utilization", type=float, default=0.6)
+  parser.add_argument(
+      "--vllm_utilization",
+      type=float,
+      default=0.6,
+  )
+  parser.add_argument(
+      "--rollout_vllm_hbm_utilization",
+      dest="vllm_utilization",
+      type=float,
+      default=argparse.SUPPRESS,
+      help=argparse.SUPPRESS,
+  )
   parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=None)
   parser.add_argument(
       "--rollout_vllm_max_num_batched_tokens", type=int, default=None
@@ -274,6 +299,13 @@ def create_arg_parser() -> argparse.ArgumentParser:
   )
   parser.add_argument("--use_flash_attention", type=_str_to_bool, default=True)
   parser.add_argument("--flash_attention_block_size", type=int, default=1024)
+  parser.add_argument("--do_mem_profiling", type=_str_to_bool, default=False)
+  parser.add_argument(
+      "--logging_level",
+      type=str,
+      default="INFO",
+      choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+  )
   parser.add_argument(
       "--dtype",
       type=str,
@@ -522,8 +554,8 @@ def create_reference_and_actor(
       actor_base,
       train_mesh,
       enabled=args.train_with_lora,
-      rank=args.lora_rank,
-      alpha=args.lora_alpha,
+      rank=args.rank,
+      alpha=args.alpha,
   )
   actor = put_model_on_device(actor)
   return reference, actor
@@ -622,7 +654,7 @@ def create_rollout_config(
   if args.rollout_engine == "vllm":
     rollout_kwargs = {
         "rollout_vllm_model_version": model_path,
-        "rollout_vllm_hbm_utilization": args.rollout_vllm_hbm_utilization,
+        "rollout_vllm_hbm_utilization": args.vllm_utilization,
         "rollout_vllm_tpu_backend_type": "jax",
         "rollout_vllm_server_mode": True,
         "rollout_vllm_async_scheduling": False,
@@ -642,7 +674,7 @@ def create_rollout_config(
     }
     if args.train_with_lora:
       rollout_kwargs["rollout_vllm_lora_config"] = {
-          "max_lora_rank": args.lora_rank,
+          "max_lora_rank": args.rank,
       }
     return base_rollout.RolloutConfig(**base_rollout_dict, **rollout_kwargs)
 
@@ -734,6 +766,11 @@ def shutdown_rollout_runtime(rl_cluster: rl_cluster_lib.RLCluster) -> None:
 
 def main() -> None:
   args, _ = create_arg_parser().parse_known_args()
+  log_level = getattr(logging, args.logging_level.upper())
+  logging.getLogger().setLevel(log_level)
+  logging.getLogger("absl").setLevel(log_level)
+  absl_logging.set_verbosity(getattr(absl_logging, args.logging_level.upper()))
+  absl_logging.set_stderrthreshold(args.logging_level.lower())
   if args.optimizer_offload:
     logging.warning(
         "optimizer_offload is not wired in this recipe yet and will be ignored."
