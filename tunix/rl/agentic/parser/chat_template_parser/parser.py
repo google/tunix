@@ -159,18 +159,25 @@ class BaseChatTemplateParser(ABC):
     """Default implementation: returns tokens and logprobs unchanged."""
     return tokens, logprobs
 
+  @property
+  def thought_suffix_tokens(self) -> list[int]:
+    """Returns the tokenized suffix (if any) indicating a thought block."""
+    return []
+
+  @property
+  def eot_tokens(self) -> list[int]:
+    """Returns the tokenized end-of-turn boundary "<turn|>\n"."""
+    return []
+
+  @property
+  def turn_only_tokens(self) -> list[int]:
+    """Returns the tokenized "<turn|>" control token."""
+    return []
 
   @property
   def newline_tokens(self) -> list[int]:
     """Returns the tokenized newline "\n"."""
     return []
-  
-  def update_assistant_end_tokens(
-      self,
-      tokens: np.ndarray,
-  ) -> Tuple[np.ndarray, int]:
-    """Default implementation: returns tokens unchanged."""
-    return tokens, 0
 
 
 class DefaultChatTemplateParser(BaseChatTemplateParser):
@@ -332,7 +339,7 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
   def _init_tokens(self) -> TokenConfig:
     return TokenConfig(
         bos_token="<bos>",
-        eot_token="<turn|>",
+        eot_token="<turn|>\n",
         system_token=self._get_system_token(),
         user_token="<|turn>user\n",
         assistant_token=self._get_assistant_token(),
@@ -374,10 +381,10 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     )
 
   def _parse_system(self, content: str) -> str:
-    return self.tokens.system_token + content.strip() + self.tokens.eot_token + "\n"
+    return self.tokens.system_token + content.strip() + self.tokens.eot_token
 
   def _parse_user(self, content: str) -> str:
-    return self.tokens.user_token + content.strip() + self.tokens.eot_token + "\n"
+    return self.tokens.user_token + content.strip() + self.tokens.eot_token
 
   @staticmethod
   def _strip_thinking(text: str) -> str:
@@ -407,22 +414,10 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if self._strip_past_thinking:
       content = self._strip_thinking(content)
     cleaned_content = content.strip()
-    if not cleaned_content.endswith(self.tokens.eot_token):
+    if cleaned_content.endswith("<turn|>"):
       return "<|turn>model\n" + cleaned_content + "\n"
-    return "<|turn>model\n" + cleaned_content + self.tokens.eot_token + "\n"
+    return "<|turn>model\n" + cleaned_content + self.tokens.eot_token
 
-  def update_assistant_end_tokens(
-      self,
-      tokens: np.ndarray,
-      message: str,
-  ) -> Tuple[np.ndarray, int]:
-    """Ensures the assistant response ends with the correct tokens."""
-    assert message.endswith(self.tokens.eot_token), "Assistant response must end with eot_token."
-    # We append "\n" when pasing assistant message above so here we need to match the tokens with newline,
-    # otherwise there will be logprobs mismatch between rollout and trainer.
-    tokens = np.concatenate([tokens, np.array(self.newline_tokens, dtype=np.int32)], axis=0)
-    return tokens, len(self.newline_tokens)
-  
   def filter_thinking_tokens(
       self,
       tokens: np.ndarray,
@@ -485,6 +480,54 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     )
 
   @property
+  def thought_suffix_tokens(self) -> list[int]:
+    """Returns the tokenized suffix "<|channel>thought\n<channel|>" without BOS/EOS."""
+    suffix_str = "<|channel>thought\n<channel|>"
+    try:
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(suffix_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+  @property
+  def eot_tokens(self) -> list[int]:
+    """Returns the tokenized end-of-turn boundary "<turn|>\n"."""
+    suffix_str = "<turn|>\n"
+    try:
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(suffix_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+  @property
+  def turn_only_tokens(self) -> list[int]:
+    """Returns the tokenized "<turn|>" control token."""
+    suffix_str = "<turn|>"
+    try:
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
+    except TypeError:
+      suffix_tokens = self.tokenizer.encode(suffix_str)
+    bos_id = getattr(self.tokenizer, "bos_id", None)
+    if bos_id is not None:
+      bos_id = bos_id() if callable(bos_id) else bos_id
+    eos_id = getattr(self.tokenizer, "eos_id", None)
+    if eos_id is not None:
+      eos_id = eos_id() if callable(eos_id) else eos_id
+    return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+  @property
   def newline_tokens(self) -> list[int]:
     """Returns the tokenized newline "\n"."""
     suffix_str = "\n"
@@ -499,5 +542,3 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if eos_id is not None:
       eos_id = eos_id() if callable(eos_id) else eos_id
     return [t for t in suffix_tokens if t != bos_id and t != eos_id]
-
-
