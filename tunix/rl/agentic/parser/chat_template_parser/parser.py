@@ -315,7 +315,7 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
   def _init_tokens(self) -> TokenConfig:
     return TokenConfig(
         bos_token="<bos>",
-        eot_token="<turn|>",
+        eot_token="<turn|>\n",
         system_token=self._get_system_token(),
         user_token="<|turn>user\n",
         assistant_token=self._get_assistant_token(),
@@ -357,7 +357,7 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     )
 
   def _parse_system(self, content: str) -> str:
-    return self.tokens.system_token + content.strip() + self.tokens.eot_token + "\n"
+    return self.tokens.system_token + content.strip() + self.tokens.eot_token
 
   def _parse_user(self, content: str) -> str:
     return self.tokens.user_token + content.strip() + self.tokens.eot_token
@@ -392,11 +392,11 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
   @property
   def newline_tokens(self) -> list[int]:
     """Returns the tokenized newline "\n"."""
-    nl_str = "\n"
+    suffix_str = "\n"
     try:
-      suffix_tokens = self.tokenizer.encode(nl_str, add_special_tokens=False)
+      suffix_tokens = self.tokenizer.encode(suffix_str, add_special_tokens=False)
     except TypeError:
-      suffix_tokens = self.tokenizer.encode(nl_str)
+      suffix_tokens = self.tokenizer.encode(suffix_str)
     bos_id = getattr(self.tokenizer, "bos_id", None)
     if bos_id is not None:
       bos_id = bos_id() if callable(bos_id) else bos_id
@@ -404,3 +404,5 @@ class Gemma4ChatTemplateParser(BaseChatTemplateParser):
     if eos_id is not None:
       eos_id = eos_id() if callable(eos_id) else eos_id
     return [t for t in suffix_tokens if t != bos_id and t != eos_id]
+
+
