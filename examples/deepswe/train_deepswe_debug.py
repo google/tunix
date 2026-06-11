@@ -61,8 +61,6 @@ if os.path.exists(os.path.join(WORKDIR, "tunix")):
   WORKSPACE_ROOT = WORKDIR
 else:
   WORKSPACE_ROOT = REPO_ROOT
-ARTIFACT_ROOT = os.path.join(REPO_ROOT, "artifacts", "deepswe_debug")
-DEFAULT_METRICS_LOGGER_DIR = os.path.join(ARTIFACT_ROOT, "logs")
 
 for root in [
     os.path.dirname(__file__),
@@ -240,9 +238,7 @@ def create_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
   parser.add_argument("--max_to_keep", type=int, default=4)
   parser.add_argument("--save_interval_steps", type=int, default=10)
-  parser.add_argument(
-      "--metrics_logger_dir", type=str, default=DEFAULT_METRICS_LOGGER_DIR
-  )
+  parser.add_argument("--metrics_logger_dir", type=str, default=None)
 
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
@@ -600,37 +596,60 @@ def create_checkpointing_options(
 
 def create_metrics_logging_options(
     args: argparse.Namespace,
+) -> metrics_logger.MetricsLoggerOptions | None:
+  if args.metrics_logger_dir:
+    os.makedirs(args.metrics_logger_dir, exist_ok=True)
+  return metrics_logger.MetricsLoggerOptions(
+      log_dir=args.metrics_logger_dir, flush_every_n_steps=1
+  )
+
+
+def initialize_wandb(
+    args: argparse.Namespace,
     *,
     num_devices: int,
     rollout_dims: tuple[tuple[str, int], ...],
     train_dims: tuple[tuple[str, int], ...],
-) -> metrics_logger.MetricsLoggerOptions | None:
-  os.makedirs(args.metrics_logger_dir, exist_ok=True)
-  rollout_dim_map = dict(rollout_dims)
-  train_dim_map = dict(train_dims)
-  vllm_max_num_seqs, vllm_max_batched_tokens = resolve_vllm_rollout_limits(
-      args
-  )
-  wandb_config = vars(args).copy()
-  wandb_config.update({
-      "kv_cache_size": resolve_kv_cache_size(args),
-      "vllm_max_num_seqs": vllm_max_num_seqs,
-      "vllm_max_batched_tokens": vllm_max_batched_tokens,
-      "filter_statuses": args.filter_statuses,
-      "degenerate_group_masking": args.degenerate_group_masking,
-      "num_devices": num_devices,
-      "rollout_mesh_fsdp": rollout_dim_map.get("fsdp"),
-      "rollout_mesh_tp": rollout_dim_map.get("tp"),
-      "train_mesh_fsdp": train_dim_map.get("fsdp"),
-      "train_mesh_sp": train_dim_map.get("sp"),
-      "train_mesh_tp": train_dim_map.get("tp"),
-  })
-  return metrics_logger.MetricsLoggerOptions(
-      log_dir=args.metrics_logger_dir,
-      project_name="tunix-deepswe",
-      flush_every_n_steps=1,
-      backend_kwargs={"wandb": {"config": wandb_config}},
-  )
+) -> None:
+  try:
+    import datetime
+    import wandb  # pytype: disable=import-error
+
+    settings = wandb.Settings(console="off")
+    run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    rollout_dim_map = dict(rollout_dims)
+    train_dim_map = dict(train_dims)
+    vllm_max_num_seqs, vllm_max_batched_tokens = resolve_vllm_rollout_limits(
+        args
+    )
+    filter_statuses = (
+        [status.name for status in args.filter_statuses]
+        if args.filter_statuses
+        and all(hasattr(status, "name") for status in args.filter_statuses)
+        else args.filter_statuses
+    )
+    wandb_config = {
+        **vars(args),
+        # Derived values not present in args
+        "kv_cache_size": resolve_kv_cache_size(args),
+        "vllm_max_num_seqs": vllm_max_num_seqs,
+        "vllm_max_batched_tokens": vllm_max_batched_tokens,
+        # Stringify set so wandb can serialize it
+        "filter_statuses": filter_statuses,
+        "degenerate_group_masking": args.degenerate_group_masking,
+        # Mesh topology
+        "num_devices": num_devices,
+        "rollout_mesh_fsdp": rollout_dim_map.get("fsdp"),
+        "rollout_mesh_tp": rollout_dim_map.get("tp"),
+        "train_mesh_fsdp": train_dim_map.get("fsdp"),
+        "train_mesh_sp": train_dim_map.get("sp"),
+        "train_mesh_tp": train_dim_map.get("tp"),
+    }
+    wandb.init(
+        project="tunix", name=run_name, config=wandb_config, settings=settings
+    )
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    print(f"W&B initialization failed with error: {exc}")
 
 
 def resolve_kv_cache_size(args: argparse.Namespace) -> int:
@@ -826,6 +845,12 @@ def main() -> None:
   model_config, model_dtype, param_dtype = configure_model(
       args, enable_sp=enable_sp
   )
+  initialize_wandb(
+      args,
+      num_devices=len(jax.devices()),
+      rollout_dims=rollout_dims,
+      train_dims=train_dims,
+  )
 
   tokenizer = AutoTokenizer.from_pretrained(
       model_path,
@@ -850,12 +875,7 @@ def main() -> None:
 
   optimizer = create_optimizer(args)
   checkpointing_options = None
-  metrics_logging_options = create_metrics_logging_options(
-      args,
-      num_devices=len(jax.devices()),
-      rollout_dims=rollout_dims,
-      train_dims=train_dims,
-  )
+  metrics_logging_options = create_metrics_logging_options(args)
   rollout_config = create_rollout_config(
       args=args,
       model_path=model_path,
