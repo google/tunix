@@ -676,8 +676,9 @@ def create_cluster_config(
           compute_logps_micro_batch_size=args.compute_logps_micro_batch_size,
           rollout_micro_batch_size=args.rollout_micro_batch_size,
           metrics_logging_options=metrics_logging_options,
-          checkpoint_root_directory=args.ckpt_dir if args.ckpt_dir else None,
-          checkpointing_options=checkpointing_options,
+          # Match train_deepswe_nb.py: DeepSWE disables RL trainer checkpoints.
+          checkpoint_root_directory=None,
+          checkpointing_options=None,
       ),
       rollout_config=rollout_config,
   )
@@ -774,7 +775,7 @@ def main() -> None:
   sft_utils.show_hbm_usage("after loading qwen_reference / qwen_actor")
 
   optimizer = create_optimizer(args)
-  checkpointing_options = create_checkpointing_options(args)
+  checkpointing_options = None
   metrics_logging_options = create_metrics_logging_options(args)
   rollout_config = create_rollout_config(
       args=args,
