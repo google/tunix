@@ -179,6 +179,9 @@ training_config: &base_training_config
   checkpointing_options:
     max_to_keep: 1
     save_interval_steps: 180
+    keep_every_nth_step: null
+    enable_async_checkpointing: True
+    timeout_secs: 1200
   metrics_logging_options:
     project_name: "tunix"
     run_name: ""
