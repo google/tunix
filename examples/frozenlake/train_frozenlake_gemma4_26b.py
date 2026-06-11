@@ -400,7 +400,7 @@ show_hbm_usage("Done with loading datasets")
 
 config = model_lib.ModelConfig.gemma4_26b_a4b()
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
