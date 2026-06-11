@@ -607,14 +607,11 @@ def create_metrics_logging_options(
   )
 
 
-def create_rollout_config(
-    *,
-    args: argparse.Namespace,
-    model_path: str,
-    tokenizer: AutoTokenizer,
-    rollout_mesh: Mesh,
-) -> base_rollout.RolloutConfig:
-  kv_cache_size = args.max_prompt_length + args.max_response_length + 128
+def resolve_kv_cache_size(args: argparse.Namespace) -> int:
+  return args.max_prompt_length + args.max_response_length + 128
+
+
+def resolve_vllm_rollout_limits(args: argparse.Namespace) -> tuple[int, int]:
   vllm_max_num_seqs = (
       args.rollout_vllm_max_num_seqs
       if args.rollout_vllm_max_num_seqs is not None
@@ -624,6 +621,62 @@ def create_rollout_config(
       args.rollout_vllm_max_num_batched_tokens
       if args.rollout_vllm_max_num_batched_tokens is not None
       else 8192
+  )
+  return vllm_max_num_seqs, vllm_max_num_batched_tokens
+
+
+def initialize_wandb(
+    args: argparse.Namespace,
+    *,
+    num_devices: int,
+    rollout_dims: tuple[tuple[str, int], ...],
+    train_dims: tuple[tuple[str, int], ...],
+) -> None:
+  try:
+    import datetime
+    import wandb  # pytype: disable=import-error
+
+    settings = wandb.Settings(console="off")
+    run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    rollout_dim_map = dict(rollout_dims)
+    train_dim_map = dict(train_dims)
+    vllm_max_num_seqs, vllm_max_batched_tokens = resolve_vllm_rollout_limits(
+        args
+    )
+    wandb_config = {
+        **vars(args),
+        "kv_cache_size": resolve_kv_cache_size(args),
+        "vllm_max_num_seqs": vllm_max_num_seqs,
+        "vllm_max_batched_tokens": vllm_max_batched_tokens,
+        "filter_statuses": args.filter_statuses,
+        "degenerate_group_masking": args.degenerate_group_masking,
+        "num_devices": num_devices,
+        "rollout_mesh_fsdp": rollout_dim_map.get("fsdp"),
+        "rollout_mesh_tp": rollout_dim_map.get("tp"),
+        "train_mesh_fsdp": train_dim_map.get("fsdp"),
+        "train_mesh_sp": train_dim_map.get("sp"),
+        "train_mesh_tp": train_dim_map.get("tp"),
+    }
+    wandb.init(
+        project="tunix-deepswe",
+        name=run_name,
+        config=wandb_config,
+        settings=settings,
+    )
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    print(f"W&B initialization failed with error: {exc}")
+
+
+def create_rollout_config(
+    *,
+    args: argparse.Namespace,
+    model_path: str,
+    tokenizer: AutoTokenizer,
+    rollout_mesh: Mesh,
+) -> base_rollout.RolloutConfig:
+  kv_cache_size = resolve_kv_cache_size(args)
+  vllm_max_num_seqs, vllm_max_num_batched_tokens = (
+      resolve_vllm_rollout_limits(args)
   )
   eos_tokens = tokenizer.encode("<|im_end|>", add_special_tokens=False)
 
@@ -782,12 +835,18 @@ def main() -> None:
   ensure_model_downloaded(model_id, model_path)
 
   base_model_config = call_model_config(args.model_version.split("/")[-1])
-  rollout_mesh, train_mesh, _, train_dims = create_meshes(
+  rollout_mesh, train_mesh, rollout_dims, train_dims = create_meshes(
       args, num_kv_heads=base_model_config.num_kv_heads
   )
   enable_sp = any(name == "sp" for name, _ in train_dims)
   model_config, model_dtype, param_dtype = configure_model(
       args, enable_sp=enable_sp
+  )
+  initialize_wandb(
+      args,
+      num_devices=len(jax.devices()),
+      rollout_dims=rollout_dims,
+      train_dims=train_dims,
   )
 
   tokenizer = AutoTokenizer.from_pretrained(
