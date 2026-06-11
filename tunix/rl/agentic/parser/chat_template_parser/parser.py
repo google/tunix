@@ -135,7 +135,7 @@ class BaseChatTemplateParser(ABC):
   def _parse_system(self, content: str) -> str:
     return self.tokens.system_token + content + self.tokens.eot_token
 
-  def _parse_user(self, content: str) -> str:
+  def _parse_user(self, content: str,) -> str:
     return self.tokens.user_token + content + self.tokens.eot_token
 
   def _parse_assistant(self, content: str) -> str:
