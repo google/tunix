@@ -226,7 +226,14 @@ parser.add_argument(
     type=str,
     default="float32",
     choices=["bfloat16", "float16", "float32"],  # Restrict to valid inputs
-    help="Data type for the model weights (e.g., bfloat16, float32)",
+    help="Data type for actor model weights (e.g., bfloat16, float32)",
+)
+parser.add_argument(
+    "--reference_param_dtype",
+    type=str,
+    default="bfloat16",
+    choices=["bfloat16", "float16", "float32"],  # Restrict to valid inputs
+    help="Data type for frozen reference model weights (e.g., bfloat16, float32)",
 )
 
 
@@ -421,6 +428,7 @@ DTYPE_MAP = {
 }
 DTYPE = DTYPE_MAP[args.dtype]
 PARAM_DTYPE = DTYPE_MAP[args.param_dtype]
+REFERENCE_PARAM_DTYPE = DTYPE_MAP[args.reference_param_dtype]
 USE_FLASH_ATTENTION = args.use_flash_attention
 FLASH_ATTENTION_BLOCK_SIZE = args.flash_attention_block_size
 ENABLE_REMAT = args.enable_remat
@@ -597,6 +605,10 @@ if train_sp is not None:
 # ==========================================
 
 qwen_reference = params_lib.create_model_from_safe_tensors(
+    MODEL_PATH, config, mesh=train_mesh, dtype=REFERENCE_PARAM_DTYPE
+)
+
+qwen_actor_base = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, mesh=train_mesh, dtype=PARAM_DTYPE
 )
 
@@ -626,13 +638,9 @@ def get_lora_model(base_model, model_mesh):
 
 
 if TRAIN_WITH_LORA:
-  qwen_actor = get_lora_model(qwen_reference, train_mesh)
+  qwen_actor = get_lora_model(qwen_actor_base, train_mesh)
 else:
-  graph_def, params = nnx.split(qwen_reference)
-  qwen_actor = nnx.merge(
-      graph_def,
-      jax.tree.map(jnp.copy, params),
-  )
+  qwen_actor = qwen_actor_base
 sft_utils.show_hbm_usage()
 
 # %%
@@ -643,7 +651,9 @@ tokenizer = AutoTokenizer.from_pretrained(
     MODEL_PATH, local_files_only=True, trust_remote_code=True
 )
 
-chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
+chat_parser = template_parser.QwenChatTemplateParser(
+    tokenizer, enable_thinking=False
+)
 
 
 # %%
