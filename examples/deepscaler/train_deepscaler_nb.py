@@ -9,6 +9,7 @@ import os
 import sys
 
 from absl import logging as absl_logging
+# from etils import ecolab
 from flax import nnx
 import grain
 import jax
@@ -18,6 +19,13 @@ import optax
 import optax
 from orbax import checkpoint as ocp
 import qwix
+from tqdm.auto import tqdm
+import logging
+import math
+import sys
+from absl import logging as absl_logging
+
+import wandb
 
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
@@ -41,6 +49,17 @@ absl_logging.set_verbosity(absl_logging.INFO)
 absl_logging.set_stderrthreshold("info")
 
 print("Logging configured at INFO level.")
+
+
+try:
+  import pathwaysutils
+  pathwaysutils.initialize()
+except:
+  pass
+
+print("jax devices: ", jax.devices())
+# import os
+# os.environ["WANDB_MODE"] = "online"
 
 try:
   from etils import ecolab
@@ -74,43 +93,46 @@ with cm:
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
 
-try:
-  import pathwaysutils
-
-  pathwaysutils.initialize()
-except:
-  pass
-
-print("jax devices: ", jax.devices())
 
 # %%
 import argparse
 
 arg_parser = argparse.ArgumentParser(description="Train DeepScaleR parameters")
-arg_parser.add_argument("--batch_size", type=int, default=128)
-arg_parser.add_argument("--mini_batch_size", type=int, default=128)
+arg_parser.add_argument("--batch_size", type=int, default=8)
+arg_parser.add_argument("--mini_batch_size", type=int, default=8)
 arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
-arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=312)
+arg_parser.add_argument("--weight_decay", type=float, default=0.0)
+arg_parser.add_argument("--num_batches", type=int, default=25)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
-arg_parser.add_argument("--epsilon", type=float, default=0.2)
-arg_parser.add_argument("--epsilon_high", type=float, default=0.28)
-arg_parser.add_argument("--max_prompt_length", type=int, default=2048)
-arg_parser.add_argument("--max_response_length", type=int, default=8192)
-arg_parser.add_argument("--temperature", type=float, default=0.8)
-arg_parser.add_argument("--top_p", type=float, default=0.95)
+arg_parser.add_argument("--epsilon", type=float, default=0.003)
+arg_parser.add_argument("--epsilon_high", type=float, default=0.005)
+arg_parser.add_argument("--max_prompt_length", type=int, default=1024)
+arg_parser.add_argument("--max_response_length", type=int, default=1024)
+arg_parser.add_argument("--temperature", type=float, default=0.6)
+arg_parser.add_argument("--top_p", type=float, default=1)
 arg_parser.add_argument("--top_k", type=int, default=None)
-arg_parser.add_argument("--max_concurrency", type=int, default=768)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
+arg_parser.add_argument("--max_concurrency", type=int, default=64)
+arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
-    "--loss_agg_mode", type=str, default="token-mean"
+    "--loss_agg_mode", type=str, default="sequence-mean-token-mean"
 )
 arg_parser.add_argument(
     "--kl_loss_mode", type=str, default="low_var_kl"
+)
+# Advantage estimator. "rloo" (leave-one-out baseline) has smaller-magnitude
+# advantages than "grpo" (z-score with /std), which interacts gently with very
+# tight PPO clip ratios. "grpo" is the registry default; switch via CLI.
+arg_parser.add_argument(
+    "--advantage_estimator", type=str, default="rloo",
+    help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
+)
+arg_parser.add_argument(
+    "--loss_algo", type=str, default="gspo-token",
+    help="'grpo' (per-token PPO) or 'gspo-token' (sequence-mean IS).",
 )
 args, _ = arg_parser.parse_known_args()
 
@@ -120,14 +142,8 @@ TRAIN_FRACTION = 1.0
 # ====== Reproducibility ======
 SEED = args.seed
 
-# ====== LoRA ======
-RANK = 64
-ALPHA = 64.0
-TRAIN_WITH_LORA = False
-
 # ====== Sharding ======
-MESH = [(2, 4), ("fsdp", "tp")]
-ROLLOUT_MESH = [(4, 1), ("fsdp", "tp")]
+ROLLOUT_MESH = [(1, 4), ("fsdp", "tp")]
 TRAINER_MESH = [(4, 1), ("fsdp", "tp")]
 
 # ====== GRPO ======
@@ -144,12 +160,14 @@ TOP_K = args.top_k
 # paper. The "group" in GRPO comes from here.
 NUM_GENERATIONS = args.num_generations
 
+MAX_CONCURRENCY = args.max_concurrency
+
 # Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = 768
+VLLM_MAX_NUM_SEQS = MAX_CONCURRENCY
 
 # Max number of tokens to be processed in parallel by vllm.
 # Divide by 8 for on policy, 1 step off divide by 4
-VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 10 * 1024 // 8
+VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
 
 # === other GRPO configs ===
 # The number of iterations per batch (𝜇 in GRPO algo 1).
@@ -165,26 +183,26 @@ EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
 ENABLE_REMAT = True
+ENABLE_FLASH_ATTENTION = True
+ENABLE_MIX_PRECISION = True
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
 # Keep `NUM_TEST_BATCHES` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
-NUM_TEST_BATCHES = 50
+NUM_TEST_BATCHES = 2
 
-EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+EVAL_EVERY_N_STEPS = 10  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
 NUM_EPOCHS = 3  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
-# Max concurrency for parallel processing of trajectories.
-MAX_CONCURRENCY = args.max_concurrency
 
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 
-MODEL_DTYPE = jnp.float32
+MODEL_DTYPE = jnp.bfloat16
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -195,35 +213,33 @@ WEIGHT_DECAY = args.weight_decay
 # Linearly increase learning rate from 0. to 5e-6 in the first 10% training
 # steps, and then gradually decrease the learning rate to 0 using cosine
 # scheduler.
-WARMUP_STEPS = int(0.1 * MAX_STEPS)
+WARMUP_STEPS = 0
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
-MAX_GRAD_NORM = 1
+MAX_GRAD_NORM = 100.0
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 500
-MAX_TO_KEEP = 4
-DO_MEM_PROFILING = False
+SAVE_INTERVAL_STEPS = 5
+MAX_TO_KEEP = 100
 
-# ====== Inference ======
-GENERATION_CONFIGS = {
-    # greedy search
-    "greedy": {"temperature": 1e-4, "top_k": 1, "top_p": 1.0},
-    # some randomness
-    "standard": {"temperature": 0.7, "top_k": 50, "top_p": 0.95},
-    # liberal
-    "liberal": {"temperature": 0.85, "top_k": 2000, "top_p": 1.0},
-}
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "sglang_jax"
+    "ROLLOUT_ENGINE", "vanilla"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
-# mesh = jax.make_mesh(
-#     *MESH, axis_types=(jax.sharding.AxisType.Auto,) * len(MESH[0])
-# )
-mesh = None
+
+try:
+  wandb.login()
+except wandb.errors.UsageError as e:
+  # Handle the error, maybe disable W&B logging
+  wandb.init(mode="disabled")
+
+MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+from huggingface_hub import snapshot_download
+
+MODEL_PATH = snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
+
 
 trainer_devices = math.prod(TRAINER_MESH[0])
 rollout_devices = math.prod(ROLLOUT_MESH[0])
@@ -234,71 +250,43 @@ if trainer_devices + rollout_devices > jax.device_count():
       " available."
   )
 
+rollout_device_list = jax._src.mesh_utils.create_device_mesh(
+    ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
+)
 
-if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
-  rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-      ROLLOUT_MESH[0], jax.devices()[:rollout_devices]
-  )
-
-  rollout_mesh = jax.sharding.Mesh(
-      rollout_device_list,
-      axis_names=ROLLOUT_MESH[1],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-  )
-  # rollout_mesh = jax.make_mesh(
-  #     *ROLLOUT_MESH,
-  #     devices=jax.devices()[:rollout_devices],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-  # )
-  print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
-  trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
-      TRAINER_MESH[0], jax.devices()[-trainer_devices:]
-  )
-  # trainer_mesh = jax.make_mesh(
-  #     *TRAINER_MESH,
-  #     devices=jax.devices()[-trainer_devices:],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
-  # )
-  trainer_mesh = jax.sharding.Mesh(
-      trainer_devices_list,
-      axis_names=TRAINER_MESH[1],
-      axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
-  )
-else:
-  rollout_mesh = mesh
-  trainer_mesh = mesh
+rollout_mesh = jax.sharding.Mesh(
+    rollout_device_list,
+    axis_names=ROLLOUT_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
+)
+print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
+trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
+    TRAINER_MESH[0], jax.devices()[-trainer_devices:]
+)
+trainer_mesh = jax.sharding.Mesh(
+    trainer_devices_list,
+    axis_names=TRAINER_MESH[1],
+    axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
+)
+print(f"ZZ {trainer_devices_list=} {trainer_mesh.devices=}")
 
 # %%
-try:
-  from GOOGLE_INTERNAL_PACKAGE_PATH.pyglib import gfile
+from google.cloud import storage
 
-  file_open = gfile.Open
+import fsspec
 
-  NOTEBOOK_ENV = "g3"
-except Exception:
-  NOTEBOOK_ENV = "git"
+file_open = fsspec.open
 
-  from google.cloud import storage
 
-  import fsspec
+DATA_PATH_PREFIX = "gs://tunix/data"
+MODEL_PATH_PREFIX = "gs://linchai-bucket-dev/rl/models"
+CKPT_DIR_PREFIX = "gs://linchai-bucket-dev/rl/checkpoints/"
 
-  file_open = fsspec.open
+CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/gspo/01")
+print(f"Checkpoint directory: {CKPT_DIR}")
 
-if NOTEBOOK_ENV == "g3":
-  DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/rl/data/"
-  MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
-  CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
-else:
-  DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
-  CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
 
-print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
-CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
-
-MODEL_VERSION = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_PATH = os.path.join(MODEL_PATH_PREFIX, "DeepSeek-R1-Distill-Qwen-1.5B")
-
+print(f"Hyperparams: BATCH_SIZE={BATCH_SIZE}, NUM_BATCHES={NUM_BATCHES}, NUM_EPOCHS={NUM_EPOCHS}, TRAIN_FRACTION={TRAIN_FRACTION}, MAX_STEPS={MAX_STEPS}, LEARNING_RATE={LEARNING_RATE}, BETA={BETA}, EPSILON={EPSILON}, EPSILON_HIGH={EPSILON_HIGH}, ROLLOUT_ENGINE={ROLLOUT_ENGINE}, TOP_P={TOP_P}, TEMPERATURE={TEMPERATURE}, TOP_K={TOP_K}, NUM_GENERATIONS={NUM_GENERATIONS}")
 # %%
 show_hbm_usage = sft_utils.show_hbm_usage
 
@@ -364,13 +352,13 @@ def create_datasets(
 
 # %%
 
-tokenizer_source = MODEL_PATH if NOTEBOOK_ENV == "g3" else MODEL_VERSION
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 
 chat_parser = parser.DefaultChatTemplateParser(tokenizer)
 
 # %%
 train_dataset, test_dataset = create_datasets()
+
 train_dataset, val_dataset = data_lib.post_init_dataset(
     train_dataset,
     tokenizer,
@@ -388,7 +376,6 @@ test_dataset, _ = data_lib.post_init_dataset(
     num_batches=NUM_TEST_BATCHES,
     max_prompt_length=MAX_PROMPT_LENGTH,
 )
-
 # %%
 show_hbm_usage("Done with loading datasets")
 
@@ -396,53 +383,24 @@ show_hbm_usage("Done with loading datasets")
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.BLOCK
+if ENABLE_FLASH_ATTENTION:
+  config.use_flash_attention = True
+  config.flash_attention_block_size = 512
+if ENABLE_MIX_PRECISION:
+  config.dtype = jnp.bfloat16
 
-print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
     MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
 )
+show_hbm_usage("after loading qwen2_ref")
 
 
-# %%
-def get_lora_model(base_model, model_mesh):
-  lora_provider = qwix.LoraProvider(
-      module_path=(
-          ".*q_einsum|.*kv_einsum|.*gate_proj|.*down_proj|.*up_proj|"
-          ".*attn_vec_einsum"
-      ),
-      rank=RANK,
-      alpha=ALPHA,
-  )
-
-  model_input = base_model.get_model_input()
-  lora_model = qwix.apply_lora_to_model(
-      base_model, lora_provider, **model_input
-  )
-
-  with compat.set_mesh(model_mesh):
-    state = nnx.state(lora_model)
-    pspecs = nnx.get_partition_spec(state)
-    sharded_state = jax.lax.with_sharding_constraint(state, pspecs)
-    nnx.update(lora_model, sharded_state)
-
-  return lora_model
-
-
-# %%
-if TRAIN_WITH_LORA:
-  qwen2_actor = get_lora_model(qwen2_ref, trainer_mesh)
-else:
-  qwen2_actor = params_lib.create_model_from_safe_tensors(
-      MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE
-  )
+qwen2_actor = params_lib.create_model_from_safe_tensors(
+  MODEL_PATH, config, trainer_mesh, dtype=jnp.float32
+)
 
 # %%
 show_hbm_usage("after loading qwen2_actor")
-
-# %%
-ModelAgent = model_agent.ModelAgent
-TaskEnvironment = task_environment.TaskEnvironment
-TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 
 # %%
 # Ckpt saving
@@ -456,35 +414,24 @@ wandb_config.update({
     "WARMUP_STEPS": WARMUP_STEPS,
     "num_steps": MAX_STEPS,
     "rollout_engine": ROLLOUT_ENGINE,
+    "model_id": MODEL_VERSION,
 })
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo",
-    flush_every_n_steps=20,
+    log_dir="gs://linchai-bucket-dev/tensorboard/grpo",
+    project_name=os.getenv("WANDB_PROJECT", "tunix-deepscaler"),
+    flush_every_n_steps=1,
     backend_kwargs={"wandb": {"config": wandb_config}},
 )
 
 # %%
-# # Logs
-# if NOTEBOOK_ENV == "g3":
-#   %load_ext GOOGLE_INTERNAL_PACKAGE_PATH.learning.brain.tensorboard.notebook.extension
-# else:
-#   %load_ext tensorboard
-# %tensorboard --logdir /tmp/content/tmp/tensorboard/grpo --port=0
-
-# %%
 # Optimizer, learning rate scheduler, gradient clipping
-optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
+optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
+  learning_rate=LEARNING_RATE,
+  b1=B1,
+  b2=B2,
+  weight_decay=WEIGHT_DECAY
 )
+
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
@@ -506,28 +453,13 @@ base_rollout_dict = {
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
-sglang_jax_rollout_dict = {
-    # sglang-jax specific configs
-    "rollout_sglang_jax_model_version": (
-        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ),
-    "rollout_sglang_jax_mem_fraction_static": 0.8,
-    "rollout_sglang_jax_init_with_random_weights": True,
-    "rollout_sglang_jax_disable_radix_cache": True,
-    "rollout_sglang_jax_enable_deterministic_sampling": False,
-    "rollout_sglang_jax_chunked_prefill_size": 2048,
-    "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
-    "rollout_sglang_jax_page_size": 128,
-    "rollout_sglang_jax_use_sort_for_toppk_minp": False,
-}
-
 vllm_rollout_dict = {
     # vllm-tpu specific configs
-    "rollout_vllm_model_version": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "rollout_vllm_model_version": MODEL_VERSION,
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
-    "rollout_vllm_async_scheduling": True,
+    "rollout_vllm_async_scheduling": False,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -535,22 +467,13 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": True,
+        "enable_prefix_caching": False,
+        "dtype": "bfloat16",
     },
 }
-
-if ROLLOUT_ENGINE == "sglang_jax":
-  rollout_engine_config = base_rollout.RolloutConfig(
-      **base_rollout_dict, **sglang_jax_rollout_dict
-  )
-elif ROLLOUT_ENGINE == "vllm":
-  rollout_engine_config = base_rollout.RolloutConfig(
-      **base_rollout_dict, **vllm_rollout_dict
-  )
-elif ROLLOUT_ENGINE == "vanilla":
-  rollout_engine_config = base_rollout.RolloutConfig(**base_rollout_dict)
-else:
-  raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
+rollout_engine_config = base_rollout.RolloutConfig(
+    **base_rollout_dict, **vllm_rollout_dict
+)
 
 cluster_config = rl_cluster_lib.ClusterConfig(
     role_to_mesh={
@@ -571,6 +494,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
         # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
         train_micro_batch_size=2,
+        compute_logps_micro_batch_size=2,
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
@@ -592,16 +516,11 @@ grpo_config = GRPOConfig(
     off_policy_steps=OFF_POLICY_STEPS,
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
+    sampler_is="token",
+    sampler_is_threshold=2.0,
+    advantage_estimator=args.advantage_estimator,
+    degenerate_group_masking=False,
 )
-
-# Perf Metrics logging
-perf_metrics_config = PerfMetricsConfig(
-    custom_export_fn_v2=PerfMetricsExport.from_cluster_config(
-        cluster_config=cluster_config,
-        trace_dir="/tmp/agentic_perf",
-    ).export_metrics
-)
-
 # %%
 # RL cluster
 rl_cluster = rl_cluster_lib.RLCluster(
@@ -609,36 +528,34 @@ rl_cluster = rl_cluster_lib.RLCluster(
     reference=qwen2_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
-    perf_config=perf_metrics_config,
 )
 
 show_hbm_usage("after RLCluster creation")
 
 
 # %%
+_metric_call_idx = 0
 def metric_fn(prompts, completions, rewards, advantages, **kwargs):
   del prompts, completions, advantages, kwargs
+  global _metric_call_idx
+  _metric_call_idx += 1
   solve_all = (rewards > 0.1).all()
   solve_none = (rewards == 0).all()
   solve_partial = (~solve_all) and (~solve_none)
   solve_ratio = (rewards > 0.1).mean()
+  reward_mean = float(rewards.mean())
+  reward_max = float(rewards.max())
+  absl_logging.info(
+      "[rollout-metric] call=%d n=%d solve_ratio=%.3f reward_mean=%.3f"
+      " reward_max=%.3f solve_all=%d solve_none=%d",
+      _metric_call_idx, len(rewards), float(solve_ratio), reward_mean,
+      reward_max, int(solve_all), int(solve_none),
+  )
   return {
-      "rewards/solve_all": (
-          1 if solve_all else 0,
-          np.mean,
-      ),
-      "rewards/solve_none": (
-          1 if solve_none else 0,
-          np.mean,
-      ),
-      "rewards/solve_partial": (
-          1 if solve_partial else 0,
-          np.mean,
-      ),
-      "rewards/solve_ratio": (
-          solve_ratio,
-          np.mean,
-      ),
+      "rewards/solve_all": (1 if solve_all else 0, np.mean),
+      "rewards/solve_none": (1 if solve_none else 0, np.mean),
+      "rewards/solve_partial": (1 if solve_partial else 0, np.mean),
+      "rewards/solve_ratio": (solve_ratio, np.mean),
   }
 
 
@@ -655,4 +572,4 @@ grpo_trainer = GRPOLearner(
 show_hbm_usage("after GRPOLearner creation")
 
 # %%
-grpo_trainer.train(train_dataset)
+grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
