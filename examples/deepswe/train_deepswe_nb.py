@@ -29,6 +29,7 @@ import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
 from tunix.utils import compat
+from tunix.utils import env_utils
 from tunix.rl.agentic.agents import agent_types
 import vllm  # pytype: disable=import-error
 
@@ -720,6 +721,17 @@ wandb_config.update({
     "train_mesh_shape": [dim for _, dim in train_dims],
     "train_mesh_axes": [axis for axis, _ in train_dims],
 })
+is_internal_env = env_utils.is_internal_env()
+print(
+    "[DeepSWE NB metrics] "
+    f"is_internal_env={is_internal_env} "
+    f"jax_process_index={jax.process_index()} "
+    f"metrics_log_dir={args.metrics_logger_dir} "
+    f"project_name=tunix-deepswe "
+    f"default_backend={'CluBackend' if is_internal_env else 'TensorboardBackend+WandbBackend'} "
+    f"wandb_backend_available={metrics_logger.WandbBackend is not None} "
+    f"clu_backend_available={metrics_logger.CluBackend is not None}"
+)
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=args.metrics_logger_dir,
     project_name="tunix-deepswe",
