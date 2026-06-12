@@ -35,6 +35,20 @@ Reinforcement Learning (RL) jobs:
 *   **`tflops_per_step`**: The estimated Trillion Floating Point Operations
     (TFLOPs) performed per step (if supported by the hardware/backend).
 
+### DPO & ORPO-Specific Metrics
+
+For Direct Preference Optimization (DPO) and Odds Ratio Preference Optimization (ORPO) training, Tunix collects preference-specific alignment and loss metrics:
+
+*   **`rewards/chosen`**: The average implicit reward for the chosen responses (calculated using policy and reference log probs for DPO, or using length-averaged policy log probs for ORPO).
+*   **`rewards/rejected`**: The average implicit reward for the rejected responses.
+*   **`rewards/margin`**: The difference between chosen and rejected rewards (`rewards/chosen - rewards/rejected`). A positive margin indicates the model prefers the chosen responses.
+*   **`rewards/accuracy`**: The frequency with which the chosen response has a higher reward than the rejected response (should approach 1.0 as training converges).
+*   **`log_probs/chosen`**: The average log probability of the chosen responses under the policy model.
+*   **`log_probs/rejected`**: The average log probability of the rejected responses under the policy model.
+*   **`odds_ratio`** *(ORPO only)*: The average odds ratio between the chosen and rejected responses.
+*   **`sft_loss`** *(ORPO only)*: The supervised fine-tuning loss component (NLL) of the ORPO loss.
+*   **`or_loss`** *(ORPO only)*: The odds ratio preference loss component of the ORPO loss.
+
 ### RL-Specific Metrics (PPO/GRPO)
 
 For Reinforcement Learning jobs, Tunix collects additional metrics related to
