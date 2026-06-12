@@ -287,6 +287,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "True for AgenticRLLearner if using vLLM engine. Please set this "
             "before initializing RLCluster."
         )
+
   def _compute_rewards(
       self,
       prompts: List[str],
@@ -801,16 +802,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size
     )
-    if self._training_config.max_seq_token_per_tpu is not None:
+    is_packed = self._training_config.max_seq_token_per_tpu is not None
+    if is_packed:
       logging.info(
           "Using sequence packing with max_seq_token_per_tpu: %d",
           self._training_config.max_seq_token_per_tpu,
       )
       train_data_gen = rl_utils.pack_sequences(
-          train_data_gen, self._training_config.max_seq_token_per_tpu
+          train_data_gen,
+          self._training_config.max_seq_token_per_tpu,
+          target_items_per_update=grad_acc_steps,
       )
-    micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
+    update_steps_since_last_sync = 0
+    update_steps_per_full_batch = full_batch_size // mini_batch_size
+    unpacked_micro_step_counter = 0
     did_eval_this_global_step = False
     for train_micro_batch in train_data_gen:
       if (
@@ -845,6 +850,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # GRPO returns a list with a single TrainExample.
         merged_train_micro_batch = train_examples[0]
       else:
+        # TODO(b/491970038): handle seq packing case differently
         merged_train_micro_batch = jax.tree.map(
             lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
         )
@@ -927,8 +933,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           )
 
       # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      if is_packed:
+        # `merged_train_micro_batch.is_update_step` is a 0-d jax scalar set
+        # by `pack_sequences`; pull the host-side value before deciding.
+        is_update = bool(
+            np.asarray(merged_train_micro_batch.is_update_step).item()
+        )
+      else:
+        # Mirror `peft_trainer._train_step`'s derivation:
+        # `is_update_step` flips True every `grad_acc_steps` micro-batches.
+        unpacked_micro_step_counter += 1
+        is_update = unpacked_micro_step_counter % grad_acc_steps == 0
+      if is_update:
+        update_steps_since_last_sync += 1
+      if update_steps_since_last_sync == update_steps_per_full_batch:
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
             f"Global step {self.rl_cluster.global_steps} completed in"
@@ -1069,7 +1087,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self.rl_cluster.perf_v2.export(),
             mode=rl_cluster_lib.Mode.TRAIN,
         )
-        micro_batches_since_last_sync = 0
+        update_steps_since_last_sync = 0
         did_eval_this_global_step = False
         self._global_step_start_time = time.time()
 
