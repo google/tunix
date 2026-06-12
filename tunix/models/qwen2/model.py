@@ -543,6 +543,9 @@ class Attention(nnx.Module):
       )
 
       shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
+      if shd_b is not None and shd_b in mesh.shape:
+        if query_proj.shape[0] % mesh.shape[shd_b] != 0:
+          shd_b = None
       head_shards = (
           mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
       )

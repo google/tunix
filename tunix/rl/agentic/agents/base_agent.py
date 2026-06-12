@@ -30,6 +30,8 @@ import asyncio
 import copy
 from typing import Any, Dict
 
+import numpy as np
+
 from tunix.rl.agentic.agents import agent_types
 
 
@@ -171,13 +173,25 @@ class ConversationAgentBase(LLMBaseAgent):
     # prompts should not be applied with template beforehand to avoid double
     # templating.
     if isinstance(observation, dict) and "prompts" in observation:
-      self._messages.append(
-          {"role": "user", "content": observation["prompts"] or ""}
-      )
+      prompts = observation['prompts']
+      if isinstance(prompts, np.ndarray):
+        self._messages.append(
+          {"role": "user", "content": prompts[0] or ""}
+          )
+      elif isinstance(prompts, str):
+        self._messages.append(
+            {"role": "user", "content": observation["prompts"] or ""}
+        )
+      else:
+        raise ValueError(f"we expect a string-typed prompts field in observation while prompts is {type(prompts)}")
     elif isinstance(observation, dict) and "question" in observation:
-      self._messages.append(
-          {"role": "user", "content": observation["question"] or ""}
-      )
+      question =  observation["question"]
+      if isinstance(question, str):
+        self._messages.append(
+            {"role": "user", "content": question or ""}
+        )
+      else:
+        raise ValueError(f"we expect a string-typed question field in observation while question is {type(question)}")
     elif isinstance(observation, str):
       self._messages.append({"role": "user", "content": observation})
 
