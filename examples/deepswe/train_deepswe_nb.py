@@ -192,13 +192,24 @@ parser.add_argument(
 parser.add_argument("--advantage_estimator", type=str, default="rloo")
 parser.add_argument(
     "--use_rollout_logps",
-    type=bool,
-    default=False,
+    action=argparse.BooleanOptionalAction,
+    default=True,
     help=(
-        "Whether to use rollout-cached logprobs as old policy logps. "
-        "Default is False to recompute old logps on the actor side. "
+        "Whether rollout should return cached sampler logprobs. Required for "
+        "sampler TIS diagnostics/correction. Default is True."
     ),
 )
+parser.add_argument(
+    "--sampler_is",
+    type=str,
+    default="token",
+    choices=["none", "token"],
+    help=(
+        "Sampler-trainer truncated importance-sampling correction. Default "
+        "is token to match the FrozenLake Qwen3 recipe."
+    ),
+)
+parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
 
 parser.add_argument(
     "--degenerate_group_masking",
@@ -495,7 +506,9 @@ FILTER_STATUSES = (
 )
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
-USE_ROLLOUT_LOGPS = args.use_rollout_logps
+SAMPLER_IS = None if args.sampler_is == "none" else args.sampler_is
+SAMPLER_IS_THRESHOLD = args.sampler_is_threshold
+USE_ROLLOUT_LOGPS = args.use_rollout_logps or SAMPLER_IS is not None
 DEGENERATE_GROUP_MASKING = args.degenerate_group_masking
 
 
@@ -823,6 +836,8 @@ config_kwargs = {
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
+    "sampler_is": SAMPLER_IS,
+    "sampler_is_threshold": SAMPLER_IS_THRESHOLD,
     "degenerate_group_masking": DEGENERATE_GROUP_MASKING,
 }
 
