@@ -244,8 +244,8 @@ WARMUP_STEPS = 0
 MAX_GRAD_NORM = 100.0
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 10**9  # effectively disabled; set CKPT_DIR + lower this to enable
-MAX_TO_KEEP = 1
+SAVE_INTERVAL_STEPS = 5  # effectively disabled; set CKPT_DIR + lower this to enable
+MAX_TO_KEEP = 50
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
@@ -263,7 +263,7 @@ now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 # Checkpointing is opt-in: set CKPT_DIR to enable, otherwise nothing is written.
 # Orbax's CheckpointManager force-saves the first step regardless of the
 # configured save_interval_steps, so a large interval alone does not disable it.
-CKPT_DIR = os.getenv("CKPT_DIR") or None
+CKPT_DIR = "gs://linchai-bucket-dev/rl/checkpoints/frozenlake/e2b-it/"
 TB_LOG_DIR = "gs://linchai-bucket-dev/tensorboard/grpo"
 
 
