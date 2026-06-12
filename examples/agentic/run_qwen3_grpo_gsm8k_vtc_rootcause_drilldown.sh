@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUNNER="${SCRIPT_DIR}/run_qwen3_grpo_gsm8k_vtc_ablations.py"
 
-echo "Running VTC root-cause drilldown ablations (6 runs, 200 steps each; skips final)..."
+echo "Running VTC root-cause drilldown ablations (4 split runs, 200 steps each; skips final and bundle presets)..."
 echo "W&B URLs will be recorded under:"
 echo "  ${REPO_ROOT}/artifacts/qwen3_grpo_gsm8k_vtc/ablations/wandb_urls.tsv"
 
