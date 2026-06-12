@@ -57,6 +57,14 @@ STAGES = {
         "revert_actor_dtype_only",
         "revert_flash_only",
     ],
+    "rootcause_drilldown": [
+        "revert_prompt_reward",
+        "revert_parser_only",
+        "revert_reward_only",
+        "revert_model_bundle",
+        "revert_actor_dtype_only",
+        "revert_flash_only",
+    ],
     "dtype_drilldown": [
         "final",
         "revert_actor_dtype_only",
