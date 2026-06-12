@@ -2,7 +2,6 @@
 
 # [WIP] Reproduction of [Deepscaler](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) with Single-turn Agentic framework.
 
-import contextlib
 import logging
 import math
 import os
@@ -61,37 +60,23 @@ print("jax devices: ", jax.devices())
 # import os
 # os.environ["WANDB_MODE"] = "online"
 
-try:
-  from etils import ecolab
 
-  cm = ecolab.adhoc(
-      source=ecolab.FROM_NOTEBOOK_OR_HEAD,
-      reload="tunix",
-      behavior="preferred",
-      cell_autoreload=True,
-  )
-except:
-  import contextlib
-
-  cm = contextlib.nullcontext()
-
-with cm:
-  from tunix.models.qwen2 import params as params_lib
-  from tunix.models.qwen2 import model as model_lib
-  from tunix.sft import metrics_logger
-  from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
-  from tunix.rl.agentic.agents import model_agent
-  from tunix.rl.agentic.environments import task_environment
-  from tunix.rl.agentic.trajectory import trajectory_collect_engine
-  from tunix.rl.agentic.parser.chat_template_parser import parser
-  from tunix.rl import rl_cluster as rl_cluster_lib
-  from tunix.rl.rollout import base_rollout
-  from tunix.sft import utils as sft_utils
-  from tunix.utils import math_rewards
-  from tunix.utils import compat
-  from tunix.cli.utils import data as data_lib
-  from tunix import PerfMetricsConfig
-  from tunix.perf.experimental.export import PerfMetricsExport
+from tunix.models.qwen2 import params as params_lib
+from tunix.models.qwen2 import model as model_lib
+from tunix.sft import metrics_logger
+from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
+from tunix.rl.agentic.agents import model_agent
+from tunix.rl.agentic.environments import task_environment
+from tunix.rl.agentic.trajectory import trajectory_collect_engine
+from tunix.rl.agentic.parser.chat_template_parser import parser
+from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl.rollout import base_rollout
+from tunix.sft import utils as sft_utils
+from tunix.utils import math_rewards
+from tunix.utils import compat
+from tunix.cli.utils import data as data_lib
+from tunix import PerfMetricsConfig
+from tunix.perf.experimental.export import PerfMetricsExport
 
 
 # %%
@@ -225,7 +210,7 @@ MAX_TO_KEEP = 100
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv(
-    "ROLLOUT_ENGINE", "vanilla"
+    "ROLLOUT_ENGINE", "vllm"
 )  # one of "vanilla", "vllm" or "sglang_jax"
 
 
@@ -498,8 +483,8 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         # metrics logging
         metrics_logging_options=metrics_logging_options,
         # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
-        checkpointing_options=checkpointing_options,
+        # checkpoint_root_directory=CKPT_DIR,
+        # checkpointing_options=checkpointing_options,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -568,6 +553,8 @@ grpo_trainer = GRPOLearner(
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],
+    agent_class=model_agent.ModelAgent,
+    env_class=task_environment.TaskEnvironment,
 )
 show_hbm_usage("after GRPOLearner creation")
 
